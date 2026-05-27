@@ -13,7 +13,8 @@ use asupersync::distributed::encoding::{EncodedState, EncodingConfig, StateEncod
 use asupersync::distributed::recovery::{RecoveryDecodingConfig, StateDecoder};
 use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use asupersync::record::region::RegionState;
-use asupersync::security::{AuthenticatedSymbol, SecurityContext};
+use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
+use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::{RegionId, TaskId, Time};
 use asupersync::util::DetRng;
 use common::e2e_harness::E2eLabHarness;
@@ -50,6 +51,7 @@ fn make_realistic_snapshot(task_count: usize, child_count: usize) -> RegionSnaps
         state: RegionState::Open,
         timestamp: Time::from_secs(1_710_600_000),
         sequence: 42,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks,
@@ -63,6 +65,7 @@ fn make_realistic_snapshot(task_count: usize, child_count: usize) -> RegionSnaps
         cancel_reason: None,
         parent: Some(RegionId::new_for_test(0, 0)),
         metadata,
+        auth_tag: AuthenticationTag::zero(),
     }
 }
 

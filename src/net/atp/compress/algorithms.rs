@@ -3,8 +3,10 @@
 //! This module provides the core compression algorithm implementations
 //! with consistent interfaces and error handling.
 
-use crate::atp::manifest::CompressionAlgorithm;
 use super::CompressionError;
+use crate::atp::manifest::CompressionAlgorithm;
+#[cfg(feature = "compression")]
+use std::io::{Read, Write};
 
 /// Algorithm-specific compression parameters.
 #[derive(Debug, Clone, PartialEq)]
@@ -59,7 +61,7 @@ impl AlgorithmRegistry {
             CompressionAlgorithm::None => true,
             CompressionAlgorithm::Lz4 => true,
             CompressionAlgorithm::Gzip => true,
-            CompressionAlgorithm::Brotli => false, // Would need brotli crate
+            CompressionAlgorithm::Brotli => cfg!(feature = "compression"),
         }
     }
 
@@ -155,10 +157,19 @@ pub enum CpuUsage {
 /// Compression algorithm adapter.
 pub trait CompressionAdapter {
     /// Compress data with given parameters.
-    fn compress(&self, data: &[u8], params: &CompressionParams) -> Result<Vec<u8>, CompressionError>;
+    fn compress(
+        &self,
+        data: &[u8],
+        params: &CompressionParams,
+    ) -> Result<Vec<u8>, CompressionError>;
 
     /// Decompress data with given parameters.
-    fn decompress(&self, data: &[u8], params: &CompressionParams, expected_size: u64) -> Result<Vec<u8>, CompressionError>;
+    fn decompress(
+        &self,
+        data: &[u8],
+        params: &CompressionParams,
+        expected_size: u64,
+    ) -> Result<Vec<u8>, CompressionError>;
 
     /// Validate parameters for this algorithm.
     fn validate_params(&self, params: &CompressionParams) -> Result<(), CompressionError>;
@@ -168,12 +179,21 @@ pub trait CompressionAdapter {
 pub struct Lz4Adapter;
 
 impl CompressionAdapter for Lz4Adapter {
-    fn compress(&self, data: &[u8], _params: &CompressionParams) -> Result<Vec<u8>, CompressionError> {
+    fn compress(
+        &self,
+        data: &[u8],
+        _params: &CompressionParams,
+    ) -> Result<Vec<u8>, CompressionError> {
         lz4_flex::compress_prepend_size(data)
             .map_err(|e| CompressionError::CompressionFailed(e.to_string()))
     }
 
-    fn decompress(&self, data: &[u8], _params: &CompressionParams, expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+    fn decompress(
+        &self,
+        data: &[u8],
+        _params: &CompressionParams,
+        expected_size: u64,
+    ) -> Result<Vec<u8>, CompressionError> {
         let decompressed = lz4_flex::decompress_size_prepended(data)
             .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
 
@@ -200,26 +220,38 @@ impl CompressionAdapter for Lz4Adapter {
 pub struct GzipAdapter;
 
 impl CompressionAdapter for GzipAdapter {
-    fn compress(&self, data: &[u8], params: &CompressionParams) -> Result<Vec<u8>, CompressionError> {
+    fn compress(
+        &self,
+        data: &[u8],
+        params: &CompressionParams,
+    ) -> Result<Vec<u8>, CompressionError> {
         use flate2::{Compression, write::GzEncoder};
         use std::io::Write;
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::new(params.level.into()));
-        encoder.write_all(data)
+        encoder
+            .write_all(data)
             .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
 
-        encoder.finish()
+        encoder
+            .finish()
             .map_err(|e| CompressionError::CompressionFailed(e.to_string()))
     }
 
-    fn decompress(&self, data: &[u8], _params: &CompressionParams, expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+    fn decompress(
+        &self,
+        data: &[u8],
+        _params: &CompressionParams,
+        expected_size: u64,
+    ) -> Result<Vec<u8>, CompressionError> {
         use flate2::read::GzDecoder;
         use std::io::Read;
 
         let mut decoder = GzDecoder::new(data);
         let mut decompressed = Vec::with_capacity(expected_size as usize);
 
-        decoder.read_to_end(&mut decompressed)
+        decoder
+            .read_to_end(&mut decompressed)
             .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
 
         if decompressed.len() != expected_size as usize {
@@ -248,6 +280,108 @@ impl CompressionAdapter for GzipAdapter {
     }
 }
 
+/// Brotli compression adapter.
+pub struct BrotliAdapter;
+
+impl CompressionAdapter for BrotliAdapter {
+    fn compress(
+        &self,
+        data: &[u8],
+        params: &CompressionParams,
+    ) -> Result<Vec<u8>, CompressionError> {
+        self.validate_params(params)?;
+
+        #[cfg(feature = "compression")]
+        {
+            let quality = u32::from(params.level.min(11));
+            let mut encoder = brotli::CompressorWriter::new(Vec::new(), 4096, quality, 22);
+            encoder
+                .write_all(data)
+                .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
+            encoder
+                .flush()
+                .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
+            Ok(encoder.into_inner())
+        }
+
+        #[cfg(not(feature = "compression"))]
+        {
+            let _ = data;
+            Err(CompressionError::UnsupportedAlgorithm(
+                CompressionAlgorithm::Brotli,
+            ))
+        }
+    }
+
+    fn decompress(
+        &self,
+        data: &[u8],
+        params: &CompressionParams,
+        expected_size: u64,
+    ) -> Result<Vec<u8>, CompressionError> {
+        self.validate_params(params)?;
+
+        #[cfg(feature = "compression")]
+        {
+            let expected_size = usize::try_from(expected_size).map_err(|_| {
+                CompressionError::DecompressionFailed(
+                    "expected size does not fit usize".to_string(),
+                )
+            })?;
+            let mut decoder = brotli::Decompressor::new(data, 4096);
+            let mut decompressed = Vec::with_capacity(expected_size);
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
+
+            if decompressed.len() != expected_size {
+                return Err(CompressionError::DecompressionFailed(
+                    "size mismatch after decompression".to_string(),
+                ));
+            }
+
+            Ok(decompressed)
+        }
+
+        #[cfg(not(feature = "compression"))]
+        {
+            let _ = data;
+            let _ = expected_size;
+            Err(CompressionError::UnsupportedAlgorithm(
+                CompressionAlgorithm::Brotli,
+            ))
+        }
+    }
+
+    fn validate_params(&self, params: &CompressionParams) -> Result<(), CompressionError> {
+        if !matches!(params.algorithm, CompressionAlgorithm::Brotli) {
+            return Err(CompressionError::PolicyViolation(
+                "Brotli adapter requires Brotli algorithm".to_string(),
+            ));
+        }
+
+        if params.level > 11 {
+            return Err(CompressionError::PolicyViolation(
+                "Brotli level must be 0-11".to_string(),
+            ));
+        }
+
+        if !Self::brotli_available() {
+            return Err(CompressionError::UnsupportedAlgorithm(
+                CompressionAlgorithm::Brotli,
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl BrotliAdapter {
+    fn brotli_available() -> bool {
+        cfg!(feature = "compression")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,7 +391,10 @@ mod tests {
         assert!(AlgorithmRegistry::is_supported(CompressionAlgorithm::None));
         assert!(AlgorithmRegistry::is_supported(CompressionAlgorithm::Lz4));
         assert!(AlgorithmRegistry::is_supported(CompressionAlgorithm::Gzip));
-        assert!(!AlgorithmRegistry::is_supported(CompressionAlgorithm::Brotli));
+        assert_eq!(
+            AlgorithmRegistry::is_supported(CompressionAlgorithm::Brotli),
+            cfg!(feature = "compression")
+        );
     }
 
     #[test]
@@ -279,7 +416,9 @@ mod tests {
 
         let test_data = b"Hello, world! This is a test for LZ4 compression.";
         let compressed = adapter.compress(test_data, &params).unwrap();
-        let decompressed = adapter.decompress(&compressed, &params, test_data.len() as u64).unwrap();
+        let decompressed = adapter
+            .decompress(&compressed, &params, test_data.len() as u64)
+            .unwrap();
 
         assert_eq!(decompressed, test_data);
     }
@@ -293,8 +432,42 @@ mod tests {
 
         let test_data = b"Hello, world! This is a test for Gzip compression.";
         let compressed = adapter.compress(test_data, &params).unwrap();
-        let decompressed = adapter.decompress(&compressed, &params, test_data.len() as u64).unwrap();
+        let decompressed = adapter
+            .decompress(&compressed, &params, test_data.len() as u64)
+            .unwrap();
 
         assert_eq!(decompressed, test_data);
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn test_brotli_adapter() {
+        let adapter = BrotliAdapter;
+        let params = AlgorithmRegistry::default_params(CompressionAlgorithm::Brotli);
+
+        assert!(adapter.validate_params(&params).is_ok());
+
+        let test_data =
+            b"Hello, world! Brotli benefits from repeated repeated repeated transfer metadata.";
+        let compressed = adapter.compress(test_data, &params).unwrap();
+        let decompressed = adapter
+            .decompress(&compressed, &params, test_data.len() as u64)
+            .unwrap();
+
+        assert_eq!(decompressed, test_data);
+    }
+
+    #[test]
+    #[cfg(not(feature = "compression"))]
+    fn test_brotli_adapter_reports_unsupported_without_feature() {
+        let adapter = BrotliAdapter;
+        let params = AlgorithmRegistry::default_params(CompressionAlgorithm::Brotli);
+
+        assert!(matches!(
+            adapter.validate_params(&params),
+            Err(CompressionError::UnsupportedAlgorithm(
+                CompressionAlgorithm::Brotli
+            ))
+        ));
     }
 }

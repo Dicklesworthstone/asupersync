@@ -182,7 +182,7 @@ impl ArtifactProfile {
         let base_constant = 0x1021; // CRC-16-CCITT polynomial
 
         // Create deterministic constant that scales with chunk size
-        (base_constant as u64) << (bits.min(16).max(8))
+        (base_constant as u64) << bits.clamp(8, 16)
     }
 
     /// Find boundaries using deterministic algorithm for reproducibility.
@@ -339,7 +339,7 @@ impl ArtifactProfile {
     fn compute_deterministic_mask(avg_chunk_size: u64) -> u64 {
         // Create mask that gives approximately the right average chunk size
         let bits = (avg_chunk_size as f64).log2() as u32;
-        let mask_bits = bits.min(20).max(8);
+        let mask_bits = bits.clamp(8, 20);
 
         // Use checked_shl to prevent overflow/undefined behavior
         assert!(
@@ -464,10 +464,8 @@ impl ArtifactProfile {
         // Larger chunks and chunks with more structure get higher proof strength
         let size_factor = if chunk_data.len() > 64 * 1024 {
             2
-        } else if chunk_data.len() > 16 * 1024 {
-            1
         } else {
-            0
+            i32::from(chunk_data.len() > 16 * 1024)
         };
 
         let structure_factor = if Self::has_high_structure(chunk_data) {
@@ -476,11 +474,7 @@ impl ArtifactProfile {
             0
         };
 
-        let position_factor = if chunk_index < 5 {
-            1 // Early chunks often more important
-        } else {
-            0
-        };
+        let position_factor = i32::from(chunk_index < 5); // Early chunks often more important
 
         match size_factor + structure_factor + position_factor {
             0..=2 => ProofStrength::Basic,
@@ -536,7 +530,9 @@ impl ArtifactProfile {
         }
 
         // Simple heuristic: look for null-terminated strings
-        let null_count = data.iter().filter(|&&b| b == 0).count();
+        let null_count = data
+            .iter()
+            .fold(0usize, |count, byte| count + usize::from(*byte == 0));
         let null_ratio = null_count as f64 / data.len() as f64;
 
         // String tables typically have 5-20% null bytes
@@ -774,7 +770,7 @@ mod regex {
 
         pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
             // Simple version number detection
-            for (_i, part) in text.split_whitespace().enumerate() {
+            for part in text.split_whitespace() {
                 if Self::is_version_like(part) {
                     return Some(Match {
                         text: part,
@@ -792,7 +788,7 @@ mod regex {
             parts.len() >= 2
                 && parts
                     .iter()
-                    .all(|p| p.chars().next().map_or(false, |c| c.is_ascii_digit()))
+                    .all(|p| p.chars().next().is_some_and(|c| c.is_ascii_digit()))
         }
     }
 

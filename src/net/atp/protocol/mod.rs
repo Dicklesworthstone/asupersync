@@ -10,9 +10,9 @@
 //! - Object requests: Limit concurrent requests per peer to prevent amplification
 //! - Memory allocation: Track and limit per-peer memory usage for large objects
 //!
-//! TODO: Full integration blocked by file reservation conflicts with OrangeLantern agent.
-//! Integration should be completed by adding ResourceManager to session state and
-//! calling resource checks in frame processing and connection handling code.
+//! The Byzantine defense processor wires `ResourceManager` into frame handling,
+//! object requests, and session lifecycle accounting; transport adapters should
+//! route inbound peer traffic through that processor before dispatching payloads.
 
 pub mod byzantine_defense;
 pub mod codec;

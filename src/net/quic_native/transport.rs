@@ -1378,12 +1378,14 @@ mod tests {
             "PTO backoff should be capped at pto_count=10: {deadline_at_12} == {deadline_at_10}"
         );
 
-        // Verify the backoff is indeed 2^10 = 1024 times the base timeout
+        // Verify the backoff is indeed 2^10 = 1024 times the base timeout,
+        // anchored to the oldest ack-eliciting packet send time.
+        let sent_at = 1_000;
         let mut t3 = QuicTransportMachine::new();
-        t3.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+        t3.on_packet_sent(sent(PacketNumberSpace::Initial, 1, sent_at));
         let base_deadline = t3.pto_deadline_micros(100_000).expect("base deadline");
-        let base_timeout = base_deadline - 100_000;
-        let capped_timeout = deadline_at_10 - 100_000;
+        let base_timeout = base_deadline - sent_at;
+        let capped_timeout = deadline_at_10 - sent_at;
         assert_eq!(
             capped_timeout,
             base_timeout * 1024,

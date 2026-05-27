@@ -214,12 +214,13 @@ impl AtpTransportMetricsCollector {
     pub fn update_from_transport(&mut self, transport: &QuicTransportMachine) {
         // Update basic metrics
         let rtt = transport.rtt();
-        self.bytes_in_flight.set(transport.bytes_in_flight() as i64);
+        self.bytes_in_flight
+            .set(transport.bytes_in_flight().cast_signed());
         self.congestion_window
-            .set(transport.congestion_window_bytes() as i64);
+            .set(transport.congestion_window_bytes().cast_signed());
 
         if let Some(smoothed_rtt) = rtt.smoothed_rtt_micros() {
-            self.rtt_gauge.set(smoothed_rtt as i64);
+            self.rtt_gauge.set(smoothed_rtt.cast_signed());
             self.stability_tracker.update_rtt(smoothed_rtt);
         }
 
@@ -465,9 +466,7 @@ impl PathStabilityTracker {
         let pto_stability = (1.0 - self.pto_rate()).max(0.0);
 
         // Weighted average
-        (rtt_stability * 0.5 + loss_stability * 0.3 + pto_stability * 0.2)
-            .min(1.0)
-            .max(0.0)
+        (rtt_stability * 0.5 + loss_stability * 0.3 + pto_stability * 0.2).clamp(0.0, 1.0)
     }
 }
 

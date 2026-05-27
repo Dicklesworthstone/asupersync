@@ -274,6 +274,7 @@ impl ManagedQuicEndpoint {
                 }
                 RoutingResult::NewConnection {
                     connection_id,
+                    peer_addr,
                     outgoing_packets: mut packets,
                 } => {
                     // Check connection limit
@@ -288,12 +289,7 @@ impl ManagedQuicEndpoint {
                     // Create new connection
                     if let Err(e) = self
                         .connection_router
-                        .create_connection(
-                            cx,
-                            connection_id,
-                            "0.0.0.0:0".parse().unwrap(), // TODO: extract from packet
-                            self.config.is_server,
-                        )
+                        .create_connection(cx, connection_id, peer_addr, self.config.is_server)
                         .await
                     {
                         cx.trace(&format!(
@@ -375,15 +371,13 @@ impl ManagedQuicEndpoint {
         // Shut down UDP endpoint
         self.udp_endpoint.shutdown(cx).await?;
 
-        // TODO: In complete implementation:
-        // 1. Send CONNECTION_CLOSE to all active connections
-        // 2. Wait for drain timeout
-        // 3. Clean up connection router state
-        // 4. Cancel all pending timers
+        let closed_connections = self.connection_router.close_all(cx, Instant::now(), 0)?;
+        self.timer_scheduler.cancel();
 
         cx.trace(&format!(
-            "Managed QUIC endpoint {} shutdown complete",
-            self.endpoint_id()
+            "Managed QUIC endpoint {} shutdown complete; closed {} connections",
+            self.endpoint_id(),
+            closed_connections
         ));
 
         Ok(())

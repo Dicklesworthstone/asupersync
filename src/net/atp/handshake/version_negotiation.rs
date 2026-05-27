@@ -70,7 +70,7 @@ impl VersionNegotiationPacket {
             });
         }
 
-        let mut buf = &data[..];
+        let mut buf = data;
 
         // Check long header form
         let first_byte = buf.get_u8();

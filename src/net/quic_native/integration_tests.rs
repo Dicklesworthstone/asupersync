@@ -8,10 +8,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::cx::Cx;
     use crate::net::quic_native::{
         ConnectionRouter, ManagedEndpointConfig, ManagedQuicEndpoint, NativeQuicConnectionConfig,
-        QuicTimerScheduler, QuicUdpEndpointConfig,
+        QuicTimerScheduler,
     };
     use crate::test_utils::run_test_with_cx;
     use std::net::SocketAddr;
@@ -33,7 +32,7 @@ mod tests {
                     .await
                     .expect("server bind should succeed");
 
-            let server_addr = server.local_addr();
+            let _server_addr = server.local_addr();
 
             // Create client endpoint
             let client_config = ManagedEndpointConfig {

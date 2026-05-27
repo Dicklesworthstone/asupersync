@@ -3,11 +3,11 @@
 //! This module implements policy-driven encryption decisions with explicit
 //! privacy boundaries and relay/mailbox visibility controls.
 
-use crate::atp::manifest::{
-    EncryptionPolicy, EncryptionAlgorithm, KeyDerivation, KeyDerivationFunction,
-    ObjectKind, EncryptionDomain, PrivacyLevel,
-};
 use super::EncryptionError;
+use crate::atp::manifest::{
+    EncryptionAlgorithm, EncryptionDomain, EncryptionPolicy, KeyDerivation, KeyDerivationFunction,
+    ObjectKind, PrivacyLevel,
+};
 use std::collections::BTreeMap;
 
 /// Policy-driven encryption decision engine.
@@ -23,10 +23,7 @@ impl EncryptionPolicyEngine {
                 salt: b"atp-default-salt-32-bytes-long!!".to_vec(),
                 iterations: None,
             },
-            apply_to_kinds: vec![
-                ObjectKind::FileObject,
-                ObjectKind::ContentAddressedBlob,
-            ],
+            apply_to_kinds: vec![ObjectKind::FileObject, ObjectKind::ContentAddressedBlob],
             encrypt_metadata: false,
         }
     }
@@ -75,7 +72,9 @@ impl EncryptionPolicyEngine {
         }
 
         // Validate object kinds consistency
-        if matches!(policy.algorithm, EncryptionAlgorithm::None) && !policy.apply_to_kinds.is_empty() {
+        if matches!(policy.algorithm, EncryptionAlgorithm::None)
+            && !policy.apply_to_kinds.is_empty()
+        {
             return Err(EncryptionError::PolicyViolation(
                 "none algorithm should have empty apply_to_kinds".to_string(),
             ));
@@ -154,15 +153,12 @@ impl EncryptionPolicyEngine {
         match algorithm {
             EncryptionAlgorithm::None => true,
             EncryptionAlgorithm::ChaCha20Poly1305 => true,
-            EncryptionAlgorithm::Aes256Gcm => false, // Would need aes-gcm crate
+            EncryptionAlgorithm::Aes256Gcm => true,
         }
     }
 
     /// Check if encryption should be applied for a given object.
-    pub fn should_encrypt(
-        policy: &EncryptionPolicy,
-        object_kind: ObjectKind,
-    ) -> bool {
+    pub fn should_encrypt(policy: &EncryptionPolicy, object_kind: ObjectKind) -> bool {
         // Never encrypt if algorithm is None
         if matches!(policy.algorithm, EncryptionAlgorithm::None) {
             return false;
@@ -189,9 +185,7 @@ impl EncryptionPolicyEngine {
     pub fn mailbox_privacy_domain() -> EncryptionDomain {
         EncryptionDomain {
             domain_id: "mailbox-privacy".to_string(),
-            allowed_kdfs: vec![
-                KeyDerivationFunction::Argon2id,
-            ],
+            allowed_kdfs: vec![KeyDerivationFunction::Argon2id],
             relay_privacy: true,
             mailbox_privacy: true,
         }
@@ -348,7 +342,7 @@ mod tests {
             algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
             key_derivation: KeyDerivation {
                 kdf: KeyDerivationFunction::Pbkdf2Sha256,
-                salt: vec![1, 2, 3], // Too short
+                salt: vec![1, 2, 3],   // Too short
                 iterations: Some(500), // Too few
             },
             apply_to_kinds: vec![ObjectKind::FileObject],
@@ -391,13 +385,24 @@ mod tests {
 
         // Metadata visible without encryption should fail
         assert!(matches!(
-            EncryptionPolicyEngine::validate_privacy_level(&disabled_policy, PrivacyLevel::MetadataVisible),
+            EncryptionPolicyEngine::validate_privacy_level(
+                &disabled_policy,
+                PrivacyLevel::MetadataVisible
+            ),
             Err(EncryptionError::PrivacyViolation(_))
         ));
 
         // Valid combinations
-        assert!(EncryptionPolicyEngine::validate_privacy_level(&disabled_policy, PrivacyLevel::Public).is_ok());
-        assert!(EncryptionPolicyEngine::validate_privacy_level(&encrypted_policy, PrivacyLevel::MetadataVisible).is_ok());
+        assert!(EncryptionPolicyEngine::validate_privacy_level(
+            &disabled_policy,
+            PrivacyLevel::Public
+        )
+        .is_ok());
+        assert!(EncryptionPolicyEngine::validate_privacy_level(
+            &encrypted_policy,
+            PrivacyLevel::MetadataVisible
+        )
+        .is_ok());
     }
 
     #[test]

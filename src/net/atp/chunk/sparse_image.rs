@@ -153,11 +153,11 @@ struct SparseRegion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SparseRegionType {
     /// Region filled with zeros.
-    ZeroFilled,
+    Zero,
     /// Region with repeated pattern.
-    PatternFilled,
+    Pattern,
     /// Region with actual data.
-    DataFilled,
+    Data,
 }
 
 impl SparseImageProfile {
@@ -207,7 +207,7 @@ impl SparseImageProfile {
             let next_end = utils::u64_to_usize(region.end, "sparse region end")?;
 
             // Only create regions for significant sparse areas
-            if region.region_type != SparseRegionType::DataFilled
+            if region.region_type != SparseRegionType::Data
                 && (region.end - region.start) >= min_hole_size as u64
             {
                 regions.push(region);
@@ -233,7 +233,7 @@ impl SparseImageProfile {
             return Ok(SparseRegion {
                 start: start_offset,
                 end: start_offset,
-                region_type: SparseRegionType::DataFilled,
+                region_type: SparseRegionType::Data,
                 fill_pattern: Vec::new(),
             });
         }
@@ -247,7 +247,7 @@ impl SparseImageProfile {
                         "zero-filled sparse region end overflow".to_string(),
                     )
                 })?,
-                region_type: SparseRegionType::ZeroFilled,
+                region_type: SparseRegionType::Zero,
                 fill_pattern: vec![0],
             });
         }
@@ -261,7 +261,7 @@ impl SparseImageProfile {
                         "pattern-filled sparse region end overflow".to_string(),
                     )
                 })?,
-                region_type: SparseRegionType::PatternFilled,
+                region_type: SparseRegionType::Pattern,
                 fill_pattern: pattern,
             });
         }
@@ -276,7 +276,7 @@ impl SparseImageProfile {
                         "data sparse region end overflow".to_string(),
                     )
                 })?,
-            region_type: SparseRegionType::DataFilled,
+            region_type: SparseRegionType::Data,
             fill_pattern: Vec::new(),
         })
     }
@@ -364,11 +364,11 @@ impl SparseImageProfile {
                     })
                     .and_then(|size| utils::u64_to_usize(size, "sparse region size"))?;
                 match region.region_type {
-                    SparseRegionType::ZeroFilled | SparseRegionType::PatternFilled => {
+                    SparseRegionType::Zero | SparseRegionType::Pattern => {
                         // For sparse regions, use larger chunks to skip over holes efficiently
                         region_size.min(max_size).min(remaining)
                     }
-                    SparseRegionType::DataFilled => {
+                    SparseRegionType::Data => {
                         // For data regions, use normal chunking
                         target_size.min(region_size).max(min_size).min(remaining)
                     }
@@ -406,7 +406,7 @@ impl SparseImageProfile {
             if region.start < chunk_end && region.end > chunk_offset {
                 // This chunk overlaps with a sparse region
                 match region.region_type {
-                    SparseRegionType::ZeroFilled | SparseRegionType::PatternFilled => {
+                    SparseRegionType::Zero | SparseRegionType::Pattern => {
                         let hole_size = (region.end - region.start.max(chunk_offset))
                             .min(chunk_end - chunk_offset);
 
@@ -420,16 +420,16 @@ impl SparseImageProfile {
                         let hole_metadata = SparseHoleMetadata {
                             hole_size,
                             hole_type: match region.region_type {
-                                SparseRegionType::ZeroFilled => "zero-filled".to_string(),
-                                SparseRegionType::PatternFilled => "pattern-filled".to_string(),
-                                _ => "unknown".to_string(),
+                                SparseRegionType::Zero => "zero-filled".to_string(),
+                                SparseRegionType::Pattern => "pattern-filled".to_string(),
+                                SparseRegionType::Data => "unknown".to_string(),
                             },
                             attributes,
                         };
 
                         return (true, Some(hole_metadata));
                     }
-                    SparseRegionType::DataFilled => {
+                    SparseRegionType::Data => {
                         // Data region, not a hole
                     }
                 }
@@ -456,7 +456,9 @@ impl SparseImageProfile {
         }
 
         // Count zeros
-        let zero_count = data.iter().filter(|&&b| b == 0).count();
+        let zero_count = data
+            .iter()
+            .fold(0usize, |count, byte| count + usize::from(*byte == 0));
         let zero_ratio = zero_count as f64 / data.len() as f64;
 
         if zero_ratio > 0.9 {
@@ -651,13 +653,13 @@ mod tests {
         // Check for zero region
         let zero_region = regions
             .iter()
-            .find(|r| r.region_type == SparseRegionType::ZeroFilled);
+            .find(|r| r.region_type == SparseRegionType::Zero);
         assert!(zero_region.is_some());
 
         // Check for pattern region
         let pattern_region = regions
             .iter()
-            .find(|r| r.region_type == SparseRegionType::PatternFilled);
+            .find(|r| r.region_type == SparseRegionType::Pattern);
         assert!(pattern_region.is_some());
     }
 
@@ -666,7 +668,7 @@ mod tests {
         let sparse_regions = vec![SparseRegion {
             start: 1000,
             end: 9000,
-            region_type: SparseRegionType::ZeroFilled,
+            region_type: SparseRegionType::Zero,
             fill_pattern: vec![0],
         }];
 

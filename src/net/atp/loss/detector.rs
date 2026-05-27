@@ -11,7 +11,7 @@ use crate::net::quic_native::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Helper macro to extract success value from AtpOutcome or early return with error.
 macro_rules! try_outcome {
@@ -372,7 +372,7 @@ impl AtpLossDetector {
 
         // Update largest acked
         if let Some(largest) = largest_newly_acked {
-            if state.largest_acked.map_or(true, |prev| largest > prev) {
+            if state.largest_acked.is_none_or(|prev| largest > prev) {
                 state.largest_acked = Some(largest);
                 state.largest_acked_time = Some(now_micros);
             }
@@ -649,12 +649,12 @@ impl AtpLossDetector {
             self.pattern_analyzer.loss_events.pop_front();
         }
 
-        // Analyze patterns (simplified)
         self.analyze_loss_patterns();
     }
 
     fn analyze_loss_patterns(&mut self) {
         self.pattern_analyzer.patterns.clear();
+        self.pattern_analyzer.pattern_confidence.clear();
 
         if self.pattern_analyzer.loss_events.len() < 3 {
             return;
@@ -668,38 +668,86 @@ impl AtpLossDetector {
             .take(10)
             .collect();
 
-        // Detect burst pattern
-        if recent_events.iter().any(|e| e.lost_packets.len() > 3) {
+        let sample_count = recent_events.len() as f64;
+        let burst_events = recent_events
+            .iter()
+            .filter(|event| event.lost_packets.len() > 3)
+            .count();
+        if burst_events > 0 {
             self.pattern_analyzer.patterns.push(LossPattern::Burst);
             self.pattern_analyzer
                 .pattern_confidence
-                .insert(LossPattern::Burst, 0.8);
+                .insert(LossPattern::Burst, burst_events as f64 / sample_count);
         }
 
-        // Detect periodic pattern (simplified)
         let intervals: Vec<_> = recent_events
             .windows(2)
             .map(|w| w[0].timestamp.duration_since(w[1].timestamp))
             .collect();
 
         if intervals.len() >= 3 {
-            let avg_interval = intervals.iter().sum::<Duration>() / intervals.len() as u32;
-            let variance = intervals
+            let interval_micros: Vec<f64> = intervals
                 .iter()
-                .map(|&d| {
-                    let diff = d.as_millis() as i64 - avg_interval.as_millis() as i64;
-                    (diff * diff) as f64
-                })
-                .sum::<f64>()
-                / intervals.len() as f64;
-
-            if variance < 1000.0 {
-                // Low variance indicates periodicity
-                self.pattern_analyzer.patterns.push(LossPattern::Periodic);
-                self.pattern_analyzer
-                    .pattern_confidence
-                    .insert(LossPattern::Periodic, 0.7);
+                .map(|interval| interval.as_micros() as f64)
+                .collect();
+            let avg_interval = interval_micros.iter().sum::<f64>() / interval_micros.len() as f64;
+            if avg_interval > 0.0 {
+                let variance = interval_micros
+                    .iter()
+                    .map(|interval| {
+                        let diff = *interval - avg_interval;
+                        diff * diff
+                    })
+                    .sum::<f64>()
+                    / interval_micros.len() as f64;
+                let coefficient_of_variation = variance.sqrt() / avg_interval;
+                if coefficient_of_variation <= 0.15 {
+                    self.pattern_analyzer.patterns.push(LossPattern::Periodic);
+                    self.pattern_analyzer.pattern_confidence.insert(
+                        LossPattern::Periodic,
+                        (1.0 - coefficient_of_variation / 0.15).clamp(0.0, 1.0),
+                    );
+                }
             }
+        }
+
+        let congestion_events = recent_events
+            .iter()
+            .filter(|event| {
+                event
+                    .conditions
+                    .rttvar_micros
+                    .zip(event.conditions.rtt_micros)
+                    .is_some_and(|(rttvar, rtt)| rtt > 0 && rttvar.saturating_mul(4) > rtt)
+                    || (event.conditions.congestion_window > 0
+                        && event.conditions.bytes_in_flight
+                            >= event.conditions.congestion_window.saturating_mul(9) / 10)
+            })
+            .count();
+        if congestion_events > 0 {
+            self.pattern_analyzer.patterns.push(LossPattern::Congestion);
+            self.pattern_analyzer.pattern_confidence.insert(
+                LossPattern::Congestion,
+                congestion_events as f64 / sample_count,
+            );
+        }
+
+        let tail_events = recent_events
+            .iter()
+            .filter(|event| matches!(event.detection_method, LossDetectionMethod::EarlyRetransmit))
+            .count();
+        if tail_events > 0 {
+            self.pattern_analyzer.patterns.push(LossPattern::Tail);
+            self.pattern_analyzer
+                .pattern_confidence
+                .insert(LossPattern::Tail, tail_events as f64 / sample_count);
+        }
+
+        if self.pattern_analyzer.patterns.is_empty() {
+            self.pattern_analyzer.patterns.push(LossPattern::Sporadic);
+            self.pattern_analyzer
+                .pattern_confidence
+                .insert(LossPattern::Sporadic, 1.0);
         }
     }
 
@@ -708,14 +756,34 @@ impl AtpLossDetector {
         acked_packets: &[SentPacketMeta],
         _loss_result: &LossDetectionResult,
     ) {
-        // Check for spurious retransmits (packets declared lost but then acked)
+        let Some(last_loss) = self.pattern_analyzer.loss_events.back() else {
+            return;
+        };
+
+        let lost_packets: HashSet<u64> = last_loss.lost_packets.iter().copied().collect();
         for acked in acked_packets {
-            // Simplified: assume any out-of-order ack indicates reordering
-            if let Some(last_loss) = self.pattern_analyzer.loss_events.back() {
-                if last_loss.lost_packets.contains(&acked.packet_number) {
-                    self.metrics.false_losses += 1;
-                    self.reordering_tracker.adapt_threshold();
+            if lost_packets.contains(&acked.packet_number) {
+                self.metrics.false_losses += 1;
+                let reordering_depth = last_loss
+                    .lost_packets
+                    .iter()
+                    .copied()
+                    .filter(|lost| *lost > acked.packet_number)
+                    .count()
+                    .saturating_add(1);
+                self.reordering_tracker
+                    .record_reordering(u32::try_from(reordering_depth).unwrap_or(u32::MAX));
+                if !self
+                    .pattern_analyzer
+                    .patterns
+                    .contains(&LossPattern::Reordering)
+                {
+                    self.pattern_analyzer.patterns.push(LossPattern::Reordering);
                 }
+                self.pattern_analyzer.pattern_confidence.insert(
+                    LossPattern::Reordering,
+                    self.reordering_tracker.confidence(),
+                );
             }
         }
     }
@@ -777,12 +845,39 @@ impl ReorderingTracker {
     }
 
     fn adapt_threshold(&mut self) {
-        // Increase threshold when reordering is detected
-        self.current_threshold = (self.current_threshold + 1).min(10);
-        self.reordering_measurements.push_back(1);
+        self.record_reordering(1);
+    }
+
+    fn record_reordering(&mut self, depth: u32) {
+        let measured_depth = depth.max(1);
+        self.max_reordering = self.max_reordering.max(measured_depth);
+        let target_threshold = self.current_threshold.max(measured_depth.saturating_add(1));
+        let blended = self.current_threshold as f64
+            + (target_threshold as f64 - self.current_threshold as f64) * self.adaptation_factor;
+        self.current_threshold = blended.ceil() as u32;
+        self.current_threshold = self.current_threshold.min(10);
+        self.reordering_measurements.push_back(measured_depth);
         if self.reordering_measurements.len() > 100 {
             self.reordering_measurements.pop_front();
         }
+    }
+
+    fn confidence(&self) -> f64 {
+        if self.reordering_measurements.is_empty() {
+            return 0.0;
+        }
+
+        let recent = self.reordering_measurements.len().min(20);
+        let recent_sum = self
+            .reordering_measurements
+            .iter()
+            .rev()
+            .take(recent)
+            .copied()
+            .map(f64::from)
+            .sum::<f64>();
+        let recent_avg = recent_sum / recent as f64;
+        (recent_avg / f64::from(self.current_threshold.max(1))).clamp(0.0, 1.0)
     }
 }
 

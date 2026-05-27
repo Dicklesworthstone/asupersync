@@ -10,7 +10,7 @@ use crate::net::atp::protocol::outcome::{AtpOutcome, TransportError};
 use crate::net::quic_native::{AckEvent, PacketNumberSpace, QuicTransportMachine, SentPacketMeta};
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::Outcome;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -768,9 +768,10 @@ impl RecoverySpaceTelemetry {
 }
 
 mod packet_number_space_serde {
-    use super::*;
-    use serde::de;
+    use super::PacketNumberSpace;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
+    #[allow(clippy::ref_option)]
     pub(super) fn serialize_option<S>(
         value: &Option<PacketNumberSpace>,
         serializer: S,

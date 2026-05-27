@@ -355,8 +355,7 @@ impl PersistentCongestionDetector {
 
         // Weighted combination
         (duration_factor * 0.3 + loss_factor * 0.4 + rtt_factor * 0.2 + utilization_factor * 0.1)
-            .min(1.0)
-            .max(0.0)
+            .clamp(0.0, 1.0)
     }
 
     fn record_congestion_event(
@@ -380,7 +379,9 @@ impl PersistentCongestionDetector {
         }
 
         // Clean up old events outside tracking window
-        let cutoff = now - Duration::from_micros(self.config.tracking_window_micros);
+        let cutoff = now
+            .checked_sub(Duration::from_micros(self.config.tracking_window_micros))
+            .unwrap();
         self.congestion_events.retain(|e| e.timestamp >= cutoff);
     }
 

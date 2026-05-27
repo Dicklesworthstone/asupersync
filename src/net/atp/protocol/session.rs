@@ -2397,7 +2397,7 @@ mod tests {
     fn server_feature_confusion_is_rejected_by_client() {
         let hello =
             hello_for(SessionContextKind::Direct).with_features(&[AtpFeature::EncryptionPolicy]);
-        let mut policy = policy_for(SessionContextKind::Direct);
+        let policy = policy_for(SessionContextKind::Direct);
         let mut client = SessionNegotiator::client(hello.initiator);
         client.start_client_hello(&hello).unwrap();
 

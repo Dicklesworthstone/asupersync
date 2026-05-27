@@ -8,14 +8,15 @@
 #![allow(dead_code)]
 
 use crate::cx::Cx;
-use crate::net::quic_core::ConnectionId;
+use crate::net::quic_core::{ConnectionId, LongPacketType, PacketHeader, QuicCoreError};
 use crate::net::quic_native::{
     NativeQuicConnection, NativeQuicConnectionConfig, OutgoingPacket, ReceivedPacket,
 };
+use crate::net::quic_native::{NativeQuicConnectionError, PacketNumberSpace};
 use crate::time::Sleep;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Connection routing table that maps connection IDs to active QUIC connections.
 #[derive(Debug)]
@@ -26,6 +27,8 @@ pub struct ConnectionRouter {
     next_connection_id: u64,
     /// Connection configuration template.
     config_template: NativeQuicConnectionConfig,
+    /// Monotonic clock origin for connection timer APIs that use microseconds.
+    clock_origin: Instant,
 }
 
 /// Handle to a managed QUIC connection with timing and lifecycle state.
@@ -83,6 +86,8 @@ pub enum RoutingResult {
     NewConnection {
         /// Suggested connection ID for the new connection.
         connection_id: ConnectionId,
+        /// Remote address that originated the first datagram.
+        peer_addr: SocketAddr,
         /// Initial outgoing packets for handshake response.
         outgoing_packets: Vec<OutgoingPacket>,
     },
@@ -111,6 +116,13 @@ pub enum ConnectionRouterError {
     ConnectionCreationFailed(String),
     /// Timer scheduling failed.
     TimerSchedulingFailed(String),
+    /// Packet reached a connection but failed state-machine processing.
+    PacketProcessingFailed {
+        /// Connection ID.
+        connection_id: ConnectionId,
+        /// Processing error.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ConnectionRouterError {
@@ -129,6 +141,15 @@ impl std::fmt::Display for ConnectionRouterError {
             }
             Self::ConnectionCreationFailed(msg) => write!(f, "connection creation failed: {msg}"),
             Self::TimerSchedulingFailed(msg) => write!(f, "timer scheduling failed: {msg}"),
+            Self::PacketProcessingFailed {
+                connection_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "packet processing failed for {connection_id:?}: {reason}"
+                )
+            }
         }
     }
 }
@@ -142,6 +163,7 @@ impl ConnectionRouter {
             connections: HashMap::new(),
             next_connection_id: 1,
             config_template,
+            clock_origin: Instant::now(),
         }
     }
 
@@ -155,18 +177,61 @@ impl ConnectionRouter {
             return Err(ConnectionRouterError::Cancelled);
         }
 
-        // Extract destination connection ID from packet
-        // For now, we'll implement a simple routing based on source address
-        // In a complete implementation, this would parse the QUIC packet header
-        let connection_id = self.extract_connection_id(&packet)?;
+        let routing_info = match self.decode_routing_info(&packet) {
+            Ok(info) => info,
+            Err(err) => {
+                return Ok(RoutingResult::Drop {
+                    reason: format!("invalid QUIC header: {err}"),
+                });
+            }
+        };
+        let connection_id = routing_info.destination_cid;
+        let now_micros = self.instant_micros(packet.receive_time);
 
         if let Some(handle) = self.connections.get_mut(&connection_id) {
-            // Route to existing connection
             handle.last_activity = Instant::now();
-
-            // Process packet through connection state machine
-            // For now, return empty outgoing packets
-            // In complete implementation, this would call connection.process_packet()
+            handle
+                .connection
+                .on_datagram_received(cx, packet.data.len() as u64)
+                .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                    connection_id,
+                    reason: err.to_string(),
+                })?;
+            let payload = packet.data.get(routing_info.header_len..).ok_or_else(|| {
+                ConnectionRouterError::PacketProcessingFailed {
+                    connection_id,
+                    reason: "header length exceeded datagram length".to_string(),
+                }
+            })?;
+            handle
+                .connection
+                .process_packet_payload(
+                    cx,
+                    routing_info.space,
+                    routing_info.packet_number,
+                    payload,
+                    now_micros,
+                )
+                .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                    connection_id,
+                    reason: err.to_string(),
+                })?;
+            let outgoing_packets = drain_connection_frames(
+                cx,
+                connection_id,
+                handle,
+                routing_info.space,
+                packet.src_addr,
+                packet.receive_time,
+            )?;
+            Self::refresh_connection_timer(
+                cx,
+                connection_id,
+                handle,
+                self.clock_origin,
+                now_micros,
+                packet.receive_time,
+            )?;
             cx.trace(&format!(
                 "Routed packet from {} to connection {connection_id:?}",
                 packet.src_addr
@@ -174,27 +239,28 @@ impl ConnectionRouter {
 
             Ok(RoutingResult::Routed {
                 connection_id,
+                outgoing_packets,
+            })
+        } else if routing_info.kind == PacketRoutingKind::Initial {
+            let new_connection_id = self.allocate_connection_id();
+
+            cx.trace(&format!(
+                "New connection attempt from {} assigned ID {new_connection_id:?}",
+                packet.src_addr
+            ));
+
+            Ok(RoutingResult::NewConnection {
+                connection_id: new_connection_id,
+                peer_addr: packet.src_addr,
                 outgoing_packets: Vec::new(),
             })
         } else {
-            // Check if this looks like a new connection attempt
-            if self.is_new_connection_packet(&packet) {
-                let new_connection_id = self.allocate_connection_id();
-
-                cx.trace(&format!(
-                    "New connection attempt from {} assigned ID {new_connection_id:?}",
-                    packet.src_addr
-                ));
-
-                Ok(RoutingResult::NewConnection {
-                    connection_id: new_connection_id,
-                    outgoing_packets: Vec::new(),
-                })
-            } else {
-                Ok(RoutingResult::Drop {
-                    reason: format!("Unknown connection ID {connection_id:?}"),
-                })
-            }
+            Ok(RoutingResult::Drop {
+                reason: format!(
+                    "unknown connection ID {connection_id:?} for {:?} packet",
+                    routing_info.kind
+                ),
+            })
         }
     }
 
@@ -255,6 +321,58 @@ impl ConnectionRouter {
         }
     }
 
+    /// Close and remove every active connection.
+    pub fn close_all(
+        &mut self,
+        cx: &Cx,
+        now: Instant,
+        app_error_code: u64,
+    ) -> Result<usize, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let now_micros = self.instant_micros(now);
+        for (connection_id, handle) in &mut self.connections {
+            handle
+                .connection
+                .begin_close(cx, now_micros, app_error_code)
+                .or_else(|_| handle.connection.close_immediately(cx, app_error_code))
+                .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                    connection_id: *connection_id,
+                    reason: err.to_string(),
+                })?;
+        }
+        let closed = self.connections.len();
+        self.connections.clear();
+        Ok(closed)
+    }
+
+    /// Refresh a connection's PTO deadline from its transport state.
+    fn refresh_connection_timer(
+        cx: &Cx,
+        connection_id: ConnectionId,
+        handle: &mut ConnectionHandle,
+        origin: Instant,
+        now_micros: u64,
+        now_instant: Instant,
+    ) -> Result<(), ConnectionRouterError> {
+        handle.next_timer_deadline = handle
+            .connection
+            .pto_deadline_micros(cx, now_micros)
+            .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: err.to_string(),
+            })?
+            .and_then(|deadline| {
+                let delta = deadline.saturating_sub(now_micros);
+                origin
+                    .checked_add(Duration::from_micros(deadline))
+                    .or_else(|| now_instant.checked_add(Duration::from_micros(delta)))
+            });
+        Ok(())
+    }
+
     /// Get the next timer deadline across all connections.
     pub fn next_timer_deadline(&self) -> Option<Instant> {
         self.connections
@@ -273,25 +391,40 @@ impl ConnectionRouter {
             return Err(ConnectionRouterError::Cancelled);
         }
 
-        let outgoing_packets = Vec::new();
+        let mut outgoing_packets = Vec::new();
+        let origin = self.clock_origin;
 
         for (connection_id, handle) in &mut self.connections {
             if let Some(deadline) = handle.next_timer_deadline {
                 if current_time >= deadline {
-                    // Timer fired for this connection
                     cx.trace(&format!(
                         "Timer fired for connection {connection_id:?} at {current_time:?}"
                     ));
 
-                    // Reset timer deadline
                     handle.next_timer_deadline = None;
-
-                    // In a complete implementation, this would:
-                    // 1. Determine timer type (PTO, ACK delay, etc.)
-                    // 2. Call appropriate connection method
-                    // 3. Collect outgoing packets
-
-                    // For now, just trace the event
+                    handle.connection.on_probe_timeout(cx).map_err(|err| {
+                        ConnectionRouterError::PacketProcessingFailed {
+                            connection_id: *connection_id,
+                            reason: err.to_string(),
+                        }
+                    })?;
+                    let peer_addr = handle.peer_addr;
+                    outgoing_packets.extend(drain_connection_frames(
+                        cx,
+                        *connection_id,
+                        handle,
+                        PacketNumberSpace::ApplicationData,
+                        peer_addr,
+                        current_time,
+                    )?);
+                    Self::refresh_connection_timer(
+                        cx,
+                        *connection_id,
+                        handle,
+                        origin,
+                        instant_micros_from(origin, current_time),
+                        current_time,
+                    )?;
                 }
             }
         }
@@ -315,44 +448,44 @@ impl ConnectionRouter {
         }
     }
 
-    /// Extract connection ID from a received packet.
-    ///
-    /// This is a simplified implementation. A complete version would:
-    /// 1. Parse the QUIC packet header
-    /// 2. Extract the destination connection ID
-    /// 3. Handle different packet types (Initial, Handshake, 1-RTT)
-    fn extract_connection_id(
+    fn decode_routing_info(
         &self,
         packet: &ReceivedPacket,
-    ) -> Result<ConnectionId, ConnectionRouterError> {
-        // For now, create a deterministic connection ID from source address
-        // This is NOT correct QUIC behavior but serves as a placeholder
-        let addr_bytes = match packet.src_addr {
-            SocketAddr::V4(addr) => {
-                let mut bytes = Vec::new();
-                bytes.extend_from_slice(&addr.ip().octets());
-                bytes.extend_from_slice(&addr.port().to_be_bytes());
-                bytes
-            }
-            SocketAddr::V6(addr) => {
-                let mut bytes = Vec::new();
-                bytes.extend_from_slice(&addr.ip().octets());
-                bytes.extend_from_slice(&addr.port().to_be_bytes());
-                bytes.truncate(20); // Limit to max connection ID length
-                bytes
-            }
-        };
+    ) -> Result<PacketRoutingInfo, QuicCoreError> {
+        if packet.data.first().is_some_and(|first| first & 0x80 != 0) {
+            let (header, header_len) = PacketHeader::decode(&packet.data, 0)?;
+            return PacketRoutingInfo::from_header(header, header_len);
+        }
 
-        ConnectionId::new(&addr_bytes)
-            .map_err(|e| ConnectionRouterError::ConnectionCreationFailed(e.to_string()))
+        for cid_len in self.known_connection_id_lengths() {
+            if let Ok((header, header_len)) = PacketHeader::decode(&packet.data, cid_len) {
+                let info = PacketRoutingInfo::from_header(header, header_len)?;
+                if self.connections.contains_key(&info.destination_cid) {
+                    return Ok(info);
+                }
+            }
+        }
+
+        let (header, header_len) = PacketHeader::decode(&packet.data, 0)?;
+        PacketRoutingInfo::from_header(header, header_len)
     }
 
-    /// Check if a packet represents a new connection attempt.
-    ///
-    /// This would typically check for QUIC Initial packets.
-    fn is_new_connection_packet(&self, _packet: &ReceivedPacket) -> bool {
-        // Simplified implementation - assume all unknown packets are new connections
-        true
+    fn known_connection_id_lengths(&self) -> Vec<usize> {
+        let mut lengths = self
+            .connections
+            .keys()
+            .map(ConnectionId::len)
+            .collect::<Vec<_>>();
+        lengths.sort_unstable_by(|a, b| b.cmp(a));
+        lengths.dedup();
+        if !lengths.contains(&0) {
+            lengths.push(0);
+        }
+        lengths
+    }
+
+    fn instant_micros(&self, instant: Instant) -> u64 {
+        instant_micros_from(self.clock_origin, instant)
     }
 
     /// Allocate a new connection ID.
@@ -364,6 +497,109 @@ impl ConnectionRouter {
         let id_bytes = id.to_be_bytes();
         ConnectionId::new(&id_bytes).expect("Connection ID from counter should always be valid")
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PacketRoutingKind {
+    Initial,
+    Handshake,
+    ZeroRtt,
+    OneRtt,
+    Retry,
+}
+
+#[derive(Debug, Clone)]
+struct PacketRoutingInfo {
+    destination_cid: ConnectionId,
+    kind: PacketRoutingKind,
+    space: PacketNumberSpace,
+    packet_number: u64,
+    header_len: usize,
+}
+
+impl PacketRoutingInfo {
+    fn from_header(header: PacketHeader, header_len: usize) -> Result<Self, QuicCoreError> {
+        match header {
+            PacketHeader::Long(header) => {
+                let (kind, space) = match header.packet_type {
+                    LongPacketType::Initial => {
+                        (PacketRoutingKind::Initial, PacketNumberSpace::Initial)
+                    }
+                    LongPacketType::ZeroRtt => (
+                        PacketRoutingKind::ZeroRtt,
+                        PacketNumberSpace::ApplicationData,
+                    ),
+                    LongPacketType::Handshake => {
+                        (PacketRoutingKind::Handshake, PacketNumberSpace::Handshake)
+                    }
+                    LongPacketType::Retry => (PacketRoutingKind::Retry, PacketNumberSpace::Initial),
+                };
+                Ok(Self {
+                    destination_cid: header.dst_cid,
+                    kind,
+                    space,
+                    packet_number: header.packet_number,
+                    header_len,
+                })
+            }
+            PacketHeader::Retry(header) => Ok(Self {
+                destination_cid: header.dst_cid,
+                kind: PacketRoutingKind::Retry,
+                space: PacketNumberSpace::Initial,
+                packet_number: 0,
+                header_len,
+            }),
+            PacketHeader::Short(header) => Ok(Self {
+                destination_cid: header.dst_cid,
+                kind: PacketRoutingKind::OneRtt,
+                space: PacketNumberSpace::ApplicationData,
+                packet_number: header.packet_number,
+                header_len,
+            }),
+        }
+    }
+}
+
+fn instant_micros_from(origin: Instant, instant: Instant) -> u64 {
+    instant
+        .checked_duration_since(origin)
+        .unwrap_or(Duration::ZERO)
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn drain_connection_frames(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    handle: &mut ConnectionHandle,
+    space: PacketNumberSpace,
+    dst_addr: SocketAddr,
+    now: Instant,
+) -> Result<Vec<OutgoingPacket>, ConnectionRouterError> {
+    let frames = handle
+        .connection
+        .generate_frames(cx, space, 1_200)
+        .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: err.to_string(),
+        })?;
+    if frames.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut data = crate::bytes::BytesMut::new();
+    NativeQuicConnection::encode_frames(&frames, &mut data).map_err(
+        |err: NativeQuicConnectionError| ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: err.to_string(),
+        },
+    )?;
+
+    Ok(vec![OutgoingPacket {
+        dst_addr,
+        data: data.to_vec(),
+        send_time: Some(now),
+    }])
 }
 
 /// Statistics about the connection router state.
@@ -470,6 +706,12 @@ impl QuicTimerScheduler {
     pub fn current_deadline(&self) -> Option<Instant> {
         self.current_deadline
     }
+
+    /// Cancel the pending timer, if one is armed.
+    pub fn cancel(&mut self) {
+        self.current_sleep = None;
+        self.current_deadline = None;
+    }
 }
 
 impl Default for QuicTimerScheduler {
@@ -481,7 +723,9 @@ impl Default for QuicTimerScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::quic_native::StreamRole;
+    use crate::bytes::BytesMut;
+    use crate::net::atp::protocol::quic_frames::QuicFrame;
+    use crate::net::quic_core::{LongHeader, LongPacketType, PacketHeader};
     use crate::test_utils::run_test_with_cx;
 
     #[test]
@@ -495,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_connection_id_allocation() {
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             let config = NativeQuicConnectionConfig::default();
             let mut router = ConnectionRouter::new(config);
 
@@ -527,6 +771,64 @@ mod tests {
     }
 
     #[test]
+    fn test_long_header_initial_routes_as_new_connection() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let dst_cid = ConnectionId::new(&[0xaa, 0xbb, 0xcc]).expect("cid");
+            let src_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let packet = ReceivedPacket {
+                src_addr,
+                data: encode_long_packet(dst_cid, LongPacketType::Initial, 0, QuicFrame::Ping),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+
+            match router.route_packet(&cx, packet).await.expect("route") {
+                RoutingResult::NewConnection { peer_addr, .. } => assert_eq!(peer_addr, src_addr),
+                other => panic!("expected new connection, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_existing_connection_processes_ping_and_emits_ack_frame() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = router.allocate_connection_id();
+            let peer_addr: SocketAddr = "127.0.0.1:4434".parse().unwrap();
+            router
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("connection creation should succeed");
+
+            let packet = ReceivedPacket {
+                src_addr: peer_addr,
+                data: encode_long_packet(
+                    connection_id,
+                    LongPacketType::Initial,
+                    42,
+                    QuicFrame::Ping,
+                ),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+
+            match router.route_packet(&cx, packet).await.expect("route") {
+                RoutingResult::Routed {
+                    outgoing_packets, ..
+                } => {
+                    assert_eq!(outgoing_packets.len(), 1);
+                    assert_eq!(outgoing_packets[0].dst_addr, peer_addr);
+                    assert!(!outgoing_packets[0].data.is_empty());
+                }
+                other => panic!("expected routed packet, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
     fn test_timer_scheduler_basic() {
         run_test_with_cx(|cx| async move {
             let mut scheduler = QuicTimerScheduler::new();
@@ -543,5 +845,29 @@ mod tests {
             assert!(scheduler.has_pending_timer());
             assert_eq!(scheduler.current_deadline(), Some(deadline));
         });
+    }
+
+    fn encode_long_packet(
+        dst_cid: ConnectionId,
+        packet_type: LongPacketType,
+        packet_number: u64,
+        frame: QuicFrame,
+    ) -> Vec<u8> {
+        let mut payload = BytesMut::new();
+        frame.encode(&mut payload).expect("frame encode");
+        let header = PacketHeader::Long(LongHeader {
+            packet_type,
+            version: 1,
+            dst_cid,
+            src_cid: ConnectionId::new(&[0x01, 0x02, 0x03, 0x04]).expect("src cid"),
+            token: Vec::new(),
+            payload_length: payload.len() as u64 + 1,
+            packet_number,
+            packet_number_len: 1,
+        });
+        let mut out = Vec::new();
+        header.encode(&mut out).expect("header encode");
+        out.extend_from_slice(&payload);
+        out
     }
 }

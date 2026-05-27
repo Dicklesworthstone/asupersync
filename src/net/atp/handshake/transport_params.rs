@@ -48,6 +48,8 @@ pub enum TransportParamId {
     InitialSourceConnectionId = 0x0f,
     /// Retry source connection ID (0x10)
     RetrySourceConnectionId = 0x10,
+    /// Maximum DATAGRAM frame size (0x20, RFC 9221)
+    MaxDatagramFrameSize = 0x20,
 }
 
 impl TransportParamId {
@@ -76,6 +78,7 @@ impl TransportParamId {
             0x0e => Some(Self::ActiveConnectionIdLimit),
             0x0f => Some(Self::InitialSourceConnectionId),
             0x10 => Some(Self::RetrySourceConnectionId),
+            0x20 => Some(Self::MaxDatagramFrameSize),
             _ => None,
         }
     }
@@ -180,10 +183,12 @@ impl TransportParameters {
     pub fn server_defaults() -> Self {
         let mut params = Self::client_defaults();
 
-        // Server-specific parameters
+        let mut stateless_reset_token = [0_u8; 16];
+        getrandom::fill(&mut stateless_reset_token)
+            .expect("OS entropy is required for QUIC stateless reset tokens");
         params.set_bytes(
             TransportParamId::StatelessResetToken,
-            Bytes::from_static(&[0u8; 16]), // Placeholder, should be randomized
+            Bytes::copy_from_slice(&stateless_reset_token),
         );
 
         params
@@ -438,7 +443,7 @@ impl TransportParameters {
     /// Get maximum idle timeout as duration
     pub fn max_idle_timeout(&self) -> Option<Duration> {
         self.get_integer(TransportParamId::MaxIdleTimeout)
-            .map(|ms| Duration::from_millis(ms))
+            .map(Duration::from_millis)
     }
 }
 
@@ -536,5 +541,19 @@ mod tests {
         params.set_integer(TransportParamId::MaxIdleTimeout, 5000);
 
         assert_eq!(params.max_idle_timeout(), Some(Duration::from_millis(5000)));
+    }
+
+    #[test]
+    fn test_max_datagram_frame_size_roundtrip() {
+        let mut params = TransportParameters::new();
+        params.set_integer(TransportParamId::MaxDatagramFrameSize, 1200);
+
+        let encoded = params.encode().unwrap();
+        let decoded = TransportParameters::decode(&encoded).unwrap();
+
+        assert_eq!(
+            decoded.get_integer(TransportParamId::MaxDatagramFrameSize),
+            Some(1200)
+        );
     }
 }

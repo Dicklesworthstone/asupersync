@@ -211,10 +211,22 @@ impl AtpSdk {
 
     async fn open_session_daemon_delegated(
         &self,
-        _cx: &Cx,
-        _options: SessionOptions,
+        cx: &Cx,
+        options: SessionOptions,
     ) -> AtpOutcome<AtpSession> {
-        // TODO: Implement daemon delegation via RPC/IPC
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(
+                crate::net::atp::protocol::PlatformError::OperatingSystemError,
+            ));
+        }
+
+        if daemon_endpoint_is_reachable(&self.mode).is_err() {
+            return AtpOutcome::Err(AtpError::Daemon(
+                crate::net::atp::protocol::DaemonError::DaemonOffline,
+            ));
+        }
+
+        let _ = options;
         AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
@@ -300,6 +312,29 @@ impl AtpSession {
     }
 }
 
+fn daemon_endpoint_is_reachable(mode: &SdkMode) -> std::io::Result<()> {
+    let SdkMode::DaemonDelegated {
+        daemon_endpoint, ..
+    } = mode
+    else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SDK mode is not daemon delegated",
+        ));
+    };
+    let endpoint = daemon_endpoint
+        .strip_prefix("tcp://")
+        .unwrap_or(daemon_endpoint);
+    let addr: std::net::SocketAddr = endpoint.parse().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "daemon endpoint must be tcp://host:port or host:port",
+        )
+    })?;
+
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
+}
+
 /// Generate a transfer nonce from the context's CSPRNG-backed byte source.
 fn generate_transfer_nonce(cx: &Cx) -> TransferNonce {
     loop {
@@ -350,6 +385,7 @@ mod tests {
     use super::*;
     use crate::cx::Cx;
     use crate::net::atp::protocol::{CapabilityGrantId, CapabilityScope};
+    use futures_lite::future::block_on;
 
     fn grant_for_direct_peer(issuer: PeerId, subject: PeerId, label: &str) -> CapabilityGrant {
         CapabilityGrant::new(
@@ -373,8 +409,8 @@ mod tests {
         )])
     }
 
-    #[tokio::test]
-    async fn session_options_construction() {
+    #[test]
+    fn session_options_construction() {
         let peer = PeerId::from_label("test_peer");
 
         let direct = SessionOptions::direct(peer);
@@ -410,8 +446,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn session_options_with_manifest() {
+    #[test]
+    fn session_options_with_manifest() {
         let peer = PeerId::from_label("test_peer");
         let manifest_root = [42u8; 32];
 
@@ -419,8 +455,8 @@ mod tests {
         assert_eq!(options.manifest_root, Some(manifest_root));
     }
 
-    #[tokio::test]
-    async fn transfer_nonce_uses_full_context_entropy() {
+    #[test]
+    fn transfer_nonce_uses_full_context_entropy() {
         let cx = Cx::for_testing();
         let nonce = generate_transfer_nonce(&cx);
 
@@ -435,57 +471,63 @@ mod tests {
         assert_ne!(nonce, generate_transfer_nonce(&cx));
     }
 
-    #[tokio::test]
-    async fn in_process_session_creation() {
-        let config = SessionConfig::default();
-        let local_peer = config.local_peer;
-        let sdk = AtpSdk::new_in_process(config);
+    #[test]
+    fn in_process_session_creation() {
+        block_on(async {
+            let config = SessionConfig::default();
+            let local_peer = config.local_peer;
+            let sdk = AtpSdk::new_in_process(config);
 
-        let cx = Cx::for_testing();
-        let peer = PeerId::from_label("remote_peer");
-        let options = granted_direct_options(local_peer, peer, "sdk-session-grant");
+            let cx = Cx::for_testing();
+            let peer = PeerId::from_label("remote_peer");
+            let options = granted_direct_options(local_peer, peer, "sdk-session-grant");
 
-        let session = sdk.open_session(&cx, options).await;
-        assert!(session.is_ok());
+            let session = sdk.open_session(&cx, options).await;
+            assert!(session.is_ok());
 
-        if let Ok(session) = session {
-            assert_eq!(session.remote_peer(), peer);
-            assert_eq!(session.context(), SessionContextKind::Direct);
-            assert_eq!(session.session.accepted_grants.len(), 1);
-            assert_ne!(session.session.transcript_hash.0, [0u8; 32]);
-            assert_ne!(session.proof().transcript_hash, "0000000000000000");
-        }
+            if let AtpOutcome::Ok(session) = session {
+                assert_eq!(session.remote_peer(), peer);
+                assert_eq!(session.context(), SessionContextKind::Direct);
+                assert_eq!(session.session.accepted_grants.len(), 1);
+                assert_ne!(session.session.transcript_hash.0, [0u8; 32]);
+                assert_ne!(session.proof().transcript_hash, "0000000000000000");
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn in_process_session_rejects_empty_grants() {
-        let config = SessionConfig::default();
-        let sdk = AtpSdk::new_in_process(config);
+    #[test]
+    fn in_process_session_rejects_empty_grants() {
+        block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config);
 
-        let cx = Cx::for_testing();
-        let peer = PeerId::from_label("remote_peer");
-        let result = sdk.open_session(&cx, SessionOptions::direct(peer)).await;
+            let cx = Cx::for_testing();
+            let peer = PeerId::from_label("remote_peer");
+            let result = sdk.open_session(&cx, SessionOptions::direct(peer)).await;
 
-        match result {
-            AtpOutcome::Err(AtpError::Protocol(_)) => {}
-            other => panic!("empty grants must not negotiate a session: {other:?}"),
-        }
+            match result {
+                AtpOutcome::Err(AtpError::Protocol(_)) => {}
+                other => panic!("empty grants must not negotiate a session: {other:?}"),
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn daemon_session_creation_fails() {
-        let config = SessionConfig::default();
-        let sdk = AtpSdk::new_daemon_delegated(
-            config,
-            "localhost:8080".to_string(),
-            Some("token".to_string()),
-        );
+    #[test]
+    fn daemon_session_creation_fails() {
+        block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_daemon_delegated(
+                config,
+                "localhost:8080".to_string(),
+                Some("token".to_string()),
+            );
 
-        let cx = Cx::for_testing();
-        let peer = PeerId::from_label("remote_peer");
-        let options = SessionOptions::direct(peer);
+            let cx = Cx::for_testing();
+            let peer = PeerId::from_label("remote_peer");
+            let options = SessionOptions::direct(peer);
 
-        let session = sdk.open_session(&cx, options).await;
-        assert!(session.is_err()); // Should fail as daemon is not implemented
+            let session = sdk.open_session(&cx, options).await;
+            assert!(session.is_err()); // Should fail as daemon is not implemented
+        });
     }
 }

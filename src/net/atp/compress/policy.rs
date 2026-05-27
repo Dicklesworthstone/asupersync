@@ -4,8 +4,8 @@
 //! the verification transparency requirements of ATP-C4. Policies can disable
 //! compression per object type or path without affecting verification semantics.
 
-use crate::atp::manifest::{CompressionPolicy, CompressionAlgorithm, ObjectKind};
 use super::CompressionError;
+use crate::atp::manifest::{CompressionAlgorithm, CompressionPolicy, ObjectKind};
 
 /// Policy-driven compression decision engine.
 pub struct CompressionPolicyEngine;
@@ -17,10 +17,7 @@ impl CompressionPolicyEngine {
             algorithm: CompressionAlgorithm::Lz4,
             level: 1,
             min_size_threshold: 1024, // 1KB minimum
-            apply_to_kinds: vec![
-                ObjectKind::FileObject,
-                ObjectKind::ContentAddressedBlob,
-            ],
+            apply_to_kinds: vec![ObjectKind::FileObject, ObjectKind::ContentAddressedBlob],
         }
     }
 
@@ -86,7 +83,9 @@ impl CompressionPolicyEngine {
         }
 
         // Validate object kinds are not contradictory
-        if matches!(policy.algorithm, CompressionAlgorithm::None) && !policy.apply_to_kinds.is_empty() {
+        if matches!(policy.algorithm, CompressionAlgorithm::None)
+            && !policy.apply_to_kinds.is_empty()
+        {
             return Err(CompressionError::PolicyViolation(
                 "none algorithm should have empty apply_to_kinds".to_string(),
             ));
@@ -116,10 +115,7 @@ impl CompressionPolicyEngine {
     }
 
     /// Estimate compression ratio for policy planning.
-    pub fn estimate_compression_ratio(
-        algorithm: CompressionAlgorithm,
-        level: u8,
-    ) -> f32 {
+    pub fn estimate_compression_ratio(algorithm: CompressionAlgorithm, level: u8) -> f32 {
         match algorithm {
             CompressionAlgorithm::None => 1.0,
             CompressionAlgorithm::Lz4 => 0.6, // ~40% compression typically
@@ -130,8 +126,8 @@ impl CompressionPolicyEngine {
                 _ => 0.5,
             },
             CompressionAlgorithm::Brotli => match level {
-                0..=3 => 0.6, // Fast
-                4..=7 => 0.4, // Balanced
+                0..=3 => 0.6,  // Fast
+                4..=7 => 0.4,  // Balanced
                 8..=11 => 0.3, // High compression
                 _ => 0.4,
             },
@@ -213,9 +209,21 @@ mod tests {
 
     #[test]
     fn test_compression_ratio_estimates() {
-        assert_eq!(CompressionPolicyEngine::estimate_compression_ratio(CompressionAlgorithm::None, 0), 1.0);
-        assert_eq!(CompressionPolicyEngine::estimate_compression_ratio(CompressionAlgorithm::Lz4, 1), 0.6);
-        assert!(CompressionPolicyEngine::estimate_compression_ratio(CompressionAlgorithm::Gzip, 9) < 0.5);
-        assert!(CompressionPolicyEngine::estimate_compression_ratio(CompressionAlgorithm::Brotli, 11) < 0.4);
+        assert_eq!(
+            CompressionPolicyEngine::estimate_compression_ratio(CompressionAlgorithm::None, 0),
+            1.0
+        );
+        assert_eq!(
+            CompressionPolicyEngine::estimate_compression_ratio(CompressionAlgorithm::Lz4, 1),
+            0.6
+        );
+        assert!(
+            CompressionPolicyEngine::estimate_compression_ratio(CompressionAlgorithm::Gzip, 9)
+                < 0.5
+        );
+        assert!(
+            CompressionPolicyEngine::estimate_compression_ratio(CompressionAlgorithm::Brotli, 11)
+                < 0.4
+        );
     }
 }

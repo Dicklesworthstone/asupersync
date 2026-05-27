@@ -91,7 +91,7 @@ impl RetryPacket {
             });
         }
 
-        let mut buf = &data[..];
+        let mut buf = data;
 
         // Check packet type
         let first_byte = buf.get_u8();

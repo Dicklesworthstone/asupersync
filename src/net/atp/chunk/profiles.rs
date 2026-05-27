@@ -29,7 +29,7 @@ pub trait ChunkingProfile {
 
 /// Shared utilities for chunk computation across profiles.
 pub mod utils {
-    use super::*;
+    use super::{ChunkBoundary, ChunkMetadata, ChunkStrategy, ChunkingProfileError};
     use sha2::{Digest, Sha256};
 
     /// Compute SHA-256 hash of chunk data.

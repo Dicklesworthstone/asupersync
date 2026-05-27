@@ -106,35 +106,87 @@ impl ReassemblyBuffer {
             self.received_final = true;
         }
 
+        let uncovered_segments = match self.uncovered_segments(segment) {
+            Ok(segments) => segments,
+            Err(err) => return Outcome::err(err),
+        };
+
         // Check if this would exceed our buffering limit
-        let new_data_size = segment.data.len() as u64;
+        let new_data_size = uncovered_segments
+            .iter()
+            .fold(0_u64, |sum, segment| sum + segment.data.len() as u64);
         if self.buffered_data_size + new_data_size > self.max_buffered_data {
             return Outcome::err(StreamError::ConnectionError {
                 reason: "Reassembly buffer limit exceeded".to_string(),
             });
         }
 
-        // Check for overlaps with existing segments
-        for existing_segment in self.segments.values() {
-            if segment.overlaps_with(existing_segment) {
-                // For now, we reject overlapping segments
-                // A more sophisticated implementation could merge them
-                return Outcome::err(StreamError::InvalidState {
-                    stream_id: StreamId::new(0), // Will be filled by caller
-                    state: format!("Overlapping segment at offset {}", segment.offset), // ubs:ignore - error path only
-                });
-            }
+        for uncovered in uncovered_segments {
+            let offset = uncovered.offset;
+            self.buffered_data_size += uncovered.data.len() as u64;
+            self.segments.insert(offset, uncovered);
         }
-
-        // Insert the segment
-        let offset = segment.offset;
-        self.buffered_data_size += new_data_size;
-        self.segments.insert(offset, segment);
 
         // Try to deliver consecutive data starting from next_offset
         let deliverable = self.extract_deliverable_data();
 
         Outcome::ok(deliverable)
+    }
+
+    fn uncovered_segments(&self, segment: DataSegment) -> Result<Vec<DataSegment>, StreamError> {
+        let mut ranges = vec![(0usize, segment.data.len())];
+
+        for existing in self.segments.values() {
+            if !segment.overlaps_with(existing) {
+                continue;
+            }
+
+            let overlap_start = segment.offset.max(existing.offset);
+            let overlap_end = segment.end_offset().min(existing.end_offset());
+            let segment_start = (overlap_start - segment.offset) as usize;
+            let segment_end = (overlap_end - segment.offset) as usize;
+            let existing_start = (overlap_start - existing.offset) as usize;
+            let existing_end = (overlap_end - existing.offset) as usize;
+
+            if segment.data.slice(segment_start..segment_end)
+                != existing.data.slice(existing_start..existing_end)
+            {
+                return Err(StreamError::InvalidState {
+                    stream_id: StreamId::new(0),
+                    state: format!(
+                        "Conflicting overlapping segment at offset {}",
+                        segment.offset
+                    ),
+                });
+            }
+
+            let mut next_ranges = Vec::with_capacity(ranges.len() + 1);
+            for (start, end) in ranges {
+                if segment_end <= start || segment_start >= end {
+                    next_ranges.push((start, end));
+                    continue;
+                }
+                if start < segment_start {
+                    next_ranges.push((start, segment_start));
+                }
+                if segment_end < end {
+                    next_ranges.push((segment_end, end));
+                }
+            }
+            ranges = next_ranges;
+            if ranges.is_empty() {
+                break;
+            }
+        }
+
+        Ok(ranges
+            .into_iter()
+            .map(|(start, end)| DataSegment {
+                offset: segment.offset + start as u64,
+                data: segment.data.slice(start..end),
+                is_final: segment.is_final && end == segment.data.len(),
+            })
+            .collect())
     }
 
     /// Extract data that can be delivered in order

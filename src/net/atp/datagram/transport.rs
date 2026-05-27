@@ -3,7 +3,6 @@
 //! Implements max_datagram_frame_size transport parameter negotiation
 //! and DATAGRAM capability detection.
 
-use crate::bytes::Bytes;
 use crate::net::atp::datagram::frame::DatagramError;
 use crate::net::atp::handshake::transport_params::{TransportParamId, TransportParameters};
 use crate::types::outcome::Outcome;
@@ -36,9 +35,7 @@ pub struct DatagramTransport {
 impl DatagramTransport {
     /// Create new DATAGRAM transport handler
     pub fn new(local_enabled: bool, local_max_size: u64) -> Outcome<Self, DatagramError> {
-        if local_enabled
-            && (local_max_size < MIN_DATAGRAM_SIZE || local_max_size > MAX_DATAGRAM_SIZE)
-        {
+        if local_enabled && !(MIN_DATAGRAM_SIZE..=MAX_DATAGRAM_SIZE).contains(&local_max_size) {
             return Outcome::err(DatagramError::InvalidFrame(format!(
                 "invalid max datagram size: {} (must be {}-{})",
                 local_max_size, MIN_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE
@@ -74,32 +71,30 @@ impl DatagramTransport {
     /// Add DATAGRAM transport parameter to local parameters
     pub fn add_to_transport_params(&self, params: &mut TransportParameters) {
         if self.local_enabled {
-            // Add custom transport parameter for max_datagram_frame_size
-            let param_value = self.local_max_size.to_be_bytes().to_vec();
-            params.set_bytes(
-                // We need to handle this as a raw parameter since it's not in the standard enum
-                TransportParamId::MaxIdleTimeout, // Placeholder - will be overridden
-                Bytes::from(param_value),
-            );
-            // TODO: Implement custom parameter support in TransportParameters
+            params.set_integer(TransportParamId::MaxDatagramFrameSize, self.local_max_size);
         }
     }
 
     /// Process peer transport parameters for DATAGRAM support
     pub fn process_peer_params(
         &mut self,
-        _params: &TransportParameters,
+        params: &TransportParameters,
     ) -> Outcome<(), DatagramError> {
-        // Look for max_datagram_frame_size parameter
-        // TODO: Implement custom parameter lookup in TransportParameters
+        let Some(peer_max_size) = params.get_integer(TransportParamId::MaxDatagramFrameSize) else {
+            self.peer_enabled = false;
+            self.peer_max_size = None;
+            return Outcome::ok(());
+        };
 
-        // For now, assume peer supports DATAGRAM with default size if we have any indication
-        // This is a simplified implementation
-        if self.local_enabled {
-            self.peer_enabled = true;
-            self.peer_max_size = Some(DEFAULT_MAX_DATAGRAM_SIZE);
+        if !(MIN_DATAGRAM_SIZE..=MAX_DATAGRAM_SIZE).contains(&peer_max_size) {
+            return Outcome::err(DatagramError::InvalidFrame(format!(
+                "invalid peer max datagram size: {} (must be {}-{})",
+                peer_max_size, MIN_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE
+            )));
         }
 
+        self.peer_enabled = true;
+        self.peer_max_size = Some(peer_max_size);
         Outcome::ok(())
     }
 
@@ -397,6 +392,50 @@ mod tests {
 
         // Too large
         assert!(transport.validate_size(1024).is_err());
+    }
+
+    #[test]
+    fn test_transport_parameter_negotiation_uses_rfc9221_id() {
+        let transport = DatagramTransport::new(true, 1024).unwrap();
+        let mut params = TransportParameters::new();
+
+        transport.add_to_transport_params(&mut params);
+
+        assert_eq!(
+            params.get_integer(TransportParamId::MaxDatagramFrameSize),
+            Some(1024)
+        );
+        assert!(
+            params
+                .get_integer(TransportParamId::MaxIdleTimeout)
+                .is_none(),
+            "DATAGRAM negotiation must not overwrite max_idle_timeout"
+        );
+    }
+
+    #[test]
+    fn test_peer_params_absent_fail_closed() {
+        let mut transport = DatagramTransport::new(true, 1024).unwrap();
+        let params = TransportParameters::new();
+
+        transport.process_peer_params(&params).unwrap();
+
+        assert!(!transport.peer_supports_datagram());
+        assert!(!transport.is_enabled());
+        assert_eq!(transport.peer_max_size(), None);
+    }
+
+    #[test]
+    fn test_peer_params_enable_with_valid_rfc9221_value() {
+        let mut transport = DatagramTransport::new(true, 1024).unwrap();
+        let mut params = TransportParameters::new();
+        params.set_integer(TransportParamId::MaxDatagramFrameSize, 512);
+
+        transport.process_peer_params(&params).unwrap();
+
+        assert!(transport.peer_supports_datagram());
+        assert!(transport.is_enabled());
+        assert_eq!(transport.max_frame_size(), Some(512));
     }
 
     #[test]

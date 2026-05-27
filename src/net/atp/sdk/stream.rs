@@ -392,8 +392,8 @@ impl AsyncWrite for AtpWriter {
             )));
         }
 
-        // For simplicity, we'll just buffer the write for now
-        // In a real implementation, this would integrate with the tokio runtime
+        // AsyncWrite is a synchronous poll surface, so commit only the prefix
+        // that fits in the stream's bounded asupersync MPSC queue.
         let chunk_size = std::cmp::min(buf.len(), self.config.chunk_size);
         let data = buf[..chunk_size].to_vec();
 
@@ -511,12 +511,12 @@ impl Stream for AtpReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cx::Cx;
     use crate::net::atp::protocol::{
         CapabilityAction, CapabilityGrant, CapabilityGrantId, CapabilityScope, PeerId,
         SessionContextKind,
     };
     use crate::net::atp::sdk::{AtpSdk, SessionConfig, SessionOptions};
+    use futures_lite::future::block_on;
 
     fn granted_direct_options(config: &SessionConfig, peer: PeerId, label: &str) -> SessionOptions {
         SessionOptions::direct(peer).with_grants(vec![CapabilityGrant::new(
@@ -555,33 +555,20 @@ mod tests {
     fn atp_writer_creation() {
         crate::test_utils::init_test_logging();
 
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-            region,
-            crate::types::Budget::INFINITE,
-        );
 
-        let (_, result) = scope
-            .spawn(&mut runtime.state, &cx, async move {
-                let config = SessionConfig::default();
-                let sdk = AtpSdk::new_in_process(config);
+        block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config);
 
-                let peer = PeerId::from_label("test_peer");
-                let session_options =
-                    granted_direct_options(&SessionConfig::default(), peer, "writer-open");
-                let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let peer = PeerId::from_label("test_peer");
+            let session_options =
+                granted_direct_options(&SessionConfig::default(), peer, "writer-open");
+            let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-                let stream_config = StreamConfig::default();
-                assert_missing_stream_transport(session.create_writer(&cx, stream_config).await);
-            })
-            .unwrap();
-
-        runtime.run_until_idle();
-        result.join().unwrap();
+            let stream_config = StreamConfig::default();
+            assert_missing_stream_transport(session.create_writer(&cx, stream_config).await);
+        });
 
         crate::test_complete!("atp_writer_creation");
     }
@@ -590,33 +577,20 @@ mod tests {
     fn atp_reader_creation() {
         crate::test_utils::init_test_logging();
 
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-            region,
-            crate::types::Budget::INFINITE,
-        );
 
-        let (_, result) = scope
-            .spawn(&mut runtime.state, &cx, async move {
-                let config = SessionConfig::default();
-                let sdk = AtpSdk::new_in_process(config);
+        block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config);
 
-                let peer = PeerId::from_label("test_peer");
-                let session_options =
-                    granted_direct_options(&SessionConfig::default(), peer, "reader-open");
-                let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let peer = PeerId::from_label("test_peer");
+            let session_options =
+                granted_direct_options(&SessionConfig::default(), peer, "reader-open");
+            let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-                let stream_config = StreamConfig::default();
-                assert_missing_stream_transport(session.create_reader(&cx, stream_config).await);
-            })
-            .unwrap();
-
-        runtime.run_until_idle();
-        result.join().unwrap();
+            let stream_config = StreamConfig::default();
+            assert_missing_stream_transport(session.create_reader(&cx, stream_config).await);
+        });
 
         crate::test_complete!("atp_reader_creation");
     }
@@ -625,33 +599,20 @@ mod tests {
     fn writer_chunk_operations() {
         crate::test_utils::init_test_logging();
 
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-            region,
-            crate::types::Budget::INFINITE,
-        );
 
-        let (_, result) = scope
-            .spawn(&mut runtime.state, &cx, async move {
-                let config = SessionConfig::default();
-                let sdk = AtpSdk::new_in_process(config);
+        block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config);
 
-                let peer = PeerId::from_label("test_peer");
-                let session_options =
-                    granted_direct_options(&SessionConfig::default(), peer, "writer-chunk");
-                let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let peer = PeerId::from_label("test_peer");
+            let session_options =
+                granted_direct_options(&SessionConfig::default(), peer, "writer-chunk");
+            let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-                let stream_config = StreamConfig::default();
-                assert_missing_stream_transport(session.create_writer(&cx, stream_config).await);
-            })
-            .unwrap();
-
-        runtime.run_until_idle();
-        result.join().unwrap();
+            let stream_config = StreamConfig::default();
+            assert_missing_stream_transport(session.create_writer(&cx, stream_config).await);
+        });
 
         crate::test_complete!("writer_chunk_operations");
     }
@@ -660,33 +621,20 @@ mod tests {
     fn reader_chunk_operations() {
         crate::test_utils::init_test_logging();
 
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-            region,
-            crate::types::Budget::INFINITE,
-        );
 
-        let (_, result) = scope
-            .spawn(&mut runtime.state, &cx, async move {
-                let config = SessionConfig::default();
-                let sdk = AtpSdk::new_in_process(config);
+        block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config);
 
-                let peer = PeerId::from_label("test_peer");
-                let session_options =
-                    granted_direct_options(&SessionConfig::default(), peer, "reader-chunk");
-                let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let peer = PeerId::from_label("test_peer");
+            let session_options =
+                granted_direct_options(&SessionConfig::default(), peer, "reader-chunk");
+            let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-                let stream_config = StreamConfig::default();
-                assert_missing_stream_transport(session.create_reader(&cx, stream_config).await);
-            })
-            .unwrap();
-
-        runtime.run_until_idle();
-        result.join().unwrap();
+            let stream_config = StreamConfig::default();
+            assert_missing_stream_transport(session.create_reader(&cx, stream_config).await);
+        });
 
         crate::test_complete!("reader_chunk_operations");
     }
@@ -695,33 +643,20 @@ mod tests {
     fn async_write_interface() {
         crate::test_utils::init_test_logging();
 
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-            region,
-            crate::types::Budget::INFINITE,
-        );
 
-        let (_, result) = scope
-            .spawn(&mut runtime.state, &cx, async move {
-                let config = SessionConfig::default();
-                let sdk = AtpSdk::new_in_process(config);
+        block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config);
 
-                let peer = PeerId::from_label("test_peer");
-                let session_options =
-                    granted_direct_options(&SessionConfig::default(), peer, "async-write");
-                let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let peer = PeerId::from_label("test_peer");
+            let session_options =
+                granted_direct_options(&SessionConfig::default(), peer, "async-write");
+            let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-                let stream_config = StreamConfig::default();
-                assert_missing_stream_transport(session.create_writer(&cx, stream_config).await);
-            })
-            .unwrap();
-
-        runtime.run_until_idle();
-        result.join().unwrap();
+            let stream_config = StreamConfig::default();
+            assert_missing_stream_transport(session.create_writer(&cx, stream_config).await);
+        });
 
         crate::test_complete!("async_write_interface");
     }
@@ -730,33 +665,20 @@ mod tests {
     fn async_read_interface() {
         crate::test_utils::init_test_logging();
 
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-            region,
-            crate::types::Budget::INFINITE,
-        );
 
-        let (_, result) = scope
-            .spawn(&mut runtime.state, &cx, async move {
-                let config = SessionConfig::default();
-                let sdk = AtpSdk::new_in_process(config);
+        block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config);
 
-                let peer = PeerId::from_label("test_peer");
-                let session_options =
-                    granted_direct_options(&SessionConfig::default(), peer, "async-read");
-                let session = sdk.open_session(&cx, session_options).await.unwrap();
+            let peer = PeerId::from_label("test_peer");
+            let session_options =
+                granted_direct_options(&SessionConfig::default(), peer, "async-read");
+            let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-                let stream_config = StreamConfig::default();
-                assert_missing_stream_transport(session.create_reader(&cx, stream_config).await);
-            })
-            .unwrap();
-
-        runtime.run_until_idle();
-        result.join().unwrap();
+            let stream_config = StreamConfig::default();
+            assert_missing_stream_transport(session.create_reader(&cx, stream_config).await);
+        });
 
         crate::test_complete!("async_read_interface");
     }

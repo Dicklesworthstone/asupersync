@@ -12,22 +12,17 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Congestion control algorithm for DATAGRAM frames
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CongestionAlgorithm {
     /// Simple rate limiting based on configured rates
     RateLimited,
     /// AIMD (Additive Increase Multiplicative Decrease)
     Aimd,
     /// Token bucket with burst allowance
+    #[default]
     TokenBucket,
     /// Adaptive based on RTT and loss detection
     Adaptive,
-}
-
-impl Default for CongestionAlgorithm {
-    fn default() -> Self {
-        Self::TokenBucket
-    }
 }
 
 /// Congestion control configuration
@@ -132,7 +127,7 @@ impl CongestionState {
 
     /// Calculate recent loss ratio
     fn loss_ratio(&self, window: Duration) -> f64 {
-        let cutoff = Instant::now() - window;
+        let cutoff = Instant::now().checked_sub(window).unwrap();
         let recent_losses = self.loss_events.iter().filter(|&&t| t > cutoff).count();
 
         // Estimate based on recent activity
@@ -145,7 +140,7 @@ impl CongestionState {
 
     /// Clean old samples and events
     fn cleanup_old_data(&mut self, window: Duration) {
-        let cutoff = Instant::now() - window;
+        let cutoff = Instant::now().checked_sub(window).unwrap();
         self.loss_events.retain(|&t| t > cutoff);
     }
 }
@@ -470,8 +465,7 @@ impl CongestionController {
     pub fn queue_depth(&self, priority: DatagramPriority) -> usize {
         self.priority_queues
             .get(&priority)
-            .map(|queue| queue.len())
-            .unwrap_or(0)
+            .map_or(0, |queue| queue.len())
     }
 
     /// Get total queue depth
@@ -583,7 +577,7 @@ mod tests {
         controller.enqueue_datagram(frame2, metadata2).unwrap();
 
         // High priority should come out first
-        let (frame, metadata) = controller.try_send_next().unwrap().unwrap();
+        let (_frame, metadata) = controller.try_send_next().unwrap().unwrap();
         assert_eq!(metadata.priority, DatagramPriority::High);
     }
 

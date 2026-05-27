@@ -319,17 +319,26 @@ mod duplicate_detection_tests {
         ];
 
         for param_id in duplicate_cases {
+            let (first_value, duplicate_value) = duplicate_varint_values_for(param_id);
             let mut encoded = Vec::new();
             // First parameter
-            encode_parameter(&mut encoded, param_id, &varint_bytes(1000))
+            encode_parameter(&mut encoded, param_id, &varint_bytes(first_value))
                 .expect("encode first parameter");
             // Duplicate parameter
-            encode_parameter(&mut encoded, param_id, &varint_bytes(2000))
+            encode_parameter(&mut encoded, param_id, &varint_bytes(duplicate_value))
                 .expect("encode duplicate parameter");
 
             let err =
                 TransportParameters::decode(&encoded).expect_err("duplicate parameter should fail");
             assert_eq!(err, QuicCoreError::DuplicateTransportParameter(param_id));
+        }
+    }
+
+    fn duplicate_varint_values_for(param_id: u64) -> (u64, u64) {
+        match param_id {
+            TP_MAX_UDP_PAYLOAD_SIZE => (1200, 1400),
+            TP_ACK_DELAY_EXPONENT => (3, 4),
+            _ => (1000, 2000),
         }
     }
 

@@ -1218,10 +1218,8 @@ impl Service {
                 .contains(&(peer_id, signed.candidate_nonce))
             {
                 Err(Error::NonceReplay)
-            } else if session.candidates.len() >= session.quotas.max_total_candidates {
-                Err(Error::QuotaExceeded)
-            } else if session.peer_candidate_count(peer_id)
-                >= session.quotas.max_candidates_per_peer
+            } else if session.candidates.len() >= session.quotas.max_total_candidates
+                || session.peer_candidate_count(peer_id) >= session.quotas.max_candidates_per_peer
             {
                 Err(Error::QuotaExceeded)
             } else {

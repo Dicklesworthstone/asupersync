@@ -1339,7 +1339,7 @@ impl RetryPolicy {
         let base_delay = self.base_delay_ms as f64;
         let multiplier = self
             .backoff_multiplier
-            .powi(attempt.saturating_sub(1) as i32);
+            .powi(attempt.saturating_sub(1).cast_signed());
         let delay = base_delay * multiplier;
         let delay = delay.min(self.max_delay_ms as f64) as u64;
 

@@ -397,7 +397,7 @@ impl HandshakeTracer {
                 .or_insert(0) += 1;
         }
 
-        let total_duration = self.entries.last().map(|e| e.timestamp_ms).unwrap_or(0);
+        let total_duration = self.entries.last().map_or(0, |e| e.timestamp_ms);
 
         json!({
             "total_events": self.entries.len(),

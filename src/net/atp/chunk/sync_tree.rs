@@ -169,7 +169,7 @@ impl SyncTreeProfile {
     fn normalization_constant(avg_chunk_size: u64) -> u64 {
         // Use power of 2 based on average chunk size for efficient computation
         let bits = 64 - avg_chunk_size.leading_zeros();
-        1u64 << (bits.min(20).max(8)) // Clamp between 2^8 and 2^20
+        1u64 << bits.clamp(8, 20) // Clamp between 2^8 and 2^20
     }
 
     /// Enhanced CDC that considers line structure for better source code chunking.
@@ -295,7 +295,7 @@ impl SyncTreeProfile {
     fn compute_cdc_mask(avg_chunk_size: u64) -> u64 {
         // Create mask that gives approximately the right average chunk size
         let bits = (avg_chunk_size as f64).log2() as u32;
-        (1u64 << bits.min(20).max(8)) - 1
+        (1u64 << bits.clamp(8, 20)) - 1
     }
 
     /// Compute boundary hash for this chunk (used for deduplication hints).
@@ -331,7 +331,9 @@ impl SyncTreeProfile {
         score += (text_ratio * 1000.0) as u32;
 
         // Line count (normalized)
-        let line_count = chunk_data.iter().filter(|&&b| b == b'\n').count();
+        let line_count = chunk_data
+            .iter()
+            .fold(0usize, |count, byte| count + usize::from(*byte == b'\n'));
         score += (line_count * 10).min(1000) as u32;
 
         // Whitespace ratio (indicates structure)
@@ -446,7 +448,7 @@ impl SyncTreeProfile {
 
         // Higher similarity and lower unique ratio suggest better deduplication potential
         let dedup_potential = (1.0 - unique_ratio) * (avg_similarity / 5000.0).min(1.0);
-        dedup_potential.max(0.0).min(1.0)
+        dedup_potential.clamp(0.0, 1.0)
     }
 }
 

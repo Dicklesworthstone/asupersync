@@ -252,22 +252,17 @@ pub enum DatagramError {
 }
 
 /// Datagram priority for congestion control
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DatagramPriority {
     /// High priority - path probes, critical beacons
     High = 3,
     /// Normal priority - regular beacons, telemetry
+    #[default]
     Normal = 2,
     /// Low priority - optional diagnostics
     Low = 1,
     /// Background priority - best effort only
     Background = 0,
-}
-
-impl Default for DatagramPriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl fmt::Display for DatagramPriority {
@@ -335,7 +330,7 @@ impl DatagramMetadata {
     /// Check if datagram has expired
     pub fn is_expired(&self) -> bool {
         self.expires_at
-            .map_or(false, |expires| std::time::Instant::now() > expires)
+            .is_some_and(|expires| std::time::Instant::now() > expires)
     }
 }
 

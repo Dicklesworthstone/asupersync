@@ -81,6 +81,23 @@ pub struct TransferPolicy {
     pub prefer_stable_paths: bool,
     /// Use relays when direct paths are poor.
     pub use_relays_on_poor_paths: bool,
+    /// Candidate relays available to the transfer brain.
+    pub relay_candidates: Vec<RelayCandidate>,
+}
+
+/// Configured relay candidate for poor direct paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayCandidate {
+    /// Stable relay identifier returned in transfer decisions.
+    pub relay_id: String,
+    /// Optional direct path this relay is best suited to assist.
+    pub assisted_path_id: Option<String>,
+    /// Administrative priority; higher values win after cost and latency.
+    pub priority: u8,
+    /// Added latency estimate in microseconds.
+    pub added_latency_micros: u64,
+    /// Cost estimate in microseconds per MiB.
+    pub cost_micros_per_mib: u64,
 }
 
 impl Default for TransferPolicy {
@@ -95,6 +112,7 @@ impl Default for TransferPolicy {
             max_cwnd_growth_rate: 2.0,
             prefer_stable_paths: true,
             use_relays_on_poor_paths: true,
+            relay_candidates: Vec::new(),
         }
     }
 }
@@ -282,6 +300,8 @@ struct HistoricalDecision {
     timestamp: Instant,
     /// Paths selected.
     paths_selected: Vec<String>,
+    /// Estimated completion time captured at scheduling time.
+    estimated_completion_time: Duration,
     /// Decision rationale.
     rationale: String,
 }
@@ -463,16 +483,18 @@ impl AtpTransferBrain {
 
         // Determine if relay should be used
         let use_relay = self.should_use_relay(&selected_path_ids);
+        let suggested_relay = if use_relay {
+            self.select_suggested_relay(&selected_path_ids)
+        } else {
+            None
+        };
         reason_vector.push(DecisionReason {
             code: if use_relay {
                 DecisionReasonCode::RelayEnabled
             } else {
                 DecisionReasonCode::RelayDisabled
             },
-            detail: format!(
-                "relay={} policy_use_relays_on_poor_paths={}",
-                use_relay, self.policy.use_relays_on_poor_paths
-            ),
+            detail: self.relay_decision_detail(use_relay, suggested_relay.as_deref()),
         });
 
         // Calculate congestion parameters
@@ -500,7 +522,7 @@ impl AtpTransferBrain {
             enable_repair,
             fec_rate,
             use_relay,
-            suggested_relay: None, // TODO: Implement relay selection
+            suggested_relay,
             transfer_priority: priority,
             estimated_completion_time,
             confidence,
@@ -526,10 +548,12 @@ impl AtpTransferBrain {
             .iter()
             .find(|d| d.transfer_id == transfer_id)
         {
+            let performance_ratio =
+                calculate_performance_ratio(decision.estimated_completion_time, completion_time);
             let outcome = DecisionOutcome {
                 completion_time,
                 success,
-                performance_ratio: 1.0, // TODO: Calculate actual vs predicted
+                performance_ratio,
             };
             self.decision_history
                 .outcomes
@@ -631,7 +655,7 @@ impl AtpTransferBrain {
             .fold(0.0, f64::max);
 
         // FEC rate should be slightly higher than loss rate
-        (max_loss_rate * 1.5).min(0.3).max(0.05)
+        (max_loss_rate * 1.5).clamp(0.05, 0.3)
     }
 
     fn should_use_relay(&self, path_ids: &[String]) -> bool {
@@ -646,6 +670,46 @@ impl AtpTransferBrain {
                 true
             }
         })
+    }
+
+    fn select_suggested_relay(&self, path_ids: &[String]) -> Option<String> {
+        self.policy
+            .relay_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .assisted_path_id
+                    .as_ref()
+                    .is_none_or(|assisted_path_id| path_ids.contains(assisted_path_id))
+            })
+            .min_by(|left, right| {
+                left.cost_micros_per_mib
+                    .cmp(&right.cost_micros_per_mib)
+                    .then_with(|| left.added_latency_micros.cmp(&right.added_latency_micros))
+                    .then_with(|| right.priority.cmp(&left.priority))
+                    .then_with(|| left.relay_id.cmp(&right.relay_id))
+            })
+            .map(|candidate| candidate.relay_id.clone())
+    }
+
+    fn relay_decision_detail(&self, use_relay: bool, suggested_relay: Option<&str>) -> String {
+        if !use_relay {
+            return format!(
+                "relay=false policy_use_relays_on_poor_paths={}",
+                self.policy.use_relays_on_poor_paths
+            );
+        }
+
+        match suggested_relay {
+            Some(relay_id) => format!(
+                "relay=true selected_relay={relay_id} candidate_count={}",
+                self.policy.relay_candidates.len()
+            ),
+            None => format!(
+                "relay=true selected_relay=none candidate_count={} no_applicable_configured_relay",
+                self.policy.relay_candidates.len()
+            ),
+        }
     }
 
     fn calculate_congestion_params(
@@ -708,6 +772,7 @@ impl AtpTransferBrain {
             transfer_id,
             timestamp: Instant::now(),
             paths_selected: decision.selected_paths.clone(),
+            estimated_completion_time: decision.estimated_completion_time,
             rationale: decision
                 .reason_vector
                 .iter()
@@ -877,9 +942,50 @@ impl PathHistory {
             }
         }
 
-        // Update average performance (simplified)
-        let current_performance = metrics.path_stability * (1.0 - metrics.loss_rate);
-        self.avg_performance = self.avg_performance * 0.9 + current_performance * 0.1;
+        if metrics.packets_acked + metrics.packets_lost > 0 {
+            let observed_success_rate = metrics.packets_acked as f64
+                / (metrics.packets_acked + metrics.packets_lost) as f64;
+            self.success_rate =
+                finite_unit((self.success_rate * 0.8) + (observed_success_rate * 0.2));
+        }
+
+        let latest_throughput = self.throughput_samples.last().copied().unwrap_or(0);
+        let peak_throughput = self.throughput_samples.iter().copied().max().unwrap_or(1);
+        let throughput_score = if peak_throughput > 0 {
+            latest_throughput as f64 / peak_throughput as f64
+        } else {
+            0.0
+        };
+        let latest_latency = self.latency_samples.last().copied().unwrap_or(u64::MAX);
+        let best_latency = self
+            .latency_samples
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(latest_latency);
+        let latency_score = if latest_latency > 0 && latest_latency != u64::MAX {
+            best_latency as f64 / latest_latency as f64
+        } else {
+            0.0
+        };
+        let congestion_penalty = if metrics.congestion_limited {
+            0.15
+        } else {
+            0.0
+        } + if metrics.anti_amplification_limited {
+            0.10
+        } else {
+            0.0
+        };
+        let current_performance = finite_unit(
+            throughput_score.clamp(0.0, 1.0) * 0.25
+                + latency_score.clamp(0.0, 1.0) * 0.20
+                + self.success_rate.clamp(0.0, 1.0) * 0.25
+                + metrics.path_stability.clamp(0.0, 1.0) * 0.30
+                - congestion_penalty,
+        );
+        self.avg_performance =
+            finite_unit((self.avg_performance * 0.85) + (current_performance * 0.15));
     }
 }
 
@@ -910,6 +1016,18 @@ fn finite_unit(value: f64) -> f64 {
         value.clamp(0.0, 1.0)
     } else {
         0.0
+    }
+}
+
+fn calculate_performance_ratio(predicted: Duration, actual: Duration) -> f64 {
+    let predicted_nanos = predicted.as_nanos();
+    let actual_nanos = actual.as_nanos();
+
+    match (predicted_nanos, actual_nanos) {
+        (0, 0) => 1.0,
+        (_, 0) => f64::INFINITY,
+        (0, _) => 0.0,
+        (predicted, actual) => (predicted as f64 / actual as f64).clamp(0.0, f64::MAX),
     }
 }
 
@@ -972,8 +1090,8 @@ mod tests {
                 detected_issues: Vec::new(),
                 recommendations: Vec::new(),
                 performance_class: PathPerformanceClass::from_metrics(&AtpTransportMetrics {
-                    connection_id: "dummy".to_string(),
-                    path_id: "dummy".to_string(),
+                    connection_id: format!("test_conn_{path_id}"),
+                    path_id: path_id.to_string(),
                     smoothed_rtt_micros: Some(rtt_micros),
                     latest_rtt_micros: Some(rtt_micros),
                     rttvar_micros: Some(rtt_micros / 10),
@@ -1036,6 +1154,73 @@ mod tests {
         // Should enable repair due to high loss rate (0.08 > 0.05 threshold)
         assert!(decision.enable_repair);
         assert!(decision.fec_rate.is_some());
+    }
+
+    #[test]
+    fn relay_selection_uses_configured_candidate() {
+        let policy = TransferPolicy {
+            relay_candidates: vec![
+                RelayCandidate {
+                    relay_id: "relay_slow".to_string(),
+                    assisted_path_id: Some("poor_direct".to_string()),
+                    priority: 10,
+                    added_latency_micros: 80_000,
+                    cost_micros_per_mib: 400_000,
+                },
+                RelayCandidate {
+                    relay_id: "relay_fast".to_string(),
+                    assisted_path_id: Some("poor_direct".to_string()),
+                    priority: 5,
+                    added_latency_micros: 20_000,
+                    cost_micros_per_mib: 100_000,
+                },
+            ],
+            ..TransferPolicy::default()
+        };
+        let mut brain = AtpTransferBrain::with_policy(policy);
+        let mut metrics = create_test_metrics("poor_direct", 0.04, 250_000, 0.1);
+        metrics
+            .path_doctor_assessment
+            .as_mut()
+            .unwrap()
+            .performance_class = PathPerformanceClass::Fair;
+        brain.update_path_metrics(metrics);
+
+        let decision = brain
+            .make_transfer_decision(
+                "relay_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+
+        assert!(decision.use_relay);
+        assert_eq!(decision.suggested_relay.as_deref(), Some("relay_fast"));
+    }
+
+    #[test]
+    fn completion_report_records_prediction_error_ratio() {
+        let mut brain = AtpTransferBrain::new();
+        brain.update_path_metrics(create_test_metrics("test_path", 0.01, 100_000, 0.8));
+
+        let decision = brain
+            .make_transfer_decision(
+                "ratio_transfer".to_string(),
+                1_000_000,
+                TransferPriority::Normal,
+            )
+            .expect("decision");
+        let actual = decision.estimated_completion_time.saturating_mul(2);
+        brain.report_transfer_completion("ratio_transfer", actual, true);
+
+        let outcome = brain
+            .decision_history
+            .outcomes
+            .get(&decision.decision_id)
+            .expect("outcome");
+        assert!(outcome.success);
+        assert!(outcome.performance_ratio > 0.0);
+        assert!(outcome.performance_ratio < 1.0);
     }
 
     #[test]

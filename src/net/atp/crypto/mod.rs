@@ -17,15 +17,9 @@ use crate::atp::manifest::{
 };
 use std::collections::BTreeMap;
 
-pub mod algorithms;
-pub mod domains;
 pub mod policy;
-pub mod validation;
 
-pub use algorithms::*;
-pub use domains::*;
 pub use policy::*;
-pub use validation::*;
 
 /// Encryption result with metadata for verification.
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +151,8 @@ pub struct EncryptionEngine;
 impl EncryptionEngine {
     const CHACHA20POLY1305_NONCE_LEN: usize = 12;
     const CHACHA20POLY1305_TAG_LEN: usize = 16;
+    const AES256GCM_NONCE_LEN: usize = 12;
+    const AES256GCM_TAG_LEN: usize = 16;
 
     /// Apply encryption according to policy and domain.
     pub fn encrypt(
@@ -409,27 +405,70 @@ impl EncryptionEngine {
         }
     }
 
-    /// Encrypt using AES-256-GCM AEAD (placeholder).
+    /// Encrypt using AES-256-GCM AEAD.
     fn encrypt_aes256gcm(
-        _plaintext: &[u8],
-        _key_material: &KeyMaterial,
+        plaintext: &[u8],
+        key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, Vec<u8>, EncryptionMetadata), EncryptionError> {
-        // TODO: Implement AES-256-GCM when aes-gcm crate is added
-        Err(EncryptionError::UnsupportedAlgorithm(
-            EncryptionAlgorithm::Aes256Gcm,
-        ))
+        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::{Aes256Gcm, Nonce};
+
+        let cipher = Aes256Gcm::new_from_slice(&key_material.key)
+            .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
+
+        let nonce_bytes = Self::generate_iv(Self::AES256GCM_NONCE_LEN);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let mut buffer = plaintext.to_vec();
+        let tag = cipher
+            .encrypt_in_place_detached(nonce, b"", &mut buffer)
+            .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
+
+        let metadata = EncryptionMetadata {
+            algorithm: EncryptionAlgorithm::Aes256Gcm,
+            iv: nonce_bytes,
+            auth_tag: tag.to_vec(),
+            key_derivation: key_material.derivation.clone(),
+        };
+
+        Ok((buffer, tag.to_vec(), metadata))
     }
 
-    /// Decrypt using AES-256-GCM AEAD (placeholder).
+    /// Decrypt using AES-256-GCM AEAD.
     fn decrypt_aes256gcm(
-        _ciphertext: &[u8],
-        _metadata: &EncryptionMetadata,
-        _key_material: &KeyMaterial,
+        ciphertext: &[u8],
+        metadata: &EncryptionMetadata,
+        key_material: &KeyMaterial,
     ) -> Result<(Vec<u8>, bool), EncryptionError> {
-        // TODO: Implement AES-256-GCM when aes-gcm crate is added
-        Err(EncryptionError::UnsupportedAlgorithm(
-            EncryptionAlgorithm::Aes256Gcm,
-        ))
+        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::{Aes256Gcm, Nonce, Tag};
+
+        let cipher = Aes256Gcm::new_from_slice(&key_material.key)
+            .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
+
+        if metadata.iv.len() != Self::AES256GCM_NONCE_LEN {
+            return Err(EncryptionError::InvalidMetadata(format!(
+                "AES-256-GCM nonce must be {} bytes, got {}",
+                Self::AES256GCM_NONCE_LEN,
+                metadata.iv.len(),
+            )));
+        }
+        if metadata.auth_tag.len() != Self::AES256GCM_TAG_LEN {
+            return Err(EncryptionError::InvalidMetadata(format!(
+                "AES-256-GCM auth tag must be {} bytes, got {}",
+                Self::AES256GCM_TAG_LEN,
+                metadata.auth_tag.len(),
+            )));
+        }
+
+        let nonce = Nonce::from_slice(&metadata.iv);
+        let tag = Tag::from_slice(&metadata.auth_tag);
+
+        let mut buffer = ciphertext.to_vec();
+        match cipher.decrypt_in_place_detached(nonce, b"", &mut buffer, tag) {
+            Ok(()) => Ok((buffer, true)),
+            Err(_) => Err(EncryptionError::AuthenticationFailed),
+        }
     }
 }
 
@@ -448,16 +487,12 @@ mod tests {
 
         let key_material = KeyMaterial::new(key, "test-key".to_string(), 1, derivation);
 
-        assert!(
-            key_material
-                .validate_for_algorithm(EncryptionAlgorithm::ChaCha20Poly1305)
-                .is_ok()
-        );
-        assert!(
-            key_material
-                .validate_for_algorithm(EncryptionAlgorithm::Aes256Gcm)
-                .is_ok()
-        );
+        assert!(key_material
+            .validate_for_algorithm(EncryptionAlgorithm::ChaCha20Poly1305)
+            .is_ok());
+        assert!(key_material
+            .validate_for_algorithm(EncryptionAlgorithm::Aes256Gcm)
+            .is_ok());
 
         // Wrong key size
         let bad_key_material = KeyMaterial::new(
@@ -520,6 +555,89 @@ mod tests {
 
         assert_eq!(decrypted.plaintext, test_data);
         assert!(decrypted.authenticated);
+    }
+
+    #[test]
+    fn test_aes256gcm_roundtrip() {
+        let test_data = b"authenticated AES-256-GCM payload";
+        let key_material = KeyMaterial::new(
+            vec![9u8; 32],
+            "aes-test-key".to_string(),
+            1,
+            KeyDerivation {
+                kdf: KeyDerivationFunction::Direct,
+                salt: vec![],
+                iterations: None,
+            },
+        );
+
+        let policy = EncryptionPolicy {
+            algorithm: EncryptionAlgorithm::Aes256Gcm,
+            key_derivation: key_material.derivation.clone(),
+            apply_to_kinds: vec![ObjectKind::FileObject],
+            encrypt_metadata: false,
+        };
+
+        let result = EncryptionEngine::encrypt(
+            test_data,
+            ObjectKind::FileObject,
+            &policy,
+            None,
+            &key_material,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.metadata.algorithm, EncryptionAlgorithm::Aes256Gcm);
+        assert_eq!(
+            result.metadata.iv.len(),
+            EncryptionEngine::AES256GCM_NONCE_LEN
+        );
+        assert_eq!(result.auth_tag.len(), EncryptionEngine::AES256GCM_TAG_LEN);
+        assert_ne!(result.ciphertext, test_data);
+
+        let decrypted =
+            EncryptionEngine::decrypt(&result.ciphertext, &result.metadata, &key_material).unwrap();
+
+        assert_eq!(decrypted.plaintext, test_data);
+        assert!(decrypted.authenticated);
+    }
+
+    #[test]
+    fn aes256gcm_decrypt_rejects_tampered_ciphertext() {
+        let test_data = b"tamper-resistant payload";
+        let key_material = KeyMaterial::new(
+            vec![9u8; 32],
+            "aes-test-key".to_string(),
+            1,
+            KeyDerivation {
+                kdf: KeyDerivationFunction::Direct,
+                salt: vec![],
+                iterations: None,
+            },
+        );
+        let policy = EncryptionPolicy {
+            algorithm: EncryptionAlgorithm::Aes256Gcm,
+            key_derivation: key_material.derivation.clone(),
+            apply_to_kinds: vec![ObjectKind::FileObject],
+            encrypt_metadata: false,
+        };
+
+        let mut result = EncryptionEngine::encrypt(
+            test_data,
+            ObjectKind::FileObject,
+            &policy,
+            None,
+            &key_material,
+            None,
+        )
+        .unwrap();
+        result.ciphertext[0] ^= 0x80;
+
+        let err = EncryptionEngine::decrypt(&result.ciphertext, &result.metadata, &key_material)
+            .unwrap_err();
+
+        assert_eq!(err, EncryptionError::AuthenticationFailed);
     }
 
     #[test]

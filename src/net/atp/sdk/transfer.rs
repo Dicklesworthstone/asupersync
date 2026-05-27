@@ -489,34 +489,38 @@ impl AtpSession {
         AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
 
-    // Daemon-delegated implementations (stubs for now)
     async fn send_object_daemon_delegated(
         &self,
-        _cx: &Cx,
-        _request: TransferRequest,
+        cx: &Cx,
+        request: TransferRequest,
     ) -> AtpOutcome<ActiveTransfer> {
-        AtpOutcome::Err(AtpError::Daemon(
-            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
-        ))
+        self.daemon_delegation_unavailable(cx, Some(&request.options))
+            .await
     }
 
     async fn receive_object_daemon_delegated(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _destination: TransferDestination,
-        _options: TransferOptions,
+        options: TransferOptions,
     ) -> AtpOutcome<ActiveTransfer> {
-        AtpOutcome::Err(AtpError::Daemon(
-            crate::net::atp::protocol::DaemonError::ServiceUnavailable,
-        ))
+        self.daemon_delegation_unavailable(cx, Some(&options)).await
     }
 
     async fn verify_object_daemon_delegated(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _object_path: &Path,
         _expected_hash: Option<&[u8]>,
     ) -> AtpOutcome<ObjectVerification> {
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+        }
+        if daemon_endpoint_is_reachable(&self.mode).is_err() {
+            return AtpOutcome::Err(AtpError::Daemon(
+                crate::net::atp::protocol::DaemonError::DaemonOffline,
+            ));
+        }
         AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
@@ -524,21 +528,47 @@ impl AtpSession {
 
     async fn resume_transfer_daemon_delegated(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         _transfer_id: &TransferId,
         _checkpoint: &str,
     ) -> AtpOutcome<ActiveTransfer> {
+        self.daemon_delegation_unavailable(cx, None).await
+    }
+
+    async fn cancel_transfer_daemon_delegated(
+        &self,
+        cx: &Cx,
+        _transfer_id: &TransferId,
+        _reason: Option<String>,
+    ) -> AtpOutcome<()> {
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+        }
+        if daemon_endpoint_is_reachable(&self.mode).is_err() {
+            return AtpOutcome::Err(AtpError::Daemon(
+                crate::net::atp::protocol::DaemonError::DaemonOffline,
+            ));
+        }
         AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
     }
 
-    async fn cancel_transfer_daemon_delegated(
+    async fn daemon_delegation_unavailable(
         &self,
-        _cx: &Cx,
-        _transfer_id: &TransferId,
-        _reason: Option<String>,
-    ) -> AtpOutcome<()> {
+        cx: &Cx,
+        options: Option<&TransferOptions>,
+    ) -> AtpOutcome<ActiveTransfer> {
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+        }
+        if daemon_endpoint_is_reachable(&self.mode).is_err() {
+            return AtpOutcome::Err(AtpError::Daemon(
+                crate::net::atp::protocol::DaemonError::DaemonOffline,
+            ));
+        }
+
+        let _ = options;
         AtpOutcome::Err(AtpError::Daemon(
             crate::net::atp::protocol::DaemonError::ServiceUnavailable,
         ))
@@ -640,6 +670,29 @@ impl AtpSession {
 
         AtpOutcome::Ok(total)
     }
+}
+
+fn daemon_endpoint_is_reachable(mode: &SdkMode) -> std::io::Result<()> {
+    let SdkMode::DaemonDelegated {
+        daemon_endpoint, ..
+    } = mode
+    else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SDK mode is not daemon delegated",
+        ));
+    };
+    let endpoint = daemon_endpoint
+        .strip_prefix("tcp://")
+        .unwrap_or(daemon_endpoint);
+    let addr: std::net::SocketAddr = endpoint.parse().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "daemon endpoint must be tcp://host:port or host:port",
+        )
+    })?;
+
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
 }
 
 impl ActiveTransfer {

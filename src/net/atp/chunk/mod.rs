@@ -15,12 +15,11 @@ use crate::atp::manifest::{ChunkBoundary, ChunkPlan};
 pub(crate) use crate::atp::manifest::{ChunkMetadata, SparseHoleMetadata};
 use profiles::ChunkingProfile as ChunkingProfileTrait;
 
+pub mod artifact;
 pub mod bulk_file;
 pub mod dedupe;
-pub mod profiles;
-// TODO: Fix syntax errors in these modules
-pub mod artifact;
 pub mod media;
+pub mod profiles;
 pub mod sparse_image;
 pub mod stream;
 pub mod sync_tree;
@@ -80,7 +79,7 @@ impl ChunkingProfile {
     }
 
     /// Compute chunk boundaries using this profile.
-    #[must_use]
+    #[must_use = "this returns computed boundaries; consume or inspect the result"]
     pub fn compute_boundaries(
         self,
         data: &[u8],

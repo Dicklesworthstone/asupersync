@@ -264,7 +264,7 @@ impl StreamProfile {
             return true;
         }
 
-        // Binary reference patterns (simplified)
+        // Binary reference sentinels used by compact rolling manifests.
         chunk_data
             .windows(4)
             .any(|w| w == b"REF\x00" || w == b"\x00REF")

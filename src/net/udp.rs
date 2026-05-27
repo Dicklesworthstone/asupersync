@@ -1424,7 +1424,7 @@ impl<'a> RecvStream<'a> {
         // datagram while yielding an empty payload. Clamp to one byte so
         // callers never silently drop the entire datagram body by accident.
         // Also clamp to UDP_MAX_PACKET_SIZE to prevent DoS via unbounded allocation.
-        let clamped_size = buf_size.max(1).min(UDP_MAX_PACKET_SIZE);
+        let clamped_size = buf_size.clamp(1, UDP_MAX_PACKET_SIZE);
         Self {
             socket,
             buf: vec![0u8; clamped_size],
@@ -2097,7 +2097,7 @@ mod tests {
     #[test]
     fn udp_dos_prevention() {
         future::block_on(async {
-            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
             // Test recv_batch_from DoS prevention - packet_size limit
             let result = socket.recv_batch_from(1, UDP_MAX_PACKET_SIZE + 1).await;

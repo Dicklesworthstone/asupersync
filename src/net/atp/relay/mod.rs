@@ -335,7 +335,7 @@ struct RelayEndpointBinding {
     generation: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelayEndpointDirectory {
     udp_endpoints: BTreeMap<SocketAddr, RelayEndpointBinding>,
     tcp_tls_streams: BTreeMap<RelayTcpTlsStreamId, RelayEndpointBinding>,
@@ -538,17 +538,6 @@ impl RelayEndpointDirectory {
     fn next_endpoint_admission_generation(&mut self) -> u64 {
         self.next_admission_generation = self.next_admission_generation.saturating_add(1);
         self.next_admission_generation
-    }
-}
-
-impl Default for RelayEndpointDirectory {
-    fn default() -> Self {
-        Self {
-            udp_endpoints: BTreeMap::new(),
-            tcp_tls_streams: BTreeMap::new(),
-            quota: RelayEndpointDirectoryQuota::default(),
-            next_admission_generation: 0,
-        }
     }
 }
 

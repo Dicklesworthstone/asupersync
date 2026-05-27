@@ -560,7 +560,7 @@ impl Default for ManifestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cx::Cx;
+    use futures_lite::future::block_on;
 
     #[test]
     fn object_hash_creation() {
@@ -598,54 +598,42 @@ mod tests {
     fn memory_object_store() {
         crate::test_utils::init_test_logging();
 
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-            region,
-            crate::types::Budget::INFINITE,
-        );
 
         let store = MemoryObjectStore::new();
         let data = b"test data".to_vec();
         let content_type = "text/plain";
         let metadata = ObjectMetadata::with_filename("test.txt");
 
-        let (_, result) = scope
-            .spawn(&mut runtime.state, &cx, async move {
-                // Store object
-                let object = store
-                    .store_object(&cx, data.clone(), content_type, metadata)
-                    .await
-                    .unwrap();
-                assert_eq!(object.size_bytes, data.len() as u64);
-                assert_eq!(object.content_type, content_type);
+        block_on(async {
+            // Store object
+            let object = store
+                .store_object(&cx, data.clone(), content_type, metadata)
+                .await
+                .unwrap();
+            assert_eq!(object.size_bytes, data.len() as u64);
+            assert_eq!(object.content_type, content_type);
 
-                // Check existence
-                let exists = store.has_object(&cx, &object.hash).await.unwrap();
-                assert!(exists);
+            // Check existence
+            let exists = store.has_object(&cx, &object.hash).await.unwrap();
+            assert!(exists);
 
-                // Retrieve object
-                let retrieved = store.get_object(&cx, &object.hash).await.unwrap();
-                assert_eq!(retrieved, Some(data));
+            // Retrieve object
+            let retrieved = store.get_object(&cx, &object.hash).await.unwrap();
+            assert_eq!(retrieved, Some(data));
 
-                // Get object info
-                let info = store.get_object_info(&cx, &object.hash).await.unwrap();
-                assert!(info.is_some());
-                assert_eq!(info.unwrap().hash, object.hash);
+            // Get object info
+            let info = store.get_object_info(&cx, &object.hash).await.unwrap();
+            assert!(info.is_some());
+            assert_eq!(info.unwrap().hash, object.hash);
 
-                // Delete object
-                let deleted = store.delete_object(&cx, &object.hash).await.unwrap();
-                assert!(deleted);
+            // Delete object
+            let deleted = store.delete_object(&cx, &object.hash).await.unwrap();
+            assert!(deleted);
 
-                let exists_after_delete = store.has_object(&cx, &object.hash).await.unwrap();
-                assert!(!exists_after_delete);
-            })
-            .unwrap();
-
-        result.join().unwrap();
+            let exists_after_delete = store.has_object(&cx, &object.hash).await.unwrap();
+            assert!(!exists_after_delete);
+        });
 
         crate::test_complete!("memory_object_store");
     }
@@ -689,15 +677,7 @@ mod tests {
 
         use tempfile::tempdir;
 
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
-            region,
-            crate::types::Budget::INFINITE,
-        );
 
         let temp_dir = tempdir().unwrap();
         let store = FileSystemObjectStore::new(temp_dir.path().to_path_buf());
@@ -705,38 +685,34 @@ mod tests {
         let content_type = "application/octet-stream";
         let metadata = ObjectMetadata::with_filename("fstest.bin");
 
-        let (_, result) = scope
-            .spawn(&mut runtime.state, &cx, async move {
-                // Store object
-                let object = store
-                    .store_object(&cx, data.clone(), content_type, metadata)
-                    .await
-                    .unwrap();
+        block_on(async {
+            // Store object
+            let object = store
+                .store_object(&cx, data.clone(), content_type, metadata)
+                .await
+                .unwrap();
 
-                // Verify file was created
-                let object_path = store.object_path(&object.hash);
-                assert!(object_path.exists());
+            // Verify file was created
+            let object_path = store.object_path(&object.hash);
+            assert!(object_path.exists());
 
-                // Retrieve object
-                let retrieved = store.get_object(&cx, &object.hash).await.unwrap();
-                assert_eq!(retrieved, Some(data));
+            // Retrieve object
+            let retrieved = store.get_object(&cx, &object.hash).await.unwrap();
+            assert_eq!(retrieved, Some(data));
 
-                // Get object info
-                let info = store.get_object_info(&cx, &object.hash).await.unwrap();
-                assert!(info.is_some());
+            // Get object info
+            let info = store.get_object_info(&cx, &object.hash).await.unwrap();
+            assert!(info.is_some());
 
-                // List objects
-                let objects = store.list_objects(&cx).await.unwrap();
-                assert!(objects.contains(&object.hash));
+            // List objects
+            let objects = store.list_objects(&cx).await.unwrap();
+            assert!(objects.contains(&object.hash));
 
-                // Delete object
-                let deleted = store.delete_object(&cx, &object.hash).await.unwrap();
-                assert!(deleted);
-                assert!(!object_path.exists());
-            })
-            .unwrap();
-
-        result.join().unwrap();
+            // Delete object
+            let deleted = store.delete_object(&cx, &object.hash).await.unwrap();
+            assert!(deleted);
+            assert!(!object_path.exists());
+        });
 
         crate::test_complete!("filesystem_object_store");
     }

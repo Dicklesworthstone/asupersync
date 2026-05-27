@@ -2,6 +2,7 @@
 
 use super::{AdapterConfig, AtpH3Error, AtpH3Result, AtpH3Stream, H3FrameCodec, StreamDirection};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// H3 session state.
@@ -32,6 +33,10 @@ pub struct H3Session {
     codec: H3FrameCodec,
     /// Active streams.
     streams: HashMap<u64, AtpH3Stream>,
+    /// Outbound WebTransport datagrams awaiting backend transmission.
+    datagram_send_queue: VecDeque<Vec<u8>>,
+    /// Maximum queued datagrams before backpressure.
+    datagram_queue_high_water: usize,
     /// Next stream ID for outbound streams.
     next_stream_id: u64,
     /// Session creation time.
@@ -54,6 +59,8 @@ impl H3Session {
             config: config.clone(),
             codec: H3FrameCodec::new(),
             streams: HashMap::new(),
+            datagram_send_queue: VecDeque::new(),
+            datagram_queue_high_water: 64,
             next_stream_id: 0, // Client streams start at 0, 4, 8, ...
             created_at: now,
             last_activity: now,
@@ -167,10 +174,16 @@ impl H3Session {
         Ok(())
     }
 
-    /// Send datagram data.
+    /// Queue datagram data for WebTransport backend transmission.
     pub fn send_datagram(&mut self, data: &[u8]) -> AtpH3Result<()> {
         if !self.is_active() {
             return Err(AtpH3Error::Session("Session is not active".to_string()));
+        }
+
+        if self.datagram_send_queue.len() >= self.datagram_queue_high_water {
+            return Err(AtpH3Error::Session(
+                "Datagram send queue full - apply backpressure".to_string(),
+            ));
         }
 
         if data.len() > self.config.max_datagram_size {
@@ -181,10 +194,28 @@ impl H3Session {
             )));
         }
 
-        // TODO: Implement actual datagram transmission
-        // This would interface with the WebTransport datagram API
+        self.datagram_send_queue.push_back(data.to_vec());
         self.update_activity();
         Ok(())
+    }
+
+    /// Pop the next queued datagram for the concrete WebTransport backend.
+    pub fn next_datagram(&mut self) -> Option<Vec<u8>> {
+        let datagram = self.datagram_send_queue.pop_front();
+        if datagram.is_some() {
+            self.update_activity();
+        }
+        datagram
+    }
+
+    /// Returns true if a datagram is queued for backend transmission.
+    pub fn has_pending_datagram(&self) -> bool {
+        !self.datagram_send_queue.is_empty()
+    }
+
+    /// Number of datagrams queued for backend transmission.
+    pub fn datagram_queue_len(&self) -> usize {
+        self.datagram_send_queue.len()
     }
 
     /// Check if the session has timed out.
@@ -244,6 +275,7 @@ impl H3Session {
             session_id: self.session_id.clone(),
             state: self.state.clone(),
             stream_count: self.streams.len(),
+            datagram_queue_len: self.datagram_send_queue.len(),
             max_streams: self.config.max_streams as usize,
             uptime_ms: self.uptime().as_millis() as u64,
             idle_time_ms: self.idle_time().as_millis() as u64,
@@ -266,6 +298,8 @@ pub struct SessionStats {
     pub state: SessionState,
     /// Number of active streams.
     pub stream_count: usize,
+    /// Number of queued outbound datagrams.
+    pub datagram_queue_len: usize,
     /// Maximum allowed streams.
     pub max_streams: usize,
     /// Session uptime in milliseconds.
@@ -394,13 +428,33 @@ mod tests {
         let mut session = H3Session::new("test-session".to_string(), &config).unwrap();
         session.activate().unwrap();
 
-        // Send normal datagram
+        // Queue normal datagram
         let data = vec![0u8; 100];
         assert!(session.send_datagram(&data).is_ok());
+        assert!(session.has_pending_datagram());
+        assert_eq!(session.datagram_queue_len(), 1);
+        assert_eq!(session.next_datagram(), Some(data));
+        assert!(!session.has_pending_datagram());
 
         // Exceed size limit
         let large_data = vec![0u8; 2000];
         assert!(session.send_datagram(&large_data).is_err());
+    }
+
+    #[test]
+    fn test_datagram_send_applies_backpressure() {
+        let config = test_config();
+        let mut session = H3Session::new("test-session".to_string(), &config).unwrap();
+        session.activate().unwrap();
+
+        for _ in 0..64 {
+            session.send_datagram(&[1, 2, 3]).unwrap();
+        }
+
+        let err = session
+            .send_datagram(&[1, 2, 3])
+            .expect_err("queue high water should apply backpressure");
+        assert!(err.to_string().contains("Datagram send queue full"));
     }
 
     #[test]
@@ -417,6 +471,7 @@ mod tests {
         assert_eq!(stats.session_id, "test-session");
         assert_eq!(stats.state, SessionState::Active);
         assert_eq!(stats.stream_count, 1);
+        assert_eq!(stats.datagram_queue_len, 0);
         assert_eq!(stats.max_streams, 10);
         assert!(stats.uptime_ms > 0);
     }

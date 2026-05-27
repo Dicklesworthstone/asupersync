@@ -12,17 +12,17 @@
 //! - Compression metadata enables proof reconstruction
 
 use crate::atp::manifest::{
-    CompressionAlgorithm, CompressionMetadata, CompressionPolicy,
-    TransformOrder, TransformType, ObjectKind,
+    CompressionAlgorithm, CompressionMetadata, CompressionPolicy, ObjectKind, TransformOrder,
+    TransformType,
 };
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 
-pub mod policy;
 pub mod algorithms;
+pub mod policy;
 pub mod validation;
 
-pub use policy::*;
 pub use algorithms::*;
+pub use policy::*;
 pub use validation::*;
 
 /// Compression result with metadata for verification.
@@ -61,7 +61,9 @@ impl std::fmt::Display for CompressionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PolicyViolation(msg) => write!(f, "compression policy violation: {msg}"),
-            Self::UnsupportedAlgorithm(alg) => write!(f, "unsupported compression algorithm: {alg:?}"),
+            Self::UnsupportedAlgorithm(alg) => {
+                write!(f, "unsupported compression algorithm: {alg:?}")
+            }
             Self::CompressionFailed(msg) => write!(f, "compression failed: {msg}"),
             Self::DecompressionFailed(msg) => write!(f, "decompression failed: {msg}"),
             Self::SizeThresholdViolation => write!(f, "size below compression threshold"),
@@ -86,9 +88,9 @@ impl CompressionEngine {
     ) -> Result<CompressionResult, CompressionError> {
         // Validate compression is allowed for this object kind
         if !policy.apply_to_kinds.contains(&object_kind) {
-            return Err(CompressionError::PolicyViolation(
-                format!("compression not allowed for object kind {object_kind:?}"),
-            ));
+            return Err(CompressionError::PolicyViolation(format!(
+                "compression not allowed for object kind {object_kind:?}"
+            )));
         }
 
         // Check size threshold
@@ -162,27 +164,40 @@ impl CompressionEngine {
 
         match metadata.algorithm {
             CompressionAlgorithm::None => Ok(compressed_data.to_vec()),
-            CompressionAlgorithm::Lz4 => Self::decompress_lz4(compressed_data, metadata.original_size),
-            CompressionAlgorithm::Gzip => Self::decompress_gzip(compressed_data, metadata.original_size),
-            CompressionAlgorithm::Brotli => Self::decompress_brotli(compressed_data, metadata.original_size),
+            CompressionAlgorithm::Lz4 => {
+                Self::decompress_lz4(compressed_data, metadata.original_size)
+            }
+            CompressionAlgorithm::Gzip => {
+                Self::decompress_gzip(compressed_data, metadata.original_size)
+            }
+            CompressionAlgorithm::Brotli => {
+                Self::decompress_brotli(compressed_data, metadata.original_size)
+            }
         }
     }
 
     /// Check if compression is enabled for object type in policy.
     pub fn is_compression_enabled(policy: &CompressionPolicy, object_kind: ObjectKind) -> bool {
-        !matches!(policy.algorithm, CompressionAlgorithm::None) &&
-        policy.apply_to_kinds.contains(&object_kind)
+        !matches!(policy.algorithm, CompressionAlgorithm::None)
+            && policy.apply_to_kinds.contains(&object_kind)
     }
 
     /// Validate transform position in the transform order.
-    fn validate_transform_position(transform_order: &TransformOrder) -> Result<(), CompressionError> {
-        let compression_pos = transform_order.transforms.iter()
+    fn validate_transform_position(
+        transform_order: &TransformOrder,
+    ) -> Result<(), CompressionError> {
+        let compression_pos = transform_order
+            .transforms
+            .iter()
             .position(|&t| t == TransformType::Compression);
 
         if let Some(pos) = compression_pos {
             // Compression should come after chunking but before encryption
-            if let Some(chunk_pos) = transform_order.transforms.iter()
-                .position(|&t| t == TransformType::Chunking) {
+            if let Some(chunk_pos) = transform_order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::Chunking)
+            {
                 if pos <= chunk_pos {
                     return Err(CompressionError::TransformOrderViolation(
                         "compression must come after chunking".to_string(),
@@ -190,8 +205,11 @@ impl CompressionEngine {
                 }
             }
 
-            if let Some(enc_pos) = transform_order.transforms.iter()
-                .position(|&t| t == TransformType::Encryption) {
+            if let Some(enc_pos) = transform_order
+                .transforms
+                .iter()
+                .position(|&t| t == TransformType::Encryption)
+            {
                 if pos >= enc_pos {
                     return Err(CompressionError::TransformOrderViolation(
                         "compression must come before encryption".to_string(),
@@ -236,10 +254,12 @@ impl CompressionEngine {
         use flate2::{Compression, write::GzEncoder};
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level.into()));
-        encoder.write_all(data)
+        encoder
+            .write_all(data)
             .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
 
-        encoder.finish()
+        encoder
+            .finish()
             .map_err(|e| CompressionError::CompressionFailed(e.to_string()))
     }
 
@@ -250,7 +270,8 @@ impl CompressionEngine {
         let mut decoder = GzDecoder::new(compressed);
         let mut decompressed = Vec::with_capacity(expected_size as usize);
 
-        decoder.read_to_end(&mut decompressed)
+        decoder
+            .read_to_end(&mut decompressed)
             .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
 
         if decompressed.len() != expected_size as usize {
@@ -262,16 +283,62 @@ impl CompressionEngine {
         Ok(decompressed)
     }
 
-    /// Compress using Brotli (placeholder - would need brotli crate).
-    fn compress_brotli(_data: &[u8], _level: u8) -> Result<Vec<u8>, CompressionError> {
-        // TODO: Implement Brotli compression when brotli crate is added
-        Err(CompressionError::UnsupportedAlgorithm(CompressionAlgorithm::Brotli))
+    /// Compress using Brotli.
+    #[cfg(feature = "compression")]
+    fn compress_brotli(data: &[u8], level: u8) -> Result<Vec<u8>, CompressionError> {
+        let quality = u32::from(level.min(11));
+        let mut encoder = brotli::CompressorWriter::new(Vec::new(), 4096, quality, 22);
+        encoder
+            .write_all(data)
+            .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
+        encoder
+            .flush()
+            .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
+        Ok(encoder.into_inner())
     }
 
-    /// Decompress Brotli (placeholder).
-    fn decompress_brotli(_compressed: &[u8], _expected_size: u64) -> Result<Vec<u8>, CompressionError> {
-        // TODO: Implement Brotli decompression when brotli crate is added
-        Err(CompressionError::UnsupportedAlgorithm(CompressionAlgorithm::Brotli))
+    /// Compress using Brotli.
+    #[cfg(not(feature = "compression"))]
+    fn compress_brotli(_data: &[u8], _level: u8) -> Result<Vec<u8>, CompressionError> {
+        Err(CompressionError::UnsupportedAlgorithm(
+            CompressionAlgorithm::Brotli,
+        ))
+    }
+
+    /// Decompress Brotli.
+    #[cfg(feature = "compression")]
+    fn decompress_brotli(
+        compressed: &[u8],
+        expected_size: u64,
+    ) -> Result<Vec<u8>, CompressionError> {
+        let expected_size = usize::try_from(expected_size).map_err(|_| {
+            CompressionError::DecompressionFailed("expected size does not fit usize".to_string())
+        })?;
+        let mut decoder = brotli::Decompressor::new(compressed, 4096);
+        let mut decompressed = Vec::with_capacity(expected_size);
+
+        decoder
+            .read_to_end(&mut decompressed)
+            .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
+
+        if decompressed.len() != expected_size {
+            return Err(CompressionError::DecompressionFailed(
+                "decompressed size mismatch".to_string(),
+            ));
+        }
+
+        Ok(decompressed)
+    }
+
+    /// Decompress Brotli.
+    #[cfg(not(feature = "compression"))]
+    fn decompress_brotli(
+        _compressed: &[u8],
+        _expected_size: u64,
+    ) -> Result<Vec<u8>, CompressionError> {
+        Err(CompressionError::UnsupportedAlgorithm(
+            CompressionAlgorithm::Brotli,
+        ))
     }
 }
 
@@ -281,7 +348,8 @@ mod tests {
 
     #[test]
     fn test_lz4_compression_roundtrip() {
-        let test_data = b"Hello, world! This is a test string for compression.";
+        let test_data =
+            b"Hello, world! This is a test string for compression. compression compression";
         let policy = CompressionPolicy {
             algorithm: CompressionAlgorithm::Lz4,
             level: 1,
@@ -289,23 +357,65 @@ mod tests {
             apply_to_kinds: vec![ObjectKind::FileObject],
         };
 
-        let result = CompressionEngine::compress(
-            test_data,
-            ObjectKind::FileObject,
-            &policy,
-            None,
-        ).unwrap();
+        let result =
+            CompressionEngine::compress(test_data, ObjectKind::FileObject, &policy, None).unwrap();
 
         assert_eq!(result.metadata.algorithm, CompressionAlgorithm::Lz4);
         assert_eq!(result.metadata.original_size, test_data.len() as u64);
         assert!(result.metadata.compression_ratio <= 1.0);
 
-        let decompressed = CompressionEngine::decompress(
-            &result.compressed_data,
-            &result.metadata,
-        ).unwrap();
+        let decompressed =
+            CompressionEngine::decompress(&result.compressed_data, &result.metadata).unwrap();
 
         assert_eq!(decompressed, test_data);
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn test_brotli_compression_roundtrip() {
+        let test_data = b"ATP metadata compresses well when repeated: manifest manifest manifest chunk chunk chunk object object object";
+        let policy = CompressionPolicy {
+            algorithm: CompressionAlgorithm::Brotli,
+            level: 6,
+            min_size_threshold: 10,
+            apply_to_kinds: vec![ObjectKind::FileObject],
+        };
+
+        let result =
+            CompressionEngine::compress(test_data, ObjectKind::FileObject, &policy, None).unwrap();
+
+        assert_eq!(result.metadata.algorithm, CompressionAlgorithm::Brotli);
+        assert_eq!(result.metadata.original_size, test_data.len() as u64);
+        assert_eq!(
+            result.metadata.compressed_size,
+            result.compressed_data.len() as u64
+        );
+
+        let decompressed =
+            CompressionEngine::decompress(&result.compressed_data, &result.metadata).unwrap();
+
+        assert_eq!(decompressed, test_data);
+    }
+
+    #[test]
+    #[cfg(not(feature = "compression"))]
+    fn test_brotli_reports_unsupported_without_feature() {
+        let test_data = b"ATP metadata compresses well when repeated: manifest manifest manifest";
+        let policy = CompressionPolicy {
+            algorithm: CompressionAlgorithm::Brotli,
+            level: 6,
+            min_size_threshold: 10,
+            apply_to_kinds: vec![ObjectKind::FileObject],
+        };
+
+        let result = CompressionEngine::compress(test_data, ObjectKind::FileObject, &policy, None);
+
+        assert!(matches!(
+            result,
+            Err(CompressionError::UnsupportedAlgorithm(
+                CompressionAlgorithm::Brotli
+            ))
+        ));
     }
 
     #[test]
@@ -338,19 +448,20 @@ mod tests {
             apply_to_kinds: vec![ObjectKind::FileObject],
         };
 
-        let result = CompressionEngine::compress(
-            test_data,
-            ObjectKind::FileObject,
-            &policy,
-            None,
-        );
+        let result = CompressionEngine::compress(test_data, ObjectKind::FileObject, &policy, None);
 
-        assert!(matches!(result, Err(CompressionError::SizeThresholdViolation)));
+        assert!(matches!(
+            result,
+            Err(CompressionError::SizeThresholdViolation)
+        ));
     }
 
     #[test]
     fn test_transform_order_validation() {
-        use crate::atp::manifest::{TransformOrder, TransformType, HashPoint, VerificationBoundary, VerificationLevel, PrivacyLevel};
+        use crate::atp::manifest::{
+            HashPoint, PrivacyLevel, TransformOrder, TransformType, VerificationBoundary,
+            VerificationLevel,
+        };
 
         let test_data = b"Hello, world! This is a test string for compression.";
         let policy = CompressionPolicy {
@@ -406,6 +517,9 @@ mod tests {
             &policy,
             Some(&invalid_order),
         );
-        assert!(matches!(result, Err(CompressionError::TransformOrderViolation(_))));
+        assert!(matches!(
+            result,
+            Err(CompressionError::TransformOrderViolation(_))
+        ));
     }
 }

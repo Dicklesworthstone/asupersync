@@ -454,7 +454,7 @@ impl FakeAtpUdpSocket {
                         possibly_truncated,
                     });
                 }
-                Some(FakeUdpEvent::Drop) => continue,
+                Some(FakeUdpEvent::Drop) => {}
                 Some(FakeUdpEvent::StaleReady) | None => break,
                 Some(FakeUdpEvent::SocketError(error)) => {
                     if batch.packets.is_empty() {

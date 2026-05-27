@@ -4,11 +4,11 @@
 //! transforms preserve verification semantics and comply with ATP-C4
 //! transform proof policies.
 
-use crate::atp::manifest::{
-    CompressionPolicy, CompressionMetadata, TransformProofPolicy,
-    TransformOrder, TransformType, HashPoint,
-};
 use super::CompressionError;
+use crate::atp::manifest::{
+    CompressionMetadata, CompressionPolicy, HashPoint, TransformOrder, TransformProofPolicy,
+    TransformType,
+};
 
 /// Compression validation engine.
 pub struct CompressionValidator;
@@ -89,7 +89,9 @@ impl CompressionValidator {
     }
 
     /// Check if compression algorithm is potentially lossy.
-    fn is_potentially_lossy_algorithm(algorithm: crate::atp::manifest::CompressionAlgorithm) -> bool {
+    fn is_potentially_lossy_algorithm(
+        algorithm: crate::atp::manifest::CompressionAlgorithm,
+    ) -> bool {
         use crate::atp::manifest::CompressionAlgorithm;
 
         // Currently all our implemented algorithms are lossless
@@ -130,7 +132,9 @@ impl CompressionValidator {
         transform_order: &TransformOrder,
         has_compression: bool,
     ) -> Result<(), CompressionError> {
-        let compression_in_order = transform_order.transforms.contains(&TransformType::Compression);
+        let compression_in_order = transform_order
+            .transforms
+            .contains(&TransformType::Compression);
 
         // Check consistency
         if has_compression != compression_in_order {
@@ -143,13 +147,18 @@ impl CompressionValidator {
             return Ok(()); // No compression, nothing to validate
         }
 
-        let compression_pos = transform_order.transforms.iter()
+        let compression_pos = transform_order
+            .transforms
+            .iter()
             .position(|&t| t == TransformType::Compression)
             .unwrap();
 
         // Compression should come after chunking if present
-        if let Some(chunking_pos) = transform_order.transforms.iter()
-            .position(|&t| t == TransformType::Chunking) {
+        if let Some(chunking_pos) = transform_order
+            .transforms
+            .iter()
+            .position(|&t| t == TransformType::Chunking)
+        {
             if compression_pos <= chunking_pos {
                 return Err(CompressionError::TransformOrderViolation(
                     "compression must come after chunking".to_string(),
@@ -158,8 +167,11 @@ impl CompressionValidator {
         }
 
         // Compression should come before encryption if present
-        if let Some(encryption_pos) = transform_order.transforms.iter()
-            .position(|&t| t == TransformType::Encryption) {
+        if let Some(encryption_pos) = transform_order
+            .transforms
+            .iter()
+            .position(|&t| t == TransformType::Encryption)
+        {
             if compression_pos >= encryption_pos {
                 return Err(CompressionError::TransformOrderViolation(
                     "compression must come before encryption".to_string(),
@@ -191,7 +203,9 @@ impl CompressionValidator {
             HashPoint::PostCompression => Ok(()),
             HashPoint::Ciphertext => {
                 // Valid if encryption comes after compression
-                let has_encryption = transform_order.transforms.contains(&TransformType::Encryption);
+                let has_encryption = transform_order
+                    .transforms
+                    .contains(&TransformType::Encryption);
                 if !has_encryption {
                     return Err(CompressionError::TransformOrderViolation(
                         "ciphertext hash point without encryption".to_string(),
@@ -312,7 +326,9 @@ mod tests {
             apply_to_kinds: vec![ObjectKind::FileObject],
         };
 
-        assert!(CompressionValidator::validate_compression_metadata(&metadata, &policy, None).is_ok());
+        assert!(
+            CompressionValidator::validate_compression_metadata(&metadata, &policy, None).is_ok()
+        );
     }
 
     #[test]
@@ -358,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_transform_order_validation() {
-        use crate::atp::manifest::{VerificationBoundary, VerificationLevel, PrivacyLevel};
+        use crate::atp::manifest::{PrivacyLevel, VerificationBoundary, VerificationLevel};
 
         let valid_order = TransformOrder {
             transforms: vec![
@@ -375,14 +391,13 @@ mod tests {
             },
         };
 
-        assert!(CompressionValidator::validate_transform_order_position(&valid_order, true).is_ok());
+        assert!(
+            CompressionValidator::validate_transform_order_position(&valid_order, true).is_ok()
+        );
 
         // Invalid order: compression before chunking
         let invalid_order = TransformOrder {
-            transforms: vec![
-                TransformType::Compression,
-                TransformType::Chunking,
-            ],
+            transforms: vec![TransformType::Compression, TransformType::Chunking],
             hash_point: HashPoint::PostCompression,
             verification_boundary: VerificationBoundary {
                 relay_verifiable: VerificationLevel::TransferIntegrity,

@@ -10,6 +10,8 @@
 use crate::bytes::BytesMut;
 use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
+use crate::net::atp::protocol::varint::VarInt;
+use std::collections::VecDeque;
 use std::fmt;
 
 use super::streams::{QuicStreamError, StreamId, StreamRole, StreamTable, StreamTableError};
@@ -172,6 +174,7 @@ pub struct NativeQuicConnection {
     peer_address_validated: bool,
     anti_amplification_bytes_received: u64,
     anti_amplification_bytes_sent: u64,
+    pending_control_frames: VecDeque<QuicFrame>,
 }
 
 impl NativeQuicConnection {
@@ -199,6 +202,7 @@ impl NativeQuicConnection {
             peer_address_validated: config.role == StreamRole::Client,
             anti_amplification_bytes_received: 0,
             anti_amplification_bytes_sent: 0,
+            pending_control_frames: VecDeque::new(),
         }
     }
 
@@ -627,6 +631,13 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Record a PTO firing and queue an ack-eliciting probe frame.
+    pub fn on_probe_timeout(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
+        self.on_pto_expired(cx)?;
+        self.pending_control_frames.push_back(QuicFrame::Ping);
+        Ok(())
+    }
+
     /// Request local key update.
     pub fn request_local_key_update(
         &mut self,
@@ -779,85 +790,180 @@ fn map_stream_table_error(err: StreamTableError) -> NativeQuicConnectionError {
 }
 
 impl NativeQuicConnection {
+    /// Process a decoded packet payload and update connection state.
+    pub fn process_packet_payload(
+        &mut self,
+        cx: &Cx,
+        space: PacketNumberSpace,
+        packet_number: u64,
+        payload: &[u8],
+        now_micros: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        let frames = Self::decode_frames(payload)?;
+        let ack_eliciting = frames.iter().any(frame_is_ack_eliciting);
+
+        for frame in &frames {
+            self.process_frame_at(cx, frame, space, now_micros)?;
+        }
+
+        if ack_eliciting {
+            self.queue_ack_frame(packet_number);
+        }
+
+        Ok(())
+    }
+
     /// Process an incoming QUIC frame and update connection state.
-    ///
-    /// This method provides a basic frame processing interface that can be
-    /// extended as the state machine APIs evolve. Currently handles:
-    /// - PING frames (no-op)
-    /// - Basic frame validation and logging
     pub fn process_frame(
         &mut self,
         cx: &Cx,
         frame: &QuicFrame,
-        _space: PacketNumberSpace,
+        space: PacketNumberSpace,
     ) -> Result<(), NativeQuicConnectionError> {
-        cx.checkpoint()
-            .map_err(|_| NativeQuicConnectionError::Cancelled)?;
+        self.process_frame_at(cx, frame, space, 0)
+    }
 
+    fn process_frame_at(
+        &mut self,
+        cx: &Cx,
+        frame: &QuicFrame,
+        space: PacketNumberSpace,
+        now_micros: u64,
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
         match frame {
-            QuicFrame::Ping => {
-                // PING frame requires no state update, used for keep-alive
+            QuicFrame::Padding { .. } | QuicFrame::Ping => Ok(()),
+            QuicFrame::Ack {
+                largest_acknowledged,
+                ack_delay,
+                first_ack_range,
+                ack_ranges,
+                ..
+            } => {
+                let ranges = ack_frame_ranges(
+                    largest_acknowledged.value(),
+                    first_ack_range.value(),
+                    ack_ranges,
+                )?;
+                let _ = self.on_ack_ranges(cx, space, &ranges, ack_delay.value(), now_micros)?;
                 Ok(())
             }
-            QuicFrame::Ack { .. } => {
-                // TODO: Integration with transport machine pending API alignment
-                Ok(())
-            }
-            QuicFrame::Stream { .. } => {
-                // TODO: Integration with stream table pending API alignment
+            QuicFrame::Stream {
+                stream_id,
+                offset,
+                data,
+                fin,
+            } => {
+                let id = StreamId(stream_id.value());
+                if self.streams.stream(id).is_err() {
+                    self.accept_remote_stream(cx, id)?;
+                }
+                self.receive_stream_segment(
+                    cx,
+                    id,
+                    offset.map_or(0, VarInt::value),
+                    data.len() as u64,
+                    *fin,
+                )?;
                 Ok(())
             }
             QuicFrame::Crypto { .. } => {
-                // TODO: Integration with TLS machine pending API alignment
+                if self.transport.state() == QuicConnectionState::Idle {
+                    self.transport.begin_handshake()?;
+                }
                 Ok(())
             }
-            QuicFrame::ResetStream { .. } => {
-                // TODO: Integration with stream table pending API alignment
+            QuicFrame::ResetStream {
+                stream_id,
+                final_size,
+                ..
+            } => {
+                let id = StreamId(stream_id.value());
+                if self.streams.stream(id).is_err() {
+                    self.accept_remote_stream(cx, id)?;
+                }
+                self.set_stream_final_size(cx, id, final_size.value())?;
                 Ok(())
             }
-            QuicFrame::StopSending { .. } => {
-                // TODO: Integration with stream table pending API alignment
+            QuicFrame::StopSending {
+                stream_id,
+                error_code,
+            } => {
+                self.on_stop_sending(cx, StreamId(stream_id.value()), error_code.value())?;
                 Ok(())
             }
-            QuicFrame::PathChallenge { .. } => {
-                // TODO: Integration with path manager
+            QuicFrame::MaxData { maximum_data } => {
+                self.streams
+                    .increase_connection_send_limit(maximum_data.value())
+                    .map_err(QuicStreamError::Flow)?;
+                Ok(())
+            }
+            QuicFrame::MaxStreamData {
+                stream_id,
+                maximum_stream_data,
+            } => {
+                self.streams
+                    .stream_mut(StreamId(stream_id.value()))
+                    .map_err(map_stream_table_error)?
+                    .send_credit
+                    .increase_limit(maximum_stream_data.value())
+                    .map_err(QuicStreamError::Flow)?;
+                Ok(())
+            }
+            QuicFrame::PathChallenge { data } => {
+                self.pending_control_frames
+                    .push_back(QuicFrame::PathResponse { data: *data });
                 Ok(())
             }
             QuicFrame::PathResponse { .. } => {
-                // TODO: Integration with path manager
+                self.peer_address_validated = true;
                 Ok(())
             }
-            QuicFrame::ConnectionClose { .. } => {
-                // TODO: Integration with transport machine pending API alignment
+            QuicFrame::ConnectionClose { error_code, .. } => {
+                self.begin_close(cx, now_micros, error_code.value())?;
                 Ok(())
             }
             QuicFrame::HandshakeDone => {
-                // TODO: Integration with TLS machine pending API alignment
+                if self.role == StreamRole::Client && self.tls.level() == CryptoLevel::OneRtt {
+                    self.on_handshake_confirmed(cx)?;
+                }
                 Ok(())
             }
-            _ => {
-                // Other frame types not yet implemented
-                Ok(())
-            }
+            QuicFrame::MaxStreams { .. }
+            | QuicFrame::DataBlocked { .. }
+            | QuicFrame::StreamDataBlocked { .. }
+            | QuicFrame::StreamsBlocked { .. } => Ok(()),
         }
     }
 
-    /// Basic frame generation interface.
-    ///
-    /// This provides the foundation for generating outgoing frames.
-    /// Currently returns minimal frames for demonstration.
+    /// Drain queued control frames for packet assembly.
     pub fn generate_frames(
         &mut self,
         cx: &Cx,
         _space: PacketNumberSpace,
-        _max_frame_bytes: usize,
+        max_frame_bytes: usize,
     ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
-        cx.checkpoint()
-            .map_err(|_| NativeQuicConnectionError::Cancelled)?;
+        checkpoint(cx)?;
+        let mut frames = Vec::new();
+        let mut used = 0usize;
 
-        // For now, return an empty frame set
-        // TODO: Generate ACK, STREAM, and control frames as APIs stabilize
-        Ok(Vec::new())
+        while let Some(frame) = self.pending_control_frames.pop_front() {
+            let mut encoded = BytesMut::new();
+            frame.encode(&mut encoded)?;
+            let frame_len = encoded.len();
+            if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
+                self.pending_control_frames.push_front(frame);
+                break;
+            }
+            used = used.saturating_add(frame_len);
+            frames.push(frame);
+            if used >= max_frame_bytes {
+                break;
+            }
+        }
+
+        Ok(frames)
     }
 
     /// Encode frames into a buffer for packet assembly.
@@ -886,6 +992,56 @@ impl NativeQuicConnection {
 
         Ok(frames)
     }
+
+    fn queue_ack_frame(&mut self, packet_number: u64) {
+        self.pending_control_frames.push_back(QuicFrame::Ack {
+            largest_acknowledged: VarInt::from_u64_unchecked(packet_number),
+            ack_delay: VarInt::from_u64_unchecked(0),
+            ack_range_count: VarInt::from_u64_unchecked(0),
+            first_ack_range: VarInt::from_u64_unchecked(0),
+            ack_ranges: Vec::new(),
+            ecn_counts: None,
+        });
+    }
+}
+
+fn frame_is_ack_eliciting(frame: &QuicFrame) -> bool {
+    !matches!(frame, QuicFrame::Padding { .. } | QuicFrame::Ack { .. })
+}
+
+fn ack_frame_ranges(
+    largest_acknowledged: u64,
+    first_ack_range: u64,
+    ack_ranges: &[crate::net::atp::protocol::quic_frames::AckRange],
+) -> Result<Vec<AckRange>, NativeQuicConnectionError> {
+    let first_smallest = largest_acknowledged.checked_sub(first_ack_range).ok_or(
+        NativeQuicConnectionError::InvalidState("ACK first range exceeds largest packet number"),
+    )?;
+    let mut ranges = vec![AckRange::new(largest_acknowledged, first_smallest).ok_or(
+        NativeQuicConnectionError::InvalidState("invalid ACK first range"),
+    )?];
+    let mut previous_smallest = first_smallest;
+
+    for range in ack_ranges {
+        let gap = range.gap.value();
+        let next_largest = previous_smallest.checked_sub(gap.saturating_add(2)).ok_or(
+            NativeQuicConnectionError::InvalidState(
+                "ACK range gap underflowed packet number space",
+            ),
+        )?;
+        let next_smallest = next_largest
+            .checked_sub(range.ack_range_length.value())
+            .ok_or(NativeQuicConnectionError::InvalidState(
+                "ACK range length exceeds largest packet number",
+            ))?;
+        ranges.push(
+            AckRange::new(next_largest, next_smallest)
+                .ok_or(NativeQuicConnectionError::InvalidState("invalid ACK range"))?,
+        );
+        previous_smallest = next_smallest;
+    }
+
+    Ok(ranges)
 }
 
 #[cfg(test)]

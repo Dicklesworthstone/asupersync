@@ -234,56 +234,13 @@ impl MediaProfile {
         data: &[u8],
         chunk_plan: &ChunkPlan,
     ) -> Result<Vec<u64>, ChunkingProfileError> {
-        let mut boundaries = Vec::new();
-        let target_size = utils::u64_to_usize(chunk_plan.target_chunk_size, "target chunk size")?;
-        let min_size = utils::u64_to_usize(chunk_plan.min_chunk_size, "minimum chunk size")?;
-        let max_size = utils::u64_to_usize(chunk_plan.max_chunk_size, "maximum chunk size")?;
-        let merge_threshold =
-            utils::checked_usize_add(target_size, min_size, "media video remainder threshold")?;
-        let data_len = utils::data_len_u64(data)?;
-
-        // Look for video frame boundaries (simplified heuristic)
-        let mut current_pos = 0;
-        let mut last_boundary = 0;
-
-        while current_pos < data.len() {
-            let remaining = data.len() - last_boundary;
-
-            // Check if we've hit target size or found a good boundary
-            let chunk_size = current_pos - last_boundary;
-            let should_break = if remaining <= merge_threshold {
-                true // Take remaining data
-            } else if chunk_size >= max_size {
-                true // Force break at max size
-            } else if chunk_size >= min_size {
-                // Look for frame boundary markers
-                Self::is_video_frame_boundary(&data[current_pos..])
-            } else {
-                false
-            };
-
-            let target_end = utils::checked_usize_add(
-                current_pos,
-                target_size.min(data.len() - current_pos),
-                "media video target end",
-            )?;
-
-            if should_break || target_end >= data.len() {
-                boundaries.push(utils::usize_to_u64(target_end, "media video boundary")?);
-                last_boundary = target_end;
-                current_pos = last_boundary;
-            } else {
-                current_pos =
-                    utils::checked_usize_add(current_pos, 1024, "media video scan position")?; // Check every 1KB for frame boundaries
-            }
-        }
-
-        // Ensure final boundary
-        if boundaries.last().copied().unwrap_or(0) < data_len {
-            boundaries.push(data_len);
-        }
-
-        Ok(boundaries)
+        Self::find_marker_aligned_boundaries(
+            data,
+            chunk_plan,
+            1024,
+            Self::is_video_frame_boundary,
+            "media video",
+        )
     }
 
     /// Find chunk boundaries for audio content.
@@ -291,8 +248,13 @@ impl MediaProfile {
         data: &[u8],
         chunk_plan: &ChunkPlan,
     ) -> Result<Vec<u64>, ChunkingProfileError> {
-        // For audio, use time-based chunking (simplified to fixed size for now)
-        Self::find_fixed_boundaries(data, chunk_plan)
+        Self::find_marker_aligned_boundaries(
+            data,
+            chunk_plan,
+            512,
+            Self::is_audio_frame_boundary,
+            "media audio",
+        )
     }
 
     /// Find chunk boundaries for image content.
@@ -326,8 +288,13 @@ impl MediaProfile {
         data: &[u8],
         chunk_plan: &ChunkPlan,
     ) -> Result<Vec<u64>, ChunkingProfileError> {
-        // ML models: try to align with layer boundaries (simplified)
-        Self::find_fixed_boundaries(data, chunk_plan)
+        Self::find_marker_aligned_boundaries(
+            data,
+            chunk_plan,
+            4096,
+            Self::is_model_layer_boundary,
+            "media model",
+        )
     }
 
     /// Find generic media boundaries using fixed sizing.
@@ -365,6 +332,61 @@ impl MediaProfile {
         Ok(boundaries)
     }
 
+    fn find_marker_aligned_boundaries(
+        data: &[u8],
+        chunk_plan: &ChunkPlan,
+        scan_step: usize,
+        is_boundary: fn(&[u8]) -> bool,
+        label: &'static str,
+    ) -> Result<Vec<u64>, ChunkingProfileError> {
+        let mut boundaries = Vec::new();
+        let target_size = utils::u64_to_usize(chunk_plan.target_chunk_size, "target chunk size")?;
+        let min_size = utils::u64_to_usize(chunk_plan.min_chunk_size, "minimum chunk size")?;
+        let max_size = utils::u64_to_usize(chunk_plan.max_chunk_size, "maximum chunk size")?;
+        let merge_threshold =
+            utils::checked_usize_add(target_size, min_size, "media aligned remainder threshold")?;
+        let data_len = utils::data_len_u64(data)?;
+
+        let mut last_boundary = 0usize;
+        let mut current_pos = 0usize;
+        while last_boundary < data.len() {
+            let remaining = data.len() - last_boundary;
+            if remaining <= merge_threshold {
+                boundaries.push(data_len);
+                break;
+            }
+
+            let chunk_size = current_pos.saturating_sub(last_boundary);
+            let boundary_pos = if chunk_size >= max_size
+                || (chunk_size >= min_size && is_boundary(&data[current_pos..]))
+            {
+                Some(current_pos)
+            } else {
+                None
+            };
+
+            if let Some(pos) = boundary_pos.filter(|pos| *pos > last_boundary) {
+                boundaries.push(utils::usize_to_u64(pos, label)?);
+                last_boundary = pos;
+                current_pos = pos;
+                continue;
+            }
+
+            if current_pos >= data.len() {
+                boundaries.push(data_len);
+                break;
+            }
+
+            current_pos = utils::checked_usize_add(current_pos, scan_step, label)?.min(data.len());
+        }
+
+        if boundaries.last().copied().unwrap_or(0) < data_len {
+            boundaries.push(data_len);
+        }
+
+        Ok(boundaries)
+    }
+
     /// Check if position is at a video frame boundary.
     fn is_video_frame_boundary(data: &[u8]) -> bool {
         if data.len() < 8 {
@@ -376,6 +398,35 @@ impl MediaProfile {
         data.starts_with(b"\x00\x00\x01") ||     // MPEG start code
         data.starts_with(b"\xFF\xFE") ||         // Some video formats
         (data[0] == 0x1A && data[1] == 0x45) // WebM cluster start
+    }
+
+    fn is_audio_frame_boundary(data: &[u8]) -> bool {
+        data.starts_with(b"ID3")
+            || data.starts_with(b"OggS")
+            || data.starts_with(b"fLaC")
+            || data.starts_with(b"RIFF")
+            || (data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xF0) == 0xF0)
+    }
+
+    fn is_model_layer_boundary(data: &[u8]) -> bool {
+        if data.len() < 8 {
+            return false;
+        }
+
+        if data.starts_with(b"ONNX")
+            || data.starts_with(b"PK\x03\x04")
+            || data.starts_with(b"NUMPY")
+            || data.windows(8).take(4).any(|w| w == b"safetens")
+        {
+            return true;
+        }
+
+        let prefix = String::from_utf8_lossy(&data[..data.len().min(256)]).to_ascii_lowercase();
+        prefix.contains("\"weight\"")
+            || prefix.contains("\"tensor\"")
+            || prefix.contains("\"layer\"")
+            || prefix.contains("module.")
+            || prefix.contains("state_dict")
     }
 
     /// Determine if this chunk represents a keyframe boundary.

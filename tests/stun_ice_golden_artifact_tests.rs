@@ -4,7 +4,7 @@
 //! stable JSON and binary formats. Golden artifacts ensure protocol
 //! compatibility and detect unexpected serialization changes.
 
-use asupersync::net::stun::{IceCandidate, IceCandidateType, StunError, StunMessageType};
+use asupersync::net::stun::{IceCandidate, IceCandidateType, StunError};
 use serde_json;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -12,7 +12,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 mod golden_artifact_harness {
     use serde::Serialize;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     /// Golden artifact directory for STUN/ICE artifacts.
     fn artifacts_dir() -> PathBuf {
@@ -86,7 +86,7 @@ mod golden_artifact_harness {
         ensure_artifacts_dir()?;
 
         let artifact_path = artifacts_dir().join(format!("{}.golden.bin", name));
-        let actual_binary = bincode::serialize(value)?;
+        let actual_binary = bincode::serde::encode_to_vec(value, bincode::config::legacy())?;
 
         if update_mode {
             fs::write(&artifact_path, &actual_binary)?;
@@ -333,7 +333,6 @@ mod ice_candidate_tests {
 /// Golden artifact tests for STUN protocol structures.
 mod stun_protocol_tests {
     use super::golden_artifact_harness::*;
-    use super::*;
 
     /// STUN message for golden testing (simplified representation).
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -426,9 +425,9 @@ mod error_and_edge_case_tests {
     fn stun_error_to_serializable(error: &StunError) -> SerializableStunError {
         SerializableStunError {
             error_type: match error {
-                StunError::NotImplemented => "NotImplemented".to_string(),
                 StunError::Timeout => "Timeout".to_string(),
                 StunError::InvalidResponse => "InvalidResponse".to_string(),
+                StunError::Protocol(_) => "Protocol".to_string(),
                 StunError::Network(_) => "Network".to_string(),
             },
             message: error.to_string(),
@@ -438,9 +437,9 @@ mod error_and_edge_case_tests {
     #[test]
     fn stun_errors_golden() {
         let errors = vec![
-            stun_error_to_serializable(&StunError::NotImplemented),
             stun_error_to_serializable(&StunError::Timeout),
             stun_error_to_serializable(&StunError::InvalidResponse),
+            stun_error_to_serializable(&StunError::Protocol("Binding error response".to_string())),
             stun_error_to_serializable(&StunError::Network("Connection refused".to_string())),
         ];
         verify_golden_json("stun_errors", &errors, is_update_mode())

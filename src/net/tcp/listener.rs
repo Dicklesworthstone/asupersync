@@ -391,11 +391,11 @@ impl TcpListenerApi for TcpListener {
     fn accept(
         &self,
     ) -> impl std::future::Future<Output = io::Result<(Self::Stream, SocketAddr)>> + Send {
-        std::future::poll_fn(|cx| self.poll_accept(cx))
+        std::future::poll_fn(|cx| TcpListener::poll_accept(self, cx))
     }
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Self::Stream, SocketAddr)>> {
-        self.poll_accept(cx)
+        TcpListener::poll_accept(self, cx)
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {

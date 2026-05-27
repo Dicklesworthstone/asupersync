@@ -246,7 +246,7 @@ impl ProbeStats {
     /// Check if path appears healthy
     pub fn is_healthy(&self) -> bool {
         self.loss_ratio < 0.1 && // Less than 10% loss
-        self.last_success.map_or(false, |t| t.elapsed() < Duration::from_secs(60))
+        self.last_success.is_some_and(|t| t.elapsed() < Duration::from_secs(60))
     }
 }
 
@@ -513,7 +513,7 @@ mod tests {
         let mut manager = ProbeManager::new(transport);
 
         // Create probe
-        let frame = manager.create_probe(ProbeType::Rtt, 1).unwrap();
+        let _frame = manager.create_probe(ProbeType::Rtt, 1).unwrap();
         assert_eq!(manager.pending_count(), 1);
 
         // Verify stats updated

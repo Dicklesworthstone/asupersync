@@ -21,24 +21,19 @@ use crate::types::outcome::Outcome;
 use std::collections::HashMap;
 
 /// Stream priority classes for ATP traffic
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StreamPriority {
     /// ATP control frames (highest priority)
     Control = 0,
     /// Proof bundles and verification data
     Proof = 1,
     /// Primary data transfer
+    #[default]
     Data = 2,
     /// Repair symbols and recovery data
     Repair = 3,
     /// Diagnostics and logging (lowest priority)
     Diagnostics = 4,
-}
-
-impl Default for StreamPriority {
-    fn default() -> Self {
-        StreamPriority::Data
-    }
 }
 
 /// Stream identifier with direction

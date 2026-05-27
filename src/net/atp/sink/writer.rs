@@ -24,6 +24,8 @@ pub struct AtpWriter {
     active_transfers: Arc<Mutex<HashMap<TransferId, ActiveTransfer>>>,
     /// Chunk evidence for transfers that have actually passed through this writer.
     transferred_chunks: Arc<Mutex<HashMap<TransferId, Vec<ChunkTransferProof>>>>,
+    /// Retained progress events emitted by transfers.
+    progress_events: Arc<Mutex<Vec<TransferProgress>>>,
     /// Configuration options
     config: WriterConfig,
 }
@@ -56,7 +58,7 @@ impl Default for WriterConfig {
 }
 
 /// Active transfer state
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ActiveTransfer {
     transfer_id: TransferId,
     start_time: Instant,
@@ -76,6 +78,7 @@ impl AtpWriter {
             session,
             active_transfers: Arc::new(Mutex::new(HashMap::new())),
             transferred_chunks: Arc::new(Mutex::new(HashMap::new())),
+            progress_events: Arc::new(Mutex::new(Vec::new())),
             config: WriterConfig::default(),
         }
     }
@@ -86,6 +89,7 @@ impl AtpWriter {
             session,
             active_transfers: Arc::new(Mutex::new(HashMap::new())),
             transferred_chunks: Arc::new(Mutex::new(HashMap::new())),
+            progress_events: Arc::new(Mutex::new(Vec::new())),
             config,
         }
     }
@@ -473,6 +477,7 @@ impl super::AtpWriter for AtpWriter {
     fn get_progress(&self, transfer_id: TransferId) -> Option<TransferProgress> {
         let transfers = self.active_transfers.lock().unwrap();
         transfers.get(&transfer_id).map(|active| {
+            let verified_bytes = self.verified_bytes_for_transfer(transfer_id);
             TransferProgress {
                 transfer_id: active.transfer_id,
                 bytes_transferred: active.bytes_transferred,
@@ -507,7 +512,7 @@ impl super::AtpWriter for AtpWriter {
                 }),
                 timestamp: SystemTime::now(),
                 phase: active.current_phase,
-                verified_bytes: active.bytes_transferred, // Simplified
+                verified_bytes,
             }
         })
     }
@@ -690,6 +695,20 @@ impl AtpWriter {
             .cloned()
     }
 
+    fn verified_bytes_for_transfer(&self, transfer_id: TransferId) -> u64 {
+        self.transferred_chunks
+            .lock()
+            .ok()
+            .and_then(|chunks| {
+                chunks.get(&transfer_id).map(|proofs| {
+                    proofs
+                        .iter()
+                        .fold(0_u64, |sum, proof| sum.saturating_add(proof.size_bytes))
+                })
+            })
+            .unwrap_or(0)
+    }
+
     fn remove_active_transfer(&self, transfer_id: TransferId) {
         if let Ok(mut transfers) = self.active_transfers.lock() {
             transfers.remove(&transfer_id);
@@ -706,16 +725,14 @@ impl AtpWriter {
         if let Some(active) = self.get_active_transfer(transfer_id) {
             if active.last_progress_report.elapsed() >= options.progress_interval {
                 if let Some(progress) = self.get_progress(transfer_id) {
-                    // In real implementation, would emit progress event
-                    println!(
-                        "Progress: {}/{:?} bytes ({:.1}%)",
-                        progress.bytes_transferred,
-                        progress.total_bytes,
-                        progress
-                            .total_bytes
-                            .map(|total| (progress.bytes_transferred as f64 / total as f64) * 100.0)
-                            .unwrap_or(0.0)
-                    );
+                    if let Ok(mut events) = self.progress_events.lock() {
+                        events.push(progress);
+                    }
+                    if let Ok(mut transfers) = self.active_transfers.lock()
+                        && let Some(active) = transfers.get_mut(&transfer_id)
+                    {
+                        active.last_progress_report = Instant::now();
+                    }
                 }
             }
         }
@@ -775,8 +792,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_transfer_progress_calculation() {
-        // This would require a mock session in real implementation
-        // For now, just test the progress calculation logic
         let active = ActiveTransfer {
             transfer_id: TransferId::new(),
             start_time: Instant::now() - Duration::from_secs(10),

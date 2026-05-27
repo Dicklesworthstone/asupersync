@@ -172,7 +172,7 @@ fn test_congestion_control() {
     controller.enqueue_datagram(high_frame, high_meta).unwrap();
 
     // High priority should come out first
-    let (frame, metadata) = controller.try_send_next().unwrap().unwrap();
+    let (_frame, metadata) = controller.try_send_next().unwrap().unwrap();
     assert_eq!(metadata.priority, DatagramPriority::High);
 
     // Test congestion feedback
@@ -391,7 +391,7 @@ fn test_full_datagram_workflow() {
         .unwrap();
 
     // Send probe
-    let (sent_frame, sent_metadata) = congestion_controller.try_send_next().unwrap().unwrap();
+    let (_sent_frame, sent_metadata) = congestion_controller.try_send_next().unwrap().unwrap();
     assert_eq!(sent_metadata.payload_class, "probe");
 
     // Create beacon
@@ -406,7 +406,7 @@ fn test_full_datagram_workflow() {
         .unwrap();
 
     // Send beacon
-    let (sent_frame, sent_metadata) = congestion_controller.try_send_next().unwrap().unwrap();
+    let (_sent_frame, sent_metadata) = congestion_controller.try_send_next().unwrap().unwrap();
     assert_eq!(sent_metadata.payload_class, "beacon");
 
     // Verify stats
