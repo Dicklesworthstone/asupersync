@@ -457,10 +457,7 @@ fn create_test_piece_map(
 }
 
 fn create_swarm_peers(peer_ids: &[TestPeerId]) -> Vec<TestSwarmPeer> {
-    peer_ids
-        .iter()
-        .map(create_test_swarm_peer)
-        .collect()
+    peer_ids.iter().map(create_test_swarm_peer).collect()
 }
 
 fn create_test_swarm_peer(peer_id: &TestPeerId) -> TestSwarmPeer {

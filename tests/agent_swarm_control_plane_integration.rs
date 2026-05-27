@@ -51,9 +51,9 @@ fn test_agent_admission_basic() -> TestResult {
             agent_id: "test-agent-1".to_string(),
             resource_requirements: ResourceRequirements {
                 cpu_cores: 2.0,
-                memory_bytes: 1024 * 1024 * 1024,     // 1GB
-                disk_bytes: 5 * 1024 * 1024 * 1024,   // 5GB
-                network_bandwidth: 100_000,           // 100KB/s
+                memory_bytes: 1024 * 1024 * 1024,   // 1GB
+                disk_bytes: 5 * 1024 * 1024 * 1024, // 5GB
+                network_bandwidth: 100_000,         // 100KB/s
                 estimated_duration: Some(Duration::from_secs(3600)),
             },
             required_capabilities: vec![],
