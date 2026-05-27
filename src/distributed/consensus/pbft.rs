@@ -304,7 +304,7 @@ impl<T: PbftTransport> PbftNode<T> {
     /// Send pre-prepare message as primary.
     async fn send_preprepare(
         &self,
-        cx: &Cx,
+        _cx: &Cx,
         view: ViewNumber,
         sequence: SequenceNumber,
         batch: ConsensusBatch,
@@ -366,7 +366,7 @@ impl<T: PbftTransport> PbftNode<T> {
     /// Handle pre-prepare message from primary.
     async fn handle_preprepare(
         &self,
-        cx: &Cx,
+        _cx: &Cx,
         view: ViewNumber,
         sequence: SequenceNumber,
         digest: MessageDigest,
@@ -417,7 +417,7 @@ impl<T: PbftTransport> PbftNode<T> {
     /// Handle prepare message from replica.
     async fn handle_prepare(
         &self,
-        cx: &Cx,
+        _cx: &Cx,
         view: ViewNumber,
         sequence: SequenceNumber,
         digest: MessageDigest,

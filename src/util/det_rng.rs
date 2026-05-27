@@ -194,7 +194,16 @@ impl DetRng {
         let b0 = bytes[0];
 
         // All bytes the same
-        if bytes.iter().all(|&b| b == b0) {
+        let mut all_same = true;
+        let mut idx = 1usize;
+        while idx < bytes.len() {
+            if bytes[idx] != b0 {
+                all_same = false;
+                break;
+            }
+            idx += 1;
+        }
+        if all_same {
             return true;
         }
 
@@ -202,11 +211,13 @@ impl DetRng {
         let mut is_arithmetic = true;
         if bytes.len() >= 3 {
             let diff = bytes[1].wrapping_sub(bytes[0]);
-            for i in 2..bytes.len() {
-                if bytes[i].wrapping_sub(bytes[i-1]) != diff {
+            let mut i = 2usize;
+            while i < bytes.len() {
+                if bytes[i].wrapping_sub(bytes[i - 1]) != diff {
                     is_arithmetic = false;
                     break;
                 }
+                i += 1;
             }
         }
 

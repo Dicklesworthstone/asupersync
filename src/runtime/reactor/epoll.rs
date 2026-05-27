@@ -122,6 +122,7 @@ struct RegistrationInfo {
     /// The current interest flags.
     interest: Interest,
     /// File descriptor identity to detect reuse/TOCTOU races.
+    #[allow(dead_code)]
     fd_identity: FdIdentity,
 }
 

@@ -20,7 +20,6 @@ use super::extract::Request;
 use super::handler::Handler;
 use super::response::{Response, StatusCode};
 use std::cmp::Ordering;
-use std::panic::{self, AssertUnwindSafe};
 
 // ─── Media Type ──────────────────────────────────────────────────────────────
 
@@ -377,7 +376,8 @@ impl<H: Handler> ErrorHandlerMiddleware<H> {
 }
 
 impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'static>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
         let accept = req
             .headers
@@ -387,11 +387,11 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
             .unwrap_or_default();
 
         // TODO: Implement proper async panic handling
-        let result = if self.config.catch_panics {
+        let result: Result<Response, ()> = if self.config.catch_panics {
             // For now, disable panic catching for async handlers
-            Ok(self.inner.call(cx, req).await)
+            Ok(self.inner.call(&cx, req).await)
         } else {
-            Ok(self.inner.call(cx, req).await)
+            Ok(self.inner.call(&cx, req).await)
         };
 
         match result {

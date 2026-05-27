@@ -475,6 +475,7 @@ impl BoundedLoadDecision {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn format_optional_endpoint_id(endpoint_id: Option<EndpointId>) -> String {
         endpoint_id.map_or_else(String::new, |endpoint_id| endpoint_id.to_string())
     }
@@ -517,6 +518,7 @@ impl BoundedLoadDecision {
         )
     }
 
+    #[allow(dead_code)]
     fn format_fairness_state(
         &self,
         rejected_endpoint_count: usize,

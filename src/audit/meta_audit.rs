@@ -100,7 +100,7 @@ impl MetaAuditor {
     /// 4. Privilege escalation through audit domain violations
     pub fn validate_audit_capabilities(
         &mut self,
-        cx: &Cx,
+        _cx: &Cx,
         target_region: Option<RegionId>,
     ) -> Result<CapabilityEscalationResult, Error> {
         // Validate this audit operation is authorized by the region's capability context

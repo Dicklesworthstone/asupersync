@@ -140,6 +140,7 @@ static GLOBAL_PULL_RATE_TRACKER: std::sync::LazyLock<Mutex<GlobalPullRateTracker
     std::sync::LazyLock::new(|| Mutex::new(GlobalPullRateTracker::new()));
 
 /// Global token tracker for anti-replay protection
+#[allow(dead_code)]
 static GLOBAL_ACK_TOKEN_TRACKER: std::sync::LazyLock<AckTokenTracker> =
     std::sync::LazyLock::new(|| AckTokenTracker::new());
 

@@ -471,7 +471,7 @@ impl NatsConfig {
             // Standard string comparison (!=) leaks timing information about where strings differ,
             // allowing attackers to iteratively guess correct public key characters.
             let subject_matches = claims.subject.as_bytes().ct_eq(public_key.as_bytes());
-            if subject_matches.into() == false {
+            if !bool::from(subject_matches) {
                 return Err(NatsError::InvalidAuth(format!(
                     "JWT sub claim {} does not match seed public key {}",
                     claims.subject, public_key

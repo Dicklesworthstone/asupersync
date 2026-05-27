@@ -111,6 +111,7 @@ enum RelayCapability {
     /// Relay operations are denied
     Denied,
     /// Conditional relay based on peer/destination
+    #[allow(dead_code)]
     Conditional,
 }
 
@@ -122,6 +123,7 @@ enum Ipv6Capability {
     /// IPv6 operations are denied
     Denied,
     /// Conditional IPv6 based on network policy
+    #[allow(dead_code)]
     Conditional,
 }
 

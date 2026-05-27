@@ -3277,6 +3277,7 @@ impl Runtime {
     /// This is for execution paths that are polled directly by `block_on`
     /// rather than through the scheduler, but still need `Cx::current()` to
     /// reflect the active request/task context.
+    #[allow(dead_code)]
     pub(crate) fn block_on_with_cx<F: Future>(
         &self,
         request_cx: crate::cx::Cx,
@@ -3295,6 +3296,7 @@ impl Runtime {
     /// required for framework adapter paths that are invoked from within an
     /// already-running runtime task and must not sever deadline/cancellation
     /// propagation by switching to a detached helper runtime.
+    #[allow(dead_code)]
     pub(crate) fn block_on_current_with_cx<F: Future>(
         request_cx: crate::cx::Cx,
         future: F,
@@ -3315,6 +3317,7 @@ impl Runtime {
     /// Create a request-scoped [`Cx`](crate::cx::Cx) from the currently
     /// installed runtime handle, if one exists.
     #[must_use]
+    #[allow(dead_code)]
     pub(crate) fn current_request_cx_with_budget(budget: Budget) -> Option<crate::cx::Cx> {
         let handle = Self::current_handle()?;
         let inner = handle.try_inner().ok()?;

@@ -144,9 +144,10 @@ impl<H: Handler> SecurityHeadersMiddleware<H> {
 }
 
 impl<H: Handler> Handler for SecurityHeadersMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'static>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
-            let mut resp = self.inner.call(cx, req).await;
+            let mut resp = self.inner.call(&cx, req).await;
 
         // Apply each configured header, only if not already set.
         if let Some(ref val) = self.policy.content_type_options {

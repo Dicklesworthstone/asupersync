@@ -273,6 +273,26 @@ impl DecodeProof {
                         hasher.update([*expected]);
                         hasher.update([*actual]);
                     }
+                    FailureReason::ComputeBudgetExhausted {
+                        used,
+                        requested,
+                        max,
+                    } => {
+                        hasher.update([8u8]); // ComputeBudgetExhausted discriminant
+                        hasher.update(used.to_le_bytes());
+                        hasher.update(requested.to_le_bytes());
+                        hasher.update(max.to_le_bytes());
+                    }
+                    FailureReason::EsiRateLimitExceeded {
+                        esi,
+                        column_count,
+                        max_columns,
+                    } => {
+                        hasher.update([9u8]); // EsiRateLimitExceeded discriminant
+                        hasher.update(esi.to_le_bytes());
+                        hasher.update((*column_count as u32).to_le_bytes());
+                        hasher.update((*max_columns as u32).to_le_bytes());
+                    }
                 }
             }
         }
@@ -1483,6 +1503,24 @@ pub enum FailureReason {
         /// Received RHS byte from input symbol.
         actual: u8,
     },
+    /// Decoder compute budget was exhausted.
+    ComputeBudgetExhausted {
+        /// Budget consumed before this operation.
+        used: u64,
+        /// Additional budget requested by the operation.
+        requested: u64,
+        /// Maximum allowed budget.
+        max: u64,
+    },
+    /// ESI expansion exceeded the configured per-symbol rate limit.
+    EsiRateLimitExceeded {
+        /// ESI that exceeded the limit.
+        esi: u32,
+        /// Columns that would have been generated.
+        column_count: usize,
+        /// Maximum allowed columns.
+        max_columns: usize,
+    },
 }
 
 impl From<&DecodeError> for FailureReason {
@@ -1539,6 +1577,24 @@ impl From<&DecodeError> for FailureReason {
                 byte_index: *byte_index,
                 expected: *expected,
                 actual: *actual,
+            },
+            DecodeError::ComputeBudgetExhausted {
+                used,
+                requested,
+                max,
+            } => Self::ComputeBudgetExhausted {
+                used: *used,
+                requested: *requested,
+                max: *max,
+            },
+            DecodeError::EsiRateLimitExceeded {
+                esi,
+                column_count,
+                max_columns,
+            } => Self::EsiRateLimitExceeded {
+                esi: *esi,
+                column_count: *column_count,
+                max_columns: *max_columns,
             },
         }
     }

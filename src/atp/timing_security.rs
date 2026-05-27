@@ -23,7 +23,6 @@
 //! secrets through statistical timing analysis.
 
 use std::collections::VecDeque;
-use std::time::Instant;
 
 /// Configuration for timing side-channel detection.
 #[derive(Debug, Clone)]

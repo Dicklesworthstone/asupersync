@@ -143,13 +143,14 @@ impl<H: Handler> CompressionMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CompressionMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
         // Extract accept-encoding before passing the request.
         let accept_encoding = req.header("accept-encoding").map(str::to_owned);
         let request_sensitivity = RequestCompressionSensitivity::from_request(&req);
 
-        let mut resp = self.inner.call(cx, req).await;
+        let mut resp = self.inner.call(&cx, req).await;
 
         // Skip compression for special status codes.
         if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {

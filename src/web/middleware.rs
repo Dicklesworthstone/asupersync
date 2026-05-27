@@ -47,9 +47,7 @@
 //! 4xx/5xx responses still carry the security headers.
 
 use std::convert::Infallible;
-use std::fmt;
 use std::future::Future;
-use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -63,9 +61,9 @@ use crate::http::compress::{
     ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
     negotiate_encoding,
 };
-use crate::tracing_compat::{debug, error, warn};
-use crate::types::Time;
 use crate::cx::Cx;
+use crate::tracing_compat::{debug, warn};
+use crate::types::Time;
 
 use super::extract::Request;
 use super::handler::Handler;
@@ -306,10 +304,11 @@ impl<H: Handler> CorsMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CorsMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
         let Some(origin) = header_value(&req, "origin") else {
-            return self.inner.call(cx, req).await;
+            return self.inner.call(&cx, req).await;
         };
 
         if Self::is_malformed_origin_value(&origin) {
@@ -317,12 +316,12 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
                 origin = %origin,
                 "CorsMiddleware: dropping malformed multi-origin request header"
             );
-            return self.inner.call(cx, req).await;
+            return self.inner.call(&cx, req).await;
         }
 
         let Some(allow_origin) = self.allowed_origin_value(&origin) else {
             // Origin not allowed: pass through without CORS headers.
-            return self.inner.call(cx, req).await;
+            return self.inner.call(&cx, req).await;
         };
 
         if Self::is_preflight(&req) {
@@ -348,7 +347,7 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
             return resp;
         }
 
-        let resp = self.inner.call(cx, req).await;
+        let resp = self.inner.call(&cx, req).await;
         self.apply_common_headers(resp, &allow_origin)
         })
     }
@@ -438,10 +437,11 @@ impl<H: Handler> TimeoutMiddleware<H> {
 }
 
 impl<H: Handler> Handler for TimeoutMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             let start = (self.time_getter)();
-            let resp = self.inner.call(cx, req).await;
+            let resp = self.inner.call(&cx, req).await;
             let elapsed = Duration::from_nanos((self.time_getter)().duration_since(start));
 
             if elapsed > self.timeout {
@@ -467,15 +467,6 @@ pub struct CircuitBreakerMiddleware<H> {
     inner: H,
     breaker: Arc<CircuitBreaker>,
     time_getter: fn() -> Time,
-}
-
-#[derive(Debug)]
-struct HandlerServerError(Response);
-
-impl fmt::Display for HandlerServerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "server error: {}", self.0.status.as_u16())
-    }
 }
 
 impl<H: Handler> CircuitBreakerMiddleware<H> {
@@ -529,52 +520,39 @@ impl<H: Handler> CircuitBreakerMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
         let now = (self.time_getter)();
 
         // Get permit from circuit breaker
         let permit = match self.breaker.should_allow(now) {
             Ok(permit) => permit,
-            Err(err) => {
-                // Circuit breaker is open, return error response
-                return crate::web::response::Response::builder()
-                    .status(503)
-                    .body("Service temporarily unavailable")
-                    .unwrap_or_else(|_| crate::web::response::Response::default());
+            Err(crate::combinator::circuit_breaker::CircuitBreakerError::Open { remaining }) => {
+                let body =
+                    format!("Service Unavailable: circuit breaker open, retry after {remaining:?}");
+                return Response::new(StatusCode::SERVICE_UNAVAILABLE, body.into_bytes())
+                    .header("retry-after", format!("{}", remaining.as_secs().max(1)));
+            }
+            Err(crate::combinator::circuit_breaker::CircuitBreakerError::HalfOpenFull) => {
+                return Response::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    b"Service Unavailable: circuit breaker half-open, max probes active".to_vec(),
+                );
+            }
+            Err(crate::combinator::circuit_breaker::CircuitBreakerError::Inner(())) => {
+                unreachable!("should_allow cannot produce inner operation errors")
             }
         };
 
         // Call the handler
-        let resp = self.inner.call(cx, req).await;
-        let result = if resp.status.is_server_error() {
-            self.breaker.record_error(permit, "server_error", now);
-            Err(HandlerServerError(resp))
+        let resp = self.inner.call(&cx, req).await;
+        if resp.status.is_server_error() {
+            self.breaker.record_failure(permit, "server_error", now);
         } else {
             self.breaker.record_success(permit, now);
-            Ok(resp)
-        };
-
-        match result {
-            Ok(resp) => resp,
-            Err(crate::combinator::circuit_breaker::CircuitBreakerError::Open { remaining }) => {
-                let body =
-                    format!("Service Unavailable: circuit breaker open, retry after {remaining:?}");
-                Response::new(StatusCode::SERVICE_UNAVAILABLE, body.into_bytes())
-                    .header("retry-after", format!("{}", remaining.as_secs().max(1)))
-            }
-            Err(crate::combinator::circuit_breaker::CircuitBreakerError::HalfOpenFull) => {
-                Response::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    b"Service Unavailable: circuit breaker half-open, max probes active".to_vec(),
-                )
-            }
-            Err(crate::combinator::circuit_breaker::CircuitBreakerError::Inner(err)) => {
-                // Preserve the original server-error response while still counting
-                // it as a breaker failure.
-                err.0
-            }
         }
+        resp
         })
     }
 }
@@ -639,6 +617,7 @@ impl<H: Handler> RateLimitMiddleware<H> {
 
 impl<H: Handler> Handler for RateLimitMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         let now = (self.time_getter)();
 
         Box::pin(async move {
@@ -646,7 +625,7 @@ impl<H: Handler> Handler for RateLimitMiddleware<H> {
             match self.limiter.call(now, || Ok::<_, Infallible>(())) {
                 Ok(()) => {
                     // Rate limit passed, call inner handler
-                    self.inner.call(cx, req).await
+                    self.inner.call(&cx, req).await
                 }
                 Err(
                     crate::combinator::rate_limit::RateLimitError::RateLimitExceeded
@@ -711,10 +690,11 @@ impl<H: Handler> BulkheadMiddleware<H> {
 
 impl<H: Handler> Handler for BulkheadMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             match self.bulkhead.try_acquire(1) {
                 Some(p) => {
-                    let resp = self.inner.call(cx, req).await;
+                    let resp = self.inner.call(&cx, req).await;
                     p.release();
                     resp
                 }
@@ -775,11 +755,12 @@ fn is_idempotent(method: &str) -> bool {
 }
 
 impl<H: Handler> Handler for RetryMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             // Check if retry is appropriate for this method.
             if self.idempotent_only && !is_idempotent(&req.method) {
-                return self.inner.call(cx, req).await;
+                return self.inner.call(&cx, req).await;
             }
 
             let max = self.policy.max_attempts.max(1);
@@ -792,7 +773,7 @@ impl<H: Handler> Handler for RetryMiddleware<H> {
                     // Sleep before retry (Phase 1: async sleep with cancellation support).
                     if !delay.is_zero() {
                         // Use asupersync::time::sleep for cooperative yielding and cancellation support
-                        crate::time::sleep(delay).await;
+                        crate::time::sleep(wall_clock_now(), delay).await;
                     }
                     // Compute next delay with exponential backoff.
                     delay = Duration::from_secs_f64(
@@ -802,7 +783,7 @@ impl<H: Handler> Handler for RetryMiddleware<H> {
                 }
                 let try_req = req.clone();
 
-                let resp = self.inner.call(cx, try_req).await;
+                let resp = self.inner.call(&cx, try_req).await;
                 if !resp.status.is_server_error() {
                     return resp;
                 }
@@ -870,9 +851,10 @@ impl<H: Handler> CompressionMiddleware<H> {
 
 impl<H: Handler> Handler for CompressionMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             let accept_encoding = header_value(&req, "accept-encoding");
-            let mut resp = self.inner.call(cx, req).await;
+            let mut resp = self.inner.call(&cx, req).await;
 
         if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
             return resp;
@@ -1007,6 +989,7 @@ impl<H: Handler> RequestBodyLimitMiddleware<H> {
 
 impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             // SECURITY: Check Content-Length header BEFORE reading body to prevent DoS
             if let Some(cl_value) = super::extract::header_value_ci(&req, "content-length") {
@@ -1035,7 +1018,7 @@ impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
                     .into_bytes(),
                 );
             }
-            self.inner.call(cx, req).await
+            self.inner.call(&cx, req).await
         })
     }
 }
@@ -1163,7 +1146,8 @@ fn sanitize_and_truncate_id(id: &str, max_length: usize) -> String {
 }
 
 impl<H: Handler> Handler for RequestIdMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, mut req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, cx: &crate::Cx, mut req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
         let request_id = header_value(&req, &self.header_name).unwrap_or_else(|| {
             let id = self.counter.fetch_add(1, Ordering::Relaxed);
@@ -1176,7 +1160,7 @@ impl<H: Handler> Handler for RequestIdMiddleware<H> {
         req.extensions.insert("request_id", request_id.clone());
         req.extensions.insert("trace_id", request_id.clone());
 
-        let mut resp = self.inner.call(cx, req).await;
+        let mut resp = self.inner.call(&cx, req).await;
         resp.set_header(&self.header_name, request_id);
         resp
         })
@@ -1267,6 +1251,7 @@ fn resolve_trace_id(req: &Request) -> Option<String> {
 
 impl<H: Handler> Handler for RequestTraceMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             let method = req.method.clone();
             let path = req.path.clone();
@@ -1280,7 +1265,7 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
                 "http request start"
             );
 
-            let mut resp = self.inner.call(cx, req).await;
+            let mut resp = self.inner.call(&cx, req).await;
         let duration_ms =
             Duration::from_nanos((self.time_getter)().duration_since(start)).as_millis();
         let status_code = resp.status.as_u16();
@@ -1493,12 +1478,13 @@ impl<H: Handler> AuthMiddleware<H> {
 
 impl<H: Handler> Handler for AuthMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             if !self.policy.allows_at(&req, (self.time_getter)()) {
                 return Response::new(StatusCode::UNAUTHORIZED, b"Unauthorized".to_vec())
                     .header("www-authenticate", "Bearer");
             }
-            self.inner.call(cx, req).await
+            self.inner.call(&cx, req).await
         })
     }
 }
@@ -1551,6 +1537,7 @@ impl<H: Handler> LoadShedMiddleware<H> {
 
 impl<H: Handler> Handler for LoadShedMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             let previous = self.in_flight.fetch_add(1, Ordering::AcqRel);
             if previous >= self.policy.max_in_flight {
@@ -1564,7 +1551,7 @@ impl<H: Handler> Handler for LoadShedMiddleware<H> {
             let _guard = InFlightGuard {
                 counter: &self.in_flight,
             };
-            self.inner.call(cx, req).await
+            self.inner.call(&cx, req).await
         })
     }
 }
@@ -1600,6 +1587,7 @@ impl<H: Handler> CatchPanicMiddleware<H> {
 /// downcast to both. Anything else surfaces as a sentinel string so the
 /// log site never panics on the panic — the recovery path must be
 /// totally infallible.
+#[allow(dead_code)]
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         return (*s).to_string();
@@ -1612,10 +1600,11 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 impl<H: Handler> Handler for CatchPanicMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             // TODO: Implement proper async panic catching if needed
             // For now, just delegate to inner handler
-            self.inner.call(cx, req).await
+            self.inner.call(&cx, req).await
         })
     }
 }
@@ -1677,6 +1666,7 @@ fn normalization_redirect_response(path: &str) -> Response {
 
 impl<H: Handler> Handler for NormalizePathMiddleware<H> {
     fn call(&self, cx: &Cx, mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
             let path = &req.path;
 
@@ -1688,13 +1678,13 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
                             req.path = "/".to_string();
                         }
                     }
-                    self.inner.call(cx, req).await
+                    self.inner.call(&cx, req).await
                 }
                 TrailingSlash::Always => {
                     if !path.ends_with('/') && !path.contains('.') {
                         req.path = format!("{path}/");
                     }
-                    self.inner.call(cx, req).await
+                    self.inner.call(&cx, req).await
                 }
                 TrailingSlash::RedirectTrim => {
                     if path.len() > 1 && path.ends_with('/') {
@@ -1704,14 +1694,14 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
                         }
                         return normalization_redirect_response(&trimmed);
                     }
-                    self.inner.call(cx, req).await
+                    self.inner.call(&cx, req).await
                 }
                 TrailingSlash::RedirectAlways => {
                     if !path.ends_with('/') && !path.contains('.') {
                         let with_slash = format!("{path}/");
                         return normalization_redirect_response(&with_slash);
                     }
-                    self.inner.call(cx, req).await
+                    self.inner.call(&cx, req).await
                 }
             }
         })
@@ -1772,8 +1762,9 @@ impl<H: Handler> SetResponseHeaderMiddleware<H> {
 
 impl<H: Handler> Handler for SetResponseHeaderMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
         Box::pin(async move {
-            let mut resp = self.inner.call(cx, req).await;
+            let mut resp = self.inner.call(&cx, req).await;
             match self.mode {
                 HeaderOverwrite::Always => {
                     resp.set_header(&self.name, self.value.clone());
@@ -2014,6 +2005,8 @@ mod tests {
         clippy::cast_possible_wrap,
         clippy::future_not_send
     )]
+    use std::panic::{self, AssertUnwindSafe};
+
     use super::*;
     use crate::web::handler::FnHandler;
 

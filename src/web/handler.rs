@@ -8,11 +8,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::Cx;
-use crate::runtime::{Runtime, RuntimeBuilder};
-use crate::types::Budget;
 
 use super::extract::{FromRequest, FromRequestParts, Request};
-use super::response::{IntoResponse, Response, StatusCode};
+use super::response::{IntoResponse, Response};
 
 /// A request handler.
 ///
@@ -52,7 +50,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let func = &self.func;
         Box::pin(async move {
             (func)().into_response()
@@ -83,7 +81,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let func = &self.func;
         Box::pin(async move {
             match T1::from_request(req) {
@@ -118,7 +116,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let func = &self.func;
         Box::pin(async move {
             let t1 = match T1::from_request_parts(&req) {
@@ -159,7 +157,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let func = &self.func;
         Box::pin(async move {
             let (t1, t2, t3) = match extract_arg_3::<T1, T2, T3>(req) {
@@ -197,7 +195,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let func = &self.func;
         Box::pin(async move {
             let (t1, t2, t3, t4) = match extract_arg_4::<T1, T2, T3, T4>(req) {

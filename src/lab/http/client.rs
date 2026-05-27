@@ -6,6 +6,7 @@ use crate::bytes::Bytes;
 use crate::util::DetRng;
 use crate::web::extract::Request;
 use crate::web::response::Response;
+use crate::Cx;
 
 use super::server::VirtualServer;
 
@@ -41,6 +42,13 @@ impl<'a> VirtualClient<'a> {
     #[must_use]
     pub fn get(&self, path: &str) -> Response {
         self.server.handle(Request::new("GET", path))
+    }
+
+    /// Send a GET request with an explicit capability context.
+    pub async fn get_with_cx(&self, cx: &Cx, path: &str) -> Response {
+        self.server
+            .handle_with_cx(cx, Request::new("GET", path))
+            .await
     }
 
     /// Send a POST request with a body.

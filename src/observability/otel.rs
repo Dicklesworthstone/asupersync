@@ -7802,6 +7802,7 @@ pub mod otlp_request_builder {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn proto_labels(labels: &MetricLabels) -> Vec<KeyValue> {
         proto_labels_with_config(labels, None)
     }
@@ -7832,7 +7833,7 @@ pub mod otlp_request_builder {
             .map(|(key, value)| {
                 // **PII REDACTION**: Apply PII filtering to label values
                 let redacted_value = if let Some(config) = privacy_config {
-                    config.redact_pii(key, value)
+                    config.redact_pii(&key, &value)
                 } else {
                     value.clone()
                 };

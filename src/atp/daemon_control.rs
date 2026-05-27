@@ -14,11 +14,11 @@
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
 use crate::types::RegionId;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-use sysinfo::{System, Pid, Process, ProcessesToUpdate};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 /// Daemon control capability required for process management operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,7 +445,10 @@ impl SecureDaemonController {
         // This ensures the operation is running in the proper security context
         if cx.budget().remaining_cost().unwrap_or(0) == 0 {
             return Err(Error::new(ErrorKind::AdmissionDenied)
-                .with_message("Daemon control operation not authorized by capability context"));
+                .with_message(format!(
+                    "Daemon control operation for region {:?} not authorized by capability context",
+                    self.region_id
+                )));
         }
 
         // Additional validation could check cx.current_region() == self.region_id

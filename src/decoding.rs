@@ -908,14 +908,17 @@ fn decode_block(
                         "decoded output verification failed at symbol {esi}, byte {byte_index}: expected 0x{expected:02x}, actual 0x{actual:02x}"
                     ),
                 },
-                RaptorDecodeError::ComputeBudgetExhausted { operations_limit } => {
-                    DecodingError::ComputeLimitExceeded {
-                        limit: operations_limit,
+                RaptorDecodeError::ComputeBudgetExhausted { used, requested, max } => {
+                    DecodingError::MatrixInversionFailed {
+                        reason: format!("compute budget exhausted: used {used}, requested {requested}, max {max}"),
                     }
                 },
-                RaptorDecodeError::EsiRateLimitExceeded { limit } => {
-                    DecodingError::RateLimitExceeded {
-                        limit,
+                RaptorDecodeError::EsiRateLimitExceeded { esi, column_count, max_columns } => {
+                    DecodingError::InconsistentMetadata {
+                        sbn: plan.sbn,
+                        details: format!(
+                            "ESI rate limit exceeded: symbol {esi} would generate {column_count} columns (max {max_columns})"
+                        ),
                     }
                 },
             };

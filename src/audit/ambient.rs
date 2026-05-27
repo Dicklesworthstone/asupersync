@@ -568,7 +568,7 @@ fn validate_known_findings_integrity() {
 /// Validates the audit system itself has not been compromised.
 fn validate_audit_system_integrity() {
     // Basic check: ensure the audit system's own code doesn't have obvious ambient authority
-    let audit_source_patterns = [
+    let _audit_source_patterns = [
         ("std::fs::read_to_string", "Audit system using direct file access"),
         ("println!", "Audit system using ambient output"),
         ("eprintln!", "Audit system using ambient error output"),

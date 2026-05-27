@@ -16,10 +16,10 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
-use crate::Cx;
 use super::extract::{Extensions, Request};
 use super::handler::Handler;
 use super::response::{IntoResponse, Response, StatusCode};
+use crate::Cx;
 
 // ─── Method Constants ────────────────────────────────────────────────────────
 
@@ -372,7 +372,17 @@ impl Router {
     /// Top-level routes are selected by path specificity. Nested routers are
     /// selected by longest matching prefix after top-level route selection.
     #[must_use]
-    pub async fn handle(&self, cx: &Cx, mut req: Request) -> Response {
+    pub fn handle(&self, req: Request) -> Response {
+        let cx = Cx::for_testing();
+        futures_lite::future::block_on(self.handle_with_cx(&cx, req))
+    }
+
+    /// Handle an incoming request with an explicit capability context.
+    ///
+    /// This is the async path used by runtime-integrated handlers and lab
+    /// harnesses that already own a [`Cx`].
+    #[must_use]
+    pub async fn handle_with_cx(&self, cx: &Cx, mut req: Request) -> Response {
         req.extensions.extend_from(&self.extensions);
 
         // Pick the most specific top-level route. First-registered only wins
@@ -410,7 +420,7 @@ impl Router {
         }
         if let Some((_, router, sub_path)) = best_nested_match {
             req.path = sub_path;
-            return router.handle(cx, req).await;
+            return Box::pin(router.handle_with_cx(cx, req)).await;
         }
 
         // Fallback.

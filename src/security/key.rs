@@ -22,7 +22,7 @@ use crate::util::DetRng;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -338,16 +338,22 @@ impl AuthKey {
     /// uniformly distributed output by design.
     #[must_use]
     pub fn from_hkdf(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> Self {
-        use hkdf::Hkdf;
-        use sha2::Sha256;
+        const ZERO_SALT: [u8; AUTH_KEY_SIZE] = [0; AUTH_KEY_SIZE];
 
         // Extract phase: PRK = HKDF-Extract(salt, IKM)
-        let hkdf = Hkdf::<Sha256>::new(salt, ikm);
+        let mut extract_mac =
+            HmacSha256::new_from_slice(salt.unwrap_or(&ZERO_SALT)).expect("HMAC accepts any key length");
+        extract_mac.update(ikm);
+        let prk = extract_mac.finalize().into_bytes();
 
-        // Expand phase: OKM = HKDF-Expand(PRK, info, L)
+        // Expand phase: OKM = HKDF-Expand(PRK, info, L). AUTH_KEY_SIZE fits
+        // in one SHA-256 output block, so a single HKDF block is sufficient.
+        let mut expand_mac = HmacSha256::new_from_slice(&prk).expect("HMAC accepts any key length");
+        expand_mac.update(info);
+        expand_mac.update(&[1]);
+        let result = expand_mac.finalize().into_bytes();
         let mut okm = [0u8; AUTH_KEY_SIZE];
-        hkdf.expand(info, &mut okm)
-            .expect("HKDF-Expand with 32-byte output should never fail");
+        okm.copy_from_slice(&result[..AUTH_KEY_SIZE]);
 
         // HKDF output is uniformly distributed by construction, so skip validation
         Self { bytes: okm }

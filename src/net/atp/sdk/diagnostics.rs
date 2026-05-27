@@ -514,7 +514,7 @@ pub struct PathMonitor {
 }
 
 impl PathMonitor {
-    async fn start(session: AtpSession, cx: Cx, interval_ms: u64) -> AtpOutcome<Self> {
+    async fn start(session: AtpSession, _cx: Cx, interval_ms: u64) -> AtpOutcome<Self> {
         let monitor = Self {
             session: session.clone(),
             monitoring: true,

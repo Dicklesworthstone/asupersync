@@ -422,9 +422,17 @@ impl DistributedRegionRecord {
     /// core split-brain detection mechanism.
     pub fn detect_partition(&mut self, now: Time) -> Result<Vec<StateTransition>, Error> {
         let mut transitions = Vec::new();
+        let mut needs_reconcile = false;
+        let replica_timeout_ns = self
+            .config
+            .replica_timeout
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        let double_timeout_ns = (self.config.replica_timeout * 2)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
         let timeout_threshold = Time::from_nanos(
-            now.as_nanos().saturating_sub(self.config.replica_timeout.as_nanos())
-                .try_into().unwrap_or(u64::MAX)
+            now.as_nanos().saturating_sub(replica_timeout_ns)
         );
 
         for replica in &mut self.replicas {
@@ -435,16 +443,18 @@ impl DistributedRegionRecord {
                 replica.status = ReplicaStatus::Suspect;
             } else if replica.status == ReplicaStatus::Suspect
                 && replica.last_heartbeat < Time::from_nanos(
-                    now.as_nanos().saturating_sub((self.config.replica_timeout * 2).as_nanos())
-                        .try_into().unwrap_or(u64::MAX)
+                    now.as_nanos().saturating_sub(double_timeout_ns)
                 )
             {
                 // Confirm as unavailable after 2x timeout
                 replica.status = ReplicaStatus::Unavailable;
+                needs_reconcile = true;
+            }
+        }
 
-                if let Some(transition) = self.reconcile_replica_change(now) {
-                    transitions.push(transition);
-                }
+        if needs_reconcile {
+            if let Some(transition) = self.reconcile_replica_change(now) {
+                transitions.push(transition);
             }
         }
 

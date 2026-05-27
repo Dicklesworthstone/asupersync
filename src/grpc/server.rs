@@ -14,7 +14,6 @@ use crate::cx::{Cx, cap};
 
 use super::client::CompressionEncoding;
 use super::codec::{Codec, FramedCodec};
-use super::interceptor;
 use super::reflection::ReflectionService;
 use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status, TransportErrorKind};
