@@ -7,13 +7,24 @@
 //! tagged by requirement level for coverage accounting.
 
 use asupersync::cx::Cx;
-use asupersync::net::atp::protocol::{AtpFrame, FrameType, ProtocolVersion};
-use asupersync::net::atp::sdk::{AtpSdk, SdkMode, SessionConfig, TransferPolicy};
+use asupersync::net::atp::protocol::{
+    AtpError, AtpFeature, AtpFrame, CapabilityAction, CapabilityGrant, CapabilityGrantId,
+    CapabilityScope, FrameType, PeerId, ProtocolError, ProtocolVersion, SessionContextKind,
+    SessionError, SessionTraceId,
+};
+use asupersync::net::atp::sdk::{
+    AtpSdk, ObjectHash, SessionConfig, SessionOptions, TransferDestination, TransferOptions,
+    TransferPolicy, TransferRequest, TransferSource,
+};
 use asupersync::net::atp::test_utils::fixtures;
 use asupersync::net::atp::test_utils::*;
-use asupersync::types::Outcome;
+use futures_lite::future::block_on;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use serde_json::json;
+
+const ATP_PROTOCOL_CONFORMANCE_ARTIFACT: &str =
+    "artifacts/conformance/atp_protocol_conformance.ndjson";
+const ATP_NR_OWNER_BEAD: &str = "asupersync-vk4kcf";
 
 /// Conformance test requirement level based on RFC 2119.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,10 +58,83 @@ pub enum TestCategory {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum ConformanceResult {
-    Pass,
-    Fail { reason: String },
-    Skipped { reason: String },
-    ExpectedFailure { reason: String }, // XFAIL for known divergences
+    Pass {
+        observed: String,
+    },
+    Fail {
+        reason: String,
+        observed: String,
+    },
+    Skipped {
+        reason: String,
+        observed: String,
+    },
+    KnownGap {
+        reason: String,
+        owner_bead: String,
+        observed: String,
+    },
+}
+
+impl ConformanceResult {
+    fn pass(observed: impl Into<String>) -> Self {
+        Self::Pass {
+            observed: observed.into(),
+        }
+    }
+
+    fn fail(reason: impl Into<String>, observed: impl Into<String>) -> Self {
+        Self::Fail {
+            reason: reason.into(),
+            observed: observed.into(),
+        }
+    }
+
+    fn known_gap(
+        reason: impl Into<String>,
+        owner_bead: impl Into<String>,
+        observed: impl Into<String>,
+    ) -> Self {
+        Self::KnownGap {
+            reason: reason.into(),
+            owner_bead: owner_bead.into(),
+            observed: observed.into(),
+        }
+    }
+
+    fn verdict(&self) -> &'static str {
+        match self {
+            Self::Pass { .. } => "PASS",
+            Self::Fail { .. } => "FAIL",
+            Self::Skipped { .. } => "SKIP",
+            Self::KnownGap { .. } => "KNOWN_GAP",
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Pass { .. } => None,
+            Self::Fail { reason, .. }
+            | Self::Skipped { reason, .. }
+            | Self::KnownGap { reason, .. } => Some(reason),
+        }
+    }
+
+    fn observed(&self) -> &str {
+        match self {
+            Self::Pass { observed }
+            | Self::Fail { observed, .. }
+            | Self::Skipped { observed, .. }
+            | Self::KnownGap { observed, .. } => observed,
+        }
+    }
+
+    fn owner_bead(&self) -> Option<&str> {
+        match self {
+            Self::KnownGap { owner_bead, .. } => Some(owner_bead),
+            _ => None,
+        }
+    }
 }
 
 /// Individual conformance test case.
@@ -183,6 +267,83 @@ const ATP_CONFORMANCE_CASES: &[ConformanceCase] = &[
     },
 ];
 
+fn conformance_grant(
+    issuer: PeerId,
+    subject: PeerId,
+    label: &str,
+    actions: impl IntoIterator<Item = CapabilityAction>,
+) -> CapabilityGrant {
+    CapabilityGrant::new(
+        CapabilityGrantId::from_label(label),
+        issuer,
+        subject,
+        actions,
+        CapabilityScope::for_context(SessionContextKind::Direct),
+    )
+}
+
+fn conformance_sdk_session(
+    cx: &Cx,
+    label: &str,
+) -> Result<asupersync::net::atp::sdk::AtpSession, String> {
+    let config = SessionConfig::default();
+    let local_peer = config.local_peer;
+    let remote_peer = PeerId::from_label(&format!("atp_conformance_remote_{label}"));
+    let sdk = AtpSdk::new_in_process(config);
+    let options = SessionOptions::direct(remote_peer).with_grants(vec![conformance_grant(
+        remote_peer,
+        local_peer,
+        label,
+        [CapabilityAction::Read, CapabilityAction::Write],
+    )]);
+
+    match block_on(sdk.open_session(cx, options)) {
+        asupersync::net::atp::protocol::AtpOutcome::Ok(session) => Ok(session),
+        other => Err(format!("session negotiation failed: {other:?}")),
+    }
+}
+
+fn conformance_transfer_request(label: &str, bytes: usize) -> TransferRequest {
+    TransferRequest {
+        source: TransferSource::Object {
+            data: (0..bytes).map(|index| (index % 251) as u8).collect(),
+            content_type: Some("application/octet-stream".to_string()),
+        },
+        destination: TransferDestination::Object {
+            object_id: format!("atp-conformance-{label}"),
+        },
+        options: TransferOptions {
+            transfer_id: Some(asupersync::net::atp::sdk::TransferId::new(format!(
+                "atp-conformance-{label}"
+            ))),
+            ..TransferOptions::default()
+        },
+    }
+}
+
+fn session_error_code(error: &SessionError) -> &'static str {
+    match error {
+        SessionError::WithProof { source, .. } => source.code(),
+        other => other.code(),
+    }
+}
+
+fn conformance_event_json(case: &ConformanceCase, result: &ConformanceResult) -> String {
+    json!({
+        "case_id": case.id,
+        "section": case.section,
+        "requirement_level": format!("{:?}", case.level),
+        "category": format!("{:?}", case.category),
+        "verdict": result.verdict(),
+        "description": case.description,
+        "observed_behavior": result.observed(),
+        "failure_reason": result.reason(),
+        "owner_bead": result.owner_bead(),
+        "artifact_path": ATP_PROTOCOL_CONFORMANCE_ARTIFACT,
+    })
+    .to_string()
+}
+
 /// Test that ATP frames must have valid frame types.
 fn test_frame_type_required(_cx: &Cx) -> ConformanceResult {
     // Test that all frame types are valid
@@ -198,24 +359,29 @@ fn test_frame_type_required(_cx: &Cx) -> ConformanceResult {
     for frame_type in frame_types {
         let frame = AtpFrame::empty(frame_type);
         if frame.is_err() {
-            return ConformanceResult::Fail {
-                reason: format!("Failed to create frame with type {:?}", frame_type),
-            };
+            return ConformanceResult::fail(
+                format!("Failed to create frame with type {:?}", frame_type),
+                format!("frame_type={frame_type:?} constructor returned error"),
+            );
         }
 
         let frame = frame.unwrap();
         if frame.frame_type() != frame_type {
-            return ConformanceResult::Fail {
-                reason: format!(
+            return ConformanceResult::fail(
+                format!(
                     "Frame type mismatch: expected {:?}, got {:?}",
                     frame_type,
                     frame.frame_type()
                 ),
-            };
+                format!(
+                    "frame_type={frame_type:?} payload_len={}",
+                    frame.payload().len()
+                ),
+            );
         }
     }
 
-    ConformanceResult::Pass
+    ConformanceResult::pass("all canonical ATP frame types constructed and round-tripped")
 }
 
 /// Test that ATP frames must support empty payloads.
@@ -223,16 +389,18 @@ fn test_frame_empty_payload_support(_cx: &Cx) -> ConformanceResult {
     match AtpFrame::empty(FrameType::Data) {
         Ok(frame) => {
             if !frame.payload().is_empty() {
-                ConformanceResult::Fail {
-                    reason: "Empty frame should have empty payload".to_string(),
-                }
+                ConformanceResult::fail(
+                    "Empty frame should have empty payload",
+                    format!("payload_len={}", frame.payload().len()),
+                )
             } else {
-                ConformanceResult::Pass
+                ConformanceResult::pass("FrameType::Data empty frame has zero-byte payload")
             }
         }
-        Err(err) => ConformanceResult::Fail {
-            reason: format!("Failed to create empty frame: {}", err),
-        },
+        Err(err) => ConformanceResult::fail(
+            format!("Failed to create empty frame: {}", err),
+            "Frame::empty(FrameType::Data) returned error",
+        ),
     }
 }
 
@@ -243,65 +411,102 @@ fn test_frame_validation(_cx: &Cx) -> ConformanceResult {
     match AtpFrame::new(ProtocolVersion::CURRENT, FrameType::Data, payload.clone()) {
         Ok(frame) => {
             if frame.payload() != payload {
-                ConformanceResult::Fail {
-                    reason: "Frame payload does not match input".to_string(),
-                }
+                ConformanceResult::fail(
+                    "Frame payload does not match input",
+                    format!(
+                        "expected_payload_len={} observed_payload_len={}",
+                        payload.len(),
+                        frame.payload().len()
+                    ),
+                )
             } else {
-                ConformanceResult::Pass
+                ConformanceResult::pass(format!(
+                    "payload_len={} preserved by AtpFrame::new",
+                    payload.len()
+                ))
             }
         }
-        Err(err) => ConformanceResult::Fail {
-            reason: format!("Failed to create frame with payload: {}", err),
-        },
+        Err(err) => ConformanceResult::fail(
+            format!("Failed to create frame with payload: {}", err),
+            format!("payload_len={}", payload.len()),
+        ),
     }
 }
 
 /// Test that sessions must have timeout configuration.
 fn test_session_timeout_required(_cx: &Cx) -> ConformanceResult {
-    let config = SessionConfig {
-        local_peer: fixtures::test_peer_id(1),
-        session_timeout_ms: 0,
-        enable_compression: false,
-        enable_repair: false,
-        enable_resume: false,
-        max_concurrent_transfers: 1,
-        stream_buffer_size: 1024,
-    };
+    let config = SessionConfig::default();
 
-    // Session with zero timeout should be invalid
     if config.session_timeout_ms == 0 {
-        ConformanceResult::Fail {
-            reason: "Session timeout must be greater than zero".to_string(),
-        }
+        ConformanceResult::fail(
+            "Default session timeout must be greater than zero",
+            "SessionConfig::default produced session_timeout_ms=0",
+        )
     } else {
-        ConformanceResult::Pass
+        ConformanceResult::pass(format!(
+            "SessionConfig::default produced session_timeout_ms={}",
+            config.session_timeout_ms
+        ))
     }
 }
 
 /// Test that sessions must respect concurrent transfer limits.
-fn test_concurrent_transfer_limits(_cx: &Cx) -> ConformanceResult {
+fn test_concurrent_transfer_limits(cx: &Cx) -> ConformanceResult {
     let config = SessionConfig {
         local_peer: fixtures::test_peer_id(1),
         session_timeout_ms: 30000,
         enable_compression: false,
         enable_repair: false,
         enable_resume: false,
-        max_concurrent_transfers: 5,
+        max_concurrent_transfers: 1,
         stream_buffer_size: 1024,
     };
+    let local_peer = config.local_peer;
+    let remote_peer = fixtures::test_peer_id(2);
+    let sdk = AtpSdk::new_in_process(config.clone());
+    let options = SessionOptions::direct(remote_peer).with_grants(vec![conformance_grant(
+        remote_peer,
+        local_peer,
+        "concurrent-transfer-limit",
+        [CapabilityAction::Read, CapabilityAction::Write],
+    )]);
 
-    // Verify limit is enforced (mock test for now)
-    if config.max_concurrent_transfers == 0 {
-        ConformanceResult::Fail {
-            reason: "Maximum concurrent transfers must be greater than zero".to_string(),
+    block_on(async {
+        let session = match sdk.open_session(cx, options).await {
+            asupersync::net::atp::protocol::AtpOutcome::Ok(session) => session,
+            other => {
+                return ConformanceResult::fail(
+                    "Session setup failed before transfer-limit observation",
+                    format!("open_session={other:?}"),
+                );
+            }
+        };
+
+        let first = session
+            .send_object(cx, conformance_transfer_request("first", 128))
+            .await;
+        let second = session
+            .send_object(cx, conformance_transfer_request("second", 128))
+            .await;
+        let first_ok = first.is_ok();
+        let second_ok = second.is_ok();
+
+        if first_ok && !second_ok {
+            ConformanceResult::pass(format!(
+                "max_concurrent_transfers={} first_ok={first_ok} second_ok={second_ok}",
+                config.max_concurrent_transfers
+            ))
+        } else {
+            ConformanceResult::known_gap(
+                "SDK active-transfer registry does not yet reject a second simultaneous transfer when the session limit is one",
+                ATP_NR_OWNER_BEAD,
+                format!(
+                    "max_concurrent_transfers={} first_ok={first_ok} second_ok={second_ok}",
+                    config.max_concurrent_transfers
+                ),
+            )
         }
-    } else if config.max_concurrent_transfers > 1000 {
-        ConformanceResult::Fail {
-            reason: "Maximum concurrent transfers should have reasonable upper bound".to_string(),
-        }
-    } else {
-        ConformanceResult::Pass
-    }
+    })
 }
 
 /// Test that sessions should support compression configuration.
@@ -323,7 +528,9 @@ fn test_compression_configuration(_cx: &Cx) -> ConformanceResult {
     config.enable_compression = false;
     assert!(!config.enable_compression);
 
-    ConformanceResult::Pass
+    ConformanceResult::pass(
+        "SessionConfig compression flag toggles true and false deterministically",
+    )
 }
 
 /// Test that transfers must enforce maximum size limits.
@@ -340,36 +547,40 @@ fn test_transfer_size_limits(_cx: &Cx) -> ConformanceResult {
 
     // Test that limits are reasonable
     if policy.max_transfer_size_bytes == 0 {
-        ConformanceResult::Fail {
-            reason: "Maximum transfer size must be greater than zero".to_string(),
-        }
+        ConformanceResult::fail(
+            "Maximum transfer size must be greater than zero",
+            "max_transfer_size_bytes=0",
+        )
     } else if u64::from(policy.max_chunk_size_bytes) > policy.max_transfer_size_bytes {
-        ConformanceResult::Fail {
-            reason: "Chunk size cannot exceed transfer size".to_string(),
-        }
+        ConformanceResult::fail(
+            "Chunk size cannot exceed transfer size",
+            format!(
+                "max_chunk_size_bytes={} max_transfer_size_bytes={}",
+                policy.max_chunk_size_bytes, policy.max_transfer_size_bytes
+            ),
+        )
     } else {
-        ConformanceResult::Pass
+        ConformanceResult::pass(format!(
+            "max_transfer_size_bytes={} max_chunk_size_bytes={}",
+            policy.max_transfer_size_bytes, policy.max_chunk_size_bytes
+        ))
     }
 }
 
 /// Test that transfers must enforce timeout policies.
 fn test_transfer_timeout_enforcement(_cx: &Cx) -> ConformanceResult {
-    let policy = TransferPolicy {
-        max_transfer_size_bytes: 1024 * 1024,
-        max_chunk_size_bytes: 64 * 1024,
-        transfer_timeout_ms: 0, // Invalid timeout
-        enable_auto_retry: true,
-        max_retry_attempts: 3,
-        retry_backoff_ms: 1000,
-        progress_report_interval_ms: 1000,
-    };
+    let policy = TransferPolicy::default();
 
     if policy.transfer_timeout_ms == 0 {
-        ConformanceResult::Fail {
-            reason: "Transfer timeout must be greater than zero".to_string(),
-        }
+        ConformanceResult::fail(
+            "Default transfer timeout must be greater than zero",
+            "TransferPolicy::default produced transfer_timeout_ms=0",
+        )
     } else {
-        ConformanceResult::Pass
+        ConformanceResult::pass(format!(
+            "TransferPolicy::default produced transfer_timeout_ms={}",
+            policy.transfer_timeout_ms
+        ))
     }
 }
 
@@ -387,47 +598,193 @@ fn test_automatic_retry_support(_cx: &Cx) -> ConformanceResult {
 
     // Test retry configuration
     if policy.enable_auto_retry && policy.max_retry_attempts == 0 {
-        ConformanceResult::Fail {
-            reason: "Auto retry enabled but max attempts is zero".to_string(),
-        }
+        ConformanceResult::fail(
+            "Auto retry enabled but max attempts is zero",
+            "enable_auto_retry=true max_retry_attempts=0",
+        )
     } else if policy.enable_auto_retry && policy.retry_backoff_ms == 0 {
-        ConformanceResult::Fail {
-            reason: "Auto retry enabled but backoff is zero".to_string(),
-        }
+        ConformanceResult::fail(
+            "Auto retry enabled but backoff is zero",
+            "enable_auto_retry=true retry_backoff_ms=0",
+        )
     } else {
-        ConformanceResult::Pass
+        ConformanceResult::pass(format!(
+            "enable_auto_retry={} max_retry_attempts={} retry_backoff_ms={}",
+            policy.enable_auto_retry, policy.max_retry_attempts, policy.retry_backoff_ms
+        ))
     }
 }
 
 /// Test that transfers must verify data integrity.
-fn test_data_integrity_verification(_cx: &Cx) -> ConformanceResult {
-    // This is a placeholder - real implementation would test actual verification
-    ConformanceResult::ExpectedFailure {
-        reason: "Data integrity verification implementation pending".to_string(),
+fn test_data_integrity_verification(cx: &Cx) -> ConformanceResult {
+    let session = match conformance_sdk_session(cx, "integrity-verification") {
+        Ok(session) => session,
+        Err(reason) => return ConformanceResult::fail(reason, "session setup failed"),
+    };
+    let temp_dir = match tempfile::tempdir() {
+        Ok(temp_dir) => temp_dir,
+        Err(err) => {
+            return ConformanceResult::fail(
+                format!("failed to create conformance tempdir: {err}"),
+                "tempdir creation failed",
+            );
+        }
+    };
+    let payload = test_data::pattern_data(4096);
+    let expected_hash = ObjectHash::from_data(&payload);
+    let object_path = temp_dir.path().join("integrity-payload.bin");
+    if let Err(err) = std::fs::write(&object_path, &payload) {
+        return ConformanceResult::fail(
+            format!("failed to write integrity fixture: {err}"),
+            object_path.display().to_string(),
+        );
+    }
+
+    match block_on(session.verify_object(cx, &object_path, Some(expected_hash.as_bytes()))) {
+        asupersync::net::atp::protocol::AtpOutcome::Ok(verification)
+            if verification.verified
+                && verification.integrity_check_passed
+                && verification.hash == expected_hash.as_bytes().to_vec() =>
+        {
+            ConformanceResult::pass(format!(
+                "verified=true integrity_check_passed=true bytes={} hash_prefix={}",
+                payload.len(),
+                &expected_hash.hex()[..16]
+            ))
+        }
+        asupersync::net::atp::protocol::AtpOutcome::Ok(verification) => ConformanceResult::fail(
+            "verification result did not satisfy integrity contract",
+            format!(
+                "verified={} integrity_check_passed={} hash_len={}",
+                verification.verified,
+                verification.integrity_check_passed,
+                verification.hash.len()
+            ),
+        ),
+        other => ConformanceResult::fail(
+            "verify_object returned non-Ok outcome",
+            format!("verify_object={other:?}"),
+        ),
     }
 }
 
 /// Test that corrupted data must be rejected.
-fn test_corruption_detection(_cx: &Cx) -> ConformanceResult {
-    // This is a placeholder - real implementation would test corruption detection
-    ConformanceResult::ExpectedFailure {
-        reason: "Corruption detection implementation pending".to_string(),
+fn test_corruption_detection(cx: &Cx) -> ConformanceResult {
+    let session = match conformance_sdk_session(cx, "corruption-detection") {
+        Ok(session) => session,
+        Err(reason) => return ConformanceResult::fail(reason, "session setup failed"),
+    };
+    let temp_dir = match tempfile::tempdir() {
+        Ok(temp_dir) => temp_dir,
+        Err(err) => {
+            return ConformanceResult::fail(
+                format!("failed to create conformance tempdir: {err}"),
+                "tempdir creation failed",
+            );
+        }
+    };
+    let original = test_data::deterministic_data(2048, 0xA7A7_0001);
+    let expected_hash = ObjectHash::from_data(&original);
+    let object_path = temp_dir.path().join("corrupted-payload.bin");
+    if let Err(err) = std::fs::write(&object_path, &original) {
+        return ConformanceResult::fail(
+            format!("failed to write original fixture: {err}"),
+            object_path.display().to_string(),
+        );
+    }
+    let mut corrupted = original;
+    corrupted[17] ^= 0xA5;
+    corrupted[1024] ^= 0x5A;
+    if let Err(err) = std::fs::write(&object_path, &corrupted) {
+        return ConformanceResult::fail(
+            format!("failed to write corrupted fixture: {err}"),
+            object_path.display().to_string(),
+        );
+    }
+
+    match block_on(session.verify_object(cx, &object_path, Some(expected_hash.as_bytes()))) {
+        asupersync::net::atp::protocol::AtpOutcome::Ok(verification)
+            if !verification.verified && !verification.integrity_check_passed =>
+        {
+            ConformanceResult::pass(format!(
+                "corrupted payload rejected: verified=false integrity_check_passed=false expected_hash_prefix={}",
+                &expected_hash.hex()[..16]
+            ))
+        }
+        asupersync::net::atp::protocol::AtpOutcome::Ok(verification) => ConformanceResult::fail(
+            "corrupted payload was not rejected by verification",
+            format!(
+                "verified={} integrity_check_passed={} size_bytes={}",
+                verification.verified, verification.integrity_check_passed, verification.size_bytes
+            ),
+        ),
+        other => ConformanceResult::fail(
+            "verify_object returned non-Ok outcome for corruption fixture",
+            format!("verify_object={other:?}"),
+        ),
     }
 }
 
 /// Test that operations must require explicit capabilities.
 fn test_capability_requirements(_cx: &Cx) -> ConformanceResult {
-    // This is a placeholder - real implementation would test capability enforcement
-    ConformanceResult::ExpectedFailure {
-        reason: "Capability requirement enforcement implementation pending".to_string(),
+    let initiator = fixtures::test_peer_id(10);
+    let responder = fixtures::test_peer_id(11);
+    let hello = asupersync::net::atp::protocol::ClientHello::new(
+        initiator,
+        responder,
+        asupersync::net::atp::protocol::TransferNonce::from_seed("capability-required"),
+        SessionContextKind::Direct,
+        SessionTraceId::new(7_001),
+    )
+    .with_features(&[AtpFeature::EncryptionPolicy, AtpFeature::ProofBundles])
+    .with_requested_actions(&[CapabilityAction::Read, CapabilityAction::Write]);
+    let mut policy = asupersync::net::atp::protocol::SessionPolicy::new(responder, 0)
+        .with_supported_features(&[AtpFeature::EncryptionPolicy, AtpFeature::ProofBundles])
+        .with_required_actions(&[CapabilityAction::Read, CapabilityAction::Write])
+        .with_accepted_contexts(&[SessionContextKind::Direct]);
+    let mut server = asupersync::net::atp::protocol::SessionNegotiator::server(responder);
+
+    match server.accept_client_hello(&hello, &mut policy) {
+        Err(error) if session_error_code(&error) == "missing_grant_action" => {
+            ConformanceResult::pass(format!(
+                "missing grant rejected with error_code={}",
+                session_error_code(&error)
+            ))
+        }
+        other => ConformanceResult::fail(
+            "missing explicit capability grant was not rejected with missing_grant_action",
+            format!("accept_client_hello={other:?}"),
+        ),
     }
 }
 
 /// Test that authorization boundaries must be enforced.
-fn test_authorization_enforcement(_cx: &Cx) -> ConformanceResult {
-    // This is a placeholder - real implementation would test authorization
-    ConformanceResult::ExpectedFailure {
-        reason: "Authorization boundary enforcement implementation pending".to_string(),
+fn test_authorization_enforcement(cx: &Cx) -> ConformanceResult {
+    let config = SessionConfig::default();
+    let local_peer = config.local_peer;
+    let remote_peer = fixtures::test_peer_id(22);
+    let untrusted_issuer = fixtures::test_peer_id(23);
+    let sdk = AtpSdk::new_in_process(config);
+    let bad_grant = conformance_grant(
+        untrusted_issuer,
+        local_peer,
+        "untrusted-issuer",
+        [CapabilityAction::Read, CapabilityAction::Write],
+    );
+    let options = SessionOptions::direct(remote_peer).with_grants(vec![bad_grant]);
+
+    match block_on(sdk.open_session(cx, options)) {
+        asupersync::net::atp::protocol::AtpOutcome::Err(AtpError::Protocol(
+            ProtocolError::SessionStateMismatch,
+        )) => ConformanceResult::pass(format!(
+            "untrusted grant issuer rejected for local_peer={} remote_peer={}",
+            local_peer.redacted(),
+            remote_peer.redacted()
+        )),
+        other => ConformanceResult::fail(
+            "untrusted grant issuer was not rejected by session authorization",
+            format!("open_session={other:?}"),
+        ),
     }
 }
 
@@ -438,49 +795,45 @@ fn atp_protocol_full_conformance() {
     let mut pass = 0;
     let mut fail = 0;
     let mut skipped = 0;
-    let mut xfail = 0; // Expected failures (known divergences)
+    let mut known_gap = 0;
 
     for case in ATP_CONFORMANCE_CASES {
         let result = (case.test_fn)(&cx);
-        let verdict = match result {
-            ConformanceResult::Pass => {
+        let verdict = result.verdict();
+        match &result {
+            ConformanceResult::Pass { .. } => {
                 pass += 1;
-                "PASS"
             }
-            ConformanceResult::Fail { reason } => {
+            ConformanceResult::Fail { reason, .. } => {
                 fail += 1;
                 eprintln!(
                     "FAIL {}: {}\n  reason: {}",
                     case.id, case.description, reason
                 );
-                "FAIL"
             }
-            ConformanceResult::Skipped { reason } => {
+            ConformanceResult::Skipped { reason, .. } => {
                 skipped += 1;
                 eprintln!(
                     "SKIP {}: {}\n  reason: {}",
                     case.id, case.description, reason
                 );
-                "SKIP"
             }
-            ConformanceResult::ExpectedFailure { reason } => {
-                xfail += 1;
+            ConformanceResult::KnownGap {
+                reason, owner_bead, ..
+            } => {
+                known_gap += 1;
                 eprintln!(
-                    "XFAIL {}: {}\n  reason: {}",
-                    case.id, case.description, reason
+                    "KNOWN_GAP {}: {}\n  owner_bead: {}\n  reason: {}",
+                    case.id, case.description, owner_bead, reason
                 );
-                "XFAIL"
             }
         };
 
         // Structured JSON output for CI parsing
-        eprintln!(
-            "{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\"}}",
-            case.id, verdict, case.level, case.category
-        );
+        eprintln!("{}", conformance_event_json(case, &result));
     }
 
-    let total = pass + fail + skipped + xfail;
+    let total = pass + fail + skipped + known_gap;
     let must_tests = ATP_CONFORMANCE_CASES
         .iter()
         .filter(|c| c.level == RequirementLevel::Must)
@@ -488,7 +841,7 @@ fn atp_protocol_full_conformance() {
     let must_pass = ATP_CONFORMANCE_CASES
         .iter()
         .filter(|c| c.level == RequirementLevel::Must)
-        .filter(|c| matches!((c.test_fn)(&cx), ConformanceResult::Pass))
+        .filter(|c| matches!((c.test_fn)(&cx), ConformanceResult::Pass { .. }))
         .count();
     let compliance_score = if must_tests > 0 {
         (must_pass as f64 / must_tests as f64) * 100.0
@@ -497,8 +850,8 @@ fn atp_protocol_full_conformance() {
     };
 
     eprintln!(
-        "\nATP Protocol Conformance: {}/{} pass, {} fail, {} skip, {} xfail",
-        pass, total, fail, skipped, xfail
+        "\nATP Protocol Conformance: {}/{} pass, {} fail, {} skip, {} known_gap",
+        pass, total, fail, skipped, known_gap
     );
     eprintln!(
         "MUST requirements: {}/{} pass ({:.1}%)",
@@ -538,10 +891,10 @@ fn atp_protocol_coverage_matrix() {
     for case in ATP_CONFORMANCE_CASES {
         let result = (case.test_fn)(&cx);
         let status = match result {
-            ConformanceResult::Pass => "✅ PASS",
-            ConformanceResult::Fail { .. } => "❌ FAIL",
-            ConformanceResult::Skipped { .. } => "⏭️ SKIP",
-            ConformanceResult::ExpectedFailure { .. } => "⚠️ XFAIL",
+            ConformanceResult::Pass { .. } => "PASS",
+            ConformanceResult::Fail { .. } => "FAIL",
+            ConformanceResult::Skipped { .. } => "SKIP",
+            ConformanceResult::KnownGap { .. } => "KNOWN_GAP",
         };
 
         println!(

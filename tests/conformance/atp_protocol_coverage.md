@@ -5,14 +5,14 @@
 | Protocol Section | MUST Clauses | SHOULD Clauses | MAY Clauses | Tested | Passing | Divergent | Score |
 |------------------|:------------:|:-------------:|:----------:|:------:|:-------:|:---------:|-------|
 | Frame Handling (§3) | 2 | 1 | 0 | 3 | 3 | 0 | 100% |
-| Session Management (§4) | 2 | 1 | 0 | 3 | 3 | 0 | 100% |
+| Session Management (§4) | 2 | 1 | 0 | 3 | 2 | 1 | 66.7% |
 | Transfer Policies (§5) | 2 | 1 | 0 | 3 | 3 | 0 | 100% |
-| Data Integrity (§6) | 2 | 0 | 0 | 2 | 0 | 2 | 0% |
-| Security Model (§7) | 2 | 0 | 0 | 2 | 0 | 2 | 0% |
+| Data Integrity (§6) | 2 | 0 | 0 | 2 | 2 | 0 | 100% |
+| Security Model (§7) | 2 | 0 | 0 | 2 | 2 | 0 | 100% |
 | Observability (§8) | 0 | 0 | 0 | 0 | 0 | 0 | N/A |
-| **TOTALS** | **10** | **3** | **0** | **13** | **9** | **4** | **69.2%** |
+| **TOTALS** | **10** | **3** | **0** | **13** | **12** | **1** | **92.3%** |
 
-⚠️ **CONFORMANCE STATUS: NON-COMPLIANT** (69.2% MUST coverage < 95% threshold)
+**CONFORMANCE STATUS: NON-COMPLIANT** (90.0% MUST coverage < 95% threshold)
 
 ## Detailed Coverage Analysis
 
@@ -29,7 +29,7 @@
 | Test ID | Requirement | Level | Status | Implementation |
 |---------|-------------|--------|--------|----------------|
 | ATP-SESSION-001 | Session timeout required | MUST | ✅ PASS | Timeout configuration validation |
-| ATP-SESSION-002 | Concurrent transfer limits | MUST | ✅ PASS | Transfer limit enforcement |
+| ATP-SESSION-002 | Concurrent transfer limits | MUST | KNOWN_GAP | Executable SDK observation shows active-transfer registry enforcement still tracked by asupersync-vk4kcf |
 | ATP-SESSION-003 | Compression configuration | SHOULD | ✅ PASS | Compression toggle support |
 
 #### Transfer Policies (§5)
@@ -39,19 +39,19 @@
 | ATP-TRANSFER-002 | Timeout enforcement | MUST | ✅ PASS | Timeout policy validation |
 | ATP-TRANSFER-003 | Automatic retry support | SHOULD | ✅ PASS | Retry configuration |
 
-### ⚠️ Partially Implemented Areas (XFAIL)
+### Executable Integrity and Security Areas
 
 #### Data Integrity (§6)
 | Test ID | Requirement | Level | Status | Implementation |
 |---------|-------------|--------|--------|----------------|
-| ATP-INTEGRITY-001 | Data integrity verification | MUST | ⚠️ XFAIL | Implementation pending |
-| ATP-INTEGRITY-002 | Corruption detection | MUST | ⚠️ XFAIL | Implementation pending |
+| ATP-INTEGRITY-001 | Data integrity verification | MUST | ✅ PASS | SDK object verification checks SHA-256 expected hash |
+| ATP-INTEGRITY-002 | Corruption detection | MUST | ✅ PASS | Tampered payload fails object verification |
 
 #### Security Model (§7)
 | Test ID | Requirement | Level | Status | Implementation |
 |---------|-------------|--------|--------|----------------|
-| ATP-SECURITY-001 | Capability requirements | MUST | ⚠️ XFAIL | Implementation pending |
-| ATP-SECURITY-002 | Authorization enforcement | MUST | ⚠️ XFAIL | Implementation pending |
+| ATP-SECURITY-001 | Capability requirements | MUST | ✅ PASS | Session negotiation rejects missing grants |
+| ATP-SECURITY-002 | Authorization enforcement | MUST | ✅ PASS | Session negotiation rejects untrusted grant issuers |
 
 ### 📋 Not Yet Tested Areas
 
@@ -63,11 +63,8 @@
 
 ## Priority Implementation Plan
 
-### Phase 1: Critical Security (Priority: MUST fix for compliance)
-1. **ATP-INTEGRITY-001**: Implement cryptographic data integrity verification
-2. **ATP-INTEGRITY-002**: Add corruption detection and rejection mechanisms
-3. **ATP-SECURITY-001**: Enforce capability requirements for all operations
-4. **ATP-SECURITY-002**: Implement authorization boundary enforcement
+### Phase 1: Critical Session Limit Enforcement (Priority: MUST fix for compliance)
+1. **ATP-SESSION-002**: Add active-transfer registry enforcement so max_concurrent_transfers rejects excess live transfers.
 
 ### Phase 2: Observability Foundation (Priority: SHOULD for production)
 1. Add structured logging conformance tests
@@ -90,12 +87,15 @@ These properties are verified through parameter validation and constraint checki
 - Transfer limits via policy enforcement verification
 - Compression options via feature toggle testing
 
-### ⚠️ Cryptographic and Security (Pending Implementation)
-These properties require actual protocol implementations to test:
-- Data integrity verification via cryptographic proof checking
-- Corruption detection via malicious data injection
-- Capability scoping via permission boundary testing
-- Authorization enforcement via access control validation
+### Integrity and Security (Implemented)
+These properties are verified against live ATP SDK/session behavior:
+- Data integrity verification via SHA-256 object verification
+- Corruption detection via tampered payload verification failure
+- Capability scoping via missing-grant negotiation rejection
+- Authorization enforcement via untrusted-issuer negotiation rejection
+
+### Known ATP-NR Gap
+- Concurrent transfer limits are observed by an executable test, but SDK active-transfer registry enforcement is still tracked by asupersync-vk4kcf and cannot count as pass evidence.
 
 ### 📋 Behavioral and Operational (Not Tested)
 These properties require extended integration testing:
@@ -132,30 +132,30 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_atp_conformance carg
 ## Known Limitations
 
 ### Implementation Constraints
-- **Placeholder tests**: Security and integrity tests are XFAIL pending implementation
-- **Mock validations**: Some tests use configuration validation rather than runtime behavior
+- **Known gap**: ATP-SESSION-002 reports an executable known gap for active-transfer registry enforcement
+- **Configuration validations**: Some low-level policy tests intentionally validate protocol configuration constraints rather than network I/O
 - **Single-threaded**: Tests don't verify concurrent access patterns
 
 ### Coverage Boundaries
-- **Protocol implementation**: Tests configuration and validation, not full protocol behavior
+- **Protocol implementation**: Tests configuration, SDK verification, and session negotiation; it does not start external network transports
 - **Integration points**: Missing cross-component interaction testing
 - **Performance**: Speed and resource usage not covered by conformance tests
 
 ### Scope Boundaries
 - **Real network behavior**: Tests don't use actual network protocols
-- **Cryptographic operations**: Tests don't verify actual cryptographic implementations
+- **Cryptographic operations**: Tests verify SHA-256 object integrity; detached signature proof coverage remains in the SDK unit suite
 - **Multi-peer scenarios**: Tests focus on single-peer configuration validation
 
 ## Maintenance Protocol
 
 ### Regular Verification
 - **Every release**: Run full conformance test suite and verify compliance score
-- **Weekly**: Review XFAIL items for implementation progress
+- **Weekly**: Review KNOWN_GAP items for implementation progress
 - **After protocol changes**: Update test cases for new requirements
 
 ### Update Triggers
 - **New ATP requirements**: Add tests for additional protocol clauses
-- **Implementation milestones**: Convert XFAIL tests to actual implementations
+- **Implementation milestones**: Convert KNOWN_GAP cases to passing executable tests
 - **Security findings**: Add regression tests for security vulnerabilities
 
 ### Version Control
@@ -166,16 +166,16 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_atp_conformance carg
 ## Compliance Roadmap
 
 ### Target Compliance: 95% MUST requirements
-- **Current**: 60% MUST compliance (6/10 requirements implemented)
+- **Current**: 90% MUST compliance (9/10 requirements implemented)
 - **Required**: 95% MUST compliance (10/10 requirements implemented)
-- **Blocker**: Security and integrity implementations pending
+- **Blocker**: Active-transfer registry enforcement for ATP-SESSION-002
 
 ### Milestone Schedule
-- **Q2 2026**: Implement data integrity verification (ATP-INTEGRITY-*)
-- **Q3 2026**: Implement security model enforcement (ATP-SECURITY-*)
+- **Q2 2026**: Implement active-transfer registry enforcement for ATP-SESSION-002
+- **Q3 2026**: Broaden capability and authorization coverage beyond direct-session negotiation
 - **Q4 2026**: Add observability conformance tests
 - **2027 H1**: Achieve full 95% MUST compliance
 
-Last updated: 2026-05-26  
-Next review: 2026-06-26  
+Last updated: 2026-05-27
+Next review: 2026-06-26
 Target compliance: 2026-12-31
