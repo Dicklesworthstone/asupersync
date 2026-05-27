@@ -157,14 +157,17 @@ fn dashboard_json_answers_user_questions_and_lists_live_gates() {
     assert_ne!(
         answers["all_done"]["answer"].as_str(),
         Some("yes"),
-        "ATP cannot be marked done while downstream ATP-NR gates remain open"
+        "ATP cannot be marked done while release-blocking rows remain"
     );
+    let all_done_gate_blockers = answers["all_done"]["blocking_gate_ids"]
+        .as_array()
+        .expect("all_done blocking gates");
+    let all_done_artifact_blockers = answers["all_done"]["blocking_artifact_paths"]
+        .as_array()
+        .expect("all_done blocking artifacts");
     assert!(
-        !answers["all_done"]["blocking_gate_ids"]
-            .as_array()
-            .expect("blocking gates")
-            .is_empty(),
-        "all_done must name blocking gates"
+        !all_done_gate_blockers.is_empty() || !all_done_artifact_blockers.is_empty(),
+        "all_done must name blocking gates or proof artifacts"
     );
 
     let gates = dashboard["release_gates"]
@@ -232,11 +235,39 @@ fn dashboard_detects_missing_artifacts_and_stale_proof_snapshot() {
         .expect("proof status artifact row");
     assert_eq!(proof_status["exists"].as_bool(), Some(true));
     assert_eq!(
+        proof_status["dashboard_status"].as_str(),
+        Some("red_stale_proof")
+    );
+    assert_eq!(
         proof_status["stale"].as_bool(),
         Some(true),
         "2026-05-08 proof snapshot must be stale as of 2026-05-21 under the 7-day policy"
     );
     assert_eq!(proof_status["release_blocking"].as_bool(), Some(true));
+    assert!(
+        proof_status["first_blocker"]
+            .as_str()
+            .expect("proof artifact first_blocker")
+            .contains("stale proof artifact"),
+        "stale proof artifacts must explain the exact blocker"
+    );
+
+    let release_answer = &dashboard["answers"]["release_proof_green"];
+    assert_eq!(
+        release_answer["answer"].as_str(),
+        Some("no"),
+        "stale release proof artifacts must make the release-proof answer red"
+    );
+    let blocking_artifacts = release_answer["blocking_artifact_paths"]
+        .as_array()
+        .expect("release proof blocking_artifact_paths")
+        .iter()
+        .map(|row| row.as_str().expect("artifact path"))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        blocking_artifacts.contains("artifacts/proof_status_snapshot_v1.json"),
+        "release-proof answer must name stale proof artifacts"
+    );
 
     assert!(
         dashboard["release_gates"]

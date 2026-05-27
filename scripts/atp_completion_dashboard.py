@@ -150,8 +150,12 @@ def artifact_state(relative_path: str, as_of: dt.date, max_age_days: int) -> dic
         "stale": False,
         "age_days": None,
         "created_date": None,
+        "dashboard_status": "green",
+        "first_blocker": "",
     }
     if not path.exists():
+        state["dashboard_status"] = "red_missing_artifact"
+        state["first_blocker"] = f"missing proof artifact: {relative_path}"
         return state
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -164,6 +168,12 @@ def artifact_state(relative_path: str, as_of: dt.date, max_age_days: int) -> dic
         state["created_date"] = created_date
         state["age_days"] = age_days
         state["stale"] = age_days > max_age_days
+        if state["stale"]:
+            state["dashboard_status"] = "red_stale_proof"
+            state["first_blocker"] = (
+                f"stale proof artifact: {relative_path} is {age_days} days old "
+                f"(max {max_age_days})"
+            )
     return state
 
 
@@ -277,15 +287,25 @@ def classify_workstreams(
 def answer_questions(
     contract: dict[str, Any],
     gate_rows: list[dict[str, Any]],
+    artifact_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     gates_by_id = {row["gate_id"]: row for row in gate_rows}
+    release_artifact_blockers = [
+        row for row in (artifact_rows or []) if row.get("release_blocking")
+    ]
     answers: dict[str, dict[str, Any]] = {}
     for question in contract["required_questions"]:
+        question_id = str(question["question_id"])
         gate_ids = [str(gate_id) for gate_id in question["requires_gate_ids"]]
         statuses = [gates_by_id[gate_id]["dashboard_status"] for gate_id in gate_ids]
-        if all(status == "green" for status in statuses):
+        artifact_blockers = (
+            release_artifact_blockers
+            if question_id in {"all_done", "release_proof_green"}
+            else []
+        )
+        if all(status == "green" for status in statuses) and not artifact_blockers:
             answer = "yes"
-        elif any(status.startswith("yellow") for status in statuses):
+        elif any(status.startswith("yellow") for status in statuses) and not artifact_blockers:
             answer = "partial"
         else:
             answer = "no"
@@ -294,12 +314,24 @@ def answer_questions(
             for gate_id in gate_ids
             if gates_by_id[gate_id]["dashboard_status"] != "green"
         ]
-        answers[str(question["question_id"])] = {
+        first_blocker = ""
+        if blockers:
+            first_blocker = blockers[0]["first_blocker"]
+        elif artifact_blockers:
+            first_blocker = str(
+                artifact_blockers[0].get("first_blocker")
+                or artifact_blockers[0].get("path")
+                or "release-blocking proof artifact"
+            )
+        answers[question_id] = {
             "question": question["question"],
             "answer": answer,
             "requires_gate_ids": gate_ids,
             "blocking_gate_ids": [row["gate_id"] for row in blockers],
-            "first_blocker": blockers[0]["first_blocker"] if blockers else "",
+            "blocking_artifact_paths": [
+                str(row["path"]) for row in artifact_blockers if row.get("path")
+            ],
+            "first_blocker": first_blocker,
         }
     return answers
 
@@ -311,9 +343,14 @@ def proof_artifacts(contract: dict[str, Any], as_of: dt.date) -> list[dict[str, 
         for path in contract.get("proof_sources", [])
     ]
     for row in rows:
-        row["release_blocking"] = bool(row["stale"]) and bool(
-            contract["stale_proof_policy"]["stale_is_release_blocking"]
-        )
+        if row["dashboard_status"] == "red_missing_artifact":
+            row["release_blocking"] = True
+        elif row["dashboard_status"] == "red_stale_proof":
+            row["release_blocking"] = bool(
+                contract["stale_proof_policy"]["stale_is_release_blocking"]
+            )
+        else:
+            row["release_blocking"] = False
     return rows
 
 
@@ -331,7 +368,7 @@ def build_dashboard(
     ]
     workstream_rows = classify_workstreams(contract, issues)
     artifacts = proof_artifacts(contract, as_of)
-    answers = answer_questions(contract, gate_rows)
+    answers = answer_questions(contract, gate_rows, artifacts)
     release_blocking_rows = [
         row
         for row in [*gate_rows, *workstream_rows, *artifacts]
@@ -462,6 +499,37 @@ def run_self_tests() -> None:
     assert classified["dashboard_status"] == "red_missing_artifact"
     assert classified["missing_artifacts"] == [
         "target/atp-completion-dashboard-self-test/never-created-proof.json"
+    ]
+    missing_artifact_contract = {
+        "stale_proof_policy": {
+            "max_age_days": 7,
+            "stale_is_release_blocking": True,
+        },
+        "proof_sources": [
+            "target/atp-completion-dashboard-self-test/missing-proof-source.json"
+        ],
+        "required_questions": [
+            {
+                "question_id": "release_proof_green",
+                "question": "green?",
+                "requires_gate_ids": ["ATP-Z"],
+            }
+        ],
+    }
+    missing_artifacts = proof_artifacts(
+        missing_artifact_contract,
+        parse_date("2026-05-21"),
+    )
+    assert missing_artifacts[0]["dashboard_status"] == "red_missing_artifact"
+    assert missing_artifacts[0]["release_blocking"] is True
+    answers = answer_questions(
+        missing_artifact_contract,
+        [{"gate_id": "ATP-Z", "dashboard_status": "green", "first_blocker": ""}],
+        missing_artifacts,
+    )
+    assert answers["release_proof_green"]["answer"] == "no"
+    assert answers["release_proof_green"]["blocking_artifact_paths"] == [
+        "target/atp-completion-dashboard-self-test/missing-proof-source.json"
     ]
     print("atp completion dashboard self-test: pass")
 
