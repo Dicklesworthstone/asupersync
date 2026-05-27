@@ -21,10 +21,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use crate::actor::Actor;
 use crate::cx::Cx;
-use crate::types::Time;
+use crate::types::{Outcome, Time};
+use futures_lite::future::block_on;
+use serde_json::json;
 
 /// Test verdict for conformance checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +248,195 @@ impl MockTime {
     fn now(&self) -> Time {
         *self.current.lock().unwrap()
     }
+}
+
+#[derive(Debug, Clone)]
+struct ActorObservation {
+    observed_events: Vec<String>,
+    post_stop_send_rejected: Option<bool>,
+}
+
+fn noop_waker() -> Waker {
+    struct NoopWaker;
+
+    impl std::task::Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    Waker::from(Arc::new(NoopWaker))
+}
+
+fn drive_counter_actor(
+    messages: &[u64],
+    stop_before_run: bool,
+    attempt_post_stop_send: bool,
+) -> Result<ActorObservation, String> {
+    let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+    let region = runtime
+        .state
+        .create_root_region(crate::types::Budget::INFINITE);
+    let cx = Cx::for_testing();
+    let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
+        region,
+        crate::types::Budget::INFINITE,
+    );
+
+    let actor = CounterActor::new();
+    let event_log = Arc::clone(&actor.lifecycle_events);
+    let (handle, stored) = scope
+        .spawn_actor(&mut runtime.state, &cx, actor, 32)
+        .map_err(|err| format!("spawn_actor failed: {err:?}"))?;
+    let task_id = handle.task_id();
+    runtime.state.store_spawned_task(task_id, stored);
+
+    for &message in messages {
+        handle
+            .try_send(message)
+            .map_err(|err| format!("try_send({message}) failed before run: {err:?}"))?;
+    }
+
+    let mut post_stop_send_rejected = None;
+    if stop_before_run {
+        handle.stop();
+        if attempt_post_stop_send {
+            post_stop_send_rejected = Some(matches!(
+                handle.try_send(999_999),
+                Err(crate::channel::mpsc::SendError::Disconnected(999_999))
+            ));
+        }
+    } else {
+        drop(handle);
+    }
+
+    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime.run_until_quiescent();
+
+    Ok(ActorObservation {
+        observed_events: event_log.lock().unwrap().clone(),
+        post_stop_send_rejected,
+    })
+}
+
+fn drive_two_phase_send_actor() -> Result<Vec<String>, String> {
+    let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+    let region = runtime
+        .state
+        .create_root_region(crate::types::Budget::INFINITE);
+    let cx = Cx::for_testing();
+    let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
+        region,
+        crate::types::Budget::INFINITE,
+    );
+
+    let actor = CounterActor::new();
+    let event_log = Arc::clone(&actor.lifecycle_events);
+    let (handle, stored) = scope
+        .spawn_actor(&mut runtime.state, &cx, actor, 32)
+        .map_err(|err| format!("spawn_actor failed: {err:?}"))?;
+    let task_id = handle.task_id();
+    runtime.state.store_spawned_task(task_id, stored);
+
+    let actor_ref = handle.sender();
+    let permit =
+        block_on(actor_ref.reserve(&cx)).map_err(|err| format!("reserve phase failed: {err:?}"))?;
+    let reserved_snapshot = permit.telemetry_snapshot(0xA7C0);
+    match permit.send(41) {
+        Outcome::Ok(()) => {}
+        other => return Err(format!("permit send phase failed: {other:?}")),
+    }
+
+    drop(actor_ref);
+    drop(handle);
+    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime.run_until_quiescent();
+
+    let mut observed_events = vec![
+        format!(
+            "reserved_uncommitted_obligations={}",
+            reserved_snapshot.reserved_uncommitted_obligations
+        ),
+        "permit_send=ok".to_string(),
+    ];
+    observed_events.extend(event_log.lock().unwrap().iter().cloned());
+    Ok(observed_events)
+}
+
+fn drive_cancelled_reserve_actor() -> Result<Vec<String>, String> {
+    let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+    let region = runtime
+        .state
+        .create_root_region(crate::types::Budget::INFINITE);
+    let cx = Cx::for_testing();
+    let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
+        region,
+        crate::types::Budget::INFINITE,
+    );
+
+    let actor = CounterActor::new();
+    let event_log = Arc::clone(&actor.lifecycle_events);
+    let (handle, stored) = scope
+        .spawn_actor(&mut runtime.state, &cx, actor, 1)
+        .map_err(|err| format!("spawn_actor failed: {err:?}"))?;
+    let task_id = handle.task_id();
+    runtime.state.store_spawned_task(task_id, stored);
+
+    handle
+        .try_send(1)
+        .map_err(|err| format!("initial try_send failed: {err:?}"))?;
+
+    let actor_ref = handle.sender();
+    let mut reserve = Box::pin(actor_ref.reserve(&cx));
+    let waker = noop_waker();
+    let mut task_cx = Context::from_waker(&waker);
+    let reserve_poll_was_pending = matches!(reserve.as_mut().poll(&mut task_cx), Poll::Pending);
+    drop(reserve);
+
+    handle.stop();
+    runtime.scheduler.lock().schedule(task_id, 0);
+    runtime.run_until_quiescent();
+
+    let mut observed_events = vec![format!(
+        "cancelled_reserve_poll_pending={reserve_poll_was_pending}"
+    )];
+    observed_events.extend(event_log.lock().unwrap().iter().cloned());
+    Ok(observed_events)
+}
+
+fn emit_structured_result(result: &ConformanceTestResult, observed_events: &[String]) {
+    let failure_reason = match &result.verdict {
+        TestVerdict::Pass => None,
+        TestVerdict::Fail(reason) => Some(reason.as_str()),
+    };
+    eprintln!(
+        "{}",
+        json!({
+            "test_name": result.test_name,
+            "requirement_level": format!("{:?}", result.requirement_level),
+            "category": format!("{:?}", result.category),
+            "observed_events": observed_events,
+            "verdict": if matches!(result.verdict, TestVerdict::Pass) { "PASS" } else { "FAIL" },
+            "failure_reason": failure_reason,
+        })
+    );
+}
+
+fn observed_result(
+    test_name: &'static str,
+    requirement_level: RequirementLevel,
+    category: TestCategory,
+    verdict: TestVerdict,
+    observed_events: Vec<String>,
+) -> ConformanceTestResult {
+    let result = ConformanceTestResult {
+        test_name,
+        requirement_level,
+        category,
+        verdict,
+    };
+    emit_structured_result(&result, &observed_events);
+    result
 }
 
 /// Main conformance test harness for actor contracts.
@@ -541,110 +733,200 @@ impl ActorConformanceHarness {
     /// Test on_start called before message processing.
     fn test_on_start_before_messages(&mut self) -> ConformanceTestResult {
         // MUST: on_start called before any messages processed
-        let actor = CounterActor::new();
-        let events = actor.lifecycle_events();
-
-        // Would verify in integration test that on_start comes before handle
-        let correct_ordering = events.is_empty(); // No events yet
-
-        let verdict = if correct_ordering {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail("on_start not called before messages".into())
+        let test_name = "on_start_before_messages";
+        let (verdict, observed_events) = match drive_counter_actor(&[1], false, false) {
+            Ok(observation) => {
+                let start_index = observation
+                    .observed_events
+                    .iter()
+                    .position(|event| event == "on_start");
+                let first_handle_index = observation
+                    .observed_events
+                    .iter()
+                    .position(|event| event.starts_with("handle("));
+                let correct_ordering = matches!(
+                    (start_index, first_handle_index),
+                    (Some(start), Some(handle)) if start < handle
+                );
+                if correct_ordering {
+                    (TestVerdict::Pass, observation.observed_events)
+                } else {
+                    (
+                        TestVerdict::Fail(
+                            "observed actor lifecycle did not call on_start before first handle"
+                                .into(),
+                        ),
+                        observation.observed_events,
+                    )
+                }
+            }
+            Err(reason) => (TestVerdict::Fail(reason), Vec::new()),
         };
 
-        ConformanceTestResult {
-            test_name: "on_start_before_messages",
-            requirement_level: RequirementLevel::Must,
-            category: TestCategory::LifecycleManagement,
+        observed_result(
+            test_name,
+            RequirementLevel::Must,
+            TestCategory::LifecycleManagement,
             verdict,
-        }
+            observed_events,
+        )
     }
 
     /// Test on_stop called after mailbox drain.
     fn test_on_stop_after_drain(&mut self) -> ConformanceTestResult {
         // MUST: on_stop called after mailbox is drained
-        let _actor = CounterActor::new();
-
-        // Lifecycle hook ordering enforced by actor loop implementation
-        let correct_drain_order = true; // Verified by actor loop design
-
-        let verdict = if correct_drain_order {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail("on_stop not called after drain".into())
+        let test_name = "on_stop_after_drain";
+        let (verdict, observed_events) = match drive_counter_actor(&[1, 2, 3], true, true) {
+            Ok(observation) => {
+                let stop_index = observation
+                    .observed_events
+                    .iter()
+                    .position(|event| event == "on_stop");
+                let all_handles_before_stop = stop_index.is_some_and(|stop| {
+                    ["handle(1)", "handle(2)", "handle(3)"]
+                        .iter()
+                        .all(|expected| {
+                            observation
+                                .observed_events
+                                .iter()
+                                .position(|event| event == expected)
+                                .is_some_and(|handle| handle < stop)
+                        })
+                });
+                let post_stop_send_rejected = observation.post_stop_send_rejected == Some(true);
+                let mut observed_events = observation.observed_events;
+                observed_events.push(format!("post_stop_send_rejected={post_stop_send_rejected}"));
+                if all_handles_before_stop && post_stop_send_rejected {
+                    (TestVerdict::Pass, observed_events)
+                } else {
+                    (
+                        TestVerdict::Fail(
+                            "observed actor lifecycle did not drain buffered messages before on_stop"
+                                .into(),
+                        ),
+                        observed_events,
+                    )
+                }
+            }
+            Err(reason) => (TestVerdict::Fail(reason), Vec::new()),
         };
 
-        ConformanceTestResult {
-            test_name: "on_stop_after_drain",
-            requirement_level: RequirementLevel::Must,
-            category: TestCategory::LifecycleManagement,
+        observed_result(
+            test_name,
+            RequirementLevel::Must,
+            TestCategory::LifecycleManagement,
             verdict,
-        }
+            observed_events,
+        )
     }
 
     /// Test lifecycle hook calling order.
     fn test_lifecycle_hook_ordering(&mut self) -> ConformanceTestResult {
         // MUST: on_start → handle messages → on_stop
-        let _actor = CounterActor::new();
-
-        // Ordering enforced by actor loop structure
-        let correct_ordering = true; // Verified by implementation
-
-        let verdict = if correct_ordering {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail("Lifecycle hook ordering incorrect".into())
+        let test_name = "lifecycle_hook_ordering";
+        let (verdict, observed_events) = match drive_counter_actor(&[7, 11], false, false) {
+            Ok(observation) => {
+                let expected = ["on_start", "handle(7)", "handle(11)", "on_stop"];
+                let correct_ordering = observation
+                    .observed_events
+                    .iter()
+                    .map(String::as_str)
+                    .eq(expected);
+                if correct_ordering {
+                    (TestVerdict::Pass, observation.observed_events)
+                } else {
+                    (
+                        TestVerdict::Fail(
+                            "lifecycle event order diverged from start-handle-stop".into(),
+                        ),
+                        observation.observed_events,
+                    )
+                }
+            }
+            Err(reason) => (TestVerdict::Fail(reason), Vec::new()),
         };
 
-        ConformanceTestResult {
-            test_name: "lifecycle_hook_ordering",
-            requirement_level: RequirementLevel::Must,
-            category: TestCategory::LifecycleManagement,
+        observed_result(
+            test_name,
+            RequirementLevel::Must,
+            TestCategory::LifecycleManagement,
             verdict,
-        }
+            observed_events,
+        )
     }
 
     /// Test two-phase send pattern.
     fn test_two_phase_send_pattern(&mut self) -> ConformanceTestResult {
         // MUST: Messages use reserve/send pattern
-        // Verified by mpsc channel usage in actor implementation
-
-        let two_phase_pattern = true; // Enforced by mpsc::Sender API
-
-        let verdict = if two_phase_pattern {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail("Two-phase send pattern not implemented".into())
+        let test_name = "two_phase_send_pattern";
+        let (verdict, observed_events) = match drive_two_phase_send_actor() {
+            Ok(observed_events) => {
+                let reserved = observed_events
+                    .iter()
+                    .any(|event| event == "reserved_uncommitted_obligations=1");
+                let committed = observed_events
+                    .iter()
+                    .any(|event| event == "permit_send=ok");
+                let delivered = observed_events.iter().any(|event| event == "handle(41)");
+                if reserved && committed && delivered {
+                    (TestVerdict::Pass, observed_events)
+                } else {
+                    (
+                        TestVerdict::Fail(
+                            "two-phase reserve/send observation did not reserve, commit, and deliver"
+                                .into(),
+                        ),
+                        observed_events,
+                    )
+                }
+            }
+            Err(reason) => (TestVerdict::Fail(reason), Vec::new()),
         };
 
-        ConformanceTestResult {
-            test_name: "two_phase_send_pattern",
-            requirement_level: RequirementLevel::Must,
-            category: TestCategory::TwoPhaseMessaging,
+        observed_result(
+            test_name,
+            RequirementLevel::Must,
+            TestCategory::TwoPhaseMessaging,
             verdict,
-        }
+            observed_events,
+        )
     }
 
     /// Test cancel-safe messaging.
     fn test_cancel_safe_messaging(&mut self) -> ConformanceTestResult {
         // MUST: Messaging is cancel-safe (no data loss on cancellation)
-        // Enforced by two-phase reserve/commit pattern
-
-        let cancel_safe = true; // Guaranteed by two-phase protocol
-
-        let verdict = if cancel_safe {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail("Cancel-safe messaging not guaranteed".into())
+        let test_name = "cancel_safe_messaging";
+        let (verdict, observed_events) = match drive_cancelled_reserve_actor() {
+            Ok(observed_events) => {
+                let reserve_was_pending = observed_events
+                    .iter()
+                    .any(|event| event == "cancelled_reserve_poll_pending=true");
+                let delivered_existing = observed_events.iter().any(|event| event == "handle(1)");
+                let no_phantom_delivery = !observed_events
+                    .iter()
+                    .any(|event| event.starts_with("handle(") && event != "handle(1)");
+                if reserve_was_pending && delivered_existing && no_phantom_delivery {
+                    (TestVerdict::Pass, observed_events)
+                } else {
+                    (
+                        TestVerdict::Fail(
+                            "cancelled reserve did not preserve existing message without phantom delivery"
+                                .into(),
+                        ),
+                        observed_events,
+                    )
+                }
+            }
+            Err(reason) => (TestVerdict::Fail(reason), Vec::new()),
         };
 
-        ConformanceTestResult {
-            test_name: "cancel_safe_messaging",
-            requirement_level: RequirementLevel::Must,
-            category: TestCategory::TwoPhaseMessaging,
+        observed_result(
+            test_name,
+            RequirementLevel::Must,
+            TestCategory::TwoPhaseMessaging,
             verdict,
-        }
+            observed_events,
+        )
     }
 
     /// Test try_send non-blocking semantics.
