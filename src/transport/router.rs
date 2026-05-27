@@ -353,19 +353,18 @@ impl BoundedLoadConfig {
         const MAX_SAFE_EPSILON_MILLI: u32 = 5_000; // Max 500% overhead
         const MAX_SAFE_CAPACITY_PER_WEIGHT: u32 = 1_000; // Reasonable scaling
 
-        let safe_weight = endpoint.weight.min(MAX_SAFE_WEIGHT).max(1);
+        let safe_weight = endpoint.weight.clamp(1, MAX_SAFE_WEIGHT);
         let safe_epsilon = self.epsilon_milli.min(MAX_SAFE_EPSILON_MILLI);
         let safe_capacity_per_weight = self
             .capacity_per_weight
-            .min(MAX_SAFE_CAPACITY_PER_WEIGHT)
-            .max(1);
+            .clamp(1, MAX_SAFE_CAPACITY_PER_WEIGHT);
 
         // br-asupersync-qfgsh1: Use checked arithmetic to detect overflow attempts
         let base = match safe_weight.checked_mul(safe_capacity_per_weight) {
             Some(result) => result,
             None => {
                 // Overflow detected - return bounded capacity instead of unlimited
-                return self.min_capacity.max(1).min(1_000); // Bounded fallback
+                return self.min_capacity.clamp(1, 1_000); // Bounded fallback
             }
         };
 
@@ -376,7 +375,7 @@ impl BoundedLoadConfig {
             Some(product) => product.div_ceil(1_000),
             None => {
                 // Overflow detected in scaling - return bounded capacity
-                return self.min_capacity.max(1).min(1_000); // Bounded fallback
+                return self.min_capacity.clamp(1, 1_000); // Bounded fallback
             }
         };
 
@@ -385,7 +384,7 @@ impl BoundedLoadConfig {
             Ok(capacity) if capacity <= 100_000 => capacity, // Reasonable upper limit
             _ => {
                 // Value too large or conversion failed - use bounded capacity
-                self.min_capacity.max(1).min(1_000) // Bounded fallback
+                self.min_capacity.clamp(1, 1_000) // Bounded fallback
             }
         };
 

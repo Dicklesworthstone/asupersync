@@ -48,9 +48,7 @@ fn take_finished_fallbacks(state: &mut SleepState) -> Vec<std::thread::JoinHandl
             if let Some(fallback) = state.fallback.take() {
                 state.zombie_fallbacks.push(fallback.join);
             }
-        }
-    } else if let Some(fallback) = state.fallback.as_ref() {
-        if fallback.join.is_finished() {
+        } else if fallback.join.is_finished() {
             if let Some(fallback) = state.fallback.take() {
                 finished.push(fallback.join);
             }

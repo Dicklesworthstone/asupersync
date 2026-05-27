@@ -466,12 +466,12 @@ fn is_valid_header_name_rfc7230(name: &str) -> bool {
     for byte in name.bytes() {
         match byte {
             // ALPHA (A-Z, a-z)
-            b'A'..=b'Z' | b'a'..=b'z' => continue,
+            b'A'..=b'Z' | b'a'..=b'z' => {}
             // DIGIT (0-9)
-            b'0'..=b'9' => continue,
+            b'0'..=b'9' => {}
             // tchar special characters
             b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_'
-            | b'`' | b'|' | b'~' => continue,
+            | b'`' | b'|' | b'~' => {}
             // Invalid character for header name
             _ => return false,
         }
@@ -496,9 +496,9 @@ fn is_valid_header_value_rfc7230(value: &str) -> bool {
     for &byte in bytes {
         match byte {
             // VCHAR (visible characters)
-            0x21..=0x7E => continue,
+            0x21..=0x7E => {}
             // SP (space) and HTAB (horizontal tab) - allowed in field values
-            b' ' | b'\t' => continue,
+            b' ' | b'\t' => {}
             // obs-text (0x80-0xFF) - technically allowed but we reject for safety
             // Control characters (0x00-0x1F, 0x7F) - forbidden
             _ => return false,

@@ -57,13 +57,11 @@ fn validate_safe_path(path: &Path, allow_absolute: bool) -> io::Result<()> {
             }
             std::path::Component::CurDir => {
                 // Current directory references are generally safe but unnecessary
-                continue;
             }
             std::path::Component::Prefix(_)
             | std::path::Component::RootDir
             | std::path::Component::Normal(_) => {
                 // These are safe components
-                continue;
             }
         }
     }

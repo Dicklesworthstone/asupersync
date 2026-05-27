@@ -615,22 +615,21 @@ impl DistributedRegionRecord {
                 self.vector_clock.increment(&self.local_node_id);
 
                 // Use sequence number for tie-breaking in concurrent case
-                if remote_sequence > local_sequence {
-                    ConflictResolutionResult::AcceptRemote
-                } else if local_sequence > remote_sequence {
-                    ConflictResolutionResult::KeepLocal
-                } else {
-                    // Same sequence number - use node ID lexicographic order for determinism
-                    let remote_node_id = remote_vector_clock
-                        .iter()
-                        .max_by_key(|(_, count)| *count)
-                        .map(|(node_id, _)| node_id)
-                        .unwrap_or(&self.local_node_id);
+                match remote_sequence.cmp(&local_sequence) {
+                    std::cmp::Ordering::Greater => ConflictResolutionResult::AcceptRemote,
+                    std::cmp::Ordering::Less => ConflictResolutionResult::KeepLocal,
+                    std::cmp::Ordering::Equal => {
+                        // Same sequence number - use node ID lexicographic order for determinism
+                        let remote_node_id = remote_vector_clock
+                            .iter()
+                            .max_by_key(|(_, count)| *count)
+                            .map_or(&self.local_node_id, |(node_id, _)| node_id);
 
-                    if self.local_node_id > *remote_node_id {
-                        ConflictResolutionResult::KeepLocal
-                    } else {
-                        ConflictResolutionResult::AcceptRemote
+                        if self.local_node_id > *remote_node_id {
+                            ConflictResolutionResult::KeepLocal
+                        } else {
+                            ConflictResolutionResult::AcceptRemote
+                        }
                     }
                 }
             }

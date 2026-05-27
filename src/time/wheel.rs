@@ -594,7 +594,7 @@ impl TimerWheel {
             return min_deadline;
         }
 
-        for (_idx, level) in self.levels.iter().enumerate() {
+        for level in &self.levels {
             let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
             let level_tick = now_nanos / level.resolution_ns;
             let current_slot = (level_tick % (SLOTS_PER_LEVEL as u64)) as usize;
@@ -819,7 +819,7 @@ impl TimerWheel {
 
     fn promote_coalescing_window_entries(&mut self, boundary: Time, ready: &mut Vec<TimerEntry>) {
         let boundary_ns = boundary.as_nanos();
-        for (_idx, level) in self.levels.iter_mut().enumerate() {
+        for level in &mut self.levels {
             let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
             let level_tick_current = now_nanos / level.resolution_ns;
             let level_tick_boundary = boundary_ns / level.resolution_ns;
@@ -980,7 +980,7 @@ impl TimerWheel {
             .filter(|e| self.is_live(e) && e.deadline <= coalesced_time)
             .count();
 
-        for (_idx, level) in self.levels.iter().enumerate() {
+        for level in &self.levels {
             let now_nanos = self.current_tick.saturating_mul(LEVEL0_RESOLUTION_NS);
             let level_tick_current = now_nanos / level.resolution_ns;
             let level_tick_boundary = window_end_ns / level.resolution_ns;

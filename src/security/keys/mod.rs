@@ -201,7 +201,7 @@ impl IdentityKeyStore {
     /// Export the active public identity key.
     pub fn export_public(&self) -> Result<PublicIdentityKey, KeyStoreError> {
         let active = self.active_key_record()?;
-        Ok(active.public_view()?)
+        active.public_view()
     }
 
     /// Export every public key generation in deterministic order.

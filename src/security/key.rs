@@ -51,6 +51,7 @@ pub const MIN_HAMMING_WEIGHT: u32 = 64;
 pub const MAX_HAMMING_WEIGHT: u32 = 192;
 
 /// Maximum frequency any single byte value can appear in a valid key.
+///
 /// No byte value should appear more than 4 times in 32 bytes (12.5%).
 /// This prevents concentration attacks where keys have predictable patterns.
 pub const MAX_BYTE_FREQUENCY: usize = 4;

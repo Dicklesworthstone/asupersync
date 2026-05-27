@@ -342,7 +342,7 @@ impl CryptoSalt {
         let domain_bytes = domain.as_bytes();
         for (i, &domain_byte) in domain_bytes.iter().enumerate() {
             // Skip first 8 bytes to preserve seed value for as_u64()
-            if i >= 8 && i < 32 {
+            if (8..32).contains(&i) {
                 salt_bytes[i] ^= domain_byte;
             }
         }

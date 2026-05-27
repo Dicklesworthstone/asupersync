@@ -2,7 +2,7 @@
 //!
 //! Implements ASW-10: verification logic to determine whether a compacted or resumed
 //! agent session has enough evidence to continue safely without restarting from
-//! stale assumptions.
+//! stale inputs.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -522,7 +522,7 @@ impl HandoffVerifier {
         }
 
         // Check bead claims
-        if let Some(coord_req) = self.check_bead_claims(&capsule.claimed_beads) {
+        if let Some(coord_req) = self.check_bead_claims(capsule) {
             coordination_requirements.push(coord_req);
         }
 
@@ -584,20 +584,18 @@ impl HandoffVerifier {
 
     /// Computes SHA-256 hash of capsule content for integrity verification.
     fn compute_content_hash(&self, capsule: &HandoffCapsule) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
         // Create a capsule copy without the content_hash field for hashing
         let mut capsule_for_hash = capsule.clone();
         capsule_for_hash.content_hash = String::new(); // Exclude hash field itself
 
-        // Serialize to JSON for consistent hashing across SystemTime fields
         if let Ok(json_bytes) = serde_json::to_vec(&capsule_for_hash) {
-            let mut hasher = DefaultHasher::new();
-            json_bytes.hash(&mut hasher);
-            format!("{:x}", hasher.finish())
+            let mut hasher = Sha256::new();
+            hasher.update(b"asupersync.agent_swarm.handoff_capsule.v1\0");
+            hasher.update(json_bytes);
+            hex::encode(hasher.finalize())
         } else {
-            // Fallback to empty string hash if serialization fails
             "serialization-failed".to_string()
         }
     }
@@ -676,20 +674,92 @@ impl HandoffVerifier {
         let expired_count = reservations.iter().filter(|r| r.expires_at < now).count();
 
         if expired_count > 0 {
+            let mut targets: Vec<String> = reservations
+                .iter()
+                .filter(|reservation| reservation.expires_at < now)
+                .map(|reservation| format!("reservation:{}", reservation.id))
+                .collect();
+            targets.sort();
+            targets.dedup();
+
             Some(CoordinationRequirement {
                 requirement_type: CoordinationType::FileReservationHandoff,
-                target_agents: vec!["system".to_string()], // Placeholder
-                estimated_time: Duration::from_secs(300),  // 5 minutes
+                target_agents: targets,
+                estimated_time: Duration::from_secs(300), // 5 minutes
             })
         } else {
             None
         }
     }
 
-    fn check_bead_claims(&self, _claims: &[BeadClaim]) -> Option<CoordinationRequirement> {
-        // For now, assume bead claims are always valid
-        // In practice, would check against current bead state
-        None
+    fn check_bead_claims(&self, capsule: &HandoffCapsule) -> Option<CoordinationRequirement> {
+        let now = SystemTime::now();
+        let mut needs_coordination = Vec::new();
+
+        for claim in &capsule.claimed_beads {
+            let bead_id = claim.bead_id.trim();
+            if bead_id.is_empty() {
+                needs_coordination.push("bead:<blank>".to_string());
+                continue;
+            }
+            if !claim.progress.is_finite() || !(0.0..=1.0).contains(&claim.progress) {
+                needs_coordination.push(format!("bead:{bead_id}:invalid-progress"));
+                continue;
+            }
+
+            match claim.status {
+                BeadStatus::Open => {
+                    needs_coordination.push(format!("bead:{bead_id}:not-claimed"));
+                }
+                BeadStatus::InProgress => {
+                    let claim_age = now
+                        .duration_since(claim.claimed_at)
+                        .unwrap_or(Duration::MAX);
+                    let has_recent_evidence = capsule
+                        .proof_commands
+                        .iter()
+                        .any(|cmd| cmd.command_line.contains(bead_id))
+                        || capsule
+                            .pushed_commits
+                            .iter()
+                            .any(|commit| commit.message_summary.contains(bead_id));
+                    if claim_age > self.staleness_thresholds.git_sync_max_age
+                        && !has_recent_evidence
+                    {
+                        needs_coordination.push(format!("bead:{bead_id}:stale-claim"));
+                    }
+                }
+                BeadStatus::Blocked => {
+                    let blocker_matches = capsule.first_blocker.as_ref().is_some_and(|blocker| {
+                        blocker
+                            .dependencies
+                            .iter()
+                            .any(|dependency| dependency.contains(bead_id))
+                            || blocker.description.contains(bead_id)
+                    });
+                    if !blocker_matches {
+                        needs_coordination.push(format!("bead:{bead_id}:missing-blocker"));
+                    }
+                }
+                BeadStatus::Closed => {
+                    if claim.progress < 1.0 {
+                        needs_coordination.push(format!("bead:{bead_id}:closed-without-progress"));
+                    }
+                }
+            }
+        }
+
+        if needs_coordination.is_empty() {
+            None
+        } else {
+            needs_coordination.sort();
+            needs_coordination.dedup();
+            Some(CoordinationRequirement {
+                requirement_type: CoordinationType::BeadTransfer,
+                target_agents: needs_coordination,
+                estimated_time: Duration::from_secs(300),
+            })
+        }
     }
 
     fn check_proof_commands(&self, commands: &[ProofCommand]) -> Option<SafetyViolation> {
@@ -888,6 +958,40 @@ mod tests {
                     c.requirement_type,
                     CoordinationType::FileReservationHandoff
                 )));
+            }
+            other => panic!("Expected CoordinateFirst, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_invalid_bead_claims_need_coordination() {
+        let verifier = HandoffVerifier::new();
+        let mut capsule = create_test_capsule();
+
+        capsule.claimed_beads.push(BeadClaim {
+            bead_id: "asupersync-test-bead".to_string(),
+            title: "stale claim".to_string(),
+            status: BeadStatus::InProgress,
+            claimed_at: SystemTime::now() - Duration::from_secs(3600),
+            progress: 0.5,
+        });
+        refresh_content_hash(&mut capsule);
+
+        match verifier.verify_handoff(&capsule) {
+            HandoffDecision::CoordinateFirst {
+                coordination_needed,
+            } => {
+                let bead_coordination = coordination_needed
+                    .iter()
+                    .find(|c| matches!(c.requirement_type, CoordinationType::BeadTransfer));
+                assert!(bead_coordination.is_some());
+                assert!(
+                    bead_coordination
+                        .unwrap()
+                        .target_agents
+                        .iter()
+                        .any(|target| target.contains("stale-claim"))
+                );
             }
             other => panic!("Expected CoordinateFirst, got {:?}", other),
         }

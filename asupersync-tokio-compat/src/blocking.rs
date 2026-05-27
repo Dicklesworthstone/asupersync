@@ -284,8 +284,8 @@ mod tests {
 
     // ── INV-1: Cx is required at boundary (compile-time) ──────────────
     // This is enforced by the function signature: block_on_sync takes &Cx.
-    // A test would need to verify it doesn't compile without Cx, which is
-    // a compile-fail test. We verify the API exists and works.
+    // Compile-fail coverage belongs in a UI-test harness; this unit test proves
+    // the public boundary works when the required capability context is present.
 
     #[test]
     fn inv1_cx_required_blocking_bridge_compiles() {

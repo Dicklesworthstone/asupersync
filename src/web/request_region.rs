@@ -153,6 +153,7 @@ impl<'a> RequestRegion<'a> {
     /// runs, but a completed async response is always returned even if cancel
     /// arrived during execution.
     #[inline]
+    #[allow(clippy::future_not_send)]
     pub async fn run_async<F, Fut>(self, handler: F) -> RegionOutcome
     where
         F: FnOnce(&RequestContext<'_>) -> Fut,
@@ -160,7 +161,7 @@ impl<'a> RequestRegion<'a> {
     {
         let _cx_guard = Cx::set_current(Some(self.cx.clone()));
         let ctx = RequestContext {
-            cx: &self.cx,
+            cx: self.cx,
             request: &self.request,
             _not_send_sync: PhantomData,
         };
@@ -194,6 +195,7 @@ impl<'a> RequestRegion<'a> {
     /// Phase 1: Integration with the async Handler trait for web framework usage.
     /// This is the primary method used by routers and middleware.
     #[inline]
+    #[allow(clippy::future_not_send)]
     pub async fn run_handler<H>(self, handler: &H) -> RegionOutcome
     where
         H: crate::web::handler::Handler,
@@ -207,7 +209,7 @@ impl<'a> RequestRegion<'a> {
 
         // br-asupersync-hwdzlm: Use CatchUnwind for proper async panic isolation
         let handler_future = CatchUnwind {
-            inner: handler.call(&self.cx, self.request),
+            inner: handler.call(self.cx, self.request),
         };
 
         // Execute the handler with async panic isolation
@@ -276,6 +278,7 @@ impl<'a> RequestRegion<'a> {
     ///
     /// This integrates with asupersync's structured concurrency and handles
     /// both application-level errors (Err) and panics with proper isolation.
+    #[allow(clippy::future_not_send)]
     pub async fn run_async_result<F, Fut>(self, handler: F) -> RegionOutcome
     where
         F: FnOnce(&RequestContext<'_>) -> Fut,
@@ -283,7 +286,7 @@ impl<'a> RequestRegion<'a> {
     {
         let _cx_guard = Cx::set_current(Some(self.cx.clone()));
         let ctx = RequestContext {
-            cx: &self.cx,
+            cx: self.cx,
             request: &self.request,
             _not_send_sync: PhantomData,
         };

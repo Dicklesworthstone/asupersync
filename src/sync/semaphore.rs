@@ -357,15 +357,16 @@ impl Semaphore {
                 // synchronization-critical path.
                 obligation: Some({
                     // Get region from current thread-local context for obligation scoping
-                    let region = crate::cx::Cx::current()
-                        .map(|cx| cx.region_id())
-                        .unwrap_or_else(|| {
+                    let region = crate::cx::Cx::current().map_or_else(
+                        || {
                             panic!(
                                 "Cannot acquire semaphore permit outside of task context: \
                                  obligation tokens require region scoping to prevent leaks. \
                                  Use async acquire() method when in async context."
                             )
-                        });
+                        },
+                        |cx| cx.region_id(),
+                    );
                     ObligationToken::reserve("semaphore-permit", region)
                 }),
                 semaphore: self,
@@ -907,16 +908,15 @@ impl Future for OwnedAcquireFuture {
                 // comment in try_acquire); count is exposed via
                 // OwnedSemaphorePermit.count.
                 obligation: Some({
-                    let region = this
-                        .cx
-                        .as_ref()
-                        .map(|cx| cx.region_id())
-                        .unwrap_or_else(|| {
+                    let region = this.cx.as_ref().map_or_else(
+                        || {
                             panic!(
                                 "Cannot acquire owned semaphore permit without context: \
                                  obligation tokens require region scoping to prevent leaks."
                             )
-                        });
+                        },
+                        |cx| cx.region_id(),
+                    );
                     ObligationToken::reserve("semaphore-permit", region)
                 }),
                 semaphore: this.semaphore.clone(),

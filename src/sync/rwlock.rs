@@ -154,7 +154,7 @@ impl std::fmt::Display for TryWriteError {
 
 impl std::error::Error for TryWriteError {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct State {
     readers: usize,
     writer_active: bool,
@@ -166,20 +166,6 @@ struct State {
     /// the queue while readers were also queued. Reset to 0 whenever a
     /// reader batch runs (forced or natural).
     consecutive_writers_served: usize,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            readers: 0,
-            writer_active: false,
-            writer_waiters: 0,
-            reader_waiters: WaiterChain::new(),
-            writer_queue: WaiterChain::new(),
-            next_waiter_id: 0,
-            consecutive_writers_served: 0,
-        }
-    }
 }
 
 /// A cancel-aware read-write lock with writer-preference fairness.

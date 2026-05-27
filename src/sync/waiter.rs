@@ -33,14 +33,14 @@ type PositionMap = HashMap<WaiterId, usize, BuildHasherDefault<DefaultHasher>>;
 /// slot as soon as the head waiter is popped for a handoff. Futures can still
 /// hold their old identity until they observe that handoff, so a bare index
 /// would allow a stale future to remove or update an unrelated newer waiter.
-pub(crate) type WaiterId = usize;
+pub type WaiterId = usize;
 
 /// Slab-backed doubly-linked FIFO of waiters
 /// (br-asupersync-wlf0xh). Each slot carries the task's `Waker` plus
 /// `prev`/`next` slab-index pointers so that O(1) removal at any
 /// position is possible from a known stable waiter id.
 #[derive(Debug, Clone)]
-pub(crate) struct WaiterChain<T = ()> {
+pub struct WaiterChain<T = ()> {
     slots: Slab<WaiterSlot<T>>,
     positions: PositionMap,
     head: Option<usize>,

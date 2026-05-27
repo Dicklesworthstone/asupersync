@@ -187,7 +187,7 @@ impl DetRng {
         }
 
         // High-quality seed
-        if popcount >= 20 && popcount <= 44 && leading_zeros <= 8 && trailing_zeros <= 8 {
+        if (20..=44).contains(&popcount) && leading_zeros <= 8 && trailing_zeros <= 8 {
             SeedQuality::Excellent
         } else {
             SeedQuality::Good

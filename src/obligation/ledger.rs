@@ -348,7 +348,7 @@ impl ObligationLedger {
             .stats
             .pending
             .checked_sub(1)
-            .ok_or_else(|| LedgerError::StatsUnderflow { counter: "pending" })?;
+            .ok_or(LedgerError::StatsUnderflow { counter: "pending" })?;
         Ok(())
     }
 

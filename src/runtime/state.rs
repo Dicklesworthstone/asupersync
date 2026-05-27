@@ -210,10 +210,7 @@ impl ReadBiasedDrainingRegionSnapshot {
                         }
                         // Cache was invalidated between reset and read, fall through to rebuild
                     }
-                    Err(_) => {
-                        // Counter was modified by another thread, retry
-                        continue;
-                    }
+                    Err(_) => {}
                 }
             } else {
                 // Cache invalid or too many writes, break out to scan
