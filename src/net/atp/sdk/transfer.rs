@@ -702,6 +702,121 @@ fn daemon_endpoint_is_reachable(mode: &SdkMode) -> std::io::Result<()> {
     std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct DetachedObjectSignatureEnvelope {
+    algorithm: String,
+    session_id_hex: String,
+    hash_hex: String,
+    size_bytes: u64,
+    signature_hex: String,
+}
+
+impl AtpSession {
+    async fn verify_detached_object_signature(
+        &self,
+        object_path: &Path,
+        computed_hash: &[u8; 32],
+        size_bytes: u64,
+    ) -> Option<bool> {
+        let signature_path = detached_object_signature_path(object_path);
+        if !signature_path.exists() {
+            return None;
+        }
+
+        match crate::fs::read(&signature_path).await {
+            Ok(payload) => Some(self.verify_detached_object_signature_payload(
+                &payload,
+                computed_hash,
+                size_bytes,
+            )),
+            Err(_) => Some(false),
+        }
+    }
+
+    fn verify_detached_object_signature_payload(
+        &self,
+        payload: &[u8],
+        computed_hash: &[u8; 32],
+        size_bytes: u64,
+    ) -> bool {
+        use subtle::ConstantTimeEq;
+
+        let Ok(envelope) = serde_json::from_slice::<DetachedObjectSignatureEnvelope>(payload)
+        else {
+            return false;
+        };
+        if envelope.algorithm != OBJECT_SIGNATURE_ALGORITHM {
+            return false;
+        }
+        if envelope.size_bytes != size_bytes {
+            return false;
+        }
+        if envelope.session_id_hex != hex::encode(self.session.session_id.as_bytes()) {
+            return false;
+        }
+
+        let Ok(hash_bytes) = decode_hex_32(&envelope.hash_hex) else {
+            return false;
+        };
+        if !bool::from(hash_bytes.ct_eq(computed_hash)) {
+            return false;
+        }
+
+        let Ok(signature_bytes) = decode_hex_32(&envelope.signature_hex) else {
+            return false;
+        };
+        let expected = self.compute_detached_object_signature(computed_hash, size_bytes);
+        bool::from(signature_bytes.ct_eq(&expected))
+    }
+
+    fn compute_detached_object_signature(
+        &self,
+        computed_hash: &[u8; 32],
+        size_bytes: u64,
+    ) -> [u8; 32] {
+        use crate::security::AuthKey;
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+
+        let mut ikm = Vec::with_capacity(160);
+        ikm.extend_from_slice(self.session.session_id.as_bytes());
+        ikm.extend_from_slice(self.session.local_peer.as_bytes());
+        ikm.extend_from_slice(self.session.remote_peer.as_bytes());
+        ikm.extend_from_slice(self.session.nonce.as_bytes());
+        ikm.extend_from_slice(self.session.transcript_hash.as_bytes());
+        let key = AuthKey::from_hkdf(
+            &ikm,
+            Some(b"asupersync-atp-sdk-object-signature-key-v1"),
+            b"session-bound-object-verification",
+        );
+
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+        mac.update(OBJECT_SIGNATURE_DOMAIN);
+        mac.update(self.session.session_id.as_bytes());
+        mac.update(&(computed_hash.len() as u64).to_be_bytes());
+        mac.update(computed_hash);
+        mac.update(&size_bytes.to_be_bytes());
+        mac.finalize().into_bytes().into()
+    }
+}
+
+fn decode_hex_32(input: &str) -> Result<[u8; 32], hex::FromHexError> {
+    let bytes = hex::decode(input)?;
+    if bytes.len() != 32 {
+        return Err(hex::FromHexError::InvalidStringLength);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn detached_object_signature_path(object_path: &Path) -> PathBuf {
+    let mut path = object_path.as_os_str().to_os_string();
+    path.push(".atp.sig");
+    PathBuf::from(path)
+}
+
 impl ActiveTransfer {
     /// Get the transfer ID.
     #[must_use]
