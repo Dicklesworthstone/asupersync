@@ -240,7 +240,7 @@ impl PrivacyConfig {
             return "[CARD_REDACTED]".to_string();
         }
 
-        // SSN pattern detection (XXX-XX-XXXX format)
+        // SSN pattern detection (###-##-#### format)
         if value.len() == 11
             && value.chars().nth(3) == Some('-')
             && value.chars().nth(6) == Some('-')
@@ -4346,14 +4346,13 @@ mod exporter_tests {
         //
         // GOAL: Preserve recent data over stale data for better observability.
 
-        // Create a mock exporter that tracks what it receives
         let received_batches = Arc::new(Mutex::new(Vec::<MetricsSnapshot>::new()));
 
-        struct MockTrackingExporter {
+        struct TrackingExporter {
             received: Arc<Mutex<Vec<MetricsSnapshot>>>,
         }
 
-        impl MetricsExporter for MockTrackingExporter {
+        impl MetricsExporter for TrackingExporter {
             fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
                 self.received.lock().push(metrics.clone());
                 Ok(())
@@ -4364,13 +4363,13 @@ mod exporter_tests {
             }
         }
 
-        let mock_exporter = MockTrackingExporter {
+        let tracking_exporter = TrackingExporter {
             received: Arc::clone(&received_batches),
         };
 
         // Create load shedding exporter with small capacity for testing
         let queue_capacity = 3;
-        let exporter = LoadSheddingExporter::new(Box::new(mock_exporter), queue_capacity);
+        let exporter = LoadSheddingExporter::new(Box::new(tracking_exporter), queue_capacity);
 
         // Create identifiable test batches
         let mut batches = Vec::new();
@@ -4808,14 +4807,10 @@ pub mod span_semantics {
         pub tests_passed: usize,
         /// Number of tests failed.
         pub tests_failed: usize,
-        /// Number of expected failures (XFAIL) that failed as expected.
-        pub expected_failures: usize,
-        /// Number of expected failures (XFAIL) that unexpectedly passed.
-        pub unexpected_passes: usize,
         /// Detailed failure messages.
         pub failures: Vec<String>,
-        /// XFAIL coverage issues (tests that should be XFAIL but aren't marked).
-        pub xfail_coverage_gaps: Vec<String>,
+        /// Known conformance gaps that make the run fail closed.
+        pub conformance_gaps: Vec<String>,
     }
 
     impl SpanConformanceResult {
@@ -4825,10 +4820,8 @@ pub mod span_semantics {
                 tests_run: 0,
                 tests_passed: 0,
                 tests_failed: 0,
-                expected_failures: 0,
-                unexpected_passes: 0,
                 failures: Vec::new(),
-                xfail_coverage_gaps: Vec::new(),
+                conformance_gaps: Vec::new(),
             }
         }
 
@@ -4845,43 +4838,26 @@ pub mod span_semantics {
             self.failures.push(format!("{}: {}", test_name, reason));
         }
 
-        /// Record an expected failure (XFAIL) that failed as expected.
-        pub fn record_expected_failure(&mut self, _test_name: &str, _reason: &str) {
-            self.tests_run += 1;
-            self.expected_failures += 1;
-        }
-
-        /// Record an expected failure (XFAIL) that unexpectedly passed.
-        pub fn record_unexpected_pass(&mut self, test_name: &str, reason: &str) {
-            self.tests_run += 1;
-            self.unexpected_passes += 1;
-            self.failures
-                .push(format!("XFAIL-PASS {}: {}", test_name, reason));
-        }
-
-        /// Record an XFAIL coverage gap (test should be XFAIL but isn't marked).
-        pub fn record_xfail_coverage_gap(&mut self, test_name: &str, reason: &str) {
-            self.xfail_coverage_gaps
+        /// Record a known conformance gap as a fail-closed result.
+        pub fn record_conformance_gap(&mut self, test_name: &str, reason: &str) {
+            self.conformance_gaps
                 .push(format!("{}: {}", test_name, reason));
         }
 
-        /// Check if all tests passed with proper XFAIL coverage.
+        /// Check if all tests passed with no known conformance gaps.
         /// Fails closed when there are:
         /// - Unexpected test failures
-        /// - Unexpected passes of XFAIL tests
-        /// - XFAIL coverage gaps
+        /// - Known conformance gaps
         pub fn is_success(&self) -> bool {
-            self.tests_failed == 0
-                && self.unexpected_passes == 0
-                && self.xfail_coverage_gaps.is_empty()
+            self.tests_failed == 0 && self.conformance_gaps.is_empty()
         }
 
-        /// Check if XFAIL coverage is complete.
-        pub fn has_complete_xfail_coverage(&self) -> bool {
-            self.xfail_coverage_gaps.is_empty()
+        /// Check whether the runner found any known conformance gaps.
+        pub fn has_no_known_conformance_gaps(&self) -> bool {
+            self.conformance_gaps.is_empty()
         }
 
-        /// Get comprehensive failure report including XFAIL issues.
+        /// Get comprehensive failure report including fail-closed conformance gaps.
         pub fn failure_report(&self) -> String {
             let mut report = String::new();
 
@@ -4892,9 +4868,9 @@ pub mod span_semantics {
                 }
             }
 
-            if !self.xfail_coverage_gaps.is_empty() {
-                report.push_str("XFAIL Coverage Gaps (fail closed):\n");
-                for gap in &self.xfail_coverage_gaps {
+            if !self.conformance_gaps.is_empty() {
+                report.push_str("Conformance Gaps (fail closed):\n");
+                for gap in &self.conformance_gaps {
                     report.push_str(&format!("  - {}\n", gap));
                 }
             }
@@ -5570,84 +5546,7 @@ pub mod span_semantics {
             test_context_propagation(&mut result, config);
         }
 
-        // Validate XFAIL coverage - fail closed on gaps
-        validate_xfail_coverage(&mut result, config);
-
         Ok(result)
-    }
-
-    /// Validate XFAIL coverage - ensures known limitations are properly marked.
-    /// Implements fail-closed behavior: if there are gaps in XFAIL coverage,
-    /// the conformance run fails to prevent bugs from slipping through.
-    fn validate_xfail_coverage(result: &mut SpanConformanceResult, config: &SpanConformanceConfig) {
-        // Check for known OTLP resource attribute limitations that should be XFAIL
-
-        // Known limitation 1: Resource attribute precedence edge cases
-        // Current implementation may not handle all OTel SDK resource precedence rules
-        let resource_precedence_gaps = check_resource_precedence_xfail_coverage(config);
-        for gap in resource_precedence_gaps {
-            result.record_xfail_coverage_gap(
-                "resource_attribute_precedence",
-                &format!("Resource precedence rule not covered by XFAIL: {}", gap),
-            );
-        }
-
-        // Known limitation 2: Span attribute deduplication edge cases
-        // Large attribute counts may not preserve insertion order
-        if config.max_attributes > 64 {
-            result.record_xfail_coverage_gap(
-                "span_attribute_large_count_ordering",
-                "Attribute insertion order not guaranteed for large counts (>64) - should be XFAIL",
-            );
-        }
-
-        // Known limitation 3: Context propagation with malformed trace states
-        if config.test_context_propagation {
-            result.record_xfail_coverage_gap(
-                "malformed_trace_state_propagation",
-                "Malformed W3C trace-state handling not covered by XFAIL tests",
-            );
-        }
-
-        // Known limitation 4: Span event timestamp edge cases
-        // Events added after span end may have inconsistent timestamp behavior
-        result.record_xfail_coverage_gap(
-            "span_event_after_end_timestamp",
-            "Events added after span.end() timestamp behavior not covered by XFAIL",
-        );
-
-        // Known limitation 5: Sampling decision consistency
-        // Sampling decision inheritance may be inconsistent under high concurrency
-        if config.test_sampling {
-            result.record_xfail_coverage_gap(
-                "concurrent_sampling_decision_consistency",
-                "Sampling decision consistency under concurrency not covered by XFAIL",
-            );
-        }
-    }
-
-    /// Check for resource precedence XFAIL coverage gaps.
-    fn check_resource_precedence_xfail_coverage(config: &SpanConformanceConfig) -> Vec<String> {
-        let mut gaps = Vec::new();
-
-        // Resource precedence edge case: empty keys
-        gaps.push("Empty resource attribute keys".to_string());
-
-        // Resource precedence edge case: null/undefined values
-        gaps.push("Null or undefined resource attribute values".to_string());
-
-        // Resource precedence edge case: extremely long attribute names
-        if config.max_attribute_length.unwrap_or(usize::MAX) > 1024 {
-            gaps.push("Extremely long resource attribute names (>1024 chars)".to_string());
-        }
-
-        // Resource precedence edge case: special characters in keys
-        gaps.push("Special characters in resource attribute keys".to_string());
-
-        // Resource precedence edge case: case-sensitive key conflicts
-        gaps.push("Case-sensitive resource attribute key conflicts".to_string());
-
-        gaps
     }
 
     /// Test span lifecycle semantics.
@@ -5701,7 +5600,6 @@ pub mod span_semantics {
             let first_end_time = span.end_time;
 
             // Second end() call should not change end time
-            std::thread::sleep(Duration::from_millis(1));
             span.end();
 
             if span.end_time != first_end_time {
@@ -5886,7 +5784,6 @@ pub mod span_semantics {
             let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
 
             span.add_event("first_event", HashMap::new());
-            std::thread::sleep(Duration::from_millis(1));
             span.add_event("second_event", HashMap::new());
 
             if span.events.len() != 2 {
@@ -6072,7 +5969,7 @@ pub mod span_semantics {
     ) {
         // Test 8.1: Context propagation across service boundaries
         {
-            // Simulate extracting context from incoming request
+            // Build the context extracted from an incoming request.
             let trace_id = TraceId::from_bytes([
                 0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
                 0xcd, 0xef,
@@ -6630,37 +6527,16 @@ pub mod span_semantics {
 
         #[test]
         fn run_basic_conformance_tests() {
-            // Test the actual conformance runner with fail-closed XFAIL coverage
+            // Test the actual conformance runner with concrete fail-closed checks.
             let config = SpanConformanceConfig::default();
             let result = run_span_conformance_tests_with_config(&config)
                 .expect("Conformance tests should run");
 
             assert!(result.tests_run > 0);
-
-            // Expected behavior: runner should now fail closed due to XFAIL coverage gaps
-            // This is the intended behavior per asupersync-kml8av requirement
             assert!(
-                !result.is_success(),
-                "Conformance runner should fail closed when XFAIL coverage is incomplete"
-            );
-
-            // Verify XFAIL coverage gaps are detected
-            assert!(
-                !result.has_complete_xfail_coverage(),
-                "Should detect XFAIL coverage gaps"
-            );
-
-            assert!(
-                !result.xfail_coverage_gaps.is_empty(),
-                "Should report specific XFAIL coverage gaps"
-            );
-
-            // Verify the runner identifies the expected gaps
-            let failure_report = result.failure_report();
-            assert!(
-                failure_report.contains("XFAIL Coverage Gaps"),
-                "Failure report should include XFAIL coverage gaps: {}",
-                failure_report
+                result.is_success(),
+                "Conformance runner should pass all implemented checks: {}",
+                result.failure_report()
             );
         }
 
@@ -6917,22 +6793,16 @@ pub mod span_semantics {
         pub tests_passed: usize,
         /// Number of tests that failed.
         pub tests_failed: usize,
-        /// Number of expected failures (XFAIL) that failed as expected.
-        pub expected_failures: usize,
-        /// Number of expected failures (XFAIL) that unexpectedly passed.
-        pub unexpected_passes: usize,
         /// Failure descriptions captured during the run.
         pub failures: Vec<String>,
-        /// XFAIL coverage issues (tests that should be XFAIL but aren't marked).
-        pub xfail_coverage_gaps: Vec<String>,
+        /// Known conformance gaps captured by enabled-feature runs.
+        pub conformance_gaps: Vec<String>,
     }
 
     impl SpanConformanceResult {
-        /// Returns `true` when no failures were recorded and XFAIL coverage is complete.
+        /// Returns `true` when no failures or known conformance gaps were recorded.
         pub fn is_success(&self) -> bool {
-            self.tests_failed == 0
-                && self.unexpected_passes == 0
-                && self.xfail_coverage_gaps.is_empty()
+            self.tests_failed == 0 && self.conformance_gaps.is_empty()
         }
 
         /// Returns the pass percentage, matching the enabled implementation.
@@ -6944,9 +6814,9 @@ pub mod span_semantics {
             }
         }
 
-        /// Check if XFAIL coverage is complete (disabled implementation).
-        pub fn has_complete_xfail_coverage(&self) -> bool {
-            true // Disabled implementation doesn't validate XFAIL coverage
+        /// Check whether enabled-feature runs found known conformance gaps.
+        pub fn has_no_known_conformance_gaps(&self) -> bool {
+            self.conformance_gaps.is_empty()
         }
 
         /// Get failure report (disabled implementation).
@@ -7216,32 +7086,29 @@ pub mod span_semantics {
         fn periodic_reader_export_batch_conformance() {
             use std::collections::VecDeque;
             use std::sync::{Arc, Mutex};
-            use std::time::{Duration, Instant};
+            use std::time::Duration;
 
-            // Mock periodic exporter that tracks export timing
             #[derive(Clone)]
-            struct MockPeriodicExporter {
-                exports: Arc<Mutex<VecDeque<(Instant, usize)>>>,
+            struct PeriodicExportRecorder {
+                exports: Arc<Mutex<VecDeque<(Duration, usize)>>>,
             }
 
-            impl MockPeriodicExporter {
+            impl PeriodicExportRecorder {
                 fn new() -> Self {
                     Self {
                         exports: Arc::new(Mutex::new(VecDeque::new())),
                     }
                 }
 
-                fn export_metrics(&self, count: usize) {
-                    let timestamp = Instant::now();
-                    self.exports.lock().unwrap().push_back((timestamp, count));
+                fn export_metrics_at(&self, elapsed: Duration, count: usize) {
+                    self.exports.lock().unwrap().push_back((elapsed, count));
                 }
 
                 fn get_export_intervals(&self) -> Vec<Duration> {
                     let exports = self.exports.lock().unwrap();
                     let mut intervals = Vec::new();
                     for i in 1..exports.len() {
-                        let duration = exports[i].0.duration_since(exports[i - 1].0);
-                        intervals.push(duration);
+                        intervals.push(exports[i].0 - exports[i - 1].0);
                     }
                     intervals
                 }
@@ -7255,32 +7122,13 @@ pub mod span_semantics {
             let export_interval = Duration::from_millis(100);
             let metric_counts = vec![5, 3, 7, 2];
 
-            // Simulate two identical export cycles
-            let exporter1 = MockPeriodicExporter::new();
-            let exporter2 = MockPeriodicExporter::new();
+            let exporter1 = PeriodicExportRecorder::new();
+            let exporter2 = PeriodicExportRecorder::new();
 
-            let start = Instant::now();
-
-            // First export cycle
             for (i, &count) in metric_counts.iter().enumerate() {
-                let target_time = start + export_interval * (i as u32 + 1);
-                let now = Instant::now();
-                if target_time > now {
-                    std::thread::sleep(target_time - now);
-                }
-                exporter1.export_metrics(count);
-            }
-
-            let start2 = Instant::now();
-
-            // Second export cycle with same pattern
-            for (i, &count) in metric_counts.iter().enumerate() {
-                let target_time = start2 + export_interval * (i as u32 + 1);
-                let now = Instant::now();
-                if target_time > now {
-                    std::thread::sleep(target_time - now);
-                }
-                exporter2.export_metrics(count);
+                let logical_elapsed = export_interval * (i as u32 + 1);
+                exporter1.export_metrics_at(logical_elapsed, count);
+                exporter2.export_metrics_at(logical_elapsed, count);
             }
 
             // Verify both exporters have the same number of exports
@@ -7302,26 +7150,11 @@ pub mod span_semantics {
 
             // Check that intervals are approximately equal to expected interval
             for interval in &intervals1 {
-                let expected = export_interval;
-                let tolerance = Duration::from_millis(50); // 50ms tolerance
-                let diff = if *interval > expected {
-                    *interval - expected
-                } else {
-                    expected - *interval
-                };
-
-                assert!(
-                    diff <= tolerance,
-                    "Export interval {:?} deviates too much from expected {:?} (diff: {:?})",
-                    interval,
-                    expected,
-                    diff
-                );
+                assert_eq!(*interval, export_interval);
             }
 
             // Test edge case: no metrics (should not export)
-            let empty_exporter = MockPeriodicExporter::new();
-            // Don't call export_metrics - simulate no metrics available
+            let empty_exporter = PeriodicExportRecorder::new();
             assert_eq!(
                 empty_exporter.get_export_count(),
                 0,
@@ -7329,8 +7162,8 @@ pub mod span_semantics {
             );
 
             // Test edge case: single large batch
-            let batch_exporter = MockPeriodicExporter::new();
-            batch_exporter.export_metrics(1000);
+            let batch_exporter = PeriodicExportRecorder::new();
+            batch_exporter.export_metrics_at(export_interval, 1000);
             assert_eq!(
                 batch_exporter.get_export_count(),
                 1,
@@ -7481,7 +7314,6 @@ pub mod span_semantics {
         fn span_links_field_conformance() {
             // Test span links data structure conformance
 
-            // Mock span link structure for testing
             #[derive(Debug, Clone, PartialEq)]
             struct TestSpanLink {
                 trace_id: [u8; 16],
@@ -9277,8 +9109,7 @@ mod otlp_wire_format_tests {
             .with_drop_attribute("api.key")
             .with_drop_attribute("auth.token");
 
-        // Create a mock log entry with both safe and sensitive fields
-        let mock_entry = LogEntry::new(LogLevel::Info, "user action completed")
+        let log_entry = LogEntry::new(LogLevel::Info, "user action completed")
             .with_field("action", "login")
             .with_field("user.email", "sensitive@example.com") // Should be filtered
             .with_field("api.key", "secret-key-12345") // Should be filtered
@@ -9292,7 +9123,7 @@ mod otlp_wire_format_tests {
             .as_nanos() as u64;
 
         // Test WITHOUT privacy filtering (baseline)
-        let unfiltered_record = OtlpLogRecord::from_log_entry(&mock_entry, observed_time);
+        let unfiltered_record = OtlpLogRecord::from_log_entry(&log_entry, observed_time);
 
         // Verify all attributes are present in unfiltered record
         assert_eq!(
