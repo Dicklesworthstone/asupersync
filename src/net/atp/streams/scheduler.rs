@@ -234,11 +234,13 @@ mod tests {
 
         // Control should come first (highest priority)
         assert_eq!(scheduler.next_stream(), Some(control_stream));
+        scheduler.mark_blocked(control_stream);
 
-        // Data should come next
+        // With control blocked, data should come next.
         assert_eq!(scheduler.next_stream(), Some(data_stream));
+        scheduler.mark_blocked(data_stream);
 
-        // Repair should come last
+        // With higher-priority streams blocked, repair should come last.
         assert_eq!(scheduler.next_stream(), Some(repair_stream));
     }
 

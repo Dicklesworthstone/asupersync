@@ -379,13 +379,18 @@ mod tests {
     fn test_overlapping_segments() {
         let mut buffer = ReassemblyBuffer::new(10000);
 
-        let segment1 = DataSegment::new(0, Bytes::from("hello"), false);
-        let segment2 = DataSegment::new(2, Bytes::from("llo"), false);
+        let segment1 = DataSegment::new(5, Bytes::from("world"), false);
+        let duplicate_overlap = DataSegment::new(7, Bytes::from("rld"), false);
+        let conflicting_overlap = DataSegment::new(6, Bytes::from("XX"), false);
 
         buffer.insert_segment(segment1).unwrap(); // ubs:ignore - test oracle
 
-        // This should fail due to overlap
-        let result = buffer.insert_segment(segment2);
+        // Duplicate overlapping bytes are harmless retransmissions.
+        let duplicate = buffer.insert_segment(duplicate_overlap).unwrap(); // ubs:ignore - test oracle
+        assert!(duplicate.is_empty());
+
+        // Conflicting buffered bytes must fail closed.
+        let result = buffer.insert_segment(conflicting_overlap);
         assert!(result.is_err());
     }
 
