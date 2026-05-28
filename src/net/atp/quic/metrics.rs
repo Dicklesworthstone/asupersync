@@ -256,6 +256,11 @@ impl AtpTransportMetricsCollector {
         self.anti_amplification.on_packet_sent(bytes);
     }
 
+    /// Record inbound peer bytes that credit the anti-amplification budget.
+    pub fn on_datagram_received(&mut self, bytes: u64) {
+        self.anti_amplification.on_datagram_received(bytes);
+    }
+
     /// Record packet acknowledgment.
     pub fn on_packet_acked(&mut self, bytes: u64) {
         self.packets_acked.increment();
@@ -496,7 +501,8 @@ impl PathStabilityTracker {
 #[derive(Debug)]
 struct AntiAmplificationLimiter {
     bytes_sent: u64,
-    bytes_acked: u64,
+    bytes_received: u64,
+    address_validated: bool,
     last_reset: Instant,
 }
 
@@ -504,7 +510,8 @@ impl AntiAmplificationLimiter {
     fn new() -> Self {
         Self {
             bytes_sent: 0,
-            bytes_acked: 0,
+            bytes_received: 0,
+            address_validated: false,
             last_reset: Instant::now(),
         }
     }
@@ -514,21 +521,32 @@ impl AntiAmplificationLimiter {
         self.maybe_reset();
     }
 
-    fn on_ack_received(&mut self, bytes: u64) {
-        self.bytes_acked = self.bytes_acked.saturating_add(bytes);
+    fn on_datagram_received(&mut self, bytes: u64) {
+        self.bytes_received = self.bytes_received.saturating_add(bytes);
+        self.maybe_reset();
+    }
+
+    fn on_ack_received(&mut self, _bytes: u64) {
+        // Receiving an ACK validates the peer address and lifts the
+        // anti-amplification limiter for this path.
+        self.address_validated = true;
         self.maybe_reset();
     }
 
     fn is_limited(&self) -> bool {
+        if self.address_validated {
+            return false;
+        }
+
         // RFC 9000: server MUST NOT send more than 3x received bytes
-        self.bytes_sent > self.bytes_acked.saturating_mul(3)
+        self.bytes_sent > self.bytes_received.saturating_mul(3)
     }
 
     fn maybe_reset(&mut self) {
         // Reset counters periodically to avoid overflow
         if self.last_reset.elapsed() > Duration::from_secs(60) {
             self.bytes_sent = 0;
-            self.bytes_acked = 0;
+            self.bytes_received = 0;
             self.last_reset = Instant::now();
         }
     }
@@ -587,20 +605,21 @@ mod tests {
     fn anti_amplification_limits() {
         let mut limiter = AntiAmplificationLimiter::new();
 
-        // Send 3000 bytes
-        limiter.on_packet_sent(3000);
-        assert!(!limiter.is_limited()); // No acks yet, but under initial limit
-
-        // Ack 500 bytes
-        limiter.on_ack_received(500);
-        assert!(!limiter.is_limited()); // 3000 < 3 * 500 = 1500 (false, actually limited)
-
-        // Actually, 3000 > 3 * 500, so should be limited
+        // No peer bytes received yet, so sending any bytes exceeds the budget.
+        limiter.on_packet_sent(1000);
         assert!(limiter.is_limited());
 
-        // Ack more bytes to lift limitation
-        limiter.on_ack_received(500); // Total acked: 1000
-        assert!(!limiter.is_limited()); // 3000 = 3 * 1000
+        // Receive 400 bytes from the peer: the server may send up to 1200 bytes.
+        limiter.on_datagram_received(400);
+        assert!(!limiter.is_limited());
+
+        // Sending beyond the 3x received budget is limited.
+        limiter.on_packet_sent(201);
+        assert!(limiter.is_limited());
+
+        // Receiving an ACK validates the address and lifts the limiter.
+        limiter.on_ack_received(0);
+        assert!(!limiter.is_limited());
     }
 
     #[test]
