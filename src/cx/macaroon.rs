@@ -3385,23 +3385,50 @@ mod tests {
     }
 
     /// Helper function to generate all permutations of caveats
-    fn generate_permutations<T: Clone + PartialEq>(
+    fn generate_permutations<T: Clone>(
         items: &[T],
         current: &mut Vec<T>,
         result: &mut Vec<Vec<T>>,
     ) {
-        if current.len() == items.len() {
-            result.push(current.clone());
-            return;
-        }
+        fn walk<T: Clone>(
+            items: &[T],
+            used: &mut [bool],
+            current: &mut Vec<T>,
+            result: &mut Vec<Vec<T>>,
+        ) {
+            if current.len() == items.len() {
+                result.push(current.clone());
+                return;
+            }
 
-        for item in items {
-            if !current.contains(item) {
+            for (idx, item) in items.iter().enumerate() {
+                if used[idx] {
+                    continue;
+                }
+                used[idx] = true;
                 current.push(item.clone());
-                generate_permutations(items, current, result);
+                walk(items, used, current, result);
                 current.pop();
+                used[idx] = false;
             }
         }
+
+        let mut used = vec![false; items.len()];
+        walk(items, &mut used, current, result);
+    }
+
+    #[test]
+    fn generate_permutations_keeps_duplicate_values() {
+        let items = vec![
+            CaveatPredicate::ResourceScope("q".into()),
+            CaveatPredicate::ResourceScope("q".into()),
+        ];
+        let mut permutations = Vec::new();
+
+        generate_permutations(&items, &mut Vec::new(), &mut permutations);
+
+        assert_eq!(permutations.len(), 2);
+        assert!(permutations.iter().all(|permutation| permutation == &items));
     }
 
     // --- Tampered token rejection ---
