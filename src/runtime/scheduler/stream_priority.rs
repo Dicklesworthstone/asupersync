@@ -215,6 +215,29 @@ impl StreamPriorityScheduler {
     }
 
     fn find_or_allocate_stream(&mut self, priority: StreamPriority, _now: Time) -> u64 {
+        // Prefer an already-active stream with the same priority. Stream
+        // priority is a lane, not a per-item allocation, so compatible content
+        // should share the lane and accumulate usage statistics on the same
+        // stream instead of consuming the stream limit unnecessarily.
+        if let Some((stream_id, _, _, _)) = self
+            .active_streams
+            .iter()
+            .filter_map(|(&stream_id, assignment)| {
+                if assignment.priority != priority {
+                    return None;
+                }
+                let usage = self.stream_usage.get(&stream_id);
+                let bytes_sent = usage.map_or(0, |usage| usage.bytes_sent);
+                let items_sent = usage.map_or(0, |usage| usage.items_sent);
+                Some((stream_id, bytes_sent, items_sent, assignment.assigned_at))
+            })
+            .min_by_key(|(stream_id, bytes_sent, items_sent, assigned_at)| {
+                (*bytes_sent, *items_sent, *assigned_at, *stream_id)
+            })
+        {
+            return stream_id;
+        }
+
         // Try to reuse an available stream with compatible priority
         while let Some(available) = self.available_streams.pop() {
             if available.last_priority == priority
