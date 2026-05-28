@@ -5962,13 +5962,12 @@ mod tests {
             let result = block_on(server.dispatch_unary(request, move |req| async move {
                 handler_started_clone.store(true, Ordering::Relaxed);
 
-                // Async sleep that can be cancelled
-                for _ in 0..20 {
-                    futures_lite::future::yield_now().await;
-                    // Small async delay to allow cancellation
-                    let _ = crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(1))
-                        .await;
-                }
+                // Cooperative async wait that remains pending past the 5ms
+                // grpc-timeout budget, giving dispatch_unary's timeout race a
+                // deterministic cancellation point.
+                futures_lite::future::yield_now().await;
+                let _ =
+                    crate::time::sleep(crate::time::wall_now(), Duration::from_millis(20)).await;
 
                 handler_completed_clone.store(true, Ordering::Relaxed);
                 Ok::<Response<Bytes>, Status>(Response::new(req.into_inner()))
