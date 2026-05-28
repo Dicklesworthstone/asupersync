@@ -4196,9 +4196,9 @@ mod tests {
             cx.region_id(),
             cx.task_id(),
             success_req.lease,
-            Time::ZERO,
+            Time::from_nanos(1_000_000_000),
         );
-        assert!(lease.is_active(Time::ZERO));
+        assert!(lease.is_active(Time::from_nanos(1_000_000_000)));
 
         let renewal = LeaseRenewal {
             remote_task_id: success_id,
@@ -4396,7 +4396,7 @@ mod tests {
             store.check(
                 &success_req.idempotency_key,
                 &success_fingerprint,
-                Time::ZERO
+                Time::from_nanos(1_000_000_000)
             ),
             DedupDecision::New
         ));
@@ -4404,7 +4404,7 @@ mod tests {
             success_req.idempotency_key,
             success_id,
             success_fingerprint.clone(),
-            Time::ZERO,
+            Time::from_nanos(1_000_000_000),
         ));
         assert!(store.complete(
             &success_req.idempotency_key,

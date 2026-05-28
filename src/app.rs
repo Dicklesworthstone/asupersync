@@ -1305,7 +1305,7 @@ mod tests {
             Budget::INFINITE,
         );
 
-        let budget = Budget::new().with_poll_quota(42);
+        let budget = Budget::new().with_poll_quota(100_000);
         let spec = AppSpec::new("budgeted_app").with_budget(budget);
         let handle = spec.start(&mut state, &cx, root).expect("start ok");
 
@@ -1415,7 +1415,7 @@ mod tests {
     #[test]
     fn app_compile_budget_propagates() {
         init_test("app_compile_budget_propagates");
-        let budget = Budget::new().with_poll_quota(99);
+        let budget = Budget::new().with_poll_quota(100_000);
         let compiled = AppSpec::new("budgeted_compile")
             .with_budget(budget)
             .compile()
@@ -1933,7 +1933,7 @@ mod tests {
                     let task_id = stored.task_id();
 
                     // Register the task name in the shared registry.
-                    let now = crate::types::Time::ZERO;
+                    let now = crate::types::Time::from_nanos(1_000_000_000);
                     let lease = reg_clone
                         .lock()
                         .register("my_worker", task_id, region, now)
@@ -2259,7 +2259,7 @@ mod tests {
                 "lobby",
                 ChatRoom::new(100),
                 32,
-                crate::types::Time::ZERO,
+                crate::types::Time::from_nanos(1_000_000_000),
             )
             .unwrap();
         let task_id = named_handle.task_id();

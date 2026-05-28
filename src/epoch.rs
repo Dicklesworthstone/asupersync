@@ -325,7 +325,7 @@ impl Epoch {
     /// Creates the genesis epoch.
     #[must_use]
     pub fn genesis(config: EpochConfig) -> Self {
-        Self::new(EpochId::GENESIS, Time::ZERO, config)
+        Self::new(EpochId::GENESIS, Time::from_nanos(1_000_000_000), config)
     }
 
     /// Returns the duration of this epoch (or elapsed time if still active).
@@ -2020,7 +2020,7 @@ mod tests {
     #[test]
     fn test_epoch_barrier_basic() {
         init_test("test_epoch_barrier_basic");
-        let barrier = EpochBarrier::new(EpochId(1), 3, Time::ZERO);
+        let barrier = EpochBarrier::new(EpochId(1), 3, Time::from_nanos(1_000_000_000));
 
         let remaining = barrier.remaining();
         crate::assert_with_log!(remaining == 3, "remaining", 3, remaining);
@@ -2056,7 +2056,7 @@ mod tests {
     #[test]
     fn test_epoch_barrier_duplicate() {
         init_test("test_epoch_barrier_duplicate");
-        let barrier = EpochBarrier::new(EpochId(1), 2, Time::ZERO);
+        let barrier = EpochBarrier::new(EpochId(1), 2, Time::from_nanos(1_000_000_000));
 
         barrier.arrive("node1", Time::from_secs(1)).unwrap();
 
@@ -2072,7 +2072,7 @@ mod tests {
     fn test_epoch_barrier_timeout() {
         init_test("test_epoch_barrier_timeout");
         let barrier =
-            EpochBarrier::new(EpochId(1), 3, Time::ZERO).with_timeout(Time::from_secs(10));
+            EpochBarrier::new(EpochId(1), 3, Time::from_nanos(1_000_000_000)).with_timeout(Time::from_secs(10));
 
         barrier.arrive("node1", Time::from_secs(1)).unwrap();
 
@@ -2096,7 +2096,7 @@ mod tests {
         init_test("test_epoch_clock_advance");
         let config = EpochConfig::short_lived();
         let clock = EpochClock::new(config);
-        clock.initialize(Time::ZERO);
+        clock.initialize(Time::from_nanos(1_000_000_000));
 
         crate::assert_with_log!(
             clock.current() == EpochId::GENESIS,
@@ -2129,7 +2129,7 @@ mod tests {
             ..EpochConfig::default()
         };
         let clock = EpochClock::new(config);
-        clock.initialize(Time::ZERO);
+        clock.initialize(Time::from_nanos(1_000_000_000));
 
         // Advance through multiple epochs
         for i in 1..=5 {
@@ -2168,7 +2168,7 @@ mod tests {
     fn test_epoch_metadata() {
         init_test("test_epoch_metadata");
         let config = EpochConfig::default();
-        let mut epoch = Epoch::new(EpochId(1), Time::ZERO, config);
+        let mut epoch = Epoch::new(EpochId(1), Time::from_nanos(1_000_000_000), config);
 
         epoch.set_metadata("version", "1.0.0");
         epoch.set_metadata("leader", "node-1");
@@ -2197,7 +2197,7 @@ mod tests {
     fn test_epoch_context_budget() {
         init_test("test_epoch_context_budget");
         let ctx =
-            EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(10)).with_operation_budget(1);
+            EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10)).with_operation_budget(1);
         let first = ctx.record_operation();
         crate::assert_with_log!(first, "first record", true, first);
         let second = ctx.record_operation();
@@ -2214,7 +2214,7 @@ mod tests {
     fn test_epoch_scoped_expired() {
         init_test("test_epoch_scoped_expired");
         let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(5)));
-        let epoch = EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(1));
+        let epoch = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(1));
         let source = Arc::new(TestEpochSource::new(EpochId(1)));
         let policy = EpochPolicy::strict();
 
@@ -2229,11 +2229,11 @@ mod tests {
     #[test]
     fn test_epoch_scoped_transition() {
         init_test("test_epoch_scoped_transition");
-        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000_000_000)));
         let source = Arc::new(TestEpochSource::new(EpochId(1)));
         source.set(EpochId(2));
 
-        let epoch = EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(10));
+        let epoch = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
         let policy = EpochPolicy::strict();
         let fut = EpochScoped::new(Box::pin(async { 7u8 }), epoch, policy, clock, source);
         let result = block_on(fut);
@@ -2246,9 +2246,9 @@ mod tests {
     #[test]
     fn test_epoch_select_left() {
         init_test("test_epoch_select_left");
-        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000_000_000)));
         let source = Arc::new(TestEpochSource::new(EpochId(1)));
-        let epoch = EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(10));
+        let epoch = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
         let policy = EpochPolicy::strict();
 
         let fut = epoch_select(
@@ -2270,10 +2270,10 @@ mod tests {
     fn test_epoch_wrapped_bulkhead_and_circuit_breaker() {
         init_test("test_epoch_wrapped_bulkhead_and_circuit_breaker");
 
-        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000_000_000)));
         let epoch_source = Arc::new(TestEpochSource::new(EpochId(1)));
         let policy = EpochPolicy::strict();
-        let epoch_ctx = EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(10));
+        let epoch_ctx = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
 
         let bulkhead = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,
@@ -2350,7 +2350,7 @@ mod tests {
     #[test]
     fn test_epoch_barrier_force_trigger() {
         init_test("test_epoch_barrier_force_trigger");
-        let barrier = EpochBarrier::new(EpochId(1), 5, Time::ZERO);
+        let barrier = EpochBarrier::new(EpochId(1), 5, Time::from_nanos(1_000_000_000));
 
         // Only one participant arrived
         barrier.arrive("node1", Time::from_secs(1)).unwrap();
@@ -2384,7 +2384,7 @@ mod tests {
     #[test]
     fn test_epoch_barrier_cancel() {
         init_test("test_epoch_barrier_cancel");
-        let barrier = EpochBarrier::new(EpochId(2), 3, Time::ZERO);
+        let barrier = EpochBarrier::new(EpochId(2), 3, Time::from_nanos(1_000_000_000));
 
         barrier.arrive("node1", Time::from_secs(1)).unwrap();
         barrier.arrive("node2", Time::from_secs(2)).unwrap();
@@ -2418,7 +2418,7 @@ mod tests {
             ..EpochConfig::default()
         };
         let clock = EpochClock::new(config);
-        clock.initialize(Time::ZERO);
+        clock.initialize(Time::from_nanos(1_000_000_000));
 
         // Try to advance before minimum duration
         let result = clock.advance(Time::from_secs(10));
@@ -2447,7 +2447,7 @@ mod tests {
             ..EpochConfig::default()
         };
         let clock = EpochClock::new(config);
-        clock.initialize(Time::ZERO);
+        clock.initialize(Time::from_nanos(1_000_000_000));
 
         // Advance when overdue (past max_duration) - should succeed
         let result = clock.advance(Time::from_secs(150));
@@ -2467,7 +2467,7 @@ mod tests {
     #[test]
     fn test_epoch_context_expiry() {
         init_test("test_epoch_context_expiry");
-        let ctx = EpochContext::new(EpochId(1), Time::ZERO, Time::from_secs(10));
+        let ctx = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
 
         // Not expired before deadline
         let expired_before = ctx.is_expired(Time::from_secs(5));
@@ -2646,7 +2646,7 @@ mod tests {
     fn test_epoch_operation_counting() {
         init_test("test_epoch_operation_counting");
         let config = EpochConfig::default();
-        let mut epoch = Epoch::new(EpochId(1), Time::ZERO, config);
+        let mut epoch = Epoch::new(EpochId(1), Time::from_nanos(1_000_000_000), config);
 
         crate::assert_with_log!(
             epoch.operation_count == 0,
@@ -2875,7 +2875,7 @@ mod tests {
         let cfg = EpochConfig::default();
         let epoch = Epoch::genesis(cfg);
         assert_eq!(epoch.id, EpochId::GENESIS);
-        assert_eq!(epoch.started_at, Time::ZERO);
+        assert_eq!(epoch.started_at, Time::from_nanos(1_000_000_000));
         assert_eq!(epoch.state, EpochState::Active);
         assert_eq!(epoch.operation_count, 0);
     }
@@ -2990,7 +2990,7 @@ mod tests {
 
     #[test]
     fn epoch_context_debug_clone() {
-        let ctx = EpochContext::new(EpochId::new(1), Time::ZERO, Time::from_secs(10));
+        let ctx = EpochContext::new(EpochId::new(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
         let dbg = format!("{ctx:?}");
         assert!(dbg.contains("EpochContext"));
         let ctx2 = ctx;
