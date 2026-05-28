@@ -1,10 +1,7 @@
 ---
 source: src/observability/otel.rs
-expression: |-
-  json!({
-      "parent": test_span_snapshot(&parent), "remote_child":
-      test_span_snapshot(&remote_child),
-  })
+assertion_line: 6590
+expression: "json!({\n    \"parent\": test_span_snapshot(&parent), \"remote_child\":\n    test_span_snapshot(&remote_child),\n})"
 ---
 {
   "parent": {
@@ -38,7 +35,7 @@ expression: |-
       "kind": "error"
     },
     "trace_id": "[ID]",
-    "trace_state_vendor": null
+    "trace_state": ""
   },
   "remote_child": {
     "attributes": {},
@@ -58,6 +55,6 @@ expression: |-
       "kind": "unset"
     },
     "trace_id": "[ID]",
-    "trace_state_vendor": "edge"
+    "trace_state": "vendor=edge"
   }
 }

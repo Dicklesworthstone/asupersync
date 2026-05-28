@@ -1,0 +1,531 @@
+---
+source: src/trace/event.rs
+assertion_line: 4154
+expression: events
+---
+[
+  {
+    "version": 1,
+    "seq": 1,
+    "time": 0,
+    "logical_time": null,
+    "kind": "user_trace",
+    "data": "None"
+  },
+  {
+    "version": 1,
+    "seq": 2,
+    "time": 100,
+    "logical_time": null,
+    "kind": "spawn",
+    "data": {
+      "Task": {
+        "task": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        }
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 3,
+    "time": 200,
+    "logical_time": null,
+    "kind": "region_created",
+    "data": {
+      "Region": {
+        "region": {
+          "kind": "RegionId",
+          "index": 2,
+          "generation": 1
+        },
+        "parent": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        }
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 4,
+    "time": 300,
+    "logical_time": null,
+    "kind": "obligation_commit",
+    "data": {
+      "Obligation": {
+        "obligation": {
+          "kind": "ObligationId",
+          "index": 5,
+          "generation": 1
+        },
+        "task": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        },
+        "kind": "Lease",
+        "state": "Committed",
+        "duration_ns": 1500,
+        "abort_reason": null
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 5,
+    "time": 310,
+    "logical_time": null,
+    "kind": "obligation_abort",
+    "data": {
+      "Obligation": {
+        "obligation": {
+          "kind": "ObligationId",
+          "index": 6,
+          "generation": 1
+        },
+        "task": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        },
+        "kind": "SendPermit",
+        "state": "Aborted",
+        "duration_ns": 2500,
+        "abort_reason": "Error"
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 6,
+    "time": 400,
+    "logical_time": null,
+    "kind": "cancel_request",
+    "data": {
+      "Cancel": {
+        "task": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        },
+        "reason": {
+          "kind": "Timeout",
+          "origin_region": {
+            "kind": "RegionId",
+            "index": 0,
+            "generation": 0
+          },
+          "origin_task": null,
+          "timestamp": 0,
+          "message": null,
+          "cause": null,
+          "truncated": false,
+          "truncated_at_depth": null
+        }
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 7,
+    "time": 500,
+    "logical_time": null,
+    "kind": "worker_cancel_requested",
+    "data": {
+      "Worker": {
+        "worker_id": "worker-canonical",
+        "job_id": 42,
+        "decision_seq": 7,
+        "replay_hash": 3735928559,
+        "task": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        },
+        "obligation": {
+          "kind": "ObligationId",
+          "index": 2,
+          "generation": 1
+        }
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 8,
+    "time": 600,
+    "logical_time": null,
+    "kind": "region_cancelled",
+    "data": {
+      "RegionCancel": {
+        "region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        },
+        "reason": {
+          "kind": "Shutdown",
+          "origin_region": {
+            "kind": "RegionId",
+            "index": 0,
+            "generation": 0
+          },
+          "origin_task": null,
+          "timestamp": 0,
+          "message": null,
+          "cause": null,
+          "truncated": false,
+          "truncated_at_depth": null
+        }
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 9,
+    "time": 700,
+    "logical_time": null,
+    "kind": "time_advance",
+    "data": {
+      "Time": {
+        "old": 700,
+        "new": 800
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 10,
+    "time": 800,
+    "logical_time": null,
+    "kind": "timer_scheduled",
+    "data": {
+      "Timer": {
+        "timer_id": 100,
+        "deadline": 900
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 11,
+    "time": 810,
+    "logical_time": null,
+    "kind": "timer_fired",
+    "data": {
+      "Timer": {
+        "timer_id": 100,
+        "deadline": null
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 12,
+    "time": 900,
+    "logical_time": null,
+    "kind": "io_requested",
+    "data": {
+      "IoRequested": {
+        "token": 7,
+        "interest": 3
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 13,
+    "time": 1000,
+    "logical_time": null,
+    "kind": "io_ready",
+    "data": {
+      "IoReady": {
+        "token": 7,
+        "readiness": 1
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 14,
+    "time": 1100,
+    "logical_time": null,
+    "kind": "io_result",
+    "data": {
+      "IoResult": {
+        "token": 7,
+        "bytes": 4096
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 15,
+    "time": 1200,
+    "logical_time": null,
+    "kind": "io_error",
+    "data": {
+      "IoError": {
+        "token": 7,
+        "kind": 5
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 16,
+    "time": 1300,
+    "logical_time": null,
+    "kind": "rng_seed",
+    "data": {
+      "RngSeed": {
+        "seed": 12648430
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 17,
+    "time": 1400,
+    "logical_time": null,
+    "kind": "rng_value",
+    "data": {
+      "RngValue": {
+        "value": 42
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 18,
+    "time": 1500,
+    "logical_time": null,
+    "kind": "checkpoint",
+    "data": {
+      "Checkpoint": {
+        "sequence": 1000,
+        "active_tasks": 5,
+        "active_regions": 2
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 19,
+    "time": 1600,
+    "logical_time": null,
+    "kind": "futurelock_detected",
+    "data": {
+      "Futurelock": {
+        "task": {
+          "kind": "TaskId",
+          "index": 2,
+          "generation": 1
+        },
+        "region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        },
+        "idle_steps": 100,
+        "held": [
+          [
+            {
+              "kind": "ObligationId",
+              "index": 3,
+              "generation": 1
+            },
+            "SendPermit"
+          ]
+        ]
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 20,
+    "time": 1700,
+    "logical_time": null,
+    "kind": "monitor_created",
+    "data": {
+      "Monitor": {
+        "monitor_ref": 50,
+        "watcher": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "watcher_region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        },
+        "monitored": {
+          "kind": "TaskId",
+          "index": 2,
+          "generation": 1
+        }
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 21,
+    "time": 1800,
+    "logical_time": null,
+    "kind": "down_delivered",
+    "data": {
+      "Down": {
+        "monitor_ref": 50,
+        "watcher": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "monitored": {
+          "kind": "TaskId",
+          "index": 2,
+          "generation": 1
+        },
+        "completion_vt": 1750,
+        "reason": "Normal"
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 22,
+    "time": 1900,
+    "logical_time": null,
+    "kind": "link_created",
+    "data": {
+      "Link": {
+        "link_ref": 60,
+        "task_a": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "region_a": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        },
+        "task_b": {
+          "kind": "TaskId",
+          "index": 2,
+          "generation": 1
+        },
+        "region_b": {
+          "kind": "RegionId",
+          "index": 2,
+          "generation": 1
+        }
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 23,
+    "time": 2000,
+    "logical_time": null,
+    "kind": "exit_delivered",
+    "data": {
+      "Exit": {
+        "link_ref": 60,
+        "from": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "to": {
+          "kind": "TaskId",
+          "index": 2,
+          "generation": 1
+        },
+        "failure_vt": 1950,
+        "reason": "Normal"
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 24,
+    "time": 2100,
+    "logical_time": null,
+    "kind": "user_trace",
+    "data": {
+      "Message": "canonical-trace-marker"
+    }
+  },
+  {
+    "version": 1,
+    "seq": 25,
+    "time": 2200,
+    "logical_time": null,
+    "kind": "chaos_injection",
+    "data": {
+      "Chaos": {
+        "kind": "delay",
+        "task": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "detail": "injected 1ms delay"
+      }
+    }
+  },
+  {
+    "version": 1,
+    "seq": 26,
+    "time": 2300,
+    "logical_time": {
+      "lamport": 7
+    },
+    "kind": "poll",
+    "data": {
+      "Task": {
+        "task": {
+          "kind": "TaskId",
+          "index": 1,
+          "generation": 1
+        },
+        "region": {
+          "kind": "RegionId",
+          "index": 1,
+          "generation": 1
+        }
+      }
+    }
+  }
+]

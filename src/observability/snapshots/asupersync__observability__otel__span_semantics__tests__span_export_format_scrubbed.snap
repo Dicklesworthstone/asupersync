@@ -1,13 +1,7 @@
 ---
 source: src/observability/otel.rs
-expression: |-
-  json!({
-      "happy_path": test_span_snapshot(&happy_path), "error_path":
-      test_span_snapshot(&error_path), "multi_span_trace": [
-          test_span_snapshot(&root), test_span_snapshot(&decode_child),
-          test_span_snapshot(&publish_child),
-      ],
-  })
+assertion_line: 6664
+expression: "json!({\n    \"happy_path\": test_span_snapshot(&happy_path), \"error_path\":\n    test_span_snapshot(&error_path), \"multi_span_trace\":\n    [test_span_snapshot(&root), test_span_snapshot(&decode_child),\n    test_span_snapshot(&publish_child),],\n})"
 ---
 {
   "error_path": {
@@ -39,7 +33,7 @@ expression: |-
       "kind": "error"
     },
     "trace_id": "[ID]",
-    "trace_state_vendor": null
+    "trace_state": ""
   },
   "happy_path": {
     "attributes": {
@@ -68,7 +62,7 @@ expression: |-
       "kind": "ok"
     },
     "trace_id": "[ID]",
-    "trace_state_vendor": null
+    "trace_state": ""
   },
   "multi_span_trace": [
     {
@@ -99,7 +93,7 @@ expression: |-
         "kind": "ok"
       },
       "trace_id": "[ID]",
-      "trace_state_vendor": null
+      "trace_state": ""
     },
     {
       "attributes": {
@@ -129,7 +123,7 @@ expression: |-
         "kind": "ok"
       },
       "trace_id": "[ID]",
-      "trace_state_vendor": null
+      "trace_state": ""
     },
     {
       "attributes": {
@@ -159,7 +153,7 @@ expression: |-
         "kind": "ok"
       },
       "trace_id": "[ID]",
-      "trace_state_vendor": null
+      "trace_state": ""
     }
   ]
 }

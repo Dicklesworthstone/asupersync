@@ -1,5 +1,6 @@
 ---
 source: src/observability/task_inspector.rs
+assertion_line: 1365
 expression: scrubbed
 ---
 == Summary ==
@@ -27,6 +28,7 @@ POTENTIAL STUCK TASKS:
     "by_region": [
       {
         "region_id": {
+          "kind": "RegionId",
           "index": 0,
           "generation": 0
         },
@@ -34,6 +36,7 @@ POTENTIAL STUCK TASKS:
       },
       {
         "region_id": {
+          "kind": "RegionId",
           "index": 1,
           "generation": 0
         },
@@ -44,10 +47,12 @@ POTENTIAL STUCK TASKS:
   "tasks": [
     {
       "id": {
+        "kind": "TaskId",
         "index": 0,
         "generation": 0
       },
       "region_id": {
+        "kind": "RegionId",
         "index": 0,
         "generation": 0
       },
@@ -64,10 +69,12 @@ POTENTIAL STUCK TASKS:
     },
     {
       "id": {
+        "kind": "TaskId",
         "index": 1,
         "generation": 0
       },
       "region_id": {
+        "kind": "RegionId",
         "index": 0,
         "generation": 0
       },
@@ -77,16 +84,18 @@ POTENTIAL STUCK TASKS:
       "polls_remaining": 6,
       "created_at": 5000000000,
       "age_nanos": 40000000000,
-      "time_since_last_poll_nanos": 10000000000,
+      "time_since_last_poll_nanos": null,
       "wake_pending": true,
       "obligations": [
         {
+          "kind": "ObligationId",
           "index": 0,
           "generation": 0
         }
       ],
       "waiters": [
         {
+          "kind": "TaskId",
           "index": 4,
           "generation": 0
         }
@@ -94,10 +103,12 @@ POTENTIAL STUCK TASKS:
     },
     {
       "id": {
+        "kind": "TaskId",
         "index": 2,
         "generation": 0
       },
       "region_id": {
+        "kind": "RegionId",
         "index": 1,
         "generation": 0
       },
@@ -118,10 +129,12 @@ POTENTIAL STUCK TASKS:
     },
     {
       "id": {
+        "kind": "TaskId",
         "index": 3,
         "generation": 0
       },
       "region_id": {
+        "kind": "RegionId",
         "index": 1,
         "generation": 0
       },
@@ -142,10 +155,12 @@ POTENTIAL STUCK TASKS:
     },
     {
       "id": {
+        "kind": "TaskId",
         "index": 4,
         "generation": 0
       },
       "region_id": {
+        "kind": "RegionId",
         "index": 1,
         "generation": 0
       },
