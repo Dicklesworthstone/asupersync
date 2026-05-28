@@ -61,6 +61,8 @@ test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
 legacy-internal-test-harnesses = []
 # Opt-in compile surface for ignored, environment-gated real-service E2E tests.
 real-service-e2e = []
+# Focused proof lane for the H3 WebSocket endpoint/result E2E harness.
+h3-websocket-e2e = []
 # Focused proof lane for the deterministic RaptorQ roundtrip E2E harness.
 raptorq-roundtrip-e2e = []
 # Focused no-mock obligation cleanup E2E harness for asupersync-9u057b.5.

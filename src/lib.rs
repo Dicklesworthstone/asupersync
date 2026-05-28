@@ -500,7 +500,7 @@ pub mod real_http_h3_native_messaging_jetstream_integration_e2e_tests;
 pub mod real_http_h3_native_net_quic_native_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h3_server_h3_body_streaming_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
+#[cfg(all(test, any(feature = "real-service-e2e", feature = "h3-websocket-e2e")))]
 pub mod real_http_h3_server_websocket_upgrade_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_pool_service_discover_integration_e2e_tests;

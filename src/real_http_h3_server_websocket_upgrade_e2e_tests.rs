@@ -17,24 +17,21 @@ mod tests {
         dead_code
     )]
 
+    use base64::Engine as _;
     use std::collections::HashMap;
-    use std::io;
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
-    use tokio::sync::{Mutex, RwLock, oneshot};
-    use tokio::time::timeout;
+    use std::time::Instant;
+    use tokio::sync::{Mutex, RwLock};
 
     // Import HTTP/3 and WebSocket implementations
     use crate::bytes::{Bytes, BytesMut};
-    use crate::http::h3_native::{
-        ControlFramePayload, H3_SETTING_ENABLE_CONNECT_PROTOCOL, H3Frame, H3FrameType,
-        H3NativeError, H3Settings,
-    };
+    use crate::codec::{Decoder, Encoder};
+    use crate::http::h3_native::{H3NativeError, H3Settings};
     use crate::net::quic_native::streams::{StreamDirection, StreamId, StreamRole};
-    use crate::net::websocket::close::CloseReason;
-    use crate::net::websocket::frame::{Frame, FrameCodec, Opcode};
-    use crate::net::websocket::handshake::{HandshakeError, compute_accept_key};
+    use crate::net::websocket::{
+        CloseCode, CloseReason, Frame, FrameCodec, Opcode, compute_accept_key,
+    };
 
     // ---------------------------------------------------------------------------
     // HTTP/3 WebSocket Upgrade Test Framework
@@ -131,11 +128,16 @@ mod tests {
             stat_updater(&mut stats);
         }
 
-        async fn finalize(&self, result: bool, error: Option<String>) -> H3WebSocketTestResult {
+        async fn finalize(
+            &self,
+            server_addr: SocketAddr,
+            result: bool,
+            error: Option<String>,
+        ) -> H3WebSocketTestResult {
             let stats = self.stats.read().await.clone();
             H3WebSocketTestResult {
                 test_name: self.test_name.clone(),
-                server_addr: "0.0.0.0:0".parse().unwrap(), // Ephemeral bind address.
+                server_addr,
                 phase: self.current_phase,
                 success: result,
                 error,
@@ -143,6 +145,30 @@ mod tests {
                 h3_ws_stats: stats,
             }
         }
+    }
+
+    fn test_endpoint(port_offset: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 43_000 + port_offset))
+    }
+
+    fn ws_key(seed: u8) -> String {
+        base64::engine::general_purpose::STANDARD.encode([seed; 16])
+    }
+
+    fn encode_ws_frame(codec: &mut FrameCodec, frame: Frame) -> Result<Bytes, H3NativeError> {
+        let mut out = BytesMut::new();
+        codec
+            .encode(frame, &mut out)
+            .map_err(|_| H3NativeError::InvalidFrame("failed to encode WebSocket frame"))?;
+        Ok(out.freeze())
+    }
+
+    fn decode_ws_frame(codec: &mut FrameCodec, data: &[u8]) -> Result<Frame, H3NativeError> {
+        let mut input = BytesMut::from(data);
+        codec
+            .decode(&mut input)
+            .map_err(|_| H3NativeError::InvalidFrame("failed to decode WebSocket frame"))?
+            .ok_or(H3NativeError::UnexpectedEof)
     }
 
     /// Deterministic HTTP/3 server with WebSocket upgrade support.
@@ -190,8 +216,16 @@ mod tests {
 
         /// Exchange H3 SETTINGS with CONNECT protocol enabled.
         pub async fn exchange_settings(&mut self) -> Result<(), H3NativeError> {
-            let mut settings = H3Settings::new();
-            settings.set_enable_connect_protocol(true)?;
+            let settings = H3Settings {
+                enable_connect_protocol: Some(true),
+                ..H3Settings::default()
+            };
+            let mut payload = Vec::new();
+            settings.encode_payload(&mut payload)?;
+            let decoded = H3Settings::decode_payload(&payload)?;
+            if decoded.enable_connect_protocol != Some(true) {
+                return Err(H3NativeError::InvalidSettingValue(0x08));
+            }
 
             // Establish control stream.
             let control_stream =
@@ -209,6 +243,17 @@ mod tests {
             target: &str,
             headers: HashMap<String, String>,
         ) -> Result<WebSocketStream, H3NativeError> {
+            if !self.connect_enabled {
+                return Err(H3NativeError::StreamProtocol(
+                    "CONNECT protocol is disabled by peer SETTINGS",
+                ));
+            }
+            if target != "websocket" {
+                return Err(H3NativeError::InvalidFrame(
+                    "CONNECT target must be websocket",
+                ));
+            }
+
             // Validate CONNECT method for WebSocket upgrade (RFC 9220)
             let upgrade = headers.get("upgrade").ok_or_else(|| {
                 H3NativeError::InvalidFrame("Missing Upgrade header for WebSocket CONNECT")
@@ -243,7 +288,7 @@ mod tests {
                     .map(|e| e.split(',').map(|s| s.trim().to_string()).collect())
                     .unwrap_or_default(),
                 upgrade_headers: headers,
-                frame_codec: FrameCodec::new(),
+                frame_codec: FrameCodec::server(),
                 close_reason: None,
                 bytes_sent: 0,
                 bytes_received: 0,
@@ -269,16 +314,13 @@ mod tests {
             // Update stream state
             if let Some(stream) = self.active_streams.lock().await.get_mut(&stream_id) {
                 stream.state = WebSocketStreamState::UpgradeResponse;
+                stream
+                    .upgrade_headers
+                    .insert(":status".to_string(), "200".to_string());
+                stream
+                    .upgrade_headers
+                    .insert("sec-websocket-accept".to_string(), accept_key);
             }
-
-            // Build 200 response with WebSocket upgrade headers.
-            // In real implementation, this would encode HTTP/3 HEADERS frame
-            let response_headers = vec![
-                (":status", "200"),
-                ("upgrade", "websocket"),
-                ("connection", "upgrade"),
-                ("sec-websocket-accept", &accept_key),
-            ];
 
             self.stats.write().await.websocket_upgrades += 1;
             Ok(())
@@ -322,8 +364,10 @@ mod tests {
             self.stats.write().await.websocket_frames_received += 1;
 
             // Handle close frames
-            if let Frame::Close { code, reason } = &frame {
-                stream.close_reason = Some(CloseReason::new(*code, reason.clone()));
+            if frame.opcode == Opcode::Close {
+                let close_reason = CloseReason::parse(&frame.payload)
+                    .map_err(|_| H3NativeError::InvalidFrame("invalid WebSocket close payload"))?;
+                stream.close_reason = Some(close_reason);
                 stream.state = WebSocketStreamState::Closing;
             }
 
@@ -348,10 +392,7 @@ mod tests {
             }
 
             // Encode WebSocket frame
-            let encoded = stream
-                .frame_codec
-                .encode_frame(frame)
-                .map_err(|_| H3NativeError::InvalidFrame("Failed to encode WebSocket frame"))?;
+            let encoded = encode_ws_frame(&mut stream.frame_codec, frame)?;
 
             stream.bytes_sent += encoded.len() as u64;
             self.stats.write().await.websocket_frames_sent += 1;
@@ -394,12 +435,18 @@ mod tests {
                 server_addr,
                 stats: Arc::new(RwLock::new(H3WebSocketStats::default())),
                 websocket_stream_id: None,
-                frame_codec: FrameCodec::new(),
+                frame_codec: FrameCodec::client(),
             }
         }
 
         /// Establish QUIC connection and HTTP/3 control stream
         pub async fn connect(&mut self) -> Result<(), H3NativeError> {
+            if self.server_addr.port() == 0 {
+                return Err(H3NativeError::StreamProtocol(
+                    "test endpoint must use an observed nonzero port",
+                ));
+            }
+
             // Establish QUIC connection.
             self.stats.write().await.quic_connections += 1;
 
@@ -419,7 +466,7 @@ mod tests {
             self.websocket_stream_id = Some(stream_id);
 
             // Generate WebSocket key
-            let ws_key = base64::encode(&[1u8; 16]); // Simplified for testing
+            let ws_key = ws_key(1);
 
             // Build CONNECT request headers.
             let mut headers = HashMap::new();
@@ -439,10 +486,7 @@ mod tests {
 
         /// Send WebSocket frame to server
         pub async fn send_frame(&mut self, frame: Frame) -> Result<Bytes, H3NativeError> {
-            let encoded = self
-                .frame_codec
-                .encode_frame(frame)
-                .map_err(|_| H3NativeError::InvalidFrame("Failed to encode frame"))?;
+            let encoded = encode_ws_frame(&mut self.frame_codec, frame)?;
 
             self.stats.write().await.websocket_frames_sent += 1;
             self.stats.write().await.bytes_on_quic_streams += encoded.len() as u64;
@@ -452,10 +496,7 @@ mod tests {
 
         /// Receive and decode WebSocket frame
         pub async fn receive_frame(&mut self, data: &[u8]) -> Result<Frame, H3NativeError> {
-            let frame = self
-                .frame_codec
-                .decode_frame(data)
-                .map_err(|_| H3NativeError::InvalidFrame("Failed to decode frame"))?;
+            let frame = decode_ws_frame(&mut self.frame_codec, data)?;
 
             self.stats.write().await.websocket_frames_received += 1;
             Ok(frame)
@@ -469,7 +510,7 @@ mod tests {
     #[tokio::test]
     async fn test_h3_websocket_basic_upgrade() {
         let mut logger = H3WebSocketE2ELogger::new("h3_websocket_basic_upgrade".to_string());
-        let addr = "127.0.0.1:0".parse().unwrap();
+        let addr = test_endpoint(1);
 
         logger.log_phase(H3WebSocketPhase::Setup, addr).await;
 
@@ -506,7 +547,7 @@ mod tests {
             // 4. Server processes CONNECT request
             let mut headers = HashMap::new();
             headers.insert("upgrade".to_string(), "websocket".to_string());
-            headers.insert("sec-websocket-key".to_string(), base64::encode(&[1u8; 16]));
+            headers.insert("sec-websocket-key".to_string(), ws_key(1));
             headers.insert("sec-websocket-version".to_string(), "13".to_string());
             headers.insert("sec-websocket-protocol".to_string(), "chat".to_string());
 
@@ -518,9 +559,7 @@ mod tests {
             logger
                 .log_phase(H3WebSocketPhase::WebSocketHandshake, addr)
                 .await;
-            server
-                .send_upgrade_response(stream_id, &base64::encode(&[1u8; 16]))
-                .await?;
+            server.send_upgrade_response(stream_id, &ws_key(1)).await?;
             server.activate_websocket_stream(stream_id).await?;
 
             // 6. Test WebSocket frame exchange
@@ -529,38 +568,36 @@ mod tests {
                 .await;
 
             // Client sends ping frame
-            let ping_frame = Frame::Ping {
-                data: vec![1, 2, 3, 4],
-            };
+            let ping_frame = Frame::ping(Bytes::from_static(&[1, 2, 3, 4]));
             let ping_encoded = client.send_frame(ping_frame).await?;
 
             // Server handles ping and responds with pong
             let received_frame = server
                 .handle_websocket_frame(stream_id, &ping_encoded)
                 .await?;
-            assert!(matches!(received_frame, Some(Frame::Ping { .. })));
+            assert!(matches!(
+                received_frame.as_ref().map(|frame| frame.opcode),
+                Some(Opcode::Ping)
+            ));
 
-            let pong_frame = Frame::Pong {
-                data: vec![1, 2, 3, 4],
-            };
+            let pong_frame = Frame::pong(Bytes::from_static(&[1, 2, 3, 4]));
             let pong_encoded = server.send_websocket_frame(stream_id, pong_frame).await?;
 
             // Client receives pong
             let pong_received = client.receive_frame(&pong_encoded).await?;
-            assert!(matches!(pong_received, Frame::Pong { .. }));
+            assert_eq!(pong_received.opcode, Opcode::Pong);
 
             // 7. Test message exchange
-            let text_frame = Frame::Text {
-                data: "Hello HTTP/3 WebSocket!".as_bytes().to_vec(),
-            };
+            let text_frame = Frame::text(Bytes::from_static(b"Hello HTTP/3 WebSocket!"));
             let text_encoded = client.send_frame(text_frame).await?;
             let received_text = server
                 .handle_websocket_frame(stream_id, &text_encoded)
                 .await?;
 
-            if let Some(Frame::Text { data }) = received_text {
+            if let Some(frame) = received_text {
+                assert_eq!(frame.opcode, Opcode::Text);
                 assert_eq!(
-                    std::str::from_utf8(&data).unwrap(),
+                    std::str::from_utf8(&frame.payload).unwrap(),
                     "Hello HTTP/3 WebSocket!"
                 );
             } else {
@@ -571,7 +608,7 @@ mod tests {
             logger
                 .log_phase(H3WebSocketPhase::CloseHandshake, addr)
                 .await;
-            let close_reason = CloseReason::new(1000, "Normal closure".to_string());
+            let close_reason = CloseReason::with_text(CloseCode::Normal, "Normal closure");
             server
                 .close_websocket_stream(stream_id, close_reason)
                 .await?;
@@ -604,11 +641,11 @@ mod tests {
                 assert!(client_stats.websocket_frames_sent >= 2); // ping + text
                 assert!(client_stats.websocket_frames_received >= 1); // pong
 
-                logger.finalize(true, None).await
+                logger.finalize(server.addr, true, None).await
             }
             Err(e) => {
                 logger
-                    .finalize(false, Some(format!("Test failed: {e}")))
+                    .finalize(server.addr, false, Some(format!("Test failed: {e}")))
                     .await
             }
         };
@@ -620,6 +657,8 @@ mod tests {
             "H3 WebSocket basic upgrade test failed: {:?}",
             test_result.error
         );
+        assert_eq!(test_result.server_addr, addr);
+        assert_ne!(test_result.server_addr.port(), 0);
 
         eprintln!("✅ H3 WebSocket basic upgrade test completed successfully");
         eprintln!("📊 Final stats: {:?}", test_result.h3_ws_stats);
@@ -628,7 +667,7 @@ mod tests {
     #[tokio::test]
     async fn test_h3_websocket_protocol_negotiation() {
         let mut logger = H3WebSocketE2ELogger::new("h3_websocket_protocol_negotiation".to_string());
-        let addr = "127.0.0.1:0".parse().unwrap();
+        let addr = test_endpoint(2);
 
         logger.log_phase(H3WebSocketPhase::Setup, addr).await;
 
@@ -646,7 +685,7 @@ mod tests {
 
             let mut headers = HashMap::new();
             headers.insert("upgrade".to_string(), "websocket".to_string());
-            headers.insert("sec-websocket-key".to_string(), base64::encode(&[2u8; 16]));
+            headers.insert("sec-websocket-key".to_string(), ws_key(2));
             headers.insert("sec-websocket-version".to_string(), "13".to_string());
             headers.insert(
                 "sec-websocket-protocol".to_string(),
@@ -660,16 +699,18 @@ mod tests {
             // Verify protocol is parsed correctly
             assert_eq!(ws_stream.subprotocol, Some("chat, echo".to_string()));
 
-            server
-                .send_upgrade_response(stream_id, &base64::encode(&[2u8; 16]))
-                .await?;
+            server.send_upgrade_response(stream_id, &ws_key(2)).await?;
 
             Ok::<(), H3NativeError>(())
         }
         .await;
 
         let test_result = logger
-            .finalize(result.is_ok(), result.err().map(|e| format!("{e}")))
+            .finalize(
+                server.addr,
+                result.is_ok(),
+                result.err().map(|e| format!("{e}")),
+            )
             .await;
 
         assert!(
@@ -677,6 +718,8 @@ mod tests {
             "Protocol negotiation test failed: {:?}",
             test_result.error
         );
+        assert_eq!(test_result.server_addr, addr);
+        assert_ne!(test_result.server_addr.port(), 0);
 
         eprintln!("✅ H3 WebSocket protocol negotiation test completed successfully");
     }
@@ -684,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn test_h3_websocket_error_handling() {
         let mut logger = H3WebSocketE2ELogger::new("h3_websocket_error_handling".to_string());
-        let addr = "127.0.0.1:0".parse().unwrap();
+        let addr = test_endpoint(3);
 
         let mut server = H3WebSocketServer::new(addr);
 
@@ -695,7 +738,7 @@ mod tests {
 
             // Test missing upgrade header
             let mut bad_headers = HashMap::new();
-            bad_headers.insert("sec-websocket-key".to_string(), base64::encode(&[3u8; 16]));
+            bad_headers.insert("sec-websocket-key".to_string(), ws_key(3));
 
             let connect_result = server
                 .handle_connect_request(stream_id, "websocket", bad_headers)
@@ -708,7 +751,7 @@ mod tests {
             // Test invalid WebSocket version
             let mut invalid_version = HashMap::new();
             invalid_version.insert("upgrade".to_string(), "websocket".to_string());
-            invalid_version.insert("sec-websocket-key".to_string(), base64::encode(&[4u8; 16]));
+            invalid_version.insert("sec-websocket-key".to_string(), ws_key(4));
             invalid_version.insert("sec-websocket-version".to_string(), "12".to_string());
 
             let version_result = server
@@ -737,7 +780,11 @@ mod tests {
         .await;
 
         let test_result = logger
-            .finalize(result.is_ok(), result.err().map(|e| format!("{e}")))
+            .finalize(
+                server.addr,
+                result.is_ok(),
+                result.err().map(|e| format!("{e}")),
+            )
             .await;
 
         assert!(
@@ -745,6 +792,8 @@ mod tests {
             "Error handling test failed: {:?}",
             test_result.error
         );
+        assert_eq!(test_result.server_addr, addr);
+        assert_ne!(test_result.server_addr.port(), 0);
 
         eprintln!("✅ H3 WebSocket error handling test completed successfully");
     }
@@ -752,7 +801,7 @@ mod tests {
     #[tokio::test]
     async fn test_h3_websocket_high_load_stream_management() {
         let mut logger = H3WebSocketE2ELogger::new("h3_websocket_high_load".to_string());
-        let addr = "127.0.0.1:0".parse().unwrap();
+        let addr = test_endpoint(4);
 
         logger.log_phase(H3WebSocketPhase::Setup, addr).await;
 
@@ -783,20 +832,17 @@ mod tests {
                 );
 
                 // Establish WebSocket on each stream
+                let key_seed = u8::try_from(i).expect("stream index fits in WebSocket key seed");
+                let key = ws_key(key_seed);
                 let mut headers = HashMap::new();
                 headers.insert("upgrade".to_string(), "websocket".to_string());
-                headers.insert(
-                    "sec-websocket-key".to_string(),
-                    base64::encode(&[i as u8; 16]),
-                );
+                headers.insert("sec-websocket-key".to_string(), key.clone());
                 headers.insert("sec-websocket-version".to_string(), "13".to_string());
 
                 server
                     .handle_connect_request(stream_id, "websocket", headers)
                     .await?;
-                server
-                    .send_upgrade_response(stream_id, &base64::encode(&[i as u8; 16]))
-                    .await?;
+                server.send_upgrade_response(stream_id, &key).await?;
                 server.activate_websocket_stream(stream_id).await?;
 
                 clients.push((client, stream_id));
@@ -810,9 +856,7 @@ mod tests {
             for (client_idx, (client, stream_id)) in clients.iter_mut().enumerate() {
                 for frame_idx in 0..FRAMES_PER_STREAM {
                     let message = format!("Stream {} Frame {}", client_idx, frame_idx);
-                    let frame = Frame::Text {
-                        data: message.as_bytes().to_vec(),
-                    };
+                    let frame = Frame::text(Bytes::from(message.into_bytes()));
                     let encoded = client.send_frame(frame).await?;
 
                     server.handle_websocket_frame(*stream_id, &encoded).await?;
@@ -828,7 +872,7 @@ mod tests {
                 .log_phase(H3WebSocketPhase::CloseHandshake, addr)
                 .await;
             for (_, stream_id) in &clients {
-                let close_reason = CloseReason::new(1000, "Test complete".to_string());
+                let close_reason = CloseReason::with_text(CloseCode::Normal, "Test complete");
                 server
                     .close_websocket_stream(*stream_id, close_reason)
                     .await?;
@@ -852,11 +896,15 @@ mod tests {
                 );
                 assert_eq!(stats.stream_closes, NUM_STREAMS as u64);
 
-                logger.finalize(true, None).await
+                logger.finalize(server.addr, true, None).await
             }
             Err(e) => {
                 logger
-                    .finalize(false, Some(format!("High load test failed: {e}")))
+                    .finalize(
+                        server.addr,
+                        false,
+                        Some(format!("High load test failed: {e}")),
+                    )
                     .await
             }
         };
@@ -868,6 +916,8 @@ mod tests {
             "High load test failed: {:?}",
             test_result.error
         );
+        assert_eq!(test_result.server_addr, addr);
+        assert_ne!(test_result.server_addr.port(), 0);
 
         eprintln!("✅ H3 WebSocket high load test completed successfully");
         eprintln!(
@@ -896,7 +946,7 @@ mod tests {
     #[tokio::test]
     async fn test_h3_websocket_stats_accuracy() {
         let mut logger = H3WebSocketE2ELogger::new("h3_websocket_stats_accuracy".to_string());
-        let addr = "127.0.0.1:0".parse().unwrap();
+        let addr = test_endpoint(5);
 
         let mut server = H3WebSocketServer::new(addr);
         let mut client = H3WebSocketClient::new(addr);
@@ -907,37 +957,32 @@ mod tests {
 
             let stream_id = client.send_connect_request("test.com:443", None).await?;
 
+            let key = ws_key(5);
             let mut headers = HashMap::new();
             headers.insert("upgrade".to_string(), "websocket".to_string());
-            headers.insert("sec-websocket-key".to_string(), base64::encode(&[5u8; 16]));
+            headers.insert("sec-websocket-key".to_string(), key.clone());
             headers.insert("sec-websocket-version".to_string(), "13".to_string());
 
             server
                 .handle_connect_request(stream_id, "websocket", headers)
                 .await?;
-            server
-                .send_upgrade_response(stream_id, &base64::encode(&[5u8; 16]))
-                .await?;
+            server.send_upgrade_response(stream_id, &key).await?;
             server.activate_websocket_stream(stream_id).await?;
 
             // Send exactly 3 frames and receive 2 frames
             for i in 0..3 {
-                let frame = Frame::Text {
-                    data: format!("Message {}", i).as_bytes().to_vec(),
-                };
+                let frame = Frame::text(Bytes::from(format!("Message {}", i).into_bytes()));
                 let encoded = client.send_frame(frame).await?;
                 server.handle_websocket_frame(stream_id, &encoded).await?;
             }
 
             for i in 0..2 {
-                let frame = Frame::Text {
-                    data: format!("Response {}", i).as_bytes().to_vec(),
-                };
+                let frame = Frame::text(Bytes::from(format!("Response {}", i).into_bytes()));
                 let encoded = server.send_websocket_frame(stream_id, frame).await?;
                 client.receive_frame(&encoded).await?;
             }
 
-            let close_reason = CloseReason::new(1000, "Stats test complete".to_string());
+            let close_reason = CloseReason::with_text(CloseCode::Normal, "Stats test complete");
             server
                 .close_websocket_stream(stream_id, close_reason)
                 .await?;
@@ -968,11 +1013,15 @@ mod tests {
                     frames_received: 2,
                 });
 
-                logger.finalize(true, None).await
+                logger.finalize(server.addr, true, None).await
             }
             Err(e) => {
                 logger
-                    .finalize(false, Some(format!("Stats accuracy test failed: {e}")))
+                    .finalize(
+                        server.addr,
+                        false,
+                        Some(format!("Stats accuracy test failed: {e}")),
+                    )
                     .await
             }
         };
@@ -982,6 +1031,8 @@ mod tests {
             "Stats accuracy test failed: {:?}",
             test_result.error
         );
+        assert_eq!(test_result.server_addr, addr);
+        assert_ne!(test_result.server_addr.port(), 0);
 
         eprintln!("✅ H3 WebSocket stats accuracy test completed successfully");
     }
