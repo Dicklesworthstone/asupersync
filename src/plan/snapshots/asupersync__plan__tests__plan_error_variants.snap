@@ -1,0 +1,25 @@
+---
+source: src/plan/mod.rs
+assertion_line: 1578
+expression: errors
+---
+[
+    MissingNode {
+        parent: PlanId(
+            0,
+        ),
+        child: PlanId(
+            42,
+        ),
+    },
+    EmptyChildren {
+        parent: PlanId(
+            7,
+        ),
+    },
+    Cycle {
+        at: PlanId(
+            3,
+        ),
+    },
+]

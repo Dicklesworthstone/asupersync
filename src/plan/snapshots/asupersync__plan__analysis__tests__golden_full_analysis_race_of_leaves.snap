@@ -1,0 +1,33 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3294
+expression: "format!(\"{}\", analysis)"
+---
+Plan Analysis Report
+====================
+
+Summary: 3/3 safe, 0 obligation issue(s), 0 cancel issue(s)
+Overall Safe: true
+
+Safe Nodes (3):
+  Node 0: clean (cost: alloc=1 cancel=1 obl=0 depth=1)
+  Node 1: clean (cost: alloc=1 cancel=1 obl=0 depth=1)
+  Node 2: clean (cost: alloc=3 cancel=1 obl=0 depth=2)
+
+Detailed Node Analysis:
+----------------------
+Node 0:
+  Safety: obligation=clean, cancel=safe, overall=true
+  Budget: polls=[1, 1]
+  Cost: alloc=1 cancel=1 obl=0 depth=1
+  Obligation Flow: reserves=[] [all-paths-ok]
+Node 1:
+  Safety: obligation=clean, cancel=safe, overall=true
+  Budget: polls=[1, 1]
+  Cost: alloc=1 cancel=1 obl=0 depth=1
+  Obligation Flow: reserves=[] [all-paths-ok]
+Node 2:
+  Safety: obligation=clean, cancel=safe, overall=true
+  Budget: polls=[1, 1] par=2
+  Cost: alloc=3 cancel=1 obl=0 depth=2
+  Obligation Flow: reserves=[] [all-paths-ok]

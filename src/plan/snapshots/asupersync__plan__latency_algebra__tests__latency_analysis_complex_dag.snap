@@ -1,0 +1,25 @@
+---
+source: src/plan/latency_algebra.rs
+assertion_line: 2823
+expression: "format!(\"{analysis}\")"
+---
+Latency Analysis (8 nodes)
+  node[0]: delay<=0.000200s, backlog<=0.10
+  node[1]: delay<=0.300000s, backlog<=22.50
+  node[2]: delay<=0.002500s, backlog<=0.50
+  node[3]: delay<=0.004000s, backlog<=0.60
+  node[4]: delay<=0.003750s, backlog<=0.38
+  node[5]: delay<=0.000200s, backlog<=0.10
+  node[6]: delay<=0.003750s, backlog<=0.38
+  node[7]: delay<=0.003750s, backlog<=0.38
+  --- end-to-end ---
+Latency Bound Analysis
+  delay    <= 0.003750s
+  backlog  <= 0.38 units
+  util     =  66.7%
+  provenance:
+    node[4]: 0.003750s — leaf "result_aggregation": delay=0.003750s
+    node[6]: 0.003750s — race of 2 children: min delay=0.003750s (winner=child[1])
+    node[7]: 0.003750s — join of 2 children: max delay=0.003750s
+    node[0]: 0.000200s — leaf "fast_cache_lookup": delay=0.000200s
+    node[5]: 0.000200s — race of 3 children: min delay=0.000200s (winner=child[0])

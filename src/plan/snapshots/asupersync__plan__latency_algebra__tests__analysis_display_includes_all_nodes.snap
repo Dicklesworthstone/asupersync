@@ -1,0 +1,18 @@
+---
+source: src/plan/latency_algebra.rs
+assertion_line: 2503
+expression: "format!(\"{analysis}\")"
+---
+Latency Analysis (3 nodes)
+  node[0]: delay<=0.000000s, backlog<=0.00
+  node[1]: delay<=0.000000s, backlog<=0.00
+  node[2]: delay<=0.000000s, backlog<=0.00
+  --- end-to-end ---
+Latency Bound Analysis
+  delay    <= 0.000000s
+  backlog  <= 0.00 units
+  util     =  50.0%
+  provenance:
+    node[0]: 0.000000s — leaf "a": delay=0.000000s
+    node[1]: 0.000000s — leaf "b": delay=0.000000s
+    node[2]: 0.000000s — join of 2 children: max delay=0.000000s

@@ -1,0 +1,9 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3153
+expression: rendered
+---
+Safe -> safe
+MayOrphan -> may-orphan
+Orphan -> orphan
+Unknown -> unknown

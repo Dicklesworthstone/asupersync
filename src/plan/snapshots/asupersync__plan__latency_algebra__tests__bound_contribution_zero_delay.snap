@@ -1,0 +1,6 @@
+---
+source: src/plan/latency_algebra.rs
+assertion_line: 2718
+expression: "format!(\"{contribution}\")"
+---
+node[0]: 0.000000s — instant operation
