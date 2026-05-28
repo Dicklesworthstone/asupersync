@@ -4955,12 +4955,19 @@ mod tests {
             );
         }
 
-        // Verify cloned context produces same entropy sequence
+        // Verify cloned context shares the entropy stream rather than
+        // replaying the first draw from a copied RNG state.
         let val1 = original_cx.random_usize(100);
         let val2 = cloned_cx.random_usize(100);
+        let control_cx = test_cx_with_entropy(123);
+        let expected1 = control_cx.random_usize(100);
+        let expected2 = control_cx.random_usize(100);
 
-        // Both should access the same entropy source
-        assert_eq!(val1, val2, "Cloned context should share entropy state");
+        assert_eq!(
+            (val1, val2),
+            (expected1, expected2),
+            "Cloned context should continue the shared entropy sequence"
+        );
     }
 
     /// MR6: Composite Trace Ordering (Composition)
