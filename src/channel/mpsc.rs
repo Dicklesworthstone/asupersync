@@ -554,8 +554,11 @@ impl<T> Sender<T> {
         }
 
         let has_physical_capacity = inner.has_capacity(self.shared.capacity);
+        let waiter_owns_available_slot = has_physical_capacity && !inner.send_wakers.is_empty();
 
-        let evicted = if has_physical_capacity {
+        let evicted = if waiter_owns_available_slot {
+            return Err(SendError::Full(value));
+        } else if has_physical_capacity {
             None
         } else if let Some(index) = inner.queue.iter().position(&mut predicate) {
             // Evict the oldest committed message (not a reserved slot) that the
@@ -623,16 +626,11 @@ impl<T> Reserve<'_, T> {
                         None
                     }
                 } else {
-                    // Stale waiter: not in slab, channel alive.
-                    // Another agent (e.g., Receiver) removed us from the queue and slab
-                    // to wake us up because capacity was available.
-                    // We are dropping without using that capacity, so we MUST pass the baton
-                    // to the next waiter if there is still capacity, to prevent lost wakeups.
-                    if inner.has_capacity(self.sender.shared.capacity) {
-                        inner.take_next_sender_waker()
-                    } else {
-                        None
-                    }
+                    // Stale waiter: the token is no longer registered, so this
+                    // future does not own a queue position to release. Waking the
+                    // next waiter here fabricates a capacity handoff and can
+                    // spuriously notify later senders.
+                    None
                 }
             };
             if let Some(w) = next_waker {
@@ -1720,10 +1718,10 @@ mod tests {
     #[test]
     fn reserve_cancellation_after_reservation_granted_no_leak() {
         init_test("reserve_cancellation_after_reservation_granted_no_leak");
-        let (tx, mut rx) = channel::<i32>(2); // capacity 2
+        let (tx, mut rx) = channel::<i32>(1);
         let cx = test_cx();
 
-        // Fill one slot to force the next reserve to wait
+        // Fill the only slot to force the next reserve to wait.
         block_on(tx.send(&cx, 1)).expect("initial send");
 
         // Create a reserve future but don't immediately poll it
@@ -1763,12 +1761,12 @@ mod tests {
         // After fix: permit drop should properly clean up
         drop(_permit);
 
-        // Verify capacity is properly restored by successfully reserving twice more
+        // Verify capacity is properly restored by successfully reserving and
+        // aborting again. Capacity is one, so each successful abort should make
+        // the next reservation possible.
         let permit1 = tx.try_reserve().expect("first try_reserve after cleanup");
-        let permit2 = tx.try_reserve().expect("second try_reserve after cleanup");
-
-        // Clean up
         permit1.abort();
+        let permit2 = tx.try_reserve().expect("second try_reserve after cleanup");
         permit2.abort();
 
         crate::test_complete!("reserve_cancellation_after_reservation_granted_no_leak");

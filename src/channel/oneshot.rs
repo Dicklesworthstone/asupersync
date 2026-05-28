@@ -1681,20 +1681,21 @@ mod tests {
     #[test]
     fn recv_with_cancel_pending() {
         init_test("recv_with_cancel_pending");
-        let cx = test_cx();
-        cx.set_cancel_requested(true);
+        let sender_cx = test_cx();
+        let receiver_cx = test_cx();
+        receiver_cx.set_cancel_requested(true);
 
         let (tx, mut rx) = channel::<i32>();
 
-        // Sender sends but receiver is cancelled
-        tx.send(&cx, 42).expect("send should succeed");
+        // Sender sends before the receiver observes cancellation.
+        tx.send(&sender_cx, 42).expect("send should succeed");
 
         // Recv should still work because value is ready before checkpoint
         // Actually let me check - the value is ready, so recv should get it
         // before hitting the checkpoint in the wait loop
 
         // First iteration finds the value
-        let result = block_on(rx.recv(&cx));
+        let result = block_on(rx.recv(&receiver_cx));
         crate::assert_with_log!(result.is_ok(), "recv ok", true, result.is_ok());
         let value = result.unwrap();
         crate::assert_with_log!(value == 42, "recv value", 42, value);
@@ -2543,8 +2544,8 @@ mod tests {
         tx.send(&sender_cx, test_value)
             .expect("send should succeed");
 
-        // Verify value is ready before cancellation
-        assert!(rx.try_recv().is_ok(), "value should be ready after send");
+        // Verify value is ready before cancellation without consuming it.
+        assert!(rx.is_ready(), "value should be ready after send");
 
         // Now cancel the receiver context AFTER the value was committed
         receiver_cx.set_cancel_requested(true);

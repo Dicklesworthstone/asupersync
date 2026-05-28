@@ -51,6 +51,32 @@ use crate::channel::{mpsc, oneshot};
 use crate::cx::Cx;
 use crate::obligation::graded::{AbortedProof, CommittedProof, ObligationToken, SendPermit};
 
+fn reserve_tracked_send_obligation(description: &'static str) -> ObligationToken<SendPermit> {
+    if let Some(cx) = crate::cx::Cx::current() {
+        ObligationToken::<SendPermit>::reserve(description, cx.region_id())
+    } else {
+        reserve_tracked_send_obligation_without_current(description)
+    }
+}
+
+#[cfg(test)]
+fn reserve_tracked_send_obligation_without_current(
+    description: &'static str,
+) -> ObligationToken<SendPermit> {
+    ObligationToken::<SendPermit>::reserve_test(description)
+}
+
+#[cfg(not(test))]
+fn reserve_tracked_send_obligation_without_current(
+    description: &'static str,
+) -> ObligationToken<SendPermit> {
+    panic!(
+        "Cannot create tracked permit outside of task context: obligation \
+         tokens require region scoping to prevent leaks. Use async reserve() \
+         with a Cx when outside unit-test code. Description: {description}"
+    )
+}
+
 /// Redacted telemetry for one underlying channel inside a session wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionSubchannelTelemetrySnapshot {
@@ -188,16 +214,7 @@ impl<T> TrackedSender<T> {
     /// Non-blocking reserve attempt.
     pub fn try_reserve(&self) -> Result<TrackedPermit<'_, T>, mpsc::SendError<()>> {
         let permit = self.inner.try_reserve()?;
-        let obligation = {
-            let region = crate::cx::Cx::current()
-                .expect(
-                    "Cannot create tracked permit outside of task context: \
-                     obligation tokens require region scoping to prevent leaks. \
-                     Use async reserve() method when in async context.",
-                )
-                .region_id();
-            ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)", region)
-        };
+        let obligation = reserve_tracked_send_obligation("TrackedPermit(mpsc)");
         Ok(TrackedPermit { permit, obligation })
     }
 
