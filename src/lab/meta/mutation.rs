@@ -910,7 +910,7 @@ mod tests {
     use std::collections::HashSet;
 
     fn expected_oracle_invariant_count() -> usize {
-        let mut count = 17;
+        let mut count = 24;
         if cfg!(feature = "messaging-fabric") {
             count += 4;
         }
