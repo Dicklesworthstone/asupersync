@@ -1918,8 +1918,8 @@ mod tests {
     #[test]
     fn direct_attenuation_check_requires_parent_prefix_and_expected_signature() {
         let key = test_root_key();
-        let parent =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let parent = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let added = CaveatPredicate::RegionScope(42);
         let child = parent.clone().add_caveat(added.clone());
 
@@ -1985,8 +1985,8 @@ mod tests {
     #[test]
     fn time_before_caveat_passes() {
         let key = test_root_key();
-        let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let token = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         let ctx = VerificationContext::new().with_time(500);
         assert!(token.verify(&key, &ctx).is_ok());
@@ -1995,8 +1995,8 @@ mod tests {
     #[test]
     fn time_before_caveat_fails_when_expired() {
         let key = test_root_key();
-        let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let token = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         let ctx = VerificationContext::new().with_time(1500);
         let err = token.verify(&key, &ctx).unwrap_err();
@@ -2009,8 +2009,8 @@ mod tests {
     #[test]
     fn time_before_caveat_fails_closed_without_time_context() {
         let key = test_root_key();
-        let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let token = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         let err = token.verify(&key, &VerificationContext::new()).unwrap_err();
         assert!(matches!(err, VerificationError::CaveatFailed { .. }));
@@ -2218,8 +2218,8 @@ mod tests {
     #[test]
     fn from_binary_rejects_truncated_data() {
         let key = test_root_key();
-        let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let token = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let bytes = token.to_binary();
 
         // Truncate at various points.
@@ -2283,10 +2283,10 @@ mod tests {
     #[test]
     fn minting_is_deterministic() {
         let key = test_root_key();
-        let t1 =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
-        let t2 =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let t1 = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let t2 = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         assert_eq!(t1.signature().as_bytes(), t2.signature().as_bytes());
     }
@@ -3032,7 +3032,7 @@ mod tests {
     /// Strategy that generates arbitrary `CaveatPredicate` values.
     fn arb_predicate() -> impl Strategy<Value = CaveatPredicate> {
         prop_oneof![
-            (u64::MAX/2..u64::MAX).prop_map(CaveatPredicate::TimeBefore),
+            (u64::MAX / 2..u64::MAX).prop_map(CaveatPredicate::TimeBefore),
             (0u64..1000u64).prop_map(CaveatPredicate::TimeAfter),
             any::<u64>().prop_map(CaveatPredicate::RegionScope),
             any::<u64>().prop_map(CaveatPredicate::TaskScope),
@@ -3408,8 +3408,8 @@ mod tests {
     #[test]
     fn tampered_signature_bytes_rejected() {
         let key = test_root_key();
-        let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let token = MacaroonToken::mint(&key, "cap", "loc")
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let mut bytes = token.to_binary();
 
         // Flip last byte of signature (signature is the last AUTH_KEY_SIZE bytes).
