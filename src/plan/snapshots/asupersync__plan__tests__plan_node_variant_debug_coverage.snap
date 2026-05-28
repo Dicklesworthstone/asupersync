@@ -1,0 +1,39 @@
+---
+source: src/plan/mod.rs
+assertion_line: 1560
+expression: variants
+---
+[
+    Leaf {
+        label: "sample-leaf",
+    },
+    Join {
+        children: [
+            PlanId(
+                0,
+            ),
+            PlanId(
+                1,
+            ),
+        ],
+    },
+    Race {
+        children: [
+            PlanId(
+                2,
+            ),
+            PlanId(
+                3,
+            ),
+            PlanId(
+                4,
+            ),
+        ],
+    },
+    Timeout {
+        child: PlanId(
+            5,
+        ),
+        duration: 750ms,
+    },
+]

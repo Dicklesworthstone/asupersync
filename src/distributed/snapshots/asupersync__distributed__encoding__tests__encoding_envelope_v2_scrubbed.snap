@@ -1,12 +1,13 @@
 ---
 source: src/distributed/encoding.rs
-expression: "json!({ \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"base\", &base), \"extension\": scrub_encoded_state_envelope_for_snapshot_test(\"extension\", &extension), })"
+assertion_line: 1332
+expression: "serde_json::json!({\n    \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"base\", &base),\n    \"extension\":\n    scrub_encoded_state_envelope_for_snapshot_test(\"extension\", &extension),\n})"
 ---
 {
   "base": {
     "envelope": {
       "encoded_at_nanos": 77000000000,
-      "original_size": 73,
+      "original_size": 89,
       "redundancy_factor": "1.500",
       "repair_count": 1,
       "source_count": 2
@@ -15,7 +16,7 @@ expression: "json!({ \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"
     "params": {
       "min_symbols_for_decode": 2,
       "object_id": "ObjectId(00000000000000000000000000000010)",
-      "object_size": 73,
+      "object_size": 89,
       "source_blocks": 1,
       "symbol_size": 48,
       "symbols_per_block": 2
@@ -55,21 +56,21 @@ expression: "json!({ \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"
         "esi": 0,
         "kind": "source",
         "len": 48,
-        "preview_hex": "53 4e 41 50 01 01 00 00",
+        "preview_hex": "53 4e 41 50 02 01 00 00",
         "sbn": 0
       },
       {
         "esi": 1,
         "kind": "source",
         "len": 48,
-        "preview_hex": "02 00 00 00 01 00 ca 9a",
+        "preview_hex": "00 00 01 00 00 00 00 00",
         "sbn": 0
       },
       {
         "esi": 2,
         "kind": "repair",
         "len": 48,
-        "preview_hex": "09 60 dc 05 6a d8 30 44",
+        "preview_hex": "53 4e a6 50 02 01 00 00",
         "sbn": 0
       }
     ]
@@ -77,7 +78,7 @@ expression: "json!({ \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"
   "extension": {
     "envelope": {
       "encoded_at_nanos": 88000000000,
-      "original_size": 150,
+      "original_size": 166,
       "redundancy_factor": "1.286",
       "repair_count": 2,
       "source_count": 7
@@ -86,7 +87,7 @@ expression: "json!({ \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"
     "params": {
       "min_symbols_for_decode": 7,
       "object_id": "ObjectId(00000000000000000000000000000020)",
-      "object_size": 150,
+      "object_size": 166,
       "source_blocks": 2,
       "symbol_size": 24,
       "symbols_per_block": 4
@@ -153,63 +154,63 @@ expression: "json!({ \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"
         "esi": 0,
         "kind": "source",
         "len": 24,
-        "preview_hex": "53 4e 41 50 01 07 00 00",
+        "preview_hex": "53 4e 41 50 02 07 00 00",
         "sbn": 0
       },
       {
         "esi": 1,
         "kind": "source",
         "len": 24,
-        "preview_hex": "00 00 00 00 00 00 02 00",
+        "preview_hex": "00 00 00 00 00 00 07 00",
         "sbn": 0
       },
       {
         "esi": 2,
         "kind": "source",
         "len": 24,
-        "preview_hex": "02 00 00 00 03 08 02 00",
+        "preview_hex": "00 00 03 00 00 00 00 00",
         "sbn": 0
       },
       {
         "esi": 3,
         "kind": "source",
         "len": 24,
-        "preview_hex": "00 00 05 00 00 00 01 00",
+        "preview_hex": "00 00 08 00 00 00 00 00",
         "sbn": 0
       },
       {
         "esi": 4,
         "kind": "repair",
         "len": 24,
-        "preview_hex": "5f 60 3b 05 6e 8e 96 00",
+        "preview_hex": "53 4e 04 50 02 07 8f 00",
         "sbn": 0
       },
       {
         "esi": 0,
         "kind": "source",
         "len": 24,
-        "preview_hex": "00 00 00 00 00 01 19 00",
+        "preview_hex": "a0 db 21 5d 00 00 00 01",
         "sbn": 1
       },
       {
         "esi": 1,
         "kind": "source",
         "len": 24,
-        "preview_hex": "73 69 6f 6e 20 66 69 65",
+        "preview_hex": "00 00 74 69 6d 65 6f 75",
         "sbn": 1
       },
       {
         "esi": 2,
         "kind": "source",
         "len": 24,
-        "preview_hex": "de ad be ef 10 20 00 00",
+        "preview_hex": "6c 64 73 01 02 00 00 00",
         "sbn": 1
       },
       {
         "esi": 3,
         "kind": "repair",
         "len": 24,
-        "preview_hex": "52 ad f5 32 a6 c1 44 18",
+        "preview_hex": "d1 ee 8a 99 e8 92 2a 45",
         "sbn": 1
       }
     ]

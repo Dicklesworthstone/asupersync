@@ -1,0 +1,10 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3245
+expression: rendered
+---
+DeadlineMicros(None) -> ∞
+DeadlineMicros(Some(0)) -> 0µs
+DeadlineMicros(Some(42)) -> 42µs
+DeadlineMicros(Some(1500)) -> 1ms
+DeadlineMicros(Some(2500000)) -> 2s

@@ -1,0 +1,14 @@
+---
+source: src/plan/latency_algebra.rs
+assertion_line: 2842
+expression: "format!(\"{analysis}\")"
+---
+Latency Analysis (1 nodes)
+  node[0]: delay<=0.221911s, backlog<=26.23
+  --- end-to-end ---
+Latency Bound Analysis
+  delay    <= 0.221911s
+  backlog  <= 26.23 units
+  util     =  62.6%
+  provenance:
+    node[0]: 0.221911s — leaf "annotated_service": delay=0.221911s
