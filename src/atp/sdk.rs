@@ -1822,7 +1822,18 @@ mod tests {
             assert!(stream_handle.manifest().is_some());
             assert_eq!(stream_handle.total_bytes, data.len() as u64);
             assert!(stream_handle.verified_epochs_count() > 0);
-            assert!(!stream_handle.is_finalized()); // Since we didn't mark as final
+            assert!(
+                stream_handle.is_finalized(),
+                "stream_large_buffer has the full payload and should emit a final epoch"
+            );
+
+            let report = stream_handle.early_usability_report(ConsumptionPolicy::VerifiedOnly);
+            assert_eq!(
+                report.usable_state,
+                StreamEarlyUsabilityState::FinalCommitted
+            );
+            assert_eq!(report.final_commit_state, StreamFinalCommitState::Committed);
+            assert!(report.safety_caveats.is_empty());
 
             // Test consumption policy creation
             let manifest = stream_handle.manifest().unwrap().clone();
