@@ -15808,7 +15808,110 @@ mod tests {
             insta::assert_snapshot!(
                 "three_lane_scheduler_deadline_ordering_state",
                 state_dump_snapshot.as_str(),
-                @"three_lane_scheduler_deadline_ordering_state"
+                @"
+SchedulerStateDump {
+    scenario: \"3-lane-5-task-1-cancel-deadline-ordering\",
+    timestamp: \"2026-05-03T17:00:00.000Z\",
+    worker_count: 1,
+    global_ready_count: 2,
+    lane_states: {
+        \"cancel\": LaneState {
+            name: \"cancel\",
+            task_count: 1,
+            tasks: [
+                \"cancel_task_99_99\",
+            ],
+            priority_distribution: {
+                255: 1,
+            },
+        },
+        \"ready\": LaneState {
+            name: \"ready\",
+            task_count: 3,
+            tasks: [
+                \"task_1_1_1\",
+                \"task_4_4_4\",
+                \"task_5_5_5\",
+            ],
+            priority_distribution: {
+                75: 1,
+                125: 1,
+                200: 1,
+            },
+        },
+        \"timed\": LaneState {
+            name: \"timed\",
+            task_count: 2,
+            tasks: [
+                \"task_2_2_2\",
+                \"task_3_3_3\",
+            ],
+            priority_distribution: {
+                100: 1,
+                150: 1,
+            },
+        },
+    },
+    task_details: {
+        \"cancel_task_99_99\": TaskDetail {
+            task_id: \"cancel_task_99_99\",
+            priority: 255,
+            deadline: None,
+            lane: \"cancel\",
+            created_at: \"T+30ms\",
+        },
+        \"task_1_1_1\": TaskDetail {
+            task_id: \"task_1_1_1\",
+            priority: 200,
+            deadline: Some(
+                \"far\",
+            ),
+            lane: \"ready\",
+            created_at: \"T+0ms\",
+        },
+        \"task_2_2_2\": TaskDetail {
+            task_id: \"task_2_2_2\",
+            priority: 150,
+            deadline: Some(
+                \"near_50ms\",
+            ),
+            lane: \"timed\",
+            created_at: \"T+10ms\",
+        },
+        \"task_3_3_3\": TaskDetail {
+            task_id: \"task_3_3_3\",
+            priority: 100,
+            deadline: Some(
+                \"immediate_5ms\",
+            ),
+            lane: \"timed\",
+            created_at: \"T+15ms\",
+        },
+        \"task_4_4_4\": TaskDetail {
+            task_id: \"task_4_4_4\",
+            priority: 125,
+            deadline: None,
+            lane: \"ready\",
+            created_at: \"T+20ms\",
+        },
+        \"task_5_5_5\": TaskDetail {
+            task_id: \"task_5_5_5\",
+            priority: 75,
+            deadline: None,
+            lane: \"ready\",
+            created_at: \"T+25ms\",
+        },
+    },
+    scheduling_order: [
+        \"cancel_task_99_99\",
+        \"task_3_3_3\",
+        \"task_2_2_2\",
+        \"task_1_1_1\",
+        \"task_4_4_4\",
+        \"task_5_5_5\",
+    ],
+}
+"
             );
         });
 
