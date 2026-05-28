@@ -232,7 +232,7 @@ impl FinalizerStack {
     /// is verified by tests in region.rs (`finalizer_lifo_order`).
     #[inline]
     pub fn pop(&mut self) -> Option<Finalizer> {
-        let __len_before = self.finalizers.len();
+        let _len_before = self.finalizers.len();
         let result = self.finalizers.pop();
 
         // Defensive assertion: LIFO ordering contract verification
