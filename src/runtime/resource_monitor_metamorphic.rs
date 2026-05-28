@@ -54,7 +54,12 @@ fn mr1_measurement_additivity() {
         increments: Vec<u64>
     )| {
         prop_assume!(!increments.is_empty() && increments.len() <= 10);
-        let total_increment: u64 = increments.iter().sum();
+        let Some(total_increment) = increments
+            .iter()
+            .try_fold(0_u64, |total, increment| total.checked_add(*increment))
+        else {
+            return Ok(());
+        };
         prop_assume!(base_usage.saturating_add(total_increment) < u64::MAX / 2);
 
         let config = MonitorConfig::default();
@@ -280,16 +285,22 @@ fn mr5_cross_resource_independence() {
         );
         let _ = monitor.engine().process_measurements();
         let memory_degradation_after = monitor.pressure().get_degradation_level(&ResourceType::Memory);
-        let fd_degradation = monitor.pressure().get_degradation_level(&ResourceType::FileDescriptors);
+        let memory_measurement_after = monitor.pressure().get_measurement(&ResourceType::Memory);
+        let fd_measurement = monitor.pressure().get_measurement(&ResourceType::FileDescriptors);
 
         prop_assert_eq!(memory_degradation_before, memory_degradation_after,
             "Cross-resource independence violation: memory degradation changed from {:?} to {:?} after updating file descriptors",
             memory_degradation_before, memory_degradation_after);
 
-        // Verify both resources have independent state
-        prop_assert!(
-            memory_degradation_after != DegradationLevel::None || fd_degradation != DegradationLevel::None || memory_usage == 0,
-            "At least one resource should show some state change"
+        prop_assert_eq!(
+            memory_measurement_after.as_ref().map(|measurement| measurement.current),
+            Some(memory_usage),
+            "Cross-resource independence violation: memory measurement changed after updating file descriptors"
+        );
+        prop_assert_eq!(
+            fd_measurement.as_ref().map(|measurement| measurement.current),
+            Some(fd_usage),
+            "File descriptor measurement should be recorded independently"
         );
     });
 }
@@ -419,6 +430,9 @@ fn mr8_subset_consistency() {
     )| {
         prop_assume!(all_measurements.len() >= 3 && all_measurements.len() <= 6);
         prop_assume!(all_measurements.iter().all(|(_, _, threshold)| *threshold > 0));
+        let unique_resources: std::collections::HashSet<_> =
+            all_measurements.iter().map(|(resource_type, _, _)| resource_type.clone()).collect();
+        prop_assume!(unique_resources.len() == all_measurements.len());
 
         // Create subset (first half)
         let subset_size = all_measurements.len() / 2;
