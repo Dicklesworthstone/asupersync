@@ -398,61 +398,65 @@ pub fn detect_ambient_violations(source_code: &str) -> Vec<AmbientViolation> {
 /// while keeping the core detection logic testable.
 fn detect_ambient_violations_impl(source_code: &str) -> Vec<AmbientViolation> {
     let mut violations = Vec::new();
+    let mut line_filter = AmbientDetectionLineFilter::default();
 
     // Split into lines for line number reporting
     let lines: Vec<&str> = source_code.lines().collect();
 
     // First pass: detect direct pattern matches
     for (line_num, line) in lines.iter().enumerate() {
-        // Skip test code and comments
-        if line.contains("#[cfg(test)]") || line.trim_start().starts_with("//") {
+        let Some(code_line) = line_filter.sanitized_non_test_line(line) else {
             continue;
-        }
+        };
 
         // Check against enhanced GREP_PATTERNS
-        for (pattern, category) in GREP_PATTERNS {
-            if line.contains(pattern.trim_start_matches("r\"").trim_end_matches('"')) {
-                violations.push(AmbientViolation {
-                    line_number: line_num + 1,
-                    line_content: line.to_string(),
-                    pattern: pattern.to_string(),
-                    category: *category,
-                    violation_type: ViolationType::DirectUsage,
-                });
-            }
+        for (pattern, category) in matching_grep_patterns(&code_line) {
+            violations.push(AmbientViolation {
+                line_number: line_num + 1,
+                line_content: (*line).to_string(),
+                pattern: pattern.to_string(),
+                category,
+                violation_type: ViolationType::DirectUsage,
+            });
         }
 
         // Check for suspicious aliases
+        let mut alias_categories_seen = Vec::new();
         for (pattern, category) in SUSPICIOUS_ALIAS_PATTERNS {
             let regex_pattern = pattern.trim_start_matches("r\"").trim_end_matches('"');
             // Simple pattern matching for now - could be enhanced with regex crate
-            if line.contains("use") && line.contains("as") {
+            if code_line.contains("use") && code_line.contains("as") {
                 // Check if this looks like an ambient authority alias
                 let is_suspicious = match category {
                     AmbientCategory::Time => {
-                        line.contains("Instant")
-                            || line.contains("SystemTime")
-                            || line.contains("time::")
+                        code_line.contains("Instant")
+                            || code_line.contains("SystemTime")
+                            || code_line.contains("time::")
                     }
-                    AmbientCategory::Spawn => line.contains("thread::") || line.contains("spawn"),
+                    AmbientCategory::Spawn => {
+                        code_line.contains("thread::") || code_line.contains("spawn")
+                    }
                     AmbientCategory::Entropy => {
-                        line.contains("getrandom")
-                            || line.contains("thread_rng")
-                            || line.contains("rand")
+                        code_line.contains("getrandom")
+                            || code_line.contains("thread_rng")
+                            || code_line.contains("rand")
                     }
                     AmbientCategory::Io => {
-                        line.contains("std::fs")
-                            || line.contains("std::net")
-                            || line.contains("File")
+                        code_line.contains("std::fs")
+                            || code_line.contains("std::net")
+                            || code_line.contains("File")
                     }
-                    AmbientCategory::Env => line.contains("std::env") || line.contains("env::"),
+                    AmbientCategory::Env => {
+                        code_line.contains("std::env") || code_line.contains("env::")
+                    }
                     AmbientCategory::Output => false, // Macro aliases are harder to detect this way
                 };
 
-                if is_suspicious {
+                if is_suspicious && !alias_categories_seen.contains(category) {
+                    alias_categories_seen.push(*category);
                     violations.push(AmbientViolation {
                         line_number: line_num + 1,
-                        line_content: line.to_string(),
+                        line_content: (*line).to_string(),
                         pattern: regex_pattern.to_string(),
                         category: *category,
                         violation_type: ViolationType::SuspiciousAlias,
@@ -463,6 +467,213 @@ fn detect_ambient_violations_impl(source_code: &str) -> Vec<AmbientViolation> {
     }
 
     violations
+}
+
+fn grep_pattern_literal(pattern: &str) -> String {
+    pattern.replace(r"\(", "(").replace(r"\)", ")")
+}
+
+fn line_contains_grep_literal(line: &str, literal: &str) -> bool {
+    line.match_indices(literal).any(|(idx, _)| {
+        let before = line[..idx].chars().next_back();
+        !matches!(before, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_')
+    })
+}
+
+fn matching_grep_patterns(line: &str) -> Vec<(&'static str, AmbientCategory)> {
+    let mut patterns: Vec<_> = GREP_PATTERNS
+        .iter()
+        .map(|(pattern, category)| (*pattern, grep_pattern_literal(pattern), *category))
+        .collect();
+    patterns.sort_by(|(_, lhs, _), (_, rhs, _)| rhs.len().cmp(&lhs.len()));
+
+    let mut matches = Vec::new();
+    let mut matched_literals: Vec<String> = Vec::new();
+    for (pattern, literal, category) in patterns {
+        let already_covered = matched_literals.iter().any(|matched| {
+            matched.ends_with(literal.as_str()) || literal.ends_with(matched.as_str())
+        });
+        if !already_covered && line_contains_grep_literal(line, &literal) {
+            matched_literals.push(literal);
+            matches.push((pattern, category));
+        }
+    }
+    matches
+}
+
+fn ambient_raw_string_start(bytes: &[u8], idx: usize) -> Option<(usize, usize)> {
+    let mut cursor = idx;
+
+    if bytes.get(cursor) == Some(&b'b') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'r') {
+        return None;
+    }
+
+    let mut hash_count = 0;
+    cursor += 1;
+    while bytes.get(cursor) == Some(&b'#') {
+        hash_count += 1;
+        cursor += 1;
+    }
+
+    if bytes.get(cursor) == Some(&b'"') {
+        Some((cursor + 1, hash_count))
+    } else {
+        None
+    }
+}
+
+#[derive(Default)]
+struct AmbientDetectionSanitizerState {
+    in_block_comment: bool,
+    in_string: bool,
+    raw_hashes: Option<usize>,
+}
+
+fn strip_comments_and_literals_for_detection(
+    line: &str,
+    state: &mut AmbientDetectionSanitizerState,
+) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        if state.in_block_comment {
+            if idx + 1 < bytes.len() && bytes[idx] == b'*' && bytes[idx + 1] == b'/' {
+                state.in_block_comment = false;
+                idx += 2;
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if let Some(hash_count) = state.raw_hashes {
+            if bytes[idx] == b'"'
+                && idx + 1 + hash_count <= bytes.len()
+                && bytes[idx + 1..idx + 1 + hash_count]
+                    .iter()
+                    .all(|b| *b == b'#')
+            {
+                state.raw_hashes = None;
+                idx += 1 + hash_count;
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if state.in_string {
+            match bytes[idx] {
+                b'\\' => idx = (idx + 2).min(bytes.len()),
+                b'"' => {
+                    state.in_string = false;
+                    idx += 1;
+                }
+                _ => idx += 1,
+            }
+            continue;
+        }
+
+        if idx + 1 < bytes.len() && bytes[idx] == b'/' && bytes[idx + 1] == b'/' {
+            break;
+        }
+        if idx + 1 < bytes.len() && bytes[idx] == b'/' && bytes[idx + 1] == b'*' {
+            state.in_block_comment = true;
+            idx += 2;
+            continue;
+        }
+        if let Some((next_idx, hash_count)) = ambient_raw_string_start(bytes, idx) {
+            state.raw_hashes = Some(hash_count);
+            idx = next_idx;
+            continue;
+        }
+        if bytes[idx] == b'"' {
+            state.in_string = true;
+            idx += 1;
+            continue;
+        }
+
+        out.push(bytes[idx] as char);
+        idx += 1;
+    }
+
+    out
+}
+
+#[derive(Default)]
+struct AmbientDetectionLineFilter {
+    pending_cfg_test: bool,
+    in_cfg_test_item: bool,
+    cfg_test_depth: i32,
+    sanitizer_state: AmbientDetectionSanitizerState,
+}
+
+impl AmbientDetectionLineFilter {
+    fn sanitized_non_test_line(&mut self, line: &str) -> Option<String> {
+        let trimmed = line.trim();
+
+        if self.in_cfg_test_item {
+            self.advance_cfg_test_depth(line);
+            return None;
+        }
+
+        if trimmed == "#[cfg(test)]" {
+            self.pending_cfg_test = true;
+            return None;
+        }
+
+        if self.pending_cfg_test {
+            if trimmed.is_empty() || trimmed.starts_with("#[") {
+                return None;
+            }
+            self.pending_cfg_test = false;
+            if trimmed.starts_with("mod ")
+                || trimmed.starts_with("pub mod ")
+                || trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("pub async fn ")
+            {
+                self.start_cfg_test_item(line);
+                return None;
+            }
+        }
+
+        let stripped = strip_comments_and_literals_for_detection(line, &mut self.sanitizer_state);
+        if stripped.trim().is_empty() {
+            None
+        } else {
+            Some(stripped)
+        }
+    }
+
+    fn start_cfg_test_item(&mut self, line: &str) {
+        let depth = brace_delta(line);
+        if depth > 0 {
+            self.in_cfg_test_item = true;
+            self.cfg_test_depth = depth;
+        }
+    }
+
+    fn advance_cfg_test_depth(&mut self, line: &str) {
+        self.cfg_test_depth += brace_delta(line);
+        if self.cfg_test_depth <= 0 {
+            self.in_cfg_test_item = false;
+            self.cfg_test_depth = 0;
+        }
+    }
+}
+
+fn brace_delta(line: &str) -> i32 {
+    line.chars().fold(0, |depth, ch| match ch {
+        '{' => depth + 1,
+        '}' => depth - 1,
+        _ => depth,
+    })
 }
 
 /// Represents a detected ambient authority violation.
@@ -880,7 +1091,7 @@ mod tests {
 
         // Should only detect the one in production code
         assert_eq!(violations.len(), 1);
-        assert!(violations[0].line_content.contains("production_code"));
+        assert!(violations[0].line_content.contains("Instant::now"));
         assert_eq!(violations[0].category, AmbientCategory::Time);
     }
 
@@ -1613,7 +1824,7 @@ fn production_path() {
     fn severity_debug_clone_copy() {
         let s = Severity::Medium;
         let dbg = format!("{s:?}");
-        assert!(dbg.contains("Warning"), "{dbg}");
+        assert!(dbg.contains("Medium"), "{dbg}");
         let copied = s;
         let cloned = s;
         assert_eq!(copied, cloned);
