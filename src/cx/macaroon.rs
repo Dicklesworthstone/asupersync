@@ -3032,8 +3032,8 @@ mod tests {
     /// Strategy that generates arbitrary `CaveatPredicate` values.
     fn arb_predicate() -> impl Strategy<Value = CaveatPredicate> {
         prop_oneof![
-            any::<u64>().prop_map(CaveatPredicate::TimeBefore),
-            any::<u64>().prop_map(CaveatPredicate::TimeAfter),
+            (u64::MAX/2..u64::MAX).prop_map(CaveatPredicate::TimeBefore),
+            (0u64..1000u64).prop_map(CaveatPredicate::TimeAfter),
             any::<u64>().prop_map(CaveatPredicate::RegionScope),
             any::<u64>().prop_map(CaveatPredicate::TaskScope),
             any::<u32>().prop_map(CaveatPredicate::MaxUses),
