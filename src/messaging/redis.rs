@@ -8861,6 +8861,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set read timeout");
 
+            write_hello3_ok(&mut stream);
             let psubscribe = read_resp_frame(&mut stream);
             assert_resp_command(psubscribe, &[b"PSUBSCRIBE", b"safe.*"]);
             let injected_ack = RespValue::Array(Some(vec![
@@ -9197,6 +9198,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set first read timeout");
 
+            write_hello3_ok(&mut first_stream);
             let first_ping = read_resp_frame(&mut first_stream);
             assert_resp_command(first_ping, &[b"PING"]);
             first_ping_tx.send(()).expect("signal first ping");
@@ -9222,6 +9224,7 @@ mod tests {
             second_stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set second read timeout");
+            write_hello3_ok(&mut second_stream);
             let second_ping = read_resp_frame(&mut second_stream);
             assert_resp_command(second_ping, &[b"PING"]);
             second_stream
@@ -9512,6 +9515,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set first read timeout");
 
+            write_hello3_ok(&mut first_stream);
             let first_multi = read_resp_frame(&mut first_stream);
             assert_resp_command(first_multi, &[b"MULTI"]);
             first_multi_tx.send(()).expect("signal first multi");
@@ -9538,6 +9542,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set second read timeout");
 
+            write_hello3_ok(&mut second_stream);
             let second_multi = read_resp_frame(&mut second_stream);
             assert_resp_command(second_multi, &[b"MULTI"]);
             second_stream

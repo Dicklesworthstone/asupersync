@@ -3594,7 +3594,7 @@ mod tests {
             None,
             None,
             None,
-            Some(timer),
+            Some(timer.clone()),
             None,
         );
         let mut wait = Box::pin(wait_retry_backoff(&cx, Duration::from_millis(5)));
@@ -3606,6 +3606,7 @@ mod tests {
         ));
 
         clock.advance(5_000_000);
+        assert_eq!(timer.process_timers(), 1);
 
         assert!(matches!(
             std::future::Future::poll(wait.as_mut(), &mut task_cx),
