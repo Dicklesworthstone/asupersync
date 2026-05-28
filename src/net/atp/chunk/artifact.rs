@@ -368,10 +368,6 @@ impl ArtifactProfile {
 
     /// Detect build system from artifact signatures.
     fn detect_build_system(data: &[u8]) -> String {
-        if data.len() < 100 {
-            return "unknown".to_string();
-        }
-
         // Check for various build system signatures
         let data_str = String::from_utf8_lossy(&data[..1000.min(data.len())]);
 
@@ -415,10 +411,6 @@ impl ArtifactProfile {
 
     /// Detect toolchain version from artifact metadata.
     fn detect_toolchain_version(data: &[u8]) -> String {
-        if data.len() < 100 {
-            return "unknown".to_string();
-        }
-
         let data_str = String::from_utf8_lossy(&data[..2000.min(data.len())]);
 
         // Look for version strings in the data
@@ -487,6 +479,9 @@ impl ArtifactProfile {
     fn has_high_structure(data: &[u8]) -> bool {
         if data.len() < 1024 {
             return false;
+        }
+        if data.len() > 64 * 1024 && Self::has_binary_headers(data) {
+            return true;
         }
 
         // Count different types of structural indicators
