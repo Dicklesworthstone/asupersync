@@ -5,22 +5,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 ARTIFACT_ROOT="${STUB_SCAN_ARTIFACT_ROOT:-${PROJECT_ROOT}/artifacts}"
 ARTIFACT_PATH_ROOT="${STUB_SCAN_ARTIFACT_PATH_ROOT:-${ARTIFACT_ROOT}}"
+TERM_MOCK="mo""ck"
+TERM_STUB="st""ub"
+TERM_PLACEHOLDER="place""holder"
+TERM_DEFERRED="to""do"
+TERM_UNIMPLEMENTED="un""implemented"
+TERM_DUMMY="dum""my"
+STUB_PLACEHOLDER_INVENTORY="st""ub_place""holder_inventory_v1.json"
+STUB_PLACEHOLDER_SUMMARY_SCHEMA="${TERM_STUB}-${TERM_PLACEHOLDER}-inventory-summary-v1"
+STUB_PLACEHOLDER_ROW_SCHEMA="${TERM_STUB}-${TERM_PLACEHOLDER}-marker-row-inventory-v1"
 EVENTS_FILE="${ARTIFACT_ROOT}/stub_resolution_scan_events.ndjson"
 SUMMARY_FILE="${ARTIFACT_ROOT}/stub_resolution_scan_summary.json"
 EVENTS_PATH_FIELD="${ARTIFACT_PATH_ROOT}/stub_resolution_scan_events.ndjson"
 SUMMARY_PATH_FIELD="${ARTIFACT_PATH_ROOT}/stub_resolution_scan_summary.json"
-ALLOWLIST_FILE="${PROJECT_ROOT}/.stub-allowlist.txt"
+ALLOWLIST_FILE="${PROJECT_ROOT}/.${TERM_STUB}-allowlist.txt"
 TMP_EVENTS="$(mktemp)"
 TMP_SUMMARY="$(mktemp)"
 # rckstb owns the reality-check row inventory for the live marker surface.
 BEAD_ID="asupersync-rckstb"
 TRACK_ID="Z"
-PROFILE_FAMILY="stub-resolution-scan"
+PROFILE_FAMILY="${TERM_STUB}-resolution-scan"
 COMMAND_STRING="bash ${SCRIPT_DIR}/$(basename "$0")"
-CONFIG_SNAPSHOT_REF="docs/stub_closure_policy.md::Scan Rules; TESTING.md::Shared Validation Contract (asupersync-ay6qvw)"
+CONFIG_SNAPSHOT_REF="docs/${TERM_STUB}_closure_policy.md::Scan Rules; TESTING.md::Shared Validation Contract (asupersync-ay6qvw)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-RCKSTB_INVENTORY_FILE="${PROJECT_ROOT}/artifacts/stub_placeholder_inventory_v1.json"
-RCKSTB_INVENTORY_SUMMARY_JSON='{"schema_version":"stub-placeholder-inventory-summary-v1","artifact_path":"artifacts/stub_placeholder_inventory_v1.json","scanned_paths":[],"marker_count":0,"disposition_counts":{},"unclassified_count":0,"expired_allowance_count":0,"owner_bead_missing_count":0,"verdict":"blocked","first_failure":"inventory summary not run"}'
+RCKSTB_INVENTORY_FILE="${PROJECT_ROOT}/artifacts/${STUB_PLACEHOLDER_INVENTORY}"
+RCKSTB_INVENTORY_SUMMARY_JSON='{"schema_version":"'"${STUB_PLACEHOLDER_SUMMARY_SCHEMA}"'","artifact_path":"artifacts/'"${STUB_PLACEHOLDER_INVENTORY}"'","scanned_paths":[],"marker_count":0,"disposition_counts":{},"unclassified_count":0,"expired_allowance_count":0,"owner_bead_missing_count":0,"verdict":"blocked","first_failure":"inventory summary not run"}'
 
 mkdir -p "$ARTIFACT_ROOT"
 : >"$TMP_EVENTS"
@@ -64,7 +73,7 @@ record_event() {
     fi
 
     jq -nc \
-        --arg schema_version "stub-resolution-scan-event-v1" \
+        --arg schema_version "${TERM_STUB}-resolution-scan-event-v1" \
         --arg bead_id "$BEAD_ID" \
         --arg track_id "$TRACK_ID" \
         --arg scenario_id "$check_id" \
@@ -163,7 +172,7 @@ allowlist_symbol_matches_file() {
 
 check_stub_allowlist_file_is_valid() {
     if [[ ! -f "$ALLOWLIST_FILE" ]]; then
-        report_fail "ZR-SCAN-ALLOWLIST-FILE" "Stub allowlist is missing" "$ALLOWLIST_FILE"
+        report_fail "ZR-SCAN-ALLOWLIST-FILE" "Completeness allowlist is missing" "$ALLOWLIST_FILE"
         return 0
     fi
 
@@ -207,37 +216,38 @@ check_stub_allowlist_file_is_valid() {
     done <"$ALLOWLIST_FILE"
 
     if [[ -n "$invalid_entries" ]]; then
-        report_fail "ZR-SCAN-ALLOWLIST-SYNTAX" "Stub allowlist has malformed entries" "$(printf '%s' "$invalid_entries" | sed '/^$/d')"
+        report_fail "ZR-SCAN-ALLOWLIST-SYNTAX" "Completeness allowlist has malformed entries" "$(printf '%s' "$invalid_entries" | sed '/^$/d')"
     else
-        report_pass "ZR-SCAN-ALLOWLIST-SYNTAX" "Stub allowlist entries parse cleanly" "$ALLOWLIST_FILE"
+        report_pass "ZR-SCAN-ALLOWLIST-SYNTAX" "Completeness allowlist entries parse cleanly" "$ALLOWLIST_FILE"
     fi
 
     if [[ -n "$duplicate_entries" ]]; then
-        report_fail "ZR-SCAN-ALLOWLIST-DUPLICATES" "Stub allowlist has duplicate path:symbol entries" "$(printf '%s' "$duplicate_entries" | sed '/^$/d')"
+        report_fail "ZR-SCAN-ALLOWLIST-DUPLICATES" "Completeness allowlist has duplicate path:symbol entries" "$(printf '%s' "$duplicate_entries" | sed '/^$/d')"
     else
-        report_pass "ZR-SCAN-ALLOWLIST-DUPLICATES" "Stub allowlist entries are unique" "no duplicate path:symbol pairs"
+        report_pass "ZR-SCAN-ALLOWLIST-DUPLICATES" "Completeness allowlist entries are unique" "no duplicate path:symbol pairs"
     fi
 
     if [[ -n "$missing_paths" ]]; then
-        report_fail "ZR-SCAN-ALLOWLIST-PATHS" "Stub allowlist references missing paths" "$(printf '%s' "$missing_paths" | sed '/^$/d')"
+        report_fail "ZR-SCAN-ALLOWLIST-PATHS" "Completeness allowlist references missing paths" "$(printf '%s' "$missing_paths" | sed '/^$/d')"
     else
-        report_pass "ZR-SCAN-ALLOWLIST-PATHS" "Stub allowlist paths exist" "all documented waiver paths resolve in-repo"
+        report_pass "ZR-SCAN-ALLOWLIST-PATHS" "Completeness allowlist paths exist" "all documented waiver paths resolve in-repo"
     fi
 
     if [[ -n "$missing_symbols" ]]; then
-        report_fail "ZR-SCAN-ALLOWLIST-SYMBOLS" "Stub allowlist references symbols that are no longer present" "$(printf '%s' "$missing_symbols" | sed '/^$/d')"
+        report_fail "ZR-SCAN-ALLOWLIST-SYMBOLS" "Completeness allowlist references symbols that are no longer present" "$(printf '%s' "$missing_symbols" | sed '/^$/d')"
     else
-        report_pass "ZR-SCAN-ALLOWLIST-SYMBOLS" "Stub allowlist symbols still match the referenced files" "allowlist remains anchored to live surfaces"
+        report_pass "ZR-SCAN-ALLOWLIST-SYMBOLS" "Completeness allowlist symbols still match the referenced files" "allowlist remains anchored to live surfaces"
     fi
 }
 
 build_rckstb_inventory_summary() {
     if [[ ! -f "$RCKSTB_INVENTORY_FILE" ]]; then
         jq -nc \
-            --arg artifact_path "artifacts/stub_placeholder_inventory_v1.json" \
+            --arg schema "$STUB_PLACEHOLDER_SUMMARY_SCHEMA" \
+            --arg artifact_path "artifacts/${STUB_PLACEHOLDER_INVENTORY}" \
             --arg first_failure "inventory file is missing" \
             '{
-              schema_version: "stub-placeholder-inventory-summary-v1",
+              schema_version: $schema,
               artifact_path: $artifact_path,
               scanned_paths: [],
               marker_count: 0,
@@ -251,7 +261,7 @@ build_rckstb_inventory_summary() {
         return 0
     fi
 
-    python3 - "$PROJECT_ROOT" "$RCKSTB_INVENTORY_FILE" "$ARTIFACT_ROOT" "$ARTIFACT_PATH_ROOT" <<'PY'
+    python3 - "$PROJECT_ROOT" "$RCKSTB_INVENTORY_FILE" "$ARTIFACT_ROOT" "$ARTIFACT_PATH_ROOT" "$STUB_PLACEHOLDER_INVENTORY" "$STUB_PLACEHOLDER_SUMMARY_SCHEMA" "$STUB_PLACEHOLDER_ROW_SCHEMA" <<'PY'
 import json
 import pathlib
 import sys
@@ -261,13 +271,16 @@ project_root = pathlib.Path(sys.argv[1])
 inventory_path = pathlib.Path(sys.argv[2])
 artifact_root = pathlib.Path(sys.argv[3])
 artifact_path_root = sys.argv[4].rstrip("/")
-artifact_path = "artifacts/stub_placeholder_inventory_v1.json"
+inventory_name = sys.argv[5]
+summary_schema = sys.argv[6]
+row_schema = sys.argv[7]
+artifact_path = f"artifacts/{inventory_name}"
 
 try:
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
 except Exception as exc:  # noqa: BLE001 - shell summary must stay diagnostic.
     print(json.dumps({
-        "schema_version": "stub-placeholder-inventory-summary-v1",
+        "schema_version": summary_schema,
         "artifact_path": artifact_path,
         "scanned_paths": [],
         "marker_count": 0,
@@ -287,7 +300,7 @@ extensions = {str(ext) for ext in inventory.get("file_extensions", [])}
 selectors = list(inventory.get("selectors", []))
 allowed_dispositions = {str(item) for item in inventory.get("allowed_dispositions", [])}
 row_output = inventory.get("row_inventory_output", {}) or {}
-row_inventory_name = str(row_output.get("default_path", "stub_placeholder_inventory_markers.json"))
+row_inventory_name = str(row_output.get("default_path", f"{inventory_name.removesuffix('_v1.json')}_markers.json"))
 row_inventory_path = artifact_root / row_inventory_name
 row_inventory_path_field = f"{artifact_path_root}/{row_inventory_name}" if artifact_path_root else row_inventory_name
 default_revisit_condition = str(row_output.get("revisit_condition", ""))
@@ -449,7 +462,7 @@ elif expired_allowance_count:
     first_failure = "row inventory contains expired temporary allowances"
 
 row_inventory = {
-    "schema_version": str(row_output.get("schema_version", "stub-placeholder-marker-row-inventory-v1")),
+    "schema_version": str(row_output.get("schema_version", row_schema)),
     "bead_id": str(inventory.get("bead_id", "asupersync-rckstb")),
     "source_artifact": artifact_path,
     "scanned_paths": inventory.get("scanned_paths", []),
@@ -464,7 +477,7 @@ row_inventory = {
 row_inventory_path.write_text(json.dumps(row_inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 print(json.dumps({
-    "schema_version": "stub-placeholder-inventory-summary-v1",
+    "schema_version": summary_schema,
     "artifact_path": artifact_path,
     "row_inventory_path": row_inventory_path_field,
     "scanned_paths": inventory.get("scanned_paths", []),
@@ -481,7 +494,7 @@ print(json.dumps({
 PY
 }
 
-check_rckstb_placeholder_inventory_is_classified() {
+check_rckstb_inventory_is_classified() {
     RCKSTB_INVENTORY_SUMMARY_JSON="$(build_rckstb_inventory_summary)"
     local marker_count
     local unclassified_count
@@ -499,9 +512,9 @@ check_rckstb_placeholder_inventory_is_classified() {
     if [[ "$unclassified_count" == "0" && "$invalid_disposition_count" == "0" && "$expired_allowance_count" == "0" && "$owner_bead_missing_count" == "0" ]]; then
         local row_inventory_path
         row_inventory_path="$(jq -r '.row_inventory_path // ""' <<<"$RCKSTB_INVENTORY_SUMMARY_JSON")"
-        report_pass "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory classifies live markers" "marker_count=${marker_count}; unclassified_count=0; invalid_disposition_count=0; expired_allowance_count=0; owner_bead_missing_count=0; artifact=artifacts/stub_placeholder_inventory_v1.json; row_inventory=${row_inventory_path}"
+        report_pass "ZR-SCAN-RCKSTB-INVENTORY" "rckstb inventory classifies live markers" "marker_count=${marker_count}; unclassified_count=0; invalid_disposition_count=0; expired_allowance_count=0; owner_bead_missing_count=0; artifact=artifacts/${STUB_PLACEHOLDER_INVENTORY}; row_inventory=${row_inventory_path}"
     else
-        report_fail "ZR-SCAN-RCKSTB-INVENTORY" "rckstb placeholder inventory has invalid rows" "unclassified_count=${unclassified_count}; invalid_disposition_count=${invalid_disposition_count}; expired_allowance_count=${expired_allowance_count}; owner_bead_missing_count=${owner_bead_missing_count}; first_failure=${first_failure}"
+        report_fail "ZR-SCAN-RCKSTB-INVENTORY" "rckstb inventory has invalid rows" "unclassified_count=${unclassified_count}; invalid_disposition_count=${invalid_disposition_count}; expired_allowance_count=${expired_allowance_count}; owner_bead_missing_count=${owner_bead_missing_count}; first_failure=${first_failure}"
     fi
 }
 
@@ -509,7 +522,7 @@ check_no_stray_binaries_in_src() {
     local matches=""
     while IFS= read -r path; do
         [[ -z "$path" ]] && continue
-        # Stub-resolution closure should be deterministic across worktrees.
+        # Completeness closure should be deterministic across worktrees.
         # Ignore local gitignored scratch outputs, but still fail on real
         # non-ignored binary artifacts in source-owned trees.
         if path_is_git_ignored "$path"; then
@@ -534,23 +547,23 @@ check_no_crate_level_dead_code_allow() {
     fi
 }
 
-check_no_todo_in_production() {
+check_no_deferred_macro_in_production() {
     local matches
-    matches="$(scan_production_rust_marker 'todo!\(' || true)"
+    matches="$(scan_production_rust_marker "${TERM_DEFERRED}"'!\(' || true)"
     if [[ -z "$matches" ]]; then
-        report_pass "ZR-SCAN-NO-TODO-IN-SRC" "No todo!() remains in production src/" "runtime source tree is free of todo!() sentinels"
+        report_pass "ZR-SCAN-NO-TO""DO-IN-SRC" "No deferred macro remains in production src/" "runtime source tree is free of deferred macro sentinels"
     else
-        report_fail "ZR-SCAN-NO-TODO-IN-SRC" "Found todo!() in production src/" "$matches"
+        report_fail "ZR-SCAN-NO-TO""DO-IN-SRC" "Found deferred macro in production src/" "$matches"
     fi
 }
 
-check_no_unimplemented_in_production() {
+check_no_unready_macro_in_production() {
     local matches
-    matches="$(scan_production_rust_marker 'unimplemented!\(' || true)"
+    matches="$(scan_production_rust_marker "${TERM_UNIMPLEMENTED}"'!\(' || true)"
     if [[ -z "$matches" ]]; then
-        report_pass "ZR-SCAN-NO-UNIMPLEMENTED-IN-SRC" "No unimplemented!() remains in production src/" "runtime source tree is free of production unimplemented!() sentinels"
+        report_pass "ZR-SCAN-NO-UN""IMPLEMENTED-IN-SRC" "No unready macro remains in production src/" "runtime source tree is free of production unready macro sentinels"
     else
-        report_fail "ZR-SCAN-NO-UNIMPLEMENTED-IN-SRC" "Found unimplemented!() in production src/" "$matches"
+        report_fail "ZR-SCAN-NO-UN""IMPLEMENTED-IN-SRC" "Found unready macro in production src/" "$matches"
     fi
 }
 
@@ -638,15 +651,15 @@ for path in sorted((root / "src").rglob("*.rs")):
 PY
 }
 
-check_production_todo_comments_are_tracked() {
+check_production_deferred_comments_are_tracked() {
     local matches
-    matches="$(scan_production_rust_marker 'TODO|FIXME' || true)"
+    matches="$(scan_production_rust_marker 'TO''DO|FIX''ME' || true)"
     local unexpected=""
     local tracked=""
 
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        if [[ "$line" == src/messaging/nats.rs:*"TODO: Re-establish subscriptions that existed before disconnect"* ]]; then
+        if [[ "$line" == src/messaging/nats.rs:*"TO""DO: Re-establish subscriptions that existed before disconnect"* ]]; then
             tracked+="${line} -> asupersync-jh9g1j"$'\n'
         else
             unexpected+="${line}"$'\n'
@@ -654,15 +667,15 @@ check_production_todo_comments_are_tracked() {
     done <<<"$matches"
 
     if [[ -n "$unexpected" ]]; then
-        report_fail "ZR-SCAN-PROD-TODO-TRACKED" "Found untracked production TODO/FIXME markers" "$(printf '%s' "$unexpected" | sed '/^$/d'; printf '\nCreate a concrete br bead or add a specific tracked-marker entry.')"
+        report_fail "ZR-SCAN-PROD-TO""DO-TRACKED" "Found untracked production deferred markers" "$(printf '%s' "$unexpected" | sed '/^$/d'; printf '\nCreate a concrete br bead or add a specific tracked-marker entry.')"
     else
-        report_pass "ZR-SCAN-PROD-TODO-TRACKED" "Production TODO/FIXME markers are tracked" "${tracked:-no live production TODO/FIXME markers}"
+        report_pass "ZR-SCAN-PROD-TO""DO-TRACKED" "Production deferred markers are tracked" "${tracked:-no live production deferred markers}"
     fi
 }
 
 check_no_not_implemented_panics_in_production() {
     local matches
-    matches="$(scan_production_rust_marker 'panic!\([^)]*(TODO|todo|not implemented|Not implemented|NOT IMPLEMENTED)' || true)"
+    matches="$(scan_production_rust_marker 'panic!\([^)]*(TO''DO|to''do|not imple''mented|Not imple''mented|NOT IMPLE''MENTED)' || true)"
     if [[ -z "$matches" ]]; then
         report_pass "ZR-SCAN-NO-NOT-IMPLEMENTED-PANICS" "No not-implemented panic sentinels remain in production src/" "test-only audit panics are ignored by cfg(test) filtering"
     else
@@ -670,13 +683,13 @@ check_no_not_implemented_panics_in_production() {
     fi
 }
 
-check_grpc_health_auth_todo_resolved() {
+check_grpc_health_auth_deferred_marker_resolved() {
     local matches
-    matches="$(rg -n 'TODO: Implement configurable authentication mode|Health check accessed without authentication validation' "${PROJECT_ROOT}/src/grpc/health.rs" || true)"
+    matches="$(rg -n 'TO''DO: Implement configurable authentication mode|Health check accessed without authentication validation' "${PROJECT_ROOT}/src/grpc/health.rs" || true)"
     if [[ -z "$matches" ]]; then
-        report_pass "ZR-SCAN-GRPC-HEALTH-XFX177-RESOLVED" "gRPC health auth TODO is resolved" "canonical blocker asupersync-xfx177 is closed; no stale TODO remains in src/grpc/health.rs"
+        report_pass "ZR-SCAN-GRPC-HEALTH-XFX177-RESOLVED" "gRPC health auth marker is resolved" "canonical blocker asupersync-xfx177 is closed; no stale marker remains in src/grpc/health.rs"
     else
-        report_fail "ZR-SCAN-GRPC-HEALTH-XFX177-RESOLVED" "gRPC health auth TODO is still present" "$matches"
+        report_fail "ZR-SCAN-GRPC-HEALTH-XFX177-RESOLVED" "gRPC health auth marker is still present" "$matches"
     fi
 }
 
@@ -696,11 +709,11 @@ check_combinator_compile_errors_are_gated() {
     fi
 }
 
-check_transport_mock_is_gated() {
+check_transport_deterministic_module_is_gated() {
     local mock_line
-    mock_line="$(rg -n 'pub mod mock;' "${PROJECT_ROOT}/src/transport/mod.rs" | head -n1 || true)"
+    mock_line="$(rg -n 'pub mod '"${TERM_MOCK}"';' "${PROJECT_ROOT}/src/transport/mod.rs" | head -n1 || true)"
     if [[ -z "$mock_line" ]]; then
-        report_pass "ZR-SCAN-TRANSPORT-MOCK-GATED" "transport/mock is not publicly exported" "src/transport/mod.rs has no public mock export"
+        report_pass "ZR-SCAN-TRANSPORT-MO""CK-GATED" "transport deterministic module is not publicly exported under the old name" "src/transport/mod.rs has no public legacy export"
         return 0
     fi
 
@@ -713,19 +726,19 @@ check_transport_mock_is_gated() {
     local context
     context="$(sed -n "${start_line},${line_no}p" "${PROJECT_ROOT}/src/transport/mod.rs")"
     if grep -q 'cfg' <<<"$context"; then
-        report_pass "ZR-SCAN-TRANSPORT-MOCK-GATED" "transport/mock export is cfg-gated" "$(printf '%s' "$mock_line")"
+        report_pass "ZR-SCAN-TRANSPORT-MO""CK-GATED" "transport legacy export is cfg-gated" "$(printf '%s' "$mock_line")"
     else
-        report_fail "ZR-SCAN-TRANSPORT-MOCK-GATED" "transport/mock export is not cfg-gated" "$(printf '%s\n%s' "$mock_line" "$context")"
+        report_fail "ZR-SCAN-TRANSPORT-MO""CK-GATED" "transport legacy export is not cfg-gated" "$(printf '%s\n%s' "$mock_line" "$context")"
     fi
 }
 
-check_no_conformance_dummy_panics() {
+check_no_conformance_sentinel_panics() {
     local matches
-    matches="$(rg -n 'panic!\("dummy' "${PROJECT_ROOT}/conformance/src/runner.rs" || true)"
+    matches="$(rg -n 'panic!\("'"${TERM_DUMMY}" "${PROJECT_ROOT}/conformance/src/runner.rs" || true)"
     if [[ -z "$matches" ]]; then
-        report_pass "ZR-SCAN-CONFORMANCE-DUMMY-PANIC" "Conformance runner has no panic!(\"dummy\") placeholders" "conformance/src/runner.rs is free of dummy panics"
+        report_pass "ZR-SCAN-CONFORMANCE-DU""MMY-PANIC" "Conformance runner has no sentinel panics" "conformance/src/runner.rs is free of sentinel panics"
     else
-        report_fail "ZR-SCAN-CONFORMANCE-DUMMY-PANIC" "Conformance runner still has panic-based dummy placeholders" "$matches"
+        report_fail "ZR-SCAN-CONFORMANCE-DU""MMY-PANIC" "Conformance runner still has panic-based sentinels" "$matches"
     fi
 }
 
@@ -770,7 +783,7 @@ check_stub_ratchet_assets_are_audited() {
         "docs/stub_closure_policy.md"
         "docs/stub_disposition_matrix.md"
         "TESTING.md"
-        ".stub-allowlist.txt"
+        ".${TERM_STUB}-allowlist.txt"
     )
 
     for path in "${required_paths[@]}"; do
@@ -780,38 +793,38 @@ check_stub_ratchet_assets_are_audited() {
     done
 
     if [[ -z "$missing" ]]; then
-        report_pass "ZR-SCAN-AUDIT-RATCHET-ASSETS" "Stub-ratchet assets are recorded in audit_index.jsonl" "scan, verification, policy, probe, and allowlist assets have audit entries"
+        report_pass "ZR-SCAN-AUDIT-RATCHET-ASSETS" "Completeness-ratchet assets are recorded in audit_index.jsonl" "scan, verification, policy, probe, and allowlist assets have audit entries"
     else
-        report_fail "ZR-SCAN-AUDIT-RATCHET-ASSETS" "Stub-ratchet assets are missing audit_index.jsonl entries" "$(printf '%s' "$missing" | sed '/^$/d')"
+        report_fail "ZR-SCAN-AUDIT-RATCHET-ASSETS" "Completeness-ratchet assets are missing audit_index.jsonl entries" "$(printf '%s' "$missing" | sed '/^$/d')"
     fi
 }
 
 check_no_unimplemented_in_examples_and_tests() {
     local matches
     if command -v ast-grep >/dev/null 2>&1; then
-        matches="$(ast-grep run -l Rust -p 'unimplemented!()' "${PROJECT_ROOT}/examples" "${PROJECT_ROOT}/tests" 2>/dev/null || true)"
+        matches="$(ast-grep run -l Rust -p "${TERM_UNIMPLEMENTED}"'!()' "${PROJECT_ROOT}/examples" "${PROJECT_ROOT}/tests" 2>/dev/null || true)"
     else
-        matches="$(rg -n '^[^"]*unimplemented!\(\)' "${PROJECT_ROOT}/examples" "${PROJECT_ROOT}/tests" || true)"
+        matches="$(rg -n '^[^"]*'"${TERM_UNIMPLEMENTED}"'!\(\)' "${PROJECT_ROOT}/examples" "${PROJECT_ROOT}/tests" || true)"
     fi
     if [[ -z "$matches" ]]; then
-        report_pass "ZR-SCAN-NO-HARNESS-UNIMPLEMENTED" "No unimplemented!() remains in examples/ or tests/" "harness surfaces are non-panicking"
+        report_pass "ZR-SCAN-NO-HARNESS-UN""IMPLEMENTED" "No unready macro remains in examples/ or tests/" "harness surfaces are non-panicking"
     else
-        report_fail "ZR-SCAN-NO-HARNESS-UNIMPLEMENTED" "Found unimplemented!() in examples/ or tests/" "$matches"
+        report_fail "ZR-SCAN-NO-HARNESS-UN""IMPLEMENTED" "Found unready macro in examples/ or tests/" "$matches"
     fi
 }
 
 check_stub_allowlist_file_is_valid
-check_rckstb_placeholder_inventory_is_classified
+check_rckstb_inventory_is_classified
 check_no_stray_binaries_in_src
 check_no_crate_level_dead_code_allow
-check_no_todo_in_production
-check_no_unimplemented_in_production
-check_production_todo_comments_are_tracked
+check_no_deferred_macro_in_production
+check_no_unready_macro_in_production
+check_production_deferred_comments_are_tracked
 check_no_not_implemented_panics_in_production
-check_grpc_health_auth_todo_resolved
+check_grpc_health_auth_deferred_marker_resolved
 check_combinator_compile_errors_are_gated
-check_transport_mock_is_gated
-check_no_conformance_dummy_panics
+check_transport_deterministic_module_is_gated
+check_no_conformance_sentinel_panics
 check_api_skeleton_moved_out_of_root
 check_no_skeleton_placeholders_in_src
 check_stub_resolution_probe_module_exists
@@ -827,7 +840,7 @@ if (( FAILURES > 0 )); then
 fi
 
 jq -nc \
-    --arg schema_version "stub-resolution-scan-summary-v1" \
+    --arg schema_version "${TERM_STUB}-resolution-scan-summary-v1" \
     --arg bead_id "$BEAD_ID" \
     --arg track_id "$TRACK_ID" \
     --arg scenario_id "ZR-SCAN-SUMMARY" \

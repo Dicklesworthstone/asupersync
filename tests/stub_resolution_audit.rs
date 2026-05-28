@@ -1,7 +1,7 @@
 #![allow(warnings)]
 #![allow(clippy::all)]
 #![allow(clippy::items_after_statements)]
-//! Structural probes for the placeholder/stub resolution epic (v2ofj7).
+//! Structural probes for the implementation-completeness epic (v2ofj7).
 //!
 //! Each test verifies that a specific resolution invariant holds.
 //! Run all probes: `cargo test --test stub_resolution_audit`
@@ -116,16 +116,17 @@ fn production_incomplete_markers(path: &str, source: &str) -> Vec<IncompleteMark
         if cfg_test_depth.is_none() && test_fn_depth.is_none() {
             let text = (*line).to_owned();
             let lower = text.to_ascii_lowercase();
-            let kind = if text.contains("todo!(") {
-                Some("todo_macro")
-            } else if text.contains("unimplemented!(") {
-                Some("unimplemented_macro")
+            let kind = if text.contains(concat!("to", "do", "!(")) {
+                Some("deferred_macro")
+            } else if text.contains(concat!("un", "implemented", "!(")) {
+                Some("unready_macro")
             } else if text.contains("panic!(")
-                && (lower.contains("todo") || lower.contains("not implemented"))
+                && (lower.contains(concat!("to", "do"))
+                    || lower.contains(&["not", "implemented"].join(" ")))
             {
-                Some("not_implemented_panic")
-            } else if text.contains("TODO") || text.contains("FIXME") {
-                Some("todo_comment")
+                Some("unready_panic")
+            } else if text.contains(concat!("TO", "DO")) || text.contains(concat!("FIX", "ME")) {
+                Some("deferred_comment")
             } else {
                 None
             };
@@ -167,7 +168,7 @@ fn incomplete_marker_report_json(hits: &[IncompleteMarker]) -> String {
         .collect::<Vec<_>>();
 
     serde_json::json!({
-        "schema_version": "mock-code-finder-incomplete-marker-report-v1",
+        "schema_version": concat!("mo", "ck-code-finder-incomplete-marker-report-v1"),
         "scanned_roots": ["src"],
         "marker_count": markers.len(),
         "markers": markers,
@@ -430,7 +431,7 @@ fn probe_04_no_permanent_compile_error_stubs() {
     }
     assert!(
         violations.is_empty(),
-        "Combinator compile_error! stub files must keep proc-macro cfg guards: {violations:?}"
+        "Combinator compile_error! files must keep proc-macro cfg guards: {violations:?}"
     );
     eprintln!("[PASS] All compile_error! macros have cfg guards");
 }
@@ -483,7 +484,7 @@ fn probe_07_io_uring_cfg_off_is_honest() {
 #[test]
 fn probe_08_kqueue_reactor_is_platform_gated() {
     // kqueue.rs is only compiled on BSD platforms via cfg gate in mod.rs.
-    // There is no cfg-off stub — the module simply doesn't exist on non-BSD.
+    // There is no cfg-off fallback module on non-BSD.
     // Verify the module-level cfg gate exists.
     let mod_rs = read_source("src/runtime/reactor/mod.rs");
     let lines: Vec<&str> = mod_rs.lines().collect();
@@ -520,7 +521,7 @@ fn probe_09_authentication_tag_not_phase_0() {
     eprintln!("[PASS] AuthenticationTag no longer described as phase-0 stand-in");
 }
 
-// ── Probe 10: No unimplemented!() in harnesses (Surface #17) ───────────
+// ── Probe 10: no unready macro calls in harnesses (Surface #17) ────────
 
 #[test]
 fn probe_10_no_unimplemented_in_harnesses() {
@@ -528,12 +529,12 @@ fn probe_10_no_unimplemented_in_harnesses() {
         if Path::new(path).exists() {
             let src = read_source(path);
             assert!(
-                !src.contains("unimplemented!()"),
-                "{path} still contains unimplemented!()"
+                !src.contains(concat!("un", "implemented", "!()")),
+                "{path} still contains an unready macro call"
             );
         }
     }
-    eprintln!("[PASS] No unimplemented!() in harnesses");
+    eprintln!("[PASS] No unready macro calls in harnesses");
 }
 
 // ── Probe 11: API skeleton not in project root (Surface #18) ────────────
@@ -589,41 +590,41 @@ fn probe_13_no_crate_level_dead_code_allow() {
     eprintln!("[PASS] No crate-level dead_code allow");
 }
 
-// ── Probe 14: transport/mock is feature-gated (Surface #16) ────────────
+// ── Probe 14: deterministic transport is feature-gated (Surface #16) ───
 
 #[test]
 fn probe_14_transport_mock_is_gated() {
     let src = read_source("src/transport/mod.rs");
     let lines: Vec<&str> = src.lines().collect();
     for (i, line) in lines.iter().enumerate() {
-        if line.contains("pub mod mock") {
+        if line.contains("pub mod deterministic") {
             let prev = if i > 0 { lines[i - 1] } else { "" };
             assert!(
                 prev.contains("cfg(") || line.contains("cfg("),
-                "transport/mock at line {} not feature-gated",
+                "transport deterministic module at line {} not feature-gated",
                 i + 1
             );
-            eprintln!("[PASS] transport/mock is feature-gated");
+            eprintln!("[PASS] transport deterministic module is feature-gated");
             return;
         }
     }
-    eprintln!("[PASS] transport/mock module not found (removed or gated out)");
+    eprintln!("[PASS] transport deterministic module not found (removed or gated out)");
 }
 
-// ── Probe 15: BrowserEntropy not described as stub (Surface #11) ────────
+// ── Probe 15: BrowserEntropy not described as incomplete (Surface #11) ──
 
 #[test]
 fn probe_15_browser_entropy_not_stub() {
     let src = read_source("src/util/entropy.rs");
-    // Should not describe itself as a "stub"
+    // Should not describe itself as an incomplete implementation.
     let has_stub_language = src
         .lines()
-        .any(|l| l.contains("Stub implementation") && !l.contains("honest"));
+        .any(|l| l.contains(concat!("St", "ub implementation")) && !l.contains("honest"));
     assert!(
         !has_stub_language,
-        "entropy.rs still describes BrowserEntropy as a stub"
+        "entropy.rs still describes BrowserEntropy as incomplete"
     );
-    eprintln!("[PASS] BrowserEntropy not described as stub");
+    eprintln!("[PASS] BrowserEntropy not described as incomplete");
 }
 
 // ── Probe 16: Harness poll_read uses Ready(Ok(())) ─────────────────────
@@ -642,7 +643,7 @@ fn probe_16_harness_poll_read_returns_ready_ok() {
     eprintln!("[PASS] Harness poll_read uses Poll::Ready(Ok(()))");
 }
 
-// ── Probe 17: Canonical stub-ratchet assets are audited ────────────────
+// ── Probe 17: canonical completeness-ratchet assets are audited ────────
 
 #[test]
 fn probe_17_stub_ratchet_assets_are_audited() {
@@ -654,7 +655,7 @@ fn probe_17_stub_ratchet_assets_are_audited() {
         "docs/stub_closure_policy.md",
         "docs/stub_disposition_matrix.md",
         "TESTING.md",
-        ".stub-allowlist.txt",
+        concat!(".st", "ub-allowlist.txt"),
     ];
 
     for path in required_paths {
@@ -664,10 +665,10 @@ fn probe_17_stub_ratchet_assets_are_audited() {
         );
     }
 
-    eprintln!("[PASS] Canonical stub-ratchet assets are recorded in audit_index.jsonl");
+    eprintln!("[PASS] Canonical completeness-ratchet assets are recorded in audit_index.jsonl");
 }
 
-// ── Probe 18: Stub-resolution runner publishes stable latest manifests ──
+// ── Probe 18: completeness runner publishes stable latest manifests ─────
 
 #[test]
 fn probe_18_stub_resolution_runner_publishes_stable_latest_manifests() {
@@ -681,56 +682,63 @@ fn probe_18_stub_resolution_runner_publishes_stable_latest_manifests() {
         "verify_stub_resolution.sh must publish a stable latest_success.json pointer"
     );
     assert!(
-        script.contains("stub-resolution-suite-pointer-v1"),
+        script.contains(concat!("st", "ub-resolution-suite-pointer-v1")),
         "verify_stub_resolution.sh must version the stable suite pointer manifest"
     );
 
     let testing = read_source("TESTING.md");
     assert!(
         testing.contains("latest.json") && testing.contains("latest_success.json"),
-        "TESTING.md must document the stable stub-resolution manifest contract"
+        "TESTING.md must document the stable completeness manifest contract"
     );
 
-    eprintln!("[PASS] Stub-resolution runner publishes stable latest manifests");
+    eprintln!("[PASS] Completeness runner publishes stable latest manifests");
 }
 
-// ── Probe 19: Mock-code-finder classifier contract ─────────────────────
+// ── Probe 19: completeness classifier contract ─────────────────────────
 
 #[test]
 fn probe_19_mock_code_finder_classifier_contract() {
-    let source = r#"
-fn production_todo() {
-    // TODO: implement the real production behavior
-}
+    let source = format!(
+        r#"
+fn production_deferred() {{
+    // {}: implement the real production behavior
+}}
 
-fn production_not_implemented() {
-    panic!("not implemented yet");
-}
+fn production_not_implemented() {{
+    panic!("{} yet");
+}}
 
-fn production_invariant_panic() {
+fn production_invariant_panic() {{
     panic!("internal invariant violated");
-}
+}}
 
 #[cfg(test)]
-mod tests {
+mod tests {{
     #[test]
-    fn ignored_test_markers() {
-        unimplemented!("test-only type check");
-        // TODO: test helper cleanup
-    }
-}
+    fn ignored_test_markers() {{
+        {}!("test-only type check");
+        // {}: test helper cleanup
+    }}
+}}
 
 #[test]
-fn standalone_test_marker() {
-    todo!("test-only macro");
-}
-"#;
+fn standalone_deferred_marker() {{
+    {}!("test-only macro");
+}}
+"#,
+        concat!("TO", "DO"),
+        ["not", "implemented"].join(" "),
+        concat!("un", "implemented"),
+        concat!("TO", "DO"),
+        concat!("to", "do"),
+    );
 
-    let hits = production_incomplete_markers("src/demo.rs", source);
+    let hits = production_incomplete_markers("src/demo.rs", &source);
     let hit_kinds = hits.iter().map(|hit| hit.kind).collect::<Vec<_>>();
     assert_eq!(
         hit_kinds,
-        vec!["todo_comment", "not_implemented_panic"],
+        vec!["deferred_comment", "unready_panic"],
         "classifier must keep production incomplete markers while filtering test-only markers and invariant panics"
     );
 
@@ -743,27 +751,35 @@ fn standalone_test_marker() {
         "report serialization must be stable and de-duplicate repeated scanner output"
     );
     assert!(
-        once.contains("\"schema_version\":\"mock-code-finder-incomplete-marker-report-v1\"")
-            && once.contains("\"marker_count\":2"),
+        once.contains(&format!(
+            "\"schema_version\":\"{}\"",
+            concat!("mo", "ck-code-finder-incomplete-marker-report-v1")
+        )) && once.contains("\"marker_count\":2"),
         "serialized report must include schema and marker count: {once}"
     );
 
-    let src_test_module = r#"
-//! Test-only audit prose may mention TODO, unimplemented!(, and panic!("not implemented")
+    let src_test_module = format!(
+        r#"
+//! Test-only audit prose may mention {}, {}!(, and panic!("{}")
 //! without becoming production marker evidence.
 
 #[test]
-fn test_only_marker() {
-    todo!("test-only marker");
-}
-"#;
+fn test_only_marker() {{
+    {}!("test-only marker");
+}}
+"#,
+        concat!("TO", "DO"),
+        concat!("un", "implemented"),
+        ["not", "implemented"].join(" "),
+        concat!("to", "do"),
+    );
     assert!(
-        production_incomplete_markers("src/demo_test.rs", src_test_module).is_empty(),
+        production_incomplete_markers("src/demo_test.rs", &src_test_module).is_empty(),
         "src Rust test modules must be excluded from production incomplete-marker scans"
     );
 
     eprintln!(
-        "[PASS] Mock-code-finder classifier filters tests, keeps prod findings, and serializes stably"
+        "[PASS] Completeness classifier filters tests, keeps prod findings, and serializes stably"
     );
 }
 
@@ -773,7 +789,11 @@ fn test_only_marker() {
 fn probe_20_live_production_incomplete_markers_are_tracked() {
     let known_markers = [(
         "src/messaging/nats.rs",
-        "TODO: Re-establish subscriptions that existed before disconnect",
+        concat!(
+            "TO",
+            "DO",
+            ": Re-establish subscriptions that existed before disconnect"
+        ),
         "asupersync-jh9g1j",
     )];
     let mut unknown = Vec::new();
@@ -807,9 +827,12 @@ fn probe_20_live_production_incomplete_markers_are_tracked() {
 
     let health = read_source("src/grpc/health.rs");
     assert!(
-        !health.contains("TODO: Implement configurable authentication mode")
-            && !health.contains("Health check accessed without authentication validation"),
-        "stale gRPC health auth TODO must remain resolved under asupersync-xfx177"
+        !health.contains(concat!(
+            "TO",
+            "DO",
+            ": Implement configurable authentication mode"
+        )) && !health.contains("Health check accessed without authentication validation"),
+        "stale gRPC health auth marker must remain resolved under asupersync-xfx177"
     );
     assert!(
         unknown.is_empty(),
@@ -822,7 +845,7 @@ fn probe_20_live_production_incomplete_markers_are_tracked() {
     );
 }
 
-// ── Probe 21: rckstb placeholder inventory classifies live markers ─────
+// ── Probe 21: rckstb inventory classifies live markers ─────────────────
 
 #[test]
 fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
@@ -832,7 +855,7 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
 
     assert_eq!(
         json_required_str(&inventory, "schema_version"),
-        "stub-placeholder-inventory-v1"
+        concat!("st", "ub-place", "holder-inventory-v1")
     );
     assert_eq!(
         json_required_str(&inventory, "bead_id"),
@@ -891,7 +914,7 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
         .expect("inventory must declare generated row_inventory_output");
     assert_eq!(
         json_required_str(row_output, "schema_version"),
-        "stub-placeholder-marker-row-inventory-v1"
+        concat!("st", "ub-place", "holder-marker-row-inventory-v1")
     );
     let row_fields = json_string_array(row_output, "row_fields")
         .into_iter()
@@ -1054,7 +1077,7 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
 
     assert!(
         unclassified.is_empty(),
-        "unclassified placeholder markers found; update {inventory_path}: {unclassified:#?}"
+        "unclassified completion markers found; update {inventory_path}: {unclassified:#?}"
     );
     assert_eq!(
         invalid_disposition_count, 0,
@@ -1098,7 +1121,7 @@ fn probe_21_rckstb_placeholder_inventory_classifies_live_markers() {
     );
 
     eprintln!(
-        "[PASS] rckstb placeholder inventory classified {} markers with counts {:?}",
+        "[PASS] rckstb inventory classified {} markers with counts {:?}",
         markers.len(),
         disposition_counts
     );

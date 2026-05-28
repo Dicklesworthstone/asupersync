@@ -50,6 +50,10 @@
       "category": "fixture_reference_implementation"
     },
     {
+      "pattern": "src/*_tests.rs",
+      "category": "intentional_test_double"
+    },
+    {
       "pattern": "src/**/*_tests.rs",
       "category": "intentional_test_double"
     },
@@ -255,6 +259,7 @@
       "group_id": "normal-test-double-policy-2026-05-05",
       "patterns": [
         "tests/**",
+        "src/*_tests.rs",
         "src/**/*_tests.rs",
         "src/runtime/scheduler/lane_pressure_scaling_metamorphic.rs"
       ],

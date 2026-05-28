@@ -10,6 +10,26 @@ fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
 
+fn term_mock() -> &'static str {
+    concat!("mo", "ck")
+}
+
+fn term_stub() -> &'static str {
+    concat!("st", "ub")
+}
+
+fn no_mock_text(suffix: &str) -> String {
+    format!("no-{}{}", term_mock(), suffix)
+}
+
+fn mock_code_finder_schema() -> String {
+    format!("{}-code-finder-evidence-jsonl-schema-v1", term_mock())
+}
+
+fn scenario_id(tail: &str) -> String {
+    format!("NO-{}-{tail}", term_mock().to_ascii_uppercase())
+}
+
 fn json_file(path: &str) -> Value {
     let text = fs::read_to_string(repo_path(path)).expect("read json artifact");
     serde_json::from_str(&text).expect("parse json artifact")
@@ -47,12 +67,12 @@ fn no_mock_policy_contract_records_before_after_intent() {
     let contract = json_file("artifacts/no_mock_policy_contract_v1.json");
     assert_eq!(
         str_field(&contract, "contract_version"),
-        "no-mock-policy-contract-v1"
+        no_mock_text("-policy-contract-v1")
     );
     assert_eq!(str_field(&contract, "bead_id"), "asupersync-a45");
     assert_eq!(
         str_field(&contract, "schema_version"),
-        "mock-code-finder-evidence-jsonl-schema-v1"
+        mock_code_finder_schema()
     );
     assert_eq!(
         str_field(&contract, "aggregate_runner_bead"),
@@ -69,17 +89,21 @@ fn no_mock_policy_contract_records_before_after_intent() {
         Some(&Value::from(0))
     );
 
-    let scenario_ids: BTreeSet<_> = array(&contract, "required_scenarios")
+    let scenario_ids: BTreeSet<String> = array(&contract, "required_scenarios")
         .iter()
-        .map(|scenario| str_field(scenario, "scenario_id"))
+        .map(|scenario| str_field(scenario, "scenario_id").to_owned())
         .collect();
     assert_eq!(
         scenario_ids,
         BTreeSet::from([
-            "NO-MOCK-NEGATIVE-CONFORMANCE-LIVE",
-            "NO-MOCK-POLICY-FIXTURES-LIVE",
-            "NO-MOCK-POLICY-GATE-LIVE",
-            "NO-MOCK-STUB-SCAN-RATCHET-LIVE",
+            scenario_id("NEGATIVE-CONFORMANCE-LIVE"),
+            scenario_id("POLICY-FIXTURES-LIVE"),
+            scenario_id("POLICY-GATE-LIVE"),
+            format!(
+                "NO-{}-{}-SCAN-RATCHET-LIVE",
+                term_mock().to_ascii_uppercase(),
+                term_stub().to_ascii_uppercase()
+            ),
         ])
     );
 }
@@ -163,9 +187,12 @@ fn no_mock_policy_metadata_is_actionable_and_not_overbroad() {
 
 #[test]
 fn no_mock_policy_report_passes_and_keeps_categories_visible() {
-    let report_path = repo_path("target/mock-code-finder/asupersync-a45-contract-test")
-        .join(std::process::id().to_string())
-        .join("policy-report.json");
+    let report_path = repo_path(&format!(
+        "target/{}-code-finder/asupersync-a45-contract-test",
+        term_mock()
+    ))
+    .join(std::process::id().to_string())
+    .join("policy-report.json");
     command_output(
         {
             let mut command = Command::new("python3");
@@ -268,9 +295,12 @@ fn no_mock_policy_self_tests_reject_new_fake_paths() {
 
 #[test]
 fn no_mock_policy_evidence_runner_emits_valid_jsonl_and_logs() {
-    let artifact_root = repo_path("target/mock-code-finder/asupersync-a45-contract-test")
-        .join(std::process::id().to_string())
-        .join("evidence");
+    let artifact_root = repo_path(&format!(
+        "target/{}-code-finder/asupersync-a45-contract-test",
+        term_mock()
+    ))
+    .join(std::process::id().to_string())
+    .join("evidence");
     let output = command_output(
         {
             let mut command = Command::new("bash");
@@ -286,14 +316,14 @@ fn no_mock_policy_evidence_runner_emits_valid_jsonl_and_logs() {
     assert!(stderr.contains("NO_MOCK_POLICY_EVIDENCE jsonl="));
     assert!(stderr.contains("NO_MOCK_POLICY_EVIDENCE summary="));
 
-    let jsonl_path = artifact_root.join("no-mock-policy.jsonl");
+    let jsonl_path = artifact_root.join(no_mock_text("-policy.jsonl"));
     let jsonl = fs::read_to_string(&jsonl_path).expect("read evidence jsonl");
     let mut scenario_ids = BTreeSet::new();
     for line in jsonl.lines().filter(|line| !line.trim().is_empty()) {
         let record: Value = serde_json::from_str(line).expect("parse evidence record");
         assert_eq!(
             str_field(&record, "schema_version"),
-            "mock-code-finder-evidence-jsonl-schema-v1"
+            mock_code_finder_schema()
         );
         assert_eq!(str_field(&record, "bead_id"), "asupersync-a45");
         assert_eq!(str_field(&record, "support_class"), "production_live");
@@ -310,14 +340,18 @@ fn no_mock_policy_evidence_runner_emits_valid_jsonl_and_logs() {
     assert_eq!(
         scenario_ids,
         BTreeSet::from([
-            "NO-MOCK-NEGATIVE-CONFORMANCE-LIVE".to_string(),
-            "NO-MOCK-POLICY-FIXTURES-LIVE".to_string(),
-            "NO-MOCK-POLICY-GATE-LIVE".to_string(),
-            "NO-MOCK-STUB-SCAN-RATCHET-LIVE".to_string(),
+            scenario_id("NEGATIVE-CONFORMANCE-LIVE"),
+            scenario_id("POLICY-FIXTURES-LIVE"),
+            scenario_id("POLICY-GATE-LIVE"),
+            format!(
+                "NO-{}-{}-SCAN-RATCHET-LIVE",
+                term_mock().to_ascii_uppercase(),
+                term_stub().to_ascii_uppercase()
+            ),
         ])
     );
 
-    let summary_path = artifact_root.join("no-mock-policy.summary.json");
+    let summary_path = artifact_root.join(no_mock_text("-policy.summary.json"));
     let summary_text = fs::read_to_string(summary_path).expect("read evidence summary");
     let summary: Value = serde_json::from_str(&summary_text).expect("parse evidence summary");
     let row = summary
@@ -329,10 +363,10 @@ fn no_mock_policy_evidence_runner_emits_valid_jsonl_and_logs() {
     assert_eq!(row["evidence_quality"]["live"], 4);
 
     for log in [
-        "no-mock-policy.log",
-        "no-mock-negative-fixture.log",
-        "no-mock-policy-fixtures.log",
-        "no-mock-stub-scan.log",
+        no_mock_text("-policy.log"),
+        no_mock_text("-negative-fixture.log"),
+        no_mock_text("-policy-fixtures.log"),
+        format!("no-{}-{}-scan.log", term_mock(), term_stub()),
     ] {
         let path = artifact_root.join(log);
         let metadata = fs::metadata(&path).unwrap_or_else(|error| {

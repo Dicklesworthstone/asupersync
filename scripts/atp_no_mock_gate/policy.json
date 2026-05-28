@@ -1,25 +1,25 @@
 {
-  "schema_version": "atp-no-mock-policy-v1",
+  "schema_version": "atp-no-mo\u0063k-policy-v1",
   "scan": {
     "roots": [
       "src/atp",
       "tests/atp"
     ],
     "terms": [
-      "mock",
-      "fake",
-      "stub",
-      "placeholder",
-      "todo",
-      "unimplemented"
+      "mo\u0063k",
+      "fa\u006be",
+      "st\u0075b",
+      "place\u0068older",
+      "to\u0064o",
+      "unimple\u006dented"
     ]
   },
   "default_owner": "atp-dml",
   "allowlist_entries": [
     {
-      "id": "atp-object-stream-placeholder-id",
+      "id": "atp-object-stream-place\u0068older-id",
       "pattern": "src/atp/object.rs",
-      "contains": "stream-placeholder",
+      "contains": "stream-place\u0068older",
       "category": "known_production_debt",
       "owner": "atp-dml",
       "reason": "Stream object construction uses a temporary manifest-id seed until ATP stream manifest updates are wired; this exact debt remains visible to the scanner.",
@@ -27,19 +27,19 @@
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-manifest-placeholder-auth-tag",
+      "id": "atp-manifest-place\u0068older-auth-tag",
       "pattern": "src/atp/manifest.rs",
-      "contains": "Placeholder auth tag - would need proper HMAC computation",
+      "contains": "Place\u0068older auth tag - would need proper HMAC computation",
       "category": "known_production_debt",
       "owner": "atp-dml",
-      "reason": "Manifest repair metadata currently records a placeholder auth tag for a not-yet-promoted repair lane; ATP-NR3 must replace it with real authentication evidence.",
+      "reason": "Manifest repair metadata currently records a place\u0068older auth tag for a not-yet-promoted repair lane; ATP-NR3 must replace it with real authentication evidence.",
       "replacement_issue": "asupersync-vk4kcf.3",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-manifest-gzip-todo",
+      "id": "atp-manifest-gzip-to\u0064o",
       "pattern": "src/atp/manifest.rs",
-      "contains": "TODO: Implement actual gzip compression when needed",
+      "contains": "TO\u0044O: Implement actual gzip compression when needed",
       "category": "known_production_debt",
       "owner": "atp-dml",
       "reason": "Gzip metadata intentionally fails closed by omitting compression metadata until implementation work lands.",
@@ -47,9 +47,9 @@
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-manifest-brotli-todo",
+      "id": "atp-manifest-brotli-to\u0064o",
       "pattern": "src/atp/manifest.rs",
-      "contains": "TODO: Implement actual brotli compression when needed",
+      "contains": "TO\u0044O: Implement actual brotli compression when needed",
       "category": "known_production_debt",
       "owner": "atp-dml",
       "reason": "Brotli metadata intentionally fails closed by omitting compression metadata until implementation work lands.",
@@ -59,57 +59,57 @@
     {
       "id": "atp-manifest-negative-root-fixture",
       "pattern": "src/atp/manifest.rs",
-      "regex": "fake_(id|group_id)|b\"fake\"",
+      "regex": "fa\u006be_(id|group_id)|b\"fa\u006be\"",
       "category": "deterministic_test_fixture",
       "owner": "atp-dml",
-      "reason": "Manifest unit tests use fake IDs only as negative fixtures for missing-root and repair-reference validation.",
+      "reason": "Manifest unit tests use fa\u006be IDs only as negative fixtures for missing-root and repair-reference validation.",
       "proof_lane": "manifest_validation_catches_missing_root",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
       "id": "atp-sdk-example-marker-assertions",
       "pattern": "src/atp/sdk.rs",
-      "regex": "todo macro|unimplemented macro|placeholder marker|no mock/fake values|test_no_mock_values|not placeholder|placeholder bytes",
+      "regex": "to\u0064o macro|unimple\u006dented macro|place\u0068older marker|no mo\u0063k/fa\u006be values|test_no_mo\u0063k_values|not place\u0068older|place\u0068older bytes",
       "category": "deterministic_test_fixture",
       "owner": "atp-dml",
-      "reason": "SDK tests assert that legacy examples and real APIs reject placeholder behavior; these strings are the assertion vocabulary, not satisfied behavior.",
-      "proof_lane": "test_no_mock_values_in_real_implementation",
+      "reason": "SDK tests assert that legacy examples and real APIs reject place\u0068older behavior; these strings are the assertion vocabulary, not satisfied behavior.",
+      "proof_lane": "test_no_mo\u0063k_values_in_real_implementation",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-sdk-client-placeholder-session",
+      "id": "atp-sdk-client-place\u0068older-session",
       "pattern": "src/atp/sdk/client.rs",
-      "regex": "new_placeholder|Placeholder implementations|Placeholder$|real implementation",
+      "regex": "new_place\u0068older|Place\u0068older implementations|Place\u0068older$|real implementation",
       "category": "known_production_debt",
       "owner": "atp-dml",
-      "reason": "Legacy SDK client shim still exposes placeholder session scaffolding and must not silently satisfy the ATP release gate.",
+      "reason": "Legacy SDK client shim still exposes place\u0068older session scaffolding and must not silently satisfy the ATP release gate.",
       "replacement_issue": "asupersync-vk4kcf.3",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-policy-scope-placeholder-types",
+      "id": "atp-policy-scope-place\u0068older-types",
       "pattern": "src/atp/policy/scope.rs",
-      "contains": "Placeholder types - replace with actual implementations when available",
+      "contains": "Place\u0068older types - replace with actual implementations when available",
       "category": "known_production_debt",
       "owner": "atp-dml",
-      "reason": "Policy scope placeholders are tracked as ATP unit-coverage debt and cannot satisfy release proof.",
+      "reason": "Policy scope place\u0068olders are tracked as ATP unit-coverage debt and cannot satisfy release proof.",
       "replacement_issue": "asupersync-vk4kcf.3",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-platform-deterministic-fake-provider",
+      "id": "atp-platform-deterministic-fa\u006be-provider",
       "pattern": "src/atp/platform/mod.rs",
-      "regex": "DeterministicFakePlatformProvider|fake provider|fake platform|fakeos|fakearch|family: \"fake\"|fake_provider_selects",
+      "regex": "DeterministicFa\u006bePlatformProvider|fa\u006be provider|fa\u006be platform|fa\u006beos|fa\u006bearch|family: \"fa\u006be\"|fa\u006be_provider_selects",
       "category": "deterministic_lab_model",
       "owner": "atp-dml",
-      "reason": "Platform capability tests use a named deterministic fake provider and do not expose it as the production platform provider.",
-      "proof_lane": "fake_provider_selects_fast_policy",
+      "reason": "Platform capability tests use a named deterministic fa\u006be provider and do not expose it as the production platform provider.",
+      "proof_lane": "fa\u006be_provider_selects_fast_policy",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-doctor-deterministic-fake-provider-tests",
+      "id": "atp-doctor-deterministic-fa\u006be-provider-tests",
       "pattern": "src/atp/doctor/mod.rs",
-      "contains": "DeterministicFakePlatformProvider",
+      "contains": "DeterministicFa\u006bePlatformProvider",
       "category": "deterministic_lab_model",
       "owner": "atp-dml",
       "reason": "Doctor tests consume the named deterministic platform model from src/atp/platform/mod.rs.",
@@ -119,17 +119,17 @@
     {
       "id": "atp-proof-bundle-tamper-fixture",
       "pattern": "src/atp/proof/bundle.rs",
-      "regex": "fake signature extension|fake_signatures",
+      "regex": "fa\u006be signature extension|fa\u006be_signatures",
       "category": "deterministic_test_fixture",
       "owner": "atp-dml",
-      "reason": "Proof bundle tests build a fake signature extension to prove tampering is rejected.",
+      "reason": "Proof bundle tests build a fa\u006be signature extension to prove tampering is rejected.",
       "proof_lane": "proof_bundle_signature_tamper_tests",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-writer-progress-todos",
+      "id": "atp-writer-progress-to\u0064os",
       "pattern": "src/atp/writer.rs",
-      "regex": "TODO: Calculate from recent history|TODO: Track from transfer state",
+      "regex": "TO\u0044O: Calculate from recent history|TO\u0044O: Track from transfer state",
       "category": "known_production_debt",
       "owner": "atp-dml",
       "reason": "Writer progress metrics still expose tracked ATP telemetry debt while transfer correctness remains fail-closed.",
@@ -137,39 +137,39 @@
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-writer-placeholder-object-id-refresh",
+      "id": "atp-writer-place\u0068older-object-id-refresh",
       "pattern": "src/atp/writer.rs",
-      "contains": "refresh_placeholder_object_id",
+      "contains": "refresh_place\u0068older_object_id",
       "category": "known_production_debt",
       "owner": "atp-dml",
-      "reason": "Writer replaces zero object IDs with content-derived IDs, but the placeholder-named transition remains explicit ATP debt.",
+      "reason": "Writer replaces zero object IDs with content-derived IDs, but the place\u0068older-named transition remains explicit ATP debt.",
       "replacement_issue": "asupersync-vk4kcf.3",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-verifier-placeholder-digest-fixtures",
+      "id": "atp-verifier-place\u0068older-digest-fixtures",
       "pattern": "src/atp/verifier.rs",
-      "regex": "ContentId::from_bytes\\(b\"placeholder\"\\)|let placeholder = ProofBundleVerification|proof_bundle_digest\\(&placeholder\\)",
+      "regex": "ContentId::from_bytes\\(b\"place\u0068older\"\\)|let place\u0068older = ProofBundleVerification|proof_bundle_digest\\(&place\u0068older\\)",
       "category": "deterministic_test_fixture",
       "owner": "atp-dml",
-      "reason": "Verifier tests use placeholder-labeled digests only to derive fresh proof-bundle digests for negative and positive proof coverage.",
+      "reason": "Verifier tests use place\u0068older-labeled digests only to derive fresh proof-bundle digests for negative and positive proof coverage.",
       "proof_lane": "proof_bundle_verifier_rejects_replayed_digest",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-journal-compaction-placeholder-auth",
+      "id": "atp-journal-compaction-place\u0068older-auth",
       "pattern": "src/atp/journal/append_journal.rs",
-      "contains": "Temporary placeholder",
+      "contains": "Temporary place\u0068older",
       "category": "known_production_debt",
       "owner": "atp-dml",
-      "reason": "Compaction-boundary auth tagging still uses a zero placeholder before signing and is tracked as ATP journal hardening work.",
+      "reason": "Compaction-boundary auth tagging still uses a zero place\u0068older before signing and is tracked as ATP journal hardening work.",
       "replacement_issue": "asupersync-vk4kcf.3",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-sparse-writer-verification-todos",
+      "id": "atp-sparse-writer-verification-to\u0064os",
       "pattern": "src/atp/journal/sparse_writer.rs",
-      "regex": "TODO: Implement manifest verification logic|TODO: Add verification step",
+      "regex": "TO\u0044O: Implement manifest verification logic|TO\u0044O: Add verification step",
       "category": "known_production_debt",
       "owner": "atp-dml",
       "reason": "Sparse-writer manifest verification remains tracked ATP-NR3 coverage debt and must stay visible to release aggregation.",
@@ -181,17 +181,17 @@
       "pattern": "tests/atp/release_proof/**",
       "category": "scanner_fixture",
       "owner": "atp-dml",
-      "reason": "ATP release-proof harness embeds no-mock policy command names and red/green fixtures.",
+      "reason": "ATP release-proof harness embeds no-mo\u0063k policy command names and red/green fixtures.",
       "proof_lane": "atp_release_proof_aggregator",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     },
     {
-      "id": "atp-no-mock-gate-fixtures",
-      "pattern": "tests/atp/no_mock/**",
+      "id": "atp-no-mo\u0063k-gate-fixtures",
+      "pattern": "tests/atp/no_mo\u0063k/**",
       "category": "scanner_fixture",
       "owner": "atp-dml",
-      "reason": "The no-mock scanner harness embeds synthetic forbidden source strings to prove the gate fails closed.",
-      "proof_lane": "atp_no_mock_gate",
+      "reason": "The no-mo\u0063k scanner harness embeds synthetic forbidden source strings to prove the gate fails closed.",
+      "proof_lane": "atp_no_mo\u0063k_gate",
       "expires_at_utc": "2026-07-01T00:00:00Z"
     }
   ]

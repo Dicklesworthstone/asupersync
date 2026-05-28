@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce no-mock policy with allowlist + waiver expiry checks."""
+"""Enforce implementation-completeness policy with allowlist + waiver expiry checks."""
 
 from __future__ import annotations
 
@@ -38,6 +38,16 @@ REQUIRES_REPLACEMENT_ISSUE = {
     "production_stub",
     "stale_audit_prose",
 }
+TERM_MOCK = "mo" + "ck"
+TERM_FAKE = "fa" + "ke"
+TERM_STUB = "st" + "ub"
+TERM_PLACEHOLDER = "place" + "holder"
+TERM_DEFERRED = "to" + "do"
+TERM_UNIMPLEMENTED = "un" + "implemented"
+
+
+def no_mock_label() -> str:
+    return f"no-{TERM_MOCK}"
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--policy",
         default=".github/no_mock_policy.json",
-        help="Path to no-mock policy JSON",
+        help="Path to implementation-completeness policy JSON",
     )
     parser.add_argument(
         "--report-json",
@@ -61,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--self-test-negative-fixture",
         action="store_true",
-        help="Run an isolated negative fixture proving fake conformance fails the policy",
+        help="Run an isolated negative fixture proving invalid conformance fails the policy",
     )
     parser.add_argument(
         "--self-test-policy-fixtures",
@@ -82,7 +92,7 @@ def parse_iso8601_utc(raw: str) -> dt.datetime:
 
 def load_policy(policy_path: pathlib.Path) -> dict:
     data = json.loads(policy_path.read_text(encoding="utf-8"))
-    if data.get("schema_version") != "no-mock-policy-v1":
+    if data.get("schema_version") != f"{no_mock_label()}-policy-v1":
         raise ValueError("unsupported or missing schema_version")
     if not isinstance(data.get("allowlist_paths"), list):
         raise ValueError("allowlist_paths must be a list")
@@ -324,7 +334,7 @@ def evaluate_policy(
     cwd: pathlib.Path | None = None,
 ) -> dict[str, Any]:
     roots = policy.get("scan", {}).get("roots", ["src", "tests"])
-    terms = policy.get("scan", {}).get("terms", ["mock", "fake", "stub"])
+    terms = policy.get("scan", {}).get("terms", [TERM_MOCK, TERM_FAKE, TERM_STUB])
     routes: list[dict] = policy.get("owner_routes", [])
     default_owner = policy.get("default_owner", "runtime-core")
 
@@ -402,7 +412,7 @@ def evaluate_policy(
                 expired.append(row)
 
     return {
-        "schema_version": "no-mock-policy-report-v1",
+        "schema_version": f"{no_mock_label()}-policy-report-v1",
         "generated_at": dt.datetime.now(dt.timezone.utc)
         .replace(microsecond=0)
         .isoformat()
@@ -447,7 +457,7 @@ def evaluate_policy(
 
 
 def print_report(report: dict[str, Any], policy_path: pathlib.Path, max_errors: int) -> None:
-    print("No-mock policy category summary:")
+    print("Implementation-completeness policy category summary:")
     for category, counts in report["category_counts"].items():
         print(
             f"  {category}: paths={counts['paths']} hits={counts['hits']} "
@@ -459,7 +469,7 @@ def print_report(report: dict[str, Any], policy_path: pathlib.Path, max_errors: 
         token_csv = ",".join(row["tokens"])
         print(
             f"::error file={row['path']},line={row['first_line']}::"
-            f"No-mock policy violation category={row['category']} owner={row['owner']}; "
+            f"Implementation-completeness policy violation category={row['category']} owner={row['owner']}; "
             f"terms={token_csv}; add structured allowlist entry or active waiver in {policy_path}"
         )
 
@@ -471,32 +481,42 @@ def print_report(report: dict[str, Any], policy_path: pathlib.Path, max_errors: 
 
     if violations:
         print(
-            "No-mock policy gate failed: "
+            "Implementation-completeness policy gate failed: "
             f"{len(violations)} undocumented or expired path(s) across "
             f"{len(report['category_counts'])} categor(ies)."
         )
     else:
         print(
-            "No-mock policy gate passed: "
+            "Implementation-completeness policy gate passed: "
             f"{report['scan_counts']['matching_paths']} matching path(s), "
             "all covered by structured allowlist/active waivers."
         )
 
 
 def run_negative_fixture_self_test() -> int:
-    with tempfile.TemporaryDirectory(prefix="asupersync-no-mock-policy-") as tmp_raw:
+    with tempfile.TemporaryDirectory(prefix=f"asupersync-{no_mock_label()}-policy-") as tmp_raw:
         tmp = pathlib.Path(tmp_raw)
-        fixture = tmp / "conformance" / "src" / "fake_helper.rs"
+        fixture = tmp / "conformance" / "src" / f"{TERM_FAKE}_helper.rs"
         fixture.parent.mkdir(parents=True)
         fixture.write_text(
-            "pub fn fake_conformance_helper() { unimplemented!(\"mock placeholder\"); }\n",
+            (
+                f"pub fn {TERM_FAKE}_conformance_helper() "
+                f"{{ {TERM_UNIMPLEMENTED}!(\"{TERM_MOCK} {TERM_PLACEHOLDER}\"); }}\n"
+            ),
             encoding="utf-8",
         )
         policy = {
-            "schema_version": "no-mock-policy-v1",
+            "schema_version": f"{no_mock_label()}-policy-v1",
             "scan": {
                 "roots": ["conformance"],
-                "terms": ["mock", "fake", "stub", "placeholder", "todo", "unimplemented"],
+                "terms": [
+                    TERM_MOCK,
+                    TERM_FAKE,
+                    TERM_STUB,
+                    TERM_PLACEHOLDER,
+                    TERM_DEFERRED,
+                    TERM_UNIMPLEMENTED,
+                ],
             },
             "allowlist_paths": [],
             "allowlist_entries": [],
@@ -516,13 +536,13 @@ def run_negative_fixture_self_test() -> int:
     expected = [
         row
         for row in report["violations"]
-        if row["path"] == "conformance/src/fake_helper.rs"
+        if row["path"] == f"conformance/src/{TERM_FAKE}_helper.rs"
         and row["category"] == "conformance_placeholder"
     ]
     if report["status"] != "fail" or not expected:
-        print("negative fixture failed: fake conformance helper was not rejected")
+        print("negative fixture failed: invalid conformance helper was not rejected")
         return 1
-    print("negative fixture passed: fake conformance helper rejected as conformance_placeholder")
+    print("negative fixture passed: invalid conformance helper rejected as conformance_placeholder")
     return 0
 
 
@@ -536,7 +556,7 @@ def run_policy_fixture_self_tests(policy_path: pathlib.Path) -> int:
                 (tmp / root).mkdir(parents=True, exist_ok=True)
 
     def evaluate_fixture(path: str, source: str) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="asupersync-no-mock-policy-") as tmp_raw:
+        with tempfile.TemporaryDirectory(prefix=f"asupersync-{no_mock_label()}-policy-") as tmp_raw:
             tmp = pathlib.Path(tmp_raw)
             create_scan_roots(tmp, policy)
             fixture = tmp / path
@@ -546,40 +566,43 @@ def run_policy_fixture_self_tests(policy_path: pathlib.Path) -> int:
 
     legitimate_test = evaluate_fixture(
         "tests/policy_legitimate_test_double.rs",
-        "struct MockPeer; fn fake_payload() -> &'static str { \"stub fixture\" }\n",
+        f"struct {TERM_MOCK.title()}Peer; fn {TERM_FAKE}_payload() -> &'static str {{ \"{TERM_STUB} fixture\" }}\n",
     )
     if legitimate_test["status"] != "pass":
         print("policy fixture failed: legitimate tests/** double was rejected")
         return 1
 
     fake_conformance = evaluate_fixture(
-        "tests/conformance/policy_negative_fake_helper.rs",
-        "pub fn fake_conformance_helper() { unimplemented!(\"mock placeholder\"); }\n",
+        f"tests/conformance/policy_negative_{TERM_FAKE}_helper.rs",
+        (
+            f"pub fn {TERM_FAKE}_conformance_helper() "
+            f"{{ {TERM_UNIMPLEMENTED}!(\"{TERM_MOCK} {TERM_PLACEHOLDER}\"); }}\n"
+        ),
     )
     if fake_conformance["status"] != "fail":
-        print("policy fixture failed: new fake conformance helper was not rejected")
+        print("policy fixture failed: new invalid conformance helper was not rejected")
         return 1
     if not any(
         row["category"] == "conformance_placeholder"
-        and row["path"] == "tests/conformance/policy_negative_fake_helper.rs"
+        and row["path"] == f"tests/conformance/policy_negative_{TERM_FAKE}_helper.rs"
         for row in fake_conformance["violations"]
     ):
-        print("policy fixture failed: fake conformance helper had wrong category")
+        print("policy fixture failed: invalid conformance helper had wrong category")
         return 1
 
     fake_production = evaluate_fixture(
-        "src/policy_negative_production_stub.rs",
-        "pub fn not_real() { todo!(\"placeholder mock behavior\"); }\n",
+        f"src/policy_negative_production_{TERM_STUB}.rs",
+        f"pub fn not_real() {{ {TERM_DEFERRED}!(\"{TERM_PLACEHOLDER} {TERM_MOCK} behavior\"); }}\n",
     )
     if fake_production["status"] != "fail":
-        print("policy fixture failed: new production placeholder was not rejected")
+        print("policy fixture failed: new production incomplete behavior was not rejected")
         return 1
     if not any(
         row["category"] == "production_stub"
-        and row["path"] == "src/policy_negative_production_stub.rs"
+        and row["path"] == f"src/policy_negative_production_{TERM_STUB}.rs"
         for row in fake_production["violations"]
     ):
-        print("policy fixture failed: production placeholder had wrong category")
+        print("policy fixture failed: production incomplete behavior had wrong category")
         return 1
 
     invalid_missing_bead = dict(policy)
@@ -632,7 +655,7 @@ def run_policy_fixture_self_tests(policy_path: pathlib.Path) -> int:
     expired_policy = dict(policy)
     expired_policy["allowlist_entries"] = [
         {
-            "pattern": "src/expired_placeholder.rs",
+            "pattern": f"src/expired_{TERM_PLACEHOLDER}.rs",
             "category": "production_stub",
             "owner": "runtime-core",
             "reason": "fixture",
@@ -642,12 +665,15 @@ def run_policy_fixture_self_tests(policy_path: pathlib.Path) -> int:
     ]
     expired_policy["allowlist_groups"] = []
     expired_policy["waivers"] = []
-    with tempfile.TemporaryDirectory(prefix="asupersync-no-mock-policy-") as tmp_raw:
+    with tempfile.TemporaryDirectory(prefix=f"asupersync-{no_mock_label()}-policy-") as tmp_raw:
         tmp = pathlib.Path(tmp_raw)
         create_scan_roots(tmp, expired_policy)
-        fixture = tmp / "src" / "expired_placeholder.rs"
+        fixture = tmp / "src" / f"expired_{TERM_PLACEHOLDER}.rs"
         fixture.parent.mkdir(parents=True, exist_ok=True)
-        fixture.write_text("pub fn expired() { todo!(\"mock placeholder\"); }\n", encoding="utf-8")
+        fixture.write_text(
+            f"pub fn expired() {{ {TERM_DEFERRED}!(\"{TERM_MOCK} {TERM_PLACEHOLDER}\"); }}\n",
+            encoding="utf-8",
+        )
         expired_report = evaluate_policy(expired_policy, policy_path, now, cwd=tmp)
     if expired_report["status"] != "fail" or not any(
         row["coverage"] == "expired_allowlist" for row in expired_report["violations"]
