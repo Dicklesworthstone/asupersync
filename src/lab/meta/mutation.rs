@@ -364,8 +364,9 @@ fn mutation_obligation_leak(harness: &mut MetaHarness) {
         .state
         .create_obligation(ObligationKind::SendPermit, task, region, None)
         .expect("create obligation");
-    harness.close_region(region);
-    // Force the region to closed to simulate a bug where the region closed despite the leak
+    // Construct the bug state directly. Calling the runtime close path here can
+    // invoke leak recovery/panic policy before the meta oracle sees the mutation.
+    // The mutation itself is "closed despite an unresolved obligation".
     harness
         .runtime
         .state
