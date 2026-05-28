@@ -32,9 +32,9 @@ mod tests {
                     ("environment".to_string(), "scope-staging".to_string()),
                 ],
                 expected_final_attributes: vec![
+                    ("environment".to_string(), "scope-staging".to_string()), // Scope wins
                     ("service.name".to_string(), "scope-service".to_string()), // Scope wins
-                    ("service.version".to_string(), "1.0.0".to_string()),      // Only in resource
-                    ("environment".to_string(), "scope-staging".to_string()),  // Scope wins
+                    ("service.version".to_string(), "1.0.0".to_string()),     // Only in resource
                 ],
                 scope_should_take_precedence: true,
             },
@@ -53,14 +53,14 @@ mod tests {
                     ("collector.name".to_string(), "otel-collector".to_string()),
                 ],
                 expected_final_attributes: vec![
-                    ("service.name".to_string(), "resource-service".to_string()),
-                    ("service.version".to_string(), "1.0.0".to_string()),
+                    ("collector.name".to_string(), "otel-collector".to_string()),
                     (
                         "deployment.environment".to_string(),
                         "production".to_string(),
                     ),
                     ("instrumentation.version".to_string(), "2.1.0".to_string()),
-                    ("collector.name".to_string(), "otel-collector".to_string()),
+                    ("service.name".to_string(), "resource-service".to_string()),
+                    ("service.version".to_string(), "1.0.0".to_string()),
                 ],
                 scope_should_take_precedence: false, // No conflicts
             },
@@ -137,9 +137,9 @@ mod tests {
                     ("scope.additional".to_string(), "extra-data".to_string()),
                 ],
                 expected_final_attributes: vec![
+                    ("scope.additional".to_string(), "extra-data".to_string()),
                     ("service.name".to_string(), "identical-service".to_string()), // Same value, no precedence issue
                     ("version".to_string(), "1.0.0".to_string()),
-                    ("scope.additional".to_string(), "extra-data".to_string()),
                 ],
                 scope_should_take_precedence: false, // Values are identical
             },
