@@ -876,6 +876,21 @@ mod tests {
                 .collect()
         }
 
+        fn extract_fixture_priorities(tasks: &[TaskId], fixtures: &[(u32, u8)]) -> Vec<u8> {
+            tasks
+                .iter()
+                .map(|task_id| {
+                    let index = task_id.arena_index().index();
+                    fixtures
+                        .iter()
+                        .find_map(|&(fixture_id, priority)| {
+                            (fixture_id == index).then_some(priority)
+                        })
+                        .unwrap_or(0)
+                })
+                .collect()
+        }
+
         /// MR1: Priority Offset Additivity
         /// f(tasks + uniform_offset) should preserve relative ordering
         /// Category: Additive (f(x + c) = permute(f(x)))
@@ -891,13 +906,15 @@ mod tests {
                 baseline_heap.push(task(task_id), priority, &mut baseline_arena);
             }
             let baseline_popped = pop_all(&mut baseline_heap, &mut baseline_arena);
-            let baseline_priorities = extract_priorities(&baseline_popped, &baseline_arena);
+            let baseline_priorities = extract_fixture_priorities(&baseline_popped, &fixtures);
 
             // Build offset heap (all priorities shifted by constant)
             let mut offset_arena = setup_arena(fixtures.len() as u32);
             let mut offset_heap = IntrusivePriorityHeap::new();
+            let mut offset_fixtures = Vec::with_capacity(fixtures.len());
             for &(task_id, priority) in &fixtures {
                 let new_priority = priority.saturating_add(offset);
+                offset_fixtures.push((task_id, new_priority));
                 offset_heap.push(task(task_id), new_priority, &mut offset_arena);
             }
             let offset_popped = pop_all(&mut offset_heap, &mut offset_arena);
@@ -908,7 +925,7 @@ mod tests {
             );
 
             // Verify the priorities were actually shifted
-            let offset_priorities = extract_priorities(&offset_popped, &offset_arena);
+            let offset_priorities = extract_fixture_priorities(&offset_popped, &offset_fixtures);
             for (baseline_prio, offset_prio) in baseline_priorities.iter().zip(&offset_priorities) {
                 assert_eq!(
                     *offset_prio,
@@ -1056,10 +1073,8 @@ mod tests {
             // Extract just the same-priority items in pop order
             let mut baseline_fifo = Vec::new();
             while let Some(popped) = baseline_heap.pop(&mut baseline_arena) {
-                if let Some(record) = baseline_arena.get(popped.arena_index()) {
-                    if record.sched_priority == same_priority {
-                        baseline_fifo.push(popped);
-                    }
+                if fifo_tasks.contains(&popped) {
+                    baseline_fifo.push(popped);
                 }
             }
 
@@ -1079,10 +1094,8 @@ mod tests {
             // Extract same-priority items from noisy heap
             let mut noisy_fifo = Vec::new();
             while let Some(popped) = noisy_heap.pop(&mut noisy_arena) {
-                if let Some(record) = noisy_arena.get(popped.arena_index()) {
-                    if record.sched_priority == same_priority {
-                        noisy_fifo.push(popped);
-                    }
+                if fifo_tasks.contains(&popped) {
+                    noisy_fifo.push(popped);
                 }
             }
 
