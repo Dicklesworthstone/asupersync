@@ -302,9 +302,14 @@ impl SparseImageProfile {
         let min_run_length = 4096;
         let max_pattern_size = 64;
 
-        // Try different pattern sizes
-        for pattern_size in 1..=max_pattern_size.min(data.len() / 4) {
+        // Try different multi-byte pattern sizes. Single repeated bytes are
+        // handled by zero-run detection for true holes; non-zero uniform data
+        // should not be classified as a sparse pattern.
+        for pattern_size in 2..=max_pattern_size.min(data.len() / 4) {
             let pattern = &data[0..pattern_size];
+            if !Self::pattern_has_variation(pattern) {
+                continue;
+            }
 
             let mut run_length: usize = 0;
             let mut pos: usize = 0;
@@ -328,6 +333,12 @@ impl SparseImageProfile {
         }
 
         None
+    }
+
+    fn pattern_has_variation(pattern: &[u8]) -> bool {
+        pattern
+            .first()
+            .is_some_and(|first| pattern.iter().any(|byte| byte != first))
     }
 
     /// Find chunk boundaries that respect sparse regions.
@@ -478,28 +489,33 @@ impl SparseImageProfile {
             return false;
         }
 
-        // Sample pattern from first 64 bytes
-        let pattern_size = 64.min(data.len() / 16);
-        let pattern = &data[0..pattern_size];
-
-        let mut matches = 0;
-        let mut pos = pattern_size;
-
-        while let Some(end) = pos.checked_add(pattern_size) {
-            if end > data.len() {
-                break;
+        let max_pattern_size = 64.min(data.len() / 4);
+        for pattern_size in 2..=max_pattern_size {
+            let pattern = &data[..pattern_size];
+            if !Self::pattern_has_variation(pattern) {
+                continue;
             }
 
-            if &data[pos..end] == pattern {
-                matches += 1;
+            let total_blocks = data.len() / pattern_size;
+            if total_blocks < 4 {
+                continue;
             }
-            pos = end;
+
+            let matching_blocks = (0..total_blocks)
+                .filter(|block| {
+                    let start = block * pattern_size;
+                    let end = start + pattern_size;
+                    &data[start..end] == pattern
+                })
+                .count();
+            let match_ratio = matching_blocks as f64 / total_blocks as f64;
+
+            if match_ratio > 0.8 {
+                return true;
+            }
         }
 
-        let total_blocks = data.len() / pattern_size;
-        let match_ratio = matches as f64 / total_blocks as f64;
-
-        match_ratio > 0.8
+        false
     }
 
     /// Estimate compression ratio for sparse images.
