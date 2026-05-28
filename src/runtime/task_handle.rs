@@ -364,6 +364,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::cx::cap;
     use crate::test_utils::init_test_logging;
     use crate::types::CancelKind;
     use crate::util::ArenaIndex;
@@ -376,7 +377,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn test_cx() -> Cx<crate::cx::cap::All> {
+    fn test_cx() -> Cx<cap::All> {
         Cx::for_testing()
     }
 

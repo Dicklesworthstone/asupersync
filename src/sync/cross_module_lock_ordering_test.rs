@@ -6,6 +6,7 @@
 #![cfg(test)]
 
 use super::lock_ordering::LockModule;
+
 #[test]
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn test_cross_module_enforcement_example() {

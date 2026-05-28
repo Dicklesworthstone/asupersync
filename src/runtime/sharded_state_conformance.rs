@@ -34,8 +34,16 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
+// Conditional access to lock order tracking functions
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-use crate::runtime::sharded_state::lock_order::{held_count, held_labels};
+fn held_count() -> usize {
+    crate::runtime::sharded_state::lock_order::held_count()
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn held_labels() -> Vec<&'static str> {
+    crate::runtime::sharded_state::lock_order::held_labels()
+}
 
 #[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
 fn held_count() -> usize {
