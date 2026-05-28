@@ -1733,7 +1733,7 @@ mod tests {
         assert_eq!(lease.acquired_at(), Time::from_secs(3600));
         assert!(lease.is_active());
 
-        let proof = lease.release().unwrap();
+        let proof = lease.release().expect("lease release should succeed");
         assert!(!lease.is_active());
 
         // Proof is a CommittedProof<LeaseKind>
@@ -1749,7 +1749,7 @@ mod tests {
         let mut lease = NameLease::new("worker", tid(2), rid(0), Time::from_nanos(1_000_000_000));
         assert!(lease.is_active());
 
-        let proof = lease.abort().unwrap();
+        let proof = lease.abort().expect("lease abort should succeed");
         assert!(!lease.is_active());
         let _ = proof;
 
@@ -1761,7 +1761,7 @@ mod tests {
         init_test("name_lease_double_resolve_errors");
 
         let mut lease = NameLease::new("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000));
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         assert!(matches!(
             lease.release(),
@@ -1788,13 +1788,13 @@ mod tests {
 
         let mut lease = reg
             .register("my_server", tid(1), rid(0), Time::from_secs(3600))
-            .unwrap();
+            .expect("registration should succeed");
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.whereis("my_server"), Some(tid(1)));
         assert!(reg.is_registered("my_server"));
         assert_eq!(reg.whereis("unknown"), None);
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("registry_register_and_whereis");
     }
@@ -1820,7 +1820,7 @@ mod tests {
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
         assert!(reg.is_registered("svc"));
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         crate::test_complete!("registry_reserve_commit_makes_visible");
     }
 
@@ -1834,16 +1834,16 @@ mod tests {
             .expect("reserve ok");
 
         // Abort the permit obligation and cancel the pending entry.
-        permit.abort().unwrap();
+        permit.abort().expect("permit abort should succeed");
         reg.cancel_permit(&permit, Time::from_secs(3600))
             .expect("cancel permit");
 
         // Now the name can be registered normally.
         let mut lease = reg
             .register("svc", tid(2), rid(0), Time::from_secs(3600))
-            .unwrap();
+            .expect("registration should succeed");
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("registry_reserve_abort_releases_name");
     }
@@ -1866,7 +1866,7 @@ mod tests {
             }
         );
 
-        permit.abort().unwrap();
+        permit.abort().expect("permit abort should succeed");
         reg.cancel_permit(&permit, Time::from_nanos(1_000_000_000))
             .expect("cancel permit");
 
@@ -1886,13 +1886,13 @@ mod tests {
         assert_eq!(removed, vec!["svc"]);
 
         // Abort the permit (simulating region cleanup).
-        permit.abort().unwrap();
+        permit.abort().expect("permit abort should succeed");
 
         // Registry should no longer consider the name taken.
         let mut lease = reg
             .register("svc", tid(2), rid(0), Time::from_secs(3600))
-            .unwrap();
-        lease.release().unwrap();
+            .expect("registration should succeed");
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("registry_cleanup_region_removes_pending_permits");
     }
@@ -1917,7 +1917,7 @@ mod tests {
             }
         );
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("registry_name_taken");
     }
@@ -1941,7 +1941,7 @@ mod tests {
             })
         );
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("registry_unregister");
     }
@@ -2149,7 +2149,7 @@ mod tests {
             .register("svc", tid(1), rid(1), Time::from_secs(10))
             .unwrap();
         reg.unregister("svc", tid(1)).unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         let notifications = reg.take_name_notifications();
         assert_eq!(notifications.len(), 2);
@@ -2204,7 +2204,7 @@ mod tests {
                 .all(|n| n.kind == NameOwnershipKind::Acquired)
         );
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("name_watch_multiple_watchers_ordered_by_ref");
     }
@@ -2230,7 +2230,7 @@ mod tests {
         assert_eq!(reg.name_watcher_count(), 1);
 
         reg.unregister("svc", tid(1)).unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         let released = reg.take_name_notifications();
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].watch_ref, open_region_watch);
@@ -2258,7 +2258,7 @@ mod tests {
 
         let mut lease = reg.register("svc", tid(1), rid(9), Time::from_nanos(1_000_000_000)).unwrap();
         reg.unregister("svc", tid(1)).unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         let notifications = reg.take_name_notifications();
         assert_eq!(notifications.len(), 2);
@@ -2600,7 +2600,7 @@ mod tests {
                 "trial {trial}: winner must be tid(7)"
             );
 
-            lease.release().unwrap();
+            lease.release().expect("lease release should succeed");
         }
 
         crate::test_complete!("conformance_register_winner_stable_across_trials");
@@ -2625,7 +2625,7 @@ mod tests {
         reg.unregister("cancellable", tid(1)).unwrap();
         assert!(!reg.is_registered("cancellable"));
 
-        let proof = lease.abort().unwrap();
+        let proof = lease.abort().expect("lease abort should succeed");
         assert!(!lease.is_active());
 
         // Proof is a valid AbortedProof<LeaseKind>
@@ -2676,7 +2676,7 @@ mod tests {
                 lease.is_active(),
                 "lease '{name}' should still be active pre-abort"
             );
-            let proof = lease.abort().unwrap();
+            let proof = lease.abort().expect("lease abort should succeed");
             assert!(!lease.is_active());
             let _ = proof; // obligation resolved
         }
@@ -2881,7 +2881,7 @@ mod tests {
         // per the bulk-register loop above)
         reg.unregister("svc_000", tid(0)).unwrap();
         if let Some(lease) = active_leases.iter_mut().find(|l| l.name() == "svc_000") {
-            lease.release().unwrap();
+            lease.release().expect("lease release should succeed");
         }
 
         // Phase 4: re-register a crashed name with new holder
@@ -3017,7 +3017,7 @@ mod tests {
             .unwrap();
 
         lease.abort().unwrap();
-        permit.abort().unwrap();
+        permit.abort().expect("permit abort should succeed");
         l2.release().unwrap();
 
         crate::test_complete!("conformance_cleanup_task_removes_pending_permits");
@@ -3066,7 +3066,7 @@ mod tests {
         assert_eq!(permit.reserved_at(), Time::from_secs(42));
         assert!(permit.is_pending());
 
-        permit.abort().unwrap();
+        permit.abort().expect("permit abort should succeed");
         assert!(!permit.is_pending());
         reg.cancel_permit(&permit, Time::from_secs(42))
             .expect("cancel permit");
@@ -3095,7 +3095,7 @@ mod tests {
         assert!(lease.is_active());
 
         // The lease can be released (obligation committed).
-        let proof = lease.release().unwrap();
+        let proof = lease.release().expect("lease release should succeed");
         let resolved = proof.into_resolved_proof();
         assert_eq!(
             resolved.resolution(),
@@ -3150,7 +3150,7 @@ mod tests {
             }
         );
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("conformance_lease_blocks_reserve");
     }
@@ -3204,7 +3204,7 @@ mod tests {
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
 
         reg.unregister("svc", tid(1)).unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("commit_permit_rejects_stale_same_identity_replay");
     }
@@ -3308,7 +3308,7 @@ mod tests {
         );
         assert_eq!(reg.len(), 1);
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         crate::test_complete!("collision_fail_rejects_duplicate");
     }
 
@@ -3333,7 +3333,7 @@ mod tests {
         };
         assert_eq!(reg.whereis("fresh"), Some(tid(1)));
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         crate::test_complete!("collision_fail_succeeds_when_no_collision");
     }
 
@@ -3399,7 +3399,7 @@ mod tests {
         };
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         crate::test_complete!("collision_replace_on_free_name_registers_normally");
     }
 
@@ -3455,7 +3455,7 @@ mod tests {
         // Free the name using unregister_and_grant.
         reg.unregister_and_grant("svc", tid(1), Time::from_secs(10))
             .unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         // Waiter should have been granted.
         assert_eq!(reg.waiter_count(), 0);
@@ -3519,7 +3519,7 @@ mod tests {
         // Free the name AFTER the deadline.
         reg.unregister_and_grant("svc", tid(1), Time::from_secs(10))
             .unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         // Waiter should NOT have been granted (expired).
         assert_eq!(reg.waiter_count(), 0);
@@ -3556,7 +3556,7 @@ mod tests {
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
 
         reg.unregister("svc", tid(1)).unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         crate::test_complete!("collision_wait_rejects_already_expired_budget");
     }
@@ -3594,7 +3594,7 @@ mod tests {
         // Free the name — first waiter (tid 2) should win.
         reg.unregister_and_grant("svc", tid(1), Time::from_secs(10))
             .unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
 
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
         assert_eq!(reg.waiter_count(), 1); // tid 3 still waiting
@@ -3697,7 +3697,7 @@ mod tests {
         // Free the name — task 2 is granted the lease.
         reg.unregister_and_grant("svc", tid(1), Time::from_secs(5))
             .unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
 
         // Before take_granted, clean up region 1 (task 2's region).
@@ -3826,7 +3826,7 @@ mod tests {
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
 
         // The old permit is orphaned; abort it.
-        permit.abort().unwrap();
+        permit.abort().expect("permit abort should succeed");
         new_lease.release().unwrap();
 
         crate::test_complete!("collision_replace_displaces_pending_permit");
@@ -3867,7 +3867,7 @@ mod tests {
             _ => panic!("expected NameTaken from both"),
         }
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         crate::test_complete!("conformance_policy_fail_equivalent_to_register");
     }
 
@@ -4039,7 +4039,7 @@ mod tests {
 
         // Cleanup region 0 removes the pending permit.
         reg.cleanup_region_at(rid(0), Time::from_secs(2));
-        permit.abort().unwrap();
+        permit.abort().expect("permit abort should succeed");
 
         // The waiter from region 1 should have been granted the name.
         assert_eq!(reg.waiter_count(), 0);
@@ -4083,7 +4083,7 @@ mod tests {
 
         // Cleanup task 1 removes the pending permit.
         reg.cleanup_task_at(tid(1), Time::from_secs(2));
-        permit.abort().unwrap();
+        permit.abort().expect("permit abort should succeed");
 
         // The waiter should have been granted the name.
         assert_eq!(reg.waiter_count(), 0);
@@ -4159,7 +4159,7 @@ mod tests {
              documented invariant — pre-fix it carried the permit_id"
         );
 
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         crate::test_complete!("ziwcq4_committed_permit_resets_identity_nonce_to_zero");
     }
 
@@ -4253,7 +4253,7 @@ mod tests {
         // Correct caller succeeds.
         reg.unregister("svc", tid(1)).unwrap();
         assert!(!reg.is_registered("svc"));
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
     }
 
     #[test]
@@ -4289,7 +4289,7 @@ mod tests {
         // Correct caller: succeeds and grants the waiter.
         reg.unregister_and_grant("svc", tid(1), Time::from_secs(6))
             .unwrap();
-        lease.release().unwrap();
+        lease.release().expect("lease release should succeed");
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
         let mut g = reg.take_granted();
         assert_eq!(g.len(), 1);
