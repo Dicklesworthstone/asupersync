@@ -1151,8 +1151,15 @@ fn repair_blocks_used(scenario: &MultiPeerScenario) -> u32 {
 }
 
 fn split_bytes_across_peers(total: u64, peer_count: usize, index: usize) -> u64 {
-    let peer_count = u64::try_from(peer_count).expect("peer count fits u64");
-    let index = u64::try_from(index).expect("peer index fits u64");
+    let Ok(peer_count) = u64::try_from(peer_count) else {
+        return 0;
+    };
+    let Ok(index) = u64::try_from(index) else {
+        return 0;
+    };
+    if peer_count == 0 {
+        return 0;
+    }
     let base = total / peer_count;
     let remainder = total % peer_count;
     base + u64::from(index < remainder)
