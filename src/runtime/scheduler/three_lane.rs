@@ -15808,7 +15808,8 @@ mod tests {
             insta::assert_snapshot!(
                 "three_lane_scheduler_deadline_ordering_state",
                 state_dump_snapshot.as_str(),
-                @"SchedulerStateDump {
+                @"
+SchedulerStateDump {
     scenario: \"3-lane-5-task-1-cancel-deadline-ordering\",
     timestamp: \"2026-05-03T17:00:00.000Z\",
     worker_count: 1,
@@ -15909,7 +15910,8 @@ mod tests {
         \"task_4_4_4\",
         \"task_5_5_5\",
     ],
-}"
+}
+"
             );
         });
 
