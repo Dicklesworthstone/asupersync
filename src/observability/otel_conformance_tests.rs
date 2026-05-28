@@ -1553,8 +1553,8 @@ mod tests {
                 name: "explicit_internal_span_kind".to_string(),
                 span_name: "explicit_internal_span".to_string(),
                 span_kind: SpanKindDefinition::Internal,
-                expected_exported_span_kind: 1, // SPAN_KIND_INTERNAL
-                must_default_to_internal: true,
+                expected_exported_span_kind: 1,  // SPAN_KIND_INTERNAL
+                must_default_to_internal: false, // Explicitly set to internal
                 must_not_be_unspecified: true,
             },
             TraceSpanKindDefaultsScenario {
