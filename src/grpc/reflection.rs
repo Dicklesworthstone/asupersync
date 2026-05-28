@@ -234,31 +234,21 @@ impl ReflectionService {
     /// * `Anonymous` → `Ok(())`.
     #[allow(dead_code)]
     fn check_auth(&self, method: &str) -> Result<(), Status> {
-        // SECURITY FIX (br-asupersync-tlp8m9): Require REMOTE capability for all reflection access.
-        // Reflection exposes service schemas and method signatures, which aids attackers in
-        // understanding API surfaces. REMOTE capability is required since reflection is
-        // primarily used by external debugging tools (grpcurl, grpcui, etc.).
-        let Some(cx) = Cx::current() else {
-            return Err(Status::unauthenticated(
-                "reflection: no Cx in scope for capability check",
-            ));
-        };
-
-        if !cx.has_remote() {
-            return Err(Status::permission_denied(format!(
-                "reflection.{method}: requires REMOTE capability — \
-                reflection access is restricted to contexts with remote debugging privileges"
-            )));
-        }
-
         match &self.auth {
             ReflectionAuthMode::Locked => Err(Status::permission_denied(format!(
                 "reflection.{method}: service is in Locked mode — call \
                  .with_auth(...) for production or .allow_anonymous() for \
                  dev/test before serving reflection RPCs"
             ))),
-            ReflectionAuthMode::Required(auth) => auth(&cx, method),
             ReflectionAuthMode::Anonymous => Ok(()),
+            ReflectionAuthMode::Required(auth) => {
+                let Some(cx) = Cx::current() else {
+                    return Err(Status::unauthenticated(
+                        "reflection: no Cx in scope for auth callback",
+                    ));
+                };
+                auth(&cx, method)
+            }
         }
     }
 

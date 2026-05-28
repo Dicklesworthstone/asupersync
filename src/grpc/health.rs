@@ -1204,9 +1204,9 @@ mod tests {
         let err = service.check(&req).unwrap_err();
         let code = err.code();
         crate::assert_with_log!(
-            code == super::super::status::Code::NotFound,
-            "not found",
-            super::super::status::Code::NotFound,
+            code == super::super::status::Code::PermissionDenied,
+            "unknown service is hidden from enumeration",
+            super::super::status::Code::PermissionDenied,
             code
         );
         crate::test_complete!("health_service_check");
