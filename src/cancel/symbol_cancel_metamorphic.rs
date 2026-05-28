@@ -102,7 +102,7 @@ fn cancel_kind_strategy() -> impl Strategy<Value = CancelKind> {
 fn mr1_hierarchical_propagation() {
     proptest!(|(
         parent_id in 1u64..1000,
-        child_ids: Vec<u64>,
+        child_ids in prop::collection::vec(1u64..1000, 1..=10),
         cancel_kind in prop_oneof![
             Just(CancelKind::User),
             Just(CancelKind::Timeout),
@@ -110,8 +110,7 @@ fn mr1_hierarchical_propagation() {
             Just(CancelKind::ParentCancelled),
         ]
     )| {
-        prop_assume!(!child_ids.is_empty() && child_ids.len() <= 10);
-        prop_assume!(child_ids.iter().all(|&id| id != parent_id && id > 0));
+        prop_assume!(child_ids.iter().all(|&id| id != parent_id));
 
         let mut rng = DetRng::new(42);
         let now = Time::from_nanos(1_000_000_000);
@@ -215,11 +214,8 @@ fn mr2_reason_strengthening_monotonicity() {
 fn mr3_timing_monotonicity() {
     proptest!(|(
         object_id in 1u64..1000,
-        timestamps: Vec<u64>
+        timestamps in prop::collection::vec(1u64..(u64::MAX / 2), 1..=5)
     )| {
-        prop_assume!(!timestamps.is_empty() && timestamps.len() <= 5);
-        prop_assume!(timestamps.iter().all(|&t| t > 0 && t < u64::MAX / 2));
-
         let mut rng = DetRng::new(42);
         let token = SymbolCancelToken::new(object_id_from_u64(object_id), &mut rng);
 
@@ -263,10 +259,8 @@ fn mr3_timing_monotonicity() {
 fn mr4_token_identity_invariance() {
     proptest!(|(
         object_id in 1u64..1000,
-        operations: Vec<u8>
+        operations in prop::collection::vec(any::<u8>(), 1..=10)
     )| {
-        prop_assume!(!operations.is_empty() && operations.len() <= 10);
-
         let mut rng = DetRng::new(object_id);
         let token = SymbolCancelToken::new(object_id_from_u64(object_id), &mut rng);
 
@@ -438,10 +432,9 @@ fn mr6_cancellation_idempotence() {
 fn mr7_child_independence() {
     proptest!(|(
         parent_id in 1u64..100,
-        child_ids: Vec<u64>
+        child_ids in prop::collection::vec(1u64..100, 2..=6)
     )| {
-        prop_assume!(child_ids.len() >= 2 && child_ids.len() <= 6);
-        prop_assume!(child_ids.iter().all(|&id| id != parent_id && id > 0));
+        prop_assume!(child_ids.iter().all(|&id| id != parent_id));
 
         let mut rng = DetRng::new(42);
         let parent = SymbolCancelToken::new(object_id_from_u64(parent_id), &mut rng);

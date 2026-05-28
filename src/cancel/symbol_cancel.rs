@@ -2413,7 +2413,7 @@ mod tests {
             let hex_output = format!(
                 "Token: {}\n\
                 Token ID: 0x{:016x}\n\
-                Object ID: 0x{:016x}:{:016x}\n\
+                Object ID: 0x{:016x}:0x{:016x}\n\
                 Cancelled: {}\n\
                 Wire bytes: [{}]\n\
                 Hex: {}",
