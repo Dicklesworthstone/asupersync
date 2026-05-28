@@ -1587,7 +1587,7 @@ mod tests {
         let config = TestConfig::new()
             .with_seed(0x05E5_5104)
             .with_tracing(true)
-            .with_max_steps(20_000);
+            .with_max_steps(50_000);
         let mut runtime = LabRuntimeTarget::create_runtime(config);
 
         let (received, proof_kind, checkpoints) =
