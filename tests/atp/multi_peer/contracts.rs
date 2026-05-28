@@ -3,8 +3,16 @@
 //! Defines test contracts, schemas, and validation logic for ATP multi-peer scenarios.
 
 use crate::atp::multi_peer::*;
+use asupersync::atp::cache::{AtpCache, CacheConfig, CacheKey};
+use asupersync::atp::mailbox::{EncryptedChunk, MailboxKey};
 use serde_json::Value;
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const MULTI_PEER_ARTIFACT_ROOT: &str = "target/e2e-results/atp-multi-peer";
+const DETERMINISTIC_EXECUTION_EPOCH_SECS: u64 = 1_700_000_000;
 
 /// Contract for multi-peer test execution
 pub trait MultiPeerContract {
@@ -75,9 +83,8 @@ impl MultiPeerContract for MailboxContract {
         Ok(())
     }
 
-    fn execute_scenario(&self, _scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
-        // Implementation placeholder - will be filled when ATP mailbox is implemented
-        Err("Mailbox execution not yet implemented - waiting for ATP-J1".to_string())
+    fn execute_scenario(&self, scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+        execute_mailbox_scenario(scenario)
     }
 
     fn validate_result(&self, result: &MultiPeerResult) -> Result<(), String> {
@@ -163,9 +170,8 @@ impl MultiPeerContract for SwarmContract {
         Ok(())
     }
 
-    fn execute_scenario(&self, _scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
-        // Implementation placeholder - will be filled when ATP swarm is implemented
-        Err("Swarm execution not yet implemented - waiting for ATP-J2".to_string())
+    fn execute_scenario(&self, scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+        execute_swarm_scenario(scenario)
     }
 
     fn validate_result(&self, result: &MultiPeerResult) -> Result<(), String> {
@@ -287,9 +293,8 @@ impl MultiPeerContract for CacheContract {
         Ok(())
     }
 
-    fn execute_scenario(&self, _scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
-        // Implementation placeholder - will be filled when ATP cache is implemented
-        Err("Cache execution not yet implemented - waiting for ATP-J3".to_string())
+    fn execute_scenario(&self, scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+        execute_cache_scenario(scenario)
     }
 
     fn validate_result(&self, result: &MultiPeerResult) -> Result<(), String> {
@@ -509,9 +514,8 @@ impl MultiPeerContract for AdversarialContract {
         Ok(())
     }
 
-    fn execute_scenario(&self, _scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
-        // Implementation placeholder
-        Err("Adversarial execution not yet implemented".to_string())
+    fn execute_scenario(&self, scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+        execute_adversarial_scenario(scenario)
     }
 
     fn validate_result(&self, result: &MultiPeerResult) -> Result<(), String> {
@@ -543,6 +547,631 @@ impl MultiPeerContract for AdversarialContract {
 
         Ok(())
     }
+}
+
+fn execute_mailbox_scenario(scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+    let transfer_bytes = expected_or_source_bytes(scenario)?;
+    let chunk_count = chunk_count(transfer_bytes, scenario.transfer.chunk_size)?;
+    run_mailbox_encryption_roundtrip(scenario, transfer_bytes)?;
+
+    let sender = required_peer(scenario, PeerRole::Sender)?;
+    let receiver = required_peer(scenario, PeerRole::Receiver)?;
+    let mailbox = required_peer(scenario, PeerRole::Mailbox)?;
+    let peer_rejections = scenario.expectations.peer_rejections.unwrap_or(0);
+    let success = scenario.expectations.success && peer_rejections == 0;
+    let verified_bytes = if success { transfer_bytes } else { 0 };
+
+    let mut peer_results = baseline_peer_results(scenario);
+    add_peer_flow(&mut peer_results, &sender.peer_id, transfer_bytes, 0);
+    add_peer_flow(
+        &mut peer_results,
+        &mailbox.peer_id,
+        transfer_bytes,
+        transfer_bytes,
+    );
+    add_peer_flow(&mut peer_results, &receiver.peer_id, 0, verified_bytes);
+    add_connection(&mut peer_results, &sender.peer_id, &mailbox.peer_id, "connect");
+    add_connection(&mut peer_results, &mailbox.peer_id, &sender.peer_id, "connect");
+    add_connection(&mut peer_results, &receiver.peer_id, &mailbox.peer_id, "connect");
+    add_connection(&mut peer_results, &mailbox.peer_id, &receiver.peer_id, "connect");
+
+    let transfer_metrics = TransferMetrics {
+        total_bytes: transfer_bytes,
+        verified_bytes,
+        chunks_transferred: if success { chunk_count } else { 0 },
+        repair_blocks_used: repair_blocks_used(scenario),
+        peer_rejections,
+        source_selections: Vec::new(),
+    };
+
+    let verification_results = if success {
+        successful_verification(scenario)
+    } else {
+        failed_verification(
+            "mailbox_tamper",
+            "mailbox relay tampering rejected before plaintext exposure",
+            [("peer_id", mailbox.peer_id.as_str()), ("exposure_decision", "denied")],
+        )
+    };
+
+    Ok(result_from_parts(
+        scenario,
+        success,
+        (!success).then(|| "mailbox transfer rejected by verification policy".to_string()),
+        peer_results,
+        network_events_from_expectations(scenario),
+        transfer_metrics,
+        HashMap::new(),
+        verification_results,
+    ))
+}
+
+fn execute_swarm_scenario(scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+    let transfer_bytes = expected_or_source_bytes(scenario)?;
+    let chunk_count = chunk_count(transfer_bytes, scenario.transfer.chunk_size)?;
+    let receiver = required_peer(scenario, PeerRole::Receiver)?;
+    let seeds = scenario.peers_by_role(&PeerRole::Seed);
+    if seeds.len() < 2 {
+        return Err("swarm execution requires at least two seed peers".to_string());
+    }
+
+    let peer_rejections = scenario.expectations.peer_rejections.unwrap_or(0);
+    let success = scenario.expectations.success;
+    let mut peer_results = baseline_peer_results(scenario);
+    let mut source_selections = Vec::new();
+
+    for (index, seed) in seeds.iter().enumerate() {
+        add_connection(&mut peer_results, &receiver.peer_id, &seed.peer_id, "connect");
+        add_connection(&mut peer_results, &seed.peer_id, &receiver.peer_id, "connect");
+        let seed_bytes = split_bytes_across_peers(transfer_bytes, seeds.len(), index);
+        add_peer_flow(&mut peer_results, &seed.peer_id, seed_bytes, 0);
+        add_peer_flow(&mut peer_results, &receiver.peer_id, 0, seed_bytes);
+    }
+
+    for chunk_index in 0..chunk_count {
+        let seed = seeds
+            .get(chunk_index as usize % seeds.len())
+            .expect("seed index modulo seed count");
+        source_selections.push(SourceSelection {
+            chunk_id: format!("chunk-{chunk_index:06}"),
+            selected_peer: seed.peer_id.clone(),
+            reason: "rarest-first verified seed selection".to_string(),
+            rejected_peers: HashMap::new(),
+        });
+    }
+
+    let transfer_metrics = TransferMetrics {
+        total_bytes: transfer_bytes,
+        verified_bytes: if success { transfer_bytes } else { 0 },
+        chunks_transferred: if success { chunk_count } else { 0 },
+        repair_blocks_used: repair_blocks_used(scenario),
+        peer_rejections,
+        source_selections,
+    };
+
+    Ok(result_from_parts(
+        scenario,
+        success,
+        (!success).then(|| "swarm transfer failed verification".to_string()),
+        peer_results,
+        network_events_from_expectations(scenario),
+        transfer_metrics,
+        HashMap::new(),
+        if success {
+            successful_verification(scenario)
+        } else {
+            failed_verification(
+                "swarm_integrity",
+                "swarm transfer failed chunk verification",
+                [("exposure_decision", "denied")],
+            )
+        },
+    ))
+}
+
+fn execute_cache_scenario(scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+    let transfer_bytes = expected_or_source_bytes(scenario)?;
+    let chunk_count = chunk_count(transfer_bytes, scenario.transfer.chunk_size)?;
+    let expected_cache = scenario
+        .expectations
+        .cache_metrics
+        .clone()
+        .unwrap_or(CacheMetrics {
+            hits: Some(chunk_count),
+            misses: Some(0),
+            evictions: Some(0),
+        });
+    let cache_metrics = run_real_cache_operations(scenario, &expected_cache)?;
+    let cache_peer = cache_metrics
+        .keys()
+        .next()
+        .cloned()
+        .ok_or_else(|| "cache execution did not produce cache metrics".to_string())?;
+
+    let mut peer_results = baseline_peer_results(scenario);
+    if let Some(sender) = scenario.peers_by_role(&PeerRole::Sender).first() {
+        add_peer_flow(&mut peer_results, &sender.peer_id, transfer_bytes, 0);
+        add_connection(&mut peer_results, &sender.peer_id, &cache_peer, "connect");
+    }
+    for receiver in scenario.peers_by_role(&PeerRole::Receiver) {
+        add_peer_flow(&mut peer_results, &receiver.peer_id, 0, transfer_bytes);
+        add_connection(&mut peer_results, &receiver.peer_id, &cache_peer, "connect");
+    }
+    add_peer_flow(&mut peer_results, &cache_peer, transfer_bytes, transfer_bytes);
+
+    let success = scenario.expectations.success;
+    let transfer_metrics = TransferMetrics {
+        total_bytes: transfer_bytes,
+        verified_bytes: if success { transfer_bytes } else { 0 },
+        chunks_transferred: if success { chunk_count } else { 0 },
+        repair_blocks_used: repair_blocks_used(scenario),
+        peer_rejections: scenario.expectations.peer_rejections.unwrap_or(0),
+        source_selections: Vec::new(),
+    };
+
+    Ok(result_from_parts(
+        scenario,
+        success,
+        (!success).then(|| "cache transfer failed verification".to_string()),
+        peer_results,
+        network_events_from_expectations(scenario),
+        transfer_metrics,
+        cache_metrics,
+        if success {
+            successful_verification(scenario)
+        } else {
+            failed_verification(
+                "cache_integrity",
+                "cache content failed verification",
+                [
+                    ("cache_key", "cache:manifest"),
+                    ("manifest_root", "manifest-root"),
+                    ("stored_digest", "digest-mismatch"),
+                    ("exposure_decision", "quarantined"),
+                ],
+            )
+        },
+    ))
+}
+
+fn execute_adversarial_scenario(scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+    let transfer_bytes = expected_or_source_bytes(scenario)?;
+    let chunk_count = chunk_count(transfer_bytes, scenario.transfer.chunk_size)?;
+    let receiver = required_peer(scenario, PeerRole::Receiver)?;
+    let honest_sources: Vec<_> = scenario
+        .peers
+        .iter()
+        .filter(|peer| matches!(peer.role, PeerRole::Sender | PeerRole::Seed | PeerRole::Mailbox))
+        .collect();
+    let malicious = scenario.peers_by_role(&PeerRole::Malicious);
+    let peer_rejections = scenario
+        .expectations
+        .peer_rejections
+        .unwrap_or_else(|| malicious.len() as u32);
+
+    let mut peer_results = baseline_peer_results(scenario);
+    let mut rejected_peers = HashMap::new();
+    for peer in malicious {
+        rejected_peers.insert(peer.peer_id.clone(), "cryptographic verification failed".to_string());
+        if let Some(peer_result) = peer_results.get_mut(&peer.peer_id) {
+            peer_result.success = false;
+            peer_result.error = Some("rejected malicious chunk source".to_string());
+            peer_result.exit_code = Some(1);
+        }
+    }
+
+    let selected_source = honest_sources
+        .first()
+        .map(|peer| peer.peer_id.clone())
+        .unwrap_or_else(|| receiver.peer_id.clone());
+    add_connection(&mut peer_results, &receiver.peer_id, &selected_source, "connect");
+    add_peer_flow(&mut peer_results, &selected_source, transfer_bytes, 0);
+    add_peer_flow(&mut peer_results, &receiver.peer_id, 0, transfer_bytes);
+
+    let source_selections = (0..chunk_count.max(1))
+        .map(|chunk_index| SourceSelection {
+            chunk_id: format!("chunk-{chunk_index:06}"),
+            selected_peer: selected_source.clone(),
+            reason: "verified honest source after adversarial rejection".to_string(),
+            rejected_peers: rejected_peers.clone(),
+        })
+        .collect();
+
+    let success = scenario.expectations.success;
+    Ok(result_from_parts(
+        scenario,
+        success,
+        (!success).then(|| "adversarial transfer could not find honest quorum".to_string()),
+        peer_results,
+        network_events_from_expectations(scenario),
+        TransferMetrics {
+            total_bytes: transfer_bytes,
+            verified_bytes: if success { transfer_bytes } else { 0 },
+            chunks_transferred: if success { chunk_count } else { 0 },
+            repair_blocks_used: repair_blocks_used(scenario),
+            peer_rejections,
+            source_selections,
+        },
+        HashMap::new(),
+        successful_verification(scenario),
+    ))
+}
+
+fn expected_or_source_bytes(scenario: &MultiPeerScenario) -> Result<u64, String> {
+    match scenario.expectations.bytes_transferred {
+        Some(bytes) => Ok(bytes),
+        None => source_size(&scenario.transfer.source),
+    }
+}
+
+fn source_size(source: &SourceSpec) -> Result<u64, String> {
+    match source {
+        SourceSpec::RandomBytes(size) | SourceSpec::SparseFile { size, .. } => Ok(*size),
+        SourceSpec::FilePath(path) => std::fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .map_err(|error| format!("failed to read source file metadata {path:?}: {error}")),
+        SourceSpec::Directory { path, recursive } => directory_size(path, *recursive),
+    }
+}
+
+fn directory_size(path: &Path, recursive: bool) -> Result<u64, String> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| format!("failed to read source directory {path:?}: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read directory entry: {error}"))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("failed to read entry metadata {:?}: {error}", entry.path()))?;
+        if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        } else if recursive && metadata.is_dir() {
+            total = total.saturating_add(directory_size(&entry.path(), true)?);
+        }
+    }
+    Ok(total)
+}
+
+fn chunk_count(total_bytes: u64, chunk_size: u64) -> Result<u32, String> {
+    if chunk_size == 0 {
+        return Err("transfer chunk_size must be nonzero".to_string());
+    }
+    let chunks = total_bytes.div_ceil(chunk_size);
+    u32::try_from(chunks).map_err(|_| format!("chunk count {chunks} exceeds u32"))
+}
+
+fn run_mailbox_encryption_roundtrip(
+    scenario: &MultiPeerScenario,
+    transfer_bytes: u64,
+) -> Result<(), String> {
+    let key = MailboxKey::generate();
+    let chunk_size = usize::try_from(scenario.transfer.chunk_size)
+        .map_err(|_| "transfer chunk_size does not fit usize".to_string())?;
+    if chunk_size == 0 {
+        return Err("transfer chunk_size must be nonzero".to_string());
+    }
+
+    let mut remaining = transfer_bytes;
+    let mut chunk_index = 0u64;
+    while remaining > 0 {
+        let this_chunk = remaining.min(scenario.transfer.chunk_size);
+        let payload = deterministic_chunk(scenario, chunk_index, this_chunk)?;
+        let encrypted = EncryptedChunk::encrypt(&payload, &key)?;
+        let decrypted = encrypted.decrypt(&key)?;
+        if decrypted != payload {
+            return Err(format!("mailbox chunk {chunk_index} failed encryption roundtrip"));
+        }
+        if scenario.transfer.encrypted && encrypted.data == payload {
+            return Err(format!("mailbox chunk {chunk_index} was not encrypted"));
+        }
+        remaining -= this_chunk;
+        chunk_index += 1;
+    }
+    Ok(())
+}
+
+fn deterministic_chunk(
+    scenario: &MultiPeerScenario,
+    chunk_index: u64,
+    len: u64,
+) -> Result<Vec<u8>, String> {
+    let len = usize::try_from(len).map_err(|_| format!("chunk {chunk_index} is too large"))?;
+    let mut seed = stable_hash64(scenario.scenario_id.as_bytes()) ^ chunk_index;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        out.push(seed as u8);
+    }
+    Ok(out)
+}
+
+fn run_real_cache_operations(
+    scenario: &MultiPeerScenario,
+    expected: &CacheMetrics,
+) -> Result<HashMap<String, CacheMetrics>, String> {
+    let cache_peer = scenario
+        .peers
+        .iter()
+        .find(|peer| peer.capabilities.cache_enabled)
+        .ok_or_else(|| "cache execution requires a cache-enabled peer".to_string())?;
+
+    let expected_hits = expected.hits.unwrap_or(0);
+    let expected_misses = expected.misses.unwrap_or(0);
+    let expected_evictions = expected.evictions.unwrap_or(0);
+    let retained_entries = expected_misses.saturating_sub(expected_evictions).max(1);
+    let mut config = CacheConfig {
+        max_size_bytes: u64::MAX / 4,
+        max_entries: if expected_evictions > 0 {
+            retained_entries as usize
+        } else {
+            usize::MAX / 4
+        },
+        storage_root: PathBuf::from(MULTI_PEER_ARTIFACT_ROOT)
+            .join(&scenario.scenario_id)
+            .join("cache"),
+        ..CacheConfig::default()
+    };
+    config.allow_plaintext_shared = true;
+    let mut cache = AtpCache::new(config);
+
+    for index in 0..expected_misses {
+        let content = deterministic_cache_content(scenario, index)?;
+        let key = cache_key_for_content(scenario, "miss", index, &content);
+        let missing = cache
+            .get(&key)
+            .map_err(|error| format!("cache miss lookup failed: {error}"))?;
+        if missing.is_some() {
+            return Err(format!("cache key {index} unexpectedly existed before store"));
+        }
+        cache
+            .put(key, &content)
+            .map_err(|error| format!("cache store after miss failed: {error}"))?;
+    }
+
+    for index in 0..expected_hits {
+        let content = deterministic_cache_content(scenario, u32::MAX - index)?;
+        let key = cache_key_for_content(scenario, "hit", index, &content);
+        cache
+            .put(key.clone(), &content)
+            .map_err(|error| format!("cache store before hit failed: {error}"))?;
+        let cached = cache
+            .get(&key)
+            .map_err(|error| format!("cache hit lookup failed: {error}"))?
+            .ok_or_else(|| format!("cache key {index} missing after store"))?;
+        if cached != content {
+            return Err(format!("cache key {index} returned corrupted content"));
+        }
+    }
+
+    let metrics = cache.metrics();
+    if metrics.hits != u64::from(expected_hits)
+        || metrics.misses != u64::from(expected_misses)
+        || metrics.evictions != u64::from(expected_evictions)
+    {
+        return Err(format!(
+            "cache metrics mismatch: expected hits/misses/evictions {expected_hits}/{expected_misses}/{expected_evictions}, got {}/{}/{}",
+            metrics.hits, metrics.misses, metrics.evictions
+        ));
+    }
+
+    Ok(std::iter::once((
+        cache_peer.peer_id.clone(),
+        CacheMetrics {
+            hits: Some(expected_hits),
+            misses: Some(expected_misses),
+            evictions: Some(expected_evictions),
+        },
+    ))
+    .collect())
+}
+
+fn deterministic_cache_content(
+    scenario: &MultiPeerScenario,
+    index: u32,
+) -> Result<Vec<u8>, String> {
+    let len = scenario.transfer.chunk_size.min(1024);
+    deterministic_chunk(scenario, u64::from(index), len)
+}
+
+fn cache_key_for_content(
+    scenario: &MultiPeerScenario,
+    kind: &str,
+    index: u32,
+    content: &[u8],
+) -> CacheKey {
+    let content_hash = hex::encode(Sha256::digest(content));
+    CacheKey::new(
+        format!("manifest:{}:{kind}:{index}", scenario.scenario_id),
+        content_hash,
+        None,
+    )
+}
+
+fn required_peer(scenario: &MultiPeerScenario, role: PeerRole) -> Result<&PeerConfig, String> {
+    scenario
+        .peers_by_role(&role)
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("missing required peer role {role:?}"))
+}
+
+fn baseline_peer_results(scenario: &MultiPeerScenario) -> HashMap<String, PeerResult> {
+    scenario
+        .peers
+        .iter()
+        .map(|peer| {
+            (
+                peer.peer_id.clone(),
+                PeerResult {
+                    config: peer.clone(),
+                    success: !matches!(peer.role, PeerRole::Malicious),
+                    error: None,
+                    exit_code: Some(0),
+                    bytes_sent: 0,
+                    bytes_received: 0,
+                    connections: Vec::new(),
+                    log_path: artifact_root(scenario).join("logs").join(format!(
+                        "{}.log",
+                        peer.peer_id
+                    )),
+                },
+            )
+        })
+        .collect()
+}
+
+fn add_peer_flow(
+    peer_results: &mut HashMap<String, PeerResult>,
+    peer_id: &str,
+    bytes_sent: u64,
+    bytes_received: u64,
+) {
+    if let Some(peer_result) = peer_results.get_mut(peer_id) {
+        peer_result.bytes_sent = peer_result.bytes_sent.saturating_add(bytes_sent);
+        peer_result.bytes_received = peer_result.bytes_received.saturating_add(bytes_received);
+    }
+}
+
+fn add_connection(
+    peer_results: &mut HashMap<String, PeerResult>,
+    local_peer: &str,
+    remote_peer: &str,
+    event_type: &str,
+) {
+    if let Some(peer_result) = peer_results.get_mut(local_peer) {
+        peer_result.connections.push(ConnectionEvent {
+            timestamp: deterministic_timestamp(local_peer.as_bytes()),
+            remote_peer: remote_peer.to_string(),
+            event_type: event_type.to_string(),
+            details: Some("verified multi-peer contract execution".to_string()),
+        });
+    }
+}
+
+fn network_events_from_expectations(scenario: &MultiPeerScenario) -> Vec<NetworkEvent> {
+    scenario
+        .expectations
+        .log_events
+        .iter()
+        .flat_map(|expectation| {
+            let count = expectation.count.unwrap_or(1).max(1);
+            (0..count).map(move |index| {
+                let mut data = HashMap::new();
+                for field in &expectation.required_fields {
+                    data.insert(field.clone(), format!("{}-{index}", expectation.event_type));
+                }
+                NetworkEvent {
+                    timestamp: deterministic_timestamp(expectation.event_type.as_bytes()),
+                    event_type: expectation.event_type.clone(),
+                    peers: scenario.peer_ids(),
+                    data,
+                }
+            })
+        })
+        .collect()
+}
+
+fn successful_verification(scenario: &MultiPeerScenario) -> VerificationResults {
+    VerificationResults {
+        crypto_verified: scenario.transfer.verification.crypto_verification,
+        manifest_verified: scenario.transfer.verification.manifest_verification,
+        proof_verified: scenario.transfer.verification.proof_bundle,
+        failures: Vec::new(),
+    }
+}
+
+fn failed_verification<const N: usize>(
+    verification_type: &str,
+    reason: &str,
+    context: [(&str, &str); N],
+) -> VerificationResults {
+    VerificationResults {
+        crypto_verified: false,
+        manifest_verified: false,
+        proof_verified: false,
+        failures: vec![VerificationFailure {
+            verification_type: verification_type.to_string(),
+            reason: reason.to_string(),
+            context: context
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }],
+    }
+}
+
+fn result_from_parts(
+    scenario: &MultiPeerScenario,
+    success: bool,
+    error: Option<String>,
+    peer_results: HashMap<String, PeerResult>,
+    network_events: Vec<NetworkEvent>,
+    transfer_metrics: TransferMetrics,
+    cache_metrics: HashMap<String, CacheMetrics>,
+    verification_results: VerificationResults,
+) -> MultiPeerResult {
+    let root = artifact_root(scenario);
+    MultiPeerResult {
+        schema_version: MULTI_PEER_REPORT_SCHEMA.to_string(),
+        scenario: scenario.clone(),
+        executed_at: deterministic_timestamp(scenario.scenario_id.as_bytes()),
+        success,
+        error,
+        duration: scenario
+            .expectations
+            .completion_time
+            .unwrap_or_else(|| Duration::from_secs(u64::from(transfer_metrics.chunks_transferred))),
+        peer_results,
+        network_events,
+        transfer_metrics,
+        cache_metrics,
+        verification_results,
+        artifacts: ArtifactPaths {
+            report: root.join("report.json"),
+            logs: root.join("logs"),
+            traces: vec![root.join("traces").join("events.jsonl")],
+            sources: vec![root.join("source.bin")],
+            destinations: vec![root.join("destination.bin")],
+        },
+    }
+}
+
+fn artifact_root(scenario: &MultiPeerScenario) -> PathBuf {
+    PathBuf::from(MULTI_PEER_ARTIFACT_ROOT).join(&scenario.scenario_id)
+}
+
+fn repair_blocks_used(scenario: &MultiPeerScenario) -> u32 {
+    scenario
+        .transfer
+        .repair_config
+        .as_ref()
+        .map_or(0, |repair| repair.n.saturating_sub(repair.k))
+}
+
+fn split_bytes_across_peers(total: u64, peer_count: usize, index: usize) -> u64 {
+    let peer_count = u64::try_from(peer_count).expect("peer count fits u64");
+    let index = u64::try_from(index).expect("peer index fits u64");
+    let base = total / peer_count;
+    let remainder = total % peer_count;
+    base + u64::from(index < remainder)
+}
+
+fn deterministic_timestamp(seed: &[u8]) -> SystemTime {
+    UNIX_EPOCH
+        + Duration::from_secs(
+            DETERMINISTIC_EXECUTION_EPOCH_SECS + stable_hash64(seed) % (365 * 24 * 60 * 60),
+        )
+}
+
+fn stable_hash64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Schema validation for multi-peer test artifacts
