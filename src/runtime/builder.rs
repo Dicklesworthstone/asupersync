@@ -5191,7 +5191,12 @@ mod tests {
             let budget = Budget::new().with_deadline(Time::from_secs(110));
             let idx = guard.insert_task_with(|idx| {
                 let task_id = crate::types::TaskId::from_arena(idx);
-                let mut record = TaskRecord::new_with_time(task_id, region, budget, Time::from_nanos(1_000_000_000));
+                let mut record = TaskRecord::new_with_time(
+                    task_id,
+                    region,
+                    budget,
+                    Time::from_nanos(1_000_000_000),
+                );
                 let mut inner = CxInner::new(region, task_id, budget);
                 inner.checkpoint_state.last_checkpoint = Some(Time::from_nanos(1_000_000_000));
                 inner.checkpoint_state.checkpoint_count = 1;
@@ -6437,22 +6442,21 @@ worker_threads = 16
             "zero thread_stack_size normalized to 2MB"
         );
 
-        // Verify no validation errors are returned for extreme values
-        let runtime_extreme = RuntimeBuilder::new()
-            .worker_threads(usize::MAX) // Extreme value
-            .build()
-            .expect("extreme worker_threads should be accepted, not rejected");
-
+        // Verify normalization itself does not clamp extreme worker counts.
+        // Do not build a runtime here: building would try to spawn that many
+        // workers, which tests the host rather than the configuration layer.
+        let mut extreme_config = crate::runtime::config::RuntimeConfig::default();
+        extreme_config.worker_threads = usize::MAX;
+        extreme_config.normalize();
         assert_eq!(
-            runtime_extreme.inner.config.worker_threads,
+            extreme_config.worker_threads,
             usize::MAX,
             "extreme worker_threads value should be accepted as-is"
         );
-        drop(runtime_extreme);
 
         // FINDING: RuntimeBuilder follows normalization approach, not validation.
         // - Zero values are silently corrected to safe defaults
-        // - Extreme values are accepted without bounds checking
+        // - Config normalization accepts extreme values without bounds checking
         // - No ConfigurationError is returned for invalid combinations
         //
         // This is SOUND behavior for defensive programming, but may mask
