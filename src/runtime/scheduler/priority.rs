@@ -399,6 +399,21 @@ impl Scheduler {
     }
 
     #[inline]
+    fn ready_entry_is_stealable(&self, task: TaskId) -> bool {
+        self.scheduled.contains(task)
+            && !self.cancel_lane.iter().any(|entry| entry.task == task)
+            && !self.timed_lane.iter().any(|entry| entry.task == task)
+    }
+
+    #[inline]
+    fn live_ready_len(&self) -> usize {
+        self.ready_lane
+            .iter()
+            .filter(|entry| self.ready_entry_is_stealable(entry.task))
+            .count()
+    }
+
+    #[inline]
     fn tie_break_index(rng_hint: u64, len: usize) -> usize {
         debug_assert!(len > 0);
         let len_u64 = u64::try_from(len).expect("len should fit in u64");
@@ -1048,23 +1063,29 @@ impl Scheduler {
         out: &mut Vec<(TaskId, u8)>,
     ) -> usize {
         out.clear();
-        if max_steal == 0 || self.ready_lane.is_empty() {
+        if max_steal == 0 {
             return 0;
         }
-        let steal_count = (self.ready_lane.len() / 2).min(max_steal).max(1);
+        let live_ready = self.live_ready_len();
+        if live_ready == 0 {
+            return 0;
+        }
+        let steal_count = (live_ready / 2).min(max_steal).max(1);
         if out.capacity() < steal_count {
             out.reserve(steal_count - out.capacity());
         }
 
         let mut stolen = 0;
         // Pop up to steal_count valid entries. Stale entries (already
-        // removed from `scheduled` by cancel/remove) are silently
-        // discarded — consistent with every other pop_* method.
+        // removed from `scheduled` by cancel/remove, or shadowed by a lazy
+        // cancel/timed promotion) are silently discarded. Shadowed entries must
+        // not clear `scheduled`, because their live higher-priority lane entry
+        // still owns that task.
         while stolen < steal_count {
             let Some(entry) = self.ready_lane.pop() else {
                 break;
             };
-            if self.scheduled.remove(entry.task) {
+            if self.ready_entry_is_stealable(entry.task) && self.scheduled.remove(entry.task) {
                 out.push((entry.task, entry.priority));
                 stolen += 1;
             }
