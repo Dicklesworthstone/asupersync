@@ -687,12 +687,14 @@ impl ConformanceTest for ExplicitDeregisterFailureTest {
         );
 
         let result = registration.deregister();
-        // Should attempt retry, so 2 calls expected
-        let passed = result.is_err() && reactor.deregister_calls() == 2;
+        // Explicit deregister tries twice, then leaves Drop armed for one final
+        // best-effort cleanup pass. The cleanup pass retries once on ordinary
+        // errors, so persistent failure records four total calls.
+        let passed = result.is_err() && reactor.deregister_calls() == 4;
 
         let error_message = if !passed {
             Some(format!(
-                "Expected failure with 2 retries, got: {:?}, calls: {}",
+                "Expected failure with 4 total cleanup attempts, got: {:?}, calls: {}",
                 result,
                 reactor.deregister_calls()
             ))
@@ -898,6 +900,7 @@ impl ConformanceTest for NotSyncSemanticTest {
         // Runtime verification that Registration contains Cell (not Sync)
         let reactor = MockReactor::new();
         let token = Token::new(53);
+        reactor.register(token, Interest::READABLE);
 
         let registration = Registration::new(
             token,
