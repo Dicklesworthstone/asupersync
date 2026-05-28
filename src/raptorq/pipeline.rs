@@ -786,13 +786,15 @@ mod tests {
         //   padding = 26 - 21 = 5; erasure = ceil(26 * 0.05) = 2;
         //   compute_repair_count = max(5 + 2, 5 + 1) = 7.
         //
-        // - For per-block (max_block_size=80):
+        // - For per-block (max_block_size=80), the encoder splits the
+        //   payload into exact max-size chunks plus a tail:
         //   * block1: 80 bytes = 10 source. K'(10)=10. padding=0.
         //     erasure=ceil(10*0.05)=1. Per-block = max(0+1, 0+1) = 1.
-        //   * block2: 81 bytes = 11 source. K'(11)=12. padding=1.
-        //     erasure=ceil(12*0.05)=1. Per-block = max(1+1, 1+1) = 2.
-        //   * Total = 1 + 2 = 3 (unchanged from pre-fix in this case
-        //     because both blocks happen to land at small K' multiples).
+        //   * block2: 80 bytes = 10 source. K'(10)=10. padding=0.
+        //     erasure=ceil(10*0.05)=1. Per-block = max(0+1, 0+1) = 1.
+        //   * block3: 1 byte = 1 source. K'(1)=10. padding=9.
+        //     erasure=ceil(10*0.05)=1. Per-block = max(9+1, 9+1) = 10.
+        //   * Total = 1 + 1 + 10 = 12.
         let data_len = 161;
         let max_block_size = 80;
         let symbol_size = 8;
@@ -801,7 +803,7 @@ mod tests {
         assert_eq!(compute_repair_count(data_len, symbol_size, overhead), 7);
         assert_eq!(
             compute_total_repair_count(data_len, max_block_size, symbol_size, overhead),
-            3
+            12
         );
     }
 
