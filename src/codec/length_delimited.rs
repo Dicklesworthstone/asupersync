@@ -447,26 +447,26 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
         if self.builder.big_endian {
             match self.builder.length_field_length {
                 1 => dst.put_u8(length_to_encode as u8),
-                2 => dst.put_u16_be(length_to_encode as u16),
+                2 => dst.put_slice(&(length_to_encode as u16).to_be_bytes()),
                 3 => {
                     dst.put_u8((length_to_encode >> 16) as u8);
-                    dst.put_u16_be(length_to_encode as u16);
+                    dst.put_slice(&(length_to_encode as u16).to_be_bytes());
                 }
-                4 => dst.put_u32_be(length_to_encode as u32),
+                4 => dst.put_slice(&(length_to_encode as u32).to_be_bytes()),
                 5 => {
                     dst.put_u8((length_to_encode >> 32) as u8);
-                    dst.put_u32_be(length_to_encode as u32);
+                    dst.put_slice(&(length_to_encode as u32).to_be_bytes());
                 }
                 6 => {
-                    dst.put_u16_be((length_to_encode >> 32) as u16);
-                    dst.put_u32_be(length_to_encode as u32);
+                    dst.put_slice(&((length_to_encode >> 32) as u16).to_be_bytes());
+                    dst.put_slice(&(length_to_encode as u32).to_be_bytes());
                 }
                 7 => {
                     dst.put_u8((length_to_encode >> 48) as u8);
-                    dst.put_u16_be((length_to_encode >> 32) as u16);
-                    dst.put_u32_be(length_to_encode as u32);
+                    dst.put_slice(&((length_to_encode >> 32) as u16).to_be_bytes());
+                    dst.put_slice(&(length_to_encode as u32).to_be_bytes());
                 }
-                8 => dst.put_u64_be(length_to_encode),
+                8 => dst.put_slice(&length_to_encode.to_be_bytes()),
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -1119,10 +1119,9 @@ mod tests {
         let err = codec.encode(payload, &mut dst).unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string()
-                .contains("encoded length exceeds length_field_length capacity")
-        );
+        assert!(err
+            .to_string()
+            .contains("encoded length exceeds length_field_length capacity"));
         assert_eq!(dst, original, "encode must not partially mutate dst");
     }
 
