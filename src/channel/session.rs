@@ -498,8 +498,6 @@ mod tests {
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
     use crate::runtime::yield_now;
     use crate::types::Budget;
-    use crate::util::ArenaIndex;
-    use crate::{RegionId, TaskId};
     use std::future::Future;
     use std::task::{Context, Poll};
 
@@ -508,12 +506,8 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn test_cx() -> Cx {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
-        )
+    fn test_cx() -> Cx<crate::cx::cap::All> {
+        Cx::for_testing()
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {
