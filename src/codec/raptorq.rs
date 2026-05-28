@@ -635,7 +635,8 @@ mod golden_tests {
                 let re_encoded_source = &decode_result.source[esi as usize];
                 assert_eq!(
                     original_source, re_encoded_source,
-                    "MR1 violation: source symbol {esi} differs after round-trip"
+                    "MR1 violation: source symbol {esi} differs after round-trip. Original: {:?}, Re-encoded: {:?}",
+                    esi, original_source, re_encoded_source
                 );
             }
 
