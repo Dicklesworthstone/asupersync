@@ -2310,7 +2310,9 @@ impl ThreeLaneScheduler {
                 priority, "inject_ready: critical system task bypassing governor throttling"
             );
 
-            // Skip governor checks, inject directly
+            // The task was injected inside the task-table critical section
+            // above. Keep post-injection accounting here without enqueueing it
+            // a second time.
             if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
                 crate::tracing_compat::warn!(
                     ?task,
@@ -2320,7 +2322,6 @@ impl ThreeLaneScheduler {
                     "inject_ready_bypass: global ready queue at capacity, scheduling anyway"
                 );
             }
-            self.global.inject_ready(task, priority);
             self.record_scheduler_evidence_enqueue(task);
             self.wake_one();
         } else {
