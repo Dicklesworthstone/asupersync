@@ -38,9 +38,9 @@ use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read};
 #[cfg(unix)]
 use std::io::Write;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process as std_process;

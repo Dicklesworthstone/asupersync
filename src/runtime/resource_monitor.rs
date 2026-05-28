@@ -2859,12 +2859,15 @@ mod platform {
             true,
             sysinfo::ProcessRefreshKind::nothing().with_memory(),
         );
-        system.process(pid).map(|process| process.memory()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "current process was not present in sysinfo process table",
-            )
-        })
+        system
+            .process(pid)
+            .map(|process| process.memory())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "current process was not present in sysinfo process table",
+                )
+            })
     }
 
     #[cfg(windows)]
