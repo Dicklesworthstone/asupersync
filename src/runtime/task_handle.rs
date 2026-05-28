@@ -376,12 +376,8 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn test_cx() -> Cx {
-        Cx::new(
-            crate::types::RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
-        )
+    fn test_cx() -> Cx<cap::All> {
+        Cx::for_testing()
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {
