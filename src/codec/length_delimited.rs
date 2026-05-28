@@ -365,6 +365,12 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
 
         // br-asupersync-ooqkxe: validate header length overflow before proceeding
         // This matches the overflow check in the decoder (lines 249-258)
+        if self.builder.length_field_offset == usize::MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "header length overflow: length_field_offset at maximum value",
+            ));
+        }
         let header_len = self
             .builder
             .length_field_offset
