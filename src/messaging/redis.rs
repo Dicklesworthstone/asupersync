@@ -516,6 +516,26 @@ impl RespValue {
                 .map_err(|_| RedisError::Protocol(format!("invalid {label} length: {len}")))
         }
 
+        fn bulk_shape_label(tag: u8) -> &'static str {
+            match tag {
+                b'$' => "bulk string",
+                b'=' => "verbatim string",
+                b'!' => "blob error",
+                _ => "bulk-shape",
+            }
+        }
+
+        fn aggregate_label(tag: u8) -> &'static str {
+            match tag {
+                b'*' => "array",
+                b'~' => "set",
+                b'>' => "push",
+                b'%' => "map",
+                b'|' => "attribute",
+                _ => "aggregate",
+            }
+        }
+
         fn stream_end_state(buf: &[u8], i: usize) -> Result<Option<bool>, RedisError> {
             if buf.get(i) != Some(&b'.') {
                 return Ok(Some(false));
@@ -625,6 +645,7 @@ impl RespValue {
                 // and BlobError (RESP3) all share the same wire shape:
                 //   <prefix><len>\r\n<payload>\r\n
                 b'$' | b'=' | b'!' => {
+                    let label = bulk_shape_label(buf[i]);
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(None);
                     };
@@ -637,16 +658,16 @@ impl RespValue {
                     }
                     if len < 0 {
                         return Err(RedisError::Protocol(format!(
-                            "invalid bulk-shape length for byte 0x{:02x}: {len}",
-                            buf[i]
+                            "invalid {label} length for byte 0x{:02x}: {len}",
+                            buf[i],
                         )));
                     }
                     let len = usize::try_from(len).map_err(|_| {
-                        RedisError::Protocol(format!("invalid bulk-shape length: {len}"))
+                        RedisError::Protocol(format!("invalid {label} length: {len}"))
                     })?;
                     if len > limits.max_bulk_string_len {
                         return Err(RedisError::Protocol(format!(
-                            "bulk-shape length {len} exceeds maximum {}",
+                            "{label} length {len} exceeds maximum {}",
                             limits.max_bulk_string_len
                         )));
                     }
@@ -661,6 +682,7 @@ impl RespValue {
                 // Attribute (RESP3 — N pairs = 2N children).
                 b'*' | b'~' | b'>' | b'%' | b'|' => {
                     let tag = buf[i];
+                    let label = aggregate_label(tag);
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(None);
                     };
@@ -720,21 +742,21 @@ impl RespValue {
                     }
                     if n < 0 {
                         return Err(RedisError::Protocol(format!(
-                            "invalid aggregate length: {n}"
+                            "invalid {label} length: {n}"
                         )));
                     }
                     let n = usize::try_from(n).map_err(|_| {
-                        RedisError::Protocol(format!("invalid aggregate length: {n}"))
+                        RedisError::Protocol(format!("invalid {label} length: {n}"))
                     })?;
                     if n > limits.max_array_len {
                         return Err(RedisError::Protocol(format!(
-                            "aggregate length {n} exceeds maximum {}",
+                            "{label} length {n} exceeds maximum {}",
                             limits.max_array_len
                         )));
                     }
                     let children = if matches!(buf[i], b'%' | b'|') {
                         n.checked_mul(2).ok_or_else(|| {
-                            RedisError::Protocol("aggregate length overflow".to_string())
+                            RedisError::Protocol(format!("{label} length overflow"))
                         })?
                     } else {
                         n
@@ -904,6 +926,7 @@ impl RespValue {
                 }
                 b'*' | b'~' | b'>' => {
                     let tag = buf[i];
+                    let label = aggregate_label(tag);
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
@@ -958,15 +981,15 @@ impl RespValue {
                     }
                     if n < 0 {
                         return Err(RedisError::Protocol(format!(
-                            "invalid aggregate length: {n}"
+                            "invalid {label} length: {n}"
                         )));
                     }
                     let n = usize::try_from(n).map_err(|_| {
-                        RedisError::Protocol(format!("invalid aggregate length: {n}"))
+                        RedisError::Protocol(format!("invalid {label} length: {n}"))
                     })?;
                     if n > limits.max_array_len {
                         return Err(RedisError::Protocol(format!(
-                            "aggregate length {n} exceeds maximum {}",
+                            "{label} length {n} exceeds maximum {}",
                             limits.max_array_len
                         )));
                     }
@@ -994,6 +1017,7 @@ impl RespValue {
                 // RESP3 map (%) and attribute (|) — N key-value pairs.
                 b'%' | b'|' => {
                     let tag = buf[i];
+                    let label = aggregate_label(tag);
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
@@ -1055,15 +1079,15 @@ impl RespValue {
                     let n = parse_i64_ascii(&buf[i + 1..end])?;
                     if n < 0 {
                         return Err(RedisError::Protocol(format!(
-                            "invalid aggregate length: {n}"
+                            "invalid {label} length: {n}"
                         )));
                     }
                     let n = usize::try_from(n).map_err(|_| {
-                        RedisError::Protocol(format!("invalid aggregate length: {n}"))
+                        RedisError::Protocol(format!("invalid {label} length: {n}"))
                     })?;
                     if n > limits.max_array_len {
                         return Err(RedisError::Protocol(format!(
-                            "aggregate length {n} exceeds maximum {}",
+                            "{label} length {n} exceeds maximum {}",
                             limits.max_array_len
                         )));
                     }
