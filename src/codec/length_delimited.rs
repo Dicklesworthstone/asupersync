@@ -1375,7 +1375,7 @@ error.message: {}\n\
 buffer.len_after_error: {}\n\
 followup.decode.returns_none: {}\n\
 followup.decode.error: none\n",
-            err.to_string(),
+            err,
             buf.len(),
             followup.is_none()
         );

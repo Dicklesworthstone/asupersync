@@ -393,6 +393,7 @@ mod nats_mod {
             NatsError::SubscriptionNotFound(_) => "SubscriptionNotFound",
             NatsError::NotConnected => "NotConnected",
             NatsError::TlsRequired { .. } => "TlsRequired",
+            NatsError::Tls(_) => "Tls",
         }
     }
 

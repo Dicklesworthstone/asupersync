@@ -557,7 +557,7 @@ mod tests {
         for val in &["true", "1", "yes", "on", "TRUE", "Yes", "ON"] {
             assert!(
                 super::parse_bool("TEST", val)
-                    .expect(&format!("should parse truthy value '{}'", val)),
+                    .unwrap_or_else(|_| panic!("should parse truthy value '{}'", val)),
                 "expected true for {val}"
             );
         }
@@ -568,7 +568,7 @@ mod tests {
         for val in &["false", "0", "no", "off", "FALSE", "No", "OFF"] {
             assert!(
                 !super::parse_bool("TEST", val)
-                    .expect(&format!("should parse falsy value '{}'", val)),
+                    .unwrap_or_else(|_| panic!("should parse falsy value '{}'", val)),
                 "expected false for {val}"
             );
         }
