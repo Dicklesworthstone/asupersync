@@ -20,8 +20,8 @@ pub use crate::encoding::{EncodedSymbol, EncodingError, EncodingPipeline, Encodi
 #[cfg(test)]
 mod golden_tests {
     use super::*;
-    use crate::types::resource::{PoolConfig, SymbolPool};
     use crate::types::ObjectId;
+    use crate::types::resource::{PoolConfig, SymbolPool};
     use crate::util::DetRng;
     use std::fmt::Write as _;
 
