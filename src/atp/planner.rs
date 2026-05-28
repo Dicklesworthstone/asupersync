@@ -790,10 +790,11 @@ impl AtpTransferPlanner {
         object_graph: &ObjectGraphSummary,
         chunking_profile: &ChunkingProfile,
     ) -> u64 {
+        // Calculate using explicit intermediate values to ensure deterministic behavior
         let compressed_bytes =
-            (object_graph.total_bytes as f64 * chunking_profile.compression_ratio) as u64;
+            (object_graph.total_bytes as f64 * chunking_profile.compression_ratio).floor() as u64;
         let repair_bytes =
-            (compressed_bytes as f64 * chunking_profile.repair_overhead_ratio) as u64;
+            (compressed_bytes as f64 * chunking_profile.repair_overhead_ratio).floor() as u64;
         let protocol_overhead = compressed_bytes / 100; // 1% protocol overhead
 
         compressed_bytes + repair_bytes + protocol_overhead
