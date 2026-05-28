@@ -1154,7 +1154,7 @@ impl MacaroonToken {
         hasher.update(token.signature.as_bytes());
         let result = hasher.finalize();
         // Use first 8 bytes as deterministic, collision-resistant identifier
-        u64::from_be_bytes(result[..8].try_into().unwrap())
+        u64::from_be_bytes(result[..8].try_into().expect("SHA-256 output is always at least 8 bytes"))
     }
 
     fn discharge_invalid(index: usize, identifier: &str) -> VerificationError {
@@ -2159,7 +2159,7 @@ mod tests {
         let token = MacaroonToken::mint(&key, "spawn:region_1", "cx/scheduler");
 
         let bytes = token.to_binary();
-        let recovered = MacaroonToken::from_binary(&bytes).unwrap();
+        let recovered = MacaroonToken::from_binary(&bytes).expect("binary roundtrip should succeed for token with no caveats");
 
         assert_eq!(recovered.identifier(), token.identifier());
         assert_eq!(recovered.location(), token.location());
@@ -2180,7 +2180,7 @@ mod tests {
             .add_caveat(CaveatPredicate::Custom("env".into(), "test".into()));
 
         let bytes = token.to_binary();
-        let recovered = MacaroonToken::from_binary(&bytes).unwrap();
+        let recovered = MacaroonToken::from_binary(&bytes).expect("binary roundtrip should succeed for token with caveats");
 
         assert_eq!(recovered.identifier(), token.identifier());
         assert_eq!(recovered.caveat_count(), 3);
@@ -2692,9 +2692,9 @@ mod tests {
             .add_third_party_caveat("c-loc", "discharge_c", &key_c);
         let discharge_c = MacaroonToken::mint(&key_c, "discharge_c", "c-loc");
 
-        let bound_a = token.bind_for_request(&discharge_a).unwrap();
-        let bound_b = token.bind_for_request(&discharge_b).unwrap();
-        let bound_c = token.bind_for_request(&discharge_c).unwrap();
+        let bound_a = token.bind_for_request(&discharge_a).expect("should bind discharge A for request");
+        let bound_b = token.bind_for_request(&discharge_b).expect("should bind discharge B for request");
+        let bound_c = token.bind_for_request(&discharge_c).expect("should bind discharge C for request");
 
         token
             .verify_with_discharges(
@@ -2720,7 +2720,7 @@ mod tests {
         let outer_discharge = MacaroonToken::mint(&outer_key, "outer_check", "outer")
             .add_third_party_caveat("inner", "inner_check", &inner_key);
         let unbound_inner = MacaroonToken::mint(&inner_key, "inner_check", "inner");
-        let bound_outer = token.bind_for_request(&outer_discharge).unwrap();
+        let bound_outer = token.bind_for_request(&outer_discharge).expect("should bind outer discharge for request");
 
         let err = token
             .verify_with_discharges(
