@@ -524,7 +524,7 @@ mod tests {
     }
 
     fn test_cx() -> Cx<crate::cx::cap::All> {
-        Cx::for_testing()
+        Cx::for_request()
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {
