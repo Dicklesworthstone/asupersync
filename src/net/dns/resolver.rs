@@ -2960,7 +2960,8 @@ mod tests {
         };
         let resolver = Resolver::with_config(config);
 
-        let result = future::block_on(async { resolver.lookup_ip("example.invalid").await });
+        let result =
+            future::block_on(async { resolver.lookup_ip("zero-timeout.example.test").await });
         let timed_out = matches!(result, Err(DnsError::Timeout));
         crate::assert_with_log!(timed_out, "timed out", true, timed_out);
 

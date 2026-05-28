@@ -1784,8 +1784,8 @@ mod tests {
         stream.send_headers(false).unwrap(); // Idle -> Open
         assert_eq!(stream.state(), StreamState::Open);
 
-        // Receiving response headers without END_STREAM (data follows)
-        stream.recv_headers(false, true, false).unwrap();
+        // Client receives response headers without END_STREAM (data follows).
+        stream.recv_headers(false, true, true).unwrap();
         assert_eq!(stream.state(), StreamState::Open);
     }
 
@@ -1795,8 +1795,8 @@ mod tests {
         stream.send_headers(true).unwrap(); // Idle -> HalfClosedLocal
         assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 
-        // Receiving headers without END_STREAM stays HalfClosedLocal
-        stream.recv_headers(false, true, false).unwrap();
+        // Client receives response headers without END_STREAM after sending END_STREAM.
+        stream.recv_headers(false, true, true).unwrap();
         assert_eq!(stream.state(), StreamState::HalfClosedLocal);
     }
 
@@ -2846,12 +2846,11 @@ mod tests {
     #[test]
     fn tlv3gp_len_excludes_pruned_streams() {
         let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
-        for _ in 0..5 {
-            store.allocate_stream_id().unwrap();
-        }
+        let ids: Vec<u32> = (0..5)
+            .map(|_| store.allocate_stream_id().unwrap())
+            .collect();
         assert_eq!(store.len(), 5);
         // Close all of them.
-        let ids: Vec<u32> = store.active_stream_ids();
         for id in ids {
             store.get_mut(id).unwrap().reset(ErrorCode::NoError);
         }
