@@ -1409,9 +1409,9 @@ mod tests {
             "marking_display",
             &rendered,
             @r###"
-        empty: M = [0]
-        nonempty: M = [(send_permit, RegionId(0:0))=1]
-        "###
+empty: M = [0]
+nonempty: M = [(send_permit, RegionId(0:0))=1]
+"###
         );
         crate::test_complete!("marking_display");
     }
@@ -1441,7 +1441,16 @@ mod tests {
         insta::assert_snapshot!(
             "marking_timeline_display",
             &format!("{}", result.timeline),
-            @"marking_timeline_display"
+            @r###"
+Marking Timeline (7 snapshots):
+  t=0ns: M = [0] (initial)
+  t=0ns: M = [(send_permit, RegionId(0:0))=1] (reserve(send_permit, RegionId(0:0)))
+  t=5ns: M = [(send_permit, RegionId(0:0))=1, (ack, RegionId(0:0))=1] (reserve(ack, RegionId(0:0)))
+  t=10ns: M = [(ack, RegionId(0:0))=1] (commit(send_permit, RegionId(0:0)))
+  t=15ns: M = [0] (commit(ack, RegionId(0:0)))
+  t=20ns: M = [0] (region_close(RegionId(0:0)))
+  t=20ns: M = [0] (final)
+"###
         );
         crate::test_complete!("timeline_tracks_evolution");
     }
@@ -1550,29 +1559,29 @@ mod tests {
             "marking_analysis_result_display",
             &rendered,
             @r###"
-        leak: leak: 1 ack obligation(s) in RegionId(0:0) at 15ns
-        invalid: invalid at 20ns: abort(lease, RegionId(1:0)) but marking is already zero
+leak: leak: 1 ack obligation(s) in RegionId(0:0) at 15ns
+invalid: invalid at 20ns: abort(lease, RegionId(1:0)) but marking is already zero
 
-        VASS Marking Analysis Result
-        ============================
-        Events processed: 5
-        Safe: false
+VASS Marking Analysis Result
+============================
+Events processed: 5
+Safe: false
 
-        Statistics:
-          Reserved:  2
-          Committed: 1
-          Aborted:   1
-          Leaked:    0
-          Max pending: 2
-          Regions:   1
-          Kinds:     2
+Statistics:
+  Reserved:  2
+  Committed: 1
+  Aborted:   1
+  Leaked:    0
+  Max pending: 2
+  Regions:   1
+  Kinds:     2
 
-        Leak violations (1):
-          leak: 1 ack obligation(s) in RegionId(0:0) at 15ns
+Leak violations (1):
+  leak: 1 ack obligation(s) in RegionId(0:0) at 15ns
 
-        Invalid transitions (1):
-          invalid at 20ns: abort(lease, RegionId(1:0)) but marking is already zero
-        "###
+Invalid transitions (1):
+  invalid at 20ns: abort(lease, RegionId(1:0)) but marking is already zero
+"###
         );
         crate::test_complete!("marking_display_impls");
     }
@@ -1749,20 +1758,20 @@ mod tests {
             "marking_vass_conformance_matrix",
             &MarkingConformanceHarness::render_matrix(&results),
             @r###"
-        # Obligation Marking VASS Conformance Matrix
+# Obligation Marking VASS Conformance Matrix
 
-        | Req ID | Level | Status | Description | Evidence |
-        |--------|-------|--------|-------------|----------|
-        | VASS-001 | MUST | PASS | reserve/commit/close returns to zero marking | safe=true leaks=0 final_zero=true |
-        | VASS-002 | MUST | PASS | region close surfaces pending obligations as leaks | safe=false leaks=1 first_kind=Some(SendPermit) |
-        | VASS-003 | MUST | PASS | commit below zero is recorded as invalid transition | invalid=1 safe=true |
-        | VASS-004 | SHOULD | PASS | trace projection keeps only obligation and close events | projected=3 safe=true |
+| Req ID | Level | Status | Description | Evidence |
+|--------|-------|--------|-------------|----------|
+| VASS-001 | MUST | PASS | reserve/commit/close returns to zero marking | safe=true leaks=0 final_zero=true |
+| VASS-002 | MUST | PASS | region close surfaces pending obligations as leaks | safe=false leaks=1 first_kind=Some(SendPermit) |
+| VASS-003 | MUST | PASS | commit below zero is recorded as invalid transition | invalid=1 safe=true |
+| VASS-004 | SHOULD | PASS | trace projection keeps only obligation and close events | projected=3 safe=true |
 
-        Summary:
-        - MUST: 3/3
-        - SHOULD: 1/1
-        - Overall: CONFORMANT
-        "###
+Summary:
+- MUST: 3/3
+- SHOULD: 1/1
+- Overall: CONFORMANT
+"###
         );
         crate::test_complete!("marking_vass_conformance_matrix");
     }
