@@ -113,37 +113,40 @@ fn audit_subscriber_installation_order_composability() {
     println!("   • No data loss from subscriber A");
     println!("   • No errors preventing runtime creation");
 
-    // Phase 1: Application installs Subscriber A
+    // Phase 1: Application installs Subscriber A. Use a scoped dispatcher rather
+    // than the process-global default so this audit remains order-independent
+    // when other tests install tracing.
     println!("📊 Phase 1: Application installs Subscriber A");
     let app_subscriber = MockApplicationSubscriber::new("AppSubscriber".to_string());
     let app_dispatch = tracing::Dispatch::new(app_subscriber.clone());
 
-    // Set as global default (simulating app installation)
-    tracing::dispatcher::set_global_default(app_dispatch)
-        .expect("App should be able to install its subscriber");
+    let (initial_events, final_events, result) =
+        tracing::dispatcher::with_default(&app_dispatch, || {
+            // Emit test event from application
+            crate::tracing_compat::info!("Application subscriber installed");
+            let initial_events = app_subscriber.event_count();
+            println!("   Application subscriber events: {}", initial_events);
 
-    // Emit test event from application
-    crate::tracing_compat::info!("Application subscriber installed");
-    let initial_events = app_subscriber.event_count();
-    println!("   Application subscriber events: {}", initial_events);
+            // Phase 2: Create asupersync runtime (should be composable)
+            println!("📊 Phase 2: Create asupersync runtime");
 
-    // Phase 2: Create asupersync runtime (should be composable)
-    println!("📊 Phase 2: Create asupersync runtime");
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("Runtime creation should not fail due to existing subscriber");
 
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("Runtime creation should not fail due to existing subscriber");
+            // Test that runtime works normally
+            let result = runtime.block_on(async {
+                crate::tracing_compat::info!("Runtime created successfully");
+                42_u32
+            });
 
-    // Test that runtime works normally
-    let result = runtime.block_on(async {
-        crate::tracing_compat::info!("Runtime created successfully");
-        42_u32
-    });
+            let final_events = app_subscriber.event_count();
+            (initial_events, final_events, result)
+        });
 
     assert_eq!(result, 42, "Runtime should work normally");
 
     // Verify application subscriber still receives events
-    let final_events = app_subscriber.event_count();
     println!("   Final application subscriber events: {}", final_events);
 
     assert!(
