@@ -1336,8 +1336,7 @@ mod tests {
         // Format the trace and compare to the golden file. Doing this in
         // a stable plaintext format keeps the rejection contract reviewable
         // by humans and machines without an extra serialization framework.
-        let actual_trace = format!(
-            "# LengthDelimitedCodec FrameTooBig rejection trace\n\
+        let actual_trace = "# LengthDelimitedCodec FrameTooBig rejection trace\n\
              # Regression contract for br-asupersync-o7e5xu (framing recovery on\n\
              # max_frame_length violation). Re-generate by running:\n\
              #   cargo test --lib codec::length_delimited::ld_goldens_frame_too_big\n\
@@ -1364,7 +1363,7 @@ mod tests {
              buffer.len_after_error: 0\n\
              followup.decode.returns_none: true\n\
              followup.decode.error: none\n"
-        );
+            .to_string();
 
         let expected: &str =
             include_str!("../../tests/goldens/length_delim/frame_too_big_trace.txt");
