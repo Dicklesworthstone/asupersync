@@ -569,8 +569,8 @@ impl AtpTransferPlanner {
     }
 
     fn generate_chunking_profile(&self, object_graph: &ObjectGraphSummary) -> ChunkingProfile {
-        let chunk_size = if object_graph.total_bytes < 10 * 1024 * 1024 {
-            // Small transfers use smaller chunks
+        let chunk_size = if object_graph.total_bytes < 512 * 1024 {
+            // Very small transfers (< 512KB) use smaller chunks
             32 * 1024
         } else {
             self.config.default_chunk_size
