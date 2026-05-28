@@ -18,6 +18,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use sysinfo::Signal as SysSignal;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 /// Daemon control capability required for process management operations.
@@ -198,8 +200,7 @@ impl SecureDaemonController {
                             .join(" "),
                         working_dir: process
                             .cwd()
-                            .unwrap_or_else(|| std::path::Path::new("/"))
-                            .to_path_buf(),
+                            .map_or_else(platform_fallback_work_dir, Path::to_path_buf),
                         user: format!(
                             "{:?}",
                             process
@@ -226,8 +227,7 @@ impl SecureDaemonController {
             working_dir: self
                 .config_path
                 .parent()
-                .unwrap_or(Path::new("/"))
-                .to_path_buf(),
+                .map_or_else(platform_fallback_work_dir, Path::to_path_buf),
             user: "none".to_string(),
             cpu_usage: 0.0,
             memory_usage: 0,
@@ -265,8 +265,11 @@ impl SecureDaemonController {
             .stdin(Stdio::null()); // No stdin to prevent input injection
 
         // SECURITY: Drop all unnecessary privileges and use safe working directory
-        let safe_work_dir = self.config_path.parent().unwrap_or(Path::new("/tmp"));
-        cmd.current_dir(safe_work_dir);
+        let safe_work_dir = self
+            .config_path
+            .parent()
+            .map_or_else(platform_fallback_work_dir, Path::to_path_buf);
+        cmd.current_dir(&safe_work_dir);
 
         // Spawn the process
         match cmd.spawn() {
@@ -523,41 +526,115 @@ impl SecureDaemonController {
     }
 
     fn send_signal_to_process(&self, pid: u32, signal: Signal) -> Result<(), Error> {
-        use std::process::Command;
-
-        let signal_name = match signal {
-            Signal::Term => "TERM",
-            Signal::Kill => "KILL",
-        };
-
-        let output = Command::new("kill")
-            .arg(format!("-{}", signal_name))
-            .arg(pid.to_string())
-            .output()
-            .map_err(|e| {
-                Error::new(ErrorKind::Internal)
-                    .with_message(format!("Failed to send signal: {}", e))
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::new(ErrorKind::Internal)
-                .with_message(format!("kill command failed: {}", stderr)));
+        #[cfg(unix)]
+        {
+            let signal = match signal {
+                Signal::Term => SysSignal::Term,
+                Signal::Kill => SysSignal::Kill,
+            };
+            let mut system = System::new_all();
+            system.refresh_processes(ProcessesToUpdate::All, true);
+            return match system
+                .process(Pid::from_u32(pid))
+                .and_then(|process| process.kill_with(signal))
+            {
+                Some(true) => Ok(()),
+                Some(false) => Err(Error::new(ErrorKind::Internal)
+                    .with_message(format!("Failed to send {:?} to pid {}", signal, pid))),
+                None => Err(Error::new(ErrorKind::Internal).with_message(format!(
+                    "Signal {:?} is unsupported or pid {} no longer exists",
+                    signal, pid
+                ))),
+            };
         }
 
-        Ok(())
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("taskkill.exe");
+            command.arg("/PID").arg(pid.to_string()).arg("/T");
+            if matches!(signal, Signal::Kill) {
+                command.arg("/F");
+            }
+
+            let output = command.output().map_err(|e| {
+                Error::new(ErrorKind::Internal)
+                    .with_message(format!("Failed to invoke taskkill for pid {}: {}", pid, e))
+            })?;
+
+            if output.status.success() {
+                return Ok(());
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::new(ErrorKind::Internal)
+                .with_message(format!("taskkill failed for pid {}: {}", pid, stderr)));
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = signal;
+            Err(Error::new(ErrorKind::Internal).with_message(format!(
+                "Process signalling is unsupported on this platform for pid {}",
+                pid
+            )))
+        }
     }
 
     fn is_executable(path: &Path) -> Result<bool, Error> {
-        use std::os::unix::fs::PermissionsExt;
-
         let metadata = fs::metadata(path).map_err(|e| {
             Error::new(ErrorKind::InvalidInput).with_message(format!("Cannot access file: {}", e))
         })?;
+        if !metadata.is_file() {
+            return Ok(false);
+        }
 
-        let permissions = metadata.permissions();
-        Ok(permissions.mode() & 0o111 != 0) // Check any execute bit
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            return Ok(metadata.permissions().mode() & 0o111 != 0);
+        }
+
+        #[cfg(windows)]
+        {
+            return Ok(path_has_windows_executable_extension(
+                path,
+                std::env::var_os("PATHEXT").as_deref(),
+            ));
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            Ok(true)
+        }
     }
+}
+
+fn platform_fallback_work_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir())
+}
+
+#[cfg(any(windows, test))]
+fn path_has_windows_executable_extension(path: &Path, pathext: Option<&std::ffi::OsStr>) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let extension = extension.trim_start_matches('.');
+    let default_pathext = ".COM;.EXE;.BAT;.CMD;.PS1";
+    let pathext = pathext
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(default_pathext);
+
+    pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| {
+            entry
+                .trim_start_matches('.')
+                .eq_ignore_ascii_case(extension)
+        })
 }
 
 /// Signal types for process control.
@@ -657,6 +734,26 @@ mod tests {
         );
 
         assert!(controller.is_err());
+    }
+
+    #[test]
+    fn windows_executable_extension_matching_uses_pathext_semantics() {
+        assert!(path_has_windows_executable_extension(
+            Path::new("atpd.ExE"),
+            Some(std::ffi::OsStr::new(".COM;.EXE;.BAT;.CMD"))
+        ));
+        assert!(path_has_windows_executable_extension(
+            Path::new("atpd.cmd"),
+            Some(std::ffi::OsStr::new("EXE;CMD"))
+        ));
+        assert!(!path_has_windows_executable_extension(
+            Path::new("atpd.sh"),
+            Some(std::ffi::OsStr::new(".COM;.EXE;.BAT;.CMD"))
+        ));
+        assert!(!path_has_windows_executable_extension(
+            Path::new("atpd"),
+            Some(std::ffi::OsStr::new(".COM;.EXE;.BAT;.CMD"))
+        ));
     }
 
     #[test]

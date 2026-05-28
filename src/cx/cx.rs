@@ -3409,18 +3409,14 @@ mod tests {
         }
     }
 
-    fn test_cx() -> Cx {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
-        )
+    fn test_cx() -> Cx<cap::All> {
+        Cx::for_testing()
     }
 
-    fn test_cx_with_entropy(seed: u64) -> Cx {
+    fn test_cx_with_entropy(seed: u64) -> Cx<cap::All> {
         Cx::new_with_observability(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
             None,

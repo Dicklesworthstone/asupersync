@@ -232,7 +232,7 @@ impl FinalizerStack {
     /// is verified by tests in region.rs (`finalizer_lifo_order`).
     #[inline]
     pub fn pop(&mut self) -> Option<Finalizer> {
-        let len_before = self.finalizers.len();
+        let __len_before = self.finalizers.len();
         let result = self.finalizers.pop();
 
         // Defensive assertion: LIFO ordering contract verification
@@ -247,26 +247,26 @@ impl FinalizerStack {
             // EDGE CASE VALIDATION: Verify stack integrity after pop
             debug_assert_eq!(
                 self.finalizers.len(),
-                len_before.saturating_sub(1),
+                _len_before.saturating_sub(1),
                 "br-asupersync-mg70eb: finalizer stack length inconsistency after pop \
                  (before={}, after={}, expected={})",
-                len_before,
+                _len_before,
                 self.finalizers.len(),
-                len_before.saturating_sub(1)
+                _len_before.saturating_sub(1)
             );
 
             // EDGE CASE VALIDATION: Check for stack underflow edge case
             debug_assert!(
-                len_before > 0,
+                _len_before > 0,
                 "br-asupersync-mg70eb: finalizer stack underflow - popped from empty stack"
             );
         } else {
             // EDGE CASE VALIDATION: Verify empty pop behavior
             debug_assert_eq!(
-                len_before, 0,
+                _len_before, 0,
                 "br-asupersync-mg70eb: finalizer stack returned None but was not empty \
-                 (len_before={})",
-                len_before
+                 (_len_before={})",
+                _len_before
             );
         }
 

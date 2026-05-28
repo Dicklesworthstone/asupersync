@@ -363,6 +363,19 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
     fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let frame_len = item.len();
 
+        // br-asupersync-ooqkxe: validate header length overflow before proceeding
+        // This matches the overflow check in the decoder (lines 249-258)
+        let header_len = self
+            .builder
+            .length_field_offset
+            .checked_add(self.builder.length_field_length)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "header length (offset + length_field_length) overflows usize",
+                )
+            })?;
+
         // Calculate the adjusted length to write in the length field
         let adjustment = i64::try_from(self.builder.length_adjustment).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "length adjustment exceeds i64")
@@ -402,15 +415,10 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
             ));
         }
 
-        // br-asupersync-zqnmjc — Tokio wire-compat:
-        // `length_field_offset` and `num_skip` are decode-only knobs and
-        // MUST NOT change the bytes emitted by the encoder. The wire prefix
-        // is therefore just the encoded length field itself. Keep the reserve
-        // arithmetic checked so large payloads still surface InvalidData
-        // instead of wrapping the buffer budget.
-        let total_len = self
-            .builder
-            .length_field_length
+        // br-asupersync-ooqkxe: validate total reservation overflow
+        // The total reservation must account for the full header length + frame
+        // even though we only emit length_field_length bytes on the wire
+        let total_len = header_len
             .checked_add(frame_len)
             .ok_or_else(|| {
                 io::Error::new(
@@ -419,8 +427,23 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
                 )
             })?;
 
-        // Reserve space for the entire frame
-        dst.reserve(total_len);
+        // br-asupersync-zqnmjc — Tokio wire-compat:
+        // `length_field_offset` and `num_skip` are decode-only knobs and
+        // MUST NOT change the bytes emitted by the encoder. The wire prefix
+        // is therefore just the encoded length field itself.
+        let wire_len = self
+            .builder
+            .length_field_length
+            .checked_add(frame_len)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "wire buffer reservation overflows usize",
+                )
+            })?;
+
+        // Reserve space for the wire frame (length field + payload)
+        dst.reserve(wire_len);
 
         // Write the length field in the configured byte order
         if self.builder.big_endian {

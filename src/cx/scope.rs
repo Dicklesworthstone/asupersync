@@ -1815,12 +1815,8 @@ mod tests {
     use futures_lite::future::block_on;
     use std::sync::Arc;
 
-    fn test_cx() -> Cx {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
-        )
+    fn test_cx() -> Cx<cap::All> {
+        Cx::for_testing()
     }
 
     fn test_scope(region: RegionId, budget: Budget) -> Scope<'static> {
