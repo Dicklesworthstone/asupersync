@@ -566,12 +566,11 @@ mod tests {
     #[test]
     fn test_rtt_calculation() {
         let request = PathProbe::new_request(1, ProbeType::Rtt, 1, 1);
-        std::thread::sleep(Duration::from_millis(10));
-        let response = request.new_response();
+        let mut response = request.new_response();
+        response.timestamp = request.timestamp + 10_000;
 
         let rtt = request.calculate_rtt(&response);
-        assert!(rtt.is_some());
-        assert!(rtt.unwrap() >= Duration::from_millis(10));
+        assert_eq!(rtt, Some(Duration::from_millis(10)));
     }
 
     #[test]

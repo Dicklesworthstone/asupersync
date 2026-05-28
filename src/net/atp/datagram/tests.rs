@@ -301,17 +301,11 @@ fn test_probe_encoding_edge_cases() {
 #[test]
 fn test_rtt_calculation() {
     let request = PathProbe::new_request(1, ProbeType::Rtt, 1, 1);
-
-    // Sleep to create measurable time difference
-    std::thread::sleep(Duration::from_millis(10));
-
-    let response = request.new_response();
+    let mut response = request.new_response();
+    response.timestamp = request.timestamp + 10_000;
     let rtt = request.calculate_rtt(&response);
 
-    assert!(rtt.is_some());
-    let rtt = rtt.unwrap();
-    assert!(rtt >= Duration::from_millis(10));
-    assert!(rtt <= Duration::from_millis(100)); // Reasonable upper bound
+    assert_eq!(rtt, Some(Duration::from_millis(10)));
 }
 
 /// Test beacon statistics tracking
