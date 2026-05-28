@@ -1749,7 +1749,9 @@ impl<Caps> Cx<Caps> {
                     checkpoint_time,
                 )
                 .is_some();
-            if !cancelled && !exhausted {
+            // Fast path must also check if there's a message to clear
+            let has_message = guard.checkpoint_state.last_message.is_some();
+            if !cancelled && !exhausted && !has_message {
                 guard.fast_path_last_checkpoint_ns.store(
                     checkpoint_time.as_nanos(),
                     std::sync::atomic::Ordering::Relaxed,
