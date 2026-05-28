@@ -1985,6 +1985,7 @@ mod tests {
     #[test]
     fn data_frame_triggers_connection_window_update_on_low_watermark() {
         let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
         let payload_len = (DEFAULT_CONNECTION_WINDOW_SIZE / 2) + 2;
         let payload_len_usize = usize::try_from(payload_len).expect("payload_len non-negative");
         let payload_len_u32 = u32::try_from(payload_len).expect("payload_len fits u32");
@@ -2015,6 +2016,7 @@ mod tests {
     #[test]
     fn data_frame_exceeding_connection_window_errors() {
         let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
         conn.recv_window = 1;
 
         let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
@@ -2290,6 +2292,7 @@ mod tests {
     #[test]
     fn data_frame_triggers_stream_window_update_on_low_watermark() {
         let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
         // Open a stream via headers.
         let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
         conn.process_frame(headers).expect("process headers");
@@ -2324,6 +2327,7 @@ mod tests {
     #[test]
     fn data_frame_no_stream_window_update_when_above_watermark() {
         let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
         let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
         conn.process_frame(headers).expect("process headers");
 
@@ -4531,6 +4535,7 @@ mod tests {
     #[test]
     fn stream_window_update_accepts_valid_increment() {
         let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
         // Open a stream first by processing a HEADERS frame.
         let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
         conn.process_frame(headers).unwrap();
