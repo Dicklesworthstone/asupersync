@@ -7303,7 +7303,11 @@ mod tests {
 
         // Timer driver should use the same clock
         let timer = worker.timer_driver.as_ref().unwrap();
-        assert_eq!(timer.now(), Time::from_nanos(1_000_000_000), "timer should start at zero");
+        assert_eq!(
+            timer.now(),
+            Time::from_nanos(1_000_000_000),
+            "timer should start at zero"
+        );
 
         clock.advance(1000);
         assert_eq!(
@@ -15808,7 +15812,7 @@ mod tests {
             insta::assert_snapshot!(
                 "three_lane_scheduler_deadline_ordering_state",
                 state_dump_snapshot.as_str(),
-                @"
+                @r###"
 SchedulerStateDump {
     scenario: \"3-lane-5-task-1-cancel-deadline-ordering\",
     timestamp: \"2026-05-03T17:00:00.000Z\",
@@ -15911,7 +15915,7 @@ SchedulerStateDump {
         \"task_5_5_5\",
     ],
 }
-"
+"###
             );
         });
 
