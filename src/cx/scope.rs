@@ -1811,7 +1811,6 @@ mod tests {
     use crate::types::{
         CancelKind, CapabilityBudgetDimension, CapabilityBudgetRefusal, Outcome, Time,
     };
-    use crate::util::ArenaIndex;
     use futures_lite::future::block_on;
     use std::sync::Arc;
 

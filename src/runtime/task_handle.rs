@@ -364,7 +364,6 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::cx::cap;
     use crate::test_utils::init_test_logging;
     use crate::types::CancelKind;
     use crate::util::ArenaIndex;
