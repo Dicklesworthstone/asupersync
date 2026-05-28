@@ -888,8 +888,8 @@ mod tests {
         };
 
         // Run multiple independent sequences under H0
-        let num_sequences = 200;
-        let obs_per_sequence = 30;
+        let num_sequences = 200usize;
+        let obs_per_sequence = 30usize;
         let mut final_e_values = Vec::new();
         let mut alert_count = 0;
 
@@ -898,8 +898,8 @@ mod tests {
 
             for i in 0..obs_per_sequence {
                 // Generate exponential(1/μ) observations
-                let u = ((seq * obs_per_sequence + i) as f64 + 0.5)
-                    / (num_sequences * obs_per_sequence) as f64;
+                let sample_index = i * num_sequences + seq;
+                let u = (sample_index as f64 + 0.5) / (num_sequences * obs_per_sequence) as f64;
                 let x = -(config.expected_lifetime_ns as f64) * (1.0 - u).ln();
 
                 monitor.observe(x as u64);

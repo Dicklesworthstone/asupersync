@@ -251,6 +251,28 @@ impl EProcessConformanceHarness {
 // Mathematical Conformance Tests
 // ============================================================================
 
+fn deterministic_exponential_null_sample(
+    sequence: usize,
+    observation: usize,
+    sequence_count: usize,
+    observations_per_sequence: usize,
+    expected_lifetime_ns: u64,
+) -> u64 {
+    debug_assert!(sequence < sequence_count);
+    debug_assert!(observation < observations_per_sequence);
+
+    let total_samples = sequence_count
+        .checked_mul(observations_per_sequence)
+        .expect("e-process conformance sample grid overflowed");
+    let sample_index = observation
+        .checked_mul(sequence_count)
+        .and_then(|offset| offset.checked_add(sequence))
+        .expect("e-process conformance sample index overflowed");
+    let u = (sample_index as f64 + 0.5) / total_samples as f64;
+    let sample = -(expected_lifetime_ns as f64) * (1.0 - u).ln();
+    sample as u64
+}
+
 /// MART-001: Verify likelihood ratio normalization maintains E[LR] ≤ 1.
 fn test_likelihood_ratio_expectation() -> ConformanceResult {
     // Mathematical requirement: For exponential(μ) observations under H0,
@@ -323,20 +345,22 @@ fn test_supermartingale_property() -> ConformanceResult {
         min_observations: 3,
     };
 
-    let num_sequences = 100;
-    let observations_per_sequence = 50;
+    let num_sequences = 100usize;
+    let observations_per_sequence = 50usize;
     let mut final_e_values = Vec::new();
 
     for seq in 0..num_sequences {
         let mut monitor = LeakMonitor::new(config);
 
         for i in 0..observations_per_sequence {
-            // Generate exponential sample with rate 1/μ
-            let u = ((seq * observations_per_sequence + i) as f64 + 0.5)
-                / (num_sequences * observations_per_sequence) as f64;
-            let x = -(config.expected_lifetime_ns as f64) * (1.0 - u).ln();
-
-            monitor.observe(x as u64);
+            let age = deterministic_exponential_null_sample(
+                seq,
+                i,
+                num_sequences,
+                observations_per_sequence,
+                config.expected_lifetime_ns,
+            );
+            monitor.observe(age);
         }
 
         final_e_values.push(monitor.e_value());
@@ -505,20 +529,22 @@ fn test_false_positive_rate_convergence() -> ConformanceResult {
         min_observations: 10,
     };
 
-    let num_trials = 1000; // Need large N for statistical power
-    let observations_per_trial = 20;
+    let num_trials = 1000usize; // Need large N for statistical power
+    let observations_per_trial = 20usize;
     let mut alert_count = 0;
 
     for trial in 0..num_trials {
         let mut monitor = LeakMonitor::new(config);
 
         for i in 0..observations_per_trial {
-            // Generate exponential observations (null hypothesis)
-            let u = ((trial * observations_per_trial + i) as f64 + 0.5)
-                / (num_trials * observations_per_trial) as f64;
-            let x = -(config.expected_lifetime_ns as f64) * (1.0 - u).ln();
-
-            monitor.observe(x as u64);
+            let age = deterministic_exponential_null_sample(
+                trial,
+                i,
+                num_trials,
+                observations_per_trial,
+                config.expected_lifetime_ns,
+            );
+            monitor.observe(age);
         }
 
         if monitor.is_alert() {
@@ -529,11 +555,12 @@ fn test_false_positive_rate_convergence() -> ConformanceResult {
     let observed_rate = alert_count as f64 / num_trials as f64;
     let expected_rate = alpha;
 
-    // With 95% confidence, observed rate should be within ±2√(α(1-α)/n) of α
+    // Ville bounds the false-positive rate from above; conservative monitors
+    // need not converge exactly to alpha on finite deterministic samples.
     let stderr = (alpha * (1.0 - alpha) / num_trials as f64).sqrt();
     let margin = 2.0 * stderr; // 95% confidence interval
 
-    let within_bounds = (observed_rate - expected_rate).abs() <= margin;
+    let within_bounds = observed_rate <= expected_rate + margin;
 
     if within_bounds {
         ConformanceResult {
@@ -542,7 +569,7 @@ fn test_false_positive_rate_convergence() -> ConformanceResult {
             level: RequirementLevel::Should,
             status: TestStatus::Pass,
             evidence: format!(
-                "Observed rate {:.4}, Expected {:.4} ± {:.4} ({}/{})",
+                "Observed rate {:.4}, Expected upper bound {:.4} + {:.4} ({}/{})",
                 observed_rate, expected_rate, margin, alert_count, num_trials
             ),
             confidence: 0.95,
@@ -554,9 +581,8 @@ fn test_false_positive_rate_convergence() -> ConformanceResult {
             level: RequirementLevel::Should,
             status: TestStatus::Fail,
             evidence: format!(
-                "VIOLATION: Rate {:.4} outside [{:.4}, {:.4}] ({}/{})",
+                "VIOLATION: Rate {:.4} exceeds upper bound {:.4} ({}/{})",
                 observed_rate,
-                expected_rate - margin,
                 expected_rate + margin,
                 alert_count,
                 num_trials
