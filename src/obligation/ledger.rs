@@ -3562,28 +3562,50 @@ mod tests {
         assert_eq!(ledger.stats().pending, 0);
 
         // Phase 3: reset requires a clean ledger, then zeros all five counters
-        // simultaneously. Conservation must hold trivially (0 == 0).
-        ledger.reset();
-        check_conservation(&ledger, "phase3.reset");
-        assert_eq!(ledger.stats().total_acquired, 0);
-        assert!(ledger.stats().is_clean());
+        // simultaneously. The ledger above intentionally exercised the leaked
+        // bucket, so keep that ledger as leak-conservation evidence and use a
+        // clean fully resolved ledger for the reset contract.
+        assert!(!ledger.stats().is_clean());
+
+        let mut reset_ledger = ObligationLedger::new();
+        let reset_commit = reset_ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(160),
+        );
+        let reset_abort =
+            reset_ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(170));
+        reset_ledger.commit(reset_commit, Time::from_nanos(180));
+        reset_ledger.abort(
+            reset_abort,
+            Time::from_nanos(190),
+            ObligationAbortReason::Explicit,
+        );
+        check_conservation(&reset_ledger, "phase3.clean_pre_reset");
+        assert!(reset_ledger.stats().is_clean());
+
+        reset_ledger.reset();
+        check_conservation(&reset_ledger, "phase3.reset");
+        assert_eq!(reset_ledger.stats().total_acquired, 0);
+        assert!(reset_ledger.stats().is_clean());
 
         // Phase 4: re-acquire after reset and resolve one to confirm the
         // invariant tracks across the epoch boundary (the token held across
         // reset has been invalidated by the generation bump; any attempt to
         // commit it would panic — see metamorphic_post_reset_* tests).
-        let post_reset = ledger.acquire(
+        let post_reset = reset_ledger.acquire(
             ObligationKind::SendPermit,
             task,
             region,
             Time::from_nanos(200),
         );
-        check_conservation(&ledger, "phase4.post_reset_acquire");
-        ledger.commit(post_reset, Time::from_nanos(210));
-        check_conservation(&ledger, "phase4.post_reset_commit");
-        assert_eq!(ledger.stats().total_acquired, 1);
-        assert_eq!(ledger.stats().total_committed, 1);
-        assert_eq!(ledger.stats().pending, 0);
+        check_conservation(&reset_ledger, "phase4.post_reset_acquire");
+        reset_ledger.commit(post_reset, Time::from_nanos(210));
+        check_conservation(&reset_ledger, "phase4.post_reset_commit");
+        assert_eq!(reset_ledger.stats().total_acquired, 1);
+        assert_eq!(reset_ledger.stats().total_committed, 1);
+        assert_eq!(reset_ledger.stats().pending, 0);
 
         crate::test_complete!("metamorphic_conservation_acquired_equals_resolved_plus_pending");
     }
