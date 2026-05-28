@@ -3102,7 +3102,7 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
-            .unwrap();
+            .expect("should spawn counter gen_server for call/cast rejection test");
         let task_id = handle.task_id();
         runtime.state.store_spawned_task(task_id, stored);
 
@@ -3147,7 +3147,7 @@ mod tests {
 
         let (mut handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
-            .unwrap();
+            .expect("should spawn counter gen_server for join final state test");
         let task_id = handle.task_id();
         runtime.state.store_spawned_task(task_id, stored);
 
