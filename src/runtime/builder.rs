@@ -5191,9 +5191,9 @@ mod tests {
             let budget = Budget::new().with_deadline(Time::from_secs(110));
             let idx = guard.insert_task_with(|idx| {
                 let task_id = crate::types::TaskId::from_arena(idx);
-                let mut record = TaskRecord::new_with_time(task_id, region, budget, Time::ZERO);
+                let mut record = TaskRecord::new_with_time(task_id, region, budget, Time::from_nanos(1_000_000_000));
                 let mut inner = CxInner::new(region, task_id, budget);
-                inner.checkpoint_state.last_checkpoint = Some(Time::ZERO);
+                inner.checkpoint_state.last_checkpoint = Some(Time::from_nanos(1_000_000_000));
                 inner.checkpoint_state.checkpoint_count = 1;
                 record.set_cx_inner(Arc::new(RwLock::new(inner)));
                 record
@@ -5589,7 +5589,7 @@ mod tests {
     async fn sleep_once() {
         let now = Cx::current()
             .and_then(|cx| cx.timer_driver())
-            .map_or(Time::ZERO, |driver| driver.now());
+            .map_or(Time::from_nanos(1_000_000_000), |driver| driver.now());
         sleep(now, Duration::from_millis(1)).await;
     }
 
@@ -5737,7 +5737,7 @@ mod tests {
         let io_key = registration.token();
         reactor.inject_event(io_key, Event::readable(io_key), Duration::ZERO);
         let trace = state.trace_handle();
-        let now = Time::ZERO;
+        let now = Time::from_nanos(1_000_000_000);
         let mut seen = HashSet::new();
         let _ = driver.turn_with(Some(Duration::ZERO), |event, interest| {
             let io_key = event.token.0 as u64;

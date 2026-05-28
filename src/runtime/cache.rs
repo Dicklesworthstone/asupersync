@@ -557,7 +557,7 @@ mod tests {
         // Get artifact
         let retrieved = cache.get(&test_id);
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap(), test_data.as_slice());
+        assert_eq!(retrieved.expect("cache should contain stored artifact"), test_data.as_slice());
 
         // Verify access count increased
         let stats = cache.statistics();
@@ -658,8 +658,8 @@ mod tests {
         ];
 
         for policy in &policies {
-            let serialized = serde_json::to_string(policy).unwrap();
-            let deserialized: EvictionPolicy = serde_json::from_str(&serialized).unwrap();
+            let serialized = serde_json::to_string(policy).expect("eviction policy should serialize to JSON");
+            let deserialized: EvictionPolicy = serde_json::from_str(&serialized).expect("serialized policy should deserialize from JSON");
             assert_eq!(*policy, deserialized);
         }
     }
