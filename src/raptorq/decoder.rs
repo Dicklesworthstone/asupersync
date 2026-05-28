@@ -1571,13 +1571,15 @@ impl InactivationDecoder {
                     });
                 }
                 let (expected_cols, expected_coefs) = self.source_equation(sym.esi);
+                let derive_canonical_from_esi =
+                    sym.columns.is_empty() && sym.coefficients.is_empty();
                 let legacy_identity = sym.columns.len() == 1
                     && sym.coefficients.len() == 1
                     && sym.columns[0] == esi
                     && sym.coefficients[0] == Gf256::ONE;
                 let canonical_equation =
                     sym.columns == expected_cols && sym.coefficients == expected_coefs;
-                if !legacy_identity && !canonical_equation {
+                if !derive_canonical_from_esi && !legacy_identity && !canonical_equation {
                     return Err(DecodeError::InvalidSourceSymbolEquation {
                         esi: sym.esi,
                         expected_column: esi,
