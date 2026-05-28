@@ -2282,6 +2282,7 @@ mod tests {
     use crate::supervision::ChildStart;
     use crate::types::Budget;
     use crate::types::CancelKind;
+    use crate::types::RegionId;
     use crate::types::policy::FailFast;
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
@@ -2291,6 +2292,14 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn tracked_reply_test_cx() -> Cx {
+        Cx::new(
+            RegionId::new_for_test(1, 0),
+            TaskId::new_for_test(1, 0),
+            Budget::INFINITE,
+        )
     }
 
     // ---- Simple Counter GenServer ----
@@ -4089,7 +4098,7 @@ mod tests {
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let root = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx = tracked_reply_test_cx();
         let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
 
         let (handle, stored) = scope
@@ -4175,7 +4184,7 @@ mod tests {
     fn reply_debug_format() {
         init_test("reply_debug_format");
 
-        let cx = Cx::for_testing();
+        let cx = tracked_reply_test_cx();
         let (tx, _rx) = session::tracked_oneshot::<u64>();
         let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let reply = Reply::new(&cx, permit);
@@ -4201,7 +4210,7 @@ mod tests {
     fn reply_drop_under_cancel_aborts_without_panic() {
         init_test("reply_drop_under_cancel_aborts_without_panic");
 
-        let cx = Cx::for_testing();
+        let cx = tracked_reply_test_cx();
         let (tx, mut rx) = session::tracked_oneshot::<u64>();
         let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let reply = Reply::new(&cx, permit);
@@ -4233,7 +4242,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn reply_drop_without_cancel_still_panics_on_linearity_violation() {
-        let cx = Cx::for_testing();
+        let cx = tracked_reply_test_cx();
         let (tx, _rx) = session::tracked_oneshot::<u64>();
         let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let reply = Reply::new(&cx, permit);
