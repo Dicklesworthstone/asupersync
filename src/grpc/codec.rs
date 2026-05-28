@@ -1496,10 +1496,8 @@ mod tests {
     #[test]
     fn test_framed_codec_inner_decode_error_drains_follow_on_frames() {
         init_test("test_framed_codec_inner_decode_error_drains_follow_on_frames");
-        let mut codec = FramedCodec::new(LimitTrackingCodec {
-            max_encode_message_size: 32,
-            max_decode_message_size: 2,
-        });
+        let mut codec = FramedCodec::new(LimitTrackingCodec::default());
+        codec.inner_mut().max_decode_message_size = 2;
         let mut producer = GrpcCodec::new();
         let mut buf = BytesMut::new();
 
