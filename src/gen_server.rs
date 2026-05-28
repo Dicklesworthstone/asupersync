@@ -3024,7 +3024,7 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut state, &cx, Counter { count: 0 }, 32)
-            .unwrap();
+            .expect("should spawn counter gen_server for handle accessors test");
         state.store_spawned_task(handle.task_id(), stored);
 
         let _actor_id = handle.actor_id();
@@ -3050,7 +3050,7 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut state, &cx, Counter { count: 0 }, 32)
-            .unwrap();
+            .expect("should spawn counter gen_server for ref clone test");
         state.store_spawned_task(handle.task_id(), stored);
 
         let ref1 = handle.server_ref();
@@ -3071,7 +3071,7 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
-            .unwrap();
+            .expect("should spawn counter gen_server for stop transitions test");
         let task_id = handle.task_id();
         runtime.state.store_spawned_task(task_id, stored);
 
