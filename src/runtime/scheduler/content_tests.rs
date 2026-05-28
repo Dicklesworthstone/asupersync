@@ -78,18 +78,18 @@ fn test_metadata_first_prioritization() {
     // Should prioritize: Control > Manifest > Data
     let (next, evidence) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule control message first");
     assert_eq!(next.id, control_msg.id);
     assert_eq!(evidence.reason, ScheduleReason::PriorityClass);
 
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule manifest second");
     assert_eq!(next.id, manifest.id);
 
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule data chunk third");
     assert_eq!(next.id, data_chunk.id);
 }
 
@@ -143,7 +143,7 @@ fn test_sparse_missing_handling() {
     // Rare chunk should be prioritized due to higher utility
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule rare chunk due to higher utility");
     assert_eq!(next.id, rare_chunk.id);
     assert_eq!(next.metadata.get("rarity"), Some(&"rare".to_string()));
 }
@@ -191,7 +191,7 @@ fn test_multi_peer_rarity() {
     // Scarce chunk prioritized due to higher utility
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule scarce chunk due to higher utility");
     assert_eq!(next.id, scarce_chunk.id);
 }
 
@@ -246,7 +246,7 @@ fn test_cancellation_behavior() {
     // Should only get second content
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule second content after stall recovery");
     assert_eq!(next.id, content2.id);
 
     assert!(
@@ -274,18 +274,18 @@ fn test_deterministic_tie_breaking() {
     // Should come out in FIFO order (3, 1, 2)
     let (next, evidence) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule first item by tie-breaking order");
     assert_eq!(next.id, item3.id);
     assert_eq!(evidence.reason, ScheduleReason::FifoOrder);
 
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule second item by tie-breaking order");
     assert_eq!(next.id, item1.id);
 
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule third item by tie-breaking order");
     assert_eq!(next.id, item2.id);
 }
 
@@ -303,14 +303,14 @@ fn test_stream_priority_integration() {
     // Control should get critical stream priority
     let (content, assignment, _evidence) = integrated
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule control with critical stream priority");
     assert_eq!(content.id, control.id);
     assert_eq!(assignment.priority, StreamPriority::Critical);
 
     // Data should get normal stream priority
     let (content, assignment, _evidence) = integrated
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule data with normal stream priority");
     assert_eq!(content.id, data.id);
     assert_eq!(assignment.priority, StreamPriority::Normal);
 }
