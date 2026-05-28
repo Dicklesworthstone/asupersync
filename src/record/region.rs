@@ -364,7 +364,7 @@ impl RegionRecord {
     /// Creates a new region record.
     #[must_use]
     pub fn new(id: RegionId, parent: Option<RegionId>, budget: Budget) -> Self {
-        Self::new_with_time(id, parent, budget, Time::ZERO)
+        Self::new_with_time(id, parent, budget, Time::from_nanos(1_000_000_000))
     }
 
     /// Creates a new region record with an explicit capability budget.
@@ -375,7 +375,7 @@ impl RegionRecord {
         budget: Budget,
         capability_budget: CapabilityBudget,
     ) -> Self {
-        Self::new_with_time_and_capability_budget(id, parent, budget, Time::ZERO, capability_budget)
+        Self::new_with_time_and_capability_budget(id, parent, budget, Time::from_nanos(1_000_000_000), capability_budget)
     }
 
     /// Creates a new region record with an explicit creation time.

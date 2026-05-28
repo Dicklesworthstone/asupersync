@@ -349,7 +349,7 @@ impl ReplicaInfo {
             id: id.to_string(),
             address: address.to_string(),
             status: ReplicaStatus::Healthy,
-            last_heartbeat: Time::ZERO,
+            last_heartbeat: Time::from_nanos(1_000_000_000),
             symbol_count: 0,
         }
     }
