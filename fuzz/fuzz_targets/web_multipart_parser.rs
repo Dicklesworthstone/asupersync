@@ -18,9 +18,8 @@ use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::Bytes;
-use asupersync::web::extract::ExtractionError;
-use asupersync::web::multipart::MultipartLimits;
-use std::collections::HashMap;
+use asupersync::web::extract::{ExtractionError, FromRequest, Request};
+use asupersync::web::multipart::{Multipart, MultipartLimits};
 
 const MAX_INPUT_SIZE: usize = 512 * 1024; // 512KB limit
 const MAX_PARTS: usize = 50; // Limit parts to prevent excessive memory
@@ -127,7 +126,7 @@ enum BodyConfig {
     /// Body containing boundary-like sequences
     BoundaryLike {
         data: Vec<u8>,
-        fake_boundary: String,
+        decoy_boundary: String,
     },
     /// Empty body
     Empty,
@@ -173,7 +172,7 @@ fn test_multipart_parsing(input: &AdversarialMultipart) {
         return; // Skip excessively large inputs
     }
 
-    // Test direct multipart parsing (internal function simulation)
+    // Drive the production extractor around the private multipart parser.
     test_parse_multipart_direct(&multipart_body, &boundary, &limits);
 
     // Test via HTTP request extraction
@@ -182,17 +181,8 @@ fn test_multipart_parsing(input: &AdversarialMultipart) {
 
 /// Test the internal parse_multipart function directly
 fn test_parse_multipart_direct(body: &Bytes, boundary: &str, limits: &MultipartLimits) {
-    // Since parse_multipart is not public, we'll simulate its core logic
-    // by testing the public API that wraps it
-    let content_type = format!("multipart/form-data; boundary={}", boundary);
-
-    // Create a mock request
-    let mut headers = HashMap::new();
-    headers.insert("content-type".to_string(), content_type);
-
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Test through the public Multipart extraction path
-        test_multipart_with_mock_request(body, &headers, limits)
+        parse_multipart_request(body, boundary, limits)
     }));
 
     match result {
@@ -211,98 +201,45 @@ fn test_parse_multipart_direct(body: &Bytes, boundary: &str, limits: &MultipartL
 
 /// Test multipart extraction through the HTTP request interface
 fn test_multipart_extraction(body: &Bytes, boundary: &str, limits: &MultipartLimits) {
-    let content_type = format!("multipart/form-data; boundary={}", boundary);
-    let mut headers = HashMap::new();
-    headers.insert("content-type".to_string(), content_type);
-
-    let result = test_multipart_with_mock_request(body, &headers, limits);
+    let result = parse_multipart_request(body, boundary, limits);
 
     // Success and clean failure are both acceptable, but both must carry
     // useful state for the caller to act on.
     observe_multipart_result(result, limits, "multipart extraction");
 }
 
-/// Mock request testing helper
-fn test_multipart_with_mock_request(
-    body: &Bytes,
-    headers: &HashMap<String, String>,
-    limits: &MultipartLimits,
-) -> Result<MockMultipart, ExtractionError> {
-    // Since we can't easily create a full Request, we'll simulate the parsing
-    // by testing the individual parsing functions that would be called
-
-    let boundary =
-        extract_boundary_from_content_type(headers.get("content-type").unwrap_or(&"".to_string()))?;
-
-    // This would call the internal parse_multipart function
-    // For now, simulate basic validation
-    validate_multipart_structure(body, &boundary, limits)?;
-
-    Ok(MockMultipart {
-        boundary: boundary.clone(),
-        body_len: body.len(),
-    })
-}
-
-struct MockMultipart {
-    boundary: String,
-    body_len: usize,
-}
-
-/// Extract boundary from Content-Type header
-fn extract_boundary_from_content_type(content_type: &str) -> Result<String, ExtractionError> {
-    if !content_type.starts_with("multipart/form-data") {
-        return Err(ExtractionError::bad_request("Not multipart/form-data"));
-    }
-
-    for part in content_type.split(';') {
-        let part = part.trim();
-        if let Some(boundary) = part.strip_prefix("boundary=") {
-            let boundary = boundary.trim_matches('"');
-            if boundary.is_empty() {
-                return Err(ExtractionError::bad_request("Empty boundary"));
-            }
-            return Ok(boundary.to_string());
-        }
-    }
-
-    Err(ExtractionError::bad_request("No boundary found"))
-}
-
-/// Basic multipart structure validation
-fn validate_multipart_structure(
+/// Build a real request and parse it through the public multipart extractor.
+fn parse_multipart_request(
     body: &Bytes,
     boundary: &str,
-    _limits: &MultipartLimits,
-) -> Result<(), ExtractionError> {
-    // Note: MultipartLimits doesn't expose getters, so we'll skip size validation here
-    // The actual implementation would check this during parsing
-
-    let delimiter = format!("--{}", boundary);
-    let delimiter_bytes = delimiter.as_bytes();
-
-    // Check if boundary appears at least once
-    if !body
-        .windows(delimiter_bytes.len())
-        .any(|window| window == delimiter_bytes)
-    {
-        return Err(ExtractionError::bad_request("Boundary not found in body"));
-    }
-
-    Ok(())
+    limits: &MultipartLimits,
+) -> Result<Multipart, ExtractionError> {
+    let content_type = format!("multipart/form-data; boundary={boundary}");
+    let mut request = Request::new("POST", "/__asupersync_multipart_fuzz")
+        .with_header("content-type", content_type)
+        .with_body(body.clone());
+    request.extensions.insert_typed(*limits);
+    Multipart::from_request(request)
 }
 
 /// Validate parsed multipart invariants
-fn validate_multipart_invariants(multipart: &MockMultipart, _limits: &MultipartLimits) {
+fn validate_multipart_invariants(multipart: &Multipart, limits: &MultipartLimits) {
     assert!(
-        !multipart.boundary.is_empty(),
-        "Boundary should not be empty"
+        multipart.len() <= limits.max_parts,
+        "parsed multipart field count exceeded configured limit"
     );
-    // Note: limits doesn't expose getters, so we skip size validation
-    assert!(
-        multipart.body_len < 2 * 1024 * 1024,
-        "Body size should be reasonable"
-    );
+    for field in multipart.fields() {
+        assert!(
+            field.body().len() <= limits.max_part_body_size,
+            "parsed multipart field body exceeded configured limit"
+        );
+        assert!(
+            field.headers().iter().all(|(name, value)| {
+                !name.is_empty() && !value.contains('\r') && !value.contains('\n')
+            }),
+            "parsed multipart field headers should stay normalized"
+        );
+    }
 }
 
 fn validate_extraction_error(error: &ExtractionError, context: &str) {
@@ -320,7 +257,7 @@ fn validate_extraction_error(error: &ExtractionError, context: &str) {
 }
 
 fn observe_multipart_result(
-    result: Result<MockMultipart, ExtractionError>,
+    result: Result<Multipart, ExtractionError>,
     limits: &MultipartLimits,
     context: &str,
 ) {
@@ -563,11 +500,11 @@ fn build_part_body(config: &BodyConfig, _boundary: &str) -> Vec<u8> {
         }
         BodyConfig::BoundaryLike {
             data,
-            fake_boundary,
+            decoy_boundary,
         } => {
             let mut result = data[..data.len().min(32 * 1024)].to_vec();
             result.extend_from_slice(b"--");
-            result.extend_from_slice(clamp_string(fake_boundary, 100).as_bytes());
+            result.extend_from_slice(clamp_string(decoy_boundary, 100).as_bytes());
             result.extend_from_slice(b"not-a-real-boundary");
             result
         }
