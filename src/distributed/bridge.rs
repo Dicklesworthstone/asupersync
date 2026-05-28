@@ -903,6 +903,8 @@ impl RegionBridge {
         );
         let incoming_provenance = (snapshot.epoch, snapshot.origin_id);
 
+        let has_applied_inbound_snapshot = self.sync_state.last_applied_inbound_sequence > 0;
+
         match incoming_provenance.cmp(&last_provenance) {
             std::cmp::Ordering::Less => {
                 return Err(
@@ -916,7 +918,9 @@ impl RegionBridge {
                     )),
                 );
             }
-            std::cmp::Ordering::Greater if snapshot.sequence != 1 => {
+            std::cmp::Ordering::Greater
+                if has_applied_inbound_snapshot && snapshot.sequence != 1 =>
+            {
                 return Err(
                     Error::new(ErrorKind::CoordinationFailed).with_message(format!(
                         "snapshot provenance advanced to origin={} epoch={} but sequence={} \
@@ -966,7 +970,13 @@ impl RegionBridge {
         // should re-sync from a known-good ancestor (or from
         // sequence 0 for a fresh peer).
         let expected_sequence = if incoming_provenance > last_provenance {
-            1
+            if has_applied_inbound_snapshot {
+                1
+            } else {
+                // First inbound apply is a catch-up checkpoint; there
+                // is no existing watermark from which to prove a gap.
+                snapshot.sequence
+            }
         } else {
             self.sync_state
                 .last_applied_inbound_sequence
@@ -1570,6 +1580,7 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 42,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: vec![],
@@ -1583,6 +1594,7 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![],
+            auth_tag: crate::security::AuthenticationTag::zero(),
         };
 
         bridge.apply_snapshot(&snap).unwrap();
@@ -1601,6 +1613,7 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 42,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: vec![],
@@ -1614,6 +1627,7 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![],
+            auth_tag: crate::security::AuthenticationTag::zero(),
         };
 
         bridge.apply_snapshot(&snap).unwrap();
@@ -1631,6 +1645,7 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::ZERO,
             sequence: 1,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: vec![],
@@ -1644,6 +1659,7 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![],
+            auth_tag: crate::security::AuthenticationTag::zero(),
         };
 
         let result = bridge.apply_snapshot(&snap);
@@ -2516,6 +2532,7 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(sequence),
             sequence,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: vec![],
@@ -2529,6 +2546,7 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![],
+            auth_tag: crate::security::AuthenticationTag::zero(),
         }
     }
 
