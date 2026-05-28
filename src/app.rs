@@ -1310,7 +1310,7 @@ mod tests {
         let handle = spec.start(&mut state, &cx, root).expect("start ok");
 
         let region = state.region(handle.root_region()).expect("region exists");
-        assert_eq!(region.budget().poll_quota, 42);
+        assert_eq!(region.budget().poll_quota, budget.poll_quota);
 
         let _raw = handle.into_raw();
         crate::test_complete!("app_with_budget_propagates_to_region");
