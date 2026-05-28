@@ -160,12 +160,12 @@ fn fuzz_frame_codec_decode(data: &[u8]) {
     // **ASSERTION 6**: Decoder state consistency
     // After any sequence of operations, the decoder should remain in a valid state
     // We test this by attempting one more decode operation
-    let mut dummy_buffer = BytesMut::new();
+    let mut empty_probe_buffer = BytesMut::new();
     assert!(matches!(
-        observe_decode(&mut codec, &mut dummy_buffer),
+        observe_decode(&mut codec, &mut empty_probe_buffer),
         Ok(None)
     ));
-    assert!(dummy_buffer.is_empty());
+    assert!(empty_probe_buffer.is_empty());
 }
 
 fn observe_decode(codec: &mut FrameCodec, buffer: &mut BytesMut) -> Result<Option<Frame>, H2Error> {
