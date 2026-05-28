@@ -40708,17 +40708,16 @@ mod otlp_122_tests {
                         };
                     }
 
-                    if *current_depth > 32 {
-                        return DepthMeasurementResult::ExceedsLimit {
-                            attempted_depth: *current_depth,
-                        };
-                    }
+                    let mut exceeded_depth = (*current_depth > 32).then_some(*current_depth);
 
-                    // Recursively measure nested arrays
+                    // Recursively measure nested arrays. Keep traversing after
+                    // crossing the OTLP limit so diagnostics report the actual
+                    // attempted depth rather than the first over-limit frame.
                     for item in array {
                         match measure_array_depth(item, current_depth, max_depth_reached) {
                             DepthMeasurementResult::ExceedsLimit { attempted_depth } => {
-                                return DepthMeasurementResult::ExceedsLimit { attempted_depth };
+                                exceeded_depth =
+                                    Some(exceeded_depth.unwrap_or(0).max(attempted_depth));
                             }
                             DepthMeasurementResult::Error { message } => {
                                 return DepthMeasurementResult::Error { message };
@@ -40730,7 +40729,9 @@ mod otlp_122_tests {
                     }
 
                     *current_depth -= 1; // Backtrack
-                    DepthMeasurementResult::WithinLimits
+                    exceeded_depth.map_or(DepthMeasurementResult::WithinLimits, |attempted_depth| {
+                        DepthMeasurementResult::ExceedsLimit { attempted_depth }
+                    })
                 }
                 _ => {
                     // Scalar values terminate nesting and do not add array depth.
