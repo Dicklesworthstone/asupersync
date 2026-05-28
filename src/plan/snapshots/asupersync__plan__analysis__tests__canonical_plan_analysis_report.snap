@@ -1,0 +1,101 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3487
+expression: "serde_json::json!({\n    \"summary\": analysis.summary(), \"all_safe\": analysis.all_safe(),\n    \"node_count\": analysis.nodes.len(), \"obligation_issue_ids\":\n    obligation_ids, \"cancel_issue_ids\": cancel_ids, \"per_node\": per_node,\n})"
+---
+{
+  "all_safe": false,
+  "cancel_issue_ids": [
+    4,
+    5,
+    6
+  ],
+  "node_count": 7,
+  "obligation_issue_ids": [
+    0,
+    1,
+    4,
+    5,
+    6
+  ],
+  "per_node": [
+    {
+      "budget": "polls=[1, 1]",
+      "cancel": "safe",
+      "cost": "alloc=1 cancel=1 obl=1 depth=1",
+      "effective_obligation": "may-leak",
+      "has_obligation_issues": true,
+      "id": 0,
+      "is_safe": false,
+      "obligation": "clean",
+      "obligation_flow": "reserves=[\"obl:permit\"] must_resolve=[\"obl:permit\"] leak_on_cancel=[\"obl:permit\"] [all-paths-ok]"
+    },
+    {
+      "budget": "polls=[1, 1]",
+      "cancel": "safe",
+      "cost": "alloc=1 cancel=1 obl=1 depth=1",
+      "effective_obligation": "may-leak",
+      "has_obligation_issues": true,
+      "id": 1,
+      "is_safe": false,
+      "obligation": "clean",
+      "obligation_flow": "reserves=[\"obl:lease\"] must_resolve=[\"obl:lease\"] leak_on_cancel=[\"obl:lease\"] [all-paths-ok]"
+    },
+    {
+      "budget": "polls=[1, 1]",
+      "cancel": "safe",
+      "cost": "alloc=1 cancel=1 obl=0 depth=1",
+      "effective_obligation": "clean",
+      "has_obligation_issues": false,
+      "id": 2,
+      "is_safe": true,
+      "obligation": "clean",
+      "obligation_flow": "reserves=[] [all-paths-ok]"
+    },
+    {
+      "budget": "polls=[1, 1]",
+      "cancel": "safe",
+      "cost": "alloc=1 cancel=1 obl=0 depth=1",
+      "effective_obligation": "clean",
+      "has_obligation_issues": false,
+      "id": 3,
+      "is_safe": true,
+      "obligation": "clean",
+      "obligation_flow": "reserves=[] [all-paths-ok]"
+    },
+    {
+      "budget": "polls=[1, 1] par=2",
+      "cancel": "may-orphan",
+      "cost": "alloc=3 cancel=1 obl=1 depth=2",
+      "effective_obligation": "leaked",
+      "has_obligation_issues": true,
+      "id": 4,
+      "is_safe": false,
+      "obligation": "may-leak",
+      "obligation_flow": "reserves=[\"obl:lease\"] must_resolve=[\"obl:lease\"] leak_on_cancel=[\"obl:lease\"] [LEAK-RISK]"
+    },
+    {
+      "budget": "polls=[3, 3] par=4",
+      "cancel": "may-orphan",
+      "cost": "alloc=6 cancel=3 obl=2 depth=3",
+      "effective_obligation": "leaked",
+      "has_obligation_issues": true,
+      "id": 5,
+      "is_safe": false,
+      "obligation": "may-leak",
+      "obligation_flow": "reserves=[\"obl:permit\", \"obl:lease\"] must_resolve=[\"obl:permit\", \"obl:lease\"] leak_on_cancel=[\"obl:permit\", \"obl:lease\"] [LEAK-RISK]"
+    },
+    {
+      "budget": "polls=[3, 3] deadline=[100ms, 100ms] par=4",
+      "cancel": "may-orphan",
+      "cost": "alloc=7 cancel=3 obl=2 depth=4",
+      "effective_obligation": "leaked",
+      "has_obligation_issues": true,
+      "id": 6,
+      "is_safe": false,
+      "obligation": "may-leak",
+      "obligation_flow": "reserves=[\"obl:permit\", \"obl:lease\"] must_resolve=[\"obl:permit\", \"obl:lease\"] leak_on_cancel=[\"obl:permit\", \"obl:lease\"] [LEAK-RISK]"
+    }
+  ],
+  "summary": "2/7 safe, 5 obligation issue(s), 3 cancel issue(s)"
+}
