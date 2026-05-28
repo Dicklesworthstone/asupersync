@@ -6,14 +6,14 @@
 use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::record::task::TaskOutcome;
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
-use crate::tracing_compat::{debug, info_span, Span};
+use crate::tracing_compat::{Span, debug, info_span};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{
     Budget, CancelReason, CapabilityBudget, CurveBudget, RRefAccess, RegionId, TaskId, Time,
 };
 use parking_lot::RwLock;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // Thread-local flag to detect reentrant calls and prevent deadlock
 thread_local! {
@@ -1530,23 +1530,33 @@ mod tests {
         });
 
         // Add children
-        assert!(region
-            .add_child(RegionId::from_arena(ArenaIndex::new(2, 0)))
-            .is_ok());
-        assert!(region
-            .add_child(RegionId::from_arena(ArenaIndex::new(3, 0)))
-            .is_err());
+        assert!(
+            region
+                .add_child(RegionId::from_arena(ArenaIndex::new(2, 0)))
+                .is_ok()
+        );
+        assert!(
+            region
+                .add_child(RegionId::from_arena(ArenaIndex::new(3, 0)))
+                .is_err()
+        );
 
         // Add tasks
-        assert!(region
-            .add_task(TaskId::from_arena(ArenaIndex::new(1, 0)))
-            .is_ok());
-        assert!(region
-            .add_task(TaskId::from_arena(ArenaIndex::new(2, 0)))
-            .is_ok());
-        assert!(region
-            .add_task(TaskId::from_arena(ArenaIndex::new(3, 0)))
-            .is_err());
+        assert!(
+            region
+                .add_task(TaskId::from_arena(ArenaIndex::new(1, 0)))
+                .is_ok()
+        );
+        assert!(
+            region
+                .add_task(TaskId::from_arena(ArenaIndex::new(2, 0)))
+                .is_ok()
+        );
+        assert!(
+            region
+                .add_task(TaskId::from_arena(ArenaIndex::new(3, 0)))
+                .is_err()
+        );
 
         // Reserve obligations
         assert!(region.try_reserve_obligation().is_ok());

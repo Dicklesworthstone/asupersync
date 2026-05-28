@@ -16,8 +16,8 @@ use crate::util::DetHashMap;
 use core::fmt;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::types::symbol::{ObjectId, ObjectParams, SymbolId};
 use crate::types::{ObligationId, RegionId, TaskId, Time};

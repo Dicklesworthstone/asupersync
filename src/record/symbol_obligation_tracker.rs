@@ -4,7 +4,7 @@
 //! obligation protocol ([`ObligationRecord`]). Provides epoch-aware validity
 //! windows, deadline-based expiry, and RAII guards for automatic resolution.
 
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::collections::HashMap;
 
 use crate::record::obligation::{
