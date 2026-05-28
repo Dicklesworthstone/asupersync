@@ -1,0 +1,10 @@
+---
+source: src/net/stun.rs
+assertion_line: 518
+expression: message_types
+---
+[
+  "BindingRequest",
+  "BindingResponse",
+  "BindingError"
+]

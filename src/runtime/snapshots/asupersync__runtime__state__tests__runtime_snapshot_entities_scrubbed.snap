@@ -1,8 +1,11 @@
 ---
 source: src/runtime/state.rs
-expression: scrub_runtime_snapshot_for_snapshot_test(serde_json::to_value(&snapshot).unwrap())
+assertion_line: 6426
+expression: "scrub_runtime_snapshot_for_snapshot_test(serde_json::to_value(&snapshot).unwrap())"
 ---
 {
+  "finalizer_history": [],
+  "loser_drain_history": [],
   "obligations": [
     {
       "created_at": "[created_at]",

@@ -1,0 +1,11 @@
+---
+source: src/net/stun.rs
+assertion_line: 531
+expression: candidate_types
+---
+[
+  "Host",
+  "ServerReflexive",
+  "PeerReflexive",
+  "Relay"
+]

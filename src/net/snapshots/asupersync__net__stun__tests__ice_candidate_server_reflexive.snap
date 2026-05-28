@@ -1,0 +1,14 @@
+---
+source: src/net/stun.rs
+assertion_line: 566
+expression: reflexive_candidate
+---
+{
+  "foundation": "2",
+  "component": 1,
+  "protocol": "udp",
+  "priority": 100,
+  "address": "203.0.113.10:54400",
+  "candidate_type": "ServerReflexive",
+  "related_address": "192.168.1.100:5000"
+}
