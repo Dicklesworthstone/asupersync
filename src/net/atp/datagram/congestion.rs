@@ -295,6 +295,8 @@ impl CongestionController {
             CongestionAlgorithm::TokenBucket => {
                 // Reduce token generation rate temporarily
                 self.state.tokens = self.state.tokens.min(1.0);
+                self.state.congestion_window *= self.config.aimd_decrease;
+                self.state.congestion_window = self.state.congestion_window.max(1.0);
             }
             CongestionAlgorithm::Adaptive => {
                 // Adaptive response based on current conditions
