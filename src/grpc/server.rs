@@ -535,7 +535,7 @@ fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<()
             super::streaming::MetadataValue::Ascii(text) => {
                 if !is_valid_header_value_rfc7230(text) {
                     return Err(Status::invalid_argument(format!(
-                        "metadata value for '{key}' contains CRLF or invalid characters (RFC 7230 violation)"
+                        "metadata value for '{key}' contains disallowed CRLF or invalid characters (RFC 7230 violation)"
                     )));
                 }
                 if text.len() > MAX_HEADER_VALUE_LEN {
@@ -2836,9 +2836,11 @@ mod tests {
     fn enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted() {
         init_test("enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted");
         let mut metadata = super::super::streaming::Metadata::new();
-        // 16 KiB of value bytes blows past an 8 KiB cap by 2x.
-        let huge = "A".repeat(16 * 1024);
-        metadata.insert("x-attack", huge);
+        // Two individually valid entries blow past the 8 KiB aggregate cap
+        // without tripping the separate per-value hard cap first.
+        let chunk = "A".repeat(4 * 1024);
+        metadata.insert("x-attack-a", chunk.clone());
+        metadata.insert("x-attack-b", chunk);
 
         match enforce_metadata_size_limit(&metadata, 8 * 1024) {
             Err(status) => {
@@ -2872,8 +2874,10 @@ mod tests {
     fn enforce_metadata_size_limit_zero_disables_cap() {
         init_test("enforce_metadata_size_limit_zero_disables_cap");
         let mut metadata = super::super::streaming::Metadata::new();
-        let huge = "A".repeat(1024 * 1024); // 1 MiB
-        metadata.insert("x-anything", huge);
+        let chunk = "A".repeat(4 * 1024);
+        for index in 0..256 {
+            metadata.insert(format!("x-anything-{index}"), chunk.clone());
+        }
         enforce_metadata_size_limit(&metadata, 0)
             .expect("limit=0 must disable enforcement (no-cap convention)");
         crate::test_complete!("enforce_metadata_size_limit_zero_disables_cap");
@@ -5502,6 +5506,10 @@ mod tests {
     #[test]
     fn test_server_stream_enforcement_integration() {
         use futures_lite::future::block_on;
+        use std::future::Future;
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+
         init_test("test_server_stream_enforcement_integration");
 
         let server = Server::builder()
@@ -5512,38 +5520,60 @@ mod tests {
         let connection_id = "test-integration-conn".to_string();
         server.register_connection(connection_id.clone());
 
-        // First stream should succeed
-        let request1 = Request::with_metadata(Bytes::from_static(b"test"), Metadata::new());
-        let result1 = block_on(server.dispatch_unary_with_stream_enforcement(
-            connection_id.clone(),
-            1,
-            request1,
-            |req| async move { Ok(Response::new(req.into_inner())) },
-        ));
-        assert!(result1.is_ok(), "First stream should succeed");
+        {
+            let request1 = Request::with_metadata(Bytes::from_static(b"test"), Metadata::new());
+            let dispatch1 = server.dispatch_unary_with_stream_enforcement(
+                connection_id.clone(),
+                1,
+                request1,
+                |_req| async {
+                    std::future::pending::<()>().await;
+                    Ok::<Response<Bytes>, Status>(Response::new(Bytes::new()))
+                },
+            );
+            let mut dispatch1 = pin!(dispatch1);
 
-        // Second stream should succeed
-        let request2 = Request::with_metadata(Bytes::from_static(b"test2"), Metadata::new());
-        let result2 = block_on(server.dispatch_unary_with_stream_enforcement(
-            connection_id.clone(),
-            2,
-            request2,
-            |req| async move { Ok(Response::new(req.into_inner())) },
-        ));
-        assert!(result2.is_ok(), "Second stream should succeed");
+            let request2 = Request::with_metadata(Bytes::from_static(b"test2"), Metadata::new());
+            let dispatch2 = server.dispatch_unary_with_stream_enforcement(
+                connection_id.clone(),
+                2,
+                request2,
+                |_req| async {
+                    std::future::pending::<()>().await;
+                    Ok::<Response<Bytes>, Status>(Response::new(Bytes::new()))
+                },
+            );
+            let mut dispatch2 = pin!(dispatch2);
 
-        // Third stream should be rejected due to limit
-        let request3 = Request::with_metadata(Bytes::from_static(b"test3"), Metadata::new());
-        let result3 = block_on(server.dispatch_unary_with_stream_enforcement(
-            connection_id.clone(),
-            3,
-            request3,
-            |req| async move { Ok(Response::new(req.into_inner())) },
-        ));
-        assert!(result3.is_err(), "Third stream should be rejected");
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            assert!(matches!(dispatch1.as_mut().poll(&mut cx), Poll::Pending));
+            assert!(matches!(dispatch2.as_mut().poll(&mut cx), Poll::Pending));
+            assert_eq!(
+                server.connection_registry.get_stats().1,
+                2,
+                "two in-flight streams should consume both stream slots",
+            );
+
+            // Third stream should be rejected due to the two active streams above.
+            let request3 = Request::with_metadata(Bytes::from_static(b"test3"), Metadata::new());
+            let result3 = block_on(server.dispatch_unary_with_stream_enforcement(
+                connection_id.clone(),
+                3,
+                request3,
+                |req| async move { Ok(Response::new(req.into_inner())) },
+            ));
+            assert!(result3.is_err(), "Third stream should be rejected");
+            assert_eq!(
+                result3.unwrap_err().code(),
+                crate::grpc::status::Code::ResourceExhausted
+            );
+        }
+
         assert_eq!(
-            result3.unwrap_err().code(),
-            crate::grpc::status::Code::ResourceExhausted
+            server.connection_registry.get_stats().1,
+            0,
+            "dropping in-flight dispatch futures should release stream slots",
         );
 
         server.unregister_connection(&connection_id);
@@ -5633,7 +5663,6 @@ mod tests {
 
     #[test]
     fn test_connection_hoarding_attack_simulation() {
-        use futures_lite::future::block_on;
         init_test("test_connection_hoarding_attack_simulation");
 
         // Simulate an attacker opening many connections with multiple streams each
@@ -5649,14 +5678,12 @@ mod tests {
 
             // Try to max out streams on each connection
             for stream_id in 1..=3 {
-                let request =
-                    Request::with_metadata(Bytes::from_static(b"attack"), Metadata::new());
-                let result = block_on(server.dispatch_unary_with_stream_enforcement(
-                    connection_id.clone(),
+                let result = server.connection_registry.enforce_stream_limits(
+                    &connection_id,
                     stream_id,
-                    request,
-                    |req| async move { Ok(Response::new(req.into_inner())) },
-                ));
+                    server.config().max_concurrent_streams,
+                    server.config().stream_idle_timeout,
+                );
                 assert!(
                     result.is_ok(),
                     "Stream {} on connection {} should succeed within limits",
@@ -5666,13 +5693,12 @@ mod tests {
             }
 
             // Fourth stream should be rejected
-            let request = Request::with_metadata(Bytes::from_static(b"overflow"), Metadata::new());
-            let result = block_on(server.dispatch_unary_with_stream_enforcement(
-                connection_id.clone(),
+            let result = server.connection_registry.enforce_stream_limits(
+                &connection_id,
                 4,
-                request,
-                |req| async move { Ok(Response::new(req.into_inner())) },
-            ));
+                server.config().max_concurrent_streams,
+                server.config().stream_idle_timeout,
+            );
             assert!(
                 result.is_err(),
                 "Fourth stream should be rejected due to limit"
@@ -5680,10 +5706,12 @@ mod tests {
         }
 
         // Verify connection stats show limits are being enforced
-        let (active_connections, _total_streams) = server.get_connection_stats();
+        let (active_connections, total_streams) = server.get_connection_stats();
         assert_eq!(active_connections, 5, "Should track 5 connections");
-        // Note: streams may be 0 here because dispatch_unary_with_stream_enforcement
-        // removes them after completion, which is correct behavior
+        assert_eq!(
+            total_streams, 15,
+            "Should track maxed-out attacker streams across all connections"
+        );
 
         // Clean up
         for conn_num in 1..=5 {
