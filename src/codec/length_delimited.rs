@@ -418,7 +418,7 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
         // br-asupersync-ooqkxe: validate total reservation overflow
         // The total reservation must account for the full header length + frame
         // even though we only emit length_field_length bytes on the wire
-        let total_len = header_len
+        let _total_len = header_len
             .checked_add(frame_len)
             .ok_or_else(|| {
                 io::Error::new(
