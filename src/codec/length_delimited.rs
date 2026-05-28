@@ -303,7 +303,7 @@ impl Decoder for LengthDelimitedCodec {
                         )
                     })?;
 
-                    if src.len() < num_skip {
+                    if src.len() < total_frame_len {
                         return Ok(None);
                     }
 
@@ -372,7 +372,7 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "header length (offset + length_field_length) overflows usize",
+                    "header length overflow",
                 )
             })?;
 
@@ -1119,9 +1119,10 @@ mod tests {
         let err = codec.encode(payload, &mut dst).unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err
-            .to_string()
-            .contains("encoded length exceeds length_field_length capacity"));
+        assert!(
+            err.to_string()
+                .contains("encoded length exceeds length_field_length capacity")
+        );
         assert_eq!(dst, original, "encode must not partially mutate dst");
     }
 
