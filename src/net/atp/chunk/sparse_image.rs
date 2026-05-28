@@ -266,11 +266,14 @@ impl SparseImageProfile {
             });
         }
 
-        // Default to data-filled region
+        // Default to a bounded data-filled span. Sparse runs can start after a
+        // short data prefix inside this scan window, so do not skip the whole
+        // window as data or later holes become invisible.
+        let data_span = data.len().min(4096);
         Ok(SparseRegion {
             start: start_offset,
             end: start_offset
-                .checked_add(utils::data_len_u64(data)?)
+                .checked_add(utils::usize_to_u64(data_span, "data sparse span")?)
                 .ok_or_else(|| {
                     ChunkingProfileError::SparseHoleDetectionFailed(
                         "data sparse region end overflow".to_string(),
@@ -297,7 +300,7 @@ impl SparseImageProfile {
     /// Find run of repeated pattern starting from the beginning.
     fn find_pattern_run(data: &[u8]) -> Option<(Vec<u8>, u64)> {
         let min_run_length = 4096;
-        let max_pattern_size = 256;
+        let max_pattern_size = 64;
 
         // Try different pattern sizes
         for pattern_size in 1..=max_pattern_size.min(data.len() / 4) {
@@ -461,7 +464,7 @@ impl SparseImageProfile {
             .fold(0usize, |count, byte| count + usize::from(*byte == 0));
         let zero_ratio = zero_count as f64 / data.len() as f64;
 
-        if zero_ratio > 0.9 {
+        if zero_ratio >= 0.9 {
             return true;
         }
 
