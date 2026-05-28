@@ -527,7 +527,8 @@ mod tests {
         // Annotate the slice element type as `&[u8]` so the byte literals'
         // differing array sizes (&[u8; 5], &[u8; 4], &[u8; 2]) coerce
         // uniformly into the slice type.
-        let frame_examples: [(bool, u8, bool, &[u8], [u8; 4]); 4] = [
+        let extended_text_payload = [b'a'; 126];
+        let frame_examples: [(bool, u8, bool, &[u8], [u8; 4]); 5] = [
             // Text frame, masked (client)
             (true, 0x1, true, b"Hello", [0x12, 0x34, 0x56, 0x78]),
             // Binary frame, unmasked (server)
@@ -542,6 +543,14 @@ mod tests {
             (true, 0x9, true, b"ping", [0xab, 0xcd, 0xef, 0x01]),
             // Close frame, unmasked (server)
             (false, 0x8, false, &[0x03, 0xe8], [0x00, 0x00, 0x00, 0x00]), // Code 1000
+            // Text frame at the 16-bit extended payload boundary (server)
+            (
+                true,
+                0x1,
+                false,
+                &extended_text_payload,
+                [0x00, 0x00, 0x00, 0x00],
+            ),
         ];
 
         let mut output = String::new();
@@ -560,7 +569,7 @@ mod tests {
             if payload.len() < 126 {
                 frame.push(mask_bit | (payload.len() as u8));
             } else {
-                // Extended payload length is outside this compact golden case.
+                // Payload lengths at 126..=65535 use the 16-bit extended form.
                 frame.push(mask_bit | 126);
                 frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
             }

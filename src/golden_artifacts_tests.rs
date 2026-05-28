@@ -1707,8 +1707,7 @@ debug_mode = false
         trajectory_bytes.extend_from_slice(&0.05f64.to_be_bytes()); // Confidence level
 
         // Trajectory points: Step (4 bytes) + E-value (8 bytes) + Event type (1 byte).
-        // Cast e_value to f64 so to_be_bytes resolves; tuple literal otherwise
-        // leaves the float as an untyped `{float}` literal that has no methods.
+        // Cast e_value to f64 so to_be_bytes is resolved on a concrete IEEE-754 value.
         for (step, e_value, event_type, _) in &trajectory_points {
             trajectory_bytes.extend_from_slice(&(*step as u32).to_be_bytes());
             trajectory_bytes.extend_from_slice(&(*e_value as f64).to_be_bytes());

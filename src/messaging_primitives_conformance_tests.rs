@@ -207,7 +207,7 @@ impl MockKafkaProducer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MockKafkaConsumer {
     group_id: String,
     assigned_partitions: Arc<parking_lot::Mutex<BTreeSet<PartitionId>>>,
@@ -640,7 +640,7 @@ impl MockRedisClient {
 // Partition Rebalance Coordinator
 // ================================================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionAssignment {
     pub consumer_id: String,
     pub partitions: BTreeSet<PartitionId>,
@@ -882,6 +882,103 @@ fn test_kafka_partition_ordering() -> TestResult {
     TestResult::Pass
 }
 
+/// Test that aborted transactional sends do not leak partial messages and a retry preserves order.
+#[cfg(test)]
+fn test_kafka_exactly_once_order_after_failure() -> TestResult {
+    let producer = MockKafkaProducer::new();
+    let partition = PartitionId {
+        topic: "test-topic".to_string(),
+        partition: 0,
+    };
+    let timestamp = SystemTime::UNIX_EPOCH;
+
+    if let Err(e) = producer.begin_transaction("tx-abort".to_string()) {
+        return TestResult::Fail {
+            reason: format!("Failed to begin aborted transaction: {}", e),
+        };
+    }
+
+    for value in ["first", "second"] {
+        let message = Message {
+            partition: partition.clone(),
+            offset: 0,
+            key: Some(value.to_string()),
+            value: value.as_bytes().to_vec(),
+            timestamp,
+            transaction_id: None,
+        };
+
+        if let Err(e) = producer.send(message, Some(format!("abort-{}", value))) {
+            return TestResult::Fail {
+                reason: format!("Failed to stage aborted message {}: {}", value, e),
+            };
+        }
+    }
+
+    if let Err(e) = producer.abort_transaction() {
+        return TestResult::Fail {
+            reason: format!("Failed to abort transaction: {}", e),
+        };
+    }
+
+    if !producer.get_partition_messages(&partition).is_empty() {
+        return TestResult::Fail {
+            reason: "Aborted transaction leaked visible messages".to_string(),
+        };
+    }
+
+    if let Err(e) = producer.begin_transaction("tx-retry".to_string()) {
+        return TestResult::Fail {
+            reason: format!("Failed to begin retry transaction: {}", e),
+        };
+    }
+
+    for value in ["first", "second", "third"] {
+        let message = Message {
+            partition: partition.clone(),
+            offset: 0,
+            key: Some(value.to_string()),
+            value: value.as_bytes().to_vec(),
+            timestamp,
+            transaction_id: None,
+        };
+
+        if let Err(e) = producer.send(message, Some(format!("retry-{}", value))) {
+            return TestResult::Fail {
+                reason: format!("Failed to stage retry message {}: {}", value, e),
+            };
+        }
+    }
+
+    if let Err(e) = producer.commit_transaction() {
+        return TestResult::Fail {
+            reason: format!("Failed to commit retry transaction: {}", e),
+        };
+    }
+
+    let stored = producer.get_partition_messages(&partition);
+    let stored_values = stored
+        .iter()
+        .map(|message| String::from_utf8_lossy(&message.value).to_string())
+        .collect::<Vec<_>>();
+    let expected = vec![
+        "first".to_string(),
+        "second".to_string(),
+        "third".to_string(),
+    ];
+
+    if stored_values != expected {
+        return TestResult::Fail {
+            reason: format!(
+                "Retry order mismatch after aborted transaction: expected {:?}, got {:?}",
+                expected, stored_values
+            ),
+        };
+    }
+
+    TestResult::Pass
+}
+
 /// Test transaction atomicity in Kafka.
 #[cfg(test)]
 fn test_kafka_transaction_atomicity() -> TestResult {
@@ -1037,6 +1134,76 @@ fn test_jetstream_exactly_once() -> TestResult {
     TestResult::Pass
 }
 
+/// Test retry deduplication while preserving committed partition order.
+#[cfg(test)]
+fn test_kafka_retry_failover_preserves_ordering() -> TestResult {
+    let producer = MockKafkaProducer::new();
+    let partition = PartitionId {
+        topic: "test-topic".to_string(),
+        partition: 0,
+    };
+    let timestamp = SystemTime::UNIX_EPOCH;
+
+    let first = Message {
+        partition: partition.clone(),
+        offset: 0,
+        key: Some("order-1".to_string()),
+        value: b"order-1".to_vec(),
+        timestamp,
+        transaction_id: None,
+    };
+    if let Err(e) = producer.send(first.clone(), Some("dedup-order-1".to_string())) {
+        return TestResult::Fail {
+            reason: format!("Initial send failed: {}", e),
+        };
+    }
+
+    if let Err(e) = producer.send(first, Some("dedup-order-1".to_string())) {
+        return TestResult::Fail {
+            reason: format!("Duplicate retry should be suppressed, got error: {}", e),
+        };
+    }
+
+    for value in ["order-2", "order-3"] {
+        let message = Message {
+            partition: partition.clone(),
+            offset: 0,
+            key: Some(value.to_string()),
+            value: value.as_bytes().to_vec(),
+            timestamp,
+            transaction_id: None,
+        };
+
+        if let Err(e) = producer.send(message, Some(format!("dedup-{}", value))) {
+            return TestResult::Fail {
+                reason: format!("Follow-up send {} failed: {}", value, e),
+            };
+        }
+    }
+
+    let stored_values = producer
+        .get_partition_messages(&partition)
+        .iter()
+        .map(|message| String::from_utf8_lossy(&message.value).to_string())
+        .collect::<Vec<_>>();
+    let expected = vec![
+        "order-1".to_string(),
+        "order-2".to_string(),
+        "order-3".to_string(),
+    ];
+
+    if stored_values != expected {
+        return TestResult::Fail {
+            reason: format!(
+                "Retry/failover order mismatch: expected {:?}, got {:?}",
+                expected, stored_values
+            ),
+        };
+    }
+
+    TestResult::Pass
+}
+
 /// Test partition rebalance idempotency.
 #[cfg(test)]
 fn test_partition_rebalance_idempotency() -> TestResult {
@@ -1112,6 +1279,160 @@ fn test_partition_rebalance_idempotency() -> TestResult {
             return TestResult::Fail {
                 reason: "Partition assignments are not idempotent".to_string(),
             };
+        }
+    }
+
+    TestResult::Pass
+}
+
+/// Test consumer assignment converges to a stable mapping for repeated rebalances.
+#[cfg(test)]
+fn test_consumer_assignment_converges_to_stable_mapping() -> TestResult {
+    let coordinator = RebalanceCoordinator::new();
+    for consumer_id in ["consumer-a", "consumer-b", "consumer-c"] {
+        coordinator.add_consumer(MockKafkaConsumer::new(consumer_id.to_string()));
+    }
+
+    let partitions = (0..6)
+        .map(|partition| PartitionId {
+            topic: "topic1".to_string(),
+            partition,
+        })
+        .collect::<Vec<_>>();
+
+    let mut expected_assignments = None;
+    for _ in 0..4 {
+        if let Err(e) = coordinator.trigger_rebalance(&partitions) {
+            return TestResult::Fail {
+                reason: format!("Rebalance failed: {}", e),
+            };
+        }
+
+        let assignments = coordinator.get_assignments();
+        let assigned = assignments
+            .iter()
+            .flat_map(|assignment| assignment.partitions.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let expected = partitions.iter().cloned().collect::<BTreeSet<_>>();
+
+        if assigned != expected {
+            return TestResult::Fail {
+                reason: format!(
+                    "Assignment did not cover every partition: expected {:?}, got {:?}",
+                    expected, assigned
+                ),
+            };
+        }
+
+        if let Some(previous) = &expected_assignments {
+            if previous != &assignments {
+                return TestResult::Fail {
+                    reason: "Repeated rebalance did not converge to a stable mapping".to_string(),
+                };
+            }
+        }
+        expected_assignments = Some(assignments);
+    }
+
+    TestResult::Pass
+}
+
+/// Test offset commits across rebalances reject gaps beyond processed work.
+#[cfg(test)]
+fn test_rebalance_offset_commits_do_not_create_gaps() -> TestResult {
+    let coordinator = RebalanceCoordinator::new();
+    let consumer = MockKafkaConsumer::new("consumer-a".to_string());
+    let consumer_handle = consumer.clone();
+    coordinator.add_consumer(consumer);
+
+    let partition = PartitionId {
+        topic: "topic1".to_string(),
+        partition: 0,
+    };
+
+    if let Err(e) = coordinator.trigger_rebalance(std::slice::from_ref(&partition)) {
+        return TestResult::Fail {
+            reason: format!("Initial rebalance failed: {}", e),
+        };
+    }
+
+    consumer_handle.mark_processed(&partition, 2);
+    if let Err(e) = consumer_handle.commit_offset(&partition, 3) {
+        return TestResult::Fail {
+            reason: format!("Commit at processed frontier failed: {}", e),
+        };
+    }
+
+    if let Err(e) = coordinator.trigger_rebalance(std::slice::from_ref(&partition)) {
+        return TestResult::Fail {
+            reason: format!("Second rebalance failed: {}", e),
+        };
+    }
+
+    if consumer_handle.get_committed_offset(&partition) != 3 {
+        return TestResult::Fail {
+            reason: format!(
+                "Committed offset changed across rebalance: expected 3, got {}",
+                consumer_handle.get_committed_offset(&partition)
+            ),
+        };
+    }
+
+    match consumer_handle.commit_offset(&partition, 5) {
+        Ok(()) => TestResult::Fail {
+            reason: "Commit beyond processed offset created a gap".to_string(),
+        },
+        Err(_) => TestResult::Pass,
+    }
+}
+
+/// Test rebalances neither drop nor duplicate partition ownership.
+#[cfg(test)]
+fn test_rebalance_no_message_loss_or_duplication() -> TestResult {
+    let coordinator = RebalanceCoordinator::new();
+    coordinator.add_consumer(MockKafkaConsumer::new("consumer-a".to_string()));
+    coordinator.add_consumer(MockKafkaConsumer::new("consumer-b".to_string()));
+
+    let partitions = (0..5)
+        .map(|partition| PartitionId {
+            topic: "topic1".to_string(),
+            partition,
+        })
+        .collect::<Vec<_>>();
+
+    if let Err(e) = coordinator.trigger_rebalance(&partitions) {
+        return TestResult::Fail {
+            reason: format!("Initial rebalance failed: {}", e),
+        };
+    }
+
+    coordinator.remove_consumer("consumer-b");
+    if let Err(e) = coordinator.trigger_rebalance(&partitions) {
+        return TestResult::Fail {
+            reason: format!("Failover rebalance failed: {}", e),
+        };
+    }
+
+    let mut assignment_counts = BTreeMap::new();
+    for assignment in coordinator.get_assignments() {
+        for partition in assignment.partitions {
+            *assignment_counts.entry(partition).or_insert(0usize) += 1;
+        }
+    }
+
+    for partition in partitions {
+        match assignment_counts.get(&partition).copied() {
+            Some(1) => {}
+            Some(count) => {
+                return TestResult::Fail {
+                    reason: format!("Partition {:?} assigned {} times", partition, count),
+                };
+            }
+            None => {
+                return TestResult::Fail {
+                    reason: format!("Partition {:?} was not assigned after failover", partition),
+                };
+            }
         }
     }
 
@@ -1510,6 +1831,10 @@ fn run_messaging_conformance_suite() {
             test_kafka_partition_ordering,
         ),
         (
+            &MESSAGING_CONFORMANCE_CASES[1],
+            test_kafka_exactly_once_order_after_failure,
+        ),
+        (
             &MESSAGING_CONFORMANCE_CASES[2],
             test_kafka_transaction_atomicity,
         ),
@@ -1517,12 +1842,27 @@ fn run_messaging_conformance_suite() {
             &MESSAGING_CONFORMANCE_CASES[3],
             test_kafka_offset_commit_semantics,
         ),
+        (
+            &MESSAGING_CONFORMANCE_CASES[4],
+            test_kafka_retry_failover_preserves_ordering,
+        ),
         (&MESSAGING_CONFORMANCE_CASES[5], test_jetstream_exactly_once),
         (
             &MESSAGING_CONFORMANCE_CASES[6],
             test_partition_rebalance_idempotency,
         ),
-        // Add remaining test mappings as conformance cases are promoted.
+        (
+            &MESSAGING_CONFORMANCE_CASES[7],
+            test_consumer_assignment_converges_to_stable_mapping,
+        ),
+        (
+            &MESSAGING_CONFORMANCE_CASES[8],
+            test_rebalance_offset_commits_do_not_create_gaps,
+        ),
+        (
+            &MESSAGING_CONFORMANCE_CASES[9],
+            test_rebalance_no_message_loss_or_duplication,
+        ),
     ];
 
     println!("🧪 Running Messaging Primitives Conformance Tests [br-conformance-11]");
@@ -1607,9 +1947,12 @@ fn run_messaging_conformance_suite() {
         entry.2 += 1; // tested
     }
 
-    // Count passing based on our test results
+    // Count passing based on the concrete conformance case result mapping.
     for (section, (must, should, tested, passing_count)) in &mut sections {
-        let passing = passed.min(*tested); // Simplified for this implementation
+        let passing = results
+            .iter()
+            .filter(|(case, result)| case.section == *section && matches!(result, TestResult::Pass))
+            .count();
         *passing_count = passing;
         let total_requirements = *must + *should;
         let score = if total_requirements > 0 {
