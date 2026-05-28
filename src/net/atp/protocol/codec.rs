@@ -472,7 +472,7 @@ mod tests {
         let result = codec.decode(&mut buf);
         assert!(matches!(result, Err(FrameError::InvalidFormat(_))));
 
-        // Test 2: Extension length that would cause overflow (DoS vulnerability)
+        // Test 2: Encodable extension length above the ATP limit.
         let mut buf2 = BytesMut::new();
         VarInt::new(0).unwrap().encode(&mut buf2).unwrap(); // Valid version
         VarInt::new(FrameType::Handshake as u64)
@@ -482,10 +482,10 @@ mod tests {
         VarInt::new(0).unwrap().encode(&mut buf2).unwrap(); // payload length
         VarInt::new(1).unwrap().encode(&mut buf2).unwrap(); // 1 extension
         VarInt::new(1).unwrap().encode(&mut buf2).unwrap(); // Valid extension ID
-        VarInt::new(usize::MAX as u64)
+        VarInt::new(MAX_EXTENSION_SIZE + 1)
             .unwrap()
             .encode(&mut buf2)
-            .unwrap(); // Extension length = usize::MAX
+            .unwrap(); // Extension length exceeds ATP limit
 
         let mut codec2 = AtpFrameCodec::new();
         let result2 = codec2.decode(&mut buf2);
