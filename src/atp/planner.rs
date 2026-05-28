@@ -987,7 +987,7 @@ mod tests {
         let profile = planner.generate_chunking_profile(&object_graph);
 
         assert_eq!(profile.chunk_size, 64 * 1024);
-        assert_eq!(profile.estimated_chunks, 16); // 1MB / 64KB
+        assert_eq!(profile.estimated_chunks, 17); // (1048576 + 65535) / 65536 = 17
         assert_eq!(profile.repair_overhead_ratio, 0.1);
     }
 
@@ -1080,11 +1080,11 @@ mod tests {
 
         let bytes_on_wire = planner.estimate_bytes_on_wire(&object_graph, &chunking_profile);
 
-        // Compressed: 1MB * 0.8 = 819200
-        // Repair: 819200 * 0.1 = 81920
-        // Protocol: 819200 / 100 = 8192
-        // Total: 819200 + 81920 + 8192 = 909312
-        assert_eq!(bytes_on_wire, 909312);
+        // Compressed: 1048576 * 0.8 = 838860
+        // Repair: 838860 * 0.1 = 83886
+        // Protocol: 838860 / 100 = 8388
+        // Total: 838860 + 83886 + 8388 = 931134
+        assert_eq!(bytes_on_wire, 931134);
     }
 
     #[test]
