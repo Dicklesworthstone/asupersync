@@ -7,8 +7,7 @@
 use crate::channel::broadcast::{RecvError, SendError, TryRecvError, channel};
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
-use crate::types::{Budget, RegionId, TaskId};
-use crate::util::{ArenaIndex, DetRng};
+use crate::util::DetRng;
 use std::future::Future;
 use std::rc::Rc;
 use std::task::{Context, Poll};
@@ -20,12 +19,8 @@ use proptest::prelude::*;
 // ============================================================================
 
 /// Create a test context for deterministic scheduling.
-fn test_cx() -> Cx {
-    Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    )
+fn test_cx() -> Cx<crate::cx::cap::All> {
+    Cx::for_testing()
 }
 
 /// Simple block_on implementation for tests.

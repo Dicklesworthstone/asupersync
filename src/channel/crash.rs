@@ -579,20 +579,13 @@ mod tests {
     use crate::channel::mpsc;
     use crate::cx::Cx;
     use crate::evidence_sink::CollectorSink;
-    use crate::types::Budget;
-    use crate::util::ArenaIndex;
-    use crate::{RegionId, TaskId};
     use std::future::Future;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex as StdMutex, Weak};
     use std::task::{Context, Poll};
 
-    fn test_cx() -> Cx {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
-        )
+    fn test_cx() -> Cx<crate::cx::cap::All> {
+        Cx::for_testing()
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {

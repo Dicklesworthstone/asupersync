@@ -37,7 +37,7 @@ use std::task::{Context, Poll};
 // ============================================================================
 
 /// Create a test context for deterministic scheduling.
-fn test_cx() -> Cx {
+fn test_cx() -> Cx<crate::cx::cap::All> {
     Cx::for_testing()
 }
 

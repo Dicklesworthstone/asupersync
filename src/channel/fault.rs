@@ -722,23 +722,12 @@ mod tests {
     use super::*;
     use crate::channel::mpsc;
     use crate::evidence_sink::CollectorSink;
-    use crate::types::Budget;
-    use crate::util::ArenaIndex;
-    use crate::{RegionId, TaskId};
     use std::future::Future;
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
-    fn test_cx() -> Cx {
-        test_cx_with_budget(Budget::INFINITE)
-    }
-
-    fn test_cx_with_budget(budget: Budget) -> Cx {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            budget,
-        )
+    fn test_cx() -> Cx<crate::cx::cap::All> {
+        Cx::for_testing()
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {

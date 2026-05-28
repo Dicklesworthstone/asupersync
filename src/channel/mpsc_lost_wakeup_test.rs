@@ -27,7 +27,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Waker};
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<crate::cx::cap::All> {
         Cx::for_testing()
     }
 
