@@ -122,7 +122,7 @@ mod tests {
         )
         .expect("Failed to create OTLP exporter");
 
-        let cx = Cx::new();
+        let cx = Cx::for_testing();
         let spans = vec![create_test_span()];
 
         // Export should fail with retryable error for 408
@@ -175,7 +175,7 @@ mod tests {
         )
         .expect("Failed to create OTLP exporter");
 
-        let cx = Cx::new();
+        let cx = Cx::for_testing();
         let spans = vec![create_test_span()];
 
         let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });
@@ -273,7 +273,7 @@ mod tests {
             )
             .expect("Failed to create OTLP exporter");
 
-            let cx = Cx::new();
+            let cx = Cx::for_testing();
             let spans = vec![create_test_span()];
 
             let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });
@@ -330,7 +330,7 @@ mod tests {
         )
         .expect("Failed to create OTLP exporter");
 
-        let cx = Cx::new();
+        let cx = Cx::for_testing();
         let spans = vec![create_test_span()];
 
         let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });
@@ -424,7 +424,7 @@ mod tests {
             )
             .expect("Failed to create OTLP exporter");
 
-            let cx = Cx::new();
+            let cx = Cx::for_testing();
             let spans = vec![create_test_span()];
 
             let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });

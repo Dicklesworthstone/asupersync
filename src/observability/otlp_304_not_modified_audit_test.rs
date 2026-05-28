@@ -130,7 +130,7 @@ mod tests {
         )
         .expect("Failed to create OTLP exporter");
 
-        let cx = Cx::new();
+        let cx = Cx::for_testing();
         let spans = vec![create_test_span()];
 
         // Export should fail with terminal error for 304
@@ -220,7 +220,7 @@ mod tests {
             )
             .expect("Failed to create OTLP exporter");
 
-            let cx = Cx::new();
+            let cx = Cx::for_testing();
             let spans = vec![create_test_span()];
 
             let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });
@@ -325,7 +325,7 @@ mod tests {
             )
             .expect("Failed to create OTLP exporter");
 
-            let cx = Cx::new();
+            let cx = Cx::for_testing();
             let spans = vec![create_test_span()];
 
             let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });
@@ -390,7 +390,7 @@ mod tests {
         )
         .expect("Failed to create OTLP exporter");
 
-        let cx = Cx::new();
+        let cx = Cx::for_testing();
         let spans = vec![create_test_span()];
 
         let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });
@@ -453,7 +453,7 @@ mod tests {
         )
         .expect("Failed to create OTLP exporter");
 
-        let cx = Cx::new();
+        let cx = Cx::for_testing();
         let spans = vec![create_test_span()];
 
         let result = cx.block_on(async { exporter.export_spans(&cx, &spans).await });

@@ -571,7 +571,7 @@ mod tests {
 
         logger.log_phase(RebalanceTestPhase::Setup).await;
 
-        let cx = Cx::new().unwrap();
+        let cx = Cx::for_testing().unwrap();
 
         let result = async {
             // Create consumer group
@@ -689,7 +689,7 @@ mod tests {
             group_id.clone(),
         );
 
-        let cx = Cx::new().unwrap();
+        let cx = Cx::for_testing().unwrap();
 
         let result = async {
             let group = ConsumerGroupSimulator::new(group_id.clone(), 4).await?;
@@ -779,7 +779,7 @@ mod tests {
             group_id.clone(),
         );
 
-        let cx = Cx::new().unwrap();
+        let cx = Cx::for_testing().unwrap();
 
         const NUM_CONSUMERS: usize = 6;
         const REBALANCE_ROUNDS: usize = 3;
@@ -892,7 +892,7 @@ mod tests {
             group_id.clone(),
         );
 
-        let cx = Cx::new().unwrap();
+        let cx = Cx::for_testing().unwrap();
 
         let result = async {
             let group = ConsumerGroupSimulator::new(group_id.clone(), 2).await?;
@@ -990,7 +990,7 @@ mod tests {
             group_id.clone(),
         );
 
-        let cx = Cx::new().unwrap();
+        let cx = Cx::for_testing().unwrap();
 
         let result = async {
             let group = ConsumerGroupSimulator::new(group_id.clone(), 2).await?;

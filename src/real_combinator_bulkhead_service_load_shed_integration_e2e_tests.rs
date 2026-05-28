@@ -389,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulkhead_saturation_triggers_load_shed() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -451,7 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_in_flight_requests_preserved_during_load_shed() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -518,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dynamic_policy_adaptation() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -578,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_threshold_coordination_edge_cases() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -639,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resource_accounting_consistency() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {

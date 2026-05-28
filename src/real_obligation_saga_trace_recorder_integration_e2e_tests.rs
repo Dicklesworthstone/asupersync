@@ -712,7 +712,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_saga_compensation_trace_ordering() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -789,7 +789,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_crash_injection_mid_flow_recovery() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -855,7 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_trace_event_causal_consistency() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -948,7 +948,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_deterministic_crash_recovery_replay() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1011,7 +1011,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complex_compensation_graph_ordering() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
