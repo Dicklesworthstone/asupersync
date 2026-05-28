@@ -9128,8 +9128,8 @@ mod otlp_wire_format_tests {
         // Verify all attributes are present in unfiltered record
         assert_eq!(
             unfiltered_record.attributes.len(),
-            5,
-            "Unfiltered record should contain all 5 attributes"
+            6,
+            "Unfiltered record should contain all 6 attributes"
         );
         assert!(
             unfiltered_record
@@ -9160,8 +9160,8 @@ mod otlp_wire_format_tests {
         // Verify sensitive attributes are filtered out
         assert_eq!(
             filtered_record.attributes.len(),
-            2,
-            "Filtered record should contain only 2 safe attributes"
+            3,
+            "Filtered record should contain only 3 safe attributes"
         );
         assert!(
             filtered_record
@@ -9186,6 +9186,13 @@ mod otlp_wire_format_tests {
         );
 
         // Verify safe attributes are preserved
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "action"),
+            "action should be preserved"
+        );
         assert!(
             filtered_record
                 .attributes
