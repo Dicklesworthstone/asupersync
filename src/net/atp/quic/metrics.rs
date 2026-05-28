@@ -158,13 +158,35 @@ impl PathPerformanceClass {
         let overall_score =
             (rtt_score + loss_score + congestion_score + stability_score + timeout_score) / 5.0;
 
-        match overall_score {
+        let mut class = match overall_score {
             s if s >= 0.9 => Self::Excellent,
             s if s >= 0.7 => Self::Good,
             s if s >= 0.5 => Self::Fair,
             s if s >= 0.3 => Self::Poor,
             _ => Self::Unusable,
+        };
+
+        if metrics.pto_count >= 4
+            || metrics.loss_rate >= 0.5
+            || matches!(metrics.smoothed_rtt_micros, Some(rtt) if rtt > 500_000)
+        {
+            return Self::Unusable;
         }
+
+        if metrics.pto_count >= 3
+            || metrics.loss_rate >= 0.2
+            || matches!(metrics.smoothed_rtt_micros, Some(300_001..=500_000))
+        {
+            if class.score() > Self::Poor.score() {
+                class = Self::Poor;
+            }
+        }
+
+        if metrics.loss_rate >= 0.1 && class.score() > Self::Good.score() {
+            class = Self::Good;
+        }
+
+        class
     }
 }
 
