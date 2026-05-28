@@ -2,7 +2,7 @@
 
 use super::{AtpH3Error, AtpH3Result};
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Stream direction for ATP-over-H3.
 #[derive(Debug, Clone, PartialEq)]
@@ -288,8 +288,8 @@ impl AtpH3Stream {
             send_queue_len: self.send_queue.len(),
             recv_buffer_len: self.recv_buffer.len(),
             max_buffer_size: self.max_buffer_size,
-            uptime_ms: self.created_at.elapsed().as_millis() as u64,
-            idle_time_ms: self.last_activity.elapsed().as_millis() as u64,
+            uptime_ms: duration_millis_floor_one(self.created_at.elapsed()),
+            idle_time_ms: duration_millis_floor_one(self.last_activity.elapsed()),
         }
     }
 
@@ -307,6 +307,14 @@ impl AtpH3Stream {
     fn update_activity(&mut self) {
         self.last_activity = Instant::now();
     }
+}
+
+fn duration_millis_floor_one(duration: Duration) -> u64 {
+    if duration.is_zero() {
+        return 0;
+    }
+
+    u64::try_from(duration.as_millis().max(1)).unwrap_or(u64::MAX)
 }
 
 /// Stream statistics.
