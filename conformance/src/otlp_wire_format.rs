@@ -17504,79 +17504,100 @@ fn model_opentelemetry_otlp_serialization_stable_byte_order(
     })
 }
 
-/// Serialize an OTLP field to bytes
+const PROTOBUF_MAX_FIELD_NUMBER: u32 = 536_870_911;
+const PROTOBUF_WIRE_VARINT: u8 = 0;
+const PROTOBUF_WIRE_FIXED64: u8 = 1;
+const PROTOBUF_WIRE_LENGTH_DELIMITED: u8 = 2;
+
+/// Serialize an OTLP field to protobuf wire-format bytes.
 fn serialize_otlp_field(field: &OtlpFieldDefinition) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
 
-    // Simple protobuf-like serialization simulation
     match &field.field_value {
         OtlpFieldValue::String(s) => {
             if !s.is_empty() {
-                bytes.push(((field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
-                bytes.push(s.len() as u8);
-                bytes.extend_from_slice(s.as_bytes());
+                encode_length_delimited_field(field.field_number, s.as_bytes(), &mut bytes)?;
             }
         }
         OtlpFieldValue::Int64(i) => {
             if *i != 0 {
-                bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
-                // Simple varint encoding simulation
-                let mut val = *i as u64;
-                while val >= 128 {
-                    bytes.push((val & 0x7F) as u8 | 0x80);
-                    val >>= 7;
-                }
-                bytes.push(val as u8);
+                encode_field_key(field.field_number, PROTOBUF_WIRE_VARINT, &mut bytes)?;
+                encode_varint(*i as u64, &mut bytes);
             }
         }
         OtlpFieldValue::Uint64(u) => {
             if *u != 0 {
-                bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
-                // Simple varint encoding simulation
-                let mut val = *u;
-                while val >= 128 {
-                    bytes.push((val & 0x7F) as u8 | 0x80);
-                    val >>= 7;
-                }
-                bytes.push(val as u8);
+                encode_field_key(field.field_number, PROTOBUF_WIRE_VARINT, &mut bytes)?;
+                encode_varint(*u, &mut bytes);
             }
         }
         OtlpFieldValue::Double(d) => {
             if *d != 0.0 {
-                bytes.push(((field.field_number << 3) | 1) as u8); // wire type 1 (fixed64)
+                encode_field_key(field.field_number, PROTOBUF_WIRE_FIXED64, &mut bytes)?;
                 bytes.extend_from_slice(&d.to_le_bytes());
             }
         }
         OtlpFieldValue::Bool(b) => {
             if *b {
-                bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
-                bytes.push(1);
+                encode_field_key(field.field_number, PROTOBUF_WIRE_VARINT, &mut bytes)?;
+                encode_varint(1, &mut bytes);
             }
         }
         OtlpFieldValue::Bytes(b) => {
             if !b.is_empty() {
-                bytes.push(((field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
-                bytes.push(b.len() as u8);
-                bytes.extend_from_slice(b);
+                encode_length_delimited_field(field.field_number, b, &mut bytes)?;
             }
         }
         OtlpFieldValue::Message(m) => {
             if !m.is_empty() {
-                bytes.push(((field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
-                let msg_bytes = m.as_bytes();
-                bytes.push(msg_bytes.len() as u8);
-                bytes.extend_from_slice(msg_bytes);
+                encode_length_delimited_field(field.field_number, m.as_bytes(), &mut bytes)?;
             }
         }
         OtlpFieldValue::Enum(e) => {
             if *e != 0 {
-                bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
-                bytes.push(*e as u8);
+                encode_field_key(field.field_number, PROTOBUF_WIRE_VARINT, &mut bytes)?;
+                encode_varint(*e as i64 as u64, &mut bytes);
             }
         }
     }
 
     Ok(bytes)
+}
+
+fn encode_length_delimited_field(
+    field_number: u32,
+    payload: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<(), String> {
+    encode_field_key(field_number, PROTOBUF_WIRE_LENGTH_DELIMITED, output)?;
+    let payload_len = u64::try_from(payload.len())
+        .map_err(|_| format!("protobuf payload length {} exceeds u64", payload.len()))?;
+    encode_varint(payload_len, output);
+    output.extend_from_slice(payload);
+    Ok(())
+}
+
+fn encode_field_key(field_number: u32, wire_type: u8, output: &mut Vec<u8>) -> Result<(), String> {
+    if field_number == 0 || field_number > PROTOBUF_MAX_FIELD_NUMBER {
+        return Err(format!(
+            "invalid protobuf field number {field_number}; valid range is 1..={PROTOBUF_MAX_FIELD_NUMBER}"
+        ));
+    }
+    if wire_type > 5 {
+        return Err(format!("invalid protobuf wire type {wire_type}"));
+    }
+
+    let key = (u64::from(field_number) << 3) | u64::from(wire_type);
+    encode_varint(key, output);
+    Ok(())
+}
+
+fn encode_varint(mut value: u64, output: &mut Vec<u8>) {
+    while value >= 0x80 {
+        output.push(((value & 0x7f) as u8) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
 }
 
 /// Serialize a repeated field
@@ -17605,26 +17626,15 @@ fn serialize_repeated_field(
     }
 
     for value in &sorted_values {
-        match value {
-            OtlpFieldValue::Message(m) => {
-                bytes.push(((repeated_field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
-                let msg_bytes = m.as_bytes();
-                bytes.push(msg_bytes.len() as u8);
-                bytes.extend_from_slice(msg_bytes);
-            }
-            _ => {
-                // Handle other repeated value types
-                let temp_field = OtlpFieldDefinition {
-                    field_name: repeated_field.field_name.clone(),
-                    field_number: repeated_field.field_number,
-                    field_type: repeated_field.field_type.clone(),
-                    field_value: value.clone(),
-                    is_repeated: true,
-                };
-                let field_bytes = serialize_otlp_field(&temp_field)?;
-                bytes.extend_from_slice(&field_bytes);
-            }
-        }
+        let temp_field = OtlpFieldDefinition {
+            field_name: repeated_field.field_name.clone(),
+            field_number: repeated_field.field_number,
+            field_type: repeated_field.field_type.clone(),
+            field_value: value.clone(),
+            is_repeated: true,
+        };
+        let field_bytes = serialize_otlp_field(&temp_field)?;
+        bytes.extend_from_slice(&field_bytes);
     }
 
     Ok(bytes)
@@ -19167,6 +19177,56 @@ mod tests {
         assert_eq!(trace.get_export_count(), 0);
         assert!(trace.get_export_metric_counts().is_empty());
         assert!(trace.get_export_intervals().is_empty());
+    }
+
+    #[test]
+    fn serialize_otlp_field_uses_real_protobuf_varint_tags_and_lengths() {
+        let payload = "x".repeat(130);
+        let field = OtlpFieldDefinition {
+            field_name: "large_string".to_string(),
+            field_number: 32,
+            field_type: OtlpFieldType::String,
+            field_value: OtlpFieldValue::String(payload.clone()),
+            is_repeated: false,
+        };
+
+        let bytes = serialize_otlp_field(&field).expect("serialize field");
+
+        assert_eq!(&bytes[0..2], &[0x82, 0x02]);
+        assert_eq!(&bytes[2..4], &[0x82, 0x01]);
+        assert_eq!(&bytes[4..], payload.as_bytes());
+    }
+
+    #[test]
+    fn serialize_otlp_field_encodes_negative_int64_as_ten_byte_varint() {
+        let field = OtlpFieldDefinition {
+            field_name: "negative".to_string(),
+            field_number: 1,
+            field_type: OtlpFieldType::Int64,
+            field_value: OtlpFieldValue::Int64(-1),
+            is_repeated: false,
+        };
+
+        let bytes = serialize_otlp_field(&field).expect("serialize field");
+
+        assert_eq!(bytes[0], 0x08);
+        assert_eq!(&bytes[1..10], &[0xff; 9]);
+        assert_eq!(bytes[10], 0x01);
+    }
+
+    #[test]
+    fn serialize_otlp_field_rejects_invalid_field_numbers() {
+        let field = OtlpFieldDefinition {
+            field_name: "invalid".to_string(),
+            field_number: 0,
+            field_type: OtlpFieldType::Uint64,
+            field_value: OtlpFieldValue::Uint64(1),
+            is_repeated: false,
+        };
+
+        let error = serialize_otlp_field(&field).expect_err("field number zero must fail");
+
+        assert!(error.contains("invalid protobuf field number"));
     }
 
     #[test]
