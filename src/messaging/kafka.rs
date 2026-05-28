@@ -543,10 +543,15 @@ async fn wait_retry_backoff(cx: &Cx, delay: Duration) -> Result<(), KafkaError> 
         return cx.checkpoint().map_err(|_| KafkaError::Cancelled);
     }
 
-    let now = cx
-        .timer_driver()
-        .map_or_else(crate::time::wall_now, |driver| driver.now());
-    let mut sleeper = crate::time::sleep(now, delay);
+    let mut sleeper = cx.timer_driver().map_or_else(
+        || crate::time::sleep(crate::time::wall_now(), delay),
+        |driver| {
+            let deadline = driver
+                .now()
+                .saturating_add_nanos(delay.as_nanos().min(u128::from(u64::MAX)) as u64);
+            crate::time::Sleep::with_timer_driver(deadline, driver)
+        },
+    );
     std::future::poll_fn(|task_cx| {
         if cx.checkpoint().is_err() {
             return std::task::Poll::Ready(Err(KafkaError::Cancelled));
