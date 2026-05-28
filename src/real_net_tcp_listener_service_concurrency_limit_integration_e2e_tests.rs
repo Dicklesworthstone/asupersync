@@ -628,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrency_limit_back_pressures_accept_loop() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -680,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_accept_loop_recovery_after_saturation() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -727,7 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gradual_load_increase_back_pressure() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -783,7 +783,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_burst_load_saturation_handling() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -836,7 +836,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_duration_impact_on_back_pressure() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         // Test with short connection duration
@@ -892,7 +892,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrency_limit_coordination_edge_cases() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {

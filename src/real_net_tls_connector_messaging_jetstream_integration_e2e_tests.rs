@@ -1224,7 +1224,7 @@ impl CertificateChain {
 /// Test 1: Normal TLS JetStream operations with stable certificates
 #[tokio::test]
 async fn test_normal_tls_jetstream_operations() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = TlsJetStreamRotationConfig::default();
     let system = MockTlsJetStreamRotationSystem::new(&cx, config).await?;
 
@@ -1256,7 +1256,7 @@ async fn test_normal_tls_jetstream_operations() -> Result<(), Box<dyn std::error
 /// Test 2: Certificate rotation during active message stream
 #[tokio::test]
 async fn test_certificate_rotation_during_stream() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = TlsJetStreamRotationConfig::default();
     let system = MockTlsJetStreamRotationSystem::new(&cx, config).await?;
 
@@ -1298,7 +1298,7 @@ async fn test_certificate_rotation_during_stream() -> Result<(), Box<dyn std::er
 /// Test 3: Expired certificate handling and replacement
 #[tokio::test]
 async fn test_expired_certificate_handling() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let mut config = TlsJetStreamRotationConfig::default();
     config.cert_validity_duration = Duration::from_millis(100); // Very short for testing
     let system = MockTlsJetStreamRotationSystem::new(&cx, config).await?;
@@ -1324,7 +1324,7 @@ async fn test_expired_certificate_handling() -> Result<(), Box<dyn std::error::E
 /// Test 4: Certificate chain updates (root CA and intermediate changes)
 #[tokio::test]
 async fn test_certificate_chain_updates() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = TlsJetStreamRotationConfig::default();
     let system = MockTlsJetStreamRotationSystem::new(&cx, config).await?;
 
@@ -1349,7 +1349,7 @@ async fn test_certificate_chain_updates() -> Result<(), Box<dyn std::error::Erro
 /// Test 5: Invalid certificate rejection and error handling
 #[tokio::test]
 async fn test_invalid_certificate_rejection() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = TlsJetStreamRotationConfig::default();
     let system = MockTlsJetStreamRotationSystem::new(&cx, config).await?;
 
@@ -1371,7 +1371,7 @@ async fn test_invalid_certificate_rejection() -> Result<(), Box<dyn std::error::
 /// Test 6: Connection recovery after TLS failures
 #[tokio::test]
 async fn test_connection_recovery_after_failures() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = TlsJetStreamRotationConfig::default();
     let system = MockTlsJetStreamRotationSystem::new(&cx, config).await?;
 
