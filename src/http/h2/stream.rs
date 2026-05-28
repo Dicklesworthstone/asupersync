@@ -992,10 +992,32 @@ impl StreamStore {
         self.compact_base();
     }
 
-    /// Trim leading `None` entries by advancing `base_id`. Called
-    /// after every removal so memory is reclaimed promptly.
+    /// Trim leading `None` entries by advancing `base_id`.
+    ///
+    /// HTTP/2 client-initiated and server-initiated stream-id spaces advance
+    /// independently. A gap at the front can only be compacted when that id is
+    /// already below the next legal id for its parity; otherwise the empty slot
+    /// may still represent a future remote stream.
     fn compact_base(&mut self) {
-        let leading_none = self.streams.iter().take_while(|s| s.is_none()).count();
+        let base = self.base_id;
+        let next_client = self.next_client_stream_id;
+        let next_server = self.next_server_stream_id;
+        let leading_none = self
+            .streams
+            .iter()
+            .enumerate()
+            .take_while(|(index, slot)| {
+                if slot.is_some() {
+                    return false;
+                }
+                let id = base.saturating_add(*index as u32);
+                if id % 2 == 1 {
+                    id < next_client
+                } else {
+                    id < next_server
+                }
+            })
+            .count();
         if leading_none > 0 {
             self.streams.drain(..leading_none);
             self.base_id = self.base_id.saturating_add(leading_none as u32);
@@ -2860,6 +2882,30 @@ mod tests {
         store.prune_closed();
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn tlv3gp_prune_preserves_unopened_opposite_parity_ids() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let first_local = store.allocate_stream_id().unwrap();
+        let second_local = store.allocate_stream_id().unwrap();
+
+        store
+            .get_mut(first_local)
+            .unwrap()
+            .reset(ErrorCode::NoError);
+        store
+            .get_mut(second_local)
+            .unwrap()
+            .reset(ErrorCode::NoError);
+        store.prune_closed();
+
+        assert_eq!(store.len(), 0);
+        assert!(
+            store.reserve_remote_stream(2).is_ok(),
+            "pruning local streams must not burn unopened remote stream id 2"
+        );
+        assert!(store.get(2).is_some());
     }
 
     #[test]
