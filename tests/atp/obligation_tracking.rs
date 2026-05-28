@@ -171,7 +171,7 @@ impl AtpObligationTracker {
         let obligations = self.obligations.lock().unwrap();
         let mut leaked = Vec::new();
 
-        for (_, info) in obligations.iter() {
+        for info in obligations.values() {
             let age = now.duration_since(info.created_at);
 
             if age > max_age
