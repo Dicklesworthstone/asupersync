@@ -419,23 +419,23 @@ fn test_directory_transfer_simulation() {
     // Should prioritize: manifest > readme > small_file > large_file
     let (content, assignment, _) = integrated
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule manifest with critical priority");
     assert_eq!(content.id, manifest.id);
     assert_eq!(assignment.priority, StreamPriority::Critical);
 
     let (content, _, _) = integrated
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule readme with highest efficiency");
     assert_eq!(content.id, readme.id); // Highest efficiency for data
 
     let (content, _, _) = integrated
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule small file by size priority");
     assert_eq!(content.id, small_file.id);
 
     let (content, _, _) = integrated
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("should schedule large file last");
     assert_eq!(content.id, large_file.id);
 }
 
