@@ -2422,7 +2422,8 @@ mod tests {
         // Discharge has its own first-party caveats.
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
             .add_caveat(CaveatPredicate::MaxUses(10));
-        let bound = token.bind_for_request(&discharge).unwrap();
+        let bound = token.bind_for_request(&discharge)
+            .expect("should bind discharge for request");
 
         let ctx = VerificationContext::new().with_use_count(5);
         assert!(
