@@ -5,12 +5,12 @@
 //! scheduling decisions made. Unlike unit tests that check exact outcomes, metamorphic
 //! tests verify relationships between different execution scenarios.
 
-use crate::obligation::lyapunov::SchedulingSuggestion;
+use crate::record::ObligationKind;
 use crate::runtime::RuntimeState;
 use crate::runtime::scheduler::ThreeLaneScheduler;
 use crate::sync::ContendedMutex;
 use crate::time::{TimerDriverHandle, VirtualClock};
-use crate::types::{RegionId, TaskId, Time};
+use crate::types::{Budget, RegionId, TaskId, Time};
 use crate::util::DetRng;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +55,20 @@ fn generate_task_ids(count: usize, seed: u64) -> Vec<TaskId> {
         tasks.push(task_id);
     }
     tasks
+}
+
+/// Create runtime state that naturally asks the governor to drain obligations.
+fn create_drain_obligation_state() -> Arc<ContendedMutex<RuntimeState>> {
+    let mut state = RuntimeState::new();
+    let root = state.create_root_region(Budget::unlimited());
+    let (task_id, _handle) = state
+        .create_task(root, Budget::unlimited(), async {})
+        .expect("create task");
+    let _obligation = state
+        .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+        .expect("create obligation");
+    state.now = Time::from_nanos(1_000_000_000);
+    Arc::new(ContendedMutex::new("metamorphic.runtime_state", state))
 }
 
 /// Simulate work completion by tracking task processing.
@@ -350,8 +364,6 @@ fn mr_composite_conservation_and_order_invariance() {
 /// Catches: Cancel lane priority violations, starvation bugs, fairness failures
 #[test]
 fn mr_cancel_lane_starvation_bound() {
-    // SchedulingSuggestion imported at module level
-
     proptest!(|(
         cancel_streak_limit in 2usize..8,
         ready_tasks in 1usize..5,
@@ -368,7 +380,7 @@ fn mr_cancel_lane_starvation_bound() {
 
         // Generate task IDs
         let ready_task_ids = generate_task_ids(ready_tasks, seed);
-        let cancel_task_ids = generate_task_ids(cancel_tasks, seed + 1);
+        let cancel_task_ids = generate_task_ids(cancel_tasks, seed.wrapping_add(1));
 
         // Inject ready work first
         for &task_id in &ready_task_ids {
@@ -436,29 +448,26 @@ fn mr_cancel_lane_starvation_bound() {
 /// Catches: Drain phase fairness violations, obligation draining bugs
 #[test]
 fn mr_drain_widened_bound() {
-    // SchedulingSuggestion imported at module level
-
     proptest!(|(
         cancel_streak_limit in 2usize..6,
         ready_tasks in 1usize..4,
         cancel_tasks in 1usize..8,
         seed in any::<u64>(),
     )| {
-        let state = Arc::new(ContendedMutex::new(
-            "metamorphic.runtime_state",
-            RuntimeState::new()
-        ));
-        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, cancel_streak_limit);
+        let state = create_drain_obligation_state();
+        let mut scheduler = ThreeLaneScheduler::new_with_options(
+            1,
+            &state,
+            cancel_streak_limit,
+            true,
+            1,
+        );
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
 
-        // Force drain obligation mode to test 2*L bound
-        #[cfg(any(test, feature = "test-internals"))]
-        worker.set_cached_suggestion(SchedulingSuggestion::DrainObligations);
-
         // Generate and inject tasks
         let ready_task_ids = generate_task_ids(ready_tasks, seed);
-        let cancel_task_ids = generate_task_ids(cancel_tasks, seed + 1);
+        let cancel_task_ids = generate_task_ids(cancel_tasks, seed.wrapping_add(1));
 
         for &task_id in &ready_task_ids {
             scheduler.inject_ready(task_id, 100);
@@ -527,7 +536,7 @@ fn mr_work_stealing_locality_preservation() {
         for worker_id in 0..worker_count {
             let worker_tasks = generate_task_ids(
                 tasks_per_worker,
-                seed + (worker_id as u64)
+                seed.wrapping_add(worker_id as u64)
             );
             all_task_ids.extend(&worker_tasks);
 
@@ -672,33 +681,39 @@ fn mr_edf_timed_lane_ordering() {
 /// Tests that drain mode properly doubles the cancel streak limit
 #[test]
 fn mr_composite_cancel_drain_consistency() {
-    // SchedulingSuggestion imported at module level
-
     proptest!(|(
         cancel_streak_limit in 2usize..5,
         seed in any::<u64>(),
     )| {
-        let state = Arc::new(ContendedMutex::new(
+        let normal_state = Arc::new(ContendedMutex::new(
             "metamorphic.runtime_state",
             RuntimeState::new()
         ));
+        let drain_state = create_drain_obligation_state();
 
         // Test normal mode
-        let mut scheduler_normal = ThreeLaneScheduler::new_with_cancel_limit(1, &state, cancel_streak_limit);
+        let mut scheduler_normal =
+            ThreeLaneScheduler::new_with_cancel_limit(1, &normal_state, cancel_streak_limit);
         let mut workers_normal = scheduler_normal.take_workers();
         let worker_normal = &mut workers_normal[0];
 
         // Test drain mode
-        let mut scheduler_drain = ThreeLaneScheduler::new_with_cancel_limit(1, &state, cancel_streak_limit);
+        let mut scheduler_drain = ThreeLaneScheduler::new_with_options(
+            1,
+            &drain_state,
+            cancel_streak_limit,
+            true,
+            1,
+        );
         let mut workers_drain = scheduler_drain.take_workers();
         let worker_drain = &mut workers_drain[0];
 
-        #[cfg(any(test, feature = "test-internals"))]
-        worker_drain.set_cached_suggestion(SchedulingSuggestion::DrainObligations);
-
         // Generate same workload for both
         let ready_tasks = generate_task_ids(2, seed);
-        let cancel_tasks = generate_task_ids(cancel_streak_limit * 3, seed + 1); // Enough to test limits
+        let cancel_tasks = generate_task_ids(
+            cancel_streak_limit * 3,
+            seed.wrapping_add(1),
+        ); // Enough to test limits
 
         // Inject work to both schedulers identically
         for &task_id in &ready_tasks {
@@ -710,7 +725,12 @@ fn mr_composite_cancel_drain_consistency() {
             scheduler_drain.inject_cancel(task_id, 100);
         }
 
-        // Track maximum streaks in both modes
+        for _ in 0..(ready_tasks.len() + cancel_tasks.len()) {
+            let _ = worker_normal.next_task();
+            let _ = worker_drain.next_task();
+        }
+
+        // Track observed fairness limits in both modes.
         let normal_certificate = worker_normal.preemption_fairness_certificate();
         let drain_certificate = worker_drain.preemption_fairness_certificate();
 
@@ -840,8 +860,6 @@ mod validation_tests {
     /// Validate cancel starvation bound test infrastructure
     #[test]
     fn validate_cancel_starvation_bound_infrastructure() {
-        // SchedulingSuggestion imported at module level
-
         let state = Arc::new(ContendedMutex::new(
             "test.runtime_state",
             RuntimeState::new(),
