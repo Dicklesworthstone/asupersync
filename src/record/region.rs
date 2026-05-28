@@ -2328,9 +2328,15 @@ mod tests {
     #[test]
     fn heap_stats_return_to_zero_single_region() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
-        region.heap_alloc(1u32).expect("should allocate u32 for heap stats test");
-        region.heap_alloc(2u64).expect("should allocate u64 for heap stats test");
-        region.heap_alloc("hello".to_string()).expect("should allocate string for heap stats test");
+        region
+            .heap_alloc(1u32)
+            .expect("should allocate u32 for heap stats test");
+        region
+            .heap_alloc(2u64)
+            .expect("should allocate u64 for heap stats test");
+        region
+            .heap_alloc("hello".to_string())
+            .expect("should allocate string for heap stats test");
 
         assert_eq!(region.heap_stats().live, 3);
         assert_eq!(region.heap_stats().allocations, 3);
@@ -2357,15 +2363,29 @@ mod tests {
         let child1 = RegionRecord::new(child1_id, Some(parent_id), Budget::default());
         let child2 = RegionRecord::new(child2_id, Some(parent_id), Budget::default());
 
-        parent.add_child(child1_id).expect("should add first child to parent");
-        parent.add_child(child2_id).expect("should add second child to parent");
+        parent
+            .add_child(child1_id)
+            .expect("should add first child to parent");
+        parent
+            .add_child(child2_id)
+            .expect("should add second child to parent");
 
         // Allocate in all three regions
-        parent.heap_alloc(10u32).expect("should allocate in parent region");
-        parent.heap_alloc(20u32).expect("should allocate second item in parent");
-        child1.heap_alloc(30u64).expect("should allocate in child1 region");
-        child2.heap_alloc(40u64).expect("should allocate first item in child2");
-        child2.heap_alloc(50u64).expect("should allocate second item in child2");
+        parent
+            .heap_alloc(10u32)
+            .expect("should allocate in parent region");
+        parent
+            .heap_alloc(20u32)
+            .expect("should allocate second item in parent");
+        child1
+            .heap_alloc(30u64)
+            .expect("should allocate in child1 region");
+        child2
+            .heap_alloc(40u64)
+            .expect("should allocate first item in child2");
+        child2
+            .heap_alloc(50u64)
+            .expect("should allocate second item in child2");
 
         // Verify per-region allocation counts
         assert_eq!(parent.heap_stats().live, 2);
@@ -2406,17 +2426,23 @@ mod tests {
         // happens atomically at complete_close(), after all finalizers finish.
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
 
-        region.heap_alloc(42u32).expect("should allocate during normal phase");
+        region
+            .heap_alloc(42u32)
+            .expect("should allocate during normal phase");
         assert_eq!(region.heap_len(), 1);
 
         // Closing — heap_alloc still allowed
         assert!(region.begin_close(None));
-        region.heap_alloc(99u32).expect("should allocate during closing phase");
+        region
+            .heap_alloc(99u32)
+            .expect("should allocate during closing phase");
         assert_eq!(region.heap_len(), 2);
 
         // Finalizing — heap_alloc still allowed (finalizers may allocate)
         assert!(region.begin_finalize());
-        region.heap_alloc(200u32).expect("should allocate during finalizing phase");
+        region
+            .heap_alloc(200u32)
+            .expect("should allocate during finalizing phase");
         assert_eq!(region.heap_len(), 3);
 
         // Close — all 3 allocations reclaimed
@@ -2438,8 +2464,12 @@ mod tests {
     #[test]
     fn heap_reclamation_timing_matches_state_machine() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
-        region.heap_alloc(1u32).expect("should allocate u32 for state machine test");
-        region.heap_alloc(2u64).expect("should allocate u64 for state machine test");
+        region
+            .heap_alloc(1u32)
+            .expect("should allocate u32 for state machine test");
+        region
+            .heap_alloc(2u64)
+            .expect("should allocate u64 for state machine test");
 
         // Heap still live during Closing
         assert!(region.begin_close(None));
@@ -2519,8 +2549,12 @@ mod tests {
     #[test]
     fn complete_close_is_idempotent_for_reclamation() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
-        region.heap_alloc(1u32).expect("should allocate first item for reclamation test");
-        region.heap_alloc(2u32).expect("should allocate second item for reclamation test");
+        region
+            .heap_alloc(1u32)
+            .expect("should allocate first item for reclamation test");
+        region
+            .heap_alloc(2u32)
+            .expect("should allocate second item for reclamation test");
 
         assert!(region.begin_close(None));
         assert!(region.begin_finalize());

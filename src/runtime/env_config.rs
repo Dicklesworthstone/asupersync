@@ -516,9 +516,19 @@ mod tests {
 
     #[test]
     fn parse_usize_valid() {
-        assert_eq!(super::parse_usize("TEST", "42").expect("should parse valid usize '42'"), 42);
-        assert_eq!(super::parse_usize("TEST", " 100 ").expect("should parse valid usize ' 100 ' with whitespace"), 100);
-        assert_eq!(super::parse_usize("TEST", "0").expect("should parse valid usize '0'"), 0);
+        assert_eq!(
+            super::parse_usize("TEST", "42").expect("should parse valid usize '42'"),
+            42
+        );
+        assert_eq!(
+            super::parse_usize("TEST", " 100 ")
+                .expect("should parse valid usize ' 100 ' with whitespace"),
+            100
+        );
+        assert_eq!(
+            super::parse_usize("TEST", "0").expect("should parse valid usize '0'"),
+            0
+        );
     }
 
     #[test]
@@ -531,7 +541,10 @@ mod tests {
 
     #[test]
     fn parse_u32_valid() {
-        assert_eq!(super::parse_u32("TEST", "128").expect("should parse valid u32 '128'"), 128);
+        assert_eq!(
+            super::parse_u32("TEST", "128").expect("should parse valid u32 '128'"),
+            128
+        );
     }
 
     #[test]
@@ -543,7 +556,8 @@ mod tests {
     fn parse_bool_all_truthy() {
         for val in &["true", "1", "yes", "on", "TRUE", "Yes", "ON"] {
             assert!(
-                super::parse_bool("TEST", val).expect(&format!("should parse truthy value '{}'", val)),
+                super::parse_bool("TEST", val)
+                    .expect(&format!("should parse truthy value '{}'", val)),
                 "expected true for {val}"
             );
         }
@@ -553,7 +567,8 @@ mod tests {
     fn parse_bool_all_falsy() {
         for val in &["false", "0", "no", "off", "FALSE", "No", "OFF"] {
             assert!(
-                !super::parse_bool("TEST", val).expect(&format!("should parse falsy value '{}'", val)),
+                !super::parse_bool("TEST", val)
+                    .expect(&format!("should parse falsy value '{}'", val)),
                 "expected false for {val}"
             );
         }

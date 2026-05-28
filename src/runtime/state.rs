@@ -6778,7 +6778,12 @@ mod tests {
     fn snapshot_preserves_event_version() {
         init_test("snapshot_preserves_event_version");
         let state = RuntimeState::new();
-        let event = TraceEvent::new(1, Time::from_nanos(1_000_000_000), TraceEventKind::UserTrace, TraceData::None);
+        let event = TraceEvent::new(
+            1,
+            Time::from_nanos(1_000_000_000),
+            TraceEventKind::UserTrace,
+            TraceData::None,
+        );
         state.trace.push_event(event);
 
         let snapshot = state.snapshot();
@@ -7549,7 +7554,12 @@ mod tests {
 
         let root = state.create_root_region(Budget::INFINITE);
         let idx_root = state.insert_task_with(|idx| {
-            TaskRecord::new_with_time(TaskId::from_arena(idx), root, Budget::INFINITE, Time::from_nanos(1_000_000_000))
+            TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                root,
+                Budget::INFINITE,
+                Time::from_nanos(1_000_000_000),
+            )
         });
         state
             .regions
@@ -7559,7 +7569,12 @@ mod tests {
             .unwrap();
         let child = create_child_region(&mut state, root);
         let idx_child = state.insert_task_with(|idx| {
-            TaskRecord::new_with_time(TaskId::from_arena(idx), child, Budget::INFINITE, Time::from_nanos(1_000_000_000))
+            TaskRecord::new_with_time(
+                TaskId::from_arena(idx),
+                child,
+                Budget::INFINITE,
+                Time::from_nanos(1_000_000_000),
+            )
         });
         state
             .regions

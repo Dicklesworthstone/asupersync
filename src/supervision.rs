@@ -5943,7 +5943,8 @@ mod tests {
         assert!(table.by_region.is_empty());
 
         let _mref = table.monitor(watcher, region, monitored);
-        let _downs = table.notify_down(monitored, &Outcome::Ok(()), Time::from_nanos(1_000_000_000));
+        let _downs =
+            table.notify_down(monitored, &Outcome::Ok(()), Time::from_nanos(1_000_000_000));
         assert!(table.by_monitored.is_empty());
         assert!(table.by_region.is_empty());
 

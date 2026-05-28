@@ -2071,8 +2071,8 @@ mod tests {
     #[test]
     fn test_epoch_barrier_timeout() {
         init_test("test_epoch_barrier_timeout");
-        let barrier =
-            EpochBarrier::new(EpochId(1), 3, Time::from_nanos(1_000_000_000)).with_timeout(Time::from_secs(10));
+        let barrier = EpochBarrier::new(EpochId(1), 3, Time::from_nanos(1_000_000_000))
+            .with_timeout(Time::from_secs(10));
 
         barrier.arrive("node1", Time::from_secs(1)).unwrap();
 
@@ -2196,8 +2196,12 @@ mod tests {
     #[test]
     fn test_epoch_context_budget() {
         init_test("test_epoch_context_budget");
-        let ctx =
-            EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10)).with_operation_budget(1);
+        let ctx = EpochContext::new(
+            EpochId(1),
+            Time::from_nanos(1_000_000_000),
+            Time::from_secs(10),
+        )
+        .with_operation_budget(1);
         let first = ctx.record_operation();
         crate::assert_with_log!(first, "first record", true, first);
         let second = ctx.record_operation();
@@ -2214,7 +2218,11 @@ mod tests {
     fn test_epoch_scoped_expired() {
         init_test("test_epoch_scoped_expired");
         let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(5)));
-        let epoch = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(1));
+        let epoch = EpochContext::new(
+            EpochId(1),
+            Time::from_nanos(1_000_000_000),
+            Time::from_secs(1),
+        );
         let source = Arc::new(TestEpochSource::new(EpochId(1)));
         let policy = EpochPolicy::strict();
 
@@ -2233,7 +2241,11 @@ mod tests {
         let source = Arc::new(TestEpochSource::new(EpochId(1)));
         source.set(EpochId(2));
 
-        let epoch = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
+        let epoch = EpochContext::new(
+            EpochId(1),
+            Time::from_nanos(1_000_000_000),
+            Time::from_secs(10),
+        );
         let policy = EpochPolicy::strict();
         let fut = EpochScoped::new(Box::pin(async { 7u8 }), epoch, policy, clock, source);
         let result = block_on(fut);
@@ -2248,7 +2260,11 @@ mod tests {
         init_test("test_epoch_select_left");
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000_000_000)));
         let source = Arc::new(TestEpochSource::new(EpochId(1)));
-        let epoch = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
+        let epoch = EpochContext::new(
+            EpochId(1),
+            Time::from_nanos(1_000_000_000),
+            Time::from_secs(10),
+        );
         let policy = EpochPolicy::strict();
 
         let fut = epoch_select(
@@ -2273,7 +2289,11 @@ mod tests {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000_000_000)));
         let epoch_source = Arc::new(TestEpochSource::new(EpochId(1)));
         let policy = EpochPolicy::strict();
-        let epoch_ctx = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
+        let epoch_ctx = EpochContext::new(
+            EpochId(1),
+            Time::from_nanos(1_000_000_000),
+            Time::from_secs(10),
+        );
 
         let bulkhead = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,
@@ -2467,7 +2487,11 @@ mod tests {
     #[test]
     fn test_epoch_context_expiry() {
         init_test("test_epoch_context_expiry");
-        let ctx = EpochContext::new(EpochId(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
+        let ctx = EpochContext::new(
+            EpochId(1),
+            Time::from_nanos(1_000_000_000),
+            Time::from_secs(10),
+        );
 
         // Not expired before deadline
         let expired_before = ctx.is_expired(Time::from_secs(5));
@@ -2990,7 +3014,11 @@ mod tests {
 
     #[test]
     fn epoch_context_debug_clone() {
-        let ctx = EpochContext::new(EpochId::new(1), Time::from_nanos(1_000_000_000), Time::from_secs(10));
+        let ctx = EpochContext::new(
+            EpochId::new(1),
+            Time::from_nanos(1_000_000_000),
+            Time::from_secs(10),
+        );
         let dbg = format!("{ctx:?}");
         assert!(dbg.contains("EpochContext"));
         let ctx2 = ctx;

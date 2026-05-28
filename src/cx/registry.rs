@@ -1857,7 +1857,9 @@ mod tests {
             .reserve("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
             .expect("reserve ok");
 
-        let err = reg.register("svc", tid(2), rid(0), Time::from_nanos(1_000_000_000)).unwrap_err();
+        let err = reg
+            .register("svc", tid(2), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap_err();
         assert_eq!(
             err,
             NameLeaseError::NameTaken {
@@ -1927,7 +1929,9 @@ mod tests {
         init_test("registry_unregister");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("temp", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("temp", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         reg.unregister("temp", tid(1)).unwrap();
         assert!(!reg.is_registered("temp"));
@@ -1951,9 +1955,15 @@ mod tests {
         init_test("registry_registered_names_sorted");
 
         let mut reg = NameRegistry::new();
-        let mut l1 = reg.register("zebra", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
-        let mut l2 = reg.register("alpha", tid(2), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
-        let mut l3 = reg.register("middle", tid(3), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("zebra", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
+        let mut l2 = reg
+            .register("alpha", tid(2), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
+        let mut l3 = reg
+            .register("middle", tid(3), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // API contract guarantees sorted order
         assert_eq!(reg.registered_names(), vec!["alpha", "middle", "zebra"]);
@@ -1970,9 +1980,15 @@ mod tests {
         init_test("registry_cleanup_region");
 
         let mut reg = NameRegistry::new();
-        let mut l1 = reg.register("svc_a", tid(1), rid(1), Time::from_nanos(1_000_000_000)).unwrap();
-        let mut l2 = reg.register("svc_b", tid(2), rid(1), Time::from_nanos(1_000_000_000)).unwrap();
-        let mut l3 = reg.register("svc_c", tid(3), rid(2), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("svc_a", tid(1), rid(1), Time::from_nanos(1_000_000_000))
+            .unwrap();
+        let mut l2 = reg
+            .register("svc_b", tid(2), rid(1), Time::from_nanos(1_000_000_000))
+            .unwrap();
+        let mut l3 = reg
+            .register("svc_c", tid(3), rid(2), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         assert_eq!(reg.len(), 3);
 
@@ -1995,9 +2011,15 @@ mod tests {
         init_test("registry_cleanup_task");
 
         let mut reg = NameRegistry::new();
-        let mut l1 = reg.register("name_a", tid(5), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
-        let mut l2 = reg.register("name_b", tid(5), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
-        let mut l3 = reg.register("name_c", tid(6), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("name_a", tid(5), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
+        let mut l2 = reg
+            .register("name_b", tid(5), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
+        let mut l3 = reg
+            .register("name_c", tid(6), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         let removed = reg.cleanup_task(tid(5));
         assert_eq!(removed, vec!["name_a", "name_b"]);
@@ -2192,7 +2214,9 @@ mod tests {
             .watch_name("svc", tid(12), rid(8))
             .expect("watcher limit exceeded");
 
-        let mut lease = reg.register("svc", tid(1), rid(1), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(1), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let notifications = reg.take_name_notifications();
         assert_eq!(notifications.len(), 3);
 
@@ -2221,7 +2245,9 @@ mod tests {
             .watch_name("svc", tid(11), rid(2))
             .expect("watcher limit exceeded");
 
-        let mut lease = reg.register("svc", tid(1), rid(1), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(1), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let acquired = reg.take_name_notifications();
         assert_eq!(acquired.len(), 2);
 
@@ -2256,7 +2282,9 @@ mod tests {
         assert!(removed.is_empty());
         assert_eq!(reg.name_watcher_count(), 1);
 
-        let mut lease = reg.register("svc", tid(1), rid(9), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(9), Time::from_nanos(1_000_000_000))
+            .unwrap();
         reg.unregister("svc", tid(1)).unwrap();
         lease.release().expect("lease release should succeed");
 
@@ -2276,7 +2304,9 @@ mod tests {
             .watch_name("svc", tid(42), rid(9))
             .expect("watch registration should succeed");
 
-        let mut old_lease = reg.register("svc", tid(1), rid(1), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut old_lease = reg
+            .register("svc", tid(1), rid(1), Time::from_nanos(1_000_000_000))
+            .unwrap();
         reg.take_name_notifications();
 
         let outcome = reg
@@ -2434,7 +2464,9 @@ mod tests {
         let mut reg = NameRegistry::new();
 
         // Task 1 registers 3 names across 2 regions
-        let mut l1 = reg.register("svc_a", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("svc_a", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let mut l2 = reg
             .register("svc_b", tid(1), rid(0), Time::from_secs(1))
             .unwrap();
@@ -2479,7 +2511,9 @@ mod tests {
         let mut reg = NameRegistry::new();
 
         // Region 1: 3 tasks register names
-        let mut l1 = reg.register("db", tid(10), rid(1), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("db", tid(10), rid(1), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let mut l2 = reg
             .register("cache", tid(11), rid(1), Time::from_secs(1))
             .unwrap();
@@ -2537,7 +2571,12 @@ mod tests {
 
         // Task 99 registers first (even though it has a higher TaskId)
         let mut winner = reg
-            .register("singleton", tid(99), rid(0), Time::from_nanos(1_000_000_000))
+            .register(
+                "singleton",
+                tid(99),
+                rid(0),
+                Time::from_nanos(1_000_000_000),
+            )
             .unwrap();
 
         // Task 1 tries second — should lose deterministically
@@ -2585,11 +2624,21 @@ mod tests {
             let mut reg = NameRegistry::new();
 
             let mut lease = reg
-                .register("stable_name", tid(7), rid(0), Time::from_nanos(1_000_000_000))
+                .register(
+                    "stable_name",
+                    tid(7),
+                    rid(0),
+                    Time::from_nanos(1_000_000_000),
+                )
                 .unwrap();
 
             let err = reg
-                .register("stable_name", tid(3), rid(0), Time::from_nanos(1_000_000_000))
+                .register(
+                    "stable_name",
+                    tid(3),
+                    rid(0),
+                    Time::from_nanos(1_000_000_000),
+                )
                 .unwrap_err();
             assert_eq!(
                 err,
@@ -2617,7 +2666,12 @@ mod tests {
 
         // Register a name
         let mut lease = reg
-            .register("cancellable", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .register(
+                "cancellable",
+                tid(1),
+                rid(0),
+                Time::from_nanos(1_000_000_000),
+            )
             .unwrap();
         assert!(lease.is_active());
 
@@ -2755,7 +2809,9 @@ mod tests {
         // Verify that cleanup_region returns names in sorted order.
         // which ensures abort events follow a deterministic order.
         let mut reg = NameRegistry::new();
-        let mut l1 = reg.register("b", tid(2), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("b", tid(2), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let mut l2 = reg
             .register("a", tid(1), rid(0), Time::from_secs(1))
             .unwrap();
@@ -2787,7 +2843,9 @@ mod tests {
         let mut reg = NameRegistry::new();
 
         // Register in reverse alphabetical order
-        let mut l1 = reg.register("z_last", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("z_last", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let mut l2 = reg
             .register("m_mid", tid(1), rid(0), Time::from_secs(1))
             .unwrap();
@@ -2819,7 +2877,12 @@ mod tests {
 
         // Original holder registers
         let mut old_lease = reg
-            .register("primary_db", tid(10), rid(0), Time::from_nanos(1_000_000_000))
+            .register(
+                "primary_db",
+                tid(10),
+                rid(0),
+                Time::from_nanos(1_000_000_000),
+            )
             .unwrap();
 
         // Crash: cleanup the old task
@@ -2938,7 +3001,8 @@ mod tests {
         init_test("conformance_linearity_proofs");
 
         // Test committed proof
-        let mut committed_lease = NameLease::new("committed", tid(1), rid(0), Time::from_nanos(1_000_000_000));
+        let mut committed_lease =
+            NameLease::new("committed", tid(1), rid(0), Time::from_nanos(1_000_000_000));
         let committed = committed_lease.release().unwrap();
         let resolved = committed.into_resolved_proof();
         assert_eq!(
@@ -2948,7 +3012,8 @@ mod tests {
         );
 
         // Test aborted proof
-        let mut aborted_lease = NameLease::new("aborted", tid(2), rid(0), Time::from_nanos(1_000_000_000));
+        let mut aborted_lease =
+            NameLease::new("aborted", tid(2), rid(0), Time::from_nanos(1_000_000_000));
         let aborted = aborted_lease.abort().unwrap();
         let resolved = aborted.into_resolved_proof();
         assert_eq!(
@@ -2969,7 +3034,9 @@ mod tests {
         let mut reg = NameRegistry::new();
 
         // Same task ID (1) registers in two different regions
-        let mut l1 = reg.register("r1_name", tid(1), rid(1), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("r1_name", tid(1), rid(1), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let mut l2 = reg
             .register("r2_name", tid(1), rid(2), Time::from_secs(1))
             .unwrap();
@@ -3002,7 +3069,9 @@ mod tests {
         let mut reg = NameRegistry::new();
 
         // Task 1 has a committed lease and a pending permit.
-        let mut lease = reg.register("active", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("active", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let mut permit = reg
             .reserve("pending_name", tid(1), rid(0), Time::from_secs(1))
             .expect("reserve ok");
@@ -3045,7 +3114,8 @@ mod tests {
         );
 
         p1.abort().unwrap();
-        reg.cancel_permit(&p1, Time::from_nanos(1_000_000_000)).expect("cancel permit");
+        reg.cancel_permit(&p1, Time::from_nanos(1_000_000_000))
+            .expect("cancel permit");
 
         crate::test_complete!("conformance_double_reserve_blocked");
     }
@@ -3137,7 +3207,9 @@ mod tests {
         init_test("conformance_lease_blocks_reserve");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("taken", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("taken", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         let err = reg
             .reserve("taken", tid(2), rid(0), Time::from_nanos(1_000_000_000))
@@ -3234,7 +3306,8 @@ mod tests {
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
         reg.unregister("svc", tid(1))
             .expect("should unregister svc after stale permit test");
-        lease.release()
+        lease
+            .release()
             .expect("should release lease after stale permit test");
 
         crate::test_complete!("cancel_permit_rejects_stale_same_identity_replay");
@@ -3262,7 +3335,8 @@ mod tests {
             }
         );
 
-        let mut cleanup = NamePermit::new("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000), 1);
+        let mut cleanup =
+            NamePermit::new("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000), 1);
         reg.cancel_permit(&cleanup, Time::from_secs(1))
             .expect("cleanup pending entry");
         cleanup.abort().expect("resolve cleanup permit");
@@ -3342,7 +3416,9 @@ mod tests {
         init_test("collision_replace_displaces_old_holder");
 
         let mut reg = NameRegistry::new();
-        let mut old_lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut old_lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         let outcome = reg
             .register_with_policy(
@@ -3408,7 +3484,9 @@ mod tests {
         init_test("collision_wait_enqueues_waiter");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         let outcome = reg
             .register_with_policy(
@@ -3436,7 +3514,9 @@ mod tests {
         init_test("collision_wait_grants_on_unregister");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Enqueue a waiter.
         let outcome = reg
@@ -3502,7 +3582,9 @@ mod tests {
         init_test("collision_wait_expired_waiter_not_granted");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Enqueue a waiter with a short deadline.
         reg.register_with_policy(
@@ -3535,7 +3617,9 @@ mod tests {
         init_test("collision_wait_rejects_already_expired_budget");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         let err = reg
             .register_with_policy(
@@ -3566,7 +3650,9 @@ mod tests {
         init_test("collision_wait_fifo_ordering");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Enqueue two waiters.
         reg.register_with_policy(
@@ -3619,7 +3705,9 @@ mod tests {
         init_test("collision_wait_cleanup_region_removes_waiters");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Enqueue a waiter in region 1.
         reg.register_with_policy(
@@ -3647,7 +3735,9 @@ mod tests {
         init_test("collision_wait_cleanup_task_removes_waiters");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Enqueue a waiter from task 2.
         reg.register_with_policy(
@@ -3680,7 +3770,9 @@ mod tests {
 
         let mut reg = NameRegistry::new();
         // Task 1 in region 0 holds "svc".
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Task 2 in region 1 waits for "svc".
         reg.register_with_policy(
@@ -3720,7 +3812,8 @@ mod tests {
         init_test("cleanup_task_aborts_granted_lease_obligation");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
             .expect("should register svc for cleanup_task test");
 
         // Task 2 waits for "svc".
@@ -3756,7 +3849,8 @@ mod tests {
         init_test("collision_drain_expired_waiters");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
             .expect("should register svc for tid(1)");
 
         // Two waiters with different deadlines.
@@ -3841,7 +3935,13 @@ mod tests {
 
         // Register with Fail policy.
         let outcome = reg
-            .register_with_policy("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000), NameCollisionPolicy::Fail)
+            .register_with_policy(
+                "svc",
+                tid(1),
+                rid(0),
+                Time::from_nanos(1_000_000_000),
+                NameCollisionPolicy::Fail,
+            )
             .unwrap();
         let mut lease = match outcome {
             NameCollisionOutcome::Registered { lease } => lease,
@@ -3850,9 +3950,17 @@ mod tests {
 
         // Try again — should fail identically to register().
         let err_policy = reg
-            .register_with_policy("svc", tid(2), rid(0), Time::from_nanos(1_000_000_000), NameCollisionPolicy::Fail)
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(0),
+                Time::from_nanos(1_000_000_000),
+                NameCollisionPolicy::Fail,
+            )
             .unwrap_err();
-        let err_register = reg.register("svc", tid(3), rid(0), Time::from_nanos(1_000_000_000)).unwrap_err();
+        let err_register = reg
+            .register("svc", tid(3), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap_err();
 
         // Both should be NameTaken with holder tid(1).
         match (&err_policy, &err_register) {
@@ -3877,7 +3985,9 @@ mod tests {
         init_test("conformance_replace_lease_is_valid");
 
         let mut reg = NameRegistry::new();
-        let mut old_lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut old_lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         let outcome = reg
             .register_with_policy(
@@ -3933,7 +4043,8 @@ mod tests {
 
         let mut reg = NameRegistry::new();
         // Task 1 in region 0 holds "svc".
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
             .expect("should register svc for cross_region test");
 
         // Task 2 in region 1 waits for "svc".
@@ -3953,7 +4064,8 @@ mod tests {
         reg.cleanup_region_at(rid(0), Time::from_secs(3600));
         // The original lease obligation must be resolved even though cleanup
         // removed it from the registry.
-        lease.abort()
+        lease
+            .abort()
             .expect("should abort lease after cleanup_region");
         assert_eq!(reg.waiter_count(), 0);
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
@@ -3976,7 +4088,9 @@ mod tests {
 
         let mut reg = NameRegistry::new();
         // Task 1 holds "svc".
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Task 2 waits for "svc".
         reg.register_with_policy(
@@ -4171,11 +4285,19 @@ mod tests {
         init_test("ziwcq4_all_register_paths_produce_zero_nonce_active_entries");
         let mut reg = NameRegistry::new();
 
-        let mut l1 = reg.register("a", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l1 = reg
+            .register("a", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         assert_eq!(reg.leases.get("a").unwrap().identity_nonce, 0);
 
         let outcome = reg
-            .register_with_policy("b", tid(1), rid(0), Time::from_nanos(1_000_000_000), NameCollisionPolicy::Fail)
+            .register_with_policy(
+                "b",
+                tid(1),
+                rid(0),
+                Time::from_nanos(1_000_000_000),
+                NameCollisionPolicy::Fail,
+            )
             .unwrap();
         let mut l2 = match outcome {
             NameCollisionOutcome::Registered { lease } => lease,
@@ -4184,7 +4306,9 @@ mod tests {
         assert_eq!(reg.leases.get("b").unwrap().identity_nonce, 0);
 
         // Replace path: register c, then replace.
-        let mut l3 = reg.register("c", tid(2), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut l3 = reg
+            .register("c", tid(2), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         let outcome = reg
             .register_with_policy(
                 "c",
@@ -4239,7 +4363,9 @@ mod tests {
         // holder.
         init_test("zpanx6_unregister_with_wrong_caller_returns_permission_denied");
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Wrong caller: tid(99) attempts to drop tid(1)'s lease.
         let err = reg.unregister("svc", tid(99)).unwrap_err();
@@ -4260,7 +4386,9 @@ mod tests {
     fn zpanx6_unregister_and_grant_enforces_caller_identity_too() {
         init_test("zpanx6_unregister_and_grant_enforces_caller_identity_too");
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
 
         // Enqueue a waiter so we can verify a wrong-caller failure
         // does NOT trigger the grant side effect.
@@ -4321,7 +4449,9 @@ mod tests {
         // work when out-of-band authority is needed.
         init_test("zpanx6_force_unregister_bypasses_caller_check");
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         reg.force_unregister("svc")
             .expect("force path bypasses identity check");
         assert!(!reg.is_registered("svc"));
@@ -4332,7 +4462,9 @@ mod tests {
     fn zpanx6_force_unregister_and_grant_bypasses_caller_check_and_grants() {
         init_test("zpanx6_force_unregister_and_grant_bypasses_caller_check_and_grants");
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         reg.register_with_policy(
             "svc",
             tid(2),
@@ -4362,7 +4494,9 @@ mod tests {
         // semantics.
         init_test("zpanx6_unregister_owned_and_grant_still_works_via_force_path");
         let mut reg = NameRegistry::new();
-        let lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let lease = reg
+            .register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .unwrap();
         reg.unregister_owned_and_grant(&lease, Time::from_secs(5))
             .expect("genuine lease unregister via force-grant path");
         assert!(!reg.is_registered("svc"));
@@ -4433,7 +4567,12 @@ mod tests {
     /// continues to work.
     #[test]
     fn name_lease_description_matches_legacy_format() {
-        let lease = NameLease::new("alice-service", tid(1), rid(0), Time::from_nanos(1_000_000_000));
+        let lease = NameLease::new(
+            "alice-service",
+            tid(1),
+            rid(0),
+            Time::from_nanos(1_000_000_000),
+        );
         let want = format!("name_lease:{}", "alice-service");
         let got = lease.token.as_ref().unwrap().description();
         assert_eq!(got, want, "n4103r refactor changed description shape");
@@ -4443,7 +4582,13 @@ mod tests {
     /// NamePermit::new.
     #[test]
     fn name_permit_description_matches_legacy_format() {
-        let permit = NamePermit::new("svc-name", tid(1), rid(0), Time::from_nanos(1_000_000_000), 1);
+        let permit = NamePermit::new(
+            "svc-name",
+            tid(1),
+            rid(0),
+            Time::from_nanos(1_000_000_000),
+            1,
+        );
         let want = format!("name_permit:{}", "svc-name");
         let got = permit.token.as_ref().unwrap().description();
         assert_eq!(got, want, "n4103r refactor changed description shape");
@@ -4457,7 +4602,12 @@ mod tests {
         let empty = NameLease::new("", tid(1), rid(0), Time::from_nanos(1_000_000_000));
         assert_eq!(empty.token.as_ref().unwrap().description(), "name_lease:");
 
-        let uni = NameLease::new("сервис-α-🔒", tid(1), rid(0), Time::from_nanos(1_000_000_000));
+        let uni = NameLease::new(
+            "сервис-α-🔒",
+            tid(1),
+            rid(0),
+            Time::from_nanos(1_000_000_000),
+        );
         assert_eq!(
             uni.token.as_ref().unwrap().description(),
             "name_lease:сервис-α-🔒"

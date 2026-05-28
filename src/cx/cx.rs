@@ -4093,7 +4093,9 @@ mod tests {
 
     #[test]
     fn checkpoint_deadline_exhaustion_sets_cancel_reason() {
-        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::from_nanos(1_000_000_000)));
+        let cx = Cx::for_testing_with_budget(
+            Budget::new().with_deadline(Time::from_nanos(1_000_000_000)),
+        );
 
         assert!(cx.checkpoint().is_err());
         let reason = cx
@@ -4210,7 +4212,9 @@ mod tests {
 
     #[test]
     fn masked_checkpoint_defers_budget_exhaustion() {
-        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::from_nanos(1_000_000_000)));
+        let cx = Cx::for_testing_with_budget(
+            Budget::new().with_deadline(Time::from_nanos(1_000_000_000)),
+        );
 
         cx.masked(|| {
             assert!(
@@ -4360,18 +4364,27 @@ mod tests {
         let cx2 = cx.clone();
 
         assert_eq!(
-            cx.macaroon().expect("cx should have macaroon after with_macaroon").identifier(),
-            cx2.macaroon().expect("cloned cx should have macaroon").identifier()
+            cx.macaroon()
+                .expect("cx should have macaroon after with_macaroon")
+                .identifier(),
+            cx2.macaroon()
+                .expect("cloned cx should have macaroon")
+                .identifier()
         );
 
         // Test attenuation to verify the attenuation mechanism works
-        let attenuated_cx = cx.attenuate(CaveatPredicate::TimeBefore(u64::MAX / 2))
+        let attenuated_cx = cx
+            .attenuate(CaveatPredicate::TimeBefore(u64::MAX / 2))
             .expect("attenuation should succeed");
         assert!(
-            attenuated_cx.macaroon().expect("attenuated cx should have macaroon").is_direct_attenuation_of(
-                cx.macaroon().expect("cx should have macaroon for attenuation check"),
-                &CaveatPredicate::TimeBefore(u64::MAX / 2)
-            ),
+            attenuated_cx
+                .macaroon()
+                .expect("attenuated cx should have macaroon")
+                .is_direct_attenuation_of(
+                    cx.macaroon()
+                        .expect("cx should have macaroon for attenuation check"),
+                    &CaveatPredicate::TimeBefore(u64::MAX / 2)
+                ),
             "Cx::attenuate must install only a direct child of the parent token"
         );
     }
@@ -4385,7 +4398,10 @@ mod tests {
 
         assert_eq!(
             cx.macaroon().expect("cx should have macaroon").identifier(),
-            narrow.macaroon().expect("narrow should have macaroon").identifier()
+            narrow
+                .macaroon()
+                .expect("narrow should have macaroon")
+                .identifier()
         );
     }
 
@@ -4400,13 +4416,25 @@ mod tests {
             .expect("attenuate should succeed");
 
         // Original unchanged
-        assert_eq!(cx.macaroon().expect("cx should have macaroon").caveat_count(), 0);
+        assert_eq!(
+            cx.macaroon()
+                .expect("cx should have macaroon")
+                .caveat_count(),
+            0
+        );
         // Attenuated has one caveat
-        assert_eq!(cx2.macaroon().expect("cx2 should have macaroon").caveat_count(), 1);
+        assert_eq!(
+            cx2.macaroon()
+                .expect("cx2 should have macaroon")
+                .caveat_count(),
+            1
+        );
         // Both share the same identifier
         assert_eq!(
             cx.macaroon().expect("cx should have macaroon").identifier(),
-            cx2.macaroon().expect("cx2 should have macaroon").identifier()
+            cx2.macaroon()
+                .expect("cx2 should have macaroon")
+                .identifier()
         );
     }
 
@@ -4429,7 +4457,12 @@ mod tests {
             attenuated.is_none(),
             "oversized caveat content must fail closed instead of reaching the encoder"
         );
-        assert_eq!(cx.macaroon().expect("cx should have macaroon").caveat_count(), 0);
+        assert_eq!(
+            cx.macaroon()
+                .expect("cx should have macaroon")
+                .caveat_count(),
+            0
+        );
     }
 
     #[test]
@@ -4447,9 +4480,18 @@ mod tests {
         let attenuated = cx
             .attenuate_from_budget()
             .expect("macaroon should still be present");
-        assert_eq!(attenuated.macaroon().expect("attenuated should have macaroon").caveat_count(), 0);
         assert_eq!(
-            attenuated.macaroon().expect("attenuated should have macaroon").identifier(),
+            attenuated
+                .macaroon()
+                .expect("attenuated should have macaroon")
+                .caveat_count(),
+            0
+        );
+        assert_eq!(
+            attenuated
+                .macaroon()
+                .expect("attenuated should have macaroon")
+                .identifier(),
             cx.macaroon().expect("cx should have macaroon").identifier()
         );
     }
@@ -4464,7 +4506,13 @@ mod tests {
         let attenuated = cx
             .attenuate_from_budget()
             .expect("attenuation with deadline should succeed");
-        assert_eq!(attenuated.macaroon().expect("attenuated should have macaroon").caveat_count(), 1);
+        assert_eq!(
+            attenuated
+                .macaroon()
+                .expect("attenuated should have macaroon")
+                .caveat_count(),
+            1
+        );
     }
 
     #[test]
@@ -4542,10 +4590,14 @@ mod tests {
         let cx = test_cx().with_macaroon(token);
 
         // Attenuate with time limit
-        let cx2 = cx.attenuate(CaveatPredicate::TimeBefore(u64::MAX / 4)).expect("attenuation should succeed");
+        let cx2 = cx
+            .attenuate(CaveatPredicate::TimeBefore(u64::MAX / 4))
+            .expect("attenuation should succeed");
 
         // Further attenuate with max uses
-        let cx3 = cx2.attenuate(CaveatPredicate::MaxUses(5)).expect("second attenuation should succeed");
+        let cx3 = cx2
+            .attenuate(CaveatPredicate::MaxUses(5))
+            .expect("second attenuation should succeed");
 
         // Original has no restrictions
         let ctx = VerificationContext::new().with_time(1000);
@@ -4585,7 +4637,8 @@ mod tests {
         let ctx = VerificationContext::new();
 
         // Successful verification should emit evidence
-        cx.verify_capability(&key, "spawn:r1", &ctx).expect("capability verification should succeed");
+        cx.verify_capability(&key, "spawn:r1", &ctx)
+            .expect("capability verification should succeed");
         let entries = sink.entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].component, "cx_macaroon");
@@ -5121,7 +5174,9 @@ mod tests {
             let restricted: Cx<cap::None> = full_cx.restrict::<cap::None>();
             let _inner = restricted.set_current_restricted();
             assert_eq!(
-                Cx::current().expect("current context should be set").runtime_mask,
+                Cx::current()
+                    .expect("current context should be set")
+                    .runtime_mask,
                 cap::CapMask::none(),
                 "inside scope: restricted"
             );

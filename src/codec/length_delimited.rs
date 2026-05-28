@@ -1125,9 +1125,10 @@ mod tests {
         let err = codec.encode(payload, &mut dst).unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(err
-            .to_string()
-            .contains("encoded length exceeds length_field_length capacity"));
+        assert!(
+            err.to_string()
+                .contains("encoded length exceeds length_field_length capacity")
+        );
         assert_eq!(dst, original, "encode must not partially mutate dst");
     }
 

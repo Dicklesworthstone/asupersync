@@ -1154,7 +1154,11 @@ impl MacaroonToken {
         hasher.update(token.signature.as_bytes());
         let result = hasher.finalize();
         // Use first 8 bytes as deterministic, collision-resistant identifier
-        u64::from_be_bytes(result[..8].try_into().expect("SHA-256 output is always at least 8 bytes"))
+        u64::from_be_bytes(
+            result[..8]
+                .try_into()
+                .expect("SHA-256 output is always at least 8 bytes"),
+        )
     }
 
     fn discharge_invalid(index: usize, identifier: &str) -> VerificationError {
@@ -2159,7 +2163,8 @@ mod tests {
         let token = MacaroonToken::mint(&key, "spawn:region_1", "cx/scheduler");
 
         let bytes = token.to_binary();
-        let recovered = MacaroonToken::from_binary(&bytes).expect("binary roundtrip should succeed for token with no caveats");
+        let recovered = MacaroonToken::from_binary(&bytes)
+            .expect("binary roundtrip should succeed for token with no caveats");
 
         assert_eq!(recovered.identifier(), token.identifier());
         assert_eq!(recovered.location(), token.location());
@@ -2180,7 +2185,8 @@ mod tests {
             .add_caveat(CaveatPredicate::Custom("env".into(), "test".into()));
 
         let bytes = token.to_binary();
-        let recovered = MacaroonToken::from_binary(&bytes).expect("binary roundtrip should succeed for token with caveats");
+        let recovered = MacaroonToken::from_binary(&bytes)
+            .expect("binary roundtrip should succeed for token with caveats");
 
         assert_eq!(recovered.identifier(), token.identifier());
         assert_eq!(recovered.caveat_count(), 3);
@@ -2200,7 +2206,8 @@ mod tests {
             .add_caveat(CaveatPredicate::Custom("k".into(), "v".into()));
 
         let bytes = token.to_binary();
-        let recovered = MacaroonToken::from_binary(&bytes).expect("binary deserialization should succeed");
+        let recovered =
+            MacaroonToken::from_binary(&bytes).expect("binary deserialization should succeed");
 
         assert_eq!(recovered.caveats(), token.caveats());
         assert!(recovered.verify_signature(&key));
@@ -2245,7 +2252,8 @@ mod tests {
 
         for pred in &predicates {
             let bytes = pred.to_bytes();
-            let (recovered, consumed) = CaveatPredicate::from_bytes(&bytes).expect("predicate parsing should succeed");
+            let (recovered, consumed) =
+                CaveatPredicate::from_bytes(&bytes).expect("predicate parsing should succeed");
             assert_eq!(&recovered, pred, "Roundtrip failed for {pred:?}");
             assert_eq!(consumed, bytes.len());
         }
@@ -2335,7 +2343,9 @@ mod tests {
         let discharge = MacaroonToken::mint(&caveat_key, "user_check", "https://auth.example");
 
         // Holder binds the discharge to the authorizing token.
-        let bound_discharge = token.bind_for_request(&discharge).expect("discharge binding should succeed");
+        let bound_discharge = token
+            .bind_for_request(&discharge)
+            .expect("discharge binding should succeed");
 
         // Verifier checks everything.
         let ctx = VerificationContext::new().with_time(1000);
@@ -2422,7 +2432,8 @@ mod tests {
         // Discharge has its own first-party caveats.
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
             .add_caveat(CaveatPredicate::MaxUses(10));
-        let bound = token.bind_for_request(&discharge)
+        let bound = token
+            .bind_for_request(&discharge)
             .expect("should bind discharge for request");
 
         let ctx = VerificationContext::new().with_use_count(5);
@@ -2447,7 +2458,9 @@ mod tests {
 
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
             .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
-        let bound = token.bind_for_request(&discharge).expect("discharge binding should succeed");
+        let bound = token
+            .bind_for_request(&discharge)
+            .expect("discharge binding should succeed");
 
         // At time=500 — passes (discharge caveat satisfied).
         let ctx_ok = VerificationContext::new().with_time(500);
@@ -2481,7 +2494,9 @@ mod tests {
 
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
             .add_caveat(CaveatPredicate::MaxUses(5));
-        let bound = token.bind_for_request(&discharge).expect("discharge binding should succeed");
+        let bound = token
+            .bind_for_request(&discharge)
+            .expect("discharge binding should succeed");
 
         let ctx_ok = VerificationContext::new().with_use_count(3);
         assert!(
@@ -2509,7 +2524,8 @@ mod tests {
             .add_caveat(CaveatPredicate::MaxUses(3));
 
         let bytes = token.to_binary();
-        let recovered = MacaroonToken::from_binary(&bytes).expect("binary deserialization should succeed");
+        let recovered =
+            MacaroonToken::from_binary(&bytes).expect("binary deserialization should succeed");
 
         assert_eq!(recovered.identifier(), token.identifier());
         assert_eq!(recovered.caveat_count(), 3);
@@ -2537,8 +2553,12 @@ mod tests {
 
         let d1 = MacaroonToken::mint(&ck1, "check1", "tp1");
         let d2 = MacaroonToken::mint(&ck2, "check2", "tp2");
-        let bd1 = token.bind_for_request(&d1).expect("first discharge binding should succeed");
-        let bd2 = token.bind_for_request(&d2).expect("second discharge binding should succeed");
+        let bd1 = token
+            .bind_for_request(&d1)
+            .expect("first discharge binding should succeed");
+        let bd2 = token
+            .bind_for_request(&d2)
+            .expect("second discharge binding should succeed");
 
         let ctx = VerificationContext::new().with_time(5000).with_region(42);
         assert!(
@@ -2692,9 +2712,15 @@ mod tests {
             .add_third_party_caveat("c-loc", "discharge_c", &key_c);
         let discharge_c = MacaroonToken::mint(&key_c, "discharge_c", "c-loc");
 
-        let bound_a = token.bind_for_request(&discharge_a).expect("should bind discharge A for request");
-        let bound_b = token.bind_for_request(&discharge_b).expect("should bind discharge B for request");
-        let bound_c = token.bind_for_request(&discharge_c).expect("should bind discharge C for request");
+        let bound_a = token
+            .bind_for_request(&discharge_a)
+            .expect("should bind discharge A for request");
+        let bound_b = token
+            .bind_for_request(&discharge_b)
+            .expect("should bind discharge B for request");
+        let bound_c = token
+            .bind_for_request(&discharge_c)
+            .expect("should bind discharge C for request");
 
         token
             .verify_with_discharges(
@@ -2720,7 +2746,9 @@ mod tests {
         let outer_discharge = MacaroonToken::mint(&outer_key, "outer_check", "outer")
             .add_third_party_caveat("inner", "inner_check", &inner_key);
         let unbound_inner = MacaroonToken::mint(&inner_key, "inner_check", "inner");
-        let bound_outer = token.bind_for_request(&outer_discharge).expect("should bind outer discharge for request");
+        let bound_outer = token
+            .bind_for_request(&outer_discharge)
+            .expect("should bind outer discharge for request");
 
         let err = token
             .verify_with_discharges(
@@ -3589,7 +3617,9 @@ mod tests {
         let discharge = MacaroonToken::mint(&auth_key, "user_auth", "auth-svc");
 
         // Holder binds discharge.
-        let bound = token.bind_for_request(&discharge).expect("discharge binding should succeed");
+        let bound = token
+            .bind_for_request(&discharge)
+            .expect("discharge binding should succeed");
 
         // Verify the full chain.
         let ctx = VerificationContext::new().with_time(5000).with_region(1);
@@ -3688,7 +3718,9 @@ mod tests {
         let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
 
         assert!(!discharge.is_bound());
-        let bound = token.bind_for_request(&discharge).expect("discharge binding should succeed");
+        let bound = token
+            .bind_for_request(&discharge)
+            .expect("discharge binding should succeed");
         assert!(
             bound.is_bound(),
             "bind_for_request output must be marked bound"
@@ -3743,7 +3775,9 @@ mod tests {
             &caveat_key,
         );
         let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
-        let bound = token.bind_for_request(&discharge).expect("discharge binding should succeed");
+        let bound = token
+            .bind_for_request(&discharge)
+            .expect("discharge binding should succeed");
         assert!(bound.is_bound());
 
         let bytes = bound.to_binary();

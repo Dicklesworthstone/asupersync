@@ -1037,8 +1037,12 @@ impl GlobalProtocol {
                 forward,
                 compensate,
             } => {
-                let forward_fallthrough =
-                    Self::analyze_progress_recursive(forward, target_label, analysis, progress_seen);
+                let forward_fallthrough = Self::analyze_progress_recursive(
+                    forward,
+                    target_label,
+                    analysis,
+                    progress_seen,
+                );
                 let mut fallthrough = BTreeSet::new();
                 for path_progress in forward_fallthrough {
                     fallthrough.extend(Self::analyze_progress_recursive(
