@@ -1674,7 +1674,12 @@ impl RedisConfig {
         } else if let Some(rest) = url.strip_prefix("redis://") {
             ("redis://", rest)
         } else {
-            // No recognized scheme, redact entire URL to be safe
+            // No recognized scheme; redact the entire URL, but retain an
+            // explicit credential marker when userinfo is present so callers can
+            // assert that secrets were not emitted.
+            if url.contains('@') {
+                return "[REDACTED_INVALID_URL:***]".to_string();
+            }
             return "[REDACTED_INVALID_URL]".to_string();
         };
 
@@ -7765,6 +7770,10 @@ mod tests {
         assert_eq!(
             RedisConfig::redact_url_for_errors("http://invalid"),
             "[REDACTED_INVALID_URL]"
+        );
+        assert_eq!(
+            RedisConfig::redact_url_for_errors("http://user:secret123@localhost:6379"),
+            "[REDACTED_INVALID_URL:***]"
         );
 
         // Test with complex passwords containing special characters
