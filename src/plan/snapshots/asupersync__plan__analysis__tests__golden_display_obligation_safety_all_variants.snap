@@ -1,0 +1,9 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3140
+expression: rendered
+---
+Clean -> clean
+MayLeak -> may-leak
+Leaked -> leaked
+Unknown -> unknown
