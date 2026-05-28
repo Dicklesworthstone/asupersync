@@ -16,8 +16,10 @@
 
 use crate::channel::mpsc;
 use crate::cx::Cx;
-use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
+#[cfg(feature = "tls")]
+use crate::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
 use crate::tracing_compat::warn;
 use crate::types::Time;
 use base64::{
@@ -72,16 +74,18 @@ pub enum NatsError {
     /// Connection not established.
     NotConnected,
     /// TLS upgrade required by the server INFO frame OR mandated by
-    /// the client config (`require_tls = true`), but this client does
-    /// NOT yet implement the NATS TLS upgrade handshake. The client
-    /// fails closed before sending CONNECT to avoid leaking
-    /// credentials in cleartext (br-asupersync-2kmc12).
+    /// the client config (`require_tls = true`), but the current
+    /// build/config cannot create a TLS connector. The client fails
+    /// closed before sending CONNECT to avoid leaking credentials in
+    /// cleartext (br-asupersync-2kmc12).
     TlsRequired {
         /// True if the server's INFO frame set `tls_required`.
         server_required: bool,
         /// True if the client config set `require_tls`.
         client_required: bool,
     },
+    /// TLS connector construction or handshake failure.
+    Tls(crate::tls::TlsError),
 }
 
 impl fmt::Display for NatsError {
@@ -102,10 +106,11 @@ impl fmt::Display for NatsError {
             } => write!(
                 f,
                 "NATS TLS upgrade required (server_required={server_required}, \
-                 client_required={client_required}) but the client TLS upgrade \
-                 handshake is not yet implemented; refusing to send CONNECT in \
+                 client_required={client_required}) but no usable TLS connector \
+                 is configured for this build; refusing to send CONNECT in \
                  cleartext to avoid credential exposure (br-asupersync-2kmc12)"
             ),
+            Self::Tls(err) => write!(f, "NATS TLS error: {err}"),
         }
     }
 }
@@ -114,6 +119,7 @@ impl std::error::Error for NatsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            Self::Tls(e) => Some(e),
             _ => None,
         }
     }
@@ -250,14 +256,20 @@ pub struct NatsConfig {
     ///
     /// When `true`, OR when the server's INFO frame sets
     /// `tls_required = true`, [`NatsClient::connect_with_config`]
-    /// fails closed with [`NatsError::TlsRequired`] BEFORE sending
-    /// CONNECT, preventing the client from transmitting `user`/`pass`/
-    /// `auth_token` in cleartext over a plain TCP socket. This is the
-    /// secure default policy: TLS upgrade itself is a follow-up
-    /// (the asupersync TLS connector needs to be wired into the
-    /// stream type), but until then we MUST refuse to send credentials
-    /// in cleartext when TLS is required by either side.
+    /// performs the NATS post-INFO TLS upgrade BEFORE sending CONNECT,
+    /// preventing the client from transmitting `user`/`pass`/
+    /// `auth_token` in cleartext over a plain TCP socket. Builds
+    /// without TLS support, or TLS builds without roots/connector
+    /// configuration, fail closed before CONNECT.
     pub require_tls: bool,
+    /// TLS connector used when [`Self::require_tls`] is true or server
+    /// INFO advertises `tls_required = true`.
+    ///
+    /// If omitted in a TLS build, the client attempts to build a
+    /// default connector from enabled trust-root features:
+    /// `tls-native-roots` first, then `tls-webpki-roots`.
+    #[cfg(feature = "tls")]
+    pub tls_connector: Option<TlsConnector>,
     /// Enable automatic reconnection on TCP failures.
     pub auto_reconnect: bool,
     /// Maximum number of reconnection attempts (0 = infinite).
@@ -299,6 +311,13 @@ impl fmt::Debug for NatsConfig {
             .field("max_payload", &self.max_payload)
             .field("max_read_buffer", &self.max_read_buffer)
             .field("require_tls", &self.require_tls)
+            .field(
+                "tls_connector",
+                #[cfg(feature = "tls")]
+                &self.tls_connector.as_ref().map(|_| "<configured>"),
+                #[cfg(not(feature = "tls"))]
+                &"<tls feature disabled>",
+            )
             .finish()
     }
 }
@@ -320,6 +339,8 @@ impl Default for NatsConfig {
             max_payload: 1_048_576, // 1MB
             max_read_buffer: DEFAULT_MAX_READ_BUFFER,
             require_tls: false,
+            #[cfg(feature = "tls")]
+            tls_connector: None,
             auto_reconnect: true,
             max_reconnect_attempts: 10,
             reconnect_delay: Duration::from_millis(100),
@@ -333,13 +354,22 @@ impl NatsConfig {
     ///
     /// Format: `nats://[user:password@]host[:port]`
     ///
+    /// `tls://[user:password@]host[:port]` is also accepted and sets
+    /// [`Self::require_tls`] so the connection upgrades before
+    /// CONNECT, matching the NATS TLS URL convention.
+    ///
     /// Also supports bracketed IPv6 hosts, e.g. `nats://[::1]:4222`.
     pub fn from_url(url: &str) -> Result<Self, NatsError> {
-        let url = url
-            .strip_prefix("nats://")
-            .ok_or_else(|| NatsError::InvalidUrl(url.to_string()))?;
+        let (url, require_tls) = if let Some(url) = url.strip_prefix("nats://") {
+            (url, false)
+        } else if let Some(url) = url.strip_prefix("tls://") {
+            (url, true)
+        } else {
+            return Err(NatsError::InvalidUrl(url.to_string()));
+        };
 
         let mut config = Self::default();
+        config.require_tls = require_tls;
 
         // Parse credentials if present
         let url = if let Some((creds, rest)) = url.rsplit_once('@') {
@@ -1397,10 +1427,149 @@ impl Drop for SubscribeGuard<'_> {
     }
 }
 
+enum NatsStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(Box<TlsStream<TcpStream>>),
+    Closed,
+}
+
+impl NatsStream {
+    fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.shutdown(how),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.get_ref().shutdown(how),
+            Self::Closed => Ok(()),
+        }
+    }
+}
+
+impl From<TcpStream> for NatsStream {
+    fn from(stream: TcpStream) -> Self {
+        Self::Plain(stream)
+    }
+}
+
+impl AsyncRead for NatsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Closed => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "NATS transport is closed",
+            ))),
+        }
+    }
+}
+
+impl AsyncWrite for NatsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Closed => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "NATS transport is closed",
+            ))),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            Self::Closed => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "NATS transport is closed",
+            ))),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(stream) => stream.is_write_vectored(),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.is_write_vectored(),
+            Self::Closed => false,
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Closed => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Closed => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+fn nats_tls_server_name(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+#[cfg(feature = "tls")]
+fn build_default_nats_tls_connector() -> Result<TlsConnector, NatsError> {
+    let builder = TlsConnectorBuilder::new();
+
+    #[cfg(feature = "tls-native-roots")]
+    {
+        let builder = builder.with_native_roots().map_err(NatsError::Tls)?;
+        return builder.build().map_err(NatsError::Tls);
+    }
+
+    #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
+    {
+        return builder.with_webpki_roots().build().map_err(NatsError::Tls);
+    }
+
+    #[cfg(all(not(feature = "tls-native-roots"), not(feature = "tls-webpki-roots")))]
+    {
+        let _ = builder;
+        Err(NatsError::Tls(crate::tls::TlsError::Configuration(
+            "NATS TLS requires NatsConfig::tls_connector or a trust-root \
+             feature (tls-native-roots or tls-webpki-roots)"
+                .to_string(),
+        )))
+    }
+}
+
 /// NATS client with Cx integration.
 pub struct NatsClient {
     config: NatsConfig,
-    stream: TcpStream,
+    stream: NatsStream,
     read_buf: NatsReadBuffer,
     state: Arc<SharedState>,
     next_sid: AtomicU64,
@@ -1445,7 +1614,7 @@ impl NatsClient {
         let read_buf_limit = config.max_read_buffer;
         let mut client = Self {
             config,
-            stream,
+            stream: stream.into(),
             read_buf: NatsReadBuffer::with_limit(read_buf_limit),
             state: Arc::new(SharedState::new()),
             next_sid: AtomicU64::new(1),
@@ -1456,15 +1625,11 @@ impl NatsClient {
         // Read initial INFO from server
         let info = client.read_info(cx).await?;
 
-        // br-asupersync-2kmc12: enforce TLS-required gate BEFORE
-        // sending CONNECT (which would carry user/pass/token in
-        // cleartext). The previous implementation read info.tls_required
-        // into ServerInfo but never consulted it — credentials would
-        // leak in cleartext to any plaintext NATS server that advertised
-        // tls_required=true (or to any MitM that interposed on a
-        // plaintext socket). Until the NATS client implements a real
-        // TLS upgrade (post-INFO STARTTLS-style handshake into the
-        // asupersync TLS connector), we MUST fail closed.
+        // br-asupersync-2kmc12: enforce TLS-required BEFORE sending
+        // CONNECT (which may carry user/pass/token). NATS servers send
+        // INFO first; when INFO advertises tls_required, or the client
+        // config requires TLS, the client must perform the TLS handshake
+        // on the same TCP connection before CONNECT.
         //
         // Two trigger sources:
         //   1. Client config require_tls = true → operator policy says
@@ -1472,10 +1637,9 @@ impl NatsClient {
         //   2. Server INFO advertises tls_required = true → the server
         //      will reject (or worse, silently ignore) a plaintext
         //      CONNECT.
-        // Either trigger short-circuits before send_connect.
-        //
-        // Aborting here drops `client` (which closes the TcpStream via
-        // its Drop impl) so no CONNECT bytes ever hit the wire.
+        // Either trigger upgrades the transport. If the build/config
+        // cannot construct TLS, upgrade_to_tls fails closed before any
+        // CONNECT bytes hit the wire.
 
         // br-asupersync-8nx7g9: preserve TLS requirement decision for reconnection
         let tls_required = info.tls_required || client.config.require_tls;
@@ -1483,14 +1647,12 @@ impl NatsClient {
 
         if tls_required {
             cx.trace(&format!(
-                "nats: TLS required (server={}, client={}); refusing to \
-                 send CONNECT in cleartext",
+                "nats: TLS required (server={}, client={}); upgrading before CONNECT",
                 info.tls_required, client.config.require_tls
             ));
-            return Err(NatsError::TlsRequired {
-                server_required: info.tls_required,
-                client_required: client.config.require_tls,
-            });
+            client
+                .upgrade_to_tls(cx, info.tls_required, client.config.require_tls)
+                .await?;
         }
 
         // Enforce the server's max_payload if it is smaller than the client's.
@@ -1501,13 +1663,70 @@ impl NatsClient {
 
         *client.state.server_info.lock() = Some(info.clone());
 
-        // Send CONNECT command (now safe — TLS-required has been
-        // verified false on both sides).
+        // Send CONNECT command. If TLS was required, the stream has
+        // already been upgraded; otherwise this remains the legacy
+        // cleartext NATS handshake.
         client.send_connect(cx).await?;
         client.connected = true;
 
         cx.trace("nats: connection established");
         Ok(client)
+    }
+
+    async fn upgrade_to_tls(
+        &mut self,
+        cx: &Cx,
+        server_required: bool,
+        client_required: bool,
+    ) -> Result<(), NatsError> {
+        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
+
+        #[cfg(feature = "tls")]
+        let _ = (server_required, client_required);
+
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = self.stream.shutdown(std::net::Shutdown::Both);
+            self.stream = NatsStream::Closed;
+            let _ = cx;
+            Err(NatsError::TlsRequired {
+                server_required,
+                client_required,
+            })
+        }
+
+        #[cfg(feature = "tls")]
+        {
+            let connector = self
+                .config
+                .tls_connector
+                .clone()
+                .map_or_else(build_default_nats_tls_connector, Ok)?;
+            let server_name = nats_tls_server_name(&self.config.host).to_string();
+            let tcp_stream = match std::mem::replace(&mut self.stream, NatsStream::Closed) {
+                NatsStream::Plain(stream) => stream,
+                NatsStream::Closed => {
+                    return Err(NatsError::NotConnected);
+                }
+                NatsStream::Tls(stream) => {
+                    self.stream = NatsStream::Tls(stream);
+                    return Ok(());
+                }
+            };
+
+            cx.trace(&format!("nats: starting TLS upgrade for {server_name}"));
+            match connector.connect(&server_name, tcp_stream).await {
+                Ok(tls_stream) => {
+                    self.stream = NatsStream::Tls(Box::new(tls_stream));
+                    cx.trace("nats: TLS upgrade complete");
+                    Ok(())
+                }
+                Err(err) => {
+                    self.stream = NatsStream::Closed;
+                    Err(NatsError::Tls(err))
+                }
+            }
+        }
     }
 
     /// Read the initial INFO message from server.
@@ -1565,6 +1784,9 @@ impl NatsClient {
         connect.push_str(",\"lang\":\"rust\"");
         connect.push_str(",\"version\":\"0.1.0\"");
         connect.push_str(",\"protocol\":1");
+        if self.tls_required_on_connect {
+            connect.push_str(",\"tls_required\":true");
+        }
         // Advertise that we accept the NATS v1 message-headers extension
         // (HPUB / HMSG). The server's actual capability is reflected in
         // ServerInfo.headers, which we honour in
@@ -1691,7 +1913,7 @@ impl NatsClient {
                     ));
 
                     // Replace the stream and reset buffer
-                    self.stream = new_stream;
+                    self.stream = new_stream.into();
                     self.read_buf = NatsReadBuffer::with_limit(self.config.max_read_buffer);
                     self.connected = false;
 
@@ -1718,40 +1940,27 @@ impl NatsClient {
         // Read initial INFO from server
         let info = self.read_info(cx).await?;
 
-        // br-asupersync-8nx7g9: CRITICAL security fix - prevent TLS downgrade during reconnection
-        // Use the TLS requirement established during initial connection rather than
-        // re-evaluating from potentially manipulated server INFO. This prevents
-        // attackers from downgrading TLS requirements during reconnection.
+        // br-asupersync-8nx7g9: CRITICAL security fix - prevent TLS downgrade during reconnection.
+        // Use the TLS requirement established during initial connection as a floor, then
+        // OR in current client policy/server INFO. If TLS was ever required by the
+        // original connection, every reconnect upgrades before replaying CONNECT/SUB.
         //
         // Original issue: Reconnection re-read server INFO and could be manipulated
         // by attackers to advertise tls_required=false, bypassing original security policy.
         //
-        // Fix: Preserve the effective TLS requirement from initial connection.
-        // If TLS was required initially, it remains required for all reconnections.
-        if self.tls_required_on_connect {
+        // Fix: Preserve the effective TLS requirement from initial connection, and upgrade
+        // instead of aborting when TLS support is available.
+        let tls_required =
+            self.tls_required_on_connect || self.config.require_tls || info.tls_required;
+        self.tls_required_on_connect = tls_required;
+        if tls_required {
             cx.trace(&format!(
                 "nats: reconnection TLS requirement preserved from initial connection \
-                 (server_info_claims={}, client_config={}); refusing plaintext reconnect",
+                 (server_info_claims={}, client_config={}); upgrading before CONNECT replay",
                 info.tls_required, self.config.require_tls
             ));
-            return Err(NatsError::TlsRequired {
-                server_required: self.tls_required_on_connect,
-                client_required: self.config.require_tls,
-            });
-        }
-
-        // Additional defense: Current client config still enforces TLS
-        // (covers cases where admin updated config to be more strict after initial connection)
-        if self.config.require_tls {
-            cx.trace(&format!(
-                "nats: reconnection blocked by current client TLS requirement \
-                 (config.require_tls=true, server_claims={})",
-                info.tls_required
-            ));
-            return Err(NatsError::TlsRequired {
-                server_required: info.tls_required,
-                client_required: self.config.require_tls,
-            });
+            self.upgrade_to_tls(cx, info.tls_required, self.config.require_tls)
+                .await?;
         }
 
         // Update max_payload if server advertises a smaller limit
@@ -3047,6 +3256,11 @@ mod tests {
     use std::sync::mpsc as std_mpsc;
     use std::thread::{self, JoinHandle};
 
+    #[cfg(feature = "tls")]
+    const NATS_TEST_CERT_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.crt");
+    #[cfg(feature = "tls")]
+    const NATS_TEST_KEY_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.key");
+
     fn scrub_reply_subject(reply_to: Option<&str>) -> Option<&str> {
         let value = reply_to?;
         Some(if value.starts_with("_INBOX.") {
@@ -3287,7 +3501,7 @@ mod tests {
             let state = Arc::new(SharedState::new());
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(1),
@@ -3329,7 +3543,7 @@ mod tests {
 
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state,
                 next_sid: AtomicU64::new(8),
@@ -3379,7 +3593,7 @@ mod tests {
                 .expect("connect first reconnect client");
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream: first_stream,
+                stream: first_stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(13),
@@ -3394,7 +3608,8 @@ mod tests {
 
             client.stream = TcpStream::connect(format!("{second_addr}"))
                 .await
-                .expect("connect second reconnect client");
+                .expect("connect second reconnect client")
+                .into();
             client.read_buf = NatsReadBuffer::new();
             client.connected = false;
 
@@ -3441,7 +3656,7 @@ mod tests {
             insert_replay_subscription(&state, 42, "svc.echo", None);
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(43),
@@ -3827,6 +4042,14 @@ mod tests {
     }
 
     #[test]
+    fn test_config_from_tls_url_sets_require_tls() {
+        let config = NatsConfig::from_url("tls://localhost:4222").unwrap();
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.port, 4222);
+        assert!(config.require_tls);
+    }
+
+    #[test]
     fn test_config_from_url_ipv6() {
         let config = NatsConfig::from_url("nats://[::1]:4333").unwrap();
         assert_eq!(config.host, "[::1]");
@@ -3844,8 +4067,9 @@ mod tests {
 
     /// br-asupersync-2kmc12: when the server's INFO frame advertises
     /// `tls_required = true`, NatsClient::connect_with_config MUST
-    /// fail closed with NatsError::TlsRequired BEFORE sending the
-    /// CONNECT command. This is the credential-leak defense: the
+    /// upgrade to TLS BEFORE sending the CONNECT command. In builds
+    /// that cannot construct TLS, it must still fail closed before
+    /// plaintext CONNECT. This is the credential-leak defense: the
     /// previous implementation read tls_required into ServerInfo but
     /// never consulted it, sending CONNECT (with user/pass/token in
     /// cleartext) to a server that claimed to require TLS.
@@ -3853,9 +4077,9 @@ mod tests {
     /// The mock server scripts the wire exchange:
     ///   1. Accept the TCP connection.
     ///   2. Write an INFO frame with tls_required = true.
-    ///   3. Read whatever the client sends. Assert the client closed
-    ///      WITHOUT sending CONNECT — ANY bytes received here means
-    ///      the credential-leak bug is back.
+    ///   3. Read whatever the client sends. Plaintext CONNECT is
+    ///      forbidden; TLS ClientHello bytes are acceptable in TLS
+    ///      builds and prove the upgrade happens before credentials.
     #[test]
     fn connect_aborts_without_sending_connect_when_server_requires_tls() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
@@ -3873,23 +4097,29 @@ mod tests {
             stream.write_all(info).expect("write INFO");
             stream.flush().expect("flush INFO");
 
-            // 2. Read whatever the client sends. The client MUST close
-            //    without sending CONNECT — any bytes here would be
-            //    plaintext credentials, the very leak we're guarding
-            //    against.
+            // 2. Read whatever the client sends. The client MUST NOT
+            //    send plaintext CONNECT. TLS-enabled builds may send a
+            //    ClientHello here; this plaintext test server then
+            //    closes and the client surfaces a handshake error.
             let mut buf = [0u8; 1024];
             match stream.read(&mut buf) {
                 Ok(0) => {
-                    // Clean EOF — client closed without writing. Correct.
+                    // Clean EOF — TLS unavailable/configured fail-closed.
                 }
                 Ok(n) => {
                     let leaked = String::from_utf8_lossy(&buf[..n]);
-                    panic!(
-                        "br-asupersync-2kmc12 REGRESSION: client sent {n} bytes \
-                         after server INFO advertised tls_required=true; \
-                         payload starts with: {leaked:?}. \
-                         Credentials leaked in cleartext."
+                    assert!(
+                        !leaked.starts_with("CONNECT "),
+                        "br-asupersync-2kmc12 REGRESSION: plaintext CONNECT \
+                         sent after server INFO advertised tls_required=true; \
+                         payload starts with: {leaked:?}"
                     );
+                    assert!(
+                        !leaked.contains("secret"),
+                        "br-asupersync-2kmc12 REGRESSION: credentials leaked \
+                         before TLS handshake; payload starts with: {leaked:?}"
+                    );
+                    // Non-CONNECT bytes are expected TLS handshake bytes.
                 }
                 Err(e)
                     if matches!(
@@ -3898,9 +4128,8 @@ mod tests {
                     ) =>
                 {
                     panic!(
-                        "client did NOT close after server signalled tls_required; \
-                         it appears to be waiting on something. \
-                         The fail-closed gate may be missing or broken."
+                        "client neither closed nor attempted TLS after server \
+                         signalled tls_required"
                     );
                 }
                 Err(_) => {
@@ -3919,27 +4148,17 @@ mod tests {
                 ..Default::default()
             };
             let result = NatsClient::connect_with_config(&cx, config).await;
-            let err = result.expect_err("connect MUST fail closed when server requires TLS");
-            match err {
-                NatsError::TlsRequired {
-                    server_required,
-                    client_required,
-                } => {
-                    assert!(server_required, "server_required must be true");
-                    assert!(!client_required, "client_required must be false here");
-                }
-                other => {
-                    panic!("expected NatsError::TlsRequired, got {other:?} — gate did not fire")
-                }
-            }
+            result.expect_err(
+                "plaintext test server cannot complete TLS, but client must never send plaintext CONNECT",
+            );
         });
 
         server.join().expect("server thread join");
     }
 
-    /// br-asupersync-2kmc12: when the client config sets
-    /// require_tls = true, the same fail-closed gate fires regardless
-    /// of what the server advertises.
+    /// br-asupersync-2kmc12: when the client config sets require_tls =
+    /// true, the same pre-CONNECT TLS gate fires regardless of what
+    /// the server advertises.
     #[test]
     fn connect_aborts_without_sending_connect_when_client_requires_tls() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
@@ -3962,9 +4181,15 @@ mod tests {
             if let Ok(n) = stream.read(&mut buf) {
                 if n > 0 {
                     let leaked = String::from_utf8_lossy(&buf[..n]);
-                    panic!(
-                        "br-asupersync-2kmc12 REGRESSION: client sent {n} bytes \
-                         despite client require_tls=true; payload: {leaked:?}"
+                    assert!(
+                        !leaked.starts_with("CONNECT "),
+                        "br-asupersync-2kmc12 REGRESSION: plaintext CONNECT \
+                         sent despite client require_tls=true; payload: {leaked:?}"
+                    );
+                    assert!(
+                        !leaked.contains("secret"),
+                        "br-asupersync-2kmc12 REGRESSION: credentials leaked \
+                         before TLS handshake; payload: {leaked:?}"
                     );
                 }
             }
@@ -3980,20 +4205,86 @@ mod tests {
                 ..Default::default()
             };
             let result = NatsClient::connect_with_config(&cx, config).await;
-            let err = result.expect_err("connect MUST fail closed when client requires TLS");
-            assert!(
-                matches!(
-                    err,
-                    NatsError::TlsRequired {
-                        client_required: true,
-                        ..
-                    }
-                ),
-                "expected NatsError::TlsRequired with client_required=true, got {err:?}"
+            result.expect_err(
+                "plaintext test server cannot complete TLS, but client must never send plaintext CONNECT",
             );
         });
 
         server.join().expect("server thread join");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn connect_upgrades_to_tls_before_connect_when_server_requires_tls() {
+        use crate::io::AsyncReadExt;
+        use crate::tls::{Certificate, CertificateChain, PrivateKey, TlsAcceptorBuilder};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept TLS client");
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"test\",\"server_name\":\"test\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576,\"tls_required\":true}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            let async_stream = TcpStream::from_std(stream).expect("wrap accepted TCP stream");
+            let chain = CertificateChain::from_pem(NATS_TEST_CERT_PEM).expect("test cert chain");
+            let key = PrivateKey::from_pem(NATS_TEST_KEY_PEM).expect("test private key");
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .build()
+                .expect("build test acceptor");
+
+            futures_lite::future::block_on(async move {
+                let mut tls_stream = acceptor.accept(async_stream).await.expect("accept TLS");
+                let mut buf = [0_u8; 4096];
+                let n = tls_stream.read(&mut buf).await.expect("read TLS CONNECT");
+                assert!(n > 0, "client must send CONNECT over TLS");
+                let connect = String::from_utf8_lossy(&buf[..n]);
+                assert!(
+                    connect.starts_with("CONNECT "),
+                    "expected CONNECT over TLS, got {connect:?}"
+                );
+                assert!(
+                    connect.contains("\"tls_required\":true"),
+                    "CONNECT should advertise TLS requirement, got {connect:?}"
+                );
+                assert!(
+                    connect.contains("\"user\":\"alice\"")
+                        && connect.contains("\"pass\":\"secret\""),
+                    "credentials should be present only inside TLS, got {connect:?}"
+                );
+            });
+        });
+
+        run_test_with_cx(|cx| async move {
+            let certs = Certificate::from_pem(NATS_TEST_CERT_PEM).expect("parse test cert");
+            let connector = TlsConnectorBuilder::new()
+                .insecure_add_root_certificate(&certs[0])
+                .handshake_timeout(Duration::from_secs(2))
+                .build()
+                .expect("build test connector");
+            let config = NatsConfig {
+                host: "localhost".to_string(),
+                port: addr.port(),
+                user: Some("alice".into()),
+                password: Some("secret".into()),
+                tls_connector: Some(connector),
+                ..Default::default()
+            };
+
+            let client = NatsClient::connect_with_config(&cx, config)
+                .await
+                .expect("TLS NATS handshake should succeed");
+            assert!(
+                client.tls_required_on_connect,
+                "TLS requirement must be preserved for reconnect downgrade defense"
+            );
+        });
+
+        server.join().expect("TLS server thread join");
     }
 
     #[test]
@@ -4417,7 +4708,7 @@ mod tests {
                     max_payload: 32,
                     ..Default::default()
                 },
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state,
                 next_sid: AtomicU64::new(1),
@@ -4481,7 +4772,7 @@ mod tests {
 
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(1),
@@ -4526,7 +4817,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
@@ -4571,7 +4862,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
@@ -4650,7 +4941,7 @@ mod tests {
             let state = Arc::new(SharedState::new());
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(1),
@@ -4794,7 +5085,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
@@ -4879,7 +5170,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
@@ -5180,7 +5471,7 @@ mod tests {
                 .expect("connect client");
             let mut client = NatsClient {
                 config: NatsConfig::default(),
-                stream,
+                stream: stream.into(),
                 read_buf: NatsReadBuffer::new(),
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),

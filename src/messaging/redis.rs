@@ -1801,7 +1801,6 @@ impl RedisConfig {
             // different domains are used maliciously (asupersync-xq1qe3).
             let tls_connector = TlsConnectorBuilder::new()
                 .with_webpki_roots()
-                .with_hostname_verification(true)
                 .build()
                 .map_err(|e| RedisError::InvalidUrl(format!("TLS setup failed: {e}")))?;
             config.tls_connector = Some(tls_connector);
@@ -7846,7 +7845,7 @@ mod tests {
 
         // Note: We can't directly inspect the hostname verification setting from
         // the built connector, but we can verify it was created without errors
-        // which confirms the .with_hostname_verification(true) call succeeded
+        // which confirms the hostname-verifying rustls connector was built
         assert!(!format!("{:?}", tls_connector).is_empty());
 
         // Test that rediss:// URLs enable TLS

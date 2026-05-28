@@ -492,10 +492,10 @@ impl TlsAcceptorBuilder {
             })?;
 
         // Validate each certificate in the chain
-        for (i, cert) in chain.iter().enumerate() {
+        for (i, cert) in chain.clone().into_iter().enumerate() {
             let cert_der = cert.as_der();
             // Parse the certificate using x509-parser to check validity
-            match x509_parser::parse_x509_certificate(cert_der.as_ref()) {
+            match x509_parser::parse_x509_certificate(cert_der) {
                 Ok((_, cert)) => {
                     // Check certificate validity period
                     let validity = cert.validity();
@@ -503,7 +503,11 @@ impl TlsAcceptorBuilder {
                     // Convert ASN.1 times to Unix timestamps for comparison
                     let not_before_unix = validity.not_before.timestamp();
                     let not_after_unix = validity.not_after.timestamp();
-                    let current_unix = now.as_secs() as i64;
+                    let current_unix = i64::try_from(now.as_secs()).map_err(|_| {
+                        TlsError::Configuration(
+                            "current time exceeds i64 seconds for certificate validation".into(),
+                        )
+                    })?;
 
                     if current_unix < not_before_unix {
                         return Err(TlsError::Configuration(format!(
@@ -1067,7 +1071,7 @@ impl TlsAcceptorBuilder {
         // If the operator provides an allow-list whose protocols are
         // not advertised, no client can ever satisfy the gate.
         if let Some(allow_list) = self.sni_alpn_allow_list.as_ref() {
-            for (sni, allowed) in allow_list {
+            for allowed in allow_list.values() {
                 for protocol in allowed {
                     if !self.alpn_protocols.iter().any(|p| p == protocol) {
                         // SECURITY: br-asupersync-iz6751 — sanitize error message to prevent

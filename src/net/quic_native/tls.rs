@@ -697,12 +697,13 @@ impl QuicPacketProtectionProvider for RustlsQuicCryptoProvider {
             }
             PacketProtectionSpace::Handshake
             | PacketProtectionSpace::ZeroRtt
-            | PacketProtectionSpace::OneRtt => self.key_snapshot(space, false).or_else(|_| {
-                Err(QuicTlsError::CryptoProviderFailure {
-                    provider: self.provider_kind(),
-                    code: "rustls_key_change_required",
-                })
-            }),
+            | PacketProtectionSpace::OneRtt => {
+                self.key_snapshot(space, false)
+                    .map_err(|_| QuicTlsError::CryptoProviderFailure {
+                        provider: self.provider_kind(),
+                        code: "rustls_key_change_required",
+                    })
+            }
         }
     }
 

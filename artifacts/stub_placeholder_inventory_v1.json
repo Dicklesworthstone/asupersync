@@ -116,20 +116,6 @@
       "notes": "Macro placeholders are compile-error or documentation boundaries for builds without proc-macros, not silent runtime behavior."
     },
     {
-      "id": "src-nats-tls-upgrade-deferred",
-      "paths": [
-        "src/messaging/nats.rs"
-      ],
-      "terms": [
-        "not yet implemented",
-        "TODO"
-      ],
-      "disposition": "unsupported-fail-closed",
-      "support_class": "explicitly_unsupported",
-      "blocker_bead_id": "asupersync-2kmc12",
-      "notes": "The NATS TLS upgrade path refuses cleartext CONNECT with a stable error string and linked blocker."
-    },
-    {
       "id": "src-grpc-unimplemented-status-test-vector",
       "paths": [
         "src/grpc/streaming.rs",
