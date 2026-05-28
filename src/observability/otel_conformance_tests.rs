@@ -5018,7 +5018,7 @@ mod tests {
                 name: "basic_foreign_trace_link".to_string(),
                 current_trace_id: "12345678901234567890123456789012".to_string(), // Current span's trace
                 span_links: vec![SpanLinkInfo {
-                    trace_id: "abcdefghijklmnopqrstuvwxyz123456".to_string(), // Foreign trace
+                    trace_id: "abcdefabcdefabcdefabcdefabcdef12".to_string(), // Foreign trace
                     span_id: "fedcba0987654321".to_string(),
                     trace_state: "vendor=value".to_string(),
                     attributes: vec![("link.type".to_string(), "cross-service".to_string())],
