@@ -9,7 +9,7 @@ use std::fmt;
 use std::net::SocketAddr;
 
 /// HTTP request method.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum Method {
     /// GET
     Get,
@@ -75,6 +75,15 @@ impl Method {
 impl fmt::Display for Method {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl fmt::Debug for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Extension(method) => f.debug_tuple("Extension").field(method).finish(),
+            method => f.write_str(method.as_str()),
+        }
     }
 }
 
@@ -1123,7 +1132,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     fn scrub_snapshot_header_value(name: &str, value: &str) -> String {
         match name.to_ascii_lowercase().as_str() {
@@ -1233,7 +1242,7 @@ mod tests {
 
         let m = Method::Get;
         let dbg = format!("{m:?}");
-        assert!(dbg.contains("Get"));
+        assert_eq!(dbg, "GET");
         let cloned = m.clone();
         assert_eq!(m, cloned);
 
