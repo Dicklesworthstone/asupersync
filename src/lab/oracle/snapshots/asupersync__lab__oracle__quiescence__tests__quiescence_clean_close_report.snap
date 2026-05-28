@@ -1,5 +1,6 @@
 ---
 source: src/lab/oracle/quiescence.rs
+assertion_line: 866
 expression: snapshot_report(&oracle)
 ---
 {
@@ -7,6 +8,6 @@ expression: snapshot_report(&oracle)
   "passed": true,
   "stats": {
     "entities_tracked": 1,
-    "events_recorded": 2
+    "events_recorded": 3
   }
 }

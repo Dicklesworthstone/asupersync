@@ -1,0 +1,14 @@
+---
+source: src/atp/cache/mod.rs
+assertion_line: 758
+expression: metrics
+---
+{
+  "hits": 1500,
+  "misses": 300,
+  "evictions": 25,
+  "verification_failures": 2,
+  "total_bytes": 1048576,
+  "entry_count": 150,
+  "hit_ratio": 0.8333333333333334
+}
