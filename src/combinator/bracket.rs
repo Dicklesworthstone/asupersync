@@ -13,7 +13,7 @@
 //! noop waker complete during this drop path; futures that require external
 //! wakeups fail closed if they exhaust the bounded drop loop.
 
-use crate::cx::Cx;
+use crate::cx::{Cx, cap};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
@@ -568,7 +568,7 @@ mod tests {
         }
     }
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),

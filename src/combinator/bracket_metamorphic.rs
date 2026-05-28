@@ -12,7 +12,7 @@
 //! 4. **Panic Isolation**: A panic in `use` must still trigger `release` before propagating.
 
 use crate::combinator::bracket;
-use crate::cx::Cx;
+use crate::cx::{Cx, cap};
 use crate::lab::{LabConfig, LabRuntime};
 use crate::types::{Budget, RegionId, TaskId};
 use std::future::Future;
@@ -65,7 +65,7 @@ impl LifecycleState {
     }
 }
 
-fn test_cx() -> Cx {
+fn test_cx() -> Cx<cap::All> {
     Cx::new(
         RegionId::from_arena(crate::util::ArenaIndex::new(0, 0)),
         TaskId::from_arena(crate::util::ArenaIndex::new(0, 0)),
