@@ -181,7 +181,7 @@ mod tests {
     }
 
     /// Represents a WebSocket stream over HTTP/3 (RFC 9220)
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     pub struct WebSocketStream {
         pub stream_id: StreamId,
         pub state: WebSocketStreamState,
@@ -192,6 +192,22 @@ mod tests {
         pub close_reason: Option<CloseReason>,
         pub bytes_sent: u64,
         pub bytes_received: u64,
+    }
+
+    impl Clone for WebSocketStream {
+        fn clone(&self) -> Self {
+            Self {
+                stream_id: self.stream_id,
+                state: self.state.clone(),
+                subprotocol: self.subprotocol.clone(),
+                extensions: self.extensions.clone(),
+                upgrade_headers: self.upgrade_headers.clone(),
+                frame_codec: FrameCodec::server(),
+                close_reason: self.close_reason.clone(),
+                bytes_sent: self.bytes_sent,
+                bytes_received: self.bytes_received,
+            }
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +285,12 @@ mod tests {
             let ws_key = headers
                 .get("sec-websocket-key")
                 .ok_or_else(|| H3NativeError::InvalidFrame("Missing Sec-WebSocket-Key"))?;
+            let decoded_key = base64::engine::general_purpose::STANDARD
+                .decode(ws_key)
+                .map_err(|_| H3NativeError::InvalidFrame("Invalid Sec-WebSocket-Key"))?;
+            if decoded_key.len() != 16 {
+                return Err(H3NativeError::InvalidFrame("Invalid Sec-WebSocket-Key"));
+            }
 
             let ws_version = headers
                 .get("sec-websocket-version")
@@ -355,10 +377,7 @@ mod tests {
             }
 
             // Decode WebSocket frame
-            let frame = stream
-                .frame_codec
-                .decode_frame(frame_data)
-                .map_err(|_| H3NativeError::InvalidFrame("Invalid WebSocket frame"))?;
+            let frame = decode_ws_frame(&mut stream.frame_codec, frame_data)?;
 
             stream.bytes_received += frame_data.len() as u64;
             self.stats.write().await.websocket_frames_received += 1;
@@ -726,7 +745,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_h3_websocket_error_handling() {
-        let mut logger = H3WebSocketE2ELogger::new("h3_websocket_error_handling".to_string());
+        let logger = H3WebSocketE2ELogger::new("h3_websocket_error_handling".to_string());
         let addr = test_endpoint(3);
 
         let mut server = H3WebSocketServer::new(addr);
@@ -864,8 +883,10 @@ mod tests {
             }
 
             // Verify all streams are active
-            let active_streams = server.active_streams.lock().await;
-            assert_eq!(active_streams.len(), NUM_STREAMS);
+            {
+                let active_streams = server.active_streams.lock().await;
+                assert_eq!(active_streams.len(), NUM_STREAMS);
+            }
 
             // Close all streams
             logger
@@ -945,7 +966,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_h3_websocket_stats_accuracy() {
-        let mut logger = H3WebSocketE2ELogger::new("h3_websocket_stats_accuracy".to_string());
+        let logger = H3WebSocketE2ELogger::new("h3_websocket_stats_accuracy".to_string());
         let addr = test_endpoint(5);
 
         let mut server = H3WebSocketServer::new(addr);
