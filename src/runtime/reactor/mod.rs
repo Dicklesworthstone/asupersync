@@ -316,8 +316,10 @@ impl Events {
     /// would be fatal for edge-triggered notifications).
     pub(crate) fn push(&mut self, event: Event) {
         self.inner.push(event);
-        // SmallVec::capacity() returns the current capacity (inline or heap)
-        self.capacity = self.inner.capacity();
+        // Track the logical poll batch capacity requested by the caller, not
+        // SmallVec's inline backing capacity. Grow only when retained events
+        // exceed that logical capacity.
+        self.capacity = self.capacity.max(self.inner.len());
     }
 
     /// Returns the number of events.
