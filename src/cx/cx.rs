@@ -3412,7 +3412,13 @@ mod tests {
 
     impl Drop for CurrentCxDtorProbe {
         fn drop(&mut self) {
-            let state = if Cx::is_active() { 1 } else { 2 };
+            let state = if Cx::is_active() {
+                1
+            } else if Cx::current().is_some() {
+                2
+            } else {
+                3
+            };
             CURRENT_CX_DTOR_STATE.store(state as u8, Ordering::SeqCst);
         }
     }
@@ -3632,7 +3638,7 @@ mod tests {
             .expect("thread-local teardown should not panic when reading Cx");
         assert_eq!(
             CURRENT_CX_DTOR_STATE.load(Ordering::SeqCst),
-            2,
+            3,
             "Cx::current() should fail closed once CURRENT_CX is unavailable"
         );
     }
