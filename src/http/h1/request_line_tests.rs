@@ -55,35 +55,27 @@ mod request_line_regression_tests {
         }
     }
 
-    /// Test whitespace handling robustness
+    /// Test strict request-line delimiter handling.
     #[test]
     fn request_line_whitespace_handling() {
-        let test_cases = [
-            // Multiple spaces between components
+        let invalid_cases = [
+            // Multiple spaces between components are rejected in the default
+            // parser mode to match httparse without lenient delimiter options.
             "GET    /path    HTTP/1.1\r\n\r\n",
             "POST   /api   HTTP/1.0\r\n\r\n",
-            // Tab characters (should be rejected per HTTP spec)
+            // Tab characters are not valid request-line delimiters.
             "GET\t/path\tHTTP/1.1\r\n\r\n",
         ];
 
-        for (i, request) in test_cases.iter().enumerate() {
+        for request in invalid_cases {
             let mut codec = Http1Codec::new();
-            let mut buf = BytesMut::from(*request);
+            let mut buf = BytesMut::from(request);
 
             let result = codec.decode(&mut buf);
-            if i < 2 {
-                // Multiple spaces should be handled by slow path
-                assert!(
-                    result.is_ok(),
-                    "Failed to parse request with extra spaces: {request}",
-                );
-            } else {
-                // Tab characters should be rejected
-                assert!(
-                    result.is_err(),
-                    "Tab characters should be rejected: {request}",
-                );
-            }
+            assert!(
+                matches!(result, Err(HttpError::BadRequestLine)),
+                "malformed whitespace should be rejected: {request}",
+            );
         }
     }
 
