@@ -681,6 +681,7 @@ fn strip_comments_and_literals_for_detection(
 #[derive(Default)]
 struct AmbientDetectionLineFilter {
     pending_cfg_test: bool,
+    pending_cfg_test_item_body: bool,
     in_cfg_test_item: bool,
     cfg_test_depth: i32,
     sanitizer_state: AmbientDetectionSanitizerState,
@@ -695,6 +696,11 @@ impl AmbientDetectionLineFilter {
             return None;
         }
 
+        if self.pending_cfg_test_item_body {
+            self.start_or_continue_cfg_test_item(line);
+            return None;
+        }
+
         if trimmed == "#[cfg(test)]" {
             self.pending_cfg_test = true;
             return None;
@@ -705,14 +711,8 @@ impl AmbientDetectionLineFilter {
                 return None;
             }
             self.pending_cfg_test = false;
-            if trimmed.starts_with("mod ")
-                || trimmed.starts_with("pub mod ")
-                || trimmed.starts_with("fn ")
-                || trimmed.starts_with("pub fn ")
-                || trimmed.starts_with("async fn ")
-                || trimmed.starts_with("pub async fn ")
-            {
-                self.start_cfg_test_item(line);
+            if starts_cfg_test_item(trimmed) {
+                self.start_or_continue_cfg_test_item(line);
                 return None;
             }
         }
@@ -725,11 +725,16 @@ impl AmbientDetectionLineFilter {
         }
     }
 
-    fn start_cfg_test_item(&mut self, line: &str) {
+    fn start_or_continue_cfg_test_item(&mut self, line: &str) {
         let depth = brace_delta(line);
         if depth > 0 {
             self.in_cfg_test_item = true;
             self.cfg_test_depth = depth;
+            self.pending_cfg_test_item_body = false;
+        } else if line.trim_end().ends_with(';') {
+            self.pending_cfg_test_item_body = false;
+        } else {
+            self.pending_cfg_test_item_body = true;
         }
     }
 
@@ -748,6 +753,16 @@ fn brace_delta(line: &str) -> i32 {
         '}' => depth - 1,
         _ => depth,
     })
+}
+
+fn starts_cfg_test_item(trimmed: &str) -> bool {
+    trimmed.starts_with("mod ")
+        || trimmed.starts_with("pub mod ")
+        || trimmed.starts_with("fn ")
+        || trimmed.starts_with("pub fn ")
+        || trimmed.starts_with("async fn ")
+        || trimmed.starts_with("pub async fn ")
+        || trimmed.starts_with("impl ")
 }
 
 /// Represents a detected ambient authority violation.
@@ -1194,6 +1209,32 @@ mod tests {
     }
 
     #[test]
+    fn enhanced_patterns_exclude_split_brace_cfg_test_functions() {
+        let source = r#"
+fn production_code() {
+    let now = Instant::now();  // Should be detected
+}
+
+#[cfg(test)]
+fn test_code()
+{
+    let now = Instant::now();  // Should NOT be detected
+    thread::spawn(|| {});      // Should NOT be detected
+}
+"#;
+
+        let violations = detect_ambient_violations(source);
+
+        assert_eq!(
+            violations.len(),
+            1,
+            "cfg(test) functions with split braces must be skipped"
+        );
+        assert!(violations[0].line_content.contains("Instant::now"));
+        assert_eq!(violations[0].category, AmbientCategory::Time);
+    }
+
+    #[test]
     fn violation_type_classification() {
         let source = r#"
 use std::time::Instant as Clock;
@@ -1433,13 +1474,26 @@ fn test_function() {
     /// Uses brace-depth tracking to skip `#[cfg(test)] mod ... { }` blocks.
     fn non_test_lines(content: &str) -> Vec<(usize, String)> {
         let mut result = Vec::new();
-        let mut in_cfg_test_mod = false;
+        let mut in_cfg_test_item = false;
         let mut brace_depth: i32 = 0;
         let mut pending_cfg_test = false;
+        let mut pending_cfg_test_item_body = false;
         let mut sanitizer_state = ScanSanitizerState::default();
 
         for (idx, line) in content.lines().enumerate() {
             let trimmed = line.trim();
+
+            if pending_cfg_test_item_body {
+                let delta = brace_delta(line);
+                if delta > 0 {
+                    in_cfg_test_item = true;
+                    brace_depth = delta;
+                    pending_cfg_test_item_body = false;
+                } else if trimmed.ends_with(';') {
+                    pending_cfg_test_item_body = false;
+                }
+                continue;
+            }
 
             if trimmed == "#[cfg(test)]" {
                 pending_cfg_test = true;
@@ -1447,19 +1501,14 @@ fn test_function() {
             }
 
             if pending_cfg_test {
-                if trimmed.starts_with("mod ") {
-                    in_cfg_test_mod = true;
-                    brace_depth = 0;
+                if starts_cfg_test_item(trimmed) {
                     pending_cfg_test = false;
-                    for ch in trimmed.chars() {
-                        match ch {
-                            '{' => brace_depth += 1,
-                            '}' => brace_depth -= 1,
-                            _ => {}
-                        }
-                    }
-                    if brace_depth <= 0 {
-                        in_cfg_test_mod = false;
+                    let delta = brace_delta(line);
+                    if delta > 0 {
+                        in_cfg_test_item = true;
+                        brace_depth = delta;
+                    } else if !trimmed.ends_with(';') {
+                        pending_cfg_test_item_body = true;
                     }
                     continue;
                 }
@@ -1468,14 +1517,14 @@ fn test_function() {
                 }
             }
 
-            if in_cfg_test_mod {
+            if in_cfg_test_item {
                 for ch in line.chars() {
                     match ch {
                         '{' => brace_depth += 1,
                         '}' => {
                             brace_depth -= 1;
                             if brace_depth <= 0 {
-                                in_cfg_test_mod = false;
+                                in_cfg_test_item = false;
                             }
                         }
                         _ => {}
@@ -1743,6 +1792,38 @@ mod tests {
         assert!(
             !text.iter().any(|l| l.contains("test_code")),
             "Should exclude #[cfg(test)] module code"
+        );
+    }
+
+    #[test]
+    fn non_test_lines_filter_skips_cfg_test_functions_with_split_braces() {
+        let source = "\
+fn real_code() {
+    Instant::now();
+}
+
+#[cfg(test)]
+fn test_code()
+{
+    Instant::now();
+}
+";
+        let lines = non_test_lines(source);
+        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            text.iter().any(|l| l.contains("real_code")),
+            "Should include production code"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("test_code")),
+            "Should exclude #[cfg(test)] function signatures"
+        );
+        assert_eq!(
+            text.iter()
+                .filter(|line| line.contains("Instant::now"))
+                .count(),
+            1,
+            "Should exclude #[cfg(test)] function bodies"
         );
     }
 
