@@ -1091,7 +1091,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_framed_read_handles_partial_tcp_segments() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1163,7 +1163,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_decoder_reassembles_fragmented_messages() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1228,7 +1228,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_codec_state_consistency_across_partial_reads() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1291,7 +1291,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_variable_length_codec_with_segment_boundaries() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1347,7 +1347,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_message_fragmentation_across_multiple_segments() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1402,7 +1402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_codec_buffer_management_during_partial_reads() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {

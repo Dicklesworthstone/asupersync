@@ -1714,7 +1714,7 @@ impl WorkerPool {
 /// Test 1: Basic certificate analysis and validation
 #[tokio::test]
 async fn test_basic_certificate_analysis() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = PlanCertificateAnalysisConfig::default();
     let system = MockPlanCertificateAnalysisSystem::new(&cx, config.clone()).await?;
 
@@ -1743,7 +1743,7 @@ async fn test_basic_certificate_analysis() -> Result<(), Box<dyn std::error::Err
 /// Test 2: SLA parameter adjustment with invariant preservation
 #[tokio::test]
 async fn test_sla_parameter_adjustment() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = PlanCertificateAnalysisConfig::default();
     let system = MockPlanCertificateAnalysisSystem::new(&cx, config.clone()).await?;
 
@@ -1786,7 +1786,7 @@ async fn test_sla_parameter_adjustment() -> Result<(), Box<dyn std::error::Error
 /// Test 3: Multi-pass re-analysis with incremental changes
 #[tokio::test]
 async fn test_multi_pass_reanalysis() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = PlanCertificateAnalysisConfig::default();
     let system = MockPlanCertificateAnalysisSystem::new(&cx, config.clone()).await?;
 
@@ -1837,7 +1837,7 @@ async fn test_multi_pass_reanalysis() -> Result<(), Box<dyn std::error::Error>> 
 /// Test 4: Constraint boundary testing with edge case SLA parameters
 #[tokio::test]
 async fn test_constraint_boundary_testing() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = PlanCertificateAnalysisConfig::default();
     let system = MockPlanCertificateAnalysisSystem::new(&cx, config.clone()).await?;
 
@@ -1899,7 +1899,7 @@ async fn test_constraint_boundary_testing() -> Result<(), Box<dyn std::error::Er
 /// Test 5: Invariant stress testing with aggressive parameter changes
 #[tokio::test]
 async fn test_invariant_stress_testing() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let mut config = PlanCertificateAnalysisConfig::default();
     config.test_config.enable_stress_testing = true;
     config.test_config.stress_test_intensity = 3.0; // High intensity
@@ -1943,7 +1943,7 @@ async fn test_invariant_stress_testing() -> Result<(), Box<dyn std::error::Error
 /// Test 6: Rollback verification after invalid parameter adjustments
 #[tokio::test]
 async fn test_rollback_verification() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let mut config = PlanCertificateAnalysisConfig::default();
     config.test_config.enable_rollback_testing = true;
     let system = MockPlanCertificateAnalysisSystem::new(&cx, config.clone()).await?;
