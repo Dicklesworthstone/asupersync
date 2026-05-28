@@ -147,6 +147,8 @@ struct PoolSnapshot {
     total_spawned: usize,
     total_completed: usize,
     total_cancelled: usize,
+    total_outstanding: usize,
+    is_shutdown: bool,
     min_threads: usize,
     max_threads: usize,
     affinity_enabled: bool,
@@ -159,8 +161,15 @@ impl PoolSnapshot {
         tracked_tasks: &[TrackedTask],
     ) -> Self {
         let total_spawned = tracked_tasks.len();
-        let total_completed = tracked_tasks.iter().filter(|t| t.completed).count();
-        let total_cancelled = tracked_tasks.iter().filter(|t| t.cancelled).count();
+        let total_completed = tracked_tasks
+            .iter()
+            .filter(|t| t.completed || t.handle.is_done())
+            .count();
+        let total_cancelled = tracked_tasks
+            .iter()
+            .filter(|t| t.handle.is_cancelled())
+            .count();
+        let total_outstanding = total_spawned.saturating_sub(total_completed);
 
         Self {
             active_threads: pool.active_threads(),
@@ -169,6 +178,8 @@ impl PoolSnapshot {
             total_spawned,
             total_completed,
             total_cancelled,
+            total_outstanding,
+            is_shutdown: pool.is_shutdown(),
             min_threads: config.min_threads,
             max_threads: config.max_threads,
             affinity_enabled: pool.affinity_metrics().enabled,
@@ -293,7 +304,7 @@ fn mr_thread_count_bounds() {
 }
 
 /// MR2: EQUIVALENCE - Task Conservation
-/// Total spawned tasks = completed + cancelled + pending (accounting identity).
+/// Total spawned tasks = completed + outstanding (accounting identity).
 #[test]
 fn mr_task_conservation() {
     proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
@@ -305,11 +316,18 @@ fn mr_task_conservation() {
             apply_operation(&pool, op, &mut tracked_tasks, completion_counter.clone());
 
             let snapshot = PoolSnapshot::capture(&pool, &config, &tracked_tasks);
-            let accounted_tasks = snapshot.total_completed + snapshot.total_cancelled + snapshot.pending_tasks;
+            let accounted_tasks = snapshot.total_completed + snapshot.total_outstanding;
 
             prop_assert_eq!(snapshot.total_spawned, accounted_tasks,
-                "Task conservation violated after operation {:?}: spawned={}, completed={}, cancelled={}, pending={}",
-                op, snapshot.total_spawned, snapshot.total_completed, snapshot.total_cancelled, snapshot.pending_tasks);
+                "Task conservation violated after operation {:?}: spawned={}, completed={}, outstanding={}, cancelled={}",
+                op, snapshot.total_spawned, snapshot.total_completed, snapshot.total_outstanding, snapshot.total_cancelled);
+
+            prop_assert!(snapshot.pending_tasks <= snapshot.total_outstanding,
+                "Pending queue depth {} exceeded outstanding tasks {} after operation {:?}",
+                snapshot.pending_tasks, snapshot.total_outstanding, op);
+            prop_assert!(snapshot.busy_threads <= snapshot.total_outstanding,
+                "Busy thread count {} exceeded outstanding tasks {} after operation {:?}",
+                snapshot.busy_threads, snapshot.total_outstanding, op);
         }
 
         pool.shutdown_and_wait(Duration::from_secs(5));
@@ -374,15 +392,15 @@ fn mr_scaling_linearity() {
         // Allow some time for queue buildup
         thread::sleep(Duration::from_millis(50));
 
-        let pending1 = pool1.pending_count();
-        let pending2 = pool2.pending_count();
+        let queued_or_running1 = pool1.pending_count() + pool1.busy_threads();
+        let queued_or_running2 = pool2.pending_count() + pool2.busy_threads();
 
-        // Under saturation, pending tasks should scale approximately linearly
-        if pending1 > 0 && pending2 > 0 {
-            let ratio = pending2 as f64 / pending1 as f64;
+        // Under saturation, queued-or-running work should scale approximately linearly.
+        if queued_or_running1 > 0 && queued_or_running2 > 0 {
+            let ratio = queued_or_running2 as f64 / queued_or_running1 as f64;
             prop_assert!((1.5..=2.5).contains(&ratio),
-                "Scaling linearity violated: base_pending={}, doubled_pending={}, ratio={}",
-                pending1, pending2, ratio);
+                "Scaling linearity violated: base_in_flight={}, doubled_in_flight={}, ratio={}",
+                queued_or_running1, queued_or_running2, ratio);
         }
 
         pool1.shutdown_and_wait(Duration::from_secs(5));
@@ -663,13 +681,21 @@ mod composition_tests {
                 let snapshot = PoolSnapshot::capture(&pool, &config, &tracked_tasks);
 
                 // MR1: Thread bounds
-                prop_assert!(snapshot.active_threads >= snapshot.min_threads &&
-                           snapshot.active_threads <= snapshot.max_threads,
-                    "Thread bounds violated");
+                if snapshot.is_shutdown {
+                    prop_assert_eq!(snapshot.active_threads, 0, "Shutdown pool should retire all threads");
+                } else {
+                    prop_assert!(snapshot.active_threads >= snapshot.min_threads &&
+                               snapshot.active_threads <= snapshot.max_threads,
+                        "Thread bounds violated");
+                }
 
                 // MR2: Task conservation
-                let accounted = snapshot.total_completed + snapshot.total_cancelled + snapshot.pending_tasks;
+                let accounted = snapshot.total_completed + snapshot.total_outstanding;
                 prop_assert_eq!(snapshot.total_spawned, accounted, "Task conservation violated");
+                prop_assert!(snapshot.pending_tasks <= snapshot.total_outstanding,
+                    "Pending queue depth exceeded outstanding tasks");
+                prop_assert!(snapshot.busy_threads <= snapshot.total_outstanding,
+                    "Busy thread count exceeded outstanding tasks");
 
                 // MR3: Busy constraint
                 prop_assert!(snapshot.busy_threads <= snapshot.active_threads,

@@ -394,6 +394,7 @@ fn mr_cancel_lane_starvation_bound() {
 
         let mut cancel_dispatches = 0_usize;
         let mut ready_dispatches = 0_usize;
+        let mut ready_remaining = ready_tasks;
         let mut max_consecutive_cancel = 0;
         let mut current_cancel_streak = 0;
 
@@ -403,10 +404,13 @@ fn mr_cancel_lane_starvation_bound() {
                 // Check if this task is from cancel or ready lane
                 if cancel_task_ids.contains(&task_id) {
                     cancel_dispatches += 1;
-                    current_cancel_streak += 1;
-                    max_consecutive_cancel = max_consecutive_cancel.max(current_cancel_streak);
+                    if ready_remaining > 0 {
+                        current_cancel_streak += 1;
+                        max_consecutive_cancel = max_consecutive_cancel.max(current_cancel_streak);
+                    }
                 } else if ready_task_ids.contains(&task_id) {
                     ready_dispatches += 1;
+                    ready_remaining = ready_remaining.saturating_sub(1);
                     current_cancel_streak = 0; // Reset streak on ready dispatch
                 }
             } else {

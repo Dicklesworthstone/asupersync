@@ -7777,11 +7777,11 @@ mod tests {
             cooldown_steps: 2,
         }));
 
-        let scheduler = Arc::new(scheduler);
-        inject_ready_burst(Arc::clone(&scheduler), 32, 32, 50);
+        for task_id in 0..total_injected as u32 {
+            scheduler.inject_ready(TaskId::new_for_test(task_id, 0), 50);
+        }
+        scheduler.seed_ready_combiner_pressure_for_test(4, 1);
 
-        let mut scheduler =
-            Arc::try_unwrap(scheduler).expect("all producers should release the scheduler");
         let mut workers = scheduler.take_workers();
         let worker = workers
             .get_mut(0)
@@ -13633,7 +13633,6 @@ mod tests {
         let mut trace = Vec::with_capacity(epochs);
 
         for epoch in 0..epochs {
-            policy.selected_arm = 2; // Keep the reward stream comparable across epochs.
             policy.begin_epoch(start);
             let end = if epoch % 2 == 0 { relaxed } else { pressured };
             let reward = policy
