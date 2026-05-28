@@ -2670,8 +2670,8 @@ mod tests {
         let a = dag.leaf("a");
         let b = dag.leaf("b");
         let c = dag.leaf("c");
-        let before = dag.join(vec![a, b, c]);
-        let after = dag.join(vec![c, a, b]);
+        let before = dag.join(vec![c, a, b]);
+        let after = dag.join(vec![a, b, c]);
         dag.set_root(before);
 
         let cert = RewriteCertificate {
