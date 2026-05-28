@@ -544,11 +544,12 @@ pub fn base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
 /// but the gRPC-Web spec is permissive: many clients omit padding.
 /// `Base64StreamDecoder` accepts both:
 ///
-/// - Padded streams: `=` chars in any `push` chunk cause that chunk
-///   to be treated as the FINAL chunk, the entire combined buffer is
-///   decoded with strict STANDARD validation (which rejects
-///   misplaced padding), and the decoder is sealed. Subsequent
-///   `push` calls fail; `finish` is a no-op.
+/// - Padded streams: `=` chars mark the FINAL quartet. If the padded
+///   quartet is split across chunks, the decoder buffers it until the
+///   quartet is complete; then the entire combined buffer is decoded
+///   with strict STANDARD validation (which rejects misplaced
+///   padding), and the decoder is sealed. Subsequent `push` calls
+///   fail; `finish` is a no-op.
 /// - Unpadded streams: complete quartets decode in `push`, the
 ///   trailing 0–3 chars are buffered, and `finish` decodes them
 ///   without padding. A 1-char trailing remainder is invalid base64
@@ -607,11 +608,18 @@ impl Base64StreamDecoder {
         combined.extend_from_slice(chunk);
 
         // Padding must only appear in the FINAL quartet of the
-        // entire stream. If we see it, treat the combined buffer as
-        // the complete final input and let STANDARD validate that
-        // the padding is well-formed (correct count, correct offset,
-        // no trailing bytes after).
+        // entire stream. If the first '=' arrives before its quartet
+        // is complete (for example a final "==" split one byte at a
+        // time), buffer it until a later push completes the group.
+        // Once complete, let STANDARD validate padding placement,
+        // count, and any trailing bytes.
         if combined.contains(&b'=') {
+            if combined.len() % 4 != 0 {
+                self.pending.clear();
+                self.pending.extend_from_slice(&combined);
+                return Ok(Vec::new());
+            }
+
             use base64::Engine;
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(&combined)
