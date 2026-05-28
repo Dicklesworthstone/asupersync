@@ -16,8 +16,8 @@ use crate::util::DetHashMap;
 use core::fmt;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::types::symbol::{ObjectId, ObjectParams, SymbolId};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
@@ -1246,7 +1246,13 @@ mod tests {
         let object = test_object_id();
         let params = test_params();
 
-        let obligation = registry.create_send_object(object, &params, holder, region, Time::from_nanos(1_000_000_000));
+        let obligation = registry.create_send_object(
+            object,
+            &params,
+            holder,
+            region,
+            Time::from_nanos(1_000_000_000),
+        );
 
         // Registry should have indexed it.
         assert_eq!(registry.obligations_for_region(region).len(), 1);
@@ -1304,7 +1310,8 @@ mod tests {
         let region = test_region_id();
         let object = test_object_id();
 
-        let obligation = registry.create_decode(object, 4, holder, region, Time::from_nanos(1_000_000_000));
+        let obligation =
+            registry.create_decode(object, 4, holder, region, Time::from_nanos(1_000_000_000));
         assert_eq!(obligation.kind(), SymbolicObligationKind::DecodeObject);
         assert_eq!(obligation.progress().total, 4);
 
@@ -1331,9 +1338,15 @@ mod tests {
         let object = test_object_id();
         let params = test_params();
 
-        let older_obligation =
-            registry.create_send_object(object, &params, older, region, Time::from_nanos(1_000_000_000));
-        let newer_obligation = registry.create_acknowledge(object, 1, newer, region, Time::from_nanos(1_000_000_000));
+        let older_obligation = registry.create_send_object(
+            object,
+            &params,
+            older,
+            region,
+            Time::from_nanos(1_000_000_000),
+        );
+        let newer_obligation =
+            registry.create_acknowledge(object, 1, newer, region, Time::from_nanos(1_000_000_000));
 
         assert_eq!(
             registry.obligations_for_task(older),
@@ -1357,9 +1370,15 @@ mod tests {
         let object = test_object_id();
         let params = test_params();
 
-        let older_obligation =
-            registry.create_send_object(object, &params, holder, older, Time::from_nanos(1_000_000_000));
-        let newer_obligation = registry.create_acknowledge(object, 1, holder, newer, Time::from_nanos(1_000_000_000));
+        let older_obligation = registry.create_send_object(
+            object,
+            &params,
+            holder,
+            older,
+            Time::from_nanos(1_000_000_000),
+        );
+        let newer_obligation =
+            registry.create_acknowledge(object, 1, holder, newer, Time::from_nanos(1_000_000_000));
 
         assert_eq!(
             registry.obligations_for_region(older),
@@ -1381,7 +1400,8 @@ mod tests {
         let region = test_region_id();
         let object = test_object_id();
 
-        let obligation = registry.create_acknowledge(object, 8, holder, region, Time::from_nanos(1_000_000_000));
+        let obligation =
+            registry.create_acknowledge(object, 8, holder, region, Time::from_nanos(1_000_000_000));
         assert_eq!(
             obligation.kind(),
             SymbolicObligationKind::AcknowledgeReceipt

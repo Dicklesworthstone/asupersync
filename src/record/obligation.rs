@@ -709,7 +709,13 @@ mod tests {
     fn double_commit_panics() {
         init_test("double_commit_panics");
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::IoOp, tid, rid, Time::from_nanos(1_000_000_000));
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::IoOp,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
         ob.commit(Time::from_nanos(1_000_000_000));
         ob.commit(Time::from_nanos(1_000_000_000)); // Should panic
     }
@@ -719,9 +725,21 @@ mod tests {
     fn double_abort_panics() {
         init_test("double_abort_panics");
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::IoOp, tid, rid, Time::from_nanos(1_000_000_000));
-        ob.abort(Time::from_nanos(1_000_000_000), ObligationAbortReason::Explicit);
-        ob.abort(Time::from_nanos(1_000_000_000), ObligationAbortReason::Explicit); // Should panic
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::IoOp,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
+        ob.abort(
+            Time::from_nanos(1_000_000_000),
+            ObligationAbortReason::Explicit,
+        );
+        ob.abort(
+            Time::from_nanos(1_000_000_000),
+            ObligationAbortReason::Explicit,
+        ); // Should panic
     }
 
     #[test]
@@ -729,8 +747,17 @@ mod tests {
     fn commit_after_abort_panics() {
         init_test("commit_after_abort_panics");
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, Time::from_nanos(1_000_000_000));
-        ob.abort(Time::from_nanos(1_000_000_000), ObligationAbortReason::Cancel);
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
+        ob.abort(
+            Time::from_nanos(1_000_000_000),
+            ObligationAbortReason::Cancel,
+        );
         ob.commit(Time::from_nanos(1_000_000_000)); // Should panic
     }
 
@@ -739,7 +766,13 @@ mod tests {
     fn mark_leaked_after_commit_panics() {
         init_test("mark_leaked_after_commit_panics");
         let (oid, tid, rid) = test_ids();
-        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, Time::from_nanos(1_000_000_000));
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
         ob.commit(Time::from_nanos(1_000_000_000));
         ob.mark_leaked(Time::from_nanos(1_000_000_000)); // Should panic
     }
@@ -923,7 +956,13 @@ mod tests {
     #[test]
     fn obligation_record_new_defaults() {
         let (oid, tid, rid) = test_ids();
-        let ob = ObligationRecord::new(oid, ObligationKind::IoOp, tid, rid, Time::from_nanos(1_000_000_000));
+        let ob = ObligationRecord::new(
+            oid,
+            ObligationKind::IoOp,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
         assert_eq!(ob.state, ObligationState::Reserved);
         assert!(ob.description.is_none());
         assert!(ob.resolved_at.is_none());
@@ -935,7 +974,13 @@ mod tests {
     #[test]
     fn obligation_record_debug() {
         let (oid, tid, rid) = test_ids();
-        let ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, Time::from_nanos(1_000_000_000));
+        let ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
         let dbg = format!("{ob:?}");
         assert!(dbg.contains("ObligationRecord"));
         assert!(dbg.contains("SendPermit"));

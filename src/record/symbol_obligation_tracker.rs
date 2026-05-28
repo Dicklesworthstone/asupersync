@@ -4,7 +4,7 @@
 //! obligation protocol ([`ObligationRecord`]). Provides epoch-aware validity
 //! windows, deadline-based expiry, and RAII guards for automatic resolution.
 
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
 
 use crate::record::obligation::{
@@ -596,7 +596,8 @@ impl Drop for ObligationGuard<'_> {
     fn drop(&mut self) {
         if !self.resolved {
             // Best-effort abort with zero time (runtime can set proper time)
-            self.tracker.resolve(self.id, false, Time::from_nanos(1_000_000_000));
+            self.tracker
+                .resolve(self.id, false, Time::from_nanos(1_000_000_000));
         }
     }
 }
@@ -633,8 +634,16 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let mut ob =
-            SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::from_nanos(1_000_000_000));
+        let mut ob = SymbolObligation::transmit(
+            oid,
+            tid,
+            rid,
+            symbol_id,
+            dest,
+            None,
+            None,
+            Time::from_nanos(1_000_000_000),
+        );
 
         assert!(ob.is_pending());
         ob.commit(Time::from_millis(100));
@@ -649,8 +658,16 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let mut ob =
-            SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::from_nanos(1_000_000_000));
+        let mut ob = SymbolObligation::transmit(
+            oid,
+            tid,
+            rid,
+            symbol_id,
+            dest,
+            None,
+            None,
+            Time::from_nanos(1_000_000_000),
+        );
 
         ob.abort(Time::from_millis(100));
         assert_eq!(ob.state(), ObligationState::Aborted);
@@ -666,7 +683,15 @@ mod tests {
             end: EpochId(20),
         };
 
-        let ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window, Time::from_nanos(1_000_000_000));
+        let ob = SymbolObligation::decoding(
+            oid,
+            tid,
+            rid,
+            object_id,
+            10,
+            window,
+            Time::from_nanos(1_000_000_000),
+        );
 
         assert!(!ob.is_epoch_valid(EpochId(5))); // Before window
         assert!(ob.is_epoch_valid(EpochId(10))); // Start of window
@@ -682,7 +707,14 @@ mod tests {
         let object_id = ObjectId::new_for_test(1);
         let deadline = Time::from_millis(1000);
 
-        let ob = SymbolObligation::lease(oid, tid, rid, object_id, deadline, Time::from_nanos(1_000_000_000));
+        let ob = SymbolObligation::lease(
+            oid,
+            tid,
+            rid,
+            object_id,
+            deadline,
+            Time::from_nanos(1_000_000_000),
+        );
 
         assert!(!ob.is_expired(Time::from_millis(500)));
         assert!(ob.is_expired(Time::from_millis(1000)));
@@ -699,7 +731,16 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::from_nanos(1_000_000_000));
+        let ob = SymbolObligation::transmit(
+            oid,
+            tid,
+            rid,
+            symbol_id,
+            dest,
+            None,
+            None,
+            Time::from_nanos(1_000_000_000),
+        );
 
         let id = tracker.register(ob);
         assert_eq!(tracker.pending_count(), 1);
@@ -721,8 +762,16 @@ mod tests {
         let first_symbol = SymbolId::new_for_test(11, 0, 0);
         let second_symbol = SymbolId::new_for_test(12, 0, 0);
 
-        let first =
-            SymbolObligation::transmit(oid, tid, rid, first_symbol, dest, None, None, Time::from_nanos(1_000_000_000));
+        let first = SymbolObligation::transmit(
+            oid,
+            tid,
+            rid,
+            first_symbol,
+            dest,
+            None,
+            None,
+            Time::from_nanos(1_000_000_000),
+        );
         tracker.register(first);
         assert_eq!(tracker.by_symbol(first_symbol).len(), 1);
 
@@ -789,7 +838,16 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let ob = SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::from_nanos(1_000_000_000));
+        let ob = SymbolObligation::transmit(
+            oid,
+            tid,
+            rid,
+            symbol_id,
+            dest,
+            None,
+            None,
+            Time::from_nanos(1_000_000_000),
+        );
 
         let id = tracker.register(ob);
         let resolved = tracker.resolve(id, true, Time::from_millis(100));
@@ -810,9 +868,24 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let ob1 =
-            SymbolObligation::transmit(oid1, tid, rid, symbol_id, dest, None, None, Time::from_nanos(1_000_000_000));
-        let ob2 = SymbolObligation::ack(oid2, tid, rid, symbol_id, dest, Time::from_nanos(1_000_000_000));
+        let ob1 = SymbolObligation::transmit(
+            oid1,
+            tid,
+            rid,
+            symbol_id,
+            dest,
+            None,
+            None,
+            Time::from_nanos(1_000_000_000),
+        );
+        let ob2 = SymbolObligation::ack(
+            oid2,
+            tid,
+            rid,
+            symbol_id,
+            dest,
+            Time::from_nanos(1_000_000_000),
+        );
 
         tracker.register(ob1);
         let id2 = tracker.register(ob2);
@@ -839,7 +912,15 @@ mod tests {
             end: EpochId(20),
         };
 
-        let ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window, Time::from_nanos(1_000_000_000));
+        let ob = SymbolObligation::decoding(
+            oid,
+            tid,
+            rid,
+            object_id,
+            10,
+            window,
+            Time::from_nanos(1_000_000_000),
+        );
         tracker.register(ob);
 
         // Epoch 15 is valid, nothing aborted
@@ -864,7 +945,14 @@ mod tests {
         let object_id = ObjectId::new_for_test(1);
         let deadline = Time::from_millis(1000);
 
-        let ob = SymbolObligation::lease(oid, tid, rid, object_id, deadline, Time::from_nanos(1_000_000_000));
+        let ob = SymbolObligation::lease(
+            oid,
+            tid,
+            rid,
+            object_id,
+            deadline,
+            Time::from_nanos(1_000_000_000),
+        );
         tracker.register(ob);
 
         // Before deadline
@@ -889,7 +977,15 @@ mod tests {
             end: EpochId(100),
         };
 
-        let mut ob = SymbolObligation::decoding(oid, tid, rid, object_id, 10, window, Time::from_nanos(1_000_000_000));
+        let mut ob = SymbolObligation::decoding(
+            oid,
+            tid,
+            rid,
+            object_id,
+            10,
+            window,
+            Time::from_nanos(1_000_000_000),
+        );
 
         // Initial state
         if let SymbolObligationKind::DecodingInProgress {
@@ -916,7 +1012,14 @@ mod tests {
         let (oid, tid, rid) = test_ids();
         let symbol_id = SymbolId::new_for_test(42, 0, 0);
 
-        let mut ob = SymbolObligation::ack(oid, tid, rid, symbol_id, rid, Time::from_nanos(1_000_000_000));
+        let mut ob = SymbolObligation::ack(
+            oid,
+            tid,
+            rid,
+            symbol_id,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
 
         let result = ob.update_decoding_progress(1);
         assert_eq!(
@@ -935,7 +1038,15 @@ mod tests {
             end: EpochId(2),
         };
 
-        let mut ob = SymbolObligation::decoding(oid, tid, rid, object_id, 3, window, Time::from_nanos(1_000_000_000));
+        let mut ob = SymbolObligation::decoding(
+            oid,
+            tid,
+            rid,
+            object_id,
+            3,
+            window,
+            Time::from_nanos(1_000_000_000),
+        );
         let result = ob.update_decoding_progress(4);
         assert_eq!(
             result,
@@ -963,7 +1074,15 @@ mod tests {
             end: EpochId(2),
         };
 
-        let mut ob = SymbolObligation::decoding(oid, tid, rid, object_id, 6, window, Time::from_nanos(1_000_000_000));
+        let mut ob = SymbolObligation::decoding(
+            oid,
+            tid,
+            rid,
+            object_id,
+            6,
+            window,
+            Time::from_nanos(1_000_000_000),
+        );
         assert!(ob.update_decoding_progress(4).is_ok());
 
         let result = ob.update_decoding_progress(2);
@@ -991,8 +1110,16 @@ mod tests {
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
         let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-        let mut ob =
-            SymbolObligation::transmit(oid, tid, rid, symbol_id, dest, None, None, Time::from_nanos(1_000_000_000));
+        let mut ob = SymbolObligation::transmit(
+            oid,
+            tid,
+            rid,
+            symbol_id,
+            dest,
+            None,
+            None,
+            Time::from_nanos(1_000_000_000),
+        );
 
         ob.commit(Time::from_millis(100));
         ob.commit(Time::from_millis(200)); // Should panic
@@ -1004,7 +1131,14 @@ mod tests {
         let (oid, tid, rid) = test_ids();
         let symbol_id = SymbolId::new_for_test(1, 0, 0);
 
-        let ob = SymbolObligation::ack(oid, tid, rid, symbol_id, rid, Time::from_nanos(1_000_000_000));
+        let ob = SymbolObligation::ack(
+            oid,
+            tid,
+            rid,
+            symbol_id,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
 
         assert!(ob.is_epoch_valid(EpochId(0)));
         assert!(ob.is_epoch_valid(EpochId(u64::MAX)));
