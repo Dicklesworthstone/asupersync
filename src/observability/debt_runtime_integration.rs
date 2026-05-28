@@ -114,7 +114,7 @@ impl DebtRuntimeIntegration {
     /// Stop background monitoring.
     pub fn stop_monitoring(&mut self) {
         {
-            let mut shutdown = self.shutdown.lock().unwrap();
+            let mut shutdown = self.shutdown.lock().expect("shutdown mutex should not be poisoned");
             *shutdown = true;
         }
 
@@ -334,7 +334,7 @@ impl DebtRuntimeIntegration {
         loop {
             // Check shutdown signal
             {
-                let should_shutdown = *shutdown.lock().unwrap();
+                let should_shutdown = *shutdown.lock().expect("shutdown mutex should not be poisoned in monitoring loop");
                 if should_shutdown {
                     break;
                 }
@@ -753,13 +753,13 @@ mod tests {
         let shutdown_for_sleeper = shutdown.clone();
 
         let virtual_sleeper: DebtMonitorSleeper = Arc::new(move |d: Duration| {
-            let mut log = log_for_sleeper.lock().unwrap();
+            let mut log = log_for_sleeper.lock().expect("sleeper log mutex should not be poisoned");
             log.push(d);
             // After max_calls iterations, set shutdown so the loop
             // exits — preserves the loop semantics test without
             // hanging the test process.
             if log.len() >= max_calls {
-                *shutdown_for_sleeper.lock().unwrap() = true;
+                *shutdown_for_sleeper.lock().expect("sleeper shutdown mutex should not be poisoned") = true;
             }
             // No real sleep — we're under virtual time semantics.
         });
@@ -776,7 +776,7 @@ mod tests {
             virtual_sleeper,
         );
 
-        let calls = sleep_log.lock().unwrap();
+        let calls = sleep_log.lock().expect("sleep log mutex should not be poisoned");
         assert!(
             calls.len() >= max_calls,
             "loop should have called the sleeper at least {max_calls} times, got {}",
@@ -795,14 +795,14 @@ mod tests {
         let probe = Arc::new(Mutex::new(0u32));
         let probe_for_sleeper = probe.clone();
         let sleeper: DebtMonitorSleeper = Arc::new(move |_d| {
-            *probe_for_sleeper.lock().unwrap() += 1;
+            *probe_for_sleeper.lock().expect("probe mutex should not be poisoned in sleeper") += 1;
         });
         let integration = DebtRuntimeIntegration::default().with_sleeper(sleeper.clone());
         // Direct invocation of the captured sleeper to confirm the
         // field carries our closure (not the std::thread::sleep
         // default).
         (integration.sleeper)(Duration::from_secs(0));
-        assert_eq!(*probe.lock().unwrap(), 1);
+        assert_eq!(*probe.lock().expect("probe mutex should not be poisoned for assertion"), 1);
     }
 
     /// br-asupersync-p9wth4 — Verify the panic-counter API on
