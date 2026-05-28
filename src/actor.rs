@@ -972,10 +972,14 @@ async fn wait_supervised_restart_delay(cx: &Cx, delay: Duration) -> Outcome<(), 
         return Outcome::ok(());
     }
 
-    let now = cx
-        .timer_driver()
-        .map_or_else(crate::time::wall_now, |td| td.now());
-    let mut sleeper = crate::time::sleep(now, delay);
+    let mut sleeper = cx.timer_driver().map_or_else(
+        || crate::time::sleep(crate::time::wall_now(), delay),
+        |driver| {
+            let delay_nanos = u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX);
+            let deadline = driver.now().saturating_add_nanos(delay_nanos);
+            crate::time::Sleep::with_timer_driver(deadline, driver)
+        },
+    );
     std::future::poll_fn(|task_cx| {
         if cx.checkpoint().is_err() {
             return std::task::Poll::Ready(Outcome::err(actor_cancel_join_error(cx)));
@@ -2174,6 +2178,47 @@ mod tests {
         );
 
         crate::test_complete!("supervised_restart_window_expires_without_timer_driver");
+    }
+
+    #[test]
+    fn supervised_restart_delay_uses_explicit_timer_driver_without_ambient_cx() {
+        init_test("supervised_restart_delay_uses_explicit_timer_driver_without_ambient_cx");
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(4, 0),
+            TaskId::new_for_test(4, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut wait = Box::pin(wait_supervised_restart_delay(&cx, Duration::from_millis(5)));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(
+            Future::poll(wait.as_mut(), &mut task_cx),
+            Poll::Pending
+        ));
+
+        clock.advance(5_000_000);
+        assert_eq!(
+            timer.process_timers(),
+            1,
+            "restart delay must register with the explicit timer driver"
+        );
+
+        assert!(matches!(
+            Future::poll(wait.as_mut(), &mut task_cx),
+            Poll::Ready(Outcome::Ok(()))
+        ));
+
+        crate::test_complete!(
+            "supervised_restart_delay_uses_explicit_timer_driver_without_ambient_cx"
+        );
     }
 
     #[test]
