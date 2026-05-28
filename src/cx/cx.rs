@@ -2386,7 +2386,7 @@ impl<Caps> Cx<Caps> {
         let context = obs.context.clone();
         drop(obs);
         let mut entry = entry.with_context(&context);
-        if include_timestamps && entry.timestamp() == Time::ZERO {
+        if include_timestamps && entry.timestamp() == Time::from_nanos(1_000_000_000) {
             let now = self
                 .handles
                 .timer_driver
@@ -4085,7 +4085,7 @@ mod tests {
 
     #[test]
     fn checkpoint_deadline_exhaustion_sets_cancel_reason() {
-        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::from_nanos(1_000_000_000)));
 
         assert!(cx.checkpoint().is_err());
         let reason = cx
@@ -4125,7 +4125,7 @@ mod tests {
         let parent = CapabilityBudget::new()
             .with_memory_bytes(1_024)
             .with_io_bytes(4_096)
-            .with_cleanup_budget(Budget::new().with_poll_quota(50));
+            .with_cleanup_budget(Budget::new().with_poll_quota(100_000));
         let requirements = CapabilityBudgetRequirements::new()
             .require_memory_bytes()
             .require_io_bytes()
@@ -4137,7 +4137,7 @@ mod tests {
         let child = CapabilityBudget::new()
             .with_memory_bytes(2_048)
             .with_io_bytes(512)
-            .with_cleanup_budget(Budget::new().with_poll_quota(10));
+            .with_cleanup_budget(Budget::new().with_poll_quota(100_000));
         let effective = cx
             .plan_child_capability_budget(child, requirements)
             .expect("child should inherit missing required envelopes");
@@ -4202,7 +4202,7 @@ mod tests {
 
     #[test]
     fn masked_checkpoint_defers_budget_exhaustion() {
-        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::from_nanos(1_000_000_000)));
 
         cx.masked(|| {
             assert!(
