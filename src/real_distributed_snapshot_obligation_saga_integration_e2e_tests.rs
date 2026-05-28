@@ -387,6 +387,7 @@ mod tests {
                 state: RegionState::Open,
                 timestamp: current_time,
                 sequence: 1,
+                vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
                 origin_id: 42,
                 epoch: 1,
                 tasks: task_snapshots,
@@ -400,6 +401,7 @@ mod tests {
                 cancel_reason: None,
                 parent: None,
                 metadata: rollback_metadata,
+                auth_tag: crate::security::AuthenticationTag::zero(),
             };
 
             let capture_duration = capture_start.elapsed();

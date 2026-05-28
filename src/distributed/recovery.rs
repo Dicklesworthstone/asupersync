@@ -1468,6 +1468,7 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 42,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: vec![TaskSnapshot {
@@ -1485,6 +1486,7 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![1, 2, 3, 4],
+            auth_tag: AuthenticationTag::zero(),
         };
 
         // 2. Encode it.
@@ -1663,6 +1665,7 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 1,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: vec![TaskSnapshot {
@@ -1680,6 +1683,7 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![],
+            auth_tag: AuthenticationTag::zero(),
         }
     }
 

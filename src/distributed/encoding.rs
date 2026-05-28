@@ -568,6 +568,7 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 1,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: vec![TaskSnapshot {
@@ -585,6 +586,7 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![],
+            auth_tag: crate::security::AuthenticationTag::zero(),
         }
     }
 
@@ -594,6 +596,7 @@ mod tests {
             state: RegionState::Closing,
             timestamp: Time::from_secs(321),
             sequence: 9,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: 7,
             epoch: 2,
             tasks: vec![
@@ -618,6 +621,7 @@ mod tests {
             cancel_reason: Some("timeout: extension fields".to_string()),
             parent: Some(RegionId::new_for_test(2, 0)),
             metadata: vec![0xde, 0xad, 0xbe, 0xef, 0x10, 0x20],
+            auth_tag: crate::security::AuthenticationTag::zero(),
         }
     }
 
