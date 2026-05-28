@@ -1726,11 +1726,11 @@ mod tests {
     fn name_lease_lifecycle() {
         init_test("name_lease_lifecycle");
 
-        let mut lease = NameLease::new("my_server", tid(1), rid(0), Time::from_secs(1));
+        let mut lease = NameLease::new("my_server", tid(1), rid(0), Time::from_secs(3600));
         assert_eq!(lease.name(), "my_server");
         assert_eq!(lease.holder(), tid(1));
         assert_eq!(lease.region(), rid(0));
-        assert_eq!(lease.acquired_at(), Time::from_secs(1));
+        assert_eq!(lease.acquired_at(), Time::from_secs(3600));
         assert!(lease.is_active());
 
         let proof = lease.release().unwrap();
@@ -1787,7 +1787,7 @@ mod tests {
         assert!(reg.is_empty());
 
         let mut lease = reg
-            .register("my_server", tid(1), rid(0), Time::from_secs(1))
+            .register("my_server", tid(1), rid(0), Time::from_secs(3600))
             .unwrap();
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.whereis("my_server"), Some(tid(1)));
@@ -1809,7 +1809,7 @@ mod tests {
 
         let mut reg = NameRegistry::new();
         let permit = reg
-            .reserve("svc", tid(1), rid(0), Time::from_secs(1))
+            .reserve("svc", tid(1), rid(0), Time::from_secs(3600))
             .expect("reserve ok");
 
         // Reserved names are not visible until committed.
@@ -1830,17 +1830,17 @@ mod tests {
 
         let mut reg = NameRegistry::new();
         let mut permit = reg
-            .reserve("svc", tid(1), rid(0), Time::from_secs(1))
+            .reserve("svc", tid(1), rid(0), Time::from_secs(3600))
             .expect("reserve ok");
 
         // Abort the permit obligation and cancel the pending entry.
         permit.abort().unwrap();
-        reg.cancel_permit(&permit, Time::from_secs(1))
+        reg.cancel_permit(&permit, Time::from_secs(3600))
             .expect("cancel permit");
 
         // Now the name can be registered normally.
         let mut lease = reg
-            .register("svc", tid(2), rid(0), Time::from_secs(2))
+            .register("svc", tid(2), rid(0), Time::from_secs(3600))
             .unwrap();
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
         lease.release().unwrap();
@@ -1890,7 +1890,7 @@ mod tests {
 
         // Registry should no longer consider the name taken.
         let mut lease = reg
-            .register("svc", tid(2), rid(0), Time::from_secs(1))
+            .register("svc", tid(2), rid(0), Time::from_secs(3600))
             .unwrap();
         lease.release().unwrap();
 
@@ -2034,7 +2034,7 @@ mod tests {
 
         // Re-register same name with different task
         let mut l2 = reg
-            .register("reusable", tid(2), rid(0), Time::from_secs(1))
+            .register("reusable", tid(2), rid(0), Time::from_secs(3600))
             .unwrap();
         assert_eq!(reg.whereis("reusable"), Some(tid(2)));
         l2.release().unwrap();
@@ -2110,7 +2110,7 @@ mod tests {
         let _waiter_enqueued = RegistryEvent::WaiterEnqueued {
             name: "svc".into(),
             holder: tid(2),
-            deadline: Time::from_secs(60),
+            deadline: Time::from_secs(3600),
         };
         let _waiter_granted = RegistryEvent::WaiterGranted {
             name: "svc".into(),
@@ -3941,16 +3941,16 @@ mod tests {
             "svc",
             tid(2),
             rid(1),
-            Time::from_secs(1),
+            Time::from_secs(3600),
             NameCollisionPolicy::Wait {
-                deadline: Time::from_secs(60),
+                deadline: Time::from_secs(7200),
             },
         )
         .expect("should register waiter in different region");
         assert_eq!(reg.waiter_count(), 1);
 
         // Cleanup region 0 (holder region) should free "svc" and grant to task 2.
-        reg.cleanup_region_at(rid(0), Time::from_secs(2));
+        reg.cleanup_region_at(rid(0), Time::from_secs(3600));
         // The original lease obligation must be resolved even though cleanup
         // removed it from the registry.
         lease.abort()
