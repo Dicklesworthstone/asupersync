@@ -748,7 +748,32 @@ mod tests {
 
     #[test]
     fn canonical_fixed_seed_key_node_mapping() {
-        insta::assert_json_snapshot!(canonical_fixed_seed_key_node_mapping_snapshot());
+        assert_eq!(
+            canonical_fixed_seed_key_node_mapping_snapshot(),
+            json!({
+                "assignments": [
+                    { "key": "blob:deadbeef", "node": "node-b" },
+                    { "key": "blob:cafebabe", "node": "node-a" },
+                    { "key": "order:000001", "node": "node-a" },
+                    { "key": "order:000128", "node": "node-a" },
+                    { "key": "region:us-east-1", "node": "node-d" },
+                    { "key": "region:eu-west-1", "node": "node-c" },
+                    { "key": "route:/v1/health", "node": "node-c" },
+                    { "key": "route:/v1/orders/42", "node": "node-b" },
+                    { "key": "session:0001", "node": "node-c" },
+                    { "key": "session:1042", "node": "node-d" },
+                    { "key": "tenant:acme/invoices", "node": "node-c" },
+                    { "key": "tenant:acme/orders/99", "node": "node-b" },
+                    { "key": "tenant:globex/alerts", "node": "node-d" },
+                    { "key": "user:alice", "node": "node-c" },
+                    { "key": "user:bob", "node": "node-d" },
+                    { "key": "user:zoe", "node": "node-a" },
+                ],
+                "nodes": ["node-a", "node-b", "node-c", "node-d"],
+                "seed": 1_592_642_302_u64,
+                "vnodes_per_node": 32,
+            })
+        );
     }
 
     /// Metamorphic relation: permuting node insertion order must not change
