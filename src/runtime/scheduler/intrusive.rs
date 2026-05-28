@@ -991,6 +991,29 @@ mod tests {
         drained_by_worker
     }
 
+    fn round_robin_dispatch_order(drained_by_worker: &[Vec<TaskId>]) -> Vec<TaskId> {
+        let max_depth = drained_by_worker
+            .iter()
+            .map(std::vec::Vec::len)
+            .max()
+            .unwrap_or(0);
+        let total_len = drained_by_worker
+            .iter()
+            .map(std::vec::Vec::len)
+            .sum::<usize>();
+        let mut ordered = Vec::with_capacity(total_len);
+
+        for depth in 0..max_depth {
+            for worker_drained in drained_by_worker {
+                if let Some(task_id) = worker_drained.get(depth) {
+                    ordered.push(*task_id);
+                }
+            }
+        }
+
+        ordered
+    }
+
     fn pop_all_stack(stack: &mut IntrusiveStack, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
         let mut popped = Vec::new();
         while let Some(task_id) = stack.pop(arena) {
@@ -1337,7 +1360,7 @@ mod tests {
         let expected = pop_all_ring(&mut baseline, &mut baseline_arena);
         let drained_by_worker =
             pop_all_ring_round_robin(&mut distributed, &mut distributed_arena, worker_count);
-        let actual: Vec<_> = drained_by_worker.iter().flatten().copied().collect();
+        let actual = round_robin_dispatch_order(&drained_by_worker);
 
         assert_eq!(actual, expected);
         assert_eq!(actual.len(), task_count as usize);
