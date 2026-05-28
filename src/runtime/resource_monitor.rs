@@ -2886,30 +2886,274 @@ mod platform {
     }
 
     #[cfg(windows)]
-    fn unsupported_windows<T>(what: &'static str) -> std::io::Result<T> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!(
-                "resource_monitor: {what} is not implemented on Windows yet. \
-                 Wire a platform-specific collector via \
-                 ResourceMonitor::register_resource."
-            ),
-        ))
-    }
-
-    #[cfg(windows)]
+    #[allow(unsafe_code)]
     pub fn process_fd_count() -> std::io::Result<u64> {
-        unsupported_windows("process_fd_count")
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+        let mut handle_count = 0u32;
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle valid in
+        // the current process, and `handle_count` is a valid out pointer.
+        let ok = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut handle_count) };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(u64::from(handle_count))
+        }
     }
 
     #[cfg(windows)]
     pub fn load_avg_1min_scaled() -> std::io::Result<u64> {
-        unsupported_windows("load_avg_1min_scaled")
+        let current = windows_cpu_times()?;
+        let mut previous = WINDOWS_CPU_TIMES
+            .lock()
+            .map_err(|_| std::io::Error::other("windows CPU sampler state mutex was poisoned"))?;
+
+        let scaled = previous.map_or(0, |prev| {
+            let total_delta = current.total().saturating_sub(prev.total());
+            if total_delta == 0 {
+                return 0;
+            }
+            let idle_delta = current.idle.saturating_sub(prev.idle);
+            let busy_delta = total_delta.saturating_sub(idle_delta);
+            ((busy_delta.saturating_mul(100) + (total_delta / 2)) / total_delta).min(100)
+        });
+        *previous = Some(current);
+        Ok(scaled)
     }
 
     #[cfg(windows)]
+    #[allow(unsafe_code)]
     pub fn process_connection_count() -> std::io::Result<u64> {
-        unsupported_windows("process_connection_count")
+        use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+
+        // SAFETY: `GetCurrentProcessId` is a pure Win32 query with no preconditions.
+        let pid = unsafe { GetCurrentProcessId() };
+        let mut total = 0u64;
+        let mut successful_tables = 0u8;
+        let mut first_error = None;
+
+        for result in [
+            windows_tcp_owner_pid_count(pid, windows_address_family::IPV4),
+            windows_tcp_owner_pid_count(pid, windows_address_family::IPV6),
+            windows_udp_owner_pid_count(pid, windows_address_family::IPV4),
+            windows_udp_owner_pid_count(pid, windows_address_family::IPV6),
+        ] {
+            match result {
+                Ok(count) => {
+                    total = total.saturating_add(count);
+                    successful_tables = successful_tables.saturating_add(1);
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+
+        if successful_tables == 0 {
+            Err(first_error.unwrap_or_else(|| {
+                std::io::Error::other("no Windows TCP/UDP owner tables were sampled")
+            }))
+        } else {
+            Ok(total)
+        }
+    }
+
+    #[cfg(windows)]
+    #[derive(Clone, Copy)]
+    struct WindowsCpuTimes {
+        idle: u64,
+        kernel: u64,
+        user: u64,
+    }
+
+    #[cfg(windows)]
+    impl WindowsCpuTimes {
+        fn total(self) -> u64 {
+            self.kernel.saturating_add(self.user)
+        }
+    }
+
+    #[cfg(windows)]
+    static WINDOWS_CPU_TIMES: std::sync::Mutex<Option<WindowsCpuTimes>> =
+        std::sync::Mutex::new(None);
+
+    #[cfg(windows)]
+    fn filetime_to_u64(filetime: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+        (u64::from(filetime.dwHighDateTime) << 32) | u64::from(filetime.dwLowDateTime)
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn windows_cpu_times() -> std::io::Result<WindowsCpuTimes> {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::GetSystemTimes;
+
+        let mut idle = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: all three pointers reference initialized FILETIME
+        // storage for Win32 to overwrite.
+        let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+        if ok == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(WindowsCpuTimes {
+                idle: filetime_to_u64(idle),
+                kernel: filetime_to_u64(kernel),
+                user: filetime_to_u64(user),
+            })
+        }
+    }
+
+    #[cfg(windows)]
+    mod windows_address_family {
+        pub const IPV4: u32 = windows_sys::Win32::Networking::WinSock::AF_INET as u32;
+        pub const IPV6: u32 = windows_sys::Win32::Networking::WinSock::AF_INET6 as u32;
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn windows_ip_table(
+        mut fetch: impl FnMut(*mut core::ffi::c_void, *mut u32) -> u32,
+    ) -> std::io::Result<Vec<u8>> {
+        use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
+
+        let mut size = 0u32;
+        let first = fetch(core::ptr::null_mut(), &mut size);
+        if first == NO_ERROR && size == 0 {
+            return Ok(Vec::new());
+        }
+        if first != ERROR_INSUFFICIENT_BUFFER && first != NO_ERROR {
+            return Err(std::io::Error::from_raw_os_error(first as i32));
+        }
+
+        for _ in 0..4 {
+            if size == 0 {
+                return Ok(Vec::new());
+            }
+            let mut buffer = vec![0u8; size as usize];
+            let result = fetch(buffer.as_mut_ptr().cast(), &mut size);
+            match result {
+                NO_ERROR => {
+                    buffer.truncate(size as usize);
+                    return Ok(buffer);
+                }
+                ERROR_INSUFFICIENT_BUFFER => continue,
+                code => return Err(std::io::Error::from_raw_os_error(code as i32)),
+            }
+        }
+
+        Err(std::io::Error::other(
+            "Windows IP owner table grew during repeated sampling attempts",
+        ))
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn count_windows_owner_pid_rows<Row>(
+        table_name: &'static str,
+        buffer: &[u8],
+        pid: u32,
+        row_owner_pid: impl Fn(Row) -> u32,
+    ) -> std::io::Result<u64>
+    where
+        Row: Copy,
+    {
+        let row_offset = std::mem::size_of::<u32>();
+        let row_size = std::mem::size_of::<Row>();
+        if buffer.len() < row_offset {
+            return Ok(0);
+        }
+        if row_size == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{table_name} has zero-sized rows"),
+            ));
+        }
+
+        let entries = u32::from_ne_bytes(buffer[0..4].try_into().expect("slice length checked"));
+        let available_rows = (buffer.len() - row_offset) / row_size;
+        let entries = usize::try_from(entries).unwrap_or(usize::MAX);
+        if entries > available_rows {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{table_name} reported {entries} entries but buffer held {available_rows}"),
+            ));
+        }
+
+        let rows_ptr = buffer[row_offset..].as_ptr().cast::<Row>();
+        let mut count = 0u64;
+        for index in 0..entries {
+            // SAFETY: bounds are checked above and the table buffer is a
+            // byte buffer returned by Win32, so use unaligned reads.
+            let row = unsafe { std::ptr::read_unaligned(rows_ptr.add(index)) };
+            if row_owner_pid(row) == pid {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn windows_tcp_owner_pid_count(pid: u32, family: u32) -> std::io::Result<u64> {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
+            TCP_TABLE_OWNER_PID_ALL,
+        };
+
+        let buffer = windows_ip_table(|table, size| {
+            // SAFETY: `windows_ip_table` provides either a null probe
+            // pointer or a writable buffer with the size advertised in
+            // `size`; the remaining arguments follow the IP Helper
+            // contract for owner-PID tables.
+            unsafe { GetExtendedTcpTable(table, size, 0, family, TCP_TABLE_OWNER_PID_ALL, 0) }
+        })?;
+
+        if family == windows_address_family::IPV6 {
+            count_windows_owner_pid_rows(
+                "MIB_TCP6TABLE_OWNER_PID",
+                &buffer,
+                pid,
+                |row: MIB_TCP6ROW_OWNER_PID| row.dwOwningPid,
+            )
+        } else {
+            count_windows_owner_pid_rows(
+                "MIB_TCPTABLE_OWNER_PID",
+                &buffer,
+                pid,
+                |row: MIB_TCPROW_OWNER_PID| row.dwOwningPid,
+            )
+        }
+    }
+
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn windows_udp_owner_pid_count(pid: u32, family: u32) -> std::io::Result<u64> {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetExtendedUdpTable, MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID, UDP_TABLE_OWNER_PID,
+        };
+
+        let buffer = windows_ip_table(|table, size| {
+            // SAFETY: same shape as the TCP owner-table call above.
+            unsafe { GetExtendedUdpTable(table, size, 0, family, UDP_TABLE_OWNER_PID, 0) }
+        })?;
+
+        if family == windows_address_family::IPV6 {
+            count_windows_owner_pid_rows(
+                "MIB_UDP6TABLE_OWNER_PID",
+                &buffer,
+                pid,
+                |row: MIB_UDP6ROW_OWNER_PID| row.dwOwningPid,
+            )
+        } else {
+            count_windows_owner_pid_rows(
+                "MIB_UDPTABLE_OWNER_PID",
+                &buffer,
+                pid,
+                |row: MIB_UDPROW_OWNER_PID| row.dwOwningPid,
+            )
+        }
     }
 
     // ----- Unsupported platforms (others) -----------------------------------
@@ -3046,9 +3290,18 @@ mod platform {
         Ok((cur, max))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     pub fn fd_rlimit() -> std::io::Result<(u64, u64)> {
-        // No portable Win32 equivalent of RLIMIT_NOFILE; default to a
+        const WINDOWS_PROCESS_HANDLE_PRESSURE_CEILING: u64 = 1 << 24;
+        Ok((
+            WINDOWS_PROCESS_HANDLE_PRESSURE_CEILING,
+            WINDOWS_PROCESS_HANDLE_PRESSURE_CEILING,
+        ))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub fn fd_rlimit() -> std::io::Result<(u64, u64)> {
+        // No portable equivalent of RLIMIT_NOFILE; default to a
         // conservative pair and let the operator override via custom
         // resource collectors.
         Ok((512, 1024))
@@ -3226,7 +3479,9 @@ impl SystemResourceCollector {
     /// - Linux: count entries in `/proc/self/fd`.
     /// - macOS/BSD: count entries in `/dev/fd` (the per-process
     ///   symlink directory exposed by `fdescfs`).
-    /// - All Unix: max from `getrlimit(RLIMIT_NOFILE)`.
+    /// - Windows: count process handles with `GetProcessHandleCount`
+    ///   and compare against a fixed high-water synthetic ceiling.
+    /// - Unix: max from `getrlimit(RLIMIT_NOFILE)`.
     fn collect_fd_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
         let current_fds_result = self.observe_probe(
             ResourceProbe::ProcessFdCount,
@@ -3265,7 +3520,9 @@ impl SystemResourceCollector {
     /// - Linux: read first column of `/proc/loadavg` (1-minute load
     ///   average), normalize by core count, scale to 0..100.
     /// - macOS/BSD: `getloadavg(3)`, same normalization.
-    /// - Windows / other: `SystemAccessFailed`.
+    /// - Windows: sample `GetSystemTimes` deltas and scale busy CPU
+    ///   time to 0..100.
+    /// - Other platforms: `SystemAccessFailed`.
     fn collect_cpu_load(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
         let load_avg_1min = self
             .observe_probe(
@@ -3290,6 +3547,8 @@ impl SystemResourceCollector {
     ///   as a conservative upper bound on open sockets (libproc would
     ///   give an exact answer but pulls in a transitive `mach2` dep
     ///   the project doesn't otherwise need).
+    /// - Windows: count current-process TCP/UDP owner-PID rows through
+    ///   the IP Helper tables and use the synthetic handle ceiling.
     fn collect_network_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
         let current_connections_result = self.observe_probe(
             ResourceProbe::ProcessConnectionCount,
@@ -3308,9 +3567,9 @@ impl SystemResourceCollector {
             current_connections_result.map_err(|e| ResourceMonitorError::SystemAccessFailed {
                 reason: format!("connection count: {e}"),
             })?;
-        // Sockets share the FD table, so the connection ceiling is at
-        // most RLIMIT_NOFILE. Use a reasonable fallback when the
-        // rlimit is unavailable.
+        // Sockets share the descriptor/handle table, so the connection
+        // ceiling is capped by the platform descriptor ceiling. Use a
+        // reasonable fallback when that limit is unavailable.
         let (_, hard_max) = fd_limit_result.unwrap_or((512, 1024));
         let max_limit = if hard_max == 0 { 1024 } else { hard_max };
         let (soft_limit, hard_limit) = derive_thresholds(max_limit, 70, 85);

@@ -294,6 +294,8 @@ io-uring = { version = "0.7", optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     "Win32_System_Threading",
 ] }
 

@@ -127,3 +127,43 @@ fn track_i_process_parity_artifacts_mark_windows_as_track_i_scope() {
         "process lifecycle json must preserve PR-G3 deferred-to Track-I linkage"
     );
 }
+
+#[test]
+fn track_i_resource_monitor_uses_real_windows_platform_probes() {
+    let monitor_src = load_source("src/runtime/resource_monitor.rs");
+    let cargo_toml = load_source("Cargo.toml");
+
+    assert!(
+        !monitor_src.contains("not implemented on Windows yet"),
+        "resource monitor must not keep Windows probe stubs"
+    );
+
+    for token in [
+        "GetProcessHandleCount",
+        "GetSystemTimes",
+        "GetExtendedTcpTable",
+        "GetExtendedUdpTable",
+        "TCP_TABLE_OWNER_PID_ALL",
+        "UDP_TABLE_OWNER_PID",
+        "MIB_TCPROW_OWNER_PID",
+        "MIB_TCP6ROW_OWNER_PID",
+        "MIB_UDPROW_OWNER_PID",
+        "MIB_UDP6ROW_OWNER_PID",
+        "WINDOWS_PROCESS_HANDLE_PRESSURE_CEILING",
+    ] {
+        assert!(
+            monitor_src.contains(token),
+            "resource monitor missing real Windows probe token: {token}"
+        );
+    }
+
+    for feature in [
+        "\"Win32_NetworkManagement_IpHelper\"",
+        "\"Win32_Networking_WinSock\"",
+    ] {
+        assert!(
+            cargo_toml.contains(feature),
+            "Cargo.toml must enable windows-sys feature {feature}"
+        );
+    }
+}
