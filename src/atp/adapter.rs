@@ -21,12 +21,16 @@ use std::time::{Duration, SystemTime};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AdapterType {
     /// Native ATP over native QUIC (baseline)
+    #[serde(rename = "native-quic")]
     NativeQuic,
     /// ATP over HTTP/3 with WebTransport streams/datagrams
+    #[serde(rename = "webtransport")]
     WebTransport,
     /// ATP over MASQUE/CONNECT-UDP for proxy traversal
+    #[serde(rename = "masque-connect-udp")]
     MasqueConnectUdp,
     /// ATP over TCP/TLS 443 fallback for hostile networks
+    #[serde(rename = "tcp-tls-443")]
     TcpTlsFallback,
 }
 
@@ -603,7 +607,7 @@ impl AdapterManager {
             ),
             RequiredFeature::StreamProtocol => matches!(
                 parity.stream_support,
-                FeatureSupport::Full | FeatureSupport::Partial
+                FeatureSupport::Full | FeatureSupport::Partial | FeatureSupport::Downgraded
             ),
             RequiredFeature::ProofGeneration => matches!(
                 parity.proof_support,
@@ -611,11 +615,11 @@ impl AdapterManager {
             ),
             RequiredFeature::RepairCapabilities => matches!(
                 parity.repair_support,
-                FeatureSupport::Full | FeatureSupport::Partial
+                FeatureSupport::Full | FeatureSupport::Partial | FeatureSupport::Downgraded
             ),
             RequiredFeature::SwarmCoordination => matches!(
                 parity.swarm_support,
-                FeatureSupport::Full | FeatureSupport::Partial
+                FeatureSupport::Full | FeatureSupport::Partial | FeatureSupport::Downgraded
             ),
         }
     }

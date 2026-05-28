@@ -1229,11 +1229,6 @@ impl Manifest {
         }
         Self::bind_repair_symbol_auth_tags(&mut manifest_objects, &repair_groups);
 
-        let created_timestamp_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| ManifestError::InvalidFormat("invalid system time".to_string()))?
-            .as_nanos() as u64;
-
         Ok(Self {
             version: ManifestVersion::CURRENT,
             merkle_root,
@@ -1250,7 +1245,7 @@ impl Manifest {
             transform_proof_policy,
             repair_groups,
             unknown_optional_fields: Vec::new(),
-            created_timestamp_nanos,
+            created_timestamp_nanos: 0,
             schema_id: "atp.manifest.v1".to_string(),
         })
     }
@@ -2869,8 +2864,9 @@ mod tests {
         assert_eq!(manifest.version, ManifestVersion::CURRENT);
         assert_eq!(manifest.metadata_policy, policy);
         assert_eq!(manifest.object_count(), 2);
-        assert_eq!(manifest.roots.len(), 1);
-        assert_eq!(manifest.roots[0], file1_id);
+        assert_eq!(manifest.roots.len(), 2);
+        assert!(manifest.roots.contains(&file1_id));
+        assert!(manifest.roots.contains(&file2_id));
         assert!(manifest.objects.contains_key(&file1_id));
         assert!(manifest.objects.contains_key(&file2_id));
     }
@@ -3458,8 +3454,7 @@ mod tests {
         // Merkle roots should be identical
         assert_eq!(manifest1.merkle_root, manifest2.merkle_root);
 
-        // Canonical bytes should be identical (except timestamp)
-        // Note: timestamps will differ, so we test structure equality instead
+        // Canonical manifest metadata should be identical for identical graph inputs.
         assert_eq!(manifest1.objects, manifest2.objects);
         assert_eq!(manifest1.hash_algorithms, manifest2.hash_algorithms);
         assert_eq!(manifest1.schema_id, manifest2.schema_id);

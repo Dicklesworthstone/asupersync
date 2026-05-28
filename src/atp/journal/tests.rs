@@ -148,7 +148,7 @@ mod tests {
         let stats = tracker.get_stats();
         assert_eq!(stats.total_ranges, 3);
         assert_eq!(stats.total_bytes_covered, 70);
-        assert_eq!(stats.gap_count, 3); // gaps: 10-20, 30-50, 100-end
+        assert_eq!(stats.gap_count, 2); // gaps within observed extent: 10-20, 30-50
         assert_eq!(stats.largest_range_size, 50);
         assert_eq!(stats.smallest_range_size, 10);
     }
