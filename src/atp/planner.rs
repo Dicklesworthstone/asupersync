@@ -988,8 +988,15 @@ mod tests {
         let profile = planner.generate_chunking_profile(&object_graph);
 
         assert_eq!(profile.chunk_size, 64 * 1024);
-        assert_eq!(profile.estimated_chunks, 17); // (1048576 + 65535) / 65536 = 17
+        assert_eq!(profile.estimated_chunks, 16); // exact 1MiB / 64KiB boundary
         assert_eq!(profile.repair_overhead_ratio, 0.1);
+
+        let non_aligned_graph = ObjectGraphSummary {
+            total_bytes: (1024 * 1024) + 1,
+            ..object_graph
+        };
+        let non_aligned_profile = planner.generate_chunking_profile(&non_aligned_graph);
+        assert_eq!(non_aligned_profile.estimated_chunks, 17);
     }
 
     #[test]
