@@ -5952,10 +5952,12 @@ mod tests {
 
                 // Cooperative async wait that remains pending past the 5ms
                 // grpc-timeout budget, giving dispatch_unary's timeout race a
-                // deterministic cancellation point.
+                // deterministic cancellation point. A finite sleep can become
+                // ready alongside the timeout under scheduler delay, and
+                // TimeoutFuture intentionally prefers ready inner work at the
+                // boundary.
                 futures_lite::future::yield_now().await;
-                let _ =
-                    crate::time::sleep(crate::time::wall_now(), Duration::from_millis(20)).await;
+                std::future::pending::<()>().await;
 
                 handler_completed_clone.store(true, Ordering::Relaxed);
                 Ok::<Response<Bytes>, Status>(Response::new(req.into_inner()))
@@ -5970,6 +5972,10 @@ mod tests {
                 result.is_err(),
                 "Request should fail with DEADLINE_EXCEEDED for async operations"
             );
+            assert!(
+                !handler_completed.load(Ordering::Relaxed),
+                "Timed-out async handler should be dropped before completion"
+            );
 
             if let Err(ref status) = result {
                 assert_eq!(
@@ -5978,13 +5984,6 @@ mod tests {
                     "Should return DEADLINE_EXCEEDED status"
                 );
             }
-
-            // Handler may or may not complete depending on timing, but the request should fail
-            eprintln!(
-                "{{\"audit\":\"DEADLINE_ENFORCEMENT_ASYNC\",\"status\":\"SOUND\",\"handler_completed\":{},\"request_failed\":{}}}",
-                handler_completed.load(Ordering::Relaxed),
-                result.is_err()
-            );
 
             crate::test_complete!("audit_deadline_enforcement_works_for_async_operations");
         }
