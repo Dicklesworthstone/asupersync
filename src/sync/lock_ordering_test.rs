@@ -4,7 +4,7 @@
 mod tests {
     use super::super::contended_mutex::ContendedMutex;
     use super::super::rwlock::RwLock;
-    use crate::cx::Cx;
+    use crate::cx::{Cx, cap};
     use crate::types::{Budget, RegionId, TaskId};
     use crate::util::ArenaIndex;
     use std::sync::Arc;
@@ -172,7 +172,7 @@ mod tests {
     }
 
     /// Helper function for RwLock tests
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),

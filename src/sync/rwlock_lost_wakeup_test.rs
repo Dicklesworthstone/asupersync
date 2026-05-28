@@ -11,7 +11,7 @@
 //! - Lock preference policies and fairness guarantees
 
 use super::RwLock;
-use crate::cx::Cx;
+use crate::cx::{Cx, cap};
 use crate::types::{Budget, RegionId, TaskId};
 use crate::util::ArenaIndex;
 use std::future::Future;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
-fn test_cx() -> Cx {
+fn test_cx() -> Cx<cap::All> {
     Cx::new(
         RegionId::from_arena(ArenaIndex::new(0, 0)),
         TaskId::from_arena(ArenaIndex::new(0, 0)),
