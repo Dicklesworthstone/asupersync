@@ -364,6 +364,10 @@ impl FileSystemObjectStore {
         path
     }
 
+    fn is_hash_path_component(name: &str, expected_len: usize) -> bool {
+        name.len() == expected_len && name.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit())
+    }
+
     fn current_time_nanos() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nanos = SystemTime::now()
@@ -481,19 +485,87 @@ impl ObjectStore for FileSystemObjectStore {
     async fn list_objects(&self, _cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
         let mut hashes = Vec::new();
 
-        let mut read_dir = try_atp!(crate::fs::read_dir(&self.base_path).await, |_| {
-            AtpError::Disk(DiskError::IoError)
-        });
+        let mut first_level = match crate::fs::read_dir(&self.base_path).await {
+            Ok(read_dir) => read_dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return AtpOutcome::ok(hashes);
+            }
+            Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+        };
 
-        while let Some(entry) = try_atp!(read_dir.next_entry().await, |_| AtpError::Disk(
-            DiskError::IoError
-        )) {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(hash) = ObjectHash::from_hex(name) {
-                    hashes.push(hash);
+        while let Some(dir1_entry) = try_atp!(first_level.next_entry().await, |_| {
+            AtpError::Disk(DiskError::IoError)
+        }) {
+            let Some(dir1) = dir1_entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !Self::is_hash_path_component(&dir1, 2) {
+                continue;
+            }
+
+            let file_type = try_atp!(dir1_entry.file_type().await, |_| AtpError::Disk(
+                DiskError::IoError
+            ));
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let mut second_level = try_atp!(crate::fs::read_dir(dir1_entry.path()).await, |_| {
+                AtpError::Disk(DiskError::IoError)
+            });
+
+            while let Some(dir2_entry) = try_atp!(second_level.next_entry().await, |_| {
+                AtpError::Disk(DiskError::IoError)
+            }) {
+                let Some(dir2) = dir2_entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !Self::is_hash_path_component(&dir2, 2) {
+                    continue;
+                }
+
+                let file_type = try_atp!(dir2_entry.file_type().await, |_| AtpError::Disk(
+                    DiskError::IoError
+                ));
+                if !file_type.is_dir() {
+                    continue;
+                }
+
+                let mut object_entries =
+                    try_atp!(crate::fs::read_dir(dir2_entry.path()).await, |_| {
+                        AtpError::Disk(DiskError::IoError)
+                    });
+
+                while let Some(object_entry) = try_atp!(object_entries.next_entry().await, |_| {
+                    AtpError::Disk(DiskError::IoError)
+                }) {
+                    let Some(object_name) = object_entry.file_name().to_str().map(str::to_owned)
+                    else {
+                        continue;
+                    };
+                    if object_name.ends_with(".meta")
+                        || !Self::is_hash_path_component(&object_name, 60)
+                    {
+                        continue;
+                    }
+
+                    let file_type = try_atp!(object_entry.file_type().await, |_| {
+                        AtpError::Disk(DiskError::IoError)
+                    });
+                    if !file_type.is_file() {
+                        continue;
+                    }
+
+                    let hash_hex = format!("{dir1}{dir2}{object_name}");
+                    if let Ok(hash) = ObjectHash::from_hex(&hash_hex) {
+                        hashes.push(hash);
+                    }
                 }
             }
         }
+
+        hashes.sort();
+        hashes.dedup();
 
         AtpOutcome::ok(hashes)
     }
