@@ -29,7 +29,7 @@ impl DeadlineMonitorFixture {
         let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
         let warnings_capture = Arc::clone(&warnings);
         monitor.on_warning(move |warning| {
-            warnings_capture.lock().unwrap().push(warning);
+            warnings_capture.lock().expect("warning capture mutex should not be poisoned").push(warning);
         });
 
         Self { monitor, warnings }
@@ -57,11 +57,11 @@ impl DeadlineMonitorFixture {
     }
 
     fn get_warnings(&self) -> Vec<super::deadline_monitor::DeadlineWarning> {
-        self.warnings.lock().unwrap().clone()
+        self.warnings.lock().expect("warnings mutex should not be poisoned for get_warnings").clone()
     }
 
     fn clear_warnings(&self) {
-        self.warnings.lock().unwrap().clear();
+        self.warnings.lock().expect("warnings mutex should not be poisoned for clear_warnings").clear();
     }
 }
 
