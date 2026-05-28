@@ -173,8 +173,20 @@ pub mod utils {
             }
         }
 
-        // Add final boundary if not already present
+        // Add final boundary if not already present. Avoid creating a tiny
+        // final chunk when it can be merged into the preceding chunk without
+        // violating the max-size bound.
         if last_boundary < data_len {
+            let final_chunk_size = data_len - last_boundary;
+            if final_chunk_size < min_chunk_size && !boundaries.is_empty() {
+                let previous_start = boundaries
+                    .get(boundaries.len().saturating_sub(2))
+                    .copied()
+                    .unwrap_or(0);
+                if data_len - previous_start <= max_chunk_size {
+                    boundaries.pop();
+                }
+            }
             boundaries.push(data_len);
         }
 
