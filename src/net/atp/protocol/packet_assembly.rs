@@ -567,10 +567,16 @@ mod tests {
 
         let packet = assembler.assemble_packet().unwrap().unwrap();
 
-        // Should only contain PING and CRYPTO frames
-        assert_eq!(packet.frames.len(), 2);
-        assert!(matches!(packet.frames[0], QuicFrame::Crypto { .. })); // Higher priority
-        assert!(matches!(packet.frames[1], QuicFrame::Ping));
+        // Initial packets may be padded to the transport minimum, so filter
+        // padding before checking packet-number-space frame filtering.
+        let non_padding_frames: Vec<_> = packet
+            .frames
+            .iter()
+            .filter(|frame| !matches!(frame, QuicFrame::Padding { .. }))
+            .collect();
+        assert_eq!(non_padding_frames.len(), 2);
+        assert!(matches!(non_padding_frames[0], QuicFrame::Crypto { .. })); // Higher priority
+        assert!(matches!(non_padding_frames[1], QuicFrame::Ping));
     }
 
     #[test]
