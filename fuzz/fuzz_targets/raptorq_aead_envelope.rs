@@ -37,8 +37,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::security::{AUTH_KEY_SIZE, AuthKey};
+use asupersync::security::AuthKey;
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
+use chacha20poly1305::{
+    ChaCha20Poly1305, Nonce, Tag,
+    aead::{AeadInPlace, KeyInit},
+};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
@@ -295,6 +299,7 @@ enum AeadEnvelopeError {
     UnsupportedVersion,
     TruncatedNonce,
     MissingTag,
+    EncryptionFailed,
     DecryptionFailed,
     NonceReuse,
 }
@@ -530,81 +535,43 @@ fn derive_nonce(nonce_base: u64, esi: u32) -> [u8; NONCE_SIZE] {
     nonce
 }
 
-/// Mock AEAD encryption (ChaCha20-Poly1305 simulation).
+/// Encrypt symbol data with ChaCha20-Poly1305 and wrap it in an AEAD envelope.
 fn encrypt_symbol_to_envelope(
     key: &AuthKey,
     nonce: [u8; NONCE_SIZE],
     symbol: &Symbol,
 ) -> Result<AeadEnvelope, AeadEnvelopeError> {
-    // In a real implementation, this would use ChaCha20-Poly1305
-    // For fuzzing, we simulate with a deterministic transformation
-    let key_bytes = key.as_bytes();
+    let cipher = ChaCha20Poly1305::new_from_slice(key.as_bytes())
+        .map_err(|_| AeadEnvelopeError::EncryptionFailed)?;
+    let mut ciphertext = symbol.data().to_vec();
+    let aad = AeadEnvelope::new(nonce, Vec::new(), [0; TAG_SIZE]).associated_data();
+    let tag = cipher
+        .encrypt_in_place_detached(Nonce::from_slice(&nonce), &aad, &mut ciphertext)
+        .map_err(|_| AeadEnvelopeError::EncryptionFailed)?;
+    let mut tag_bytes = [0; TAG_SIZE];
+    tag_bytes.copy_from_slice(&tag);
 
-    // Simple XOR-based "encryption" for fuzzing purposes
-    let plaintext = symbol.data();
-    let mut ciphertext = Vec::with_capacity(plaintext.len());
-
-    for (i, &byte) in plaintext.iter().enumerate() {
-        let key_byte = key_bytes[i % AUTH_KEY_SIZE];
-        let nonce_byte = nonce[i % NONCE_SIZE];
-        ciphertext.push(byte ^ key_byte ^ nonce_byte);
-    }
-
-    // Simulate Poly1305 tag computation
-    let mut tag = [0u8; TAG_SIZE];
-    let aad = AeadEnvelope::new(nonce, ciphertext.clone(), tag).associated_data();
-
-    for (i, &byte) in aad.iter().chain(ciphertext.iter()).enumerate() {
-        tag[i % TAG_SIZE] ^= byte;
-        tag[i % TAG_SIZE] = tag[i % TAG_SIZE].wrapping_add(key_bytes[i % AUTH_KEY_SIZE]);
-    }
-
-    Ok(AeadEnvelope::new(nonce, ciphertext, tag))
+    Ok(AeadEnvelope::new(nonce, ciphertext, tag_bytes))
 }
 
-/// Mock AEAD decryption.
+/// Decrypt an AEAD envelope with ChaCha20-Poly1305.
 fn decrypt_envelope_to_symbol(
     key: &AuthKey,
     envelope: &AeadEnvelope,
 ) -> Result<Vec<u8>, AeadEnvelopeError> {
-    // Verify tag first
-    let mut expected_tag = [0u8; TAG_SIZE];
+    let cipher = ChaCha20Poly1305::new_from_slice(key.as_bytes())
+        .map_err(|_| AeadEnvelopeError::DecryptionFailed)?;
     let aad = envelope.associated_data();
-    let key_bytes = key.as_bytes();
-
-    for (i, &byte) in aad.iter().chain(envelope.ciphertext.iter()).enumerate() {
-        expected_tag[i % TAG_SIZE] ^= byte;
-        expected_tag[i % TAG_SIZE] =
-            expected_tag[i % TAG_SIZE].wrapping_add(key_bytes[i % AUTH_KEY_SIZE]);
-    }
-
-    // Constant-time tag comparison (simulated)
-    if !constant_time_eq(&expected_tag, &envelope.tag) {
-        return Err(AeadEnvelopeError::DecryptionFailed);
-    }
-
-    // Decrypt (reverse the XOR)
-    let mut plaintext = Vec::with_capacity(envelope.ciphertext.len());
-    for (i, &byte) in envelope.ciphertext.iter().enumerate() {
-        let key_byte = key_bytes[i % AUTH_KEY_SIZE];
-        let nonce_byte = envelope.nonce[i % NONCE_SIZE];
-        plaintext.push(byte ^ key_byte ^ nonce_byte);
-    }
-
+    let mut plaintext = envelope.ciphertext.clone();
+    cipher
+        .decrypt_in_place_detached(
+            Nonce::from_slice(&envelope.nonce),
+            &aad,
+            &mut plaintext,
+            Tag::from_slice(&envelope.tag),
+        )
+        .map_err(|_| AeadEnvelopeError::DecryptionFailed)?;
     Ok(plaintext)
-}
-
-/// Constant-time equality check (simulated).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
 }
 
 fn fold_extended_tag_bytes(tag: &mut [u8; TAG_SIZE], extra_bytes: &[u8]) {
@@ -707,8 +674,8 @@ fn test_tag_boundary_conditions(envelope: &AeadEnvelope, modification: TagModifi
         }
 
         TagModification::ExtendTag(extra_bytes) => {
-            // The mock envelope stores a fixed-size tag, so fold generated
-            // extension bytes into that tag instead of silently discarding them.
+            // The envelope stores a fixed-size tag, so fold generated extension
+            // bytes into that tag instead of silently discarding them.
             fold_extended_tag_bytes(&mut modified_envelope.tag, &extra_bytes);
         }
     }
@@ -883,7 +850,7 @@ fn test_byte_reordering(envelope: &AeadEnvelope, pattern: ReorderPattern, key: &
         }
 
         ReorderPattern::SwapHeaderTag => {
-            // Swap first and last bytes (simulate header/tag confusion)
+            // Swap first and last bytes to model header/tag confusion.
             let serialized = reordered_envelope.to_bytes();
             if serialized.len() >= 2 {
                 let mut swapped = serialized;
@@ -980,8 +947,8 @@ fn test_nonce_reuse_detection(
     assert_eq!(decrypted1, symbol1.data());
     assert_eq!(decrypted2, symbol2.data());
 
-    // In a real implementation, nonce reuse should be detected and prevented
-    // Here we just ensure the crypto still works (even if insecurely)
+    // Raw AEAD decrypts both envelopes; callers enforce nonce-reuse rejection
+    // before encryption when nonce tracking is enabled.
 }
 
 /// Validate harness invariants after operations.
