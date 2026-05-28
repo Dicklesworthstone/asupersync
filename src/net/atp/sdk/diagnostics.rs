@@ -884,19 +884,18 @@ pub struct PathMonitor {
 
 impl PathMonitor {
     async fn start(session: AtpSession, cx: Cx, interval_ms: u64) -> AtpOutcome<Self> {
-        let mut monitor = Self {
-            session: session.clone(),
+        if cx.checkpoint().is_err() {
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+        }
+
+        crate::runtime::yield_now().await;
+
+        AtpOutcome::ok(Self {
+            session,
             monitoring: true,
             interval_ms,
             last_diagnosis: None,
-        };
-
-        match monitor.tick(&cx).await {
-            AtpOutcome::Ok(_) => AtpOutcome::ok(monitor),
-            AtpOutcome::Err(error) => AtpOutcome::Err(error),
-            AtpOutcome::Cancelled(reason) => AtpOutcome::Cancelled(reason),
-            AtpOutcome::Panicked(panic) => AtpOutcome::Panicked(panic),
-        }
+        })
     }
 
     /// Sample the session path state once and update the latest diagnosis.
