@@ -470,6 +470,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -1033,16 +1034,26 @@ mod tests {
                     "Stale index {} should not be contained", i);
             }
 
+            let stale_generation_by_slot: BTreeMap<u32, u32> = stale_indices
+                .iter()
+                .map(|idx| (idx.index(), idx.generation()))
+                .collect();
+
             // MR: Fresh indices should access correct values
             for (i, fresh_idx) in fresh_indices.iter().enumerate() {
                 prop_assert_eq!(heap.get::<u32>(*fresh_idx), Some(&(values[i] + 1000)));
                 prop_assert!(heap.contains(*fresh_idx));
 
-                // Same slot index, different generation
-                if i < stale_indices.len() {
-                    prop_assert_eq!(fresh_idx.index(), stale_indices[i].index());
-                    prop_assert_ne!(fresh_idx.generation(), stale_indices[i].generation());
-                }
+                // Free-list reuse is LIFO, so compare by slot rather than by
+                // allocation order.
+                let stale_generation = stale_generation_by_slot
+                    .get(&fresh_idx.index())
+                    .copied()
+                    .expect("fresh allocation should reuse a stale slot");
+                prop_assert_eq!(
+                    fresh_idx.generation(),
+                    stale_generation.wrapping_add(1)
+                );
             }
         }
     }
