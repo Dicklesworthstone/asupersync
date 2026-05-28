@@ -254,21 +254,18 @@ impl SyncTreeProfile {
             false
         };
 
-        // Adjust mask based on context
-        let adjusted_mask = if line_boundary_bonus {
-            base_mask << 1 // Make boundaries more likely at good spots
+        // Reducing an all-ones CDC mask increases boundary probability.
+        let mut effective_mask = if line_boundary_bonus {
+            base_mask >> 1
         } else {
             base_mask
         };
 
-        // Size-based urgency for very large chunks
-        let urgency_factor = if chunk_size > 64 * 1024 {
-            2 // More aggressive boundary detection for large chunks
-        } else {
-            1
-        };
+        if chunk_size > 64 * 1024 {
+            effective_mask >>= 1;
+        }
 
-        (hash & (adjusted_mask >> urgency_factor)) == 0
+        (hash & effective_mask) == 0
     }
 
     /// Check if we're at an import/include statement boundary.
@@ -618,8 +615,22 @@ mod tests {
         let mask_small = SyncTreeProfile::compute_cdc_mask(1024);
         let mask_large = SyncTreeProfile::compute_cdc_mask(32768);
 
-        // Larger average chunk size should result in smaller mask (fewer boundaries)
-        assert!(mask_small > mask_large);
+        // Larger average chunk size should result in a larger mask, which
+        // lowers the chance that `(hash & mask) == 0`.
+        assert!(mask_large > mask_small);
+    }
+
+    #[test]
+    fn line_boundary_bonus_increases_boundary_probability() {
+        let base_mask = 0b11_1111;
+        let hash = 0b10_0000;
+
+        assert!(!SyncTreeProfile::is_enhanced_boundary(
+            b"abcd", 2, hash, base_mask, 1024,
+        ));
+        assert!(SyncTreeProfile::is_enhanced_boundary(
+            b"a\nbc", 2, hash, base_mask, 1024,
+        ));
     }
 
     #[test]
