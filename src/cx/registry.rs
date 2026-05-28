@@ -3946,14 +3946,15 @@ mod tests {
                 deadline: Time::from_secs(60),
             },
         )
-        .unwrap();
+        .expect("should register waiter in different region");
         assert_eq!(reg.waiter_count(), 1);
 
         // Cleanup region 0 (holder region) should free "svc" and grant to task 2.
         reg.cleanup_region_at(rid(0), Time::from_secs(2));
         // The original lease obligation must be resolved even though cleanup
         // removed it from the registry.
-        lease.abort().unwrap();
+        lease.abort()
+            .expect("should abort lease after cleanup_region");
         assert_eq!(reg.waiter_count(), 0);
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
 
