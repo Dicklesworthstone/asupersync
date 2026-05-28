@@ -2030,7 +2030,8 @@ mod tests {
         for _hop in 0..scenario.context_propagation_hops {
             // Enforce 32-entry limit (W3C requirement)
             if current_entries.len() > 32 {
-                current_entries.truncate(32); // Drop oldest (first) entries
+                let first_kept_entry = current_entries.len() - 32;
+                current_entries = current_entries.into_iter().skip(first_kept_entry).collect();
                 overflow_occurred = true;
             }
 
