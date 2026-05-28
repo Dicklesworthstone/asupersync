@@ -1982,6 +1982,10 @@ mod tests {
         ])
     }
 
+    fn test_response_headers(status: &str) -> Bytes {
+        encode_test_headers(&[(":status", status)])
+    }
+
     #[test]
     fn data_frame_triggers_connection_window_update_on_low_watermark() {
         let mut conn = Connection::server(Settings::default());
@@ -1990,7 +1994,12 @@ mod tests {
         let payload_len_usize = usize::try_from(payload_len).expect("payload_len non-negative");
         let payload_len_u32 = u32::try_from(payload_len).expect("payload_len fits u32");
         let data = Bytes::from(vec![0_u8; payload_len_usize]);
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/flow-control"),
+            false,
+            true,
+        ));
         let frame = Frame::Data(DataFrame::new(1, data, false));
 
         conn.process_frame(headers).expect("process headers frame");
@@ -2019,7 +2028,12 @@ mod tests {
         conn.state = ConnectionState::Open;
         conn.recv_window = 1;
 
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/flow-control"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).expect("process headers frame");
 
         let data = Bytes::from(vec![0_u8; 2]);
@@ -2041,7 +2055,12 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Open stream 1 via HEADERS.
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/flow-control"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // Reset stream 1 so it becomes closed.
@@ -2294,7 +2313,12 @@ mod tests {
         let mut conn = Connection::server(Settings::default());
         conn.state = ConnectionState::Open;
         // Open a stream via headers.
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/flow-control"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).expect("process headers");
 
         let initial_window = settings::DEFAULT_INITIAL_WINDOW_SIZE;
@@ -2328,7 +2352,12 @@ mod tests {
     fn data_frame_no_stream_window_update_when_above_watermark() {
         let mut conn = Connection::server(Settings::default());
         conn.state = ConnectionState::Open;
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/flow-control"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).expect("process headers");
 
         // Small payload: stays above the watermark.
@@ -2507,7 +2536,12 @@ mod tests {
         let _ = conn.next_frame().unwrap(); // drain request HEADERS
 
         // Peer ends its side of the stream first.
-        let response = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), true, true));
+        let response = Frame::Headers(HeadersFrame::new(
+            stream_id,
+            test_response_headers("200"),
+            true,
+            true,
+        ));
         conn.process_frame(response).unwrap();
         assert_eq!(
             conn.stream(stream_id).unwrap().state(),
@@ -2607,7 +2641,7 @@ mod tests {
         let frame = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 2,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed"),
             end_headers: true,
         });
 
@@ -2633,7 +2667,7 @@ mod tests {
         let frame = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 2,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed"),
             end_headers: true,
         });
 
@@ -2816,7 +2850,9 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Receive HEADERS without END_HEADERS
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false));
+        let encoded = test_request_headers("/continuation");
+        let split = encoded.len() / 2;
+        let headers = Frame::Headers(HeadersFrame::new(1, encoded.slice(..split), false, false));
         conn.process_frame(headers).unwrap();
         assert!(conn.is_awaiting_continuation());
         assert!(conn.continuation_started_at.is_some());
@@ -2824,7 +2860,7 @@ mod tests {
         // Receive CONTINUATION with END_HEADERS
         let continuation = Frame::Continuation(ContinuationFrame {
             stream_id: 1,
-            header_block: Bytes::new(),
+            header_block: encoded.slice(split..),
             end_headers: true,
         });
         conn.process_frame(continuation).unwrap();
@@ -2950,7 +2986,12 @@ mod tests {
         let _ = conn.next_frame(); // drain HEADERS
 
         // Simulate receiving response headers with END_STREAM to fully close
-        let response = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), true, true));
+        let response = Frame::Headers(HeadersFrame::new(
+            stream_id,
+            test_response_headers("200"),
+            true,
+            true,
+        ));
         conn.process_frame(response).unwrap();
 
         // Stream should now be closed
@@ -2960,7 +3001,7 @@ mod tests {
         let frame = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 2,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed"),
             end_headers: true,
         });
 
@@ -2990,7 +3031,12 @@ mod tests {
 
         // Receive response headers with END_STREAM from server.
         // This puts the stream into HalfClosedRemote from client's perspective.
-        let response = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), true, true));
+        let response = Frame::Headers(HeadersFrame::new(
+            stream_id,
+            test_response_headers("200"),
+            true,
+            true,
+        ));
         conn.process_frame(response).unwrap();
 
         assert_eq!(
@@ -3002,7 +3048,7 @@ mod tests {
         let frame = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 2,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed"),
             end_headers: true,
         });
 
@@ -3036,7 +3082,7 @@ mod tests {
         let push1 = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 2,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed-2"),
             end_headers: true,
         });
         assert!(conn.process_frame(push1).is_ok());
@@ -3045,7 +3091,7 @@ mod tests {
         let push2 = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 4,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed-4"),
             end_headers: true,
         });
         assert!(conn.process_frame(push2).is_ok());
@@ -3054,7 +3100,7 @@ mod tests {
         let push3 = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 6,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed-6"),
             end_headers: true,
         });
         let err = conn.process_frame(push3).unwrap_err();
@@ -3081,7 +3127,7 @@ mod tests {
         let push1 = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 2,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed-2"),
             end_headers: true,
         });
         assert!(conn.process_frame(push1).is_ok());
@@ -3090,7 +3136,7 @@ mod tests {
         let push2 = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 2,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed-2"),
             end_headers: true,
         });
         let err = conn.process_frame(push2).unwrap_err();
@@ -3117,7 +3163,7 @@ mod tests {
         let push1 = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 4,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed-4"),
             end_headers: true,
         });
         assert!(conn.process_frame(push1).is_ok());
@@ -3126,7 +3172,7 @@ mod tests {
         let push2 = Frame::PushPromise(PushPromiseFrame {
             stream_id,
             promised_stream_id: 2,
-            header_block: Bytes::new(),
+            header_block: test_request_headers("/pushed-2"),
             end_headers: true,
         });
         let err = conn.process_frame(push2).unwrap_err();
@@ -3162,7 +3208,7 @@ mod tests {
             let push = Frame::PushPromise(PushPromiseFrame {
                 stream_id,
                 promised_stream_id: promised_id,
-                header_block: Bytes::new(),
+                header_block: test_request_headers("/pushed"),
                 end_headers: true,
             });
 
@@ -3776,7 +3822,12 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Open stream 1 via HEADERS.
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/rst"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // RST_STREAM on an open stream should succeed.
@@ -3814,7 +3865,12 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Open stream via HEADERS
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/rst"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // Reset the stream
@@ -4015,7 +4071,12 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Open a stream.
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/window-update"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // Zero increment on stream 1: must be a *stream* error, not connection.
@@ -4049,7 +4110,12 @@ mod tests {
         let mut conn = Connection::server(Settings::default());
         conn.state = ConnectionState::Open;
 
-        let request = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let request = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/flow-control"),
+            false,
+            true,
+        ));
         conn.process_frame(request).unwrap();
 
         let response_headers = vec![Header::new(":status", "200")];
@@ -4374,7 +4440,12 @@ mod tests {
 
         // Open stream 1 via HEADERS to advance next_client_stream_id, then
         // send WINDOW_UPDATE on stream 3 which is idle (never opened).
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/window-update"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // Stream 3 is idle — WINDOW_UPDATE must be a connection error.
@@ -4401,7 +4472,12 @@ mod tests {
         // Open and reset streams up to the rate limit.
         for i in 0..DEFAULT_RST_STREAM_RATE_LIMIT {
             let stream_id = i * 2 + 1;
-            let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
+            let headers = Frame::Headers(HeadersFrame::new(
+                stream_id,
+                test_request_headers("/rst"),
+                false,
+                true,
+            ));
             conn.process_frame(headers).unwrap();
 
             let rst = Frame::RstStream(RstStreamFrame::new(stream_id, ErrorCode::Cancel));
@@ -4410,7 +4486,12 @@ mod tests {
 
         // One more RST_STREAM should trigger the rate limit.
         let stream_id = DEFAULT_RST_STREAM_RATE_LIMIT * 2 + 1;
-        let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            stream_id,
+            test_request_headers("/rst"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         let rst = Frame::RstStream(RstStreamFrame::new(stream_id, ErrorCode::Cancel));
@@ -4432,7 +4513,12 @@ mod tests {
 
         for i in 0..DEFAULT_RST_STREAM_RATE_LIMIT {
             let stream_id = i * 2 + 1;
-            let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
+            let headers = Frame::Headers(HeadersFrame::new(
+                stream_id,
+                test_request_headers("/rst"),
+                false,
+                true,
+            ));
             conn.process_frame(headers).unwrap();
 
             let rst = Frame::RstStream(RstStreamFrame::new(stream_id, ErrorCode::Cancel));
@@ -4444,7 +4530,12 @@ mod tests {
         ));
 
         let stream_id = DEFAULT_RST_STREAM_RATE_LIMIT * 2 + 1;
-        let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            stream_id,
+            test_request_headers("/rst"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         let rst = Frame::RstStream(RstStreamFrame::new(stream_id, ErrorCode::Cancel));
@@ -4463,7 +4554,12 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         for stream_id in [1, 3] {
-            let headers = Frame::Headers(HeadersFrame::new(stream_id, Bytes::new(), false, true));
+            let headers = Frame::Headers(HeadersFrame::new(
+                stream_id,
+                test_request_headers("/rst"),
+                false,
+                true,
+            ));
             conn.process_frame(headers).unwrap();
         }
 
@@ -4489,7 +4585,12 @@ mod tests {
         conn.state = ConnectionState::Open;
 
         // Open stream 1 normally.
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/parity"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
 
         // Send HEADERS on stream 2 (even = server-initiated, invalid from client).
@@ -4537,7 +4638,12 @@ mod tests {
         let mut conn = Connection::server(Settings::default());
         conn.state = ConnectionState::Open;
         // Open a stream first by processing a HEADERS frame.
-        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/window-update"),
+            false,
+            true,
+        ));
         conn.process_frame(headers).unwrap();
         assert!(conn.send_stream_window_update(1, 4096).is_ok());
         assert!(conn.has_pending_frames());
