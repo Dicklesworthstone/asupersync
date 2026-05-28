@@ -369,12 +369,7 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
             .builder
             .length_field_offset
             .checked_add(self.builder.length_field_length)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "header length overflow",
-                )
-            })?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "header length overflow"))?;
 
         // Calculate the adjusted length to write in the length field
         let adjustment = i64::try_from(self.builder.length_adjustment).map_err(|_| {
