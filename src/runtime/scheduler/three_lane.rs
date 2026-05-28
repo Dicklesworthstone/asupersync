@@ -11375,15 +11375,15 @@ mod tests {
         fn ready_dispatch_trace(order: &[(TaskId, u8)]) -> Vec<TaskId> {
             let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
             let mut scheduler = ThreeLaneScheduler::new(1, &state);
-
-            for &(task_id, priority) in order {
-                scheduler.inject_ready(task_id, priority);
-            }
-
             let mut workers = scheduler.take_workers();
             let worker = workers
                 .first_mut()
                 .expect("scheduler should create a worker");
+
+            for &(task_id, priority) in order {
+                worker.schedule_local(task_id, priority);
+            }
+
             let mut trace = Vec::new();
 
             while let Some(task_id) = worker.next_task() {
