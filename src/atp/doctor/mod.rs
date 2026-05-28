@@ -802,7 +802,10 @@ mod tests {
         assert!(document.trace.iter().any(|entry| {
             entry.candidate_id == 3 && entry.detail.contains("lost to candidate 2")
         }));
-        assert_eq!(document.recommendations[0].code, "relay_fallback_selected");
+        assert_eq!(
+            document.recommendations[0].code,
+            "tcp_tls_443_fallback_selected"
+        );
         crate::test_complete!("path_doctor_document_reports_relay_fallback_and_loser_drain_trace");
     }
 
