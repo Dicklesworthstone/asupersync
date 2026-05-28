@@ -9,7 +9,7 @@ Bead: `asupersync-h8pga6`
 
 ## Focused Work Shipped
 
-This bead tightened the internal RFC 7540 stream-state conformance harness instead of leaving priority/dependency coverage as placeholder prose:
+This bead tightened the internal RFC 7540 stream-state conformance harness instead of leaving priority/dependency coverage as prose-only evidence:
 
 - `tests/conformance/h2_rfc7540/stream_tests.rs`
   - added executable assertions that `HEADERS`, `PRIORITY`, and `CONTINUATION` reject stream ID `0`

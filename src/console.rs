@@ -550,7 +550,7 @@ fn sanitize_ansi_escape_sequences(input: &str) -> String {
         match ch {
             '\x1b' => match chars.next() {
                 Some('[') => consume_csi_sequence(&mut chars),
-                Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+                Some(']' | 'P' | 'X' | '^' | '_') => {
                     consume_string_control_sequence(&mut chars);
                 }
                 Some(_) | None => {}

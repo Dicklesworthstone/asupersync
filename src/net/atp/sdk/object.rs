@@ -543,7 +543,9 @@ impl ObjectStore for FileSystemObjectStore {
                     else {
                         continue;
                     };
-                    if object_name.ends_with(".meta")
+                    if std::path::Path::new(&object_name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("meta"))
                         || !Self::is_hash_path_component(&object_name, 60)
                     {
                         continue;

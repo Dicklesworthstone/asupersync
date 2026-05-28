@@ -479,6 +479,19 @@
       "notes": "Non-conformance tests contain audit prose, negative fixtures, and API status vectors; they are not shipped product placeholders."
     },
     {
+      "id": "conformance-http-status-reason-phrases",
+      "paths": [
+        "conformance/src/h1_response_building_conformance.rs"
+      ],
+      "terms": [
+        "Not Implemented"
+      ],
+      "disposition": "documented-deferred-surface",
+      "support_class": "terminology",
+      "blocker_bead_id": "",
+      "notes": "HTTP 501 Not Implemented is the standardized reason phrase used by response-building conformance vectors, not an unfinished implementation marker."
+    },
+    {
       "id": "conformance-general-retained-placeholders",
       "path_prefixes": [
         "conformance/"

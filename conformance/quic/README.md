@@ -25,4 +25,8 @@ The conformance tests in `tests/atp/quic/conformance.rs` reference the specifica
 
 ## Status
 
-Placeholder implementation - will be populated when ATP-N2 dependencies are complete.
+ATP native QUIC conformance material is specification scaffolding until the
+ATP-N2 dependency chain lands. Current production claims come from the
+root-level ATP/native-QUIC test lanes; this directory is reference material and
+must not be counted as live pass evidence until a later ATP-N2 proof promotes
+specific vectors.

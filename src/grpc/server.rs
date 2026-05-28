@@ -1269,10 +1269,6 @@ impl Server {
             }
         }
 
-        // ── Phase 2: invoke the user handler with deadline enforcement. ─
-        // Parse deadline from grpc-timeout header to enforce request cancellation.
-        // Per gRPC spec: server MUST cancel handler and return DEADLINE_EXCEEDED
-        // when client-specified deadline expires.
         let call_context = CallContext::from_metadata_at_with_max_deadline(
             request.metadata().clone(),
             self.config.default_timeout,
@@ -1310,25 +1306,17 @@ impl Server {
                 ));
             }
 
-            // Convert std::time::Instant to crate::types::Time for timeout_at
-            // Use remaining duration approach since direct conversion isn't available
+            // Convert std::time::Instant to crate::types::Time through a
+            // remaining-duration offset, since the two instant domains are
+            // intentionally distinct.
             let now = wall_clock_instant_now();
             let remaining_duration = std_deadline.saturating_duration_since(now);
 
-            // Additional safety check: if remaining duration is very small, fail fast
-            if remaining_duration < Duration::from_millis(1) {
-                // asupersync-gqbtfc: Clear AuthContext on deadline expiry
-                Self::clear_auth_context_from_request(&mut request_snapshot);
-                return Err(Status::deadline_exceeded(
-                    "Request deadline already expired or too close to expiry",
-                ));
-            }
-
-            let deadline = crate::time::wall_now() + remaining_duration;
-
-            // Race handler vs deadline using timeout_at
+            // Race handler vs deadline using the runtime timeout primitive.
             let handler_future = handler(request);
-            match crate::time::timeout_at(deadline, handler_future).await {
+            match crate::time::timeout(crate::time::wall_now(), remaining_duration, handler_future)
+                .await
+            {
                 Ok(result) => result,
                 Err(_timeout) => {
                     // Deadline exceeded during handler execution
@@ -6069,42 +6057,58 @@ mod tests {
             crate::test_complete!("audit_max_request_deadline_clamping_is_sound");
         }
 
-        /// AUDIT: Document the correct behavior that should be implemented
+        /// Verify that the dispatch path enforces the required gRPC deadline behavior.
         ///
-        /// This test documents the REQUIRED gRPC specification behavior:
-        /// - Parse grpc-timeout header to deadline
-        /// - Cancel handler when deadline expires
-        /// - Return DEADLINE_EXCEEDED status
+        /// The contract is executable: peer deadlines are parsed, server caps are
+        /// applied, an over-deadline async handler is cancelled, and the caller
+        /// receives `DEADLINE_EXCEEDED`.
         #[test]
-        fn audit_required_deadline_enforcement_behavior_specification() {
-            init_test("audit_required_deadline_enforcement_behavior_specification");
+        fn deadline_enforcement_contract_is_executable() {
+            use futures_lite::future::block_on;
 
-            // REQUIREMENT 1: Parse grpc-timeout header correctly
-            // ✓ IMPLEMENTED - CallContext::from_metadata_at works correctly
+            init_test("deadline_enforcement_contract_is_executable");
 
-            // REQUIREMENT 2: Monitor deadline during handler execution
-            // ✗ NOT IMPLEMENTED - dispatch_unary doesn't check deadline
-
-            // REQUIREMENT 3: Cancel handler when deadline expires
-            // ✗ NOT IMPLEMENTED - no cancellation mechanism exists
-
-            // REQUIREMENT 4: Return DEADLINE_EXCEEDED status for expired requests
-            // ✗ NOT IMPLEMENTED - no deadline expiry detection
-
-            // REQUIREMENT 5: Respect max_request_deadline server configuration
-            // ✓ IMPLEMENTED - from_metadata_at_with_max_deadline clamps correctly
-
-            // IMPLEMENTATION NEEDED:
-            // 1. Add deadline-aware dispatch method that races handler vs deadline
-            // 2. Cancel handler task when deadline expires
-            // 3. Return Status::deadline_exceeded() for expired requests
-            // 4. Update dispatch_unary to use deadline enforcement
-
-            eprintln!(
-                "{{\"requirement\":\"DEADLINE_ENFORCEMENT\",\"status\":\"DEFECTIVE\",\"details\":\"Handler cancellation not implemented\"}}"
+            let now = Instant::now();
+            let mut metadata = Metadata::new();
+            metadata.insert("grpc-timeout", "3600S");
+            let context = CallContext::from_metadata_at_with_max_deadline(
+                metadata,
+                None,
+                Some(Duration::from_millis(5)),
+                None,
+                now,
+            );
+            let deadline = context.deadline().expect("capped deadline should be set");
+            assert!(
+                deadline.duration_since(now) <= Duration::from_millis(5),
+                "server max_request_deadline should cap peer-supplied timeout"
             );
 
-            crate::test_complete!("audit_required_deadline_enforcement_behavior_specification");
+            let server = Server::builder()
+                .max_request_deadline(Duration::from_millis(5))
+                .build();
+            let mut request_metadata = Metadata::new();
+            request_metadata.insert("grpc-timeout", "1S");
+            let request = Request::with_metadata(Bytes::from_static(b"test"), request_metadata);
+
+            let handler_completed = Arc::new(AtomicBool::new(false));
+            let handler_completed_clone = Arc::clone(&handler_completed);
+            let result = block_on(server.dispatch_unary(request, move |_req| async move {
+                futures_lite::future::yield_now().await;
+                let _ =
+                    crate::time::sleep(crate::time::wall_now(), Duration::from_millis(20)).await;
+                handler_completed_clone.store(true, Ordering::Relaxed);
+                Ok::<Response<Bytes>, Status>(Response::new(Bytes::from_static(b"late")))
+            }));
+
+            let status = result.expect_err("handler should be cancelled at capped deadline");
+            assert_eq!(status.code(), Code::DeadlineExceeded);
+            assert!(
+                !handler_completed.load(Ordering::Relaxed),
+                "timed-out async handler future should be dropped before completion"
+            );
+
+            crate::test_complete!("deadline_enforcement_contract_is_executable");
         }
 
         /// AUDIT: Test edge case behavior with malformed deadlines

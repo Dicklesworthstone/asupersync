@@ -731,10 +731,8 @@ impl AmbientDetectionLineFilter {
             self.in_cfg_test_item = true;
             self.cfg_test_depth = depth;
             self.pending_cfg_test_item_body = false;
-        } else if line.trim_end().ends_with(';') {
-            self.pending_cfg_test_item_body = false;
         } else {
-            self.pending_cfg_test_item_body = true;
+            self.pending_cfg_test_item_body = !line.trim_end().ends_with(';');
         }
     }
 
