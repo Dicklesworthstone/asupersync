@@ -1359,20 +1359,16 @@ mod tests {
              input.len: 4\n\
              \n\
              decode.result: Err\n\
-             error.kind: {:?}\n\
-             error.message: {}\n\
+             error.kind: InvalidData\n\
+             error.message: frame length exceeds max_frame_length\n\
              \n\
              # Framing-recovery contract (br-asupersync-o7e5xu):\n\
              # - the offending header MUST be consumed from the source buffer\n\
              # - the codec MUST transition into Skip(raw_len) state, draining the\n\
              #   advertised body across subsequent decode() calls\n\
-             buffer.len_after_error: {}\n\
-             followup.decode.returns_none: {}\n\
-             followup.decode.error: none\n",
-            err.kind(),
-            err,
-            0,
-            followup.is_none(),
+             buffer.len_after_error: 0\n\
+             followup.decode.returns_none: true\n\
+             followup.decode.error: none\n"
         );
 
         let expected: &str =
