@@ -541,7 +541,7 @@ impl SymbolicObligation {
                 region: RegionId::from_arena(ArenaIndex::new(0, 0)),
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(total),
-                created_at: Time::ZERO,
+                created_at: Time::from_nanos(1_000_000_000),
                 registry: None,
             }),
             resolved: false,
@@ -1246,7 +1246,7 @@ mod tests {
         let object = test_object_id();
         let params = test_params();
 
-        let obligation = registry.create_send_object(object, &params, holder, region, Time::ZERO);
+        let obligation = registry.create_send_object(object, &params, holder, region, Time::from_nanos(1_000_000_000));
 
         // Registry should have indexed it.
         assert_eq!(registry.obligations_for_region(region).len(), 1);
@@ -1278,8 +1278,8 @@ mod tests {
         let sym1 = SymbolId::new(object, 0, 0);
         let sym2 = SymbolId::new(object, 0, 1);
 
-        let o1 = registry.create_send_symbol(sym1, holder, region, Time::ZERO);
-        let o2 = registry.create_send_symbol(sym2, holder, region, Time::ZERO);
+        let o1 = registry.create_send_symbol(sym1, holder, region, Time::from_nanos(1_000_000_000));
+        let o2 = registry.create_send_symbol(sym2, holder, region, Time::from_nanos(1_000_000_000));
 
         assert_eq!(registry.obligations_for_object(object).len(), 2);
         assert!(registry.has_pending_in_region(region));
@@ -1304,7 +1304,7 @@ mod tests {
         let region = test_region_id();
         let object = test_object_id();
 
-        let obligation = registry.create_decode(object, 4, holder, region, Time::ZERO);
+        let obligation = registry.create_decode(object, 4, holder, region, Time::from_nanos(1_000_000_000));
         assert_eq!(obligation.kind(), SymbolicObligationKind::DecodeObject);
         assert_eq!(obligation.progress().total, 4);
 
@@ -1332,8 +1332,8 @@ mod tests {
         let params = test_params();
 
         let older_obligation =
-            registry.create_send_object(object, &params, older, region, Time::ZERO);
-        let newer_obligation = registry.create_acknowledge(object, 1, newer, region, Time::ZERO);
+            registry.create_send_object(object, &params, older, region, Time::from_nanos(1_000_000_000));
+        let newer_obligation = registry.create_acknowledge(object, 1, newer, region, Time::from_nanos(1_000_000_000));
 
         assert_eq!(
             registry.obligations_for_task(older),
@@ -1358,8 +1358,8 @@ mod tests {
         let params = test_params();
 
         let older_obligation =
-            registry.create_send_object(object, &params, holder, older, Time::ZERO);
-        let newer_obligation = registry.create_acknowledge(object, 1, holder, newer, Time::ZERO);
+            registry.create_send_object(object, &params, holder, older, Time::from_nanos(1_000_000_000));
+        let newer_obligation = registry.create_acknowledge(object, 1, holder, newer, Time::from_nanos(1_000_000_000));
 
         assert_eq!(
             registry.obligations_for_region(older),
@@ -1381,7 +1381,7 @@ mod tests {
         let region = test_region_id();
         let object = test_object_id();
 
-        let obligation = registry.create_acknowledge(object, 8, holder, region, Time::ZERO);
+        let obligation = registry.create_acknowledge(object, 8, holder, region, Time::from_nanos(1_000_000_000));
         assert_eq!(
             obligation.kind(),
             SymbolicObligationKind::AcknowledgeReceipt
@@ -1403,7 +1403,7 @@ mod tests {
             expected,
             test_task_id(),
             test_region_id(),
-            Time::ZERO,
+            Time::from_nanos(1_000_000_000),
             None,
         );
 
@@ -1419,7 +1419,7 @@ mod tests {
             &test_params(),
             test_task_id(),
             test_region_id(),
-            Time::ZERO,
+            Time::from_nanos(1_000_000_000),
             None,
         );
         let wrong_object_symbol = SymbolId::new(ObjectId::new_for_test(99), 0, 0);
@@ -1435,7 +1435,7 @@ mod tests {
             SymbolId::new(test_object_id(), 0, 0),
             test_task_id(),
             test_region_id(),
-            Time::ZERO,
+            Time::from_nanos(1_000_000_000),
             None,
         );
 
@@ -1455,7 +1455,7 @@ mod tests {
             1,
             test_task_id(),
             test_region_id(),
-            Time::ZERO,
+            Time::from_nanos(1_000_000_000),
         );
     }
 
