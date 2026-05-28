@@ -926,7 +926,7 @@ mod tests {
         Ok(i32),
         Err,
         CancelRaceLost,
-        CancelTimeout,
+        CancelParent,
         CancelShutdown,
     }
 
@@ -948,7 +948,9 @@ mod tests {
                 Self::Ok(value) => Outcome::Ok(value),
                 Self::Err => Outcome::Err("loser-error"),
                 Self::CancelRaceLost => Outcome::Cancelled(CancelReason::race_loser()),
-                Self::CancelTimeout => Outcome::Cancelled(CancelReason::timeout()),
+                Self::CancelParent => Outcome::Cancelled(CancelReason::new(
+                    crate::types::cancel::CancelKind::ParentCancelled,
+                )),
                 Self::CancelShutdown => Outcome::Cancelled(CancelReason::shutdown()),
             }
         }
@@ -969,8 +971,26 @@ mod tests {
             any::<i16>().prop_map(|value| RaceLoserCase::Ok(i32::from(value))),
             Just(RaceLoserCase::Err),
             Just(RaceLoserCase::CancelRaceLost),
-            Just(RaceLoserCase::CancelTimeout),
+            Just(RaceLoserCase::CancelParent),
             Just(RaceLoserCase::CancelShutdown),
+        ]
+    }
+
+    fn non_empty_cancel_storm_padding_strategy() -> impl Strategy<
+        Value = (
+            Vec<Outcome<i32, &'static str>>,
+            Vec<Outcome<i32, &'static str>>,
+        ),
+    > {
+        prop_oneof![
+            (
+                prop::collection::vec(race_cancel_storm_loser_strategy(), 1usize..6),
+                prop::collection::vec(race_cancel_storm_loser_strategy(), 0usize..6),
+            ),
+            (
+                prop::collection::vec(race_cancel_storm_loser_strategy(), 0usize..6),
+                prop::collection::vec(race_cancel_storm_loser_strategy(), 1usize..6),
+            ),
         ]
     }
 
@@ -1868,17 +1888,8 @@ mod tests {
                 race_cancel_storm_loser_strategy(),
                 1usize..11,
             ),
-            prefix_cancelled in prop::collection::vec(
-                race_cancel_storm_loser_strategy(),
-                0usize..6,
-            ),
-            suffix_cancelled in prop::collection::vec(
-                race_cancel_storm_loser_strategy(),
-                0usize..6,
-            ),
+            (prefix_cancelled, suffix_cancelled) in non_empty_cancel_storm_padding_strategy(),
         ) {
-            prop_assume!(!prefix_cancelled.is_empty() || !suffix_cancelled.is_empty());
-
             let winner_index = raw_winner_index % branch_count;
             let winner_value = i32::from(winner_value);
 
@@ -2154,45 +2165,44 @@ mod tests {
     #[test]
     fn metamorphic_race_commutativity_preserves_drain() {
         proptest!(|(
-            winner_case_a in race_winner_case_strategy(),
-            winner_case_b in race_winner_case_strategy(),
+            winner_case in race_winner_case_strategy(),
+            loser_case in race_loser_case_strategy(),
         )| {
             // Race A vs B
             let outcomes_ab = vec![
-                winner_case_a.clone().into_outcome(),
-                winner_case_b.clone().into_outcome(),
+                winner_case.clone().into_outcome(),
+                loser_case.clone().into_outcome(),
             ];
 
             // Race B vs A (swapped)
             let outcomes_ba = vec![
-                winner_case_b.clone().into_outcome(),
-                winner_case_a.clone().into_outcome(),
+                loser_case.clone().into_outcome(),
+                winner_case.clone().into_outcome(),
             ];
 
-            // Test both possible winners for AB configuration
-            for winner_idx in 0..2 {
-                let result_ab = race_all_outcomes(winner_idx, outcomes_ab.clone());
+            let result_ab = race_all_outcomes(0, outcomes_ab);
+            let result_ba = race_all_outcomes(1, outcomes_ba);
 
-                // For BA configuration, winner index is flipped
-                let flipped_winner_idx = 1 - winner_idx;
-                let result_ba = race_all_outcomes(flipped_winner_idx, outcomes_ba.clone());
+            // Both should have exactly 1 loser (drained)
+            prop_assert_eq!(result_ab.loser_outcomes.len(), 1);
+            prop_assert_eq!(result_ba.loser_outcomes.len(), 1);
 
-                // Both should have exactly 1 loser (drained)
-                prop_assert_eq!(result_ab.loser_outcomes.len(), 1);
-                prop_assert_eq!(result_ba.loser_outcomes.len(), 1);
+            prop_assert_eq!(
+                race_outcome_signature(&result_ab.winner_outcome),
+                race_outcome_signature(&result_ba.winner_outcome),
+                "swapping branch positions must preserve the winning outcome"
+            );
 
-                // Both losers should be properly drained
-                let (_, loser_ab) = &result_ab.loser_outcomes[0];
-                let (_, loser_ba) = &result_ba.loser_outcomes[0];
+            let (_, loser_ab) = &result_ab.loser_outcomes[0];
+            let (_, loser_ba) = &result_ba.loser_outcomes[0];
 
-                prop_assert!(loser_ab.is_cancelled(), "AB loser must be drained");
-                prop_assert!(loser_ba.is_cancelled(), "BA loser must be drained");
-
-                if let (Outcome::Cancelled(reason_ab), Outcome::Cancelled(reason_ba)) = (loser_ab, loser_ba) {
-                    prop_assert!(matches!(reason_ab.kind(), crate::types::cancel::CancelKind::RaceLost));
-                    prop_assert!(matches!(reason_ba.kind(), crate::types::cancel::CancelKind::RaceLost));
-                }
-            }
+            prop_assert!(verify_losers_drained(&[loser_ab]).is_ok(), "AB loser must satisfy the drain invariant");
+            prop_assert!(verify_losers_drained(&[loser_ba]).is_ok(), "BA loser must satisfy the drain invariant");
+            prop_assert_eq!(
+                race_outcome_signature(loser_ab),
+                race_outcome_signature(loser_ba),
+                "swapping branch positions must preserve the drained-loser outcome"
+            );
         });
     }
 

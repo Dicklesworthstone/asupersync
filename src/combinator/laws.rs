@@ -805,9 +805,10 @@ mod tests {
     /// RACE-COMM: exhaustive severity symmetry check across all four outcome types.
     #[test]
     fn race_symmetry_exhaustive() {
-        let outcomes: Vec<Outcome<i32, i32>> = vec![ok(1), err(2), cancelled(), panicked()];
-        for a in &outcomes {
-            for b in &outcomes {
+        let winners: Vec<Outcome<i32, i32>> = vec![ok(1), err(2), cancelled(), panicked()];
+        let drained_losers: Vec<Outcome<i32, i32>> = vec![ok(3), err(4), race_lost(), panicked()];
+        for a in &winners {
+            for b in &drained_losers {
                 let (w_ab, _, l_ab) = race2_outcomes(RaceWinner::First, a.clone(), b.clone());
                 let (w_ba, _, l_ba) = race2_outcomes(RaceWinner::Second, b.clone(), a.clone());
 
