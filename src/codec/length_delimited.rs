@@ -378,9 +378,9 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "header length overflow"))?;
 
         // br-asupersync-ooqkxe: validate total reservation overflow (header + frame)
-        let _total_reservation = header_len
-            .checked_add(frame_len)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "total reservation overflow"))?;
+        let _total_reservation = header_len.checked_add(frame_len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "total reservation overflow")
+        })?;
 
         // Calculate the adjusted length to write in the length field
         let adjustment = i64::try_from(self.builder.length_adjustment).map_err(|_| {
@@ -1125,10 +1125,9 @@ mod tests {
         let err = codec.encode(payload, &mut dst).unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string()
-                .contains("encoded length exceeds length_field_length capacity")
-        );
+        assert!(err
+            .to_string()
+            .contains("encoded length exceeds length_field_length capacity"));
         assert_eq!(dst, original, "encode must not partially mutate dst");
     }
 
