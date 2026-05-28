@@ -809,13 +809,8 @@ mod tests {
         }
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Compilation validation smoke test
-    // ────────────────────────────────────────────────────────────────────
-
     #[test]
-    fn compilation_validation_smoke_test() {
-        // Minimal test to verify module compilation and imports
+    fn cx_obligation_trace_model_reports_empty_state_and_ordered_race() {
         let state = VarState::Empty;
         assert!(!state.is_leak());
 
@@ -827,5 +822,11 @@ mod tests {
             later: 1,
         };
         assert!(race.later > race.earlier);
+
+        let analysis = mock_race_analysis(vec![race.clone()]);
+        assert_eq!(analysis.race_count(), 1);
+        assert!(!analysis.is_race_free());
+        assert_eq!(analysis.races[0], race);
+        assert_eq!(analysis.backtrack_points[0].divergence_index, 0);
     }
 }

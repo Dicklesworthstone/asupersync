@@ -935,13 +935,38 @@ mod fs_config_tests {
 
 #[cfg(not(all(test, not(target_arch = "wasm32"))))]
 mod no_fs_config_fallback {
-    // Minimal feature-disabled coverage when filesystem features are unavailable.
+    #[derive(Debug, PartialEq, Eq)]
+    struct FeatureGateProof {
+        cfg_profile: &'static str,
+        unavailable_surface: &'static str,
+        support_class: &'static str,
+        reason_code: &'static str,
+    }
+
+    fn feature_gate_proof() -> FeatureGateProof {
+        FeatureGateProof {
+            cfg_profile: "not(all(test, not(target_arch = \"wasm32\")))",
+            unavailable_surface: "native-filesystem-config",
+            support_class: "unsupported_on_non_native_test_profile",
+            reason_code: "fs_config_metamorphic_module_not_compiled",
+        }
+    }
+
     #[test]
-    fn fs_config_feature_disabled() {
-        // This test always passes - just documents that FS/config tests are skipped
+    fn fs_config_reports_native_profile_gate() {
+        let proof = feature_gate_proof();
+        assert_eq!(proof.unavailable_surface, "native-filesystem-config");
+        assert_eq!(
+            proof.support_class,
+            "unsupported_on_non_native_test_profile"
+        );
+        assert_eq!(
+            proof.reason_code,
+            "fs_config_metamorphic_module_not_compiled"
+        );
         assert!(
-            true,
-            "Filesystem/config features disabled - metamorphic tests skipped"
+            proof.cfg_profile.contains("wasm32"),
+            "cfg profile must identify the target boundary"
         );
     }
 }

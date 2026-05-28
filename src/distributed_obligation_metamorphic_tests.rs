@@ -604,18 +604,19 @@ mod tests {
         }
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Compilation validation smoke test
-    // ────────────────────────────────────────────────────────────────────
-
     #[test]
-    fn compilation_validation_smoke_test() {
-        // Minimal test to verify module compilation and imports
+    fn distributed_obligation_model_starts_empty_and_keeps_monitor_separate() {
         let config = MonitorConfig::default();
-        let monitor = LeakMonitor::new(config);
+        let mut monitor = MockLeakMonitor::new(config);
         assert_eq!(monitor.observations(), 0);
+        monitor.observe(3);
+        assert_eq!(monitor.observations(), 1);
 
-        let ring = HashRing::new(3, 42);
+        let mut ring = MockHashRing::new(3, 42);
         assert_eq!(ring.node_count(), 0);
+        assert!(ring.add_node("node-a"));
+        assert!(ring.add_node("node-b"));
+        assert_eq!(ring.node_count(), 2);
+        assert_eq!(monitor.observations(), 1);
     }
 }

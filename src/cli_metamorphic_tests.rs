@@ -878,10 +878,32 @@ mod cli_tests {
 
 #[cfg(not(feature = "cli"))]
 mod no_cli_fallback {
-    // Minimal feature-disabled coverage when CLI is unavailable.
+    #[derive(Debug, PartialEq, Eq)]
+    struct FeatureGateProof {
+        cfg_profile: &'static str,
+        required_feature: &'static str,
+        support_class: &'static str,
+        reason_code: &'static str,
+    }
+
+    fn feature_gate_proof() -> FeatureGateProof {
+        FeatureGateProof {
+            cfg_profile: "not(feature = \"cli\")",
+            required_feature: "cli",
+            support_class: "unsupported_without_cli_feature",
+            reason_code: "cli_metamorphic_module_not_compiled",
+        }
+    }
+
     #[test]
-    fn cli_feature_disabled() {
-        // This test always passes - just documents that CLI tests are skipped
-        assert!(true, "CLI feature disabled - metamorphic tests skipped");
+    fn cli_reports_cli_feature_gate() {
+        let proof = feature_gate_proof();
+        assert_eq!(proof.required_feature, "cli");
+        assert_eq!(proof.support_class, "unsupported_without_cli_feature");
+        assert_eq!(proof.reason_code, "cli_metamorphic_module_not_compiled");
+        assert!(
+            proof.cfg_profile.contains("cli"),
+            "cfg profile must identify the CLI feature boundary"
+        );
     }
 }

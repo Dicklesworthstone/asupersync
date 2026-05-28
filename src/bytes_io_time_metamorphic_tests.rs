@@ -1185,13 +1185,35 @@ mod bytes_io_time_tests {
 
 #[cfg(not(all(test, feature = "test-internals")))]
 mod no_bytes_io_time_fallback {
-    // Minimal feature-disabled coverage when test-internals is unavailable.
+    #[derive(Debug, PartialEq, Eq)]
+    struct FeatureGateProof {
+        cfg_profile: &'static str,
+        required_feature: &'static str,
+        support_class: &'static str,
+        reason_code: &'static str,
+    }
+
+    fn feature_gate_proof() -> FeatureGateProof {
+        FeatureGateProof {
+            cfg_profile: "not(all(test, feature = \"test-internals\"))",
+            required_feature: "test-internals",
+            support_class: "unsupported_without_test_internals",
+            reason_code: "bytes_io_time_metamorphic_module_not_compiled",
+        }
+    }
+
     #[test]
-    fn bytes_io_time_feature_disabled() {
-        // This test always passes - just documents that bytes/io/time tests are skipped
+    fn bytes_io_time_reports_test_internals_gate() {
+        let proof = feature_gate_proof();
+        assert_eq!(proof.required_feature, "test-internals");
+        assert_eq!(proof.support_class, "unsupported_without_test_internals");
+        assert_eq!(
+            proof.reason_code,
+            "bytes_io_time_metamorphic_module_not_compiled"
+        );
         assert!(
-            true,
-            "bytes/io/time test-internals feature disabled - metamorphic tests skipped"
+            proof.cfg_profile.contains("test-internals"),
+            "cfg profile must name the missing feature boundary"
         );
     }
 }

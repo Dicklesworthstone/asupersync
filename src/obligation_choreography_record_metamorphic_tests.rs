@@ -785,19 +785,19 @@ mod tests {
         }
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Compilation validation smoke test
-    // ────────────────────────────────────────────────────────────────────
-
     #[test]
-    fn compilation_validation_smoke_test() {
-        // Minimal test to verify module compilation and imports
+    fn obligation_choreography_record_model_proves_empty_trace_safety() {
         let mut prover = MockNoAliasingProver::new();
         let events = vec![];
         let result = prover.verify(&events);
         assert!(result.is_verified);
+        assert_eq!(result.ghost_state_size, 0);
+        assert_eq!(result.trace_length, 0);
 
         let lattice_val = MockLatticeValue::bottom();
         assert_eq!(lattice_val.0, 0);
+        let joined = lattice_val.join(&MockLatticeValue(7));
+        assert_eq!(joined, MockLatticeValue(7));
+        assert_eq!(joined.join(&MockLatticeValue(3)), joined);
     }
 }
