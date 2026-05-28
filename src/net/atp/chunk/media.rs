@@ -154,6 +154,13 @@ enum MediaContentType {
 }
 
 impl MediaProfile {
+    fn contains_signature(data: &[u8], signature: &[u8]) -> bool {
+        !signature.is_empty()
+            && data
+                .windows(signature.len())
+                .any(|window| window == signature)
+    }
+
     /// Compute chunk sizes optimized for media streaming.
     fn compute_chunk_sizes(object_size_bytes: u64) -> (u64, u64, u64) {
         match object_size_bytes {
@@ -219,9 +226,9 @@ impl MediaProfile {
 
         // Check ML model formats
         if data.starts_with(b"PK\x03\x04") && // ZIP-based formats
-           (data.windows(20).any(|w| w == b"pytorch_model.bin") ||
-            data.windows(15).any(|w| w == b"saved_model.pb") ||
-            data.windows(10).any(|w| w == b"model.onnx"))
+           (Self::contains_signature(data, b"pytorch_model.bin") ||
+            Self::contains_signature(data, b"saved_model.pb") ||
+            Self::contains_signature(data, b"model.onnx"))
         {
             return MediaContentType::Model;
         }
@@ -633,6 +640,18 @@ mod tests {
         assert_eq!(
             MediaProfile::detect_content_type(mp3_header),
             MediaContentType::Audio
+        );
+
+        let pytorch_zip = b"PK\x03\x04metadata/pytorch_model.bin";
+        assert_eq!(
+            MediaProfile::detect_content_type(pytorch_zip),
+            MediaContentType::Model
+        );
+
+        let saved_model_zip = b"PK\x03\x04assets/saved_model.pb";
+        assert_eq!(
+            MediaProfile::detect_content_type(saved_model_zip),
+            MediaContentType::Model
         );
 
         // Test unknown
