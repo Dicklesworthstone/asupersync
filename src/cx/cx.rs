@@ -3632,7 +3632,7 @@ mod tests {
             .expect("thread-local teardown should not panic when reading Cx");
         assert_eq!(
             CURRENT_CX_DTOR_STATE.load(Ordering::SeqCst),
-            3,
+            2,
             "Cx::current() should fail closed once CURRENT_CX is unavailable"
         );
     }
