@@ -1886,6 +1886,10 @@ mod tests {
         let mut scrubbed = scrub_task_record_ids(value);
 
         // Scrub timing fields that vary between test runs
+        if let Some(created_at) = scrubbed.pointer_mut("/created_at") {
+            *created_at = json!(0);
+        }
+
         if let Some(created_instant) = scrubbed.pointer_mut("/created_instant") {
             *created_instant = json!("[INSTANT]");
         }
@@ -1911,7 +1915,8 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_created",
             scrub_task_record_state(
-                serde_json::to_value(&record_created).expect("should serialize created task record")
+                serde_json::to_value(&record_created)
+                    .expect("should serialize created task record")
             )
         );
 
@@ -1922,7 +1927,8 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_running",
             scrub_task_record_state(
-                serde_json::to_value(&record_running).expect("should serialize running task record")
+                serde_json::to_value(&record_running)
+                    .expect("should serialize running task record")
             )
         );
 
@@ -1937,7 +1943,8 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_cancel_requested",
             scrub_task_record_state(
-                serde_json::to_value(&record_cancel_requested).expect("should serialize cancel_requested task record")
+                serde_json::to_value(&record_cancel_requested)
+                    .expect("should serialize cancel_requested task record")
             )
         );
 
@@ -1949,7 +1956,8 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_cancelling",
             scrub_task_record_state(
-                serde_json::to_value(&record_cancelling).expect("should serialize cancelling task record")
+                serde_json::to_value(&record_cancelling)
+                    .expect("should serialize cancelling task record")
             )
         );
 
