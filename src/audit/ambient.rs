@@ -684,6 +684,7 @@ struct AmbientDetectionLineFilter {
     pending_cfg_test_item_body: bool,
     in_cfg_test_item: bool,
     cfg_test_depth: i32,
+    cfg_test_sanitizer_state: AmbientDetectionSanitizerState,
     sanitizer_state: AmbientDetectionSanitizerState,
 }
 
@@ -726,7 +727,7 @@ impl AmbientDetectionLineFilter {
     }
 
     fn start_or_continue_cfg_test_item(&mut self, line: &str) {
-        let depth = brace_delta(line);
+        let depth = brace_delta_for_detection(line, &mut self.cfg_test_sanitizer_state);
         if depth > 0 {
             self.in_cfg_test_item = true;
             self.cfg_test_depth = depth;
@@ -737,16 +738,18 @@ impl AmbientDetectionLineFilter {
     }
 
     fn advance_cfg_test_depth(&mut self, line: &str) {
-        self.cfg_test_depth += brace_delta(line);
+        self.cfg_test_depth += brace_delta_for_detection(line, &mut self.cfg_test_sanitizer_state);
         if self.cfg_test_depth <= 0 {
             self.in_cfg_test_item = false;
             self.cfg_test_depth = 0;
+            self.cfg_test_sanitizer_state = AmbientDetectionSanitizerState::default();
         }
     }
 }
 
-fn brace_delta(line: &str) -> i32 {
-    line.chars().fold(0, |depth, ch| match ch {
+fn brace_delta_for_detection(line: &str, state: &mut AmbientDetectionSanitizerState) -> i32 {
+    let stripped = strip_comments_and_literals_for_detection(line, state);
+    stripped.chars().fold(0, |depth, ch| match ch {
         '{' => depth + 1,
         '}' => depth - 1,
         _ => depth,
@@ -1233,6 +1236,35 @@ fn test_code()
     }
 
     #[test]
+    fn enhanced_patterns_exclude_cfg_test_modules_with_literal_braces() {
+        let source = r##"
+fn production_code() {
+    let now = Instant::now();  // Should be detected
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_fixture() {
+        let _json = r#"{"nested": {"brace": true}}"#;
+        let _text = "closing brace } inside a string";
+        eprintln!("test-only output");
+        let now = Instant::now();  // Should NOT be detected
+    }
+}
+"##;
+
+        let violations = detect_ambient_violations(source);
+
+        assert_eq!(
+            violations.len(),
+            1,
+            "cfg(test) modules with literal braces must stay skipped"
+        );
+        assert!(violations[0].line_content.contains("Instant::now"));
+        assert_eq!(violations[0].category, AmbientCategory::Time);
+    }
+
+    #[test]
     fn violation_type_classification() {
         let source = r#"
 use std::time::Instant as Clock;
@@ -1476,13 +1508,14 @@ fn test_function() {
         let mut brace_depth: i32 = 0;
         let mut pending_cfg_test = false;
         let mut pending_cfg_test_item_body = false;
+        let mut cfg_test_sanitizer_state = ScanSanitizerState::default();
         let mut sanitizer_state = ScanSanitizerState::default();
 
         for (idx, line) in content.lines().enumerate() {
             let trimmed = line.trim();
 
             if pending_cfg_test_item_body {
-                let delta = brace_delta(line);
+                let delta = brace_delta_for_scan(line, &mut cfg_test_sanitizer_state);
                 if delta > 0 {
                     in_cfg_test_item = true;
                     brace_depth = delta;
@@ -1501,7 +1534,8 @@ fn test_function() {
             if pending_cfg_test {
                 if starts_cfg_test_item(trimmed) {
                     pending_cfg_test = false;
-                    let delta = brace_delta(line);
+                    cfg_test_sanitizer_state = ScanSanitizerState::default();
+                    let delta = brace_delta_for_scan(line, &mut cfg_test_sanitizer_state);
                     if delta > 0 {
                         in_cfg_test_item = true;
                         brace_depth = delta;
@@ -1516,17 +1550,11 @@ fn test_function() {
             }
 
             if in_cfg_test_item {
-                for ch in line.chars() {
-                    match ch {
-                        '{' => brace_depth += 1,
-                        '}' => {
-                            brace_depth -= 1;
-                            if brace_depth <= 0 {
-                                in_cfg_test_item = false;
-                            }
-                        }
-                        _ => {}
-                    }
+                brace_depth += brace_delta_for_scan(line, &mut cfg_test_sanitizer_state);
+                if brace_depth <= 0 {
+                    in_cfg_test_item = false;
+                    brace_depth = 0;
+                    cfg_test_sanitizer_state = ScanSanitizerState::default();
                 }
                 continue;
             }
@@ -1543,6 +1571,15 @@ fn test_function() {
             result.push((idx + 1, stripped));
         }
         result
+    }
+
+    fn brace_delta_for_scan(line: &str, state: &mut ScanSanitizerState) -> i32 {
+        let stripped = strip_comments_and_literals(line, state);
+        stripped.chars().fold(0, |depth, ch| match ch {
+            '{' => depth + 1,
+            '}' => depth - 1,
+            _ => depth,
+        })
     }
 
     struct Violation {
@@ -1822,6 +1859,47 @@ fn test_code()
                 .count(),
             1,
             "Should exclude #[cfg(test)] function bodies"
+        );
+    }
+
+    #[test]
+    fn non_test_lines_filter_skips_cfg_test_modules_with_literal_braces() {
+        let source = r##"
+fn real_code() {
+    Instant::now();
+}
+
+#[cfg(test)]
+mod tests {
+    fn fixture_code() {
+        let _json = r#"{"nested": {"brace": true}}"#;
+        let _text = "closing brace } inside a string";
+        eprintln!("test-only output");
+        Instant::now();
+    }
+}
+"##;
+        let lines = non_test_lines(source);
+        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+
+        assert!(
+            text.iter().any(|line| line.contains("real_code")),
+            "Should include production code"
+        );
+        assert!(
+            !text.iter().any(|line| line.contains("fixture_code")),
+            "Should exclude cfg(test) modules even when fixtures contain braces"
+        );
+        assert_eq!(
+            text.iter()
+                .filter(|line| line.contains("Instant::now"))
+                .count(),
+            1,
+            "Should exclude test-only Instant::now after brace-heavy literals"
+        );
+        assert!(
+            !text.iter().any(|line| line.contains("eprintln!(")),
+            "Should exclude test-only output after brace-heavy literals"
         );
     }
 
