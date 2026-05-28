@@ -653,7 +653,7 @@ mod tests {
         for allocation in &allocations {
             assert!((allocation.share_ratio - 0.5).abs() < 0.01);
             assert_eq!(allocation.bandwidth_bytes_per_second, 64 * 1_048_576); // 128/2
-            assert_eq!(allocation.in_flight_bytes, 32 * 1_048_576); // 64/2
+            assert_eq!(allocation.in_flight_bytes, 64 * 1_048_576); // 128/2
             assert_eq!(allocation.repair_symbols_per_second, 2_048); // 4096/2
             assert_eq!(allocation.disk_write_concurrency, 2); // 4/2
         }
