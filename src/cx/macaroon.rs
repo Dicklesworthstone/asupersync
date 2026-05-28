@@ -1908,7 +1908,7 @@ mod tests {
         let t1 = MacaroonToken::mint(&key, "cap", "loc");
         let sig1 = *t1.signature().as_bytes();
 
-        let t2 = t1.add_caveat(CaveatPredicate::TimeBefore(1000));
+        let t2 = t1.add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let sig2 = *t2.signature().as_bytes();
 
         assert_ne!(sig1, sig2);
@@ -1919,7 +1919,7 @@ mod tests {
     fn direct_attenuation_check_requires_parent_prefix_and_expected_signature() {
         let key = test_root_key();
         let parent =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(5000));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let added = CaveatPredicate::RegionScope(42);
         let child = parent.clone().add_caveat(added.clone());
 
@@ -1954,7 +1954,7 @@ mod tests {
     fn multiple_caveats_verify() {
         let key = test_root_key();
         let token = MacaroonToken::mint(&key, "cap", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(5000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_caveat(CaveatPredicate::RegionScope(42))
             .add_caveat(CaveatPredicate::MaxUses(10));
 
@@ -1966,12 +1966,12 @@ mod tests {
     fn caveat_order_matters() {
         let key = test_root_key();
         let t1 = MacaroonToken::mint(&key, "cap", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(1000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_caveat(CaveatPredicate::MaxUses(5));
 
         let t2 = MacaroonToken::mint(&key, "cap", "loc")
             .add_caveat(CaveatPredicate::MaxUses(5))
-            .add_caveat(CaveatPredicate::TimeBefore(1000));
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         // Same caveats in different order → different signatures.
         assert_ne!(t1.signature().as_bytes(), t2.signature().as_bytes());
@@ -1986,7 +1986,7 @@ mod tests {
     fn time_before_caveat_passes() {
         let key = test_root_key();
         let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1000));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         let ctx = VerificationContext::new().with_time(500);
         assert!(token.verify(&key, &ctx).is_ok());
@@ -1996,7 +1996,7 @@ mod tests {
     fn time_before_caveat_fails_when_expired() {
         let key = test_root_key();
         let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1000));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         let ctx = VerificationContext::new().with_time(1500);
         let err = token.verify(&key, &ctx).unwrap_err();
@@ -2010,7 +2010,7 @@ mod tests {
     fn time_before_caveat_fails_closed_without_time_context() {
         let key = test_root_key();
         let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1000));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         let err = token.verify(&key, &VerificationContext::new()).unwrap_err();
         assert!(matches!(err, VerificationError::CaveatFailed { .. }));
@@ -2020,7 +2020,7 @@ mod tests {
     fn time_after_caveat_passes() {
         let key = test_root_key();
         let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeAfter(100));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeAfter(0));
 
         let ctx = VerificationContext::new().with_time(200);
         assert!(token.verify(&key, &ctx).is_ok());
@@ -2030,7 +2030,7 @@ mod tests {
     fn time_after_caveat_fails_when_too_early() {
         let key = test_root_key();
         let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeAfter(100));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeAfter(0));
 
         let ctx = VerificationContext::new().with_time(50);
         assert!(token.verify(&key, &ctx).is_err());
@@ -2106,7 +2106,7 @@ mod tests {
     fn conjunction_of_caveats() {
         let key = test_root_key();
         let token = MacaroonToken::mint(&key, "cap", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(1000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_caveat(CaveatPredicate::RegionScope(5))
             .add_caveat(CaveatPredicate::MaxUses(10));
 
@@ -2135,7 +2135,7 @@ mod tests {
     fn removing_caveat_invalidates_signature() {
         let key = test_root_key();
         let token = MacaroonToken::mint(&key, "cap", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(1000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_caveat(CaveatPredicate::MaxUses(5));
 
         // Manually construct a token with only the first caveat
@@ -2175,7 +2175,7 @@ mod tests {
     fn binary_roundtrip_with_caveats() {
         let key = test_root_key();
         let token = MacaroonToken::mint(&key, "io:net", "cx/io")
-            .add_caveat(CaveatPredicate::TimeBefore(5000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_caveat(CaveatPredicate::RegionScope(42))
             .add_caveat(CaveatPredicate::Custom("env".into(), "test".into()));
 
@@ -2192,8 +2192,8 @@ mod tests {
     fn binary_roundtrip_all_predicate_types() {
         let key = test_root_key();
         let token = MacaroonToken::mint(&key, "all", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(1000))
-            .add_caveat(CaveatPredicate::TimeAfter(100))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
+            .add_caveat(CaveatPredicate::TimeAfter(0))
             .add_caveat(CaveatPredicate::RegionScope(42))
             .add_caveat(CaveatPredicate::TaskScope(7))
             .add_caveat(CaveatPredicate::MaxUses(5))
@@ -2219,7 +2219,7 @@ mod tests {
     fn from_binary_rejects_truncated_data() {
         let key = test_root_key();
         let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1000));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let bytes = token.to_binary();
 
         // Truncate at various points.
@@ -2257,7 +2257,7 @@ mod tests {
     fn display_formatting() {
         let key = test_root_key();
         let token = MacaroonToken::mint(&key, "spawn:r1", "scheduler")
-            .add_caveat(CaveatPredicate::TimeBefore(1000));
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         let display = format!("{token}");
         assert!(display.contains("Macaroon"));
@@ -2284,9 +2284,9 @@ mod tests {
     fn minting_is_deterministic() {
         let key = test_root_key();
         let t1 =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1000));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let t2 =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1000));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         assert_eq!(t1.signature().as_bytes(), t2.signature().as_bytes());
     }
@@ -2328,7 +2328,7 @@ mod tests {
 
         // Issuer mints token with a third-party caveat.
         let token = MacaroonToken::mint(&root_key, "access:data", "service")
-            .add_caveat(CaveatPredicate::TimeBefore(5000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_third_party_caveat("https://auth.example", "user_check", &caveat_key);
 
         // Third party mints a discharge macaroon.
@@ -2445,7 +2445,7 @@ mod tests {
         );
 
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
-            .add_caveat(CaveatPredicate::TimeBefore(1000));
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let bound = token.bind_for_request(&discharge).unwrap();
 
         // At time=500 — passes (discharge caveat satisfied).
@@ -2503,7 +2503,7 @@ mod tests {
         let caveat_key = AuthKey::from_seed(700);
 
         let token = MacaroonToken::mint(&root_key, "cap", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(9000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_third_party_caveat("https://tp.example", "tp_check", &caveat_key)
             .add_caveat(CaveatPredicate::MaxUses(3));
 
@@ -2529,7 +2529,7 @@ mod tests {
         let ck2 = AuthKey::from_seed(802);
 
         let token = MacaroonToken::mint(&root_key, "multi", "svc")
-            .add_caveat(CaveatPredicate::TimeBefore(10000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_third_party_caveat("tp1", "check1", &ck1)
             .add_caveat(CaveatPredicate::RegionScope(42))
             .add_third_party_caveat("tp2", "check2", &ck2);
@@ -2587,7 +2587,7 @@ mod tests {
         let outer_discharge = MacaroonToken::mint(&outer_key, "outer_check", "outer")
             .add_third_party_caveat("inner", "inner_check", &inner_key);
         let inner_discharge = MacaroonToken::mint(&inner_key, "inner_check", "inner")
-            .add_caveat(CaveatPredicate::TimeBefore(1000));
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
 
         let bound_inner = token.bind_for_request(&inner_discharge).unwrap();
         let bound_outer = token.bind_for_request(&outer_discharge).unwrap();
@@ -2967,7 +2967,7 @@ mod tests {
         // Adding caveats can only restrict, never expand
         let token_time = token_base
             .clone()
-            .add_caveat(CaveatPredicate::TimeBefore(5000));
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let token_scope = token_time
             .clone()
             .add_caveat(CaveatPredicate::ResourceScope("api/**".to_string()));
@@ -3409,7 +3409,7 @@ mod tests {
     fn tampered_signature_bytes_rejected() {
         let key = test_root_key();
         let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(5000));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
         let mut bytes = token.to_binary();
 
         // Flip last byte of signature (signature is the last AUTH_KEY_SIZE bytes).
@@ -3424,7 +3424,7 @@ mod tests {
     fn tampered_caveat_data_rejected() {
         let key = test_root_key();
         let token = MacaroonToken::mint(&key, "cap", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(5000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_caveat(CaveatPredicate::MaxUses(10));
 
         let mut bytes = token.to_binary();
@@ -3452,7 +3452,7 @@ mod tests {
         // Service attenuates to read-only with time limit.
         let svc_token = root_token
             .clone()
-            .add_caveat(CaveatPredicate::TimeBefore(10000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_caveat(CaveatPredicate::ResourceScope("data/users/**".to_string()));
 
         // Service delegates to subsystem with further restriction.
@@ -3553,7 +3553,7 @@ mod tests {
 
         // Root service mints a token requiring authentication + region.
         let token = MacaroonToken::mint(&root_key, "api:full", "api-gateway")
-            .add_caveat(CaveatPredicate::TimeBefore(10000))
+            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
             .add_caveat(CaveatPredicate::RegionScope(1))
             .add_third_party_caveat("auth-svc", "user_auth", &auth_key);
 
@@ -3846,7 +3846,7 @@ mod tests {
         let token = MacaroonToken::mint(&root_key, "test:capability", "test_location");
 
         // Add a caveat, which triggers HMAC-derived key creation
-        let caveat = CaveatPredicate::TimeBefore(1000);
+        let caveat = CaveatPredicate::TimeBefore(u64::MAX);
         let token_with_caveat = token.add_caveat(caveat);
 
         // Verification should succeed with proper key derivation
