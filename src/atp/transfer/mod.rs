@@ -1420,7 +1420,7 @@ mod tests {
         });
         sources.migration = Some(TransferMigrationPressure {
             trace_id: trace_id.to_string(),
-            events: 2,
+            events: 0,
         });
         sources
     }
@@ -1553,7 +1553,7 @@ mod tests {
                 AtpAutotuneMetricSample::new(AtpAutotuneMetric::DecodeBacklogSymbols, 3),
                 AtpAutotuneMetricSample::new(AtpAutotuneMetric::RepairRoiPermille, 500),
                 AtpAutotuneMetricSample::new(AtpAutotuneMetric::RelayCostMicrosPerMiB, 250_000,),
-                AtpAutotuneMetricSample::new(AtpAutotuneMetric::MigrationEvents, 2),
+                AtpAutotuneMetricSample::new(AtpAutotuneMetric::MigrationEvents, 0),
             ]
         );
     }
