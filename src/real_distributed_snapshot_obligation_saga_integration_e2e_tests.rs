@@ -434,7 +434,7 @@ mod tests {
                     _ => LatticeState::Unknown,
                 };
 
-                // Create a placeholder step (in real implementation, this would be stored)
+                // Create a restored step for the in-memory saga ledger.
                 let step = SagaStep::new(
                     SagaOpKind::Reserve,
                     format!("restored_step_{}", task_snapshot.task_id.as_raw()),

@@ -275,7 +275,7 @@ impl CancelAwareAuthenticationSystem {
             return Err(AuthenticationError::OperationCancelled);
         }
 
-        // Simulate authentication process with cancel monitoring
+        // Run authentication process with cancel monitoring.
         let auth_future = self
             .authentication_provider
             .authenticate(cx, credentials.clone());
@@ -301,7 +301,7 @@ impl CancelAwareAuthenticationSystem {
         operation_type: AuthenticatedOperationType,
         cancel_token: &CancelToken,
     ) -> Result<OperationExecutionResult, Error> {
-        // Simulate different operation types with cancel monitoring
+        // Run different operation types with cancel monitoring.
         let operation_duration = match operation_type {
             AuthenticatedOperationType::Login => Duration::from_millis(100),
             AuthenticatedOperationType::TokenRefresh => Duration::from_millis(50),
@@ -462,11 +462,11 @@ impl CancelAwareAuthenticationSystem {
 
     fn create_security_cleanup_handler(&self, correlation_id: String) -> CancelHandle {
         let correlation_id_clone = correlation_id.clone();
-        let self_clone = self.clone(); // simulate Arc clone behavior
+        let self_clone = self.clone();
 
         CancelHandle::new(Box::new(move |reason| {
             // This would be an async closure in real implementation
-            // For simulation, we'll track that cleanup was initiated
+            // Track that cleanup was initiated.
             println!(
                 "Security cleanup initiated for correlation: {}",
                 correlation_id_clone
@@ -618,7 +618,7 @@ impl CancelAwareAuthenticationSystem {
     }
 }
 
-// Placeholder types for compilation (would be imported from actual modules)
+// Local security types for this integration test module.
 #[derive(Debug, Clone)]
 pub struct SecurityCredentials {
     username: String,

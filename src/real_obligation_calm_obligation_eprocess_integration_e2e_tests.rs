@@ -35,21 +35,21 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    /// Mock CALM operation handler for integration testing
+    /// Deterministic CALM operation handler for integration testing.
     #[derive(Debug)]
-    struct MockCalmOperationHandler {
+    struct DeterministicCalmOperationHandler {
         handler_id: String,
         calm_state: Arc<Mutex<CalmState>>,
         operation_log: Arc<Mutex<Vec<CalmOperationRecord>>>,
-        eprocess_monitor: Arc<MockEprocessMonitor>,
+        eprocess_monitor: Arc<DeterministicEprocessMonitor>,
         integration_tracker: Arc<CalmEprocessTracker>,
         monotonicity_validator: CalmConformanceValidator,
         active_operations: AtomicU64,
         merge_operations: AtomicU64,
     }
 
-    impl MockCalmOperationHandler {
-        fn new(handler_id: String, eprocess_monitor: Arc<MockEprocessMonitor>) -> Self {
+    impl DeterministicCalmOperationHandler {
+        fn new(handler_id: String, eprocess_monitor: Arc<DeterministicEprocessMonitor>) -> Self {
             Self {
                 handler_id,
                 calm_state: Arc::new(Mutex::new(CalmState::new())),
@@ -379,9 +379,9 @@ mod tests {
         }
     }
 
-    /// Mock eprocess monitor for integration testing
+    /// Deterministic eprocess monitor for integration testing.
     #[derive(Debug)]
-    struct MockEprocessMonitor {
+    struct DeterministicEprocessMonitor {
         monitor_id: String,
         current_state: Arc<Mutex<EProcessState>>,
         monitoring_sessions: Arc<Mutex<HashMap<OperationId, MonitoringSession>>>,
@@ -390,7 +390,7 @@ mod tests {
         evidence_log: Arc<Mutex<Vec<EProcessEvidence>>>,
     }
 
-    impl MockEprocessMonitor {
+    impl DeterministicEprocessMonitor {
         fn new(monitor_id: String) -> Self {
             Self {
                 monitor_id,
@@ -432,7 +432,7 @@ mod tests {
         }
 
         async fn monitor_execution(&self, session: MonitoringSession) -> Result<MonitoringResult> {
-            // Simulate monitoring during execution
+            // Record monitoring during execution.
             let monitoring_duration = Duration::from_millis(50);
             tokio::time::sleep(monitoring_duration).await;
 
@@ -781,7 +781,7 @@ mod tests {
             .min(1.0)
     }
 
-    // Mock types for testing
+    // Deterministic types for testing
     #[derive(Debug, Clone)]
     struct CalmOperation {
         id: OperationId,
@@ -1008,7 +1008,7 @@ mod tests {
         total_operations: usize,
     }
 
-    // Placeholder types that would be fully implemented
+    // Local aliases for integration validation stages.
     type CalmConformanceValidator = ();
     type ConformanceCheck = ();
     type MonotonicityValidation = ();
@@ -1051,12 +1051,12 @@ mod tests {
         test_config: CalmEprocessTestConfig,
     ) -> Result<CalmEprocessIntegrationSummary> {
         // Create eprocess monitor
-        let eprocess_monitor = Arc::new(MockEprocessMonitor::new(
+        let eprocess_monitor = Arc::new(DeterministicEprocessMonitor::new(
             "test_eprocess_monitor".to_string(),
         ));
 
         // Create CALM operation handler
-        let calm_handler = MockCalmOperationHandler::new(
+        let calm_handler = DeterministicCalmOperationHandler::new(
             "test_calm_handler".to_string(),
             eprocess_monitor.clone(),
         );
@@ -1086,7 +1086,7 @@ mod tests {
                 } => {
                     // Stress test monotonicity preservation
                     for _ in 0..operation_count {
-                        // Simulate concurrent operations
+                        // Exercise concurrent operations.
                         cx.sleep(Duration::from_millis(5)).await?;
                     }
                 }

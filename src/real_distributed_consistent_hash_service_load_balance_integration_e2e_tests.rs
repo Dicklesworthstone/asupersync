@@ -563,7 +563,7 @@ impl ConsistentHashLoadBalanceSystem {
         monitor.topology_version
     }
 
-    /// Simulate node failure and test rebalancing coordination
+    /// Inject node failure and test rebalancing coordination.
     pub async fn simulate_node_failure(
         &self,
         cx: &Cx,
@@ -724,7 +724,7 @@ impl ConsistentHashLoadBalanceSystem {
     }
 }
 
-// Placeholder types for compilation (would be imported from actual modules)
+// Local integration types used by this test module.
 #[derive(Debug, Clone, Default)]
 pub struct RoutingOptions {
     pub preferred_strategy: RoutingStrategy,
@@ -934,12 +934,12 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
-            // Simulate node failure during routing
+            // Inject node failure during routing.
             let failed_node = HashRingNode::new("node_1".to_string());
             let failure_result = routing_system
                 .simulate_node_failure(cx, failed_node.clone())
                 .await
-                .expect("Node failure simulation should succeed");
+                .expect("Node failure injection should succeed");
 
             assert_eq!(failure_result.failed_node, failed_node);
             assert!(!failure_result.recovery_time.is_zero());

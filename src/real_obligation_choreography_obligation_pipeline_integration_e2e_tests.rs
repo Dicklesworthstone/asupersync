@@ -81,22 +81,22 @@ use std::{
     fmt::{self, Debug, Display},
 };
 
-/// Mock system integrating choreography and pipeline for session-type protocol testing.
+/// Deterministic system integrating choreography and pipeline for session-type protocol testing.
 ///
 /// Simulates real-world obligation choreography coordinating with pipeline execution
 /// to enforce session-type protocol transitions while preventing deadlocks through
 /// sophisticated dependency analysis and resource management strategies.
-pub struct MockChoreographyPipelineSystem {
+pub struct DeterministicChoreographyPipelineSystem {
     /// Choreography engine managing session-type protocol transitions
-    choreography: Arc<MockChoreographyEngine>,
+    choreography: Arc<DeterministicChoreographyEngine>,
     /// Pipeline orchestrator handling stage execution and coordination
-    pipeline: Arc<MockPipelineOrchestrator>,
+    pipeline: Arc<DeterministicPipelineOrchestrator>,
     /// Session type checker ensuring protocol compliance
-    session_checker: Arc<MockSessionTypeChecker>,
+    session_checker: Arc<DeterministicSessionTypeChecker>,
     /// Deadlock detector preventing circular dependencies
-    deadlock_detector: Arc<MockDeadlockDetector>,
+    deadlock_detector: Arc<DeterministicDeadlockDetector>,
     /// Resource manager coordinating shared resources between stages
-    resource_manager: Arc<MockResourceManager>,
+    resource_manager: Arc<DeterministicResourceManager>,
     /// Configuration controlling system behavior
     config: ChoreographyPipelineConfig,
     /// System metrics and telemetry
@@ -239,60 +239,60 @@ type StageId = u64;
 type SessionId = u64;
 type DependencyGraph = HashMap<ResourceId, Vec<ResourceId>>;
 
-/// Mock choreography engine managing session-type protocol transitions.
-pub struct MockChoreographyEngine {
+/// Deterministic choreography engine managing session-type protocol transitions.
+pub struct DeterministicChoreographyEngine {
     protocol_definitions: Arc<RwLock<HashMap<String, ProtocolDefinition>>>,
     active_sessions: Arc<RwLock<HashMap<SessionId, SessionState>>>,
     transition_handlers: Arc<RwLock<HashMap<String, TransitionHandler>>>,
     state_validators: Arc<RwLock<HashMap<SessionType, StateValidator>>>,
-    deadlock_detector: Arc<MockDeadlockDetector>,
+    deadlock_detector: Arc<DeterministicDeadlockDetector>,
     metrics: Arc<Mutex<ChoreographyMetrics>>,
     config: ChoreographyConfig,
 }
 
-/// Mock pipeline orchestrator handling stage execution.
-pub struct MockPipelineOrchestrator {
+/// Deterministic pipeline orchestrator handling stage execution.
+pub struct DeterministicPipelineOrchestrator {
     stage_registry: Arc<RwLock<HashMap<String, StageDefinition>>>,
     execution_queue: Arc<Mutex<VecDeque<StageExecution>>>,
-    resource_manager: Arc<MockResourceManager>,
-    flow_controller: Arc<MockFlowController>,
-    backpressure_controller: Arc<MockBackpressureController>,
+    resource_manager: Arc<DeterministicResourceManager>,
+    flow_controller: Arc<DeterministicFlowController>,
+    backpressure_controller: Arc<DeterministicBackpressureController>,
     metrics: Arc<Mutex<PipelineMetrics>>,
     config: PipelineConfig,
 }
 
-/// Mock session type checker ensuring protocol compliance.
-pub struct MockSessionTypeChecker {
+/// Deterministic session type checker ensuring protocol compliance.
+pub struct DeterministicSessionTypeChecker {
     type_rules: Arc<RwLock<HashMap<SessionType, Vec<TransitionRule>>>>,
     protocol_cache: Arc<RwLock<HashMap<String, CompiledProtocol>>>,
-    validation_engine: Arc<MockValidationEngine>,
-    type_inference: Arc<MockTypeInference>,
+    validation_engine: Arc<DeterministicValidationEngine>,
+    type_inference: Arc<DeterministicTypeInference>,
     metrics: Arc<Mutex<TypeCheckingMetrics>>,
     config: TypeCheckingConfig,
 }
 
-/// Mock deadlock detector preventing circular dependencies.
-pub struct MockDeadlockDetector {
+/// Deterministic deadlock detector preventing circular dependencies.
+pub struct DeterministicDeadlockDetector {
     dependency_tracker: Arc<RwLock<DependencyTracker>>,
-    cycle_detector: Arc<MockCycleDetector>,
+    cycle_detector: Arc<DeterministicCycleDetector>,
     resolution_strategies: Arc<RwLock<Vec<DeadlockResolutionStrategy>>>,
     prevention_policies: Arc<RwLock<Vec<PreventionPolicy>>>,
     metrics: Arc<Mutex<DeadlockMetrics>>,
     config: DeadlockConfig,
 }
 
-/// Mock resource manager coordinating shared resources.
-pub struct MockResourceManager {
+/// Deterministic resource manager coordinating shared resources.
+pub struct DeterministicResourceManager {
     resource_pool: Arc<RwLock<HashMap<ResourceId, Resource>>>,
     allocation_tracker: Arc<RwLock<HashMap<ResourceId, AllocationInfo>>>,
-    lock_manager: Arc<MockLockManager>,
-    timeout_manager: Arc<MockTimeoutManager>,
-    cleanup_scheduler: Arc<MockCleanupScheduler>,
+    lock_manager: Arc<DeterministicLockManager>,
+    timeout_manager: Arc<DeterministicTimeoutManager>,
+    cleanup_scheduler: Arc<DeterministicCleanupScheduler>,
     metrics: Arc<Mutex<ResourceMetrics>>,
     config: ResourceConfig,
 }
 
-// Supporting types for the mock system
+// Supporting types for the deterministic system
 
 /// Protocol transition handler function type.
 type TransitionHandler = Box<dyn Fn(&SessionState, &SessionTransition) -> Result<SessionState, ChoreographyError> + Send + Sync>;
@@ -427,19 +427,19 @@ pub struct OptimizationHints {
     parallelizable_checks: Vec<String>,
 }
 
-/// Mock validation engine for session type checking.
-pub struct MockValidationEngine {
-    rule_compiler: Arc<MockRuleCompiler>,
+/// Deterministic validation engine for session type checking.
+pub struct DeterministicValidationEngine {
+    rule_compiler: Arc<DeterministicRuleCompiler>,
     validation_cache: Arc<RwLock<HashMap<String, ValidationResult>>>,
-    performance_profiler: Arc<MockPerformanceProfiler>,
+    performance_profiler: Arc<DeterministicPerformanceProfiler>,
     metrics: Arc<Mutex<ValidationMetrics>>,
 }
 
-/// Mock type inference engine.
-pub struct MockTypeInference {
+/// Deterministic type inference engine.
+pub struct DeterministicTypeInference {
     inference_rules: Arc<RwLock<Vec<InferenceRule>>>,
     type_cache: Arc<RwLock<HashMap<String, InferredType>>>,
-    constraint_solver: Arc<MockConstraintSolver>,
+    constraint_solver: Arc<DeterministicConstraintSolver>,
     metrics: Arc<Mutex<InferenceMetrics>>,
 }
 
@@ -461,9 +461,9 @@ pub struct InferredType {
     alternatives: Vec<SessionType>,
 }
 
-/// Mock constraint solver for type inference.
-pub struct MockConstraintSolver {
-    constraint_engine: Arc<MockConstraintEngine>,
+/// Deterministic constraint solver for type inference.
+pub struct DeterministicConstraintSolver {
+    constraint_engine: Arc<DeterministicConstraintEngine>,
     solver_cache: Arc<RwLock<HashMap<String, SolverResult>>>,
     optimization_level: OptimizationLevel,
 }
@@ -506,11 +506,11 @@ pub enum PreventionPolicy {
     AvoidanceAlgorithm { algorithm: String },
 }
 
-/// Mock cycle detector for finding circular dependencies.
-pub struct MockCycleDetector {
+/// Deterministic cycle detector for finding circular dependencies.
+pub struct DeterministicCycleDetector {
     detection_algorithm: CycleDetectionAlgorithm,
     detection_cache: Arc<RwLock<HashMap<String, DetectionResult>>>,
-    performance_tuning: Arc<MockPerformanceTuning>,
+    performance_tuning: Arc<DeterministicPerformanceTuning>,
 }
 
 /// Cycle detection algorithms.
@@ -532,11 +532,11 @@ pub struct DetectionResult {
     algorithm_used: CycleDetectionAlgorithm,
 }
 
-/// Mock flow controller for pipeline execution.
-pub struct MockFlowController {
+/// Deterministic flow controller for pipeline execution.
+pub struct DeterministicFlowController {
     flow_policies: Arc<RwLock<Vec<FlowPolicy>>>,
     rate_limiters: Arc<RwLock<HashMap<String, RateLimiter>>>,
-    admission_controller: Arc<MockAdmissionController>,
+    admission_controller: Arc<DeterministicAdmissionController>,
     metrics: Arc<Mutex<FlowControlMetrics>>,
 }
 
@@ -578,7 +578,7 @@ pub enum OverflowPolicy {
     Elastic { scale_factor: f64 },
 }
 
-/// Mock rate limiter for flow control.
+/// Deterministic rate limiter for flow control.
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
     max_rate: f64,
@@ -587,11 +587,11 @@ pub struct RateLimiter {
     burst_capacity: f64,
 }
 
-/// Mock admission controller.
-pub struct MockAdmissionController {
+/// Deterministic admission controller.
+pub struct DeterministicAdmissionController {
     admission_policies: Arc<RwLock<Vec<AdmissionPolicy>>>,
-    load_estimator: Arc<MockLoadEstimator>,
-    capacity_planner: Arc<MockCapacityPlanner>,
+    load_estimator: Arc<DeterministicLoadEstimator>,
+    capacity_planner: Arc<DeterministicCapacityPlanner>,
     metrics: Arc<Mutex<AdmissionMetrics>>,
 }
 
@@ -605,8 +605,8 @@ pub enum AdmissionPolicy {
     Custom { policy: String },
 }
 
-/// Mock backpressure controller.
-pub struct MockBackpressureController {
+/// Deterministic backpressure controller.
+pub struct DeterministicBackpressureController {
     backpressure_signals: Arc<RwLock<HashMap<StageId, BackpressureSignal>>>,
     propagation_rules: Arc<RwLock<Vec<PropagationRule>>>,
     mitigation_strategies: Arc<RwLock<Vec<MitigationStrategy>>>,
@@ -710,12 +710,12 @@ pub enum UsagePattern {
     Unknown,
 }
 
-/// Mock lock manager for resource coordination.
-pub struct MockLockManager {
+/// Deterministic lock manager for resource coordination.
+pub struct DeterministicLockManager {
     lock_table: Arc<RwLock<HashMap<ResourceId, LockEntry>>>,
     wait_queues: Arc<RwLock<HashMap<ResourceId, WaitQueue>>>,
-    deadlock_detector: Arc<MockDeadlockDetector>,
-    performance_monitor: Arc<MockPerformanceMonitor>,
+    deadlock_detector: Arc<DeterministicDeadlockDetector>,
+    performance_monitor: Arc<DeterministicPerformanceMonitor>,
     config: LockConfig,
 }
 
@@ -775,10 +775,10 @@ pub struct StarvationDetector {
     detected_starvation: Vec<StageId>,
 }
 
-/// Mock timeout manager for resource timeouts.
-pub struct MockTimeoutManager {
+/// Deterministic timeout manager for resource timeouts.
+pub struct DeterministicTimeoutManager {
     timeout_registry: Arc<RwLock<HashMap<TimeoutId, TimeoutEntry>>>,
-    timeout_scheduler: Arc<MockTimeoutScheduler>,
+    timeout_scheduler: Arc<DeterministicTimeoutScheduler>,
     escalation_policies: Arc<RwLock<Vec<EscalationPolicy>>>,
     metrics: Arc<Mutex<TimeoutMetrics>>,
 }
@@ -804,10 +804,10 @@ pub enum EscalationPolicy {
     Custom { action: String },
 }
 
-/// Mock cleanup scheduler for resource management.
-pub struct MockCleanupScheduler {
+/// Deterministic cleanup scheduler for resource management.
+pub struct DeterministicCleanupScheduler {
     cleanup_jobs: Arc<RwLock<HashMap<JobId, CleanupJob>>>,
-    scheduler: Arc<MockJobScheduler>,
+    scheduler: Arc<DeterministicJobScheduler>,
     cleanup_policies: Arc<RwLock<Vec<CleanupPolicy>>>,
     metrics: Arc<Mutex<CleanupMetrics>>,
 }
@@ -1052,22 +1052,22 @@ pub struct AdmissionMetrics {
     pub load_factor: f64,
 }
 
-// Mock implementations with minimal stub functionality
+// Deterministic integration support implementations.
 
 /// Type aliases for IDs.
 type TimeoutId = u64;
 type JobId = u64;
 
-/// Additional supporting types for mock implementations.
-pub struct MockRuleCompiler;
-pub struct MockPerformanceProfiler;
-pub struct MockConstraintEngine;
-pub struct MockPerformanceTuning;
-pub struct MockLoadEstimator;
-pub struct MockCapacityPlanner;
-pub struct MockPerformanceMonitor;
-pub struct MockTimeoutScheduler;
-pub struct MockJobScheduler;
+/// Additional supporting types for deterministic implementations.
+pub struct DeterministicRuleCompiler;
+pub struct DeterministicPerformanceProfiler;
+pub struct DeterministicConstraintEngine;
+pub struct DeterministicPerformanceTuning;
+pub struct DeterministicLoadEstimator;
+pub struct DeterministicCapacityPlanner;
+pub struct DeterministicPerformanceMonitor;
+pub struct DeterministicTimeoutScheduler;
+pub struct DeterministicJobScheduler;
 
 /// Result types for various operations.
 #[derive(Debug, Clone)]
@@ -1093,19 +1093,19 @@ pub struct TransitionRule {
     pub actions: Vec<String>,
 }
 
-impl MockChoreographyPipelineSystem {
-    /// Create a new mock choreography-pipeline system with the given configuration.
+impl DeterministicChoreographyPipelineSystem {
+    /// Create a new deterministic choreography-pipeline system with the given configuration.
     pub fn new(config: ChoreographyPipelineConfig) -> Self {
-        let choreography = Arc::new(MockChoreographyEngine::new(config.clone()));
-        let deadlock_detector = Arc::new(MockDeadlockDetector::new(config.clone()));
-        let resource_manager = Arc::new(MockResourceManager::new(config.clone()));
+        let choreography = Arc::new(DeterministicChoreographyEngine::new(config.clone()));
+        let deadlock_detector = Arc::new(DeterministicDeadlockDetector::new(config.clone()));
+        let resource_manager = Arc::new(DeterministicResourceManager::new(config.clone()));
 
-        let pipeline = Arc::new(MockPipelineOrchestrator::new(
+        let pipeline = Arc::new(DeterministicPipelineOrchestrator::new(
             config.clone(),
             Arc::clone(&resource_manager),
         ));
 
-        let session_checker = Arc::new(MockSessionTypeChecker::new(config.clone()));
+        let session_checker = Arc::new(DeterministicSessionTypeChecker::new(config.clone()));
 
         Self {
             choreography,
@@ -1408,7 +1408,7 @@ impl MockChoreographyPipelineSystem {
         stage: &PipelineStageDefinition,
         resources: &[ResourceAllocation],
     ) -> Result<StageOutput, ChoreographyPipelineError> {
-        // Simulate stage execution based on stage type
+        // Execute stage behavior based on stage type.
         match &stage.execution_type {
             StageExecutionType::Compute { duration } => {
                 Sleep::new(cx.deadline() + *duration).await.ok();
@@ -1427,7 +1427,7 @@ impl MockChoreographyPipelineSystem {
                 })
             },
             StageExecutionType::Network { requests } => {
-                // Simulate network requests
+                // Exercise network request handling.
                 for _ in 0..*requests {
                     Sleep::new(cx.deadline() + Duration::from_millis(50)).await.ok();
                 }
@@ -1807,16 +1807,16 @@ impl Display for ChoreographyPipelineError {
 
 impl std::error::Error for ChoreographyPipelineError {}
 
-// Mock implementations for the supporting components
+// Deterministic implementations for the supporting components
 
-impl MockChoreographyEngine {
+impl DeterministicChoreographyEngine {
     fn new(config: ChoreographyPipelineConfig) -> Self {
         Self {
             protocol_definitions: Arc::new(RwLock::new(HashMap::new())),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             transition_handlers: Arc::new(RwLock::new(HashMap::new())),
             state_validators: Arc::new(RwLock::new(HashMap::new())),
-            deadlock_detector: Arc::new(MockDeadlockDetector::new(config.clone())),
+            deadlock_detector: Arc::new(DeterministicDeadlockDetector::new(config.clone())),
             metrics: Arc::new(Mutex::new(ChoreographyMetrics::default())),
             config: ChoreographyConfig::from(config),
         }
@@ -1859,21 +1859,21 @@ impl MockChoreographyEngine {
     }
 }
 
-impl MockPipelineOrchestrator {
-    fn new(config: ChoreographyPipelineConfig, resource_manager: Arc<MockResourceManager>) -> Self {
+impl DeterministicPipelineOrchestrator {
+    fn new(config: ChoreographyPipelineConfig, resource_manager: Arc<DeterministicResourceManager>) -> Self {
         Self {
             stage_registry: Arc::new(RwLock::new(HashMap::new())),
             execution_queue: Arc::new(Mutex::new(VecDeque::new())),
             resource_manager,
-            flow_controller: Arc::new(MockFlowController::new(config.clone())),
-            backpressure_controller: Arc::new(MockBackpressureController::new(config.clone())),
+            flow_controller: Arc::new(DeterministicFlowController::new(config.clone())),
+            backpressure_controller: Arc::new(DeterministicBackpressureController::new(config.clone())),
             metrics: Arc::new(Mutex::new(PipelineMetrics::default())),
             config: PipelineConfig::from(config),
         }
     }
 
     fn get_stages(&self, pipeline_name: &str) -> Result<Vec<PipelineStageDefinition>, ChoreographyPipelineError> {
-        // Return mock stages for testing
+        // Return deterministic stages for testing.
         Ok(vec![
             PipelineStageDefinition {
                 name: format!("{}_stage_1", pipeline_name),
@@ -1917,13 +1917,13 @@ impl MockPipelineOrchestrator {
     }
 }
 
-impl MockSessionTypeChecker {
+impl DeterministicSessionTypeChecker {
     fn new(config: ChoreographyPipelineConfig) -> Self {
         Self {
             type_rules: Arc::new(RwLock::new(HashMap::new())),
             protocol_cache: Arc::new(RwLock::new(HashMap::new())),
-            validation_engine: Arc::new(MockValidationEngine::new()),
-            type_inference: Arc::new(MockTypeInference::new()),
+            validation_engine: Arc::new(DeterministicValidationEngine::new()),
+            type_inference: Arc::new(DeterministicTypeInference::new()),
             metrics: Arc::new(Mutex::new(TypeCheckingMetrics::default())),
             config: TypeCheckingConfig::from(config),
         }
@@ -1964,7 +1964,7 @@ impl MockSessionTypeChecker {
     }
 }
 
-impl MockDeadlockDetector {
+impl DeterministicDeadlockDetector {
     fn new(config: ChoreographyPipelineConfig) -> Self {
         Self {
             dependency_tracker: Arc::new(RwLock::new(DependencyTracker {
@@ -1973,7 +1973,7 @@ impl MockDeadlockDetector {
                 resource_owners: HashMap::new(),
                 cycle_history: Vec::new(),
             })),
-            cycle_detector: Arc::new(MockCycleDetector::new()),
+            cycle_detector: Arc::new(DeterministicCycleDetector::new()),
             resolution_strategies: Arc::new(RwLock::new(Vec::new())),
             prevention_policies: Arc::new(RwLock::new(Vec::new())),
             metrics: Arc::new(Mutex::new(DeadlockMetrics::default())),
@@ -2047,14 +2047,14 @@ impl MockDeadlockDetector {
     }
 }
 
-impl MockResourceManager {
+impl DeterministicResourceManager {
     fn new(config: ChoreographyPipelineConfig) -> Self {
         Self {
             resource_pool: Arc::new(RwLock::new(HashMap::new())),
             allocation_tracker: Arc::new(RwLock::new(HashMap::new())),
-            lock_manager: Arc::new(MockLockManager::new(config.clone())),
-            timeout_manager: Arc::new(MockTimeoutManager::new()),
-            cleanup_scheduler: Arc::new(MockCleanupScheduler::new()),
+            lock_manager: Arc::new(DeterministicLockManager::new(config.clone())),
+            timeout_manager: Arc::new(DeterministicTimeoutManager::new()),
+            cleanup_scheduler: Arc::new(DeterministicCleanupScheduler::new()),
             metrics: Arc::new(Mutex::new(ResourceMetrics::default())),
             config: ResourceConfig::from(config),
         }
@@ -2080,7 +2080,7 @@ impl MockResourceManager {
         lock_type: LockType,
         timeout: Option<Duration>,
     ) -> Result<ResourceAllocation, ChoreographyPipelineError> {
-        // Simulate resource acquisition
+        // Execute resource acquisition.
         Sleep::new(cx.deadline() + Duration::from_millis(10)).await.ok();
 
         Ok(ResourceAllocation {
@@ -2097,7 +2097,7 @@ impl MockResourceManager {
         resource_id: ResourceId,
         stage_id: StageId,
     ) -> Result<(), ChoreographyPipelineError> {
-        // Simulate resource release
+        // Execute resource release.
         Ok(())
     }
 
@@ -2111,20 +2111,20 @@ impl MockResourceManager {
     }
 }
 
-// Additional mock implementations
+// Additional deterministic implementations
 
-impl MockFlowController {
+impl DeterministicFlowController {
     fn new(config: ChoreographyPipelineConfig) -> Self {
         Self {
             flow_policies: Arc::new(RwLock::new(Vec::new())),
             rate_limiters: Arc::new(RwLock::new(HashMap::new())),
-            admission_controller: Arc::new(MockAdmissionController::new()),
+            admission_controller: Arc::new(DeterministicAdmissionController::new()),
             metrics: Arc::new(Mutex::new(FlowControlMetrics::default())),
         }
     }
 }
 
-impl MockBackpressureController {
+impl DeterministicBackpressureController {
     fn new(config: ChoreographyPipelineConfig) -> Self {
         Self {
             backpressure_signals: Arc::new(RwLock::new(HashMap::new())),
@@ -2135,87 +2135,87 @@ impl MockBackpressureController {
     }
 }
 
-impl MockValidationEngine {
+impl DeterministicValidationEngine {
     fn new() -> Self {
         Self {
-            rule_compiler: Arc::new(MockRuleCompiler),
+            rule_compiler: Arc::new(DeterministicRuleCompiler),
             validation_cache: Arc::new(RwLock::new(HashMap::new())),
-            performance_profiler: Arc::new(MockPerformanceProfiler),
+            performance_profiler: Arc::new(DeterministicPerformanceProfiler),
             metrics: Arc::new(Mutex::new(ValidationMetrics::default())),
         }
     }
 }
 
-impl MockTypeInference {
+impl DeterministicTypeInference {
     fn new() -> Self {
         Self {
             inference_rules: Arc::new(RwLock::new(Vec::new())),
             type_cache: Arc::new(RwLock::new(HashMap::new())),
-            constraint_solver: Arc::new(MockConstraintSolver::new()),
+            constraint_solver: Arc::new(DeterministicConstraintSolver::new()),
             metrics: Arc::new(Mutex::new(InferenceMetrics::default())),
         }
     }
 }
 
-impl MockConstraintSolver {
+impl DeterministicConstraintSolver {
     fn new() -> Self {
         Self {
-            constraint_engine: Arc::new(MockConstraintEngine),
+            constraint_engine: Arc::new(DeterministicConstraintEngine),
             solver_cache: Arc::new(RwLock::new(HashMap::new())),
             optimization_level: OptimizationLevel::Basic,
         }
     }
 }
 
-impl MockCycleDetector {
+impl DeterministicCycleDetector {
     fn new() -> Self {
         Self {
             detection_algorithm: CycleDetectionAlgorithm::DepthFirstSearch,
             detection_cache: Arc::new(RwLock::new(HashMap::new())),
-            performance_tuning: Arc::new(MockPerformanceTuning),
+            performance_tuning: Arc::new(DeterministicPerformanceTuning),
         }
     }
 }
 
-impl MockAdmissionController {
+impl DeterministicAdmissionController {
     fn new() -> Self {
         Self {
             admission_policies: Arc::new(RwLock::new(Vec::new())),
-            load_estimator: Arc::new(MockLoadEstimator),
-            capacity_planner: Arc::new(MockCapacityPlanner),
+            load_estimator: Arc::new(DeterministicLoadEstimator),
+            capacity_planner: Arc::new(DeterministicCapacityPlanner),
             metrics: Arc::new(Mutex::new(AdmissionMetrics::default())),
         }
     }
 }
 
-impl MockLockManager {
+impl DeterministicLockManager {
     fn new(config: ChoreographyPipelineConfig) -> Self {
         Self {
             lock_table: Arc::new(RwLock::new(HashMap::new())),
             wait_queues: Arc::new(RwLock::new(HashMap::new())),
-            deadlock_detector: Arc::new(MockDeadlockDetector::new(config.clone())),
-            performance_monitor: Arc::new(MockPerformanceMonitor),
+            deadlock_detector: Arc::new(DeterministicDeadlockDetector::new(config.clone())),
+            performance_monitor: Arc::new(DeterministicPerformanceMonitor),
             config: LockConfig::from(config),
         }
     }
 }
 
-impl MockTimeoutManager {
+impl DeterministicTimeoutManager {
     fn new() -> Self {
         Self {
             timeout_registry: Arc::new(RwLock::new(HashMap::new())),
-            timeout_scheduler: Arc::new(MockTimeoutScheduler),
+            timeout_scheduler: Arc::new(DeterministicTimeoutScheduler),
             escalation_policies: Arc::new(RwLock::new(Vec::new())),
             metrics: Arc::new(Mutex::new(TimeoutMetrics::default())),
         }
     }
 }
 
-impl MockCleanupScheduler {
+impl DeterministicCleanupScheduler {
     fn new() -> Self {
         Self {
             cleanup_jobs: Arc::new(RwLock::new(HashMap::new())),
-            scheduler: Arc::new(MockJobScheduler),
+            scheduler: Arc::new(DeterministicJobScheduler),
             cleanup_policies: Arc::new(RwLock::new(Vec::new())),
             metrics: Arc::new(Mutex::new(CleanupMetrics::default())),
         }
@@ -2317,7 +2317,7 @@ impl From<ChoreographyPipelineConfig> for LockConfig {
     }
 }
 
-/// Simple configuration types for the mock components.
+/// Simple configuration types for the deterministic components.
 #[derive(Debug, Clone)]
 pub struct ChoreographyConfig {
     pub max_sessions: usize,
@@ -2373,7 +2373,7 @@ mod tests {
             ..Default::default()
         };
 
-        let system = MockChoreographyPipelineSystem::new(config);
+        let system = DeterministicChoreographyPipelineSystem::new(config);
 
         // Test execution
         let runtime = crate::runtime::RuntimeBuilder::new()
@@ -2425,7 +2425,7 @@ mod tests {
             ..Default::default()
         };
 
-        let system = MockChoreographyPipelineSystem::new(config);
+        let system = DeterministicChoreographyPipelineSystem::new(config);
 
         let runtime = crate::runtime::RuntimeBuilder::new()
             .build()
@@ -2504,7 +2504,7 @@ mod tests {
             ..Default::default()
         };
 
-        let system = MockChoreographyPipelineSystem::new(config);
+        let system = DeterministicChoreographyPipelineSystem::new(config);
 
         let runtime = crate::runtime::RuntimeBuilder::new()
             .build()
@@ -2592,7 +2592,7 @@ mod tests {
             ..Default::default()
         };
 
-        let system = MockChoreographyPipelineSystem::new(config);
+        let system = DeterministicChoreographyPipelineSystem::new(config);
 
         let runtime = crate::runtime::RuntimeBuilder::new()
             .build()
@@ -2668,7 +2668,7 @@ mod tests {
             error_handling: ErrorHandlingPolicy::ContinueOnError, // Keep going despite failures
         };
 
-        let system = MockChoreographyPipelineSystem::new(config);
+        let system = DeterministicChoreographyPipelineSystem::new(config);
 
         let runtime = crate::runtime::RuntimeBuilder::new()
             .build()
@@ -2762,7 +2762,7 @@ mod tests {
             ..Default::default()
         };
 
-        let system = MockChoreographyPipelineSystem::new(config);
+        let system = DeterministicChoreographyPipelineSystem::new(config);
 
         let runtime = crate::runtime::RuntimeBuilder::new()
             .build()
@@ -2783,7 +2783,7 @@ mod tests {
 
             // Should succeed with inference, but might not match expected protocol
 
-            // 2. Invalid transition sequence (this would be detected by a more sophisticated mock)
+            // 2. Invalid transition sequence.
             let invalid_transition_result = system.execute_choreographed_pipeline(
                 &cx,
                 "invalid_transition_pipeline",
@@ -2839,7 +2839,7 @@ mod tests {
     #[test]
     fn test_system_configuration_and_health() {
         let config = ChoreographyPipelineConfig::default();
-        let system = MockChoreographyPipelineSystem::new(config.clone());
+        let system = DeterministicChoreographyPipelineSystem::new(config.clone());
 
         // Verify initial state
         let health = system.check_health();

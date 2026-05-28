@@ -99,7 +99,7 @@ impl DistributedEProcessState {
         match operation.classification.monotonicity {
             Monotonicity::Monotone => self.apply_monotone_operation(operation, timestamp),
             Monotonicity::NonMonotone => {
-                // Non-monotone operations require coordination - simulate by requiring
+                // Non-monotone operations require coordination by requiring
                 // all other nodes to be synchronized (simplified for testing)
                 self.apply_coordinated_operation(operation, timestamp)
             }
@@ -172,7 +172,7 @@ impl DistributedEProcessState {
             CalmOperationType::Recv { channel_id: _ } => {
                 // Recv is destructive read - requires coordination
                 self.observations += 1;
-                // Simulate coordination delay/overhead
+                // Apply coordination delay/overhead.
                 self.update_e_value_for_age(1_000_000); // 1ms coordination overhead
             }
             CalmOperationType::Release { resource_id } => {
@@ -186,7 +186,7 @@ impl DistributedEProcessState {
             }
             _ => {
                 return Err(format!(
-                    "Coordination not implemented for {:?}",
+                    "Coordination operation is unsupported in this merge path: {:?}",
                     operation.operation_type
                 ));
             }

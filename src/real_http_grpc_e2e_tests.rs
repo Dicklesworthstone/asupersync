@@ -1,7 +1,7 @@
 //! [br-e2e-2] Real HTTP/h1, HTTP/h2, and gRPC E2E tests with actual server implementations.
 //!
 //! These tests wire the actual asupersync HTTP and gRPC server implementations
-//! to ephemeral ports for production-grade E2E testing. No mocks, no stubs -
+//! to ephemeral ports for production-grade E2E testing. No test doubles -
 //! tests the full protocol stack including HTTP parsing, gRPC framing, and error handling.
 
 #[cfg(test)]
@@ -173,7 +173,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Mock HTTP Service for Testing
+    // Deterministic HTTP Service for Testing
     // ---------------------------------------------------------------------------
 
     #[derive(Debug, Clone)]

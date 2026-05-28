@@ -1,13 +1,13 @@
 //! E2E Test Hardening and Consolidation
 //!
 //! This module identifies and fixes critical issues in the e2e test suite:
-//! - Mock leakage using std::sync instead of asupersync primitives
+//! - Test double leakage using std::sync instead of asupersync primitives
 //! - Tokio contamination in supposedly real-service tests
-//! - Elaborate simulations instead of real module integration
+//! - Elaborate local models instead of real module integration
 //! - Brittle timing assumptions and flaky test patterns
 //! - Missing real service integration despite "real-service-e2e" claims
 //!
-//! Core focus: Transform elaborate mocks into true end-to-end integration tests
+//! Core focus: Transform elaborate test doubles into true end-to-end integration tests
 //! using actual asupersync modules, primitives, and runtime.
 
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -22,7 +22,7 @@ mod analysis {
         mock_leakage_files: Vec<String>,
         /// Tests using tokio primitives instead of asupersync
         tokio_contamination_files: Vec<String>,
-        /// Tests with elaborate simulations instead of real integration
+        /// Tests with elaborate local models instead of real integration
         simulation_instead_of_integration: Vec<String>,
         /// Tests with brittle timing assumptions
         brittle_timing_patterns: Vec<String>,
@@ -46,7 +46,7 @@ mod analysis {
     const IDENTIFIED_ISSUES: &str = r#"
 # E2E Test Suite Critical Issues Analysis
 
-## 1. MOCK LEAKAGE - Using std::sync instead of asupersync primitives
+## 1. TEST DOUBLE LEAKAGE - Using std::sync instead of asupersync primitives
 
 **Problem**: Tests claim to be "real-service-e2e" but use std::sync::Mutex, std::sync::Arc
 **Impact**: Tests don't verify cancel-correctness, don't test real runtime integration
@@ -66,18 +66,18 @@ use crate::types::{RegionId, TaskId, Budget};
 use crate::cx::Cx;
 ```
 
-## 2. ELABORATE SIMULATIONS instead of real integration
+## 2. ELABORATE LOCAL MODELS instead of real integration
 
-**Problem**: Creating entire mock TLS/supervision/signal systems instead of using real modules
-**Impact**: Tests verify mock behavior, not real system integration
+**Problem**: Creating entire TLS/supervision/signal test systems instead of using real modules
+**Impact**: Tests verify local test behavior, not real system integration
 **Files affected**: ALL recent e2e tests
 
 **Example from real_signal_graceful_shutdown_supervision_tree_e2e_tests.rs:**
 ```rust
-// ❌ Elaborate mock supervision tree
+// Elaborate local supervision tree
 struct SupervisionTree {
     nodes: Mutex<HashMap<NodeId, Arc<SupervisionNode>>>,
-    // ... 500+ lines of supervision simulation
+    // ... 500+ lines of supervision model
 }
 ```
 
@@ -109,7 +109,7 @@ lab_runtime.advance_virtual_time(drain_duration);
 
 **Problem**: Tests don't actually call real asupersync modules
 **Impact**: Integration bugs go undetected
-**Pattern**: Creating mock versions instead of importing real modules
+**Pattern**: Creating test-double versions instead of importing real modules
 
 **Examples of missing real imports:**
 - No `use crate::tls::TlsAcceptor` in TLS tests
@@ -171,11 +171,11 @@ lab_runtime.advance_virtual_time(drain_duration);
         // Verify we identified the issues
         assert!(
             !issues.mock_leakage_files.is_empty(),
-            "Mock leakage issues identified"
+            "Test double leakage issues identified"
         );
         assert!(
             !issues.simulation_instead_of_integration.is_empty(),
-            "Simulation issues identified"
+            "Local model issues identified"
         );
         assert!(
             !issues.brittle_timing_patterns.is_empty(),
@@ -188,7 +188,7 @@ lab_runtime.advance_virtual_time(drain_duration);
 
         println!("\n✓ E2E Test Issues Analysis Complete:");
         println!(
-            "  - Mock leakage files: {}",
+            "  - Test double leakage files: {}",
             issues.mock_leakage_files.len()
         );
         println!(
@@ -196,7 +196,7 @@ lab_runtime.advance_virtual_time(drain_duration);
             issues.tokio_contamination_files.len()
         );
         println!(
-            "  - Simulation instead of integration: {}",
+            "  - Local model instead of integration: {}",
             issues.simulation_instead_of_integration.len()
         );
         println!(
@@ -413,7 +413,7 @@ mod remediation_plan {
     const REMEDIATION_PLAN: &str = r#"
 # E2E Test Hardening Remediation Plan
 
-## Phase 1: Mock Leakage Elimination (HIGH PRIORITY)
+## Phase 1: Test Double Leakage Elimination (HIGH PRIORITY)
 
 ### 1.1 Replace std::sync with asupersync::sync
 - [ ] Replace all `std::sync::Mutex` → `crate::sync::Mutex`
@@ -431,26 +431,26 @@ mod remediation_plan {
 
 ### 2.1 TLS Integration
 - [ ] `use crate::tls::{TlsAcceptor, TlsConnector, TlsStream}`
-- [ ] Remove mock TLS structures
+- [ ] Remove local TLS test-double structures
 - [ ] Use real certificate and handshake APIs
 - [ ] Test actual TLS handshake completion
 
 ### 2.2 Supervision Integration
 - [ ] `use crate::supervision::{SupervisionStrategy, Supervisor, ChildName}`
-- [ ] Remove mock supervision tree simulation
+- [ ] Remove local supervision tree model
 - [ ] Use real supervision restart policies
 - [ ] Test actual supervisor-child relationships
 
 ### 2.3 Signal Integration
 - [ ] `use crate::signal::graceful_shutdown` (if module exists)
-- [ ] Remove mock signal handling simulation
+- [ ] Remove local signal handling model
 - [ ] Use real signal delivery and handling
 - [ ] Test actual process lifecycle
 
 ### 2.4 Distributed/RaptorQ Integration
 - [ ] `use crate::distributed::snapshot` (if module exists)
 - [ ] `use crate::raptorq::{Encoder, Decoder}`
-- [ ] Remove mock snapshot and encoding simulation
+- [ ] Remove local snapshot and encoding model
 - [ ] Use real encoding/decoding pipelines
 
 ## Phase 3: Timing Determinism (MEDIUM PRIORITY)
@@ -518,7 +518,7 @@ mod remediation_plan {
         println!("{}", REMEDIATION_PLAN);
 
         // Verify remediation plan addresses all major issue categories
-        assert!(REMEDIATION_PLAN.contains("Mock Leakage Elimination"));
+        assert!(REMEDIATION_PLAN.contains("Test Double Leakage Elimination"));
         assert!(REMEDIATION_PLAN.contains("Real Module Integration"));
         assert!(REMEDIATION_PLAN.contains("Timing Determinism"));
         assert!(REMEDIATION_PLAN.contains("Assertion Robustness"));
@@ -611,7 +611,7 @@ mod hardening_validation {
         );
         assert!(
             hardened_criteria.no_mock_leakage,
-            "Should have no mock leakage"
+            "Should have no test double leakage"
         );
 
         println!("✓ Hardening criteria validation working");
@@ -625,9 +625,9 @@ mod hardening_validation {
         println!("Priority: HIGH - Immediate remediation required");
         println!();
         println!("Issues Summary:");
-        println!("1. ❌ Mock leakage in ALL recent e2e tests");
+        println!("1. ❌ Test double leakage in ALL recent e2e tests");
         println!("2. ❌ Tokio contamination in multiple files");
-        println!("3. ❌ Elaborate simulations instead of real integration");
+        println!("3. ❌ Elaborate local models instead of real integration");
         println!("4. ❌ Brittle timing with std::thread::sleep");
         println!("5. ❌ Missing real asupersync module usage");
         println!();

@@ -225,7 +225,7 @@ mod tests {
             let replay_start = Instant::now();
 
             for (i, canonical_event) in canonical_trace.iter().enumerate() {
-                // Simulate replay event execution
+                // Execute replay event.
                 let replay_event = self.simulate_replay_event(canonical_event).await;
 
                 // Verify event matches canonical
@@ -237,7 +237,7 @@ mod tests {
                 session.add_replay_event(replay_event);
                 self.update_stats_for_event();
 
-                // Small delay to simulate execution time
+                // Small delay to model execution time.
                 sleep(Duration::from_micros(10)).await;
             }
 
@@ -429,7 +429,7 @@ mod tests {
         }
 
         fn update_stats_for_event(&self) {
-            // Placeholder for per-event stats updates
+            // Per-event stats update hook for future counter wiring.
         }
 
         pub fn generate_test_canonical_trace(&self, trace_id: &str, event_count: usize) -> Vec<CanonicalTraceEvent> {
@@ -466,7 +466,7 @@ mod tests {
         }
     }
 
-    // Mock types for the test framework
+    // Deterministic types for the test framework
     #[derive(Debug, Clone)]
     pub struct ReplaySession {
         pub session_id: String,

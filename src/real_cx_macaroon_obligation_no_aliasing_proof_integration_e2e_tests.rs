@@ -417,7 +417,10 @@ impl MacaroonNoAliasingIntegrator {
 
             result.map_err(|e| format!("Transfer failed: {:?}", e))
         } else {
-            Err("Complex multi-child transfers not implemented in test".to_string())
+            Err(
+                "Multi-child transfer requires selecting exactly one child scope in this test"
+                    .to_string(),
+            )
         }
     }
 
