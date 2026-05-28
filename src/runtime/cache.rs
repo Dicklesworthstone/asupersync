@@ -523,13 +523,13 @@ mod tests {
     fn artifact_memory_pressure_snapshot_calculations() {
         let mut snapshot = ArtifactMemoryPressureSnapshot::default();
         snapshot.pressure_bps = 7500; // 75%
-        snapshot.resident_bytes = 500 * 1024 * 1024; // 500MB
-        snapshot.max_resident_bytes = 1024 * 1024 * 1024; // 1GB
-        snapshot.high_pressure = false;
+        snapshot.resident_bytes = 512 * 1024 * 1024; // 512MiB
+        snapshot.max_resident_bytes = 1024 * 1024 * 1024; // 1GiB
+        snapshot.high_pressure = true;
 
         assert_eq!(snapshot.pressure_ratio(), 0.75);
         assert_eq!(snapshot.utilization_ratio(), 0.5);
-        assert!(!snapshot.is_under_pressure()); // Below threshold
+        assert!(snapshot.is_under_pressure()); // At threshold
     }
 
     #[test]
@@ -557,7 +557,10 @@ mod tests {
         // Get artifact
         let retrieved = cache.get(&test_id);
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.expect("cache should contain stored artifact"), test_data.as_slice());
+        assert_eq!(
+            retrieved.expect("cache should contain stored artifact"),
+            test_data.as_slice()
+        );
 
         // Verify access count increased
         let stats = cache.statistics();
@@ -658,8 +661,10 @@ mod tests {
         ];
 
         for policy in &policies {
-            let serialized = serde_json::to_string(policy).expect("eviction policy should serialize to JSON");
-            let deserialized: EvictionPolicy = serde_json::from_str(&serialized).expect("serialized policy should deserialize from JSON");
+            let serialized =
+                serde_json::to_string(policy).expect("eviction policy should serialize to JSON");
+            let deserialized: EvictionPolicy = serde_json::from_str(&serialized)
+                .expect("serialized policy should deserialize from JSON");
             assert_eq!(*policy, deserialized);
         }
     }
