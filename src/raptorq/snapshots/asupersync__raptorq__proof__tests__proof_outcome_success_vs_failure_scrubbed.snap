@@ -1,5 +1,6 @@
 ---
 source: src/raptorq/proof.rs
+assertion_line: 2281
 expression: "json!({ \"success\": success_outcome, \"failure\": failure_outcome, })"
 ---
 {
@@ -17,7 +18,7 @@ expression: "json!({ \"success\": success_outcome, \"failure\": failure_outcome,
   },
   "success": {
     "kind": "Success",
-    "source_payload_hash": 12876649971060094004,
+    "source_payload_hash": 8830733058453589808,
     "symbols_recovered": 10
   }
 }
