@@ -1,0 +1,6 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3271
+expression: analysis.summary()
+---
+5/5 safe, 0 obligation issue(s), 0 cancel issue(s)
