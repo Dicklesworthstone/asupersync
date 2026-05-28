@@ -425,7 +425,7 @@ impl CompactStep {
 /// Detail-free certificate for serialization and size-bounded storage.
 ///
 /// Each step is 9 bytes (1-byte rule discriminant + two 4-byte node indices).
-/// The header is fixed at 33 bytes. Total wire size = 33 + 9 * step_count.
+/// The header is fixed at 81 bytes. Total wire size = 81 + 9 * step_count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactCertificate {
     /// Schema version.
@@ -1884,12 +1884,12 @@ mod tests {
             .compact()
             .expect("compact certificate fits u32 wire format");
         let bound = compact.byte_size_bound();
-        // 1 step => 33 + 9 = 42 bytes
+        // 1 step => 81 + 9 = 90 bytes
         assert_eq!(
             bound,
             CompactCertificate::HEADER_SIZE + CompactStep::WIRE_SIZE
         );
-        assert_eq!(bound, 42);
+        assert_eq!(bound, 90);
     }
 
     #[test]
