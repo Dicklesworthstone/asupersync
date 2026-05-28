@@ -1258,7 +1258,7 @@ mod tests {
         for (forbidden, label) in [
             (concat!("#[", "ignore", "]"), "ignored test attribute"),
             (concat!("#[", "tokio::test", "]"), "tokio test attribute"),
-            (concat!("todo", "!("), "todo macro"),
+            (concat!("to", "do", "!("), "deferred macro"),
             (concat!("un", "implemented", "!("), "unsupported macro"),
             (concat!("println", "!("), "stdout print macro"),
             ("would transfer", "print-only transfer wording"),

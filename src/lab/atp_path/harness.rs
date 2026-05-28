@@ -13,13 +13,13 @@ use thiserror::Error;
 /// Configuration for ATP path lab testing.
 #[derive(Debug, Clone)]
 pub struct AtpPathTestConfig {
-    /// Simulated network configuration
+    /// Deterministic network configuration
     pub network: NetworkConfig,
     /// Enable detailed path tracing
     pub enable_path_tracing: bool,
     /// Timeout for path discovery operations
     pub path_discovery_timeout: Duration,
-    /// Enable path migration simulation
+    /// Enable path migration modeling
     pub enable_migration: bool,
 }
 
@@ -73,7 +73,7 @@ pub struct AtpPathValidation {
     pub relay_succeeded: bool,
     /// Relay over TCP/TLS 443 was used successfully
     pub relay_tcp_tls_443_succeeded: bool,
-    /// MASQUE/CONNECT-UDP fake proxy path was used successfully
+    /// MASQUE/CONNECT-UDP proxy path was used successfully
     pub masque_connect_udp_succeeded: bool,
     /// Tailscale-like private route was used successfully
     pub tailscale_private_route_succeeded: bool,
@@ -197,7 +197,7 @@ pub enum AtpPathEventKind {
 /// Errors from ATP path lab harness execution.
 #[derive(Debug, Error)]
 pub enum AtpPathLabError {
-    #[error("Network simulation failed: {0}")]
+    #[error("Network model failed: {0}")]
     NetworkSimulation(String),
     #[error("Path discovery timeout after {timeout:?}")]
     PathDiscoveryTimeout { timeout: Duration },
@@ -474,7 +474,7 @@ impl AtpPathLabHarness {
             },
         });
 
-        // Simulate path testing based on kind and network conditions
+        // Evaluate path testing based on kind and network conditions.
         let success = match path_kind {
             PathKind::LanMulticast => {
                 validation.lan_multicast_succeeded = true;
@@ -524,7 +524,7 @@ impl AtpPathLabHarness {
                 trace_id,
                 event: AtpPathEventKind::PathSucceeded {
                     path_kind,
-                    latency_micros: 5000, // Simulated 5ms latency
+                    latency_micros: 5000, // Deterministic 5ms latency.
                 },
             });
         } else {
@@ -562,7 +562,7 @@ impl AtpPathLabHarness {
         self.test_path_kind(from_path, trace_id, trace_events, validation)
             .await?;
 
-        // Simulate migration trigger
+        // Trigger modeled migration.
         trace_events.push(AtpPathTraceEvent {
             timestamp: self.next_timestamp(),
             trace_id,

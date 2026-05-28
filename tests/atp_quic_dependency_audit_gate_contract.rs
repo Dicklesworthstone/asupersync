@@ -81,7 +81,7 @@ fn atp_native_core_profiles_are_self_contained() {
 
         let output = cmd
             .output()
-            .expect(&format!("Failed to run cargo tree for {}", profile_name));
+            .unwrap_or_else(|_| panic!("Failed to run cargo tree for {profile_name}"));
 
         assert!(
             output.status.success(),

@@ -425,6 +425,8 @@ impl JournalTestHarness {
         for artifact in &self.artifacts {
             // Check bitmap updates are properly sequenced
             for (expected_sequence, update) in artifact.bitmap_updates.iter().enumerate() {
+                let expected_sequence = u64::try_from(expected_sequence)
+                    .expect("bitmap update sequence must fit in u64");
                 if update.sequence_number() != expected_sequence {
                     return Err(format!(
                         "Bitmap sequence gap: expected {}, got {}",

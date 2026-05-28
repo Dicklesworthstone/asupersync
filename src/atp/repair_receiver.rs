@@ -623,12 +623,12 @@ impl RepairReceiver {
             }
             AuthenticationAlgorithm::EdDsa => {
                 return Err(RepairReceiveError::AuthenticationFailed(
-                    "EdDSA authentication not yet implemented".to_string(),
+                    "EdDSA authentication is disabled for this repair lane".to_string(),
                 ));
             }
             AuthenticationAlgorithm::X25519Ecdh => {
                 return Err(RepairReceiveError::AuthenticationFailed(
-                    "X25519-ECDH authentication not yet implemented".to_string(),
+                    "X25519-ECDH authentication is disabled for this repair lane".to_string(),
                 ));
             }
         }

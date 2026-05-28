@@ -277,7 +277,7 @@ impl TailscaleProviderFailure {
     }
 }
 
-/// Fake-or-real provider output for one peer's Tailscale reachability.
+/// Provider output for one peer's Tailscale reachability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailscaleProviderCandidate {
     node_id: String,

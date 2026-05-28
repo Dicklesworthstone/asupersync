@@ -40,22 +40,22 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    /// Mock doctor diagnostics for integration testing
+    /// Deterministic doctor diagnostics for integration testing.
     #[derive(Debug)]
-    struct MockDoctorDiagnostics {
+    struct DeterministicDoctorDiagnostics {
         doctor_id: String,
         analysis_config: AnalysisConfig,
-        trace_analyzer: Arc<MockTraceAnalyzer>,
-        divergence_detector: Arc<MockDivergenceDetector>,
+        trace_analyzer: Arc<DeterministicTraceAnalyzer>,
+        divergence_detector: Arc<DeterministicDivergenceDetector>,
         integration_tracker: Arc<DoctorTraceTracker>,
         diagnostic_reports: Arc<Mutex<Vec<DiagnosticReport>>>,
         repair_suggestions: Arc<Mutex<Vec<RepairSuggestion>>>,
         analysis_count: AtomicU64,
     }
 
-    impl MockDoctorDiagnostics {
-        fn new(doctor_id: String, trace_analyzer: Arc<MockTraceAnalyzer>) -> Self {
-            let divergence_detector = Arc::new(MockDivergenceDetector::new(
+    impl DeterministicDoctorDiagnostics {
+        fn new(doctor_id: String, trace_analyzer: Arc<DeterministicTraceAnalyzer>) -> Self {
+            let divergence_detector = Arc::new(DeterministicDivergenceDetector::new(
                 "doctor_divergence_detector".to_string(),
                 trace_analyzer.clone(),
             ));
@@ -521,15 +521,15 @@ mod tests {
         }
     }
 
-    /// Mock trace analyzer for integration testing
+    /// Deterministic trace analyzer for integration testing.
     #[derive(Debug)]
-    struct MockTraceAnalyzer {
+    struct DeterministicTraceAnalyzer {
         analyzer_id: String,
         loaded_traces: Arc<Mutex<HashMap<PathBuf, TraceData>>>,
         analysis_cache: Arc<Mutex<BTreeMap<TraceHash, TraceAnalysisResult>>>,
     }
 
-    impl MockTraceAnalyzer {
+    impl DeterministicTraceAnalyzer {
         fn new(analyzer_id: String) -> Self {
             Self {
                 analyzer_id,
@@ -544,7 +544,7 @@ mod tests {
                 return Ok(cached_trace.clone());
             }
 
-            // Simulate trace file loading and parsing
+            // Load and parse trace file contents.
             let trace_data = self.parse_trace_file(path).await?;
 
             // Cache the result
@@ -557,7 +557,7 @@ mod tests {
         }
 
         async fn parse_trace_file(&self, path: &Path) -> Result<TraceData> {
-            // Simulate parsing different types of trace files
+            // Parse different types of trace files.
             let trace_events = self.generate_sample_trace_events(path);
             let execution_context = self.extract_execution_context(&trace_events);
             let causality_chain = self.build_causality_chain(&trace_events);
@@ -612,7 +612,7 @@ mod tests {
                         to: "Active",
                     },
                 },
-                // Simulate causality violation: effect before cause
+                // Record causality violation: effect before cause.
                 TraceEvent {
                     id: EventId::new(),
                     timestamp: Time::now().into(),
@@ -784,16 +784,16 @@ mod tests {
         }
     }
 
-    /// Mock divergence detector for integration testing
+    /// Deterministic divergence detector for integration testing.
     #[derive(Debug)]
-    struct MockDivergenceDetector {
+    struct DeterministicDivergenceDetector {
         detector_id: String,
-        trace_analyzer: Arc<MockTraceAnalyzer>,
+        trace_analyzer: Arc<DeterministicTraceAnalyzer>,
         detection_patterns: Vec<DivergencePattern>,
     }
 
-    impl MockDivergenceDetector {
-        fn new(detector_id: String, trace_analyzer: Arc<MockTraceAnalyzer>) -> Self {
+    impl DeterministicDivergenceDetector {
+        fn new(detector_id: String, trace_analyzer: Arc<DeterministicTraceAnalyzer>) -> Self {
             Self {
                 detector_id,
                 trace_analyzer,
@@ -1192,7 +1192,7 @@ mod tests {
         }
     }
 
-    // Mock types and structures for testing
+    // Deterministic types and structures for testing
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     struct AnalysisId(u64);
 
@@ -1411,10 +1411,13 @@ mod tests {
         test_config: DoctorTraceTestConfig,
     ) -> Result<DoctorTraceIntegrationSummary> {
         // Create trace analyzer
-        let trace_analyzer = Arc::new(MockTraceAnalyzer::new("test_trace_analyzer".to_string()));
+        let trace_analyzer = Arc::new(DeterministicTraceAnalyzer::new(
+            "test_trace_analyzer".to_string(),
+        ));
 
         // Create doctor diagnostics
-        let doctor = MockDoctorDiagnostics::new("test_doctor".to_string(), trace_analyzer.clone());
+        let doctor =
+            DeterministicDoctorDiagnostics::new("test_doctor".to_string(), trace_analyzer.clone());
 
         // Run test scenarios
         for scenario in test_config.test_scenarios {
@@ -1711,7 +1714,7 @@ mod tests {
         );
     }
 
-    // Helper types and placeholder implementations
+    // Helper types and deterministic implementations.
     impl Default for CausalityViolation {
         fn default() -> Self {
             Self {

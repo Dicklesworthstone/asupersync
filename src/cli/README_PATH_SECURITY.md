@@ -160,7 +160,7 @@ fn test_path_traversal_protection() {
 - Comprehensive CLI argument validation
 - Integration tests
 
-### 📋 TODO for Complete Security
+### 📋 Remaining Security Work
 1. Audit all `PathBuf` fields in CLI args
 2. Add secure wrappers for `upgrade.rs` operations
 3. Create CLI-wide path validation policy

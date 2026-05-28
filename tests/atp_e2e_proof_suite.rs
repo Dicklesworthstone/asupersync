@@ -328,10 +328,9 @@ fn test_atp_crash_mid_transfer_resume_reuses_verified_prefix()
         "verified_prefix_bytes".to_string(),
         verified_prefix_bytes.to_string(),
     );
-    recovery_state.metadata.insert(
-        "proof_bundle_hash".to_string(),
-        proof_bundle_hash.to_string(),
-    );
+    recovery_state
+        .metadata
+        .insert("proof_bundle_hash".to_string(), proof_bundle_hash.clone());
     let oracle_result =
         AtpTransferOracle::new("crash_mid_transfer_resume").validate(&recovery_state);
     assert!(
