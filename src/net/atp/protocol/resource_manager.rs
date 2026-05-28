@@ -344,13 +344,11 @@ impl ResourceManager {
         self.peer_usage.get(peer_id).map_or(0, |u| u.pending_frames)
     }
 
-    /// Clean up inactive peers (haven't sent frames recently).
-    pub fn cleanup_inactive_peers(&mut self, timeout: Duration) {
-        let now = Instant::now();
+    /// Clean up peers with no outstanding resource obligations.
+    pub fn cleanup_inactive_peers(&mut self, _timeout: Duration) {
         self.peer_usage.retain(|_, usage| {
-            // Keep active peers or peers with outstanding resources
-            now - usage.last_activity < timeout
-                || usage.memory_usage > 0
+            // Keep peers while they still own resources that must be released.
+            usage.memory_usage > 0
                 || usage.pending_frames > 0
                 || usage.active_sessions > 0
                 || usage.pending_requests > 0
