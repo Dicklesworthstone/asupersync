@@ -25,7 +25,7 @@ expression: scrubbed_sequence
         "kind": "RegionId"
       },
       "pinned_worker": null,
-      "polls_remaining": 25,
+      "polls_remaining": 100000,
       "prev_in_queue": null,
       "queue_tag": 0,
       "sched_generation": 0,
@@ -54,7 +54,7 @@ expression: scrubbed_sequence
         "kind": "RegionId"
       },
       "pinned_worker": null,
-      "polls_remaining": 25,
+      "polls_remaining": 100000,
       "prev_in_queue": null,
       "queue_tag": 0,
       "sched_generation": 0,
@@ -83,7 +83,7 @@ expression: scrubbed_sequence
         "kind": "RegionId"
       },
       "pinned_worker": null,
-      "polls_remaining": 25,
+      "polls_remaining": 100000,
       "prev_in_queue": null,
       "queue_tag": 0,
       "sched_generation": 0,

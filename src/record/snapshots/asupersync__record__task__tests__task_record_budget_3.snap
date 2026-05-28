@@ -1,7 +1,7 @@
 ---
 source: src/record/task.rs
-assertion_line: 1911
-expression: "scrub_task_record_state(serde_json::to_value(&record_created).expect(\"serialize created\"))"
+assertion_line: 2078
+expression: "scrub_task_record_state(serde_json::to_value(&record).expect(\"serialize budget\"))"
 ---
 {
   "cancel_epoch": 0,
@@ -9,20 +9,20 @@ expression: "scrub_task_record_state(serde_json::to_value(&record_created).expec
   "deadline": null,
   "heap_index": null,
   "id": {
-    "generation": 0,
-    "index": 1,
+    "generation": 1,
+    "index": 6,
     "kind": "TaskId"
   },
   "is_local": false,
   "last_polled_step": 0,
   "next_in_queue": null,
   "owner": {
-    "generation": 0,
-    "index": 2,
+    "generation": 1,
+    "index": 7,
     "kind": "RegionId"
   },
   "pinned_worker": null,
-  "polls_remaining": 100000,
+  "polls_remaining": 4294967295,
   "prev_in_queue": null,
   "queue_tag": 0,
   "sched_generation": 0,

@@ -1,7 +1,7 @@
 ---
 source: src/record/task.rs
-assertion_line: 1911
-expression: "scrub_task_record_state(serde_json::to_value(&record_created).expect(\"serialize created\"))"
+assertion_line: 1927
+expression: "scrub_task_record_state(serde_json::to_value(&record_running).expect(\"should serialize running task record\"))"
 ---
 {
   "cancel_epoch": 0,
