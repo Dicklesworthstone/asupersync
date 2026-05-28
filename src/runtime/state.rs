@@ -209,6 +209,7 @@ impl ReadBiasedDrainingRegionSnapshot {
                             return cached_value;
                         }
                         // Cache was invalidated between reset and read, fall through to rebuild
+                        break;
                     }
                     Err(_) => {}
                 }
@@ -1850,7 +1851,11 @@ impl RuntimeState {
     /// This Cx has elevated privileges and should only be used for
     /// runtime-internal operations like finalizers and builder tasks.
     pub(crate) fn create_system_cx(&self) -> crate::cx::Cx {
-        crate::cx::Cx::for_testing()
+        crate::cx::Cx::new(
+            self.root_region.unwrap_or_else(next_bootstrap_region_id),
+            next_bootstrap_task_id(),
+            Budget::INFINITE,
+        )
     }
 
     /// Creates the infrastructure for a task (record, context, channel) without storing the future.

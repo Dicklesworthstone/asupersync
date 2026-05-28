@@ -57,7 +57,7 @@
 //! ```
 
 use crate::record::{ObligationKind, ObligationState};
-use crate::types::RegionId;
+use crate::types::{RegionId, id::next_bootstrap_region_id};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
@@ -1055,7 +1055,7 @@ impl GradedScope {
         description: impl Into<String>,
     ) -> ObligationToken<K> {
         self.on_reserve();
-        ObligationToken::reserve_test(description)
+        ObligationToken::reserve(description, next_bootstrap_region_id())
     }
 
     /// Reserve a typed token from dynamic obligation metadata and record it.
@@ -1073,7 +1073,7 @@ impl GradedScope {
         description: impl Into<String>,
     ) -> Result<ObligationToken<K>, TypedObligationKindError> {
         let token =
-            ObligationToken::try_reserve_kind(kind, description, RegionId::new_ephemeral())?;
+            ObligationToken::try_reserve_kind(kind, description, next_bootstrap_region_id())?;
         self.on_reserve();
         Ok(token)
     }

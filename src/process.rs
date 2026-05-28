@@ -999,7 +999,7 @@ impl Child {
     pub fn wait_with_output(self) -> Result<Output, ProcessError> {
         #[cfg(windows)]
         {
-            self.wait_with_output_windows()
+            return self.wait_with_output_windows();
         }
 
         #[cfg(not(windows))]
@@ -1092,11 +1092,11 @@ impl Child {
         #[cfg(windows)]
         {
             let _ = cx;
-            crate::runtime::spawn_blocking_io(move || {
+            return crate::runtime::spawn_blocking_io(move || {
                 self.wait_with_output_windows().map_err(io::Error::from)
             })
             .await
-            .map_err(ProcessError::Io)
+            .map_err(ProcessError::Io);
         }
 
         #[cfg(not(windows))]

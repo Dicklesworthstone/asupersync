@@ -9,7 +9,7 @@
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 use crate::sync::Mutex;
-use crate::types::RegionId;
+use crate::types::{RegionId, id::next_bootstrap_region_id};
 use hmac::{Hmac, KeyInit, Mac};
 use nkeys::KeyPair;
 use serde::{Deserialize, Serialize};
@@ -617,8 +617,8 @@ impl AgentSwarmControlPlane {
                 .await;
         }
 
-        // Create an ephemeral owning region for this control-plane admission.
-        let agent_region = RegionId::new_ephemeral();
+        // Create a control-plane-local owning region for this admission.
+        let agent_region = next_bootstrap_region_id();
         let session = AgentSession {
             agent_id: request.agent_id.clone(),
             session_id: format!(

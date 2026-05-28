@@ -561,14 +561,19 @@ impl<T: PbftTransport> PbftNode<T> {
             batch
         };
 
-        // In a real implementation, this would execute the actual state machine
-        // For now, just log that execution occurred
+        let batch_size = batch.len();
+
+        // In a real implementation, this would execute the actual state machine.
+        // With tracing disabled, keep the execution path side-effect free.
+        #[cfg(feature = "tracing-integration")]
         tracing::info!(
             replica_id = %self.replica_id,
             sequence = %sequence,
-            batch_size = batch.len(),
+            batch_size,
             "Executed consensus batch"
         );
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = batch_size;
 
         Ok(())
     }

@@ -318,6 +318,7 @@ impl SignalDispatcher {
         // with no allocator / no locks observable from user space).
         for kind in all_signal_kinds() {
             let raw = raw_signal_for_kind(kind);
+            debug_assert_eq!(signal_kind_from_raw(raw), Some(kind));
             let slot = slots.get(&kind).expect("slot just inserted").clone();
             // Capture by Copy — WindowsEventHandle is Copy and Send.
             // The HANDLE remains valid for the lifetime of this
@@ -473,7 +474,7 @@ fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
     }
 }
 
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
     if raw == libc::SIGINT {
         Some(SignalKind::Interrupt)

@@ -38,6 +38,55 @@ fn cli_error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
     Box::new(std::io::Error::other(message.into()))
 }
 
+#[cfg(windows)]
+fn default_atpd_root_dir() -> PathBuf {
+    std::env::var_os("PROGRAMDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("asupersync")
+        .join("atpd")
+}
+
+#[cfg(not(windows))]
+fn default_atpd_config_path() -> PathBuf {
+    PathBuf::from("/etc/atpd/config.toml")
+}
+
+#[cfg(windows)]
+fn default_atpd_config_path() -> PathBuf {
+    default_atpd_root_dir().join("config.toml")
+}
+
+#[cfg(not(windows))]
+fn default_atpd_pid_file() -> PathBuf {
+    PathBuf::from("/var/run/atpd.pid")
+}
+
+#[cfg(windows)]
+fn default_atpd_pid_file() -> PathBuf {
+    default_atpd_root_dir().join("run").join("atpd.pid")
+}
+
+#[cfg(not(windows))]
+fn default_atpd_data_dir() -> PathBuf {
+    PathBuf::from("/var/lib/atpd")
+}
+
+#[cfg(windows)]
+fn default_atpd_data_dir() -> PathBuf {
+    default_atpd_root_dir().join("data")
+}
+
+#[cfg(not(windows))]
+fn default_atpd_log_file() -> PathBuf {
+    PathBuf::from("/var/log/atpd.log")
+}
+
+#[cfg(windows)]
+fn default_atpd_log_file() -> PathBuf {
+    default_atpd_root_dir().join("logs").join("atpd.log")
+}
+
 /// ATP Daemon - Always-on ATP transfer service
 #[derive(Parser)]
 #[command(name = "atpd")]
@@ -48,7 +97,7 @@ struct AtpdCli {
     command: AtpdCommand,
 
     /// Configuration file path
-    #[arg(long, short = 'c', default_value = "/etc/atpd/config.toml")]
+    #[arg(long, short = 'c', default_value_os_t = default_atpd_config_path())]
     config: PathBuf,
 
     /// Log level
@@ -60,7 +109,7 @@ struct AtpdCli {
     foreground: bool,
 
     /// PID file location
-    #[arg(long, default_value = "/var/run/atpd.pid")]
+    #[arg(long, default_value_os_t = default_atpd_pid_file())]
     pid_file: PathBuf,
 }
 
@@ -89,7 +138,7 @@ struct StartArgs {
     bind: SocketAddr,
 
     /// Data directory for ATP daemon
-    #[arg(long, default_value = "/var/lib/atpd")]
+    #[arg(long, default_value_os_t = default_atpd_data_dir())]
     data_dir: PathBuf,
 
     /// Maximum concurrent transfers
@@ -108,7 +157,7 @@ struct StartArgs {
 #[derive(Args, Clone)]
 struct InitArgs {
     /// Data directory to initialize
-    #[arg(long, default_value = "/var/lib/atpd")]
+    #[arg(long, default_value_os_t = default_atpd_data_dir())]
     data_dir: PathBuf,
 
     /// Generate new identity
@@ -365,10 +414,11 @@ pub struct InboxMessage {
 
 impl Default for AtpdConfig {
     fn default() -> Self {
+        let data_dir = default_atpd_data_dir();
         Self {
             identity: IdentityConfig {
                 peer_id: "peer-uninitialized".to_string(),
-                private_key_path: PathBuf::from("/var/lib/atpd/identity/private.key"),
+                private_key_path: init_identity_store_path(&data_dir),
                 device_name: "atpd-node".to_string(),
                 team_memberships: vec![],
             },
@@ -385,13 +435,13 @@ impl Default for AtpdConfig {
                 },
             },
             storage: StorageConfig {
-                data_dir: PathBuf::from("/var/lib/atpd"),
-                cache_dir: PathBuf::from("/var/lib/atpd/cache"),
+                data_dir: data_dir.clone(),
+                cache_dir: data_dir.join("cache"),
                 max_cache_size: 10 * 1024 * 1024 * 1024, // 10GB
                 cache_retention_secs: 30 * 24 * 3600,    // 30 days
                 journal: JournalConfig {
                     enable: true,
-                    journal_path: PathBuf::from("/var/lib/atpd/journal"),
+                    journal_path: data_dir.join("journal"),
                     max_journal_size: 1024 * 1024 * 1024, // 1GB
                     rotation_policy: "daily".to_string(),
                 },
@@ -421,7 +471,7 @@ impl Default for AtpdConfig {
                 logging: LoggingConfig {
                     level: "info".to_string(),
                     format: "json".to_string(),
-                    file_path: Some(PathBuf::from("/var/log/atpd.log")),
+                    file_path: Some(default_atpd_log_file()),
                     rotation: Some(LogRotationConfig {
                         max_size: 100 * 1024 * 1024, // 100MB
                         keep_files: 5,

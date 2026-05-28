@@ -20,6 +20,10 @@ use super::extract::{Extensions, Request};
 use super::handler::Handler;
 use super::response::{IntoResponse, Response, StatusCode};
 use crate::Cx;
+use crate::types::{
+    Budget,
+    id::{next_bootstrap_region_id, next_bootstrap_task_id},
+};
 
 // ─── Method Constants ────────────────────────────────────────────────────────
 
@@ -373,7 +377,11 @@ impl Router {
     /// selected by longest matching prefix after top-level route selection.
     #[must_use]
     pub fn handle(&self, req: Request) -> Response {
-        let cx = Cx::for_testing();
+        let cx = Cx::new(
+            next_bootstrap_region_id(),
+            next_bootstrap_task_id(),
+            Budget::INFINITE,
+        );
         futures_lite::future::block_on(self.handle_with_cx(&cx, req))
     }
 

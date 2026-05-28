@@ -20,7 +20,10 @@ use super::IoDriver;
 use crate::runtime::reactor::{Event, Events, Interest, Reactor, Source, Token};
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
+#[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, RawSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Wake, Waker};
@@ -230,20 +233,33 @@ impl Reactor for MockReactor {
 }
 
 /// Mock I/O source for testing.
+#[cfg(unix)]
+type MockRawSource = RawFd;
+#[cfg(windows)]
+type MockRawSource = RawSocket;
+
 #[derive(Debug)]
 pub struct MockSource {
-    fd: RawFd,
+    raw: MockRawSource,
 }
 
 impl MockSource {
-    pub fn new(fd: RawFd) -> Self {
-        Self { fd }
+    pub fn new(raw: MockRawSource) -> Self {
+        Self { raw }
     }
 }
 
+#[cfg(unix)]
 impl AsRawFd for MockSource {
     fn as_raw_fd(&self) -> RawFd {
-        self.fd
+        self.raw
+    }
+}
+
+#[cfg(windows)]
+impl AsRawSocket for MockSource {
+    fn as_raw_socket(&self) -> RawSocket {
+        self.raw
     }
 }
 

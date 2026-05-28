@@ -149,6 +149,7 @@ impl SecurePath {
         // Pre-check for obvious traversal attempts before canonicalization
         if user_path_str.contains("..") {
             // This is a preliminary check; canonicalization will be the final arbiter
+            #[cfg(feature = "tracing-integration")]
             tracing::warn!(
                 "Potential path traversal attempt detected: {}",
                 user_path_str
@@ -199,6 +200,7 @@ impl SecurePath {
         }
 
         // Log successful validation for audit purposes
+        #[cfg(feature = "tracing-integration")]
         tracing::debug!(
             "Path validation successful: {} -> {}",
             user_path_str,
