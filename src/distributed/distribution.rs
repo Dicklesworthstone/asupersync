@@ -380,6 +380,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::security::key::AuthKey;
     use crate::types::symbol::{ObjectParams, Symbol};
     use serde_json::json;
 
@@ -387,6 +388,16 @@ mod tests {
         (0..count)
             .map(|i| ReplicaInfo::new(&format!("r{i}"), &format!("addr{i}")))
             .collect()
+    }
+
+    fn authorized_security_context(replicas: &[ReplicaInfo]) -> SecurityContext {
+        let security = SecurityContext::new(AuthKey::from_seed(0xD157_71B0));
+        for replica in replicas {
+            security
+                .authorize_replica(&replica.id, None)
+                .expect("test replica id should authorize");
+        }
+        security
     }
 
     fn create_test_symbols(count: usize) -> Vec<Symbol> {
@@ -416,7 +427,9 @@ mod tests {
             original_size: 1536,
             encoded_at: Time::ZERO,
         };
-        let assignments = SymbolDistributor::compute_assignments(&encoded, &replicas);
+        let security = authorized_security_context(&replicas);
+        let assignments =
+            SymbolDistributor::compute_assignments_with_auth(&encoded, &replicas, &security, None);
 
         json!({
             "consistency": "quorum",
@@ -611,11 +624,24 @@ mod tests {
             Outcome::Ok(make_ack("r2", 10)),
         ];
 
-        distributor.evaluate_outcomes(&encoded, &replicas, outcomes, Duration::from_millis(50));
+        let security = authorized_security_context(&replicas);
+        let symbols_sent_total: u64 =
+            SymbolDistributor::compute_assignments_with_auth(&encoded, &replicas, &security, None)
+                .into_iter()
+                .map(|assignment| assignment.symbol_indices.len() as u64)
+                .sum();
+
+        distributor.evaluate_outcomes_with_sent(
+            &encoded,
+            &replicas,
+            outcomes,
+            symbols_sent_total,
+            Duration::from_millis(50),
+        );
 
         assert_eq!(distributor.metrics.distributions_total, 1);
         assert_eq!(distributor.metrics.distributions_successful, 1);
-        assert!(distributor.metrics.symbols_sent_total > 0);
+        assert_eq!(distributor.metrics.symbols_sent_total, symbols_sent_total);
         assert_eq!(distributor.metrics.acks_received_total, 3);
     }
 
@@ -625,14 +651,18 @@ mod tests {
         let mut distributor = SymbolDistributor::new(config);
         let replicas = create_test_replicas(3);
         let encoded = create_test_encoded_state();
-        let auth_context = SecurityContext::for_testing(7);
+        let auth_context = authorized_security_context(&replicas);
         let transport = MockSuccessTransport;
 
-        let expected_symbols_sent: u64 =
-            SymbolDistributor::compute_assignments(&encoded, &replicas)
-                .into_iter()
-                .map(|assignment| assignment.symbol_indices.len() as u64)
-                .sum();
+        let expected_symbols_sent: u64 = SymbolDistributor::compute_assignments_with_auth(
+            &encoded,
+            &replicas,
+            &auth_context,
+            None,
+        )
+        .into_iter()
+        .map(|assignment| assignment.symbol_indices.len() as u64)
+        .sum();
 
         let cx = Cx::for_testing();
         let result = futures_lite::future::block_on(async {

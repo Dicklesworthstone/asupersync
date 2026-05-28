@@ -752,6 +752,7 @@ fn bridge_apply_snapshot_updates_state() {
 
     // Create a snapshot with different state
     let mut snapshot = RegionSnapshot::empty(RegionId::new_for_test(1, 0));
+    snapshot.sequence = 1;
     snapshot.state = RegionState::Closing;
     snapshot.budget = BudgetSnapshot {
         deadline_nanos: Some(12345),
@@ -792,7 +793,7 @@ fn bridge_config_variants() {
     assert_eq!(bridge.config.sync_mode, SyncMode::Synchronous);
     assert_eq!(
         bridge.config.conflict_resolution,
-        ConflictResolution::DistributedWins
+        ConflictResolution::VectorClockBased
     );
 
     // Custom config.
