@@ -4970,7 +4970,7 @@ mod tests {
             sched.schedule(c1_id, 0);
             sched.schedule(c2_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Stop the server (triggers cancellation of pending calls).
         handle.stop();
