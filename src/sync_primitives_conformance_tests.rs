@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::cx::Cx;
+    use crate::cx::{Cx, cap};
     use crate::sync::{
         AcquireError, Barrier, BarrierWaitError, LockError, Mutex, Semaphore, TryAcquireError,
         TryLockError,
@@ -27,11 +27,11 @@ mod tests {
         future.poll(&mut context)
     }
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         Cx::for_testing()
     }
 
-    fn cancelled_cx() -> Cx {
+    fn cancelled_cx() -> Cx<cap::All> {
         let cx = Cx::for_testing();
         cx.set_cancel_requested(true);
         cx
