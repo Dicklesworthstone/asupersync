@@ -1590,11 +1590,8 @@ mod tests {
 
     #[test]
     fn metamorphic_round_trip_property() {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        // Use fixed seed for deterministic testing
+        let mut rng = crate::util::det_rng::DetRng::new(0x1234_5678_9ABC_DEF0);
 
         let configs = generate_test_configs(&mut rng, 20);
 
@@ -1678,11 +1675,8 @@ mod tests {
 
     #[test]
     fn metamorphic_partial_frame_state_preservation() {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        // Use fixed seed for deterministic testing
+        let mut rng = crate::util::det_rng::DetRng::new(0x1234_5678_9ABC_DEF0);
 
         let config = MetamorphicTestConfig::default();
         let payload = generate_test_payload(&mut rng, 20);
@@ -1766,11 +1760,8 @@ mod tests {
 
     #[test]
     fn metamorphic_max_frame_size_rejections() {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        // Use fixed seed for deterministic testing
+        let mut rng = crate::util::det_rng::DetRng::new(0x1234_5678_9ABC_DEF0);
 
         // Test with various max frame length limits
         for max_len in [10, 50, 100, 500] {
@@ -2043,11 +2034,8 @@ mod tests {
 
     #[test]
     fn metamorphic_byte_order_consistency() {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        // Use fixed seed for deterministic testing
+        let mut rng = crate::util::det_rng::DetRng::new(0x1234_5678_9ABC_DEF0);
 
         let payload = generate_test_payload(&mut rng, 100);
 
@@ -2182,11 +2170,8 @@ mod tests {
 
     #[test]
     fn metamorphic_composite_round_trip_with_partial_frames() {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        // Use fixed seed for deterministic testing
+        let mut rng = crate::util::det_rng::DetRng::new(0x1234_5678_9ABC_DEF0);
 
         let config = MetamorphicTestConfig::default();
         let payload = generate_test_payload(&mut rng, 50);
@@ -2227,11 +2212,8 @@ mod tests {
 
     #[test]
     fn metamorphic_cross_configuration_compatibility() {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let mut rng = crate::util::det_rng::DetRng::new(seed);
+        // Use fixed seed for deterministic testing
+        let mut rng = crate::util::det_rng::DetRng::new(0x1234_5678_9ABC_DEF0);
 
         // Test that different configurations that should be compatible actually are
         let base_config = MetamorphicTestConfig {
