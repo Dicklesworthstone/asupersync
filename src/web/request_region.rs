@@ -585,13 +585,13 @@ fn extract_panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 #[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
-    use crate::cx::Cx;
+    use crate::cx::{Cx, cap};
     use crate::obligation::graded::{GradedObligation, Resolution};
     use crate::record::ObligationKind;
     use crate::web::extract::Request;
     use crate::web::response::StatusCode;
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         Cx::for_testing()
     }
 

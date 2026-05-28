@@ -18,7 +18,7 @@ use crate::atp::transfer::{
     TransferId, TransferManifestRef, TransferState,
 };
 use crate::atp::writer::{AtpSink, AtpWriter, ResumeToken, TransferProof, WriterConfig};
-use crate::cx::Cx;
+use crate::cx::{Cx, cap};
 use crate::net::atp::protocol::outcome::{
     AtpError, AtpOutcome, ManifestError, PathError, PolicyError, ProtocolError,
 };
@@ -1235,11 +1235,11 @@ mod tests {
         DirectoryManifestEntry, DirectoryPath, PathNormalizationRules,
     };
     use crate::atp::transfer::{PeerCapabilities, TransferManifestRef};
-    use crate::cx::Cx;
+    use crate::cx::{Cx, cap};
     use crate::types::{Budget, RegionId, TaskId};
     use std::collections::BTreeSet;
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         Cx::new(
             RegionId::testing_default(),
             TaskId::testing_default(),
