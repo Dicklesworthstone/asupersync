@@ -4358,7 +4358,7 @@ mod tests {
         assert!(
             cx2.macaroon().unwrap().is_direct_attenuation_of(
                 cx.macaroon().unwrap(),
-                &CaveatPredicate::TimeBefore(5000)
+                &CaveatPredicate::TimeBefore(u64::MAX / 2)
             ),
             "Cx::attenuate must install only a direct child of the parent token"
         );

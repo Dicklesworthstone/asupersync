@@ -2240,7 +2240,7 @@ where
             if let Some(mut lease) = lease_to_resolve {
                 let _ = registry_for_finalizer
                     .lock()
-                    .unregister_owned_and_grant(&lease, Time::ZERO);
+                    .unregister_owned_and_grant(&lease, Time::from_nanos(1_000_000_000));
                 let _ = lease.release();
             }
         });
@@ -2590,7 +2590,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Then schedule client to ensure call happens after init
         {
@@ -2839,7 +2839,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Cancel the client deterministically, then poll it again to observe the cancellation.
         let client_cx = client_cx_cell
@@ -2852,7 +2852,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         let result =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
@@ -2974,7 +2974,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Cancel the client deterministically, then poll it again to observe the cancellation.
         let client_cx = client_cx_cell
@@ -2987,7 +2987,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         let result =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
@@ -3259,7 +3259,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Stop should wake the blocked recv waiter. No manual reschedule here.
         handle.stop();
@@ -3299,7 +3299,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
         assert_eq!(
             handle.state.load(),
             ActorState::Running,
@@ -3450,7 +3450,7 @@ mod tests {
             {
                 runtime.scheduler.lock().schedule(task_id, 0);
             }
-            runtime.run_until_idle();
+            runtime.run_until_quiescent();
 
             // 5 resets then disconnect
             for _ in 0..5 {
@@ -4800,7 +4800,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Stop the server and reschedule so on_stop runs
         let phases_clone = Arc::clone(&phases);
@@ -4808,7 +4808,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         {
             let recorded = phases_clone.lock();
@@ -5018,7 +5018,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Stop the server and drain.
         handle.stop();
@@ -5076,7 +5076,7 @@ mod tests {
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Re-schedule for message processing.
         {
@@ -5084,7 +5084,7 @@ mod tests {
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Phase 2: Verify the call result.
         let call_r = call_result.lock();
@@ -5159,7 +5159,7 @@ mod tests {
                     sched.schedule(cid, 0);
                 }
             }
-            runtime.run_until_idle();
+            runtime.run_until_quiescent();
 
             // Re-schedule to process enqueued calls.
             {
@@ -5169,7 +5169,7 @@ mod tests {
                     sched.schedule(cid, 0);
                 }
             }
-            runtime.run_until_idle();
+            runtime.run_until_quiescent();
 
             // Stop and drain.
             handle.stop();
@@ -5625,13 +5625,13 @@ mod tests {
             sched.schedule(server_task_id, 0);
             sched.schedule(client_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
         {
             let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         let join = futures_lite::future::block_on(handle.join(&cx));
         assert!(
@@ -5733,7 +5733,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Stop and let it drain remaining messages.
         handle.stop();
@@ -5800,7 +5800,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
         let (mut named_handle, stored) = scope
             .spawn_named_gen_server(
                 &mut runtime.state,
@@ -5897,7 +5897,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
         let (mut handle, stored) = scope
             .spawn_named_gen_server(
                 &mut runtime.state,
@@ -5992,7 +5992,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
 
         // First spawn succeeds.
         let (mut h1, s1) = scope
@@ -6089,7 +6089,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
         let (mut handle, stored) = scope
             .spawn_named_gen_server(
                 &mut runtime.state,
@@ -6172,7 +6172,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
         let (mut handle, stored) = scope
             .spawn_named_gen_server(
                 &mut runtime.state,
@@ -6252,7 +6252,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
         let (mut handle, stored) = scope
             .spawn_named_gen_server(
                 &mut runtime.state,
@@ -6344,7 +6344,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
         let (mut handle, stored) = scope
             .spawn_named_gen_server(
                 &mut runtime.state,
@@ -6418,7 +6418,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
         let (mut handle, stored) = scope
             .spawn_named_gen_server(
                 &mut runtime.state,
@@ -6496,7 +6496,7 @@ mod tests {
             }
         }
 
-        let now = crate::types::Time::ZERO;
+        let now = crate::types::Time::from_nanos(1_000_000_000);
         let (mut handle, stored) = scope
             .spawn_named_gen_server(
                 &mut runtime.state,
@@ -6689,7 +6689,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(child_task, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Region stop must still clean the registry + resolve the lease.
         let tasks_to_schedule = runtime.state.cancel_request(
