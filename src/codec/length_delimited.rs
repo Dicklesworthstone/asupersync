@@ -1627,13 +1627,10 @@ followup.decode.error: none\n",
                                 // The frame should contain the original payload
                                 // Note: The frame might include header bytes if num_skip < header_len
                                 if config.num_skip >= header_len {
-                                    let skipped_payload = config.num_skip - header_len;
-                                    let expected_payload = &original_payload[skipped_payload..];
-                                    // Full header skipped; if num_skip extends past the header,
-                                    // the returned frame is the remaining payload suffix.
+                                    // Full header skipped, frame should be the complete payload
                                     assert_eq!(
                                         &frame[..],
-                                        expected_payload,
+                                        &original_payload[..],
                                         "Round-trip failed for config {:?}, size {}",
                                         config,
                                         size
