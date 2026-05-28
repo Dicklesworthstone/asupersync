@@ -372,10 +372,18 @@ mod tests {
         TemporalScope::window(fixed_time(1_799_999_900), fixed_time(1_800_003_700))
     }
 
+    const fn strong_test_seed() -> [u8; 32] {
+        [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ]
+    }
+
     fn create_test_signer() -> CapabilitySigner {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("test-key.json");
-        let key_store = IdentityKeyStore::create(path, [1; 32], 1).expect("create key store");
+        let key_store =
+            IdentityKeyStore::create(path, strong_test_seed(), 1).expect("create key store");
         CapabilitySigner::new(key_store).expect("create signer")
     }
 
