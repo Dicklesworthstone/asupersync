@@ -2586,10 +2586,15 @@ mod tests {
             .state
             .store_spawned_task(client_task_id, client_stored);
 
+        // Schedule server first to ensure initialization completes
         {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(client_task_id, 0);
-            sched.schedule(server_task_id, 0);
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        runtime.run_until_idle();
+
+        // Then schedule client to ensure call happens after init
+        {
+            runtime.scheduler.lock().schedule(client_task_id, 0);
         }
         runtime.run_until_quiescent();
 
