@@ -3138,10 +3138,12 @@ mod tests {
 
         use std::time::Duration;
 
-        // Create a child process that creates its own session
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg("setsid sleep 30") // Create new session and sleep
+        // Create a child process that creates its own session. Spawn `setsid`
+        // directly so `child.id()` refers to the session-isolated process we
+        // later probe and kill, rather than an intermediate shell in our group.
+        let mut child = Command::new("setsid")
+            .arg("sleep")
+            .arg("30")
             .spawn()
             .expect("spawn failed");
 
