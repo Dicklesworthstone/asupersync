@@ -2233,7 +2233,9 @@ mod tests {
         let reflection = ReflectionService::new()
             .with_auth(|_cx, method| Err(Status::permission_denied(format!("denied: {method}"))));
 
-        // Should be denied by auth callback
+        let _current = Cx::set_current(Some(Cx::for_testing()));
+
+        // Should be denied by auth callback once a request Cx is in scope.
         let result = reflection.list_services();
         crate::assert_with_log!(
             result.is_err(),
