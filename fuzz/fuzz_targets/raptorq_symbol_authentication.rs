@@ -163,6 +163,7 @@ struct FuzzInput {
 struct AuthTestHarness {
     keys: Vec<AuthKey>,
     symbols: Vec<Option<AuthenticatedSymbol>>,
+    symbol_key_slots: Vec<Option<usize>>,
     operation_count: usize,
 }
 
@@ -177,17 +178,27 @@ impl AuthTestHarness {
         Self {
             keys,
             symbols: vec![None; MAX_SYMBOLS],
+            symbol_key_slots: vec![None; MAX_SYMBOLS],
             operation_count: 0,
         }
     }
 
-    fn get_key(&self, index: u8) -> Option<&AuthKey> {
-        self.keys.get(index as usize % self.keys.len().max(1))
+    fn key_slot(&self, index: u8) -> Option<usize> {
+        if self.keys.is_empty() {
+            None
+        } else {
+            Some(index as usize % self.keys.len())
+        }
     }
 
-    fn store_symbol(&mut self, index: u8, symbol: AuthenticatedSymbol) {
+    fn get_key(&self, index: u8) -> Option<&AuthKey> {
+        self.key_slot(index).and_then(|slot| self.keys.get(slot))
+    }
+
+    fn store_symbol(&mut self, index: u8, symbol: AuthenticatedSymbol, key_slot: usize) {
         let slot = index as usize % MAX_SYMBOLS;
         self.symbols[slot] = Some(symbol);
+        self.symbol_key_slots[slot] = Some(key_slot);
     }
 
     fn get_symbol(&self, index: u8) -> Option<&AuthenticatedSymbol> {
@@ -195,9 +206,10 @@ impl AuthTestHarness {
         self.symbols[slot].as_ref()
     }
 
-    fn get_symbol_mut(&mut self, index: u8) -> Option<&mut AuthenticatedSymbol> {
+    fn get_symbol_key(&self, index: u8) -> Option<&AuthKey> {
         let slot = index as usize % MAX_SYMBOLS;
-        self.symbols[slot].as_mut()
+        let key_slot = self.symbol_key_slots.get(slot).and_then(|entry| *entry)?;
+        self.keys.get(key_slot)
     }
 }
 
@@ -243,9 +255,10 @@ fn execute_auth_operation(
             esi,
             kind,
         } => {
-            if let Some(key) = harness.get_key(key_index)
+            if let Some(key_slot) = harness.key_slot(key_index)
                 && symbol_data.len() <= MAX_SYMBOL_SIZE
             {
+                let key = &harness.keys[key_slot];
                 let symbol_id = create_symbol_id(object_id, sbn, esi);
                 let symbol = Symbol::new(symbol_id, symbol_data, kind.into());
                 let tag = AuthenticationTag::compute(key, &symbol);
@@ -257,7 +270,7 @@ fn execute_auth_operation(
                     test_collision_attempt(key, &symbol, tag);
                 }
                 let auth_symbol = AuthenticatedSymbol::from_parts(symbol, tag);
-                harness.store_symbol(key_index, auth_symbol);
+                harness.store_symbol(key_index, auth_symbol, key_slot);
             }
         }
 
@@ -277,8 +290,11 @@ fn execute_auth_operation(
             corruption_offset,
             corruption_value,
         } => {
-            if let Some(auth_symbol) = harness.get_symbol_mut(symbol_index) {
-                test_symbol_corruption(auth_symbol, corruption_offset, corruption_value);
+            if let (Some(auth_symbol), Some(key)) = (
+                harness.get_symbol(symbol_index),
+                harness.get_symbol_key(symbol_index),
+            ) {
+                test_symbol_corruption(auth_symbol, key, corruption_offset, corruption_value);
             }
         }
 
@@ -377,7 +393,8 @@ fn test_collision_attempt(key: &AuthKey, symbol: &Symbol, tag: AuthenticationTag
 
 /// Test symbol corruption and authentication failure.
 fn test_symbol_corruption(
-    auth_symbol: &mut AuthenticatedSymbol,
+    auth_symbol: &AuthenticatedSymbol,
+    key: &AuthKey,
     corruption_offset: u16,
     corruption_value: u8,
 ) {
@@ -398,18 +415,14 @@ fn test_symbol_corruption(
                 auth_symbol.symbol().kind(),
             );
 
-            // Verification should fail with corrupted data
-            // Note: We use a dummy key since we don't know the original key
-            let test_key = AuthKey::from_seed(42);
-            let original_verifies = auth_symbol.tag().verify(&test_key, auth_symbol.symbol());
-            let corrupted_verifies = auth_symbol.tag().verify(&test_key, &corrupted_symbol);
-
-            // Both should have the same verification result (both fail with wrong key)
-            // The point is that corruption doesn't magically make an invalid tag valid
-            if original_verifies != corrupted_verifies {
-                // This could indicate that corruption somehow "fixed" a tag, which is suspicious
-                // but not necessarily a bug, so we don't assert
-            }
+            assert!(
+                auth_symbol.tag().verify(key, auth_symbol.symbol()),
+                "stored authentication tag failed to verify before symbol corruption"
+            );
+            assert!(
+                !auth_symbol.tag().verify(key, &corrupted_symbol),
+                "stored authentication tag verified corrupted symbol data"
+            );
         }
     }
 }
@@ -781,6 +794,13 @@ fn validate_harness_invariants(harness: &AuthTestHarness) {
     // Verify that all stored symbols maintain their integrity
     for (i, symbol_opt) in harness.symbols.iter().enumerate() {
         if let Some(symbol) = symbol_opt {
+            let key_slot = harness.symbol_key_slots[i]
+                .expect("stored authenticated symbol is missing key provenance");
+            assert!(
+                key_slot < harness.keys.len(),
+                "stored authenticated symbol references invalid key slot"
+            );
+
             // Symbol should have valid structure
             assert!(
                 !symbol.symbol().data().is_empty() || symbol.symbol().data().is_empty(),
