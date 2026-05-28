@@ -305,11 +305,9 @@ pub struct WebFrameCodec {
     /// header bytes (see br-asupersync-3asq77 for the analogous
     /// `FramedRead` poison; the codec layer needs the same fail-
     /// closed property because its callers may not always go through
-    /// FramedRead). Stored via `Cell` so the existing `&self`
-    /// signature is preserved — the codec is documented as
-    /// single-threaded and `Cell` matches that contract without the
-    /// runtime cost of `RefCell`.
-    poisoned: std::cell::Cell<bool>,
+    /// FramedRead). Stores the first terminal error reason so the
+    /// poison sentinel stays diagnostic without re-reading the buffer.
+    poisoned_reason: std::cell::RefCell<Option<String>>,
     /// Once a trailer frame has decoded successfully, the gRPC-Web
     /// stream is complete. Any later bytes are a protocol violation
     /// and must fail closed instead of being parsed as a second
@@ -329,7 +327,7 @@ impl WebFrameCodec {
     pub fn with_max_size(max_frame_size: usize) -> Self {
         Self {
             max_frame_size,
-            poisoned: std::cell::Cell::new(false),
+            poisoned_reason: std::cell::RefCell::new(None),
             completed: std::cell::Cell::new(false),
         }
     }
@@ -338,32 +336,38 @@ impl WebFrameCodec {
     /// error and the codec has been poisoned. (br-asupersync-nln9sc)
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
-        self.poisoned.get()
+        self.poisoned_reason.borrow().is_some()
+    }
+
+    fn poison(&self, reason: impl Into<String>) {
+        let mut poisoned_reason = self.poisoned_reason.borrow_mut();
+        if poisoned_reason.is_none() {
+            *poisoned_reason = Some(reason.into());
+        }
     }
 
     /// Decode the next frame from the buffer, returning `None` if
     /// insufficient data is available.
     pub fn decode(&self, src: &mut BytesMut) -> Result<Option<WebFrame>, GrpcError> {
         // br-asupersync-nln9sc: once poisoned, refuse to re-read the
-        // buffer. Returning the canonical poisoned error keeps the
-        // caller's diagnostic trail (the original error is in their
-        // logs already) while breaking the infinite-Err loop.
-        if self.poisoned.get() {
-            return Err(GrpcError::protocol(
+        // buffer. The sentinel includes the first terminal error
+        // reason so diagnostics remain stable while breaking the
+        // infinite-Err loop.
+        if let Some(reason) = self.poisoned_reason.borrow().clone() {
+            return Err(GrpcError::protocol(format!(
                 "gRPC-Web codec is poisoned after a prior unrecoverable \
-                 decode error (br-asupersync-nln9sc); construct a new \
-                 WebFrameCodec to resume",
-            ));
+                 decode error ({reason}) (br-asupersync-nln9sc); \
+                 construct a new WebFrameCodec to resume",
+            )));
         }
         if self.completed.get() {
             if src.is_empty() {
                 return Ok(None);
             }
-            self.poisoned.set(true);
-            return Err(GrpcError::protocol(
-                "received bytes after terminal gRPC-Web trailer \
-                 (br-asupersync-p2lx74)",
-            ));
+            let message =
+                "received bytes after terminal gRPC-Web trailer (br-asupersync-p2lx74)".to_string();
+            self.poison(message.clone());
+            return Err(GrpcError::protocol(message));
         }
 
         if src.len() < 5 {
@@ -383,11 +387,12 @@ impl WebFrameCodec {
         // the codec is poisoned so the next decode call will not re-
         // read the same broken header (br-asupersync-nln9sc).
         if flag & RESERVED_FLAG_MASK != 0 {
-            self.poisoned.set(true);
-            return Err(GrpcError::protocol(format!(
+            let message = format!(
                 "gRPC-Web frame has reserved flag bits set: 0x{flag:02x} \
                  (only bits 0x01 and 0x80 are defined; mask 0x7E is reserved)"
-            )));
+            );
+            self.poison(message.clone());
+            return Err(GrpcError::protocol(message));
         }
 
         if length > self.max_frame_size {
@@ -396,7 +401,10 @@ impl WebFrameCodec {
             // consume `length` body bytes (they may not have arrived,
             // and skipping would re-frame on garbage); poisoning is
             // the only safe recovery.
-            self.poisoned.set(true);
+            self.poison(format!(
+                "gRPC-Web frame length {length} exceeds maximum {}",
+                self.max_frame_size
+            ));
             return Err(GrpcError::MessageTooLarge);
         }
 
@@ -412,25 +420,25 @@ impl WebFrameCodec {
         let compressed = flag & 0x01 != 0;
         if is_trailer {
             if compressed {
-                self.poisoned.set(true);
-                return Err(GrpcError::compression(
-                    "compressed gRPC-Web trailer frames are unsupported",
-                ));
+                let message = "compressed gRPC-Web trailer frames are unsupported".to_string();
+                self.poison(message.clone());
+                return Err(GrpcError::compression(message));
             }
             // br-asupersync-nln9sc: a malformed trailer block also
             // poisons — once a trailer arrives, the gRPC-Web stream
             // is by definition over, so any decode failure here is
             // terminal anyway.
-            let trailer = decode_trailers(&payload).inspect_err(|_| {
-                self.poisoned.set(true);
+            let trailer = decode_trailers(&payload).map_err(|err| {
+                self.poison(format!("{err:?}"));
+                err
             })?;
             self.completed.set(true);
             if !src.is_empty() {
-                self.poisoned.set(true);
-                return Err(GrpcError::protocol(
-                    "received bytes after terminal gRPC-Web trailer \
-                     (br-asupersync-p2lx74)",
-                ));
+                let message =
+                    "received bytes after terminal gRPC-Web trailer (br-asupersync-p2lx74)"
+                        .to_string();
+                self.poison(message.clone());
+                return Err(GrpcError::protocol(message));
             }
             Ok(Some(WebFrame::Trailers(trailer)))
         } else {
