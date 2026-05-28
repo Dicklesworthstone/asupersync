@@ -516,7 +516,9 @@ impl ContractChecker {
                     },
                 );
 
-                // Reset quiescence tracking since we have a new reservation
+                self.check_quiescence(event.time);
+
+                // Reset quiescence tracking since we have a new reservation.
                 self.quiescence_start = None;
             }
 
@@ -2720,6 +2722,10 @@ mod tests {
         let time_bound = Time::from_millis(100);
         let events_slow_resolve = vec![
             reserve(0, o(1), ObligationKind::SendPermit, t(1), r(1)),
+            MarkingEvent::new(
+                Time::from_millis(200),
+                MarkingEventKind::TaskComplete { task: t(1) },
+            ),
             // No commit within time bound - should violate at trace end
         ];
         let mut checker_time = ContractChecker::new_with_time_bound(time_bound);
