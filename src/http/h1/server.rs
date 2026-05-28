@@ -1160,6 +1160,10 @@ mod tests {
         }
     }
 
+    fn localhost_server_config() -> Http1Config {
+        Http1Config::default().host_policy(HostPolicy::AllowList(vec!["localhost".to_string()]))
+    }
+
     struct GatedBodyIo {
         head: Vec<u8>,
         body: Vec<u8>,
@@ -1720,7 +1724,10 @@ mod tests {
             b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
             Arc::clone(&written),
         );
-        let server = Http1Server::new(|_req| async move { Response::new(200, "OK", b"hello") });
+        let server = Http1Server::with_config(
+            |_req| async move { Response::new(200, "OK", b"hello") },
+            localhost_server_config(),
+        );
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
@@ -1751,13 +1758,16 @@ mod tests {
             Arc::clone(&written),
         );
         let seen_body_for_handler = Arc::clone(&seen_body);
-        let server = Http1Server::new(move |req| {
-            let seen_body_for_handler = Arc::clone(&seen_body_for_handler);
-            async move {
-                *seen_body_for_handler.lock().unwrap() = req.body.clone();
-                Response::new(200, "OK", b"done")
-            }
-        });
+        let server = Http1Server::with_config(
+            move |req| {
+                let seen_body_for_handler = Arc::clone(&seen_body_for_handler);
+                async move {
+                    *seen_body_for_handler.lock().unwrap() = req.body.clone();
+                    Response::new(200, "OK", b"done")
+                }
+            },
+            localhost_server_config(),
+        );
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
@@ -1784,13 +1794,16 @@ mod tests {
             Arc::clone(&written),
         );
         let seen_body_for_handler = Arc::clone(&seen_body);
-        let server = Http1Server::new(move |req| {
-            let seen_body_for_handler = Arc::clone(&seen_body_for_handler);
-            async move {
-                *seen_body_for_handler.lock().unwrap() = req.body.clone();
-                Response::new(200, "OK", b"done")
-            }
-        });
+        let server = Http1Server::with_config(
+            move |req| {
+                let seen_body_for_handler = Arc::clone(&seen_body_for_handler);
+                async move {
+                    *seen_body_for_handler.lock().unwrap() = req.body.clone();
+                    Response::new(200, "OK", b"done")
+                }
+            },
+            localhost_server_config(),
+        );
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
@@ -1819,10 +1832,13 @@ mod tests {
             Arc::clone(&written),
         );
         let handler_called_for_handler = Arc::clone(&handler_called);
-        let server = Http1Server::new(move |_req| {
-            handler_called_for_handler.store(true, Ordering::SeqCst);
-            async move { Response::new(200, "OK", b"nope") }
-        });
+        let server = Http1Server::with_config(
+            move |_req| {
+                handler_called_for_handler.store(true, Ordering::SeqCst);
+                async move { Response::new(200, "OK", b"nope") }
+            },
+            localhost_server_config(),
+        );
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
