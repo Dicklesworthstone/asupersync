@@ -3216,7 +3216,7 @@ mod tests {
         let mut reg = NameRegistry::new();
         let mut stale_permit = reg
             .reserve("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
-            .expect("reserve ok");
+            .expect("should reserve svc for stale permit test");
         stale_permit.abort().expect("abort stale permit");
         reg.cancel_permit(&stale_permit, Time::from_nanos(1_000_000_000))
             .expect("cancel original permit entry");
@@ -3718,7 +3718,8 @@ mod tests {
         init_test("cleanup_task_aborts_granted_lease_obligation");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .expect("should register svc for cleanup_task test");
 
         // Task 2 waits for "svc".
         reg.register_with_policy(
@@ -3734,8 +3735,8 @@ mod tests {
 
         // Free the name — task 2 is granted.
         reg.unregister_and_grant("svc", tid(1), Time::from_secs(5))
-            .unwrap();
-        lease.release().unwrap();
+            .expect("should unregister and grant to tid(2)");
+        lease.release().expect("should release lease");
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
 
         // Before take_granted, clean up task 2.
@@ -3753,7 +3754,8 @@ mod tests {
         init_test("collision_drain_expired_waiters");
 
         let mut reg = NameRegistry::new();
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .expect("should register svc for tid(1)");
 
         // Two waiters with different deadlines.
         reg.register_with_policy(
@@ -3765,7 +3767,7 @@ mod tests {
                 deadline: Time::from_secs(10),
             },
         )
-        .unwrap();
+        .expect("should register waiter tid(2)");
         reg.register_with_policy(
             "svc",
             tid(3),
@@ -3929,7 +3931,8 @@ mod tests {
 
         let mut reg = NameRegistry::new();
         // Task 1 in region 0 holds "svc".
-        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000)).unwrap();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
+            .expect("should register svc for cross_region test");
 
         // Task 2 in region 1 waits for "svc".
         reg.register_with_policy(
@@ -4013,7 +4016,7 @@ mod tests {
         // Task 1 in region 0 reserves (pending) "svc".
         let mut permit = reg
             .reserve("svc", tid(1), rid(0), Time::from_nanos(1_000_000_000))
-            .expect("reserve ok");
+            .expect("should reserve svc for pending permit test");
 
         // Task 2 in region 1 tries to register with Wait policy.
         // The pending permit blocks registration, so task 2 becomes a waiter.
