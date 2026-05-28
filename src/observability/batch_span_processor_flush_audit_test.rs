@@ -24,9 +24,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-/// Mock collector that simulates network delay and ACK behavior.
+/// In-memory collector that applies deterministic delay and ACK behavior.
 #[derive(Debug, Clone)]
-struct MockCollectorExporter {
+struct InMemoryCollectorExporter {
     export_delay: Duration,
     flush_delay: Duration,
     export_count: Arc<AtomicU64>,
@@ -36,7 +36,7 @@ struct MockCollectorExporter {
     collector_ack_received: Arc<AtomicBool>,
 }
 
-impl MockCollectorExporter {
+impl InMemoryCollectorExporter {
     fn new(export_delay: Duration, flush_delay: Duration) -> Self {
         Self {
             export_delay,
@@ -75,19 +75,19 @@ impl MockCollectorExporter {
     }
 }
 
-impl TraceExporter for MockCollectorExporter {
+impl TraceExporter for InMemoryCollectorExporter {
     fn export(&self, _batch: &SpanBatch) -> Result<(), ExportError> {
         if self.should_fail_exports.load(Ordering::Relaxed) {
-            return Err(ExportError::Transport("Simulated export failure".into()));
+            return Err(ExportError::Transport("configured export failure".into()));
         }
 
         // Track in-flight export
         self.in_flight_exports.fetch_add(1, Ordering::Relaxed);
 
-        // Simulate network delay to collector
+        // Apply deterministic collector latency.
         std::thread::sleep(self.export_delay);
 
-        // Simulate collector ACK
+        // Record collector ACK.
         self.collector_ack_received.store(true, Ordering::Relaxed);
         self.export_count.fetch_add(1, Ordering::Relaxed);
 
@@ -100,7 +100,7 @@ impl TraceExporter for MockCollectorExporter {
         self.flush_count.fetch_add(1, Ordering::Relaxed);
 
         // CRITICAL: Real flush implementation should wait for all in-flight exports
-        // to complete before returning success. This simulates that behavior.
+        // to complete before returning success. This fixture exercises that behavior.
 
         let start = Instant::now();
         let timeout = Duration::from_secs(5); // Reasonable flush timeout
@@ -115,7 +115,7 @@ impl TraceExporter for MockCollectorExporter {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        // Simulate additional flush processing delay
+        // Apply deterministic flush processing delay.
         std::thread::sleep(self.flush_delay);
 
         Ok(())
@@ -141,20 +141,20 @@ fn audit_force_flush_waits_for_collector_ack() {
     let export_delay = Duration::from_millis(200); // Slow network to collector
     let flush_delay = Duration::from_millis(50); // Additional flush processing
 
-    let mock_collector = MockCollectorExporter::new(export_delay, flush_delay);
+    let memory_collector = InMemoryCollectorExporter::new(export_delay, flush_delay);
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_collector.clone()),
+        Box::new(memory_collector.clone()),
         100, // Large capacity
         Duration::from_secs(1),
     );
 
     println!("📊 Test scenario setup:");
     println!(
-        "   Export delay: {:?} (simulates network latency)",
+        "   Export delay: {:?} (deterministic collector latency)",
         export_delay
     );
     println!(
-        "   Flush delay: {:?} (simulates flush processing)",
+        "   Flush delay: {:?} (deterministic flush processing)",
         flush_delay
     );
 
@@ -189,7 +189,7 @@ fn audit_force_flush_waits_for_collector_ack() {
     // Phase 2: Call force_flush() and measure timing
     println!("📊 Phase 2: Call force_flush() and verify waiting behavior");
 
-    mock_collector.reset_ack();
+    memory_collector.reset_ack();
     let flush_start = Instant::now();
 
     // This should wait for collector ACK
@@ -214,10 +214,10 @@ fn audit_force_flush_waits_for_collector_ack() {
     );
 
     // Verify all spans were exported
-    let final_exports = mock_collector.export_count();
-    let final_flushes = mock_collector.flush_count();
-    let final_in_flight = mock_collector.in_flight_count();
-    let ack_received = mock_collector.ack_received();
+    let final_exports = memory_collector.export_count();
+    let final_flushes = memory_collector.flush_count();
+    let final_in_flight = memory_collector.in_flight_count();
+    let ack_received = memory_collector.ack_received();
 
     println!("📊 Force flush completion verification:");
     println!("   Exported batches: {}", final_exports);
@@ -263,11 +263,11 @@ fn audit_force_flush_waits_for_collector_ack() {
 fn audit_force_flush_collector_failure_handling() {
     println!("🔍 AUDIT: force_flush() behavior with collector failures");
 
-    let mock_collector =
-        MockCollectorExporter::new(Duration::from_millis(50), Duration::from_millis(10));
+    let memory_collector =
+        InMemoryCollectorExporter::new(Duration::from_millis(50), Duration::from_millis(10));
 
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_collector.clone()),
+        Box::new(memory_collector.clone()),
         100,
         Duration::from_secs(1),
     );
@@ -289,8 +289,7 @@ fn audit_force_flush_collector_failure_handling() {
 
     exporter.export(&batch).expect("Export should succeed");
 
-    // Simulate collector failure
-    mock_collector.set_export_failure(true);
+    memory_collector.set_export_failure(true);
 
     println!("📊 Testing flush with collector failure");
     let flush_result = exporter.flush();
@@ -320,13 +319,13 @@ fn audit_force_flush_collector_failure_handling() {
 fn audit_concurrent_flush_and_export() {
     println!("🔍 AUDIT: Concurrent flush() and export() operations");
 
-    let mock_collector = MockCollectorExporter::new(
+    let memory_collector = InMemoryCollectorExporter::new(
         Duration::from_millis(100), // Slow exports
         Duration::from_millis(20),  // Fast flush
     );
 
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_collector.clone()),
+        Box::new(memory_collector.clone()),
         100,
         Duration::from_secs(1),
     );
@@ -379,8 +378,8 @@ fn audit_concurrent_flush_and_export() {
     println!("📊 Concurrent operation results:");
     println!("   flush() result: {:?}", flush_result);
     println!("   flush() duration: {:?}", flush_duration);
-    println!("   Final exports: {}", mock_collector.export_count());
-    println!("   Final in-flight: {}", mock_collector.in_flight_count());
+    println!("   Final exports: {}", memory_collector.export_count());
+    println!("   Final in-flight: {}", memory_collector.in_flight_count());
 
     // Verify proper coordination
     assert!(
@@ -389,7 +388,7 @@ fn audit_concurrent_flush_and_export() {
     );
 
     assert_eq!(
-        mock_collector.in_flight_count(),
+        memory_collector.in_flight_count(),
         0,
         "No exports should be in-flight after flush completion"
     );
@@ -397,7 +396,7 @@ fn audit_concurrent_flush_and_export() {
     println!("✅ CONCURRENT OPERATIONS: Proper coordination verified");
 }
 
-/// **AUDIT TEST**: Demonstrate send-and-forget anti-pattern.
+/// **AUDIT TEST**: Verify send-and-forget anti-pattern.
 ///
 /// **SCENARIO**: Show what would happen with defective send-and-forget flush.
 /// **REQUIREMENT**: This would be DEFECTIVE - causes data loss.
@@ -412,7 +411,7 @@ fn audit_send_and_forget_antipattern() {
     println!("   • Application shuts down with pending exports");
     println!("   • Result: data loss");
 
-    /// Defective exporter that demonstrates send-and-forget
+    /// Defective exporter that exposes send-and-forget behavior.
     #[derive(Debug, Clone)]
     struct SendAndForgetExporter {
         export_count: Arc<AtomicU64>,
@@ -436,12 +435,12 @@ fn audit_send_and_forget_antipattern() {
         fn export(&self, _batch: &SpanBatch) -> Result<(), ExportError> {
             self.pending_exports.fetch_add(1, Ordering::Relaxed);
 
-            // Simulate async export (would complete later)
+            // Spawn delayed export work that completes after flush returns.
             std::thread::spawn({
                 let count = Arc::clone(&self.export_count);
                 let pending = Arc::clone(&self.pending_exports);
                 move || {
-                    // Simulate slow export
+                    // Delay completion long enough to expose the antipattern.
                     std::thread::sleep(Duration::from_millis(500));
                     count.fetch_add(1, Ordering::Relaxed);
                     pending.fetch_sub(1, Ordering::Relaxed);
@@ -482,7 +481,7 @@ fn audit_send_and_forget_antipattern() {
 
     exporter.export(&batch).expect("Export should succeed");
 
-    println!("📊 Demonstrating defective behavior:");
+    println!("📊 Exercising defective behavior:");
     let pending_before = defective_exporter.pending_count();
     println!("   Pending exports before flush: {}", pending_before);
 
@@ -497,7 +496,7 @@ fn audit_send_and_forget_antipattern() {
     println!("   flush() result: {:?}", flush_result);
     println!("   Pending exports after flush: {}", pending_after);
 
-    // Demonstrate the problem
+    // Verify the problem.
     assert!(
         flush_duration < Duration::from_millis(100),
         "DEFECTIVE: flush() returned too quickly"

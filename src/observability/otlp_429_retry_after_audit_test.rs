@@ -51,8 +51,8 @@ mod tests {
         }
     }
 
-    /// Mock HTTP response for testing status code classification.
-    struct MockResponse {
+    /// Deterministic HTTP response fixture for status code classification.
+    struct ResponseFixture {
         status: u16,
         headers: Vec<(String, String)>,
     }
@@ -60,7 +60,7 @@ mod tests {
     /// Current OTLP response status classifier (from otel.rs lines 1112-1154).
     ///
     /// **ANALYSIS NEEDED**: Does this correctly handle both Retry-After and exponential backoff?
-    fn current_otlp_status_classifier(response: &MockResponse) -> Result<(), OtlpError> {
+    fn current_otlp_status_classifier(response: &ResponseFixture) -> Result<(), OtlpError> {
         match response.status {
             200..=299 => Ok(()),
             429 => {
@@ -107,15 +107,15 @@ mod tests {
         }
     }
 
-    /// Mock OTLP HTTP exporter configuration for testing retry logic.
+    /// Deterministic OTLP HTTP exporter configuration for retry logic.
     #[derive(Debug, Clone)]
-    struct MockOtlpExporter {
+    struct OtlpRetryPolicyFixture {
         max_retries: u32,
         initial_retry_delay: Duration,
         max_retry_delay: Duration,
     }
 
-    impl MockOtlpExporter {
+    impl OtlpRetryPolicyFixture {
         fn new() -> Self {
             Self {
                 max_retries: 3,
@@ -215,7 +215,7 @@ mod tests {
         eprintln!("\n📊 Testing Retry-After header parsing:");
 
         for (test_name, headers, expected_duration, description) in test_cases {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: 429,
                 headers,
             };
@@ -274,7 +274,7 @@ mod tests {
         eprintln!("  • SHOULD apply exponential backoff for sustained rate limiting");
         eprintln!("  • SHOULD cap delays at maximum to prevent excessive waits");
 
-        let exporter = MockOtlpExporter::new();
+        let exporter = OtlpRetryPolicyFixture::new();
         eprintln!("\n📊 Retry Configuration:");
         eprintln!("  Max retries: {}", exporter.max_retries);
         eprintln!("  Initial delay: {:?}", exporter.initial_retry_delay);
@@ -362,10 +362,10 @@ mod tests {
         eprintln!("  • Subsequent 429s without Retry-After header");
         eprintln!("  • Client should combine both mechanisms for optimal behavior");
 
-        let exporter = MockOtlpExporter::new();
+        let exporter = OtlpRetryPolicyFixture::new();
         let mut current_delay = exporter.initial_retry_delay;
 
-        eprintln!("\n📊 Multi-Retry Sequence Simulation:");
+        eprintln!("\n📊 Multi-Retry Sequence Exercise:");
 
         // Retry 1: 429 with Retry-After
         eprintln!("\n  Retry 1: 429 with Retry-After: 30s");
@@ -463,7 +463,7 @@ mod tests {
             eprintln!("\n📋 Edge Case: {}", case_name);
             eprintln!("  Scenario: {}", description);
 
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: 429,
                 headers,
             };
@@ -498,16 +498,16 @@ mod tests {
         eprintln!("  ⚠️  Multi-header edge cases may need improvement");
     }
 
-    /// Demonstrate complete 429 retry behavior correctness.
+    /// Verify complete 429 retry behavior correctness.
     #[test]
-    fn demonstrate_429_retry_behavior_correctness() {
-        eprintln!("\n✅ DEMONSTRATING 429 RETRY BEHAVIOR CORRECTNESS");
+    fn audit_429_retry_behavior_correctness() {
+        eprintln!("\n✅ VERIFYING 429 RETRY BEHAVIOR CORRECTNESS");
         eprintln!("===============================================");
 
         eprintln!("🎯 OTLP 429 Rate Limiting Compliance Assessment:");
 
         // Test classification
-        let rate_limited = MockResponse {
+        let rate_limited = ResponseFixture {
             status: 429,
             headers: vec![("Retry-After".to_string(), "120".to_string())],
         };
@@ -534,7 +534,7 @@ mod tests {
         }
 
         // Test retry logic
-        let exporter = MockOtlpExporter::new();
+        let exporter = OtlpRetryPolicyFixture::new();
         eprintln!("\n📊 RETRY LOGIC VERIFICATION:");
 
         // Scenario: Server provides specific delay

@@ -16,24 +16,24 @@
 #![cfg(test)]
 
 use crate::observability::otlp_trace_exporter::{
-    LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
+    InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
 use crate::observability::w3c_trace_context::extract_from_http;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Mock local sampler that simulates sampling decisions.
+/// Local sampler fixture for deterministic sampling decisions.
 #[derive(Debug)]
-struct MockLocalSampler {
+struct LocalSamplerFixture {
     should_sample: bool,
 }
 
-impl MockLocalSampler {
+impl LocalSamplerFixture {
     fn new(should_sample: bool) -> Self {
         Self { should_sample }
     }
 
-    /// Simulate local sampling decision for a ROOT span.
+    /// Evaluate the local sampling decision for a root span.
     fn sample_root(&self, _span_name: &str) -> bool {
         self.should_sample
     }
@@ -44,12 +44,12 @@ impl MockLocalSampler {
     }
 }
 
-/// Mock HTTP request with traceparent header.
-struct MockHttpRequest {
+/// HTTP request fixture with traceparent header.
+struct HeaderFixtureRequest {
     headers: HashMap<String, String>,
 }
 
-impl MockHttpRequest {
+impl HeaderFixtureRequest {
     fn with_traceparent(traceparent: &str) -> Self {
         let mut headers = HashMap::new();
         headers.insert("traceparent".to_string(), traceparent.to_string());
@@ -73,22 +73,22 @@ fn audit_upstream_sampling_decision_honored() {
     println!("   • No override of upstream decisions");
 
     // Test scenario setup
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
 
     // Local sampler that would DROP (don't sample)
-    let local_sampler = MockLocalSampler::new(false);
+    let local_sampler = LocalSamplerFixture::new(false);
 
     // Phase 1: Extract upstream context with sampled=1
     println!("📊 Phase 1: Extract upstream traceparent with sampled=1");
     let upstream_sampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
     //                                                                                      ^^ sampled=1 (upstream decision)
 
-    let request = MockHttpRequest::with_traceparent(upstream_sampled_traceparent);
+    let request = HeaderFixtureRequest::with_traceparent(upstream_sampled_traceparent);
     let upstream_context = extract_from_http(&request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -148,7 +148,7 @@ fn audit_upstream_sampling_decision_honored() {
     exporter.export(&batch).expect("export should succeed");
     let processed = exporter.process_queue().expect("processing should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     println!("📊 W3C compliance verification:");
     println!("   Processed batches: {}", processed);
@@ -188,15 +188,15 @@ fn audit_upstream_sampling_decision_honored() {
 fn audit_local_sampling_applies_to_root_spans_only() {
     println!("🔍 AUDIT: Local sampling for ROOT spans vs W3C propagation for children");
 
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
 
     // Local sampler that decides DON'T sample
-    let local_sampler = MockLocalSampler::new(false);
+    let local_sampler = LocalSamplerFixture::new(false);
 
     // Test Case 1: ROOT span (no upstream context)
     println!("📊 Case 1: ROOT span - local sampler decision applies");
@@ -222,7 +222,7 @@ fn audit_local_sampling_applies_to_root_spans_only() {
     // Test Case 2: CHILD span (honors parent/upstream)
     println!("📊 Case 2: CHILD span - honors parent decision (W3C)");
 
-    // Simulate upstream context that says sample=1
+    // Upstream context says sample=1.
     let parent_sampled = true; // Upstream/parent decision
     let child_decision = local_sampler.sample_child(parent_sampled); // Should return true per W3C
 
@@ -263,7 +263,7 @@ fn audit_local_sampling_applies_to_root_spans_only() {
     exporter.export(&batch).expect("export should succeed");
     exporter.process_queue().expect("processing should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     if !exported_batches.is_empty() {
         let exported_batch = &exported_batches[0];
@@ -288,11 +288,11 @@ fn audit_local_sampling_applies_to_root_spans_only() {
     println!("   • Distributed consistency preserved");
 }
 
-/// **AUDIT TEST**: Demonstrate defective local override scenario.
+/// **AUDIT TEST**: Verify defective local override scenario.
 ///
 /// **SCENARIO**: Show what would happen if local sampler incorrectly overrides upstream.
 /// **REQUIREMENT**: This would be DEFECTIVE - breaks trace integrity.
-/// **ASSESSMENT**: DEFECTIVE behavior demonstrated (not current implementation).
+/// **ASSESSMENT**: DEFECTIVE behavior verified (not current implementation).
 #[test]
 fn audit_defective_local_override_scenario() {
     println!("🚨 AUDIT: Defective local override scenario (anti-pattern)");
@@ -302,16 +302,16 @@ fn audit_defective_local_override_scenario() {
     println!("   • Local sampler override to drop");
     println!("   • Result: broken distributed trace");
 
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
 
     // Upstream context with sampled=1
     let upstream_sampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4738-00f067aa0ba902b9-01";
-    let request = MockHttpRequest::with_traceparent(upstream_sampled_traceparent);
+    let request = HeaderFixtureRequest::with_traceparent(upstream_sampled_traceparent);
     let upstream_context = extract_from_http(&request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -319,10 +319,10 @@ fn audit_defective_local_override_scenario() {
     assert!(upstream_context.flags.is_sampled());
 
     // Local sampler that would drop
-    let local_sampler = MockLocalSampler::new(false);
+    let local_sampler = LocalSamplerFixture::new(false);
 
     // DEFECTIVE BEHAVIOR: Override upstream decision with local sampler
-    println!("🚨 Simulating DEFECTIVE behavior: local override of upstream decision");
+    println!("🚨 Exercising DEFECTIVE behavior: local override of upstream decision");
 
     let defective_flags = u8::from(local_sampler.sample_root("defective_operation"));
 
@@ -358,7 +358,7 @@ fn audit_defective_local_override_scenario() {
     exporter.export(&batch).expect("export should succeed");
     exporter.process_queue().expect("processing should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     // DEFECTIVE RESULT: No spans exported despite upstream sampled=1
     println!("🚨 Defective result analysis:");
@@ -390,9 +390,9 @@ fn audit_current_implementation_w3c_compliance() {
     println!("   2. Upstream sampled=0 → should drop");
     println!("   3. No upstream context → apply local sampling");
 
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
@@ -401,7 +401,7 @@ fn audit_current_implementation_w3c_compliance() {
 
     // Test 1: Upstream sampled=1
     let sampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4739-00f067aa0ba902ba-01";
-    let sampled_request = MockHttpRequest::with_traceparent(sampled_traceparent);
+    let sampled_request = HeaderFixtureRequest::with_traceparent(sampled_traceparent);
     let sampled_context = extract_from_http(&sampled_request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -417,7 +417,7 @@ fn audit_current_implementation_w3c_compliance() {
 
     // Test 2: Upstream sampled=0
     let unsampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e473a-00f067aa0ba902bb-00";
-    let unsampled_request = MockHttpRequest::with_traceparent(unsampled_traceparent);
+    let unsampled_request = HeaderFixtureRequest::with_traceparent(unsampled_traceparent);
     let unsampled_context = extract_from_http(&unsampled_request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -450,7 +450,7 @@ fn audit_current_implementation_w3c_compliance() {
     exporter.export(&batch).expect("export should succeed");
     exporter.process_queue().expect("processing should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     println!("📊 W3C compliance results:");
     if !exported_batches.is_empty() {

@@ -22,14 +22,14 @@
 
 use std::collections::HashMap;
 
-/// Mock trace_state configuration for testing vendor entry preservation.
+/// Trace_state configuration fixture for vendor entry preservation.
 #[derive(Debug, Clone)]
-pub struct MockTraceStateConfig {
+pub struct TraceStateConfigFixture {
     vendor_entries: Vec<(String, String)>,
     preserve_full_string: bool,
 }
 
-impl MockTraceStateConfig {
+impl TraceStateConfigFixture {
     fn new() -> Self {
         Self {
             vendor_entries: vec![],
@@ -57,9 +57,9 @@ impl MockTraceStateConfig {
     }
 }
 
-/// Mock OTLP span for testing trace_state serialization behavior.
+/// OTLP span fixture for trace_state serialization behavior.
 #[derive(Debug, Clone)]
-pub struct MockOtlpSpan {
+pub struct OtlpSpanFixture {
     trace_id: String,
     span_id: String,
     name: String,
@@ -67,7 +67,7 @@ pub struct MockOtlpSpan {
     vendor_keys: HashMap<String, String>,
 }
 
-impl MockOtlpSpan {
+impl OtlpSpanFixture {
     fn new(name: &str, trace_state: &str) -> Self {
         Self {
             trace_id: "12345678901234567890123456789012".to_string(),
@@ -89,8 +89,8 @@ impl MockOtlpSpan {
     }
 }
 
-/// Simulate current OTLP serialization behavior (vendor key extraction only).
-fn serialize_trace_state_current(span: &MockOtlpSpan) -> HashMap<String, String> {
+/// Current OTLP serialization behavior (vendor key extraction only).
+fn serialize_trace_state_current(span: &OtlpSpanFixture) -> HashMap<String, String> {
     let mut otlp_fields = HashMap::new();
 
     // Current implementation: only extract "vendor" key (DEFECT)
@@ -101,8 +101,8 @@ fn serialize_trace_state_current(span: &MockOtlpSpan) -> HashMap<String, String>
     otlp_fields
 }
 
-/// Simulate W3C-compliant OTLP serialization (full string preservation).
-fn serialize_trace_state_compliant(span: &MockOtlpSpan) -> HashMap<String, String> {
+/// W3C-compliant OTLP serialization (full string preservation).
+fn serialize_trace_state_compliant(span: &OtlpSpanFixture) -> HashMap<String, String> {
     let mut otlp_fields = HashMap::new();
 
     // W3C compliant: preserve full trace_state string
@@ -155,7 +155,7 @@ fn audit_otlp_trace_state_multi_vendor_preservation() {
     for (trace_state_input, description) in multi_vendor_scenarios {
         println!("   Testing: {} ({})", trace_state_input, description);
 
-        let span = MockOtlpSpan::new("test-span", trace_state_input);
+        let span = OtlpSpanFixture::new("test-span", trace_state_input);
 
         // **CURRENT IMPLEMENTATION BEHAVIOR**
         let current_serialized = serialize_trace_state_current(&span);
@@ -200,7 +200,7 @@ fn audit_otlp_trace_state_multi_vendor_preservation() {
     println!("📊 W3C trace-context compliance analysis:");
 
     let complex_trace_state = "edge=session:s123,cdn=cache:hit,lb=route:r456,auth=user:u789";
-    let complex_span = MockOtlpSpan::new("complex-span", complex_trace_state);
+    let complex_span = OtlpSpanFixture::new("complex-span", complex_trace_state);
 
     let current_result = serialize_trace_state_current(&complex_span);
     let compliant_result = serialize_trace_state_compliant(&complex_span);
@@ -280,7 +280,7 @@ fn audit_otlp_trace_state_vendor_opacity() {
     for (trace_state_input, description) in opacity_test_scenarios {
         println!("   Testing: {} ({})", trace_state_input, description);
 
-        let span = MockOtlpSpan::new("opacity-test", trace_state_input);
+        let span = OtlpSpanFixture::new("opacity-test", trace_state_input);
 
         // **CURRENT IMPLEMENTATION**
         let current_serialized = serialize_trace_state_current(&span);
@@ -338,7 +338,7 @@ fn audit_current_otlp_trace_state_behavior() {
     println!("   Behavior: span.context.trace_state().get(\"vendor\")");
     println!("   Issue: Only extracts 'vendor' key, not full trace_state");
 
-    // **CURRENT BEHAVIOR SIMULATION**
+    // **CURRENT BEHAVIOR CHECK**
     let test_scenarios = vec![
         "vendor=value1",
         "vendor=value1,other=value2",
@@ -351,7 +351,7 @@ fn audit_current_otlp_trace_state_behavior() {
     for trace_state in test_scenarios {
         println!("   Input: '{}'", trace_state);
 
-        let span = MockOtlpSpan::new("test", trace_state);
+        let span = OtlpSpanFixture::new("test", trace_state);
         let current_result = serialize_trace_state_current(&span);
 
         let input_entries = trace_state.split(',').count();

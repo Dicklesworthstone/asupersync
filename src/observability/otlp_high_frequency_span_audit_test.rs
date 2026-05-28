@@ -15,7 +15,7 @@
 #![cfg(test)]
 
 use crate::observability::otlp_trace_exporter::{
-    LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
+    InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -147,9 +147,9 @@ fn audit_high_frequency_span_processing_lock_analysis() {
     println!("   Total spans: {}", total_spans);
 
     // Create exporter with large queue capacity to focus on queue performance
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = Arc::new(LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter),
+        Box::new(memory_exporter),
         1000, // Large queue capacity
         Duration::from_secs(1),
     ));
@@ -237,7 +237,7 @@ fn audit_high_frequency_span_processing_lock_analysis() {
     println!("🚨 PERFORMANCE ISSUE: Mutex-protected work-queue identified");
 }
 
-/// **AUDIT TEST**: Demonstrate contention scaling with increased thread count.
+/// **AUDIT TEST**: Verify contention scaling with increased thread count.
 ///
 /// **SCENARIO**: Compare performance across different thread counts to show contention.
 /// **REQUIREMENT**: Lock-free queues should scale linearly with threads.
@@ -259,9 +259,9 @@ fn audit_mutex_contention_thread_scaling() {
     for thread_count in thread_counts {
         println!("📊 Testing {} threads:", thread_count);
 
-        let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+        let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
         let exporter = Arc::new(LoadSheddingTraceExporter::new(
-            Box::new(mock_exporter),
+            Box::new(memory_exporter),
             500,
             Duration::from_secs(1),
         ));
@@ -332,9 +332,9 @@ fn audit_queue_operation_latency_profile() {
     println!("   • Profile mutex acquisition time");
     println!("   • Identify serialization bottlenecks");
 
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_nanos(1)); // Minimal delay
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_nanos(1));
     let exporter = Arc::new(LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter),
+        Box::new(memory_exporter),
         100,
         Duration::from_secs(1),
     ));

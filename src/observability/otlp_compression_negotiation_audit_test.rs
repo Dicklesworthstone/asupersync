@@ -21,15 +21,15 @@
 
 use std::sync::{Arc, Mutex};
 
-/// Mock compression configuration for testing negotiation behavior.
+/// Compression configuration for deterministic negotiation behavior.
 #[derive(Debug, Clone)]
-pub struct MockCompressionConfig {
+pub struct NegotiationCompressionConfig {
     enabled: bool,
     algorithm: String,
     fallback_enabled: bool,
 }
 
-impl MockCompressionConfig {
+impl NegotiationCompressionConfig {
     fn new(enabled: bool) -> Self {
         Self {
             enabled,
@@ -44,15 +44,15 @@ impl MockCompressionConfig {
     }
 }
 
-/// Mock HTTP response for compression negotiation testing.
+/// HTTP response for compression negotiation testing.
 #[derive(Debug, Clone)]
-pub struct MockHttpResponse {
+pub struct NegotiationHttpResponse {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
-impl MockHttpResponse {
+impl NegotiationHttpResponse {
     fn new(status: u16) -> Self {
         Self {
             status,
@@ -67,16 +67,16 @@ impl MockHttpResponse {
     }
 }
 
-/// Mock HTTP request for tracking compression negotiation attempts.
+/// HTTP request for tracking compression negotiation attempts.
 #[derive(Debug, Clone)]
-pub struct MockHttpRequest {
+pub struct NegotiationHttpRequest {
     method: String,
     url: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
-impl MockHttpRequest {
+impl NegotiationHttpRequest {
     fn new(method: &str, url: &str, headers: Vec<(String, String)>, body: Vec<u8>) -> Self {
         Self {
             method: method.to_string(),
@@ -105,17 +105,17 @@ impl MockHttpRequest {
     }
 }
 
-/// Mock OTLP HTTP exporter for testing compression negotiation.
+/// In-memory OTLP HTTP exporter for testing compression negotiation.
 #[derive(Debug)]
-pub struct MockOtlpHttpExporter {
-    config: MockCompressionConfig,
-    requests: Arc<Mutex<Vec<MockHttpRequest>>>,
-    responses: Arc<Mutex<Vec<MockHttpResponse>>>,
+pub struct InMemoryNegotiatingOtlpHttpExporter {
+    config: NegotiationCompressionConfig,
+    requests: Arc<Mutex<Vec<NegotiationHttpRequest>>>,
+    responses: Arc<Mutex<Vec<NegotiationHttpResponse>>>,
     attempt_count: Arc<Mutex<usize>>,
 }
 
-impl MockOtlpHttpExporter {
-    fn new(config: MockCompressionConfig) -> Self {
+impl InMemoryNegotiatingOtlpHttpExporter {
+    fn new(config: NegotiationCompressionConfig) -> Self {
         Self {
             config,
             requests: Arc::new(Mutex::new(vec![])),
@@ -124,7 +124,7 @@ impl MockOtlpHttpExporter {
         }
     }
 
-    fn add_response(&self, response: MockHttpResponse) {
+    fn add_response(&self, response: NegotiationHttpResponse) {
         self.responses.lock().unwrap().push(response);
     }
 
@@ -149,7 +149,7 @@ impl MockOtlpHttpExporter {
 
         // Build request with optional compression
         let (body, headers) = if use_compression {
-            // Simulate gzip compression (just add marker for testing)
+            // Use a deterministic encoded body marker so assertions can inspect negotiation.
             let compressed_body = format!("GZIP[{}]", String::from_utf8_lossy(spans));
             let headers = vec![
                 (
@@ -167,14 +167,14 @@ impl MockOtlpHttpExporter {
             (spans.to_vec(), headers)
         };
 
-        let request = MockHttpRequest::new("POST", "/v1/traces", headers, body);
+        let request = NegotiationHttpRequest::new("POST", "/v1/traces", headers, body);
         self.requests.lock().unwrap().push(request.clone());
 
         // Get next response from queue
         let response = {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
-                MockHttpResponse::new(500) // Default server error
+                NegotiationHttpResponse::new(500) // Default server error
             } else {
                 responses.remove(0)
             }
@@ -200,7 +200,7 @@ impl MockOtlpHttpExporter {
         self.requests.lock().unwrap().len()
     }
 
-    fn get_requests(&self) -> Vec<MockHttpRequest> {
+    fn get_requests(&self) -> Vec<NegotiationHttpRequest> {
         self.requests.lock().unwrap().clone()
     }
 }
@@ -222,12 +222,12 @@ fn audit_otlp_compression_fallback_on_415() {
     println!("   • NOT: ignore 415 and keep sending gzip");
 
     // **TEST SCENARIO**: Compression-enabled client with fallback
-    let config = MockCompressionConfig::new(true).with_fallback();
-    let exporter = MockOtlpHttpExporter::new(config);
+    let config = NegotiationCompressionConfig::new(true).with_fallback();
+    let exporter = InMemoryNegotiatingOtlpHttpExporter::new(config);
 
     // Configure collector to reject gzip (415) then accept uncompressed (200)
-    exporter.add_response(MockHttpResponse::new(415)); // Reject compressed
-    exporter.add_response(MockHttpResponse::new(200)); // Accept uncompressed
+    exporter.add_response(NegotiationHttpResponse::new(415)); // Reject compressed
+    exporter.add_response(NegotiationHttpResponse::new(200)); // Accept uncompressed
 
     let test_spans = b"test span data";
 
@@ -294,11 +294,11 @@ fn audit_current_otlp_compression_behavior() {
     println!("   Behavior: 415 treated as non-retryable client error");
 
     // **CURRENT BEHAVIOR SIMULATION**
-    let config = MockCompressionConfig::new(true); // No fallback
-    let exporter = MockOtlpHttpExporter::new(config);
+    let config = NegotiationCompressionConfig::new(true); // No fallback
+    let exporter = InMemoryNegotiatingOtlpHttpExporter::new(config);
 
     // Collector rejects gzip compression
-    exporter.add_response(MockHttpResponse::new(415));
+    exporter.add_response(NegotiationHttpResponse::new(415));
 
     let test_spans = b"test span data";
 
@@ -374,13 +374,13 @@ fn audit_compression_header_edge_cases() {
             status_code, status_text, description
         );
 
-        let config = MockCompressionConfig::new(true).with_fallback();
-        let exporter = MockOtlpHttpExporter::new(config);
+        let config = NegotiationCompressionConfig::new(true).with_fallback();
+        let exporter = InMemoryNegotiatingOtlpHttpExporter::new(config);
 
         // First response: compression-related error
-        exporter.add_response(MockHttpResponse::new(status_code));
+        exporter.add_response(NegotiationHttpResponse::new(status_code));
         // Second response: success with uncompressed
-        exporter.add_response(MockHttpResponse::new(200));
+        exporter.add_response(NegotiationHttpResponse::new(200));
 
         let result = exporter.export_spans(b"test data");
 

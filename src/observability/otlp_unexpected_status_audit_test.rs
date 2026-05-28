@@ -22,16 +22,16 @@
 
 use std::time::Duration;
 
-/// Mock OTLP error for testing retry classifier behavior.
+/// OTLP error fixture for retry classifier behavior.
 #[derive(Debug, Clone)]
-pub struct MockOtlpError {
+pub struct OtlpClassifierErrorFixture {
     message: String,
     status_code: u16,
     retry_after: Option<Duration>,
     retryable: bool,
 }
 
-impl MockOtlpError {
+impl OtlpClassifierErrorFixture {
     fn retryable(status_code: u16, retry_after: Option<Duration>) -> Self {
         Self {
             message: format!("Retryable OTLP error: {}", status_code),
@@ -55,14 +55,14 @@ impl MockOtlpError {
     }
 }
 
-/// Mock HTTP response for testing retry classifier behavior.
+/// HTTP response fixture for retry classifier behavior.
 #[derive(Debug, Clone)]
-pub struct MockHttpResponse {
+pub struct ResponseFixture {
     status: u16,
     headers: Vec<(String, String)>,
 }
 
-impl MockHttpResponse {
+impl ResponseFixture {
     fn new(status: u16) -> Self {
         Self {
             status,
@@ -85,8 +85,10 @@ impl MockHttpResponse {
     }
 }
 
-/// Simulate the retry classifier logic from send_request_once()
-fn simulate_otlp_retry_classifier(response: &MockHttpResponse) -> Result<(), MockOtlpError> {
+/// Retry classifier logic from send_request_once().
+fn classify_otlp_response_status(
+    response: &ResponseFixture,
+) -> Result<(), OtlpClassifierErrorFixture> {
     // Replicate the exact logic from lines 1046-1080 in otel.rs
     match response.status() {
         200..=299 => Ok(()),
@@ -98,27 +100,33 @@ fn simulate_otlp_retry_classifier(response: &MockHttpResponse) -> Result<(), Moc
                 .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
                 .and_then(|(_, value)| value.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs);
-            Err(MockOtlpError::retryable(response.status(), retry_after))
+            Err(OtlpClassifierErrorFixture::retryable(
+                response.status(),
+                retry_after,
+            ))
         }
         502..=504 => {
             // Retryable server errors per OTLP spec
-            Err(MockOtlpError::retryable(response.status(), None))
+            Err(OtlpClassifierErrorFixture::retryable(
+                response.status(),
+                None,
+            ))
         }
         400..=499 => {
             // Client errors - not retryable
-            Err(MockOtlpError::non_retryable(format!(
+            Err(OtlpClassifierErrorFixture::non_retryable(format!(
                 "OTLP client error: {} - batch dropped",
                 response.status()
             )))
         }
         500..=599 => {
             // Other server errors - not retryable per OTLP spec
-            Err(MockOtlpError::non_retryable(format!(
+            Err(OtlpClassifierErrorFixture::non_retryable(format!(
                 "OTLP server error: {} - batch dropped",
                 response.status()
             )))
         }
-        _ => Err(MockOtlpError::non_retryable(format!(
+        _ => Err(OtlpClassifierErrorFixture::non_retryable(format!(
             "Unexpected OTLP response status: {}",
             response.status()
         ))),
@@ -166,8 +174,8 @@ fn audit_otlp_retry_classifier_unexpected_4xx_codes() {
     for (status_code, description) in unexpected_4xx_scenarios {
         println!("   Testing: HTTP {} - {}", status_code, description);
 
-        let response = MockHttpResponse::new(status_code);
-        let result = simulate_otlp_retry_classifier(&response);
+        let response = ResponseFixture::new(status_code);
+        let result = classify_otlp_response_status(&response);
 
         match result {
             Ok(()) => {
@@ -222,8 +230,8 @@ fn audit_otlp_retry_classifier_429_special_case() {
     println!("   • No Retry-After header is still retryable");
 
     // **SCENARIO 1**: 429 without Retry-After header
-    let response_no_header = MockHttpResponse::new(429);
-    let result_no_header = simulate_otlp_retry_classifier(&response_no_header);
+    let response_no_header = ResponseFixture::new(429);
+    let result_no_header = classify_otlp_response_status(&response_no_header);
 
     match result_no_header {
         Ok(()) => {
@@ -241,8 +249,8 @@ fn audit_otlp_retry_classifier_429_special_case() {
     }
 
     // **SCENARIO 2**: 429 with Retry-After header
-    let response_with_header = MockHttpResponse::new(429).with_retry_after(60);
-    let result_with_header = simulate_otlp_retry_classifier(&response_with_header);
+    let response_with_header = ResponseFixture::new(429).with_retry_after(60);
+    let result_with_header = classify_otlp_response_status(&response_with_header);
 
     match result_with_header {
         Ok(()) => {
@@ -252,7 +260,7 @@ fn audit_otlp_retry_classifier_429_special_case() {
         Err(otlp_error) => {
             if otlp_error.is_retryable() {
                 println!("✅ CORRECT: 429 with Retry-After is retryable");
-                // Note: We can't easily test retry_after parsing without more complex mocking
+                // The dedicated header-parsing audit covers the retry_after value.
             } else {
                 println!("❌ SPEC VIOLATION: 429 with Retry-After should be retryable");
                 panic!("429 Rate Limited with Retry-After must be retryable");
@@ -300,8 +308,8 @@ fn audit_otlp_retry_classifier_5xx_server_errors() {
     for (status_code, description, should_be_retryable) in server_error_scenarios {
         println!("   Testing: HTTP {} - {}", status_code, description);
 
-        let response = MockHttpResponse::new(status_code);
-        let result = simulate_otlp_retry_classifier(&response);
+        let response = ResponseFixture::new(status_code);
+        let result = classify_otlp_response_status(&response);
 
         match result {
             Ok(()) => {
@@ -390,8 +398,8 @@ fn audit_otlp_retry_classifier_edge_case_status_codes() {
     for (status_code, description) in edge_case_scenarios {
         println!("   Testing: HTTP {} - {}", status_code, description);
 
-        let response = MockHttpResponse::new(status_code);
-        let result = simulate_otlp_retry_classifier(&response);
+        let response = ResponseFixture::new(status_code);
+        let result = classify_otlp_response_status(&response);
 
         match result {
             Ok(()) => {

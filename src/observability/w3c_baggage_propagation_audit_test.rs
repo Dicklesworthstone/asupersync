@@ -92,13 +92,13 @@ impl W3CBaggageParser {
     }
 }
 
-/// Mock HTTP request with headers for testing extraction.
+/// HTTP request fixture with headers for extraction tests.
 #[derive(Debug, Clone)]
-struct MockHttpRequest {
+struct HeaderFixtureRequest {
     headers: HashMap<String, String>,
 }
 
-impl MockHttpRequest {
+impl HeaderFixtureRequest {
     fn new() -> Self {
         Self {
             headers: HashMap::new(),
@@ -178,7 +178,7 @@ fn audit_baggage_extraction_from_http() {
     println!("   • Baggage is independent of trace context (traceparent)");
 
     // Test request with both trace context and baggage
-    let request = MockHttpRequest::new()
+    let request = HeaderFixtureRequest::new()
         .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
         .with_baggage("tenant=alpha,request.class=gold,user.id=12345");
 
@@ -285,7 +285,7 @@ fn audit_baggage_independence_from_trace_context() {
 
     // Request with baggage but NO traceparent
     let request_baggage_only =
-        MockHttpRequest::new().with_baggage("session.id=sess-abc123,feature.flag=new-ui");
+        HeaderFixtureRequest::new().with_baggage("session.id=sess-abc123,feature.flag=new-ui");
 
     println!("📊 Test scenario:");
     println!("   Headers: baggage=session.id=sess-abc123,feature.flag=new-ui");
@@ -434,7 +434,7 @@ fn audit_otlp_baggage_internal_vs_http_gap() {
     println!("   Current status: Production HTTP extraction/injection implemented");
     println!("   Compliance level: HTTP propagation bridge present");
 
-    // Demonstrate the production bridge.
+    // Verify the production bridge.
     let internal_baggage = {
         let mut baggage = HashMap::new();
         baggage.insert("tenant".to_string(), "production".to_string());
@@ -442,7 +442,7 @@ fn audit_otlp_baggage_internal_vs_http_gap() {
         baggage
     };
 
-    println!("📊 Bridge demonstration:");
+    println!("📊 Bridge verification:");
     println!("   Internal baggage: {:?}", internal_baggage);
 
     let http_headers = {

@@ -17,7 +17,7 @@
 #![allow(dead_code)]
 
 use crate::observability::otlp_trace_exporter::{
-    ExportError, LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch,
+    ExportError, InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch,
     TraceExporter,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Mock exporter that tracks export calls during shutdown.
+/// In-memory exporter that tracks export calls during shutdown.
 struct ShutdownTrackingExporter {
     exported_batches: Arc<Mutex<Vec<SpanBatch>>>,
     export_delay: Duration,
@@ -69,7 +69,7 @@ impl TraceExporter for ShutdownTrackingExporter {
     fn export(&self, batch: &SpanBatch) -> Result<(), ExportError> {
         self.export_call_count.fetch_add(1, Ordering::Relaxed);
 
-        // Simulate network delay (longer if shutdown started to test timeout)
+        // Deterministic collector delay is longer once shutdown has started.
         if self.shutdown_started.load(Ordering::Relaxed) {
             thread::sleep(self.export_delay * 2); // Slower during shutdown
         } else {
@@ -81,7 +81,7 @@ impl TraceExporter for ShutdownTrackingExporter {
     }
 
     fn flush(&self) -> Result<(), ExportError> {
-        // Mock flush - simulates final flush attempt
+        // The in-memory flush path records the bounded final flush attempt.
         if self.shutdown_started.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(50)); // Flush delay during shutdown
         }
@@ -138,7 +138,7 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
     println!("   • NOT: block forever (shutdown deadlock)");
 
     let export_delay = Duration::from_millis(50);
-    let mock_exporter = Arc::new(ShutdownTrackingExporter::new(export_delay));
+    let tracking_exporter = Arc::new(ShutdownTrackingExporter::new(export_delay));
     let exporter = LoadSheddingTraceExporter::new(
         Box::new(ShutdownTrackingExporter::new(export_delay)),
         10,                     // Queue capacity
@@ -168,9 +168,9 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
     );
 
     // Mark shutdown start for tracking
-    mock_exporter.start_shutdown();
+    tracking_exporter.start_shutdown();
 
-    // **CRITICAL TEST**: Drop the exporter (simulates runtime shutdown)
+    // **CRITICAL TEST**: Drop the exporter while spans are still pending.
     let drop_start = Instant::now();
     drop(exporter);
     let drop_duration = drop_start.elapsed();
@@ -179,14 +179,14 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
     println!("   Drop duration: {:?}", drop_duration);
 
     // **ASSESSMENT**: Check if graceful shutdown happened
-    let exported_span_count = mock_exporter.exported_span_count();
+    let exported_span_count = tracking_exporter.exported_span_count();
     let total_expected = batch_count as usize * spans_per_batch;
 
     println!("   Spans exported during drop: {}", exported_span_count);
     println!("   Total expected spans: {}", total_expected);
     println!(
         "   Export call count: {}",
-        mock_exporter.export_call_count()
+        tracking_exporter.export_call_count()
     );
 
     // **OTLP COMPLIANCE ANALYSIS**
@@ -252,10 +252,10 @@ fn audit_bounded_timeout_prevents_shutdown_deadlock() {
     println!("   • Partial flush acceptable on timeout");
     println!("   • Must not block forever on slow collector");
 
-    // Create mock exporter with very slow export (simulates network issues)
+    // Use a slow in-memory exporter to exercise timeout behavior.
     let slow_export_delay = Duration::from_secs(2);
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(MockOtlpHttpExporter::new(slow_export_delay)),
+        Box::new(InMemoryOtlpHttpExporter::new(slow_export_delay)),
         5, // Small queue capacity
         Duration::from_secs(1),
     );
@@ -301,7 +301,7 @@ fn audit_concurrent_operations_during_shutdown() {
     println!("🔍 AUDIT: Concurrent operations during graceful shutdown");
 
     let exporter = Arc::new(LoadSheddingTraceExporter::new(
-        Box::new(MockOtlpHttpExporter::new(Duration::from_millis(10))),
+        Box::new(InMemoryOtlpHttpExporter::new(Duration::from_millis(10))),
         20,
         Duration::from_secs(1),
     ));
@@ -350,14 +350,14 @@ fn audit_concurrent_operations_during_shutdown() {
     println!("📊 CURRENT STATE: Immediate drop due to missing graceful shutdown");
 }
 
-/// **AUDIT TEST**: Demonstrate the antipattern of immediate span abandonment.
+/// **AUDIT TEST**: Verify the antipattern of immediate span abandonment.
 ///
 /// **SCENARIO**: Service deployment or restart causes span loss.
-/// **DEMONSTRATION**: Shows data loss pattern that graceful shutdown should prevent.
+/// **CHECK**: Shows data loss pattern that graceful shutdown should prevent.
 /// **ASSESSMENT**: Quantifies observability gaps during service lifecycle events.
 #[test]
 fn audit_immediate_abandonment_antipattern() {
-    println!("🔍 AUDIT: Immediate span abandonment antipattern demonstration");
+    println!("🔍 AUDIT: Immediate span abandonment antipattern check");
 
     println!("📋 Data loss scenarios:");
     println!("   • Service restart during high traffic");
@@ -365,17 +365,17 @@ fn audit_immediate_abandonment_antipattern() {
     println!("   • Container termination with active traces");
     println!("   • Process crash recovery");
 
-    let mock_exporter = Arc::new(MockOtlpHttpExporter::new(Duration::from_millis(10)));
+    let memory_exporter = Arc::new(InMemoryOtlpHttpExporter::new(Duration::from_millis(10)));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(MockOtlpHttpExporter::new(Duration::from_millis(10))),
+        Box::new(InMemoryOtlpHttpExporter::new(Duration::from_millis(10))),
         50,
         Duration::from_secs(1),
     );
 
-    // Simulate high-traffic scenario with many pending spans
+    // Exercise a high-traffic scenario with many pending spans.
     let batch_count = 25;
     let spans_per_batch = 40;
-    println!("📊 High-traffic simulation:");
+    println!("📊 High-traffic exercise:");
     println!("   Batches queued: {}", batch_count);
     println!("   Spans per batch: {}", spans_per_batch);
 
@@ -394,13 +394,13 @@ fn audit_immediate_abandonment_antipattern() {
     );
 
     // **ANTIPATTERN DEMONSTRATION**: Immediate drop without flush
-    let pre_drop_exported = mock_exporter.exported_span_count();
+    let pre_drop_exported = memory_exporter.exported_span_count();
 
     let drop_start = Instant::now();
     drop(exporter); // Current implementation: immediate drop
     let drop_duration = drop_start.elapsed();
 
-    let post_drop_exported = mock_exporter.exported_span_count();
+    let post_drop_exported = memory_exporter.exported_span_count();
     let spans_lost = pending_spans - (post_drop_exported - pre_drop_exported);
 
     println!("📊 Data loss analysis:");

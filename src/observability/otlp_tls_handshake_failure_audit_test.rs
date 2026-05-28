@@ -25,9 +25,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
-/// Mock TLS error types for testing handshake failure scenarios.
+/// TLS error fixture types for handshake failure scenarios.
 #[derive(Debug, Clone)]
-pub enum MockTlsError {
+pub enum TlsFailureFixture {
     /// TLS version negotiation failed.
     VersionMismatch {
         client_max: String,
@@ -41,7 +41,7 @@ pub enum MockTlsError {
     HandshakeTimeout,
 }
 
-impl fmt::Display for MockTlsError {
+impl fmt::Display for TlsFailureFixture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::VersionMismatch {
@@ -61,18 +61,18 @@ impl fmt::Display for MockTlsError {
     }
 }
 
-/// Mock OTLP HTTP client for testing TLS failure scenarios.
+/// OTLP HTTP client fixture for TLS failure scenarios.
 #[derive(Debug)]
-pub struct MockOtlpTlsClient {
+pub struct FailingTlsOtlpClient {
     pub endpoint: String,
     pub requests_attempted: Vec<String>,
-    pub tls_failures: Vec<MockTlsError>,
+    pub tls_failures: Vec<TlsFailureFixture>,
     pub should_fail_tls: bool,
-    pub failure_type: MockTlsError,
+    pub failure_type: TlsFailureFixture,
 }
 
-impl MockOtlpTlsClient {
-    fn new_with_tls_failure(endpoint: &str, failure_type: MockTlsError) -> Self {
+impl FailingTlsOtlpClient {
+    fn new_with_tls_failure(endpoint: &str, failure_type: TlsFailureFixture) -> Self {
         Self {
             endpoint: endpoint.to_string(),
             requests_attempted: Vec::new(),
@@ -83,7 +83,7 @@ impl MockOtlpTlsClient {
     }
 
     /// Current behavior: TLS failures become non-retryable errors.
-    fn send_request(&mut self, request_body: &[u8]) -> Result<MockHttpResponse, String> {
+    fn send_request(&mut self, request_body: &[u8]) -> Result<HttpResponseFixture, String> {
         self.requests_attempted.push(format!(
             "POST {} ({} bytes)",
             self.endpoint,
@@ -91,14 +91,14 @@ impl MockOtlpTlsClient {
         ));
 
         if self.should_fail_tls {
-            // Simulate TLS handshake failure
+            // Exercise TLS handshake failure handling.
             self.tls_failures.push(self.failure_type.clone());
             let error_msg = format!("OTLP request failed: TLS error: {}", self.failure_type);
             return Err(error_msg);
         }
 
         // Success case
-        Ok(MockHttpResponse {
+        Ok(HttpResponseFixture {
             status: 200,
             headers: HashMap::new(),
             body: b"".to_vec(),
@@ -110,7 +110,7 @@ impl MockOtlpTlsClient {
         &mut self,
         request_body: &[u8],
         max_attempts: usize,
-    ) -> Result<MockHttpResponse, String> {
+    ) -> Result<HttpResponseFixture, String> {
         for attempt in 1..=max_attempts {
             self.requests_attempted.push(format!(
                 "POST {} attempt {} ({} bytes)",
@@ -125,7 +125,7 @@ impl MockOtlpTlsClient {
                 continue; // DEFECTIVE: retry forever
             }
 
-            return Ok(MockHttpResponse {
+            return Ok(HttpResponseFixture {
                 status: 200,
                 headers: HashMap::new(),
                 body: b"".to_vec(),
@@ -142,7 +142,7 @@ impl MockOtlpTlsClient {
     fn send_request_with_plaintext_fallback(
         &mut self,
         request_body: &[u8],
-    ) -> Result<MockHttpResponse, String> {
+    ) -> Result<HttpResponseFixture, String> {
         self.requests_attempted.push(format!(
             "POST {} ({} bytes)",
             self.endpoint,
@@ -161,15 +161,15 @@ impl MockOtlpTlsClient {
                 request_body.len()
             ));
 
-            // Simulate successful plaintext request (insecure!)
-            return Ok(MockHttpResponse {
+            // Exercise a successful plaintext request path (insecure).
+            return Ok(HttpResponseFixture {
                 status: 200,
                 headers: HashMap::new(),
                 body: b"".to_vec(),
             });
         }
 
-        Ok(MockHttpResponse {
+        Ok(HttpResponseFixture {
             status: 200,
             headers: HashMap::new(),
             body: b"".to_vec(),
@@ -177,9 +177,9 @@ impl MockOtlpTlsClient {
     }
 }
 
-/// Mock HTTP response for testing.
+/// HTTP response fixture.
 #[derive(Debug, Clone)]
-pub struct MockHttpResponse {
+pub struct HttpResponseFixture {
     pub status: u16,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
@@ -200,17 +200,17 @@ fn audit_tls_version_mismatch_handling() {
     println!("   • Handshake fails during version negotiation");
     println!("   • Expected: Fail-fast with actionable error message");
 
-    let version_mismatch = MockTlsError::VersionMismatch {
+    let version_mismatch = TlsFailureFixture::VersionMismatch {
         client_max: "TLS 1.2".to_string(),
         server_required: "TLS 1.3".to_string(),
     };
 
-    let mut client = MockOtlpTlsClient::new_with_tls_failure(
+    let mut client = FailingTlsOtlpClient::new_with_tls_failure(
         "https://collector.example.com/v1/traces",
         version_mismatch,
     );
 
-    let test_payload = b"mock OTLP protobuf payload";
+    let test_payload = b"encoded OTLP protobuf payload";
 
     println!("📊 Test scenario:");
     println!("   Endpoint: {}", client.endpoint);
@@ -238,9 +238,9 @@ fn audit_tls_version_mismatch_handling() {
 
     // **DEFECTIVE ALTERNATIVE**: Retry forever
     println!("📊 Testing defective retry-forever behavior:");
-    let mut retry_client = MockOtlpTlsClient::new_with_tls_failure(
+    let mut retry_client = FailingTlsOtlpClient::new_with_tls_failure(
         "https://collector.example.com/v1/traces",
-        MockTlsError::VersionMismatch {
+        TlsFailureFixture::VersionMismatch {
             client_max: "TLS 1.2".to_string(),
             server_required: "TLS 1.3".to_string(),
         },
@@ -281,11 +281,11 @@ fn audit_no_plaintext_downgrade_on_tls_failure() {
     println!("   • Prevents accidental plaintext telemetry transmission");
     println!("   • Maintains data confidentiality and integrity");
 
-    let tls_timeout = MockTlsError::HandshakeTimeout;
+    let tls_timeout = TlsFailureFixture::HandshakeTimeout;
 
     // **CURRENT BEHAVIOR**: No downgrade (correct)
     println!("📊 Testing current behavior (no downgrade):");
-    let mut secure_client = MockOtlpTlsClient::new_with_tls_failure(
+    let mut secure_client = FailingTlsOtlpClient::new_with_tls_failure(
         "https://secure-collector.company.com/v1/traces",
         tls_timeout.clone(),
     );
@@ -308,7 +308,7 @@ fn audit_no_plaintext_downgrade_on_tls_failure() {
 
     // **DEFECTIVE ALTERNATIVE**: Plaintext downgrade
     println!("📊 Testing defective plaintext downgrade behavior:");
-    let mut insecure_client = MockOtlpTlsClient::new_with_tls_failure(
+    let mut insecure_client = FailingTlsOtlpClient::new_with_tls_failure(
         "https://secure-collector.company.com/v1/traces",
         tls_timeout,
     );
@@ -321,7 +321,7 @@ fn audit_no_plaintext_downgrade_on_tls_failure() {
         insecure_client.requests_attempted.len()
     );
 
-    // This demonstrates the security violation
+    // This verifies the security violation.
     assert!(downgrade_result.is_ok()); // Succeeded via HTTP
     assert_eq!(insecure_client.requests_attempted.len(), 2);
     assert!(insecure_client.requests_attempted[0].contains("https://"));
@@ -353,17 +353,17 @@ fn audit_tls_error_message_actionability() {
     let test_cases = vec![
         (
             "Version mismatch",
-            MockTlsError::VersionMismatch {
+            TlsFailureFixture::VersionMismatch {
                 client_max: "TLS 1.2".to_string(),
                 server_required: "TLS 1.3".to_string(),
             },
         ),
         (
             "Certificate error",
-            MockTlsError::CertificateError("certificate has expired".to_string()),
+            TlsFailureFixture::CertificateError("certificate has expired".to_string()),
         ),
-        ("Protocol mismatch", MockTlsError::ProtocolMismatch),
-        ("Handshake timeout", MockTlsError::HandshakeTimeout),
+        ("Protocol mismatch", TlsFailureFixture::ProtocolMismatch),
+        ("Handshake timeout", TlsFailureFixture::HandshakeTimeout),
     ];
 
     println!("📊 Testing TLS error message quality:");
@@ -371,7 +371,7 @@ fn audit_tls_error_message_actionability() {
     for (scenario, error_type) in test_cases {
         println!("   Scenario: {}", scenario);
 
-        let mut client = MockOtlpTlsClient::new_with_tls_failure(
+        let mut client = FailingTlsOtlpClient::new_with_tls_failure(
             "https://collector.example.com/v1/traces",
             error_type,
         );
@@ -442,7 +442,7 @@ fn audit_otlp_tls_error_classification() {
     println!("   • TLS errors: non-retryable (config/compatibility issue)");
     println!("   • Connection refused: retryable (service might restart)");
 
-    // Simulate the classification
+    // Exercise the classification.
     fn classify_otlp_error(error_type: &str) -> &'static str {
         match error_type {
             "TLS error" => "non_retryable", // Current behavior (correct)

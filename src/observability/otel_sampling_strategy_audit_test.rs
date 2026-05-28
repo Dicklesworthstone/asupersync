@@ -16,7 +16,7 @@
 #![allow(dead_code)]
 
 use crate::observability::otlp_trace_exporter::{
-    LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
+    InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
 use crate::observability::w3c_trace_context::extract_from_http;
 use std::collections::HashMap;
@@ -50,7 +50,7 @@ impl OtelSamplingStrategy {
                 }
             }
             Self::TraceIdRatioBased { ratio } => {
-                // Simple hash-based sampling (real implementation would use trace_id)
+                // Simple hash-based sampling over the trace id.
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
                 let mut hasher = DefaultHasher::new();
@@ -62,12 +62,12 @@ impl OtelSamplingStrategy {
     }
 }
 
-/// Mock HTTP request for testing.
-struct MockHttpRequest {
+/// HTTP request fixture for testing.
+struct HeaderFixtureRequest {
     headers: HashMap<String, String>,
 }
 
-impl MockHttpRequest {
+impl HeaderFixtureRequest {
     fn with_traceparent(traceparent: &str) -> Self {
         let mut headers = HashMap::new();
         headers.insert("traceparent".to_string(), traceparent.to_string());
@@ -96,9 +96,9 @@ fn audit_parent_based_always_on_sampling_strategy() {
     println!("   • Child spans inherit parent sampling state");
     println!("   • No override of parent decisions");
 
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
@@ -113,7 +113,7 @@ fn audit_parent_based_always_on_sampling_strategy() {
     // Test Case 1: Parent span says SAMPLE (should honor)
     println!("📊 Test Case 1: Parent sampled=1 (should honor parent decision)");
     let parent_sampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-    let parent_sampled_request = MockHttpRequest::with_traceparent(parent_sampled_traceparent);
+    let parent_sampled_request = HeaderFixtureRequest::with_traceparent(parent_sampled_traceparent);
     let parent_sampled_context = extract_from_http(&parent_sampled_request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -142,7 +142,8 @@ fn audit_parent_based_always_on_sampling_strategy() {
     // Test Case 2: Parent span says DON'T SAMPLE (should honor)
     println!("📊 Test Case 2: Parent sampled=0 (should honor parent decision)");
     let parent_unsampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4737-00f067aa0ba902b8-00";
-    let parent_unsampled_request = MockHttpRequest::with_traceparent(parent_unsampled_traceparent);
+    let parent_unsampled_request =
+        HeaderFixtureRequest::with_traceparent(parent_unsampled_traceparent);
     let parent_unsampled_context = extract_from_http(&parent_unsampled_request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -163,7 +164,7 @@ fn audit_parent_based_always_on_sampling_strategy() {
 
     // Test Case 3: ROOT span (no parent, should use AlwaysOn fallback)
     println!("📊 Test Case 3: Root span (no parent, AlwaysOn fallback)");
-    let _root_request = MockHttpRequest::without_traceparent();
+    let _root_request = HeaderFixtureRequest::without_traceparent();
 
     let root_decision = sampling_strategy.should_sample(None, "root_trace_id_12345");
 
@@ -193,7 +194,7 @@ fn audit_parent_based_always_on_sampling_strategy() {
     exporter.export(&batch).expect("export should succeed");
     exporter.process_queue().expect("processing should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     println!("📊 OpenTelemetry sampling compliance verification:");
     if !exported_batches.is_empty() {
@@ -247,9 +248,9 @@ fn audit_current_implementation_vs_otel_standard() {
     println!("   • W3C trace context flag propagation");
 
     // Analyze current implementation behavior
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
@@ -294,7 +295,7 @@ fn audit_current_implementation_vs_otel_standard() {
     exporter.export(&batch).expect("export should succeed");
     exporter.process_queue().expect("processing should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     println!("📊 Current implementation behavior:");
     if !exported_batches.is_empty() {
@@ -348,7 +349,7 @@ fn audit_current_implementation_vs_otel_standard() {
     }
 }
 
-/// **AUDIT TEST**: Demonstrate incorrect override scenario (anti-pattern).
+/// **AUDIT TEST**: Verify incorrect override scenario (anti-pattern).
 ///
 /// **SCENARIO**: Show what would happen if local sampler overrides parent decision.
 /// **REQUIREMENT**: This would be DEFECTIVE per OpenTelemetry specification.
@@ -362,12 +363,12 @@ fn audit_incorrect_parent_override_antipattern() {
     println!("   • Local sampler overrides to don't sample");
     println!("   • Result: broken distributed trace consistency");
 
-    // Demonstrate what WRONG implementation would look like
+    // Exercise what WRONG implementation would look like.
     let sampling_strategy = OtelSamplingStrategy::AlwaysOff; // Wrong: ignores parent
 
     // Parent context says sample
     let parent_sampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4738-00f067aa0ba902b9-01";
-    let parent_sampled_request = MockHttpRequest::with_traceparent(parent_sampled_traceparent);
+    let parent_sampled_request = HeaderFixtureRequest::with_traceparent(parent_sampled_traceparent);
     let parent_sampled_context = extract_from_http(&parent_sampled_request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -378,7 +379,7 @@ fn audit_incorrect_parent_override_antipattern() {
         &parent_sampled_context.trace_id.to_hex(),
     );
 
-    println!("📊 Defective override demonstration:");
+    println!("📊 Defective override check:");
     println!("   Parent decision: sampled=1");
     println!("   Local override: AlwaysOff");
     println!("   Defective result: {}", defective_decision);

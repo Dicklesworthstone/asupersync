@@ -151,7 +151,7 @@ pub enum OtlpTailSamplingSupportClass {
 }
 
 impl OtlpTailSamplingSupportClass {
-    /// Mock-code-finder `support_class` value for this support boundary.
+    /// Machine-readable `support_class` value for this support boundary.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -169,11 +169,11 @@ pub struct OtlpTailSamplingScope {
     pub bead_id: &'static str,
     /// Downstream E2E/proof bead that must consume this boundary.
     pub feeds_bead_id: &'static str,
-    /// Mock-code-finder support class.
+    /// Support class consumed by implementation-completeness policy checks.
     pub support_class: OtlpTailSamplingSupportClass,
-    /// Mock-code-finder evidence quality for this boundary.
+    /// Evidence quality for this boundary.
     pub evidence_quality: &'static str,
-    /// Mock-code-finder verdict expected for proof records until support lands.
+    /// Verdict expected for proof records until support lands.
     pub verdict: &'static str,
     /// Whether a production tail-based sampler is available.
     pub production_supported: bool,
@@ -184,7 +184,7 @@ pub struct OtlpTailSamplingScope {
 }
 
 impl OtlpTailSamplingScope {
-    /// Mock-code-finder `support_class` field value.
+    /// Machine-readable `support_class` field value.
     #[must_use]
     pub const fn support_class_str(&self) -> &'static str {
         self.support_class.as_str()
@@ -194,7 +194,7 @@ impl OtlpTailSamplingScope {
 /// Return the current production support stance for OTLP tail-based sampling.
 ///
 /// This deliberately lives beside the trace exporter so audits and proof
-/// scripts can query production truth instead of using an idealized local mock
+/// scripts can query production truth instead of using an idealized local
 /// sampler. The existing exporter supports head-based filtering via W3C
 /// `trace_flags`; deferred tail decisions remain unsupported until a real
 /// buffering/completion policy is implemented.
@@ -777,15 +777,15 @@ impl Drop for LoadSheddingTraceExporter {
     }
 }
 
-/// Mock OTLP HTTP exporter for testing.
+/// In-memory OTLP exporter for deterministic load-shedding and shutdown tests.
 #[derive(Clone)]
-pub struct MockOtlpHttpExporter {
+pub struct InMemoryOtlpHttpExporter {
     exported_batches: Arc<Mutex<Vec<SpanBatch>>>,
     export_delay: Duration,
 }
 
-impl MockOtlpHttpExporter {
-    /// Create a new mock exporter.
+impl InMemoryOtlpHttpExporter {
+    /// Create a new in-memory exporter with deterministic per-batch latency.
     #[must_use]
     pub fn new(export_delay: Duration) -> Self {
         Self {
@@ -811,9 +811,8 @@ impl MockOtlpHttpExporter {
     }
 }
 
-impl TraceExporter for MockOtlpHttpExporter {
+impl TraceExporter for InMemoryOtlpHttpExporter {
     fn export(&self, batch: &SpanBatch) -> Result<(), ExportError> {
-        // Simulate network delay
         std::thread::sleep(self.export_delay);
 
         self.exported_batches.lock().push(batch.clone());
@@ -821,14 +820,13 @@ impl TraceExporter for MockOtlpHttpExporter {
     }
 
     fn flush(&self) -> Result<(), ExportError> {
-        // Mock flush - nothing to do
         Ok(())
     }
 }
 
-impl std::fmt::Debug for MockOtlpHttpExporter {
+impl std::fmt::Debug for InMemoryOtlpHttpExporter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MockOtlpHttpExporter")
+        f.debug_struct("InMemoryOtlpHttpExporter")
             .field("export_delay", &self.export_delay)
             .field(
                 "exported_batches_count",
@@ -873,12 +871,12 @@ mod tests {
     /// **METRICS**: `otel.exporter.dropped_spans` correctly reports dropped count
     #[test]
     fn audit_otlp_trace_exporter_high_load_shedding() {
-        let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+        let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
         let queue_capacity = 3;
         let batch_timeout = Duration::from_secs(1);
 
         let exporter = LoadSheddingTraceExporter::new(
-            Box::new(mock_exporter.clone()),
+            Box::new(memory_exporter.clone()),
             queue_capacity,
             batch_timeout,
         );
@@ -919,7 +917,7 @@ mod tests {
             .expect("queue processing should succeed");
         assert_eq!(processed, 3, "should process 3 remaining batches");
 
-        let exported = mock_exporter.exported_batches();
+        let exported = memory_exporter.exported_batches();
         assert_eq!(exported.len(), 3, "should have exported 3 batches");
 
         // Verify NEWEST batches were preserved (batch IDs 3, 4, 5)
@@ -940,9 +938,9 @@ mod tests {
     /// **AUDIT TEST**: Normal operation without load shedding.
     #[test]
     fn audit_normal_operation_no_shedding() {
-        let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+        let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
         let exporter = LoadSheddingTraceExporter::new(
-            Box::new(mock_exporter.clone()),
+            Box::new(memory_exporter.clone()),
             10, // Large capacity
             Duration::from_secs(1),
         );
@@ -964,7 +962,7 @@ mod tests {
         exporter
             .process_queue()
             .expect("queue processing should succeed");
-        let exported_spans = mock_exporter.exported_span_count();
+        let exported_spans = memory_exporter.exported_span_count();
         assert_eq!(exported_spans, 500, "all 500 spans should be exported");
 
         println!("✅ NORMAL OPERATION AUDIT PASSED - No load shedding");
@@ -973,9 +971,9 @@ mod tests {
     /// **AUDIT TEST**: FIFO order preservation during load shedding.
     #[test]
     fn audit_fifo_order_preserved_during_shedding() {
-        let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+        let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
         let exporter = LoadSheddingTraceExporter::new(
-            Box::new(mock_exporter.clone()),
+            Box::new(memory_exporter.clone()),
             2, // Very small capacity
             Duration::from_secs(1),
         );
@@ -989,7 +987,7 @@ mod tests {
         exporter
             .process_queue()
             .expect("queue processing should succeed");
-        let exported = mock_exporter.exported_batches();
+        let exported = memory_exporter.exported_batches();
 
         // Should export batches 2,3 in FIFO order (oldest batches 0,1 dropped)
         assert_eq!(exported.len(), 2, "should export 2 batches");

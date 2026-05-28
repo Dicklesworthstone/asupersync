@@ -20,27 +20,27 @@
 #![cfg(test)]
 #![allow(dead_code)]
 
-/// Mock OTLP ExportTraceServiceResponse with partial success.
+/// OTLP ExportTraceServiceResponse fixture with partial success.
 #[derive(Debug, Clone)]
-pub struct MockOtlpResponse {
+pub struct OtlpTraceServiceResponseFixture {
     status: u16,
     body: Option<ExportTraceServiceResponseBody>,
 }
 
-/// Mock OTLP trace export response body.
+/// OTLP trace export response body fixture.
 #[derive(Debug, Clone)]
 pub struct ExportTraceServiceResponseBody {
     partial_success: Option<ExportPartialSuccess>,
 }
 
-/// Mock OTLP partial-success payload.
+/// OTLP partial-success payload fixture.
 #[derive(Debug, Clone)]
 pub struct ExportPartialSuccess {
     rejected_spans: i64,
     error_message: String,
 }
 
-impl MockOtlpResponse {
+impl OtlpTraceServiceResponseFixture {
     fn success() -> Self {
         Self {
             status: 200,
@@ -90,15 +90,15 @@ impl MockOtlpResponse {
     }
 }
 
-/// Mock span batch for testing partial success scenarios.
+/// Span batch fixture for partial success scenarios.
 #[derive(Debug, Clone)]
-pub struct MockSpanBatch {
+pub struct SpanBatchFixture {
     batch_id: u64,
     span_count: usize,
     spans: Vec<String>, // Span names for testing
 }
 
-impl MockSpanBatch {
+impl SpanBatchFixture {
     fn new(batch_id: u64, span_names: Vec<&str>) -> Self {
         Self {
             batch_id,
@@ -108,16 +108,16 @@ impl MockSpanBatch {
     }
 }
 
-/// Mock OTLP exporter for testing partial success handling.
+/// OTLP exporter fixture for partial success handling.
 #[derive(Debug)]
-pub struct MockPartialSuccessOtlpExporter {
+pub struct PartialSuccessOtlpExporterFixture {
     export_log: Vec<String>,
     warning_log: Vec<String>,
     retry_count: usize,
     pointer_advanced: bool,
 }
 
-impl MockPartialSuccessOtlpExporter {
+impl PartialSuccessOtlpExporterFixture {
     fn new() -> Self {
         Self {
             export_log: Vec::new(),
@@ -130,8 +130,8 @@ impl MockPartialSuccessOtlpExporter {
     /// Current implementation: DEFECTIVE - only checks status code.
     fn export_current_defective(
         &mut self,
-        batch: &MockSpanBatch,
-        response: &MockOtlpResponse,
+        batch: &SpanBatchFixture,
+        response: &OtlpTraceServiceResponseFixture,
     ) -> Result<(), String> {
         self.export_log.push(format!(
             "export_attempt batch_id={} spans={}",
@@ -152,8 +152,8 @@ impl MockPartialSuccessOtlpExporter {
     /// Correct implementation: Handle partial success per OTLP §6.1.
     fn export_correct(
         &mut self,
-        batch: &MockSpanBatch,
-        response: &MockOtlpResponse,
+        batch: &SpanBatchFixture,
+        response: &OtlpTraceServiceResponseFixture,
     ) -> Result<(), String> {
         self.export_log.push(format!(
             "export_attempt batch_id={} spans={}",
@@ -205,8 +205,8 @@ impl MockPartialSuccessOtlpExporter {
     /// Wrong implementation: Retry whole batch (causes duplicates).
     fn export_wrong_retry(
         &mut self,
-        batch: &MockSpanBatch,
-        response: &MockOtlpResponse,
+        batch: &SpanBatchFixture,
+        response: &OtlpTraceServiceResponseFixture,
     ) -> Result<(), String> {
         self.export_log.push(format!(
             "export_attempt batch_id={} spans={}",
@@ -268,7 +268,7 @@ fn audit_partial_success_response_handling() {
     println!("   • NOT: silently treat as complete success (data loss)");
 
     // **TEST SCENARIO**: Batch of 10 spans, 3 rejected by collector
-    let span_batch = MockSpanBatch::new(
+    let span_batch = SpanBatchFixture::new(
         123,
         vec![
             "span1", "span2", "span3", "span4", "span5", "span6", "span7", "span8", "span9",
@@ -276,7 +276,7 @@ fn audit_partial_success_response_handling() {
         ],
     );
 
-    let partial_response = MockOtlpResponse::partial_success(
+    let partial_response = OtlpTraceServiceResponseFixture::partial_success(
         3, // 3 spans rejected
         "Rate limit exceeded for trace ID abc123",
     );
@@ -291,7 +291,7 @@ fn audit_partial_success_response_handling() {
 
     // **CURRENT IMPLEMENTATION (DEFECTIVE)**
     println!("📊 Testing current implementation:");
-    let mut current_exporter = MockPartialSuccessOtlpExporter::new();
+    let mut current_exporter = PartialSuccessOtlpExporterFixture::new();
     let current_result = current_exporter.export_current_defective(&span_batch, &partial_response);
 
     println!("   Export result: {:?}", current_result);
@@ -324,7 +324,7 @@ fn audit_partial_success_response_handling() {
 
     // **CORRECT IMPLEMENTATION (OTLP §6.1 COMPLIANT)**
     println!("📊 Testing correct implementation:");
-    let mut correct_exporter = MockPartialSuccessOtlpExporter::new();
+    let mut correct_exporter = PartialSuccessOtlpExporterFixture::new();
     let correct_result = correct_exporter.export_correct(&span_batch, &partial_response);
 
     println!("   Export result: {:?}", correct_result);
@@ -362,7 +362,7 @@ fn audit_partial_success_response_handling() {
 
     // **WRONG IMPLEMENTATION (RETRY APPROACH)**
     println!("📊 Testing wrong retry implementation:");
-    let mut retry_exporter = MockPartialSuccessOtlpExporter::new();
+    let mut retry_exporter = PartialSuccessOtlpExporterFixture::new();
     let retry_result = retry_exporter.export_wrong_retry(&span_batch, &partial_response);
 
     println!("   Export result: {:?}", retry_result);
@@ -405,19 +405,19 @@ fn audit_partial_success_response_handling() {
 fn audit_complete_success_scenario() {
     println!("🔍 AUDIT: Complete success response handling");
 
-    let span_batch = MockSpanBatch::new(456, vec!["span1", "span2", "span3"]);
-    let complete_success_response = MockOtlpResponse::success();
+    let span_batch = SpanBatchFixture::new(456, vec!["span1", "span2", "span3"]);
+    let complete_success_response = OtlpTraceServiceResponseFixture::success();
 
     println!("📊 Complete success scenario:");
     println!("   Batch: {} spans", span_batch.span_count);
     println!("   Response: 200 with no partial_success field");
 
     // Both current and correct implementations should handle complete success
-    let mut current_exporter = MockPartialSuccessOtlpExporter::new();
+    let mut current_exporter = PartialSuccessOtlpExporterFixture::new();
     let current_result =
         current_exporter.export_current_defective(&span_batch, &complete_success_response);
 
-    let mut correct_exporter = MockPartialSuccessOtlpExporter::new();
+    let mut correct_exporter = PartialSuccessOtlpExporterFixture::new();
     let correct_result = correct_exporter.export_correct(&span_batch, &complete_success_response);
 
     println!("   Current implementation result: {:?}", current_result);
@@ -460,17 +460,17 @@ fn audit_complete_success_scenario() {
 fn audit_error_response_handling() {
     println!("🔍 AUDIT: Error response handling");
 
-    let span_batch = MockSpanBatch::new(789, vec!["span1", "span2"]);
-    let error_response = MockOtlpResponse::error(500);
+    let span_batch = SpanBatchFixture::new(789, vec!["span1", "span2"]);
+    let error_response = OtlpTraceServiceResponseFixture::error(500);
 
     println!("📊 Error response scenario:");
     println!("   Batch: {} spans", span_batch.span_count);
     println!("   Response: 500 Internal Server Error");
 
-    let mut current_exporter = MockPartialSuccessOtlpExporter::new();
+    let mut current_exporter = PartialSuccessOtlpExporterFixture::new();
     let current_result = current_exporter.export_current_defective(&span_batch, &error_response);
 
-    let mut correct_exporter = MockPartialSuccessOtlpExporter::new();
+    let mut correct_exporter = PartialSuccessOtlpExporterFixture::new();
     let correct_result = correct_exporter.export_correct(&span_batch, &error_response);
 
     println!("   Current implementation result: {:?}", current_result);

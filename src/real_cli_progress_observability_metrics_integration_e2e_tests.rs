@@ -29,9 +29,9 @@ mod tests {
         },
     };
 
-    /// Mock long-running operation for testing progress reporting
+    /// Deterministic long-running operation for testing progress reporting.
     #[derive(Debug)]
-    struct MockLongRunningOperation {
+    struct DeterministicLongRunningOperation {
         total_items: u64,
         items_processed: AtomicU64,
         processing_rate: u64, // items per second
@@ -39,7 +39,7 @@ mod tests {
         operation_start: Option<Instant>,
     }
 
-    impl MockLongRunningOperation {
+    impl DeterministicLongRunningOperation {
         fn new(total_items: u64, processing_rate: u64) -> Self {
             Self {
                 total_items,
@@ -61,7 +61,7 @@ mod tests {
             let to_process = batch_size.min(remaining);
 
             if to_process > 0 {
-                // Simulate processing time based on rate
+                // Model processing time based on rate.
                 let process_time =
                     Duration::from_millis((to_process * 1000) / self.processing_rate);
                 cx.sleep(process_time).await?;
@@ -301,13 +301,17 @@ mod tests {
     }
 
     fn validate_counter_monotonicity(earlier: &MetricsSnapshot, later: &MetricsSnapshot) -> bool {
-        // Simple validation - in a real implementation this would check all counter metrics
-        true // Placeholder - would validate that counter values don't decrease
+        earlier.counter_values.iter().all(|(name, earlier_value)| {
+            later
+                .counter_values
+                .get(name)
+                .is_some_and(|later_value| later_value >= earlier_value)
+        })
     }
 
-    /// Mock progress bar that integrates with metrics
+    /// Deterministic progress bar that integrates with metrics.
     #[derive(Debug)]
-    struct MockInstrumentedProgressBar {
+    struct DeterministicInstrumentedProgressBar {
         config: ProgressBarConfig,
         state: Arc<Mutex<ProgressState>>,
         metrics_registry: Arc<MetricRegistry>,
@@ -318,7 +322,7 @@ mod tests {
         operation_timer: Arc<Timer>,
     }
 
-    impl MockInstrumentedProgressBar {
+    impl DeterministicInstrumentedProgressBar {
         fn new(
             total: u64,
             tracker: Arc<ProgressMetricsTracker>,
@@ -387,7 +391,7 @@ mod tests {
                     self.tracker.record_eta_estimate(
                         remaining,
                         Duration::from_secs(eta_seconds),
-                        0.8, // Mock confidence level
+                        0.8,
                     );
                 }
             }
@@ -421,16 +425,16 @@ mod tests {
         }
     }
 
-    /// Mock metrics registry for testing
+    /// In-memory metrics registry for testing.
     #[derive(Debug)]
-    struct MockMetricRegistry {
-        counters: Arc<Mutex<HashMap<String, Arc<MockCounter>>>>,
-        gauges: Arc<Mutex<HashMap<String, Arc<MockGauge>>>>,
-        histograms: Arc<Mutex<HashMap<String, Arc<MockHistogram>>>>,
-        timers: Arc<Mutex<HashMap<String, Arc<MockTimer>>>>,
+    struct InMemoryMetricRegistry {
+        counters: Arc<Mutex<HashMap<String, Arc<InMemoryCounter>>>>,
+        gauges: Arc<Mutex<HashMap<String, Arc<InMemoryGauge>>>>,
+        histograms: Arc<Mutex<HashMap<String, Arc<InMemoryHistogram>>>>,
+        timers: Arc<Mutex<HashMap<String, Arc<InMemoryTimer>>>>,
     }
 
-    impl MockMetricRegistry {
+    impl InMemoryMetricRegistry {
         fn new() -> Self {
             Self {
                 counters: Arc::new(Mutex::new(HashMap::new())),
@@ -441,41 +445,41 @@ mod tests {
         }
     }
 
-    impl MetricRegistry for MockMetricRegistry {
+    impl MetricRegistry for InMemoryMetricRegistry {
         fn create_counter(&self, name: &str) -> Counter {
-            let counter = Arc::new(MockCounter::new(name.to_string()));
+            let counter = Arc::new(InMemoryCounter::new(name.to_string()));
             self.counters
                 .lock()
                 .unwrap()
                 .insert(name.to_string(), counter.clone());
-            Counter::Mock(counter)
+            Counter::InMemory(counter)
         }
 
         fn create_gauge(&self, name: &str) -> Gauge {
-            let gauge = Arc::new(MockGauge::new(name.to_string()));
+            let gauge = Arc::new(InMemoryGauge::new(name.to_string()));
             self.gauges
                 .lock()
                 .unwrap()
                 .insert(name.to_string(), gauge.clone());
-            Gauge::Mock(gauge)
+            Gauge::InMemory(gauge)
         }
 
         fn create_histogram(&self, name: &str) -> Histogram {
-            let histogram = Arc::new(MockHistogram::new(name.to_string()));
+            let histogram = Arc::new(InMemoryHistogram::new(name.to_string()));
             self.histograms
                 .lock()
                 .unwrap()
                 .insert(name.to_string(), histogram.clone());
-            Histogram::Mock(histogram)
+            Histogram::InMemory(histogram)
         }
 
         fn create_timer(&self, name: &str) -> Timer {
-            let timer = Arc::new(MockTimer::new(name.to_string()));
+            let timer = Arc::new(InMemoryTimer::new(name.to_string()));
             self.timers
                 .lock()
                 .unwrap()
                 .insert(name.to_string(), timer.clone());
-            Timer::Mock(timer)
+            Timer::InMemory(timer)
         }
 
         fn snapshot(&self) -> MetricsSnapshot {
@@ -489,7 +493,7 @@ mod tests {
         }
     }
 
-    impl MockMetricRegistry {
+    impl InMemoryMetricRegistry {
         fn collect_counter_values(&self) -> HashMap<String, u64> {
             self.counters
                 .lock()
@@ -528,12 +532,12 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct MockCounter {
+    struct InMemoryCounter {
         name: String,
         value: AtomicU64,
     }
 
-    impl MockCounter {
+    impl InMemoryCounter {
         fn new(name: String) -> Self {
             Self {
                 name,
@@ -559,12 +563,12 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct MockGauge {
+    struct InMemoryGauge {
         name: String,
         value: Arc<Mutex<f64>>,
     }
 
-    impl MockGauge {
+    impl InMemoryGauge {
         fn new(name: String) -> Self {
             Self {
                 name,
@@ -582,12 +586,12 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct MockHistogram {
+    struct InMemoryHistogram {
         name: String,
         values: Arc<Mutex<Vec<f64>>>,
     }
 
-    impl MockHistogram {
+    impl InMemoryHistogram {
         fn new(name: String) -> Self {
             Self {
                 name,
@@ -622,13 +626,13 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct MockTimer {
+    struct InMemoryTimer {
         name: String,
         start_time: Arc<Mutex<Option<Instant>>>,
         durations: Arc<Mutex<Vec<Duration>>>,
     }
 
-    impl MockTimer {
+    impl InMemoryTimer {
         fn new(name: String) -> Self {
             Self {
                 name,
@@ -705,7 +709,7 @@ mod tests {
         p99: Duration,
     }
 
-    // Mock trait implementations for testing
+    // In-memory trait implementations for testing
     trait MetricRegistry {
         fn create_counter(&self, name: &str) -> Counter;
         fn create_gauge(&self, name: &str) -> Gauge;
@@ -716,52 +720,52 @@ mod tests {
 
     #[derive(Debug)]
     enum Counter {
-        Mock(Arc<MockCounter>),
+        InMemory(Arc<InMemoryCounter>),
     }
 
     impl Counter {
         fn set(&self, value: u64) {
             match self {
-                Counter::Mock(counter) => counter.set(value),
+                Counter::InMemory(counter) => counter.set(value),
             }
         }
     }
 
     #[derive(Debug)]
     enum Gauge {
-        Mock(Arc<MockGauge>),
+        InMemory(Arc<InMemoryGauge>),
     }
 
     impl Gauge {
         fn set(&self, value: f64) {
             match self {
-                Gauge::Mock(gauge) => gauge.set(value),
+                Gauge::InMemory(gauge) => gauge.set(value),
             }
         }
     }
 
     #[derive(Debug)]
     enum Histogram {
-        Mock(Arc<MockHistogram>),
+        InMemory(Arc<InMemoryHistogram>),
     }
 
     impl Histogram {
         fn record(&self, value: f64) {
             match self {
-                Histogram::Mock(histogram) => histogram.record(value),
+                Histogram::InMemory(histogram) => histogram.record(value),
             }
         }
     }
 
     #[derive(Debug)]
     enum Timer {
-        Mock(Arc<MockTimer>),
+        InMemory(Arc<InMemoryTimer>),
     }
 
     impl Timer {
         fn stop(&self) -> Duration {
             match self {
-                Timer::Mock(timer) => timer.stop(),
+                Timer::InMemory(timer) => timer.stop(),
             }
         }
     }
@@ -775,7 +779,7 @@ mod tests {
         timer_summaries: HashMap<String, TimerSummary>,
     }
 
-    // Mock CLI types
+    // CLI test types
     #[derive(Debug)]
     struct ProgressBarConfig {
         total: u64,
@@ -809,9 +813,9 @@ mod tests {
 
     async fn run_progress_metrics_integration_test(
         cx: &Cx,
-        operation: Arc<MockLongRunningOperation>,
+        operation: Arc<DeterministicLongRunningOperation>,
         tracker: Arc<ProgressMetricsTracker>,
-        progress_bar: Arc<MockInstrumentedProgressBar>,
+        progress_bar: Arc<DeterministicInstrumentedProgressBar>,
     ) -> Result<ProgressIntegrationSummary> {
         let mut last_update = 0;
         let update_interval = 50; // Update every 50 items
@@ -858,11 +862,13 @@ mod tests {
                     let total_items = 1000;
                     let processing_rate = 100; // items per second
 
-                    let operation =
-                        Arc::new(MockLongRunningOperation::new(total_items, processing_rate));
+                    let operation = Arc::new(DeterministicLongRunningOperation::new(
+                        total_items,
+                        processing_rate,
+                    ));
                     let tracker = Arc::new(ProgressMetricsTracker::new());
-                    let metrics_registry = Arc::new(MockMetricRegistry::new());
-                    let progress_bar = Arc::new(MockInstrumentedProgressBar::new(
+                    let metrics_registry = Arc::new(InMemoryMetricRegistry::new());
+                    let progress_bar = Arc::new(DeterministicInstrumentedProgressBar::new(
                         total_items,
                         tracker.clone(),
                         metrics_registry.clone(),
@@ -921,11 +927,13 @@ mod tests {
                     let total_items = 500;
                     let expected_rate = 50; // items per second
 
-                    let operation =
-                        Arc::new(MockLongRunningOperation::new(total_items, expected_rate));
+                    let operation = Arc::new(DeterministicLongRunningOperation::new(
+                        total_items,
+                        expected_rate,
+                    ));
                     let tracker = Arc::new(ProgressMetricsTracker::new());
-                    let metrics_registry = Arc::new(MockMetricRegistry::new());
-                    let progress_bar = Arc::new(MockInstrumentedProgressBar::new(
+                    let metrics_registry = Arc::new(InMemoryMetricRegistry::new());
+                    let progress_bar = Arc::new(DeterministicInstrumentedProgressBar::new(
                         total_items,
                         tracker.clone(),
                         metrics_registry.clone(),
@@ -969,11 +977,13 @@ mod tests {
                     let total_items = 300;
                     let processing_rate = 75;
 
-                    let operation =
-                        Arc::new(MockLongRunningOperation::new(total_items, processing_rate));
+                    let operation = Arc::new(DeterministicLongRunningOperation::new(
+                        total_items,
+                        processing_rate,
+                    ));
                     let tracker = Arc::new(ProgressMetricsTracker::new());
-                    let metrics_registry = Arc::new(MockMetricRegistry::new());
-                    let progress_bar = Arc::new(MockInstrumentedProgressBar::new(
+                    let metrics_registry = Arc::new(InMemoryMetricRegistry::new());
+                    let progress_bar = Arc::new(DeterministicInstrumentedProgressBar::new(
                         total_items,
                         tracker.clone(),
                         metrics_registry.clone(),
@@ -1014,11 +1024,13 @@ mod tests {
                     let total_items = 200;
                     let processing_rate = 40;
 
-                    let operation =
-                        Arc::new(MockLongRunningOperation::new(total_items, processing_rate));
+                    let operation = Arc::new(DeterministicLongRunningOperation::new(
+                        total_items,
+                        processing_rate,
+                    ));
                     let tracker = Arc::new(ProgressMetricsTracker::new());
-                    let metrics_registry = Arc::new(MockMetricRegistry::new());
-                    let progress_bar = Arc::new(MockInstrumentedProgressBar::new(
+                    let metrics_registry = Arc::new(InMemoryMetricRegistry::new());
+                    let progress_bar = Arc::new(DeterministicInstrumentedProgressBar::new(
                         total_items,
                         tracker.clone(),
                         metrics_registry.clone(),
@@ -1059,17 +1071,19 @@ mod tests {
                     let total_items = 400;
                     let initial_rate = 80;
 
-                    let operation =
-                        Arc::new(MockLongRunningOperation::new(total_items, initial_rate));
+                    let operation = Arc::new(DeterministicLongRunningOperation::new(
+                        total_items,
+                        initial_rate,
+                    ));
                     let tracker = Arc::new(ProgressMetricsTracker::new());
-                    let metrics_registry = Arc::new(MockMetricRegistry::new());
-                    let progress_bar = Arc::new(MockInstrumentedProgressBar::new(
+                    let metrics_registry = Arc::new(InMemoryMetricRegistry::new());
+                    let progress_bar = Arc::new(DeterministicInstrumentedProgressBar::new(
                         total_items,
                         tracker.clone(),
                         metrics_registry.clone(),
                     ));
 
-                    // Simulate variable processing by pausing/resuming
+                    // Exercise variable processing by pausing/resuming.
                     let operation_clone = operation.clone();
                     let pause_task = cx.spawn(|cx| {
                         Box::pin(async move {
@@ -1122,11 +1136,13 @@ mod tests {
                     let total_items = 600;
                     let processing_rate = 60;
 
-                    let operation =
-                        Arc::new(MockLongRunningOperation::new(total_items, processing_rate));
+                    let operation = Arc::new(DeterministicLongRunningOperation::new(
+                        total_items,
+                        processing_rate,
+                    ));
                     let tracker = Arc::new(ProgressMetricsTracker::new());
-                    let metrics_registry = Arc::new(MockMetricRegistry::new());
-                    let progress_bar = Arc::new(MockInstrumentedProgressBar::new(
+                    let metrics_registry = Arc::new(InMemoryMetricRegistry::new());
+                    let progress_bar = Arc::new(DeterministicInstrumentedProgressBar::new(
                         total_items,
                         tracker.clone(),
                         metrics_registry.clone(),

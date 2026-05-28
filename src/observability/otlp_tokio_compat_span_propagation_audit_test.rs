@@ -23,9 +23,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Mock span context for testing propagation across runtime boundaries.
+/// Span context fixture for propagation across runtime boundaries.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MockSpanContext {
+pub struct SpanContextFixture {
     trace_id: String,
     span_id: String,
     parent_span_id: Option<String>,
@@ -33,7 +33,7 @@ pub struct MockSpanContext {
     trace_state: String,
 }
 
-impl MockSpanContext {
+impl SpanContextFixture {
     fn new(trace_id: &str, span_id: &str) -> Self {
         Self {
             trace_id: trace_id.to_string(),
@@ -60,15 +60,15 @@ impl MockSpanContext {
     }
 }
 
-/// Mock runtime adapter for testing span propagation behavior.
+/// Runtime adapter fixture for span propagation behavior.
 #[derive(Debug)]
-pub struct MockRuntimeAdapter {
+pub struct RuntimeBoundaryAdapterFixture {
     name: String,
-    span_contexts: Arc<Mutex<Vec<MockSpanContext>>>,
+    span_contexts: Arc<Mutex<Vec<SpanContextFixture>>>,
     propagation_enabled: bool,
 }
 
-impl MockRuntimeAdapter {
+impl RuntimeBoundaryAdapterFixture {
     fn new(name: &str, propagation_enabled: bool) -> Self {
         Self {
             name: name.to_string(),
@@ -77,8 +77,8 @@ impl MockRuntimeAdapter {
         }
     }
 
-    fn spawn_task_with_span(&self, span_context: MockSpanContext) -> MockSpanContext {
-        // Simulate task spawning across runtime boundary
+    fn spawn_task_with_span(&self, span_context: SpanContextFixture) -> SpanContextFixture {
+        // Exercise task spawning across runtime boundary.
         if self.propagation_enabled {
             // CORRECT: Preserve span context across runtime boundary
             let mut contexts = self.span_contexts.lock().unwrap();
@@ -86,38 +86,39 @@ impl MockRuntimeAdapter {
             span_context
         } else {
             // DEFECT: Span context lost at runtime boundary
-            let lost_context = MockSpanContext::new("00000000000000000000000000000000", "0000000000000000");
+            let lost_context =
+                SpanContextFixture::new("00000000000000000000000000000000", "0000000000000000");
             let mut contexts = self.span_contexts.lock().unwrap();
             contexts.push(lost_context.clone());
             lost_context
         }
     }
 
-    fn create_child_span(&self, parent: &MockSpanContext, child_span_id: &str) -> MockSpanContext {
+    fn create_child_span(&self, parent: &SpanContextFixture, child_span_id: &str) -> SpanContextFixture {
         if self.propagation_enabled {
             // CORRECT: Parent-child relationship preserved
-            MockSpanContext::new(&parent.trace_id, child_span_id)
+            SpanContextFixture::new(&parent.trace_id, child_span_id)
                 .with_parent(&parent.span_id)
                 .with_trace_state(&parent.trace_state)
         } else {
             // DEFECT: Parent-child relationship lost
-            MockSpanContext::new("00000000000000000000000000000000", child_span_id)
+            SpanContextFixture::new("00000000000000000000000000000000", child_span_id)
         }
     }
 
-    fn get_captured_spans(&self) -> Vec<MockSpanContext> {
+    fn get_captured_spans(&self) -> Vec<SpanContextFixture> {
         self.span_contexts.lock().unwrap().clone()
     }
 }
 
-/// Mock OTLP exporter for testing span collection across runtime boundaries.
+/// In-memory OTLP exporter fixture for span collection across runtime boundaries.
 #[derive(Debug)]
-pub struct MockOtlpCrossRuntimeExporter {
-    exported_spans: Arc<Mutex<Vec<MockSpanContext>>>,
+pub struct InMemoryCrossRuntimeOtlpExporter {
+    exported_spans: Arc<Mutex<Vec<SpanContextFixture>>>,
     export_count: Arc<Mutex<usize>>,
 }
 
-impl MockOtlpCrossRuntimeExporter {
+impl InMemoryCrossRuntimeOtlpExporter {
     fn new() -> Self {
         Self {
             exported_spans: Arc::new(Mutex::new(Vec::new())),
@@ -125,7 +126,7 @@ impl MockOtlpCrossRuntimeExporter {
         }
     }
 
-    fn export_span(&self, span: MockSpanContext) {
+    fn export_span(&self, span: SpanContextFixture) {
         let mut spans = self.exported_spans.lock().unwrap();
         spans.push(span);
 
@@ -133,7 +134,7 @@ impl MockOtlpCrossRuntimeExporter {
         *count += 1;
     }
 
-    fn get_exported_spans(&self) -> Vec<MockSpanContext> {
+    fn get_exported_spans(&self) -> Vec<SpanContextFixture> {
         self.exported_spans.lock().unwrap().clone()
     }
 
@@ -209,15 +210,16 @@ fn audit_otlp_tokio_compat_span_propagation() {
 
     println!("📊 Testing runtime boundary propagation scenarios:");
 
-    let exporter = MockOtlpCrossRuntimeExporter::new();
+    let exporter = InMemoryCrossRuntimeOtlpExporter::new();
 
     for (scenario_name, propagation_enabled) in runtime_scenarios {
         println!("   Testing: {} (enabled: {})", scenario_name, propagation_enabled);
 
-        let adapter = MockRuntimeAdapter::new(scenario_name, propagation_enabled);
+        let adapter = RuntimeBoundaryAdapterFixture::new(scenario_name, propagation_enabled);
 
         // **PHASE 1**: Create parent span in asupersync runtime
-        let parent_span = MockSpanContext::new("12345678901234567890123456789012", "1234567890123456")
+        let parent_span =
+            SpanContextFixture::new("12345678901234567890123456789012", "1234567890123456")
             .with_baggage("tenant", "acme-corp")
             .with_trace_state("edge=datacenter:us-east");
 
@@ -317,11 +319,12 @@ fn audit_baggage_propagation_across_tokio_compat() {
     for (scenario_name, baggage_items) in baggage_scenarios {
         println!("   Testing: {}", scenario_name);
 
-        let adapter_with_propagation = MockRuntimeAdapter::new("test", true);
-        let adapter_without_propagation = MockRuntimeAdapter::new("test", false);
+        let adapter_with_propagation = RuntimeBoundaryAdapterFixture::new("test", true);
+        let adapter_without_propagation = RuntimeBoundaryAdapterFixture::new("test", false);
 
         // Create parent span with baggage
-        let mut parent_span = MockSpanContext::new("12345678901234567890123456789012", "1111111111111111");
+        let mut parent_span =
+            SpanContextFixture::new("12345678901234567890123456789012", "1111111111111111");
         for (key, value) in &baggage_items {
             parent_span = parent_span.with_baggage(key, value);
         }
@@ -466,10 +469,11 @@ fn audit_trace_state_propagation_across_boundaries() {
     for (trace_state, description) in trace_state_scenarios {
         println!("   Testing: {} ({})", trace_state, description);
 
-        let adapter_with_propagation = MockRuntimeAdapter::new("test", true);
+        let adapter_with_propagation = RuntimeBoundaryAdapterFixture::new("test", true);
 
         // Create parent span with trace state
-        let parent_span = MockSpanContext::new("12345678901234567890123456789012", "1111111111111111")
+        let parent_span =
+            SpanContextFixture::new("12345678901234567890123456789012", "1111111111111111")
             .with_trace_state(trace_state);
 
         println!("     Parent trace_state: {}", parent_span.trace_state);

@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use asupersync::observability::otlp_trace_exporter::{
-    LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpBrownoutAction, OtlpSpan, SpanBatch,
+    InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpBrownoutAction, OtlpSpan, SpanBatch,
     TraceExporter,
 };
 use asupersync::runtime::resource_monitor::{
@@ -136,9 +136,9 @@ fn low_pressure_brownout_evidence(
 
 #[test]
 fn dropped_spans_count_matches_evicted_batch() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter), 1, Duration::from_secs(1));
+        LoadSheddingTraceExporter::new(Box::new(memory_exporter), 1, Duration::from_secs(1));
 
     let small_batch = create_test_batch(1, 3);
     let large_batch = create_test_batch(2, 7);
@@ -165,9 +165,9 @@ fn dropped_spans_count_matches_evicted_batch() {
 
 #[test]
 fn multi_producer_queue_accounting_under_load() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
     let exporter = Arc::new(LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         32,
         Duration::from_secs(1),
     ));
@@ -204,9 +204,9 @@ fn multi_producer_queue_accounting_under_load() {
         .process_queue()
         .expect("queue drain should succeed after producer burst");
     let drain_duration = drain_start.elapsed();
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
     let exported_batch_count = exported_batches.len();
-    let exported_span_count = mock_exporter.exported_span_count();
+    let exported_span_count = memory_exporter.exported_span_count();
     let dropped_batches = stats_before_drain.dropped_batches as usize;
     let dropped_spans = exporter.dropped_spans_count() as usize;
 
@@ -222,7 +222,7 @@ fn multi_producer_queue_accounting_under_load() {
     );
     assert_eq!(
         processed, exported_batch_count,
-        "drain should process exactly the batches handed to the mock exporter"
+        "drain should process exactly the batches handed to the in-memory exporter"
     );
 
     println!("✅ MULTI-PRODUCER OTLP QUEUE AUDIT PASSED");
@@ -244,9 +244,12 @@ fn multi_producer_queue_accounting_under_load() {
 
 #[test]
 fn brownout_policy_drops_low_priority_spans_and_propagates_reasons() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
-    let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 8, Duration::from_secs(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter = LoadSheddingTraceExporter::new(
+        Box::new(memory_exporter.clone()),
+        8,
+        Duration::from_secs(1),
+    );
 
     let brownout = OverloadBrownoutLedger::evaluate(
         &sample_brownout_evidence(),
@@ -271,7 +274,7 @@ fn brownout_policy_drops_low_priority_spans_and_propagates_reasons() {
         .expect("degrade-mode queue drain should succeed");
 
     let stats = exporter.load_shedding_stats();
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
     assert_eq!(stats.queue_depth, 0);
     assert_eq!(stats.dropped_batches, 0);
     assert_eq!(stats.brownout_dropped_spans, 2);
@@ -287,9 +290,12 @@ fn brownout_policy_drops_low_priority_spans_and_propagates_reasons() {
 
 #[test]
 fn brownout_policy_retains_summary_only_then_recovers_to_standalone_export() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
-    let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 4, Duration::from_secs(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter = LoadSheddingTraceExporter::new(
+        Box::new(memory_exporter.clone()),
+        4,
+        Duration::from_secs(1),
+    );
 
     let shed_optional = OverloadBrownoutLedger::evaluate(
         &OverloadBrownoutEvidence {
@@ -321,7 +327,7 @@ fn brownout_policy_retains_summary_only_then_recovers_to_standalone_export() {
     assert_eq!(retained_stats.dropped_batches, 0);
     assert_eq!(retained_stats.brownout_dropped_spans, 0);
     assert_eq!(retained_stats.retained_summary_spans, 4);
-    assert_eq!(mock_exporter.exported_span_count(), 0);
+    assert_eq!(memory_exporter.exported_span_count(), 0);
 
     let recovery_snapshot = exporter.update_brownout_policy(None);
     assert_eq!(recovery_snapshot.action, OtlpBrownoutAction::ExportAll);
@@ -336,15 +342,18 @@ fn brownout_policy_retains_summary_only_then_recovers_to_standalone_export() {
         .process_queue()
         .expect("drain after fallback recovery should succeed");
 
-    assert_eq!(mock_exporter.exported_span_count(), 3);
+    assert_eq!(memory_exporter.exported_span_count(), 3);
     assert_eq!(exporter.load_shedding_stats().retained_summary_spans, 4);
 }
 
 #[test]
 fn disabled_brownout_policy_matches_export_all_sampling_behavior() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
-    let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 8, Duration::from_secs(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter = LoadSheddingTraceExporter::new(
+        Box::new(memory_exporter.clone()),
+        8,
+        Duration::from_secs(1),
+    );
 
     let disabled = OverloadBrownoutLedger::evaluate(
         &sample_brownout_evidence(),
@@ -380,7 +389,7 @@ fn disabled_brownout_policy_matches_export_all_sampling_behavior() {
         .process_queue()
         .expect("disabled brownout mode should drain normally");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
     assert_eq!(exported_batches.len(), 1);
     assert_eq!(exported_batches[0].spans.len(), 3);
     assert_eq!(
@@ -403,9 +412,12 @@ fn disabled_brownout_policy_matches_export_all_sampling_behavior() {
 
 #[test]
 fn brownout_and_queue_drops_do_not_double_count_same_span() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
-    let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 1, Duration::from_secs(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter = LoadSheddingTraceExporter::new(
+        Box::new(memory_exporter.clone()),
+        1,
+        Duration::from_secs(1),
+    );
 
     let brownout = OverloadBrownoutLedger::evaluate(
         &sample_brownout_evidence(),
@@ -429,7 +441,7 @@ fn brownout_and_queue_drops_do_not_double_count_same_span() {
     let total_sampled_spans = (first_batch.spans.len() + second_batch.spans.len()) as u64;
     let queue_dropped_spans = exporter.dropped_spans_count();
     let brownout_dropped_spans = exporter.brownout_dropped_spans_count();
-    let exported_spans = mock_exporter.exported_span_count() as u64;
+    let exported_spans = memory_exporter.exported_span_count() as u64;
 
     assert_eq!(queue_dropped_spans, 3);
     assert_eq!(brownout_dropped_spans, 2);
@@ -443,9 +455,12 @@ fn brownout_and_queue_drops_do_not_double_count_same_span() {
 
 #[test]
 fn recovery_hysteresis_is_idempotent_until_reenable_window_completes() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
-    let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 4, Duration::from_secs(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter = LoadSheddingTraceExporter::new(
+        Box::new(memory_exporter.clone()),
+        4,
+        Duration::from_secs(1),
+    );
 
     let recovering = OverloadBrownoutLedger::evaluate(
         &low_pressure_brownout_evidence(OverloadBrownoutPhase::Degrade, 0),
@@ -476,16 +491,19 @@ fn recovery_hysteresis_is_idempotent_until_reenable_window_completes() {
         .process_queue()
         .expect("re-enabled exporter should drain normally");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
     assert_eq!(exported_batches.len(), 1);
     assert_eq!(exported_batches[0].spans.len(), 2);
 }
 
 #[test]
 fn missing_brownout_evidence_uses_conservative_fallback_reason_codes() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
-    let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 4, Duration::from_secs(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter = LoadSheddingTraceExporter::new(
+        Box::new(memory_exporter.clone()),
+        4,
+        Duration::from_secs(1),
+    );
 
     let missing_evidence = OverloadBrownoutLedger::evaluate(
         &OverloadBrownoutEvidence {
@@ -519,7 +537,7 @@ fn missing_brownout_evidence_uses_conservative_fallback_reason_codes() {
         .process_queue()
         .expect("missing-evidence fallback drain should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
     assert_eq!(exported_batches.len(), 1);
     assert_eq!(exported_batches[0].spans.len(), 1);
     assert_eq!(exported_batches[0].spans[0].attributes[1].1, "high");
@@ -527,9 +545,9 @@ fn missing_brownout_evidence_uses_conservative_fallback_reason_codes() {
 
 #[test]
 fn exporter_metadata_surfaces_do_not_leak_span_attributes() {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
     let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter), 4, Duration::from_secs(1));
+        LoadSheddingTraceExporter::new(Box::new(memory_exporter), 4, Duration::from_secs(1));
 
     let brownout = OverloadBrownoutLedger::evaluate(
         &sample_brownout_evidence(),

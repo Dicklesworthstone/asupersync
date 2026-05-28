@@ -14,18 +14,18 @@
 #![cfg(test)]
 
 use crate::observability::otlp_trace_exporter::{
-    LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
+    InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
 use crate::observability::w3c_trace_context::extract_from_http;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Mock HTTP request for testing trace context extraction.
-struct MockHttpRequest {
+/// HTTP request fixture for testing trace context extraction.
+struct HeaderFixtureRequest {
     headers: HashMap<String, String>,
 }
 
-impl MockHttpRequest {
+impl HeaderFixtureRequest {
     fn new() -> Self {
         Self {
             headers: HashMap::new(),
@@ -48,9 +48,9 @@ impl MockHttpRequest {
 fn audit_head_based_sampling_compliance() {
     println!("🔍 AUDIT: Head-based sampling compliance per OTLP specification");
 
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
@@ -59,7 +59,7 @@ fn audit_head_based_sampling_compliance() {
     let unsampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
     //                                                                                    ^^ flags=00 (not sampled)
 
-    let unsampled_request = MockHttpRequest::new().with_traceparent(unsampled_traceparent);
+    let unsampled_request = HeaderFixtureRequest::new().with_traceparent(unsampled_traceparent);
     let unsampled_context = extract_from_http(&unsampled_request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -88,7 +88,7 @@ fn audit_head_based_sampling_compliance() {
     let sampled_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4737-00f067aa0ba902b8-01";
     //                                                                                ^^ flags=01 (sampled)
 
-    let sampled_request = MockHttpRequest::new().with_traceparent(sampled_traceparent);
+    let sampled_request = HeaderFixtureRequest::new().with_traceparent(sampled_traceparent);
     let sampled_context = extract_from_http(&sampled_request.headers)
         .expect("valid traceparent")
         .expect("context present");
@@ -128,7 +128,7 @@ fn audit_head_based_sampling_compliance() {
     println!("📊 Processed {} batches", processed);
 
     // CRITICAL AUDIT CHECK: Only sampled spans should be exported
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     println!(
         "📊 Exported {} batches to OTLP endpoint",
@@ -178,9 +178,9 @@ fn audit_head_based_sampling_compliance() {
 fn audit_current_implementation_drops_unsampled_spans() {
     println!("AUDIT: Verifying current head-based sampling implementation");
 
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
@@ -204,7 +204,7 @@ fn audit_current_implementation_drops_unsampled_spans() {
         .expect("export should succeed");
     exporter.process_queue().expect("processing should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     assert!(
         exported_batches.is_empty(),
@@ -222,9 +222,9 @@ fn audit_current_implementation_drops_unsampled_spans() {
 fn audit_mixed_sampling_batch_filtering() {
     println!("🔍 AUDIT: Mixed sampling batch filtering");
 
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(1));
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(mock_exporter.clone()),
+        Box::new(memory_exporter.clone()),
         100,
         Duration::from_secs(1),
     );
@@ -266,7 +266,7 @@ fn audit_mixed_sampling_batch_filtering() {
         .expect("export should succeed");
     exporter.process_queue().expect("processing should succeed");
 
-    let exported_batches = mock_exporter.exported_batches();
+    let exported_batches = memory_exporter.exported_batches();
 
     // HEAD-BASED SAMPLING: Only sampled spans should be exported
     if !exported_batches.is_empty() {

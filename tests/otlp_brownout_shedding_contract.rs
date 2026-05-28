@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use asupersync::observability::otlp_trace_exporter::{
-    LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpBrownoutAction, OtlpSpan, SpanBatch,
+    InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpBrownoutAction, OtlpSpan, SpanBatch,
     TraceExporter,
 };
 use asupersync::runtime::resource_monitor::{
@@ -364,9 +364,12 @@ fn build_shared_brownout(
 }
 
 fn build_otlp_brownout_report(scenario: &OtlpBrownoutScenario, include_hash_probe: bool) -> Value {
-    let mock_exporter = MockOtlpHttpExporter::new(Duration::from_millis(0));
-    let exporter =
-        LoadSheddingTraceExporter::new(Box::new(mock_exporter.clone()), 8, Duration::from_secs(1));
+    let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_millis(0));
+    let exporter = LoadSheddingTraceExporter::new(
+        Box::new(memory_exporter.clone()),
+        8,
+        Duration::from_secs(1),
+    );
 
     let mut phase_sequence = Vec::new();
     let mut action_sequence = Vec::new();
@@ -383,7 +386,7 @@ fn build_otlp_brownout_report(scenario: &OtlpBrownoutScenario, include_hash_prob
         let before_brownout_drop = exporter.brownout_dropped_spans_count();
         let before_retained_summary = exporter.retained_summary_spans_count();
         let before_queue_drop = exporter.dropped_spans_count();
-        let before_exported_batches = mock_exporter.exported_batches().len();
+        let before_exported_batches = memory_exporter.exported_batches().len();
 
         let batch = create_priority_batch(index as u64 + 1, &window.priorities);
         exporter
@@ -393,7 +396,7 @@ fn build_otlp_brownout_report(scenario: &OtlpBrownoutScenario, include_hash_prob
             .process_queue()
             .expect("OTLP brownout contract queue drain should succeed");
 
-        let exported_batches = mock_exporter.exported_batches();
+        let exported_batches = memory_exporter.exported_batches();
         for exported_batch in exported_batches.iter().skip(before_exported_batches) {
             for span in &exported_batch.spans {
                 match priority_label(span) {

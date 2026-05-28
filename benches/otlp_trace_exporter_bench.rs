@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use asupersync::observability::otlp_trace_exporter::{
-    BoundedExportQueue, LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch,
+    BoundedExportQueue, InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch,
     TraceExporter,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -84,7 +84,7 @@ fn bench_multi_producer_export(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let exporter = Arc::new(LoadSheddingTraceExporter::new(
-                            Box::new(MockOtlpHttpExporter::new(Duration::from_millis(0))),
+                            Box::new(InMemoryOtlpHttpExporter::new(Duration::from_millis(0))),
                             128,
                             Duration::from_secs(1),
                         ));

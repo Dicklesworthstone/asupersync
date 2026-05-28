@@ -23,9 +23,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Mock HTTP response with chunked encoding simulation.
+/// Deterministic HTTP response fixture with chunked encoding.
 #[derive(Debug, Clone)]
-pub struct MockChunkedResponse {
+pub struct ChunkedResponseFixture {
     status: u16,
     headers: HashMap<String, String>,
     chunks: Vec<String>,
@@ -33,7 +33,7 @@ pub struct MockChunkedResponse {
     has_final_chunk: bool,
 }
 
-impl MockChunkedResponse {
+impl ChunkedResponseFixture {
     fn new(status: u16) -> Self {
         let mut headers = HashMap::new();
         headers.insert("Transfer-Encoding".to_string(), "chunked".to_string());
@@ -62,7 +62,7 @@ impl MockChunkedResponse {
 
     fn with_truncation(mut self) -> Self {
         self.is_truncated = true;
-        // Remove final chunk if it exists (simulate truncation)
+        // Remove final chunk if it exists to exercise truncation handling.
         if self.has_final_chunk {
             self.chunks.pop();
             self.has_final_chunk = false;
@@ -94,18 +94,18 @@ impl MockChunkedResponse {
     }
 }
 
-/// Mock OTLP HTTP client with chunked response validation.
+/// Deterministic OTLP HTTP client fixture with chunked response validation.
 #[derive(Debug)]
-pub struct MockOtlpHttpClient {
+pub struct ChunkValidatingOtlpHttpClient {
     validate_chunks: bool,
 }
 
-impl MockOtlpHttpClient {
+impl ChunkValidatingOtlpHttpClient {
     fn new(validate_chunks: bool) -> Self {
         Self { validate_chunks }
     }
 
-    fn process_response(&self, response: &MockChunkedResponse) -> Result<(), String> {
+    fn process_response(&self, response: &ChunkedResponseFixture) -> Result<(), String> {
         // Current implementation: only check status code (DEFECT)
         if !self.validate_chunks {
             match response.status() {
@@ -159,7 +159,7 @@ fn audit_otlp_chunked_response_truncation_detection() {
     let test_scenarios = vec![
         (
             "Complete chunked response",
-            MockChunkedResponse::new(200)
+            ChunkedResponseFixture::new(200)
                 .with_chunk("Hello ")
                 .with_chunk("World!")
                 .with_final_chunk(),
@@ -167,7 +167,7 @@ fn audit_otlp_chunked_response_truncation_detection() {
         ),
         (
             "Truncated chunked response (missing final chunk)",
-            MockChunkedResponse::new(200)
+            ChunkedResponseFixture::new(200)
                 .with_chunk("Hello ")
                 .with_chunk("World!")
                 .with_truncation(),
@@ -175,7 +175,7 @@ fn audit_otlp_chunked_response_truncation_detection() {
         ),
         (
             "Malformed chunk mid-stream",
-            MockChunkedResponse::new(200)
+            ChunkedResponseFixture::new(200)
                 .with_chunk("Complete chunk")
                 .with_chunk("Partial")
                 .with_truncation(),
@@ -183,7 +183,7 @@ fn audit_otlp_chunked_response_truncation_detection() {
         ),
         (
             "Empty but properly terminated",
-            MockChunkedResponse::new(200).with_final_chunk(),
+            ChunkedResponseFixture::new(200).with_final_chunk(),
             true, // Should succeed
         ),
     ];
@@ -191,10 +191,10 @@ fn audit_otlp_chunked_response_truncation_detection() {
     println!("📊 Testing chunked response scenarios:");
 
     // **CURRENT IMPLEMENTATION BEHAVIOR**
-    let current_client = MockOtlpHttpClient::new(false); // No validation
+    let current_client = ChunkValidatingOtlpHttpClient::new(false); // No validation
 
     // **IMPROVED IMPLEMENTATION BEHAVIOR**
-    let improved_client = MockOtlpHttpClient::new(true); // With validation
+    let improved_client = ChunkValidatingOtlpHttpClient::new(true); // With validation
 
     for (description, response, should_succeed) in test_scenarios {
         println!("   Testing: {}", description);
@@ -236,7 +236,7 @@ fn audit_otlp_chunked_response_truncation_detection() {
     // **TRUNCATION DETECTION VERIFICATION**
     println!("📊 Chunked response validation analysis:");
 
-    let truncated_response = MockChunkedResponse::new(200)
+    let truncated_response = ChunkedResponseFixture::new(200)
         .with_chunk("Partial data")
         .with_truncation();
 
@@ -293,25 +293,25 @@ fn audit_otlp_response_body_validation() {
     let validation_scenarios = vec![
         (
             "Valid response with Content-Length",
-            MockChunkedResponse::new(200),
+            ChunkedResponseFixture::new(200),
             true,
         ),
         (
             "Valid chunked response",
-            MockChunkedResponse::new(200)
+            ChunkedResponseFixture::new(200)
                 .with_chunk("data")
                 .with_final_chunk(),
             true,
         ),
         (
             "Chunked without final terminator",
-            MockChunkedResponse::new(200)
+            ChunkedResponseFixture::new(200)
                 .with_chunk("data"),
             false,
         ),
         (
             "Truncated mid-chunk",
-            MockChunkedResponse::new(200)
+            ChunkedResponseFixture::new(200)
                 .with_chunk("complete")
                 .with_chunk("partial")
                 .with_truncation(),
@@ -321,8 +321,8 @@ fn audit_otlp_response_body_validation() {
 
     println!("📊 Testing response body validation:");
 
-    let validating_client = MockOtlpHttpClient::new(true);
-    let non_validating_client = MockOtlpHttpClient::new(false);
+    let validating_client = ChunkValidatingOtlpHttpClient::new(true);
+    let non_validating_client = ChunkValidatingOtlpHttpClient::new(false);
 
     for (description, response, should_be_valid) in validation_scenarios {
         println!("   Testing: {}", description);

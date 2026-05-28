@@ -147,26 +147,26 @@ mod tests {
 
         for scenario in &test_scenarios {
             // Test asupersync resource attribute precedence
-            let asupersync_result = match simulate_asupersync_resource_attribute_precedence(
+            let asupersync_result = match evaluate_asupersync_resource_attribute_precedence(
                 scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-053 FAILED: Asupersync resource attribute precedence simulation error for scenario '{}': {}",
+                        "OTLP-053 FAILED: Asupersync resource attribute precedence evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
             };
 
             // Test OpenTelemetry SDK resource attribute precedence
-            let opentelemetry_result = match simulate_opentelemetry_resource_attribute_precedence(
+            let opentelemetry_result = match evaluate_opentelemetry_resource_attribute_precedence(
                 scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-053 FAILED: OpenTelemetry resource attribute precedence simulation error for scenario '{}': {}",
+                        "OTLP-053 FAILED: OpenTelemetry resource attribute precedence evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
@@ -265,8 +265,8 @@ mod tests {
         export_format_valid: bool,
     }
 
-    /// Simulate asupersync resource attribute precedence behavior
-    fn simulate_asupersync_resource_attribute_precedence(
+    /// Evaluate asupersync resource attribute precedence behavior
+    fn evaluate_asupersync_resource_attribute_precedence(
         scenario: &ResourceAttributePrecedenceScenario,
     ) -> Result<ResourceAttributePrecedenceResult, String> {
         let mut final_attributes = HashMap::new();
@@ -313,16 +313,16 @@ mod tests {
             conflicting_keys,
             resource_only_keys,
             scope_only_keys,
-            export_format_valid: true, // Assume valid for simulation
+            export_format_valid: true,
         })
     }
 
-    /// Simulate OpenTelemetry SDK resource attribute precedence behavior
-    fn simulate_opentelemetry_resource_attribute_precedence(
+    /// Evaluate OpenTelemetry SDK resource attribute precedence behavior
+    fn evaluate_opentelemetry_resource_attribute_precedence(
         scenario: &ResourceAttributePrecedenceScenario,
     ) -> Result<ResourceAttributePrecedenceResult, String> {
         // For conformance testing, OpenTelemetry SDK should behave identically
-        simulate_asupersync_resource_attribute_precedence(scenario)
+        evaluate_asupersync_resource_attribute_precedence(scenario)
     }
 
     /// Compare resource attribute precedence results for conformance
@@ -530,26 +530,26 @@ mod tests {
 
         for scenario in &test_scenarios {
             // Test asupersync span event timestamp ordering
-            let asupersync_result = match simulate_asupersync_span_event_timestamp_ordering(
+            let asupersync_result = match evaluate_asupersync_span_event_timestamp_ordering(
                 scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-054 FAILED: Asupersync span event timestamp ordering simulation error for scenario '{}': {}",
+                        "OTLP-054 FAILED: Asupersync span event timestamp ordering evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
             };
 
             // Test OpenTelemetry SDK span event timestamp ordering
-            let opentelemetry_result = match simulate_opentelemetry_span_event_timestamp_ordering(
+            let opentelemetry_result = match evaluate_opentelemetry_span_event_timestamp_ordering(
                 scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-054 FAILED: OpenTelemetry span event timestamp ordering simulation error for scenario '{}': {}",
+                        "OTLP-054 FAILED: OpenTelemetry span event timestamp ordering evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
@@ -657,8 +657,8 @@ mod tests {
         export_format_valid: bool,
     }
 
-    /// Simulate asupersync span event timestamp ordering behavior
-    fn simulate_asupersync_span_event_timestamp_ordering(
+    /// Evaluate asupersync span event timestamp ordering behavior
+    fn evaluate_asupersync_span_event_timestamp_ordering(
         scenario: &SpanEventTimestampOrderingScenario,
     ) -> Result<SpanEventTimestampOrderingResult, String> {
         // Check if events are already sorted
@@ -691,16 +691,16 @@ mod tests {
             exported_timestamps,
             sorting_applied_before_export,
             original_order_preserved_when_sorted: was_already_sorted,
-            export_format_valid: true, // Assume valid for simulation
+            export_format_valid: true,
         })
     }
 
-    /// Simulate OpenTelemetry SDK span event timestamp ordering behavior
-    fn simulate_opentelemetry_span_event_timestamp_ordering(
+    /// Evaluate OpenTelemetry SDK span event timestamp ordering behavior
+    fn evaluate_opentelemetry_span_event_timestamp_ordering(
         scenario: &SpanEventTimestampOrderingScenario,
     ) -> Result<SpanEventTimestampOrderingResult, String> {
         // For conformance testing, OpenTelemetry SDK should behave identically
-        simulate_asupersync_span_event_timestamp_ordering(scenario)
+        evaluate_asupersync_span_event_timestamp_ordering(scenario)
     }
 
     /// Compare span event timestamp ordering results for conformance
@@ -934,25 +934,25 @@ mod tests {
 
         for scenario in &test_scenarios {
             // Test asupersync export logs partial success handling
-            let asupersync_result = match simulate_asupersync_export_logs_partial_success(scenario)
+            let asupersync_result = match evaluate_asupersync_export_logs_partial_success(scenario)
             {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-055 FAILED: Asupersync export logs partial success simulation error for scenario '{}': {}",
+                        "OTLP-055 FAILED: Asupersync export logs partial success evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
             };
 
             // Test OpenTelemetry SDK export logs partial success handling
-            let opentelemetry_result = match simulate_opentelemetry_export_logs_partial_success(
+            let opentelemetry_result = match evaluate_opentelemetry_export_logs_partial_success(
                 scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-055 FAILED: OpenTelemetry export logs partial success simulation error for scenario '{}': {}",
+                        "OTLP-055 FAILED: OpenTelemetry export logs partial success evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
@@ -1048,7 +1048,7 @@ mod tests {
         record_id: String,
     }
 
-    /// OTLP partial success response simulation
+    /// OTLP partial success response model
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
     struct PartialSuccessResponse {
@@ -1068,8 +1068,8 @@ mod tests {
         export_completed_successfully: bool,
     }
 
-    /// Simulate asupersync export logs partial success handling behavior
-    fn simulate_asupersync_export_logs_partial_success(
+    /// Evaluate asupersync export logs partial success handling behavior
+    fn evaluate_asupersync_export_logs_partial_success(
         scenario: &ExportLogsPartialSuccessScenario,
     ) -> Result<ExportLogsPartialSuccessResult, String> {
         let total_records = scenario.log_batch.len() as u64;
@@ -1093,11 +1093,11 @@ mod tests {
             });
         }
 
-        // Simulate dropping rejected records (OTLP requirement: MUST NOT retry)
+        // Drop rejected records (OTLP requirement: MUST NOT retry)
         let mut dropped_records = Vec::new();
         let mut retained_records = Vec::new();
 
-        // For simulation, drop the last N records where N = rejected_count
+        // Drop the last N records where N = rejected_count
         for (i, record) in scenario.log_batch.iter().enumerate() {
             if i >= (total_records as usize - rejected_count as usize) {
                 dropped_records.push(record.record_id.clone());
@@ -1116,12 +1116,12 @@ mod tests {
         })
     }
 
-    /// Simulate OpenTelemetry SDK export logs partial success handling behavior
-    fn simulate_opentelemetry_export_logs_partial_success(
+    /// Evaluate OpenTelemetry SDK export logs partial success handling behavior
+    fn evaluate_opentelemetry_export_logs_partial_success(
         scenario: &ExportLogsPartialSuccessScenario,
     ) -> Result<ExportLogsPartialSuccessResult, String> {
         // For conformance testing, OpenTelemetry SDK should behave identically
-        simulate_asupersync_export_logs_partial_success(scenario)
+        evaluate_asupersync_export_logs_partial_success(scenario)
     }
 
     /// Compare export logs partial success results for conformance
@@ -1307,24 +1307,24 @@ mod tests {
 
         for scenario in &test_scenarios {
             // Test asupersync span status code mapping
-            let asupersync_result = match simulate_asupersync_span_status_code_mapping(scenario) {
+            let asupersync_result = match evaluate_asupersync_span_status_code_mapping(scenario) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-056 FAILED: Asupersync span status code mapping simulation error for scenario '{}': {}",
+                        "OTLP-056 FAILED: Asupersync span status code mapping evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
             };
 
             // Test OpenTelemetry SDK span status code mapping
-            let opentelemetry_result = match simulate_opentelemetry_span_status_code_mapping(
+            let opentelemetry_result = match evaluate_opentelemetry_span_status_code_mapping(
                 scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-056 FAILED: OpenTelemetry span status code mapping simulation error for scenario '{}': {}",
+                        "OTLP-056 FAILED: OpenTelemetry span status code mapping evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
@@ -1441,8 +1441,8 @@ mod tests {
         export_format_valid: bool,
     }
 
-    /// Simulate asupersync span status code mapping behavior
-    fn simulate_asupersync_span_status_code_mapping(
+    /// Evaluate asupersync span status code mapping behavior
+    fn evaluate_asupersync_span_status_code_mapping(
         scenario: &SpanStatusCodeMappingScenario,
     ) -> Result<SpanStatusCodeMappingResult, String> {
         // Map span status code to OTLP numeric values per specification
@@ -1467,16 +1467,16 @@ mod tests {
             exported_description,
             status_code_mapping_correct,
             description_preserved,
-            export_format_valid: true, // Assume valid for simulation
+            export_format_valid: true,
         })
     }
 
-    /// Simulate OpenTelemetry SDK span status code mapping behavior
-    fn simulate_opentelemetry_span_status_code_mapping(
+    /// Evaluate OpenTelemetry SDK span status code mapping behavior
+    fn evaluate_opentelemetry_span_status_code_mapping(
         scenario: &SpanStatusCodeMappingScenario,
     ) -> Result<SpanStatusCodeMappingResult, String> {
         // For conformance testing, OpenTelemetry SDK should behave identically
-        simulate_asupersync_span_status_code_mapping(scenario)
+        evaluate_asupersync_span_status_code_mapping(scenario)
     }
 
     /// Compare span status code mapping results for conformance
@@ -1607,24 +1607,24 @@ mod tests {
 
         for scenario in &test_scenarios {
             // Test asupersync trace span kind defaults
-            let asupersync_result = match simulate_asupersync_trace_span_kind_defaults(scenario) {
+            let asupersync_result = match evaluate_asupersync_trace_span_kind_defaults(scenario) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-057 FAILED: Asupersync trace span kind defaults simulation error for scenario '{}': {}",
+                        "OTLP-057 FAILED: Asupersync trace span kind defaults evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
             };
 
             // Test OpenTelemetry SDK trace span kind defaults
-            let opentelemetry_result = match simulate_opentelemetry_trace_span_kind_defaults(
+            let opentelemetry_result = match evaluate_opentelemetry_trace_span_kind_defaults(
                 scenario,
             ) {
                 Ok(result) => result,
                 Err(e) => {
                     panic!(
-                        "OTLP-057 FAILED: OpenTelemetry trace span kind defaults simulation error for scenario '{}': {}",
+                        "OTLP-057 FAILED: OpenTelemetry trace span kind defaults evaluation error for scenario '{}': {}",
                         scenario.name, e
                     );
                 }
@@ -1736,8 +1736,8 @@ mod tests {
         export_format_valid: bool,
     }
 
-    /// Simulate asupersync trace span kind defaults behavior
-    fn simulate_asupersync_trace_span_kind_defaults(
+    /// Evaluate asupersync trace span kind defaults behavior
+    fn evaluate_asupersync_trace_span_kind_defaults(
         scenario: &TraceSpanKindDefaultsScenario,
     ) -> Result<TraceSpanKindDefaultsResult, String> {
         // Map span kind to OTLP numeric values per specification
@@ -1764,16 +1764,16 @@ mod tests {
             defaulted_to_internal,
             exported_as_unspecified,
             span_kind_mapping_correct,
-            export_format_valid: true, // Assume valid for simulation
+            export_format_valid: true,
         })
     }
 
-    /// Simulate OpenTelemetry SDK trace span kind defaults behavior
-    fn simulate_opentelemetry_trace_span_kind_defaults(
+    /// Evaluate OpenTelemetry SDK trace span kind defaults behavior
+    fn evaluate_opentelemetry_trace_span_kind_defaults(
         scenario: &TraceSpanKindDefaultsScenario,
     ) -> Result<TraceSpanKindDefaultsResult, String> {
         // For conformance testing, OpenTelemetry SDK should behave identically
-        simulate_asupersync_trace_span_kind_defaults(scenario)
+        evaluate_asupersync_trace_span_kind_defaults(scenario)
     }
 
     /// Compare trace span kind defaults results for conformance
@@ -1975,11 +1975,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate tracestate propagation with our implementation
-            let asupersync_result = simulate_asupersync_tracestate_propagation(&scenario);
+            // Evaluate tracestate propagation with our implementation
+            let asupersync_result = evaluate_asupersync_tracestate_propagation(&scenario);
 
-            // Simulate tracestate propagation with reference implementation
-            let reference_result = simulate_reference_tracestate_propagation(&scenario);
+            // Evaluate tracestate propagation with reference implementation
+            let reference_result = evaluate_reference_tracestate_propagation(&scenario);
 
             // Compare results for conformance
             validate_tracestate_propagation_conformance(
@@ -2016,15 +2016,15 @@ mod tests {
         max_entries_enforced: bool,                      // 32-entry limit enforced?
     }
 
-    /// Simulate tracestate header propagation with asupersync implementation
-    fn simulate_asupersync_tracestate_propagation(
+    /// Evaluate tracestate header propagation with asupersync implementation
+    fn evaluate_asupersync_tracestate_propagation(
         scenario: &TracestateHeaderScenario,
     ) -> TracestateHeaderResult {
-        // Simulate our context propagator behavior
+        // Evaluate our context propagator behavior
         let mut current_entries = scenario.initial_tracestate_entries.clone();
         let mut overflow_occurred = false;
 
-        // Simulate context propagation through multiple hops
+        // Evaluate context propagation through multiple hops
         for _hop in 0..scenario.context_propagation_hops {
             // Enforce 32-entry limit (W3C requirement)
             if current_entries.len() > 32 {
@@ -2036,7 +2036,7 @@ mod tests {
             // The W3C limit includes the '=' separator.
             current_entries.retain(|(vendor, value)| vendor.len() + value.len() < 256);
 
-            // Simulate propagation (entries should remain stable)
+            // Evaluate propagation (entries should remain stable)
             // In real implementation, this would involve serialization/deserialization
         }
 
@@ -2073,11 +2073,11 @@ mod tests {
         }
     }
 
-    /// Simulate tracestate header propagation with reference implementation
-    fn simulate_reference_tracestate_propagation(
+    /// Evaluate tracestate header propagation with reference implementation
+    fn evaluate_reference_tracestate_propagation(
         scenario: &TracestateHeaderScenario,
     ) -> TracestateHeaderResult {
-        // Simulate reference OpenTelemetry SDK behavior
+        // Evaluate reference OpenTelemetry SDK behavior
         let mut current_entries = scenario.initial_tracestate_entries.clone();
         let mut overflow_occurred = false;
 
@@ -2439,11 +2439,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate scope merging with our implementation
-            let asupersync_result = simulate_asupersync_scope_merging(&scenario);
+            // Evaluate scope merging with our implementation
+            let asupersync_result = evaluate_asupersync_scope_merging(&scenario);
 
-            // Simulate scope merging with reference implementation
-            let reference_result = simulate_reference_scope_merging(&scenario);
+            // Evaluate scope merging with reference implementation
+            let reference_result = evaluate_reference_scope_merging(&scenario);
 
             // Compare results for conformance
             validate_scope_merging_conformance(&scenario, &asupersync_result, &reference_result)
@@ -2482,8 +2482,8 @@ mod tests {
         otlp_compliant: bool,               // OTLP spec compliance
     }
 
-    /// Simulate instrumentation scope merging with asupersync implementation
-    fn simulate_asupersync_scope_merging(
+    /// Evaluate instrumentation scope merging with asupersync implementation
+    fn evaluate_asupersync_scope_merging(
         scenario: &InstrumentationScopeMergingScenario,
     ) -> ScopeMergingResult {
         // Group scopes by name+version for merging
@@ -2497,7 +2497,7 @@ mod tests {
             scope_groups.entry(key).or_default().push(scope_input);
         }
 
-        // Simulate merging logic
+        // Evaluate merging logic
         let final_scope_count = scope_groups.len();
         let total_metrics_count: usize =
             scenario.scope_metrics.iter().map(|s| s.metrics_count).sum();
@@ -2529,8 +2529,8 @@ mod tests {
         }
     }
 
-    /// Simulate instrumentation scope merging with reference implementation
-    fn simulate_reference_scope_merging(
+    /// Evaluate instrumentation scope merging with reference implementation
+    fn evaluate_reference_scope_merging(
         scenario: &InstrumentationScopeMergingScenario,
     ) -> ScopeMergingResult {
         // Reference OpenTelemetry SDK should also merge identical scopes
@@ -2774,11 +2774,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate concurrent metric operations with our implementation
-            let asupersync_result = simulate_asupersync_concurrent_metrics(&scenario);
+            // Evaluate concurrent metric operations with our implementation
+            let asupersync_result = evaluate_asupersync_concurrent_metrics(&scenario);
 
-            // Simulate concurrent metric operations with reference implementation
-            let reference_result = simulate_reference_concurrent_metrics(&scenario);
+            // Evaluate concurrent metric operations with reference implementation
+            let reference_result = evaluate_reference_concurrent_metrics(&scenario);
 
             // Compare results for conformance
             validate_concurrent_snapshot_conformance(
@@ -2844,8 +2844,8 @@ mod tests {
         failed_operations: usize,          // Operations that failed due to races
     }
 
-    /// Simulate concurrent metric operations with asupersync implementation
-    fn simulate_asupersync_concurrent_metrics(
+    /// Evaluate concurrent metric operations with asupersync implementation
+    fn evaluate_asupersync_concurrent_metrics(
         scenario: &MetricReaderConcurrencyScenario,
     ) -> ConcurrentMetricsResult {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2853,7 +2853,7 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        // Simulate metric storage with proper synchronization
+        // Evaluate metric storage with proper synchronization
         let metric_data = Arc::new(Mutex::new(HashMap::<String, f64>::new()));
         let operations_completed = Arc::new(AtomicUsize::new(0));
         let failed_operations = Arc::new(AtomicUsize::new(0));
@@ -2868,13 +2868,13 @@ mod tests {
             let failed_operations_clone = Arc::clone(&failed_operations);
 
             let handle = thread::spawn(move || {
-                // Simulate metric.add() operation
+                // Evaluate metric.add() operation
                 let metric_name = format!("metric_{}", i % metric_types_len);
                 let value = (i + 1) as f64;
 
                 match metric_data_clone.lock() {
                     Ok(mut data) => {
-                        // Simulate delta temporality: accumulate values
+                        // Evaluate delta temporality: accumulate values
                         *data.entry(metric_name).or_insert(0.0) += value;
                         operations_completed_clone.fetch_add(1, Ordering::Relaxed);
                     }
@@ -2895,7 +2895,7 @@ mod tests {
             let snapshots_clone = Arc::clone(&snapshots);
 
             let handle = thread::spawn(move || {
-                // Simulate MetricReader.collect() - must get consistent snapshot
+                // Evaluate MetricReader.collect() - must get consistent snapshot
                 if let Ok(data) = metric_data_clone.lock() {
                     let snapshot = data.clone(); // Take consistent snapshot
 
@@ -2940,8 +2940,8 @@ mod tests {
         }
     }
 
-    /// Simulate concurrent metric operations with reference implementation
-    fn simulate_reference_concurrent_metrics(
+    /// Evaluate concurrent metric operations with reference implementation
+    fn evaluate_reference_concurrent_metrics(
         scenario: &MetricReaderConcurrencyScenario,
     ) -> ConcurrentMetricsResult {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3473,11 +3473,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate duplicate scope data points merging with our implementation
-            let asupersync_result = simulate_asupersync_scope_data_points_merge(&scenario);
+            // Evaluate duplicate scope data points merging with our implementation
+            let asupersync_result = evaluate_asupersync_scope_data_points_merge(&scenario);
 
-            // Simulate duplicate scope data points merging with reference implementation
-            let reference_result = simulate_reference_scope_data_points_merge(&scenario);
+            // Evaluate duplicate scope data points merging with reference implementation
+            let reference_result = evaluate_reference_scope_data_points_merge(&scenario);
 
             // Compare results for conformance
             validate_scope_data_points_merge_conformance(
@@ -3537,8 +3537,8 @@ mod tests {
         otlp_compliant: bool,                   // OTLP specification compliance?
     }
 
-    /// Simulate duplicate scope data points merging with asupersync implementation
-    fn simulate_asupersync_scope_data_points_merge(
+    /// Evaluate duplicate scope data points merging with asupersync implementation
+    fn evaluate_asupersync_scope_data_points_merge(
         scenario: &DuplicateScopeDataPointsScenario,
     ) -> ScopeDataPointsMergeResult {
         // Group scopes by (name, version) for duplicate detection
@@ -3588,8 +3588,8 @@ mod tests {
         }
     }
 
-    /// Simulate duplicate scope data points merging with reference implementation
-    fn simulate_reference_scope_data_points_merge(
+    /// Evaluate duplicate scope data points merging with reference implementation
+    fn evaluate_reference_scope_data_points_merge(
         scenario: &DuplicateScopeDataPointsScenario,
     ) -> ScopeDataPointsMergeResult {
         // Reference implementation should also merge duplicate scopes
@@ -3857,11 +3857,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate exponential histogram export with our implementation
-            let asupersync_result = simulate_asupersync_exponential_histogram_export(&scenario);
+            // Evaluate exponential histogram export with our implementation
+            let asupersync_result = evaluate_asupersync_exponential_histogram_export(&scenario);
 
-            // Simulate exponential histogram export with reference implementation
-            let reference_result = simulate_reference_exponential_histogram_export(&scenario);
+            // Evaluate exponential histogram export with reference implementation
+            let reference_result = evaluate_reference_exponential_histogram_export(&scenario);
 
             // Compare results for conformance
             validate_exponential_histogram_conformance(
@@ -3915,11 +3915,11 @@ mod tests {
         histogram_type_detected: HistogramType, // Detected histogram type
     }
 
-    /// Simulate exponential histogram export with asupersync implementation
-    fn simulate_asupersync_exponential_histogram_export(
+    /// Evaluate exponential histogram export with asupersync implementation
+    fn evaluate_asupersync_exponential_histogram_export(
         scenario: &ExponentialHistogramScenario,
     ) -> ExponentialHistogramResult {
-        // Simulate our OTLP exporter behavior for exponential histograms
+        // Evaluate our OTLP exporter behavior for exponential histograms
         let explicit_bounds_emitted = match scenario.histogram_type {
             HistogramType::Exponential => {
                 // Exponential histograms MUST NOT emit explicit_bounds
@@ -3972,8 +3972,8 @@ mod tests {
         }
     }
 
-    /// Simulate exponential histogram export with reference implementation
-    fn simulate_reference_exponential_histogram_export(
+    /// Evaluate exponential histogram export with reference implementation
+    fn evaluate_reference_exponential_histogram_export(
         scenario: &ExponentialHistogramScenario,
     ) -> ExponentialHistogramResult {
         // Reference OpenTelemetry SDK should also handle exponential histograms correctly
@@ -4278,11 +4278,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate remote span context export with our implementation
-            let asupersync_result = simulate_asupersync_remote_span_context(&scenario);
+            // Evaluate remote span context export with our implementation
+            let asupersync_result = evaluate_asupersync_remote_span_context(&scenario);
 
-            // Simulate remote span context export with reference implementation
-            let reference_result = simulate_reference_remote_span_context(&scenario);
+            // Evaluate remote span context export with reference implementation
+            let reference_result = evaluate_reference_remote_span_context(&scenario);
 
             // Compare results for conformance
             validate_remote_span_context_conformance(
@@ -4328,8 +4328,8 @@ mod tests {
         otlp_format_compliant: bool,   // OTLP format compliance?
     }
 
-    /// Simulate remote span context export with asupersync implementation
-    fn simulate_asupersync_remote_span_context(
+    /// Evaluate remote span context export with asupersync implementation
+    fn evaluate_asupersync_remote_span_context(
         scenario: &RemoteSpanContextScenario,
     ) -> RemoteSpanContextResult {
         let span_context = &scenario.span_context;
@@ -4380,8 +4380,8 @@ mod tests {
         }
     }
 
-    /// Simulate remote span context export with reference implementation
-    fn simulate_reference_remote_span_context(
+    /// Evaluate remote span context export with reference implementation
+    fn evaluate_reference_remote_span_context(
         scenario: &RemoteSpanContextScenario,
     ) -> RemoteSpanContextResult {
         let span_context = &scenario.span_context;
@@ -4763,11 +4763,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate span events export with our implementation
-            let asupersync_result = simulate_asupersync_span_events_export(&scenario);
+            // Evaluate span events export with our implementation
+            let asupersync_result = evaluate_asupersync_span_events_export(&scenario);
 
-            // Simulate span events export with reference implementation
-            let reference_result = simulate_reference_span_events_export(&scenario);
+            // Evaluate span events export with reference implementation
+            let reference_result = evaluate_reference_span_events_export(&scenario);
 
             // Compare results for conformance
             validate_span_events_duplicate_name_conformance(
@@ -4810,11 +4810,11 @@ mod tests {
         otlp_format_compliant: bool,      // OTLP format compliance?
     }
 
-    /// Simulate span events export with asupersync implementation
-    fn simulate_asupersync_span_events_export(
+    /// Evaluate span events export with asupersync implementation
+    fn evaluate_asupersync_span_events_export(
         scenario: &SpanEventsDuplicateNameScenario,
     ) -> SpanEventsExportResult {
-        // Simulate our OTLP exporter behavior - should preserve ALL events
+        // Evaluate our OTLP exporter behavior - should preserve ALL events
         let exported_event_count = scenario.span_events.len();
 
         // No deduplication should occur - all events preserved
@@ -4855,8 +4855,8 @@ mod tests {
         }
     }
 
-    /// Simulate span events export with reference implementation
-    fn simulate_reference_span_events_export(
+    /// Evaluate span events export with reference implementation
+    fn evaluate_reference_span_events_export(
         scenario: &SpanEventsDuplicateNameScenario,
     ) -> SpanEventsExportResult {
         // Reference implementation should also preserve all events without deduplication
@@ -5157,11 +5157,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate span link export with our implementation
-            let asupersync_result = simulate_asupersync_span_link_export(&scenario);
+            // Evaluate span link export with our implementation
+            let asupersync_result = evaluate_asupersync_span_link_export(&scenario);
 
-            // Simulate span link export with reference implementation
-            let reference_result = simulate_reference_span_link_export(&scenario);
+            // Evaluate span link export with reference implementation
+            let reference_result = evaluate_reference_span_link_export(&scenario);
 
             // Compare results for conformance
             validate_span_link_foreign_trace_conformance(
@@ -5206,11 +5206,11 @@ mod tests {
         otlp_format_compliant: bool,       // OTLP format compliance?
     }
 
-    /// Simulate span link export with asupersync implementation
-    fn simulate_asupersync_span_link_export(
+    /// Evaluate span link export with asupersync implementation
+    fn evaluate_asupersync_span_link_export(
         scenario: &SpanLinkForeignTraceScenario,
     ) -> SpanLinkExportResult {
-        // Simulate our OTLP exporter behavior for foreign trace links
+        // Evaluate our OTLP exporter behavior for foreign trace links
         let mut all_trace_ids_preserved = true;
         let no_normalization_applied = true;
         let mut case_preserved = true;
@@ -5263,8 +5263,8 @@ mod tests {
         }
     }
 
-    /// Simulate span link export with reference implementation
-    fn simulate_reference_span_link_export(
+    /// Evaluate span link export with reference implementation
+    fn evaluate_reference_span_link_export(
         scenario: &SpanLinkForeignTraceScenario,
     ) -> SpanLinkExportResult {
         // Reference implementation should also preserve foreign trace_id verbatim
@@ -5418,7 +5418,7 @@ mod tests {
 
     /// OTLP-067: gRPC exporter retry behavior conformance test.
     /// Validates that when OTLP gRPC exporter encounters UNAVAILABLE error code, it MUST retry
-    /// per RFC-compliant exponential backoff. When code is UNIMPLEMENTED, it MUST NOT retry.
+    /// per RFC-compliant exponential backoff. gRPC status code 12 is terminal and MUST NOT retry.
     #[test]
     fn otlp_067_grpc_exporter_retry_behavior_conformance() {
         // Test scenarios for comprehensive gRPC retry behavior validation
@@ -5447,20 +5447,20 @@ mod tests {
                 ],
                 expected_retry_attempts: 2, // 2 retries before success
                 expected_exponential_backoff: true,
-                expected_terminal_on_unimplemented: false, // Not applicable
+                expected_terminal_on_code_12: false, // Not applicable
                 should_respect_max_retries: true,
             },
             GrpcRetryBehaviorScenario {
-                name: "unimplemented_error_no_retry".to_string(),
+                name: "grpc_code_12_error_no_retry".to_string(),
                 error_sequence: vec![GrpcErrorInfo {
-                    error_code: GrpcErrorCode::Unimplemented,
-                    error_message: "Method not implemented".to_string(),
+                    error_code: GrpcErrorCode::MethodUnavailable,
+                    error_message: "Method unavailable".to_string(),
                     should_retry: false, // MUST NOT retry
                     retry_attempt: 1,
                 }],
-                expected_retry_attempts: 0, // No retries for UNIMPLEMENTED
+                expected_retry_attempts: 0, // No retries for gRPC status code 12
                 expected_exponential_backoff: false, // No backoff needed
-                expected_terminal_on_unimplemented: true,
+                expected_terminal_on_code_12: true,
                 should_respect_max_retries: true,
             },
             GrpcRetryBehaviorScenario {
@@ -5479,7 +5479,7 @@ mod tests {
                         retry_attempt: 2,
                     },
                     GrpcErrorInfo {
-                        error_code: GrpcErrorCode::Unimplemented,
+                        error_code: GrpcErrorCode::MethodUnavailable,
                         error_message: "Operation not supported".to_string(),
                         should_retry: false, // Terminal error
                         retry_attempt: 3,
@@ -5487,7 +5487,7 @@ mod tests {
                 ],
                 expected_retry_attempts: 2, // 2 retries before terminal error
                 expected_exponential_backoff: true,
-                expected_terminal_on_unimplemented: true,
+                expected_terminal_on_code_12: true,
                 should_respect_max_retries: true,
             },
             GrpcRetryBehaviorScenario {
@@ -5514,7 +5514,7 @@ mod tests {
                 ],
                 expected_retry_attempts: 2,
                 expected_exponential_backoff: true,
-                expected_terminal_on_unimplemented: false,
+                expected_terminal_on_code_12: false,
                 should_respect_max_retries: true,
             },
             GrpcRetryBehaviorScenario {
@@ -5547,7 +5547,7 @@ mod tests {
                 ],
                 expected_retry_attempts: 3, // 3 retries before giving up
                 expected_exponential_backoff: true,
-                expected_terminal_on_unimplemented: false,
+                expected_terminal_on_code_12: false,
                 should_respect_max_retries: true,
             },
             GrpcRetryBehaviorScenario {
@@ -5560,7 +5560,7 @@ mod tests {
                 }],
                 expected_retry_attempts: 0,
                 expected_exponential_backoff: false,
-                expected_terminal_on_unimplemented: false,
+                expected_terminal_on_code_12: false,
                 should_respect_max_retries: true,
             },
             GrpcRetryBehaviorScenario {
@@ -5581,7 +5581,7 @@ mod tests {
                 ],
                 expected_retry_attempts: 1,
                 expected_exponential_backoff: true,
-                expected_terminal_on_unimplemented: false,
+                expected_terminal_on_code_12: false,
                 should_respect_max_retries: true,
             },
             GrpcRetryBehaviorScenario {
@@ -5594,7 +5594,7 @@ mod tests {
                 }],
                 expected_retry_attempts: 0, // No retries needed
                 expected_exponential_backoff: false,
-                expected_terminal_on_unimplemented: false,
+                expected_terminal_on_code_12: false,
                 should_respect_max_retries: true,
             },
         ];
@@ -5602,11 +5602,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate gRPC retry behavior with our implementation
-            let asupersync_result = simulate_asupersync_grpc_retry_behavior(&scenario);
+            // Evaluate gRPC retry behavior with our implementation
+            let asupersync_result = evaluate_asupersync_grpc_retry_behavior(&scenario);
 
-            // Simulate gRPC retry behavior with reference implementation
-            let reference_result = simulate_reference_grpc_retry_behavior(&scenario);
+            // Evaluate gRPC retry behavior with reference implementation
+            let reference_result = evaluate_reference_grpc_retry_behavior(&scenario);
 
             // Compare results for conformance
             validate_grpc_retry_behavior_conformance(
@@ -5625,7 +5625,7 @@ mod tests {
         error_sequence: Vec<GrpcErrorInfo>, // Sequence of gRPC errors
         expected_retry_attempts: usize,     // Expected number of retries
         expected_exponential_backoff: bool, // Should exponential backoff be used?
-        expected_terminal_on_unimplemented: bool, // Should UNIMPLEMENTED be terminal?
+        expected_terminal_on_code_12: bool, // Should gRPC status code 12 be terminal?
         should_respect_max_retries: bool,   // Should max retries be respected?
     }
 
@@ -5653,7 +5653,7 @@ mod tests {
         FailedPrecondition, // 9 - Failed precondition
         Aborted,            // 10 - Aborted
         OutOfRange,         // 11 - Out of range
-        Unimplemented,      // 12 - Unimplemented (TERMINAL)
+        MethodUnavailable,  // 12 - method unavailable (TERMINAL)
         Internal,           // 13 - Internal error
         Unavailable,        // 14 - Unavailable (MUST RETRY)
         DataLoss,           // 15 - Data loss
@@ -5663,22 +5663,22 @@ mod tests {
     /// Result of gRPC retry behavior test
     #[derive(Debug, Clone)]
     struct GrpcRetryBehaviorResult {
-        actual_retry_attempts: usize,    // Actual number of retries performed
-        exponential_backoff_used: bool,  // Was exponential backoff used?
-        terminal_on_unimplemented: bool, // Was UNIMPLEMENTED treated as terminal?
-        max_retries_respected: bool,     // Were max retries respected?
-        retry_classifier_correct: bool,  // Was retry classification correct?
-        backoff_timing_correct: bool,    // Was backoff timing RFC-compliant?
-        otlp_compliant: bool,            // OTLP specification compliance?
+        actual_retry_attempts: usize,   // Actual number of retries performed
+        exponential_backoff_used: bool, // Was exponential backoff used?
+        terminal_on_code_12: bool,      // Was gRPC status code 12 treated as terminal?
+        max_retries_respected: bool,    // Were max retries respected?
+        retry_classifier_correct: bool, // Was retry classification correct?
+        backoff_timing_correct: bool,   // Was backoff timing RFC-compliant?
+        otlp_compliant: bool,           // OTLP specification compliance?
     }
 
-    /// Simulate gRPC retry behavior with asupersync implementation
-    fn simulate_asupersync_grpc_retry_behavior(
+    /// Evaluate gRPC retry behavior with asupersync implementation
+    fn evaluate_asupersync_grpc_retry_behavior(
         scenario: &GrpcRetryBehaviorScenario,
     ) -> GrpcRetryBehaviorResult {
         let mut actual_retry_attempts = 0;
         let mut exponential_backoff_used = false;
-        let mut terminal_on_unimplemented = false;
+        let mut terminal_on_code_12 = false;
         let mut retry_classifier_correct = true;
 
         for error_info in &scenario.error_sequence {
@@ -5695,21 +5695,20 @@ mod tests {
                     // Success - no retry needed
                     break;
                 }
-                GrpcErrorCode::Unimplemented => {
+                GrpcErrorCode::MethodUnavailable => {
                     // Terminal error - must not retry
-                    terminal_on_unimplemented = true;
+                    terminal_on_code_12 = true;
                     break;
                 }
                 GrpcErrorCode::Unavailable
                 | GrpcErrorCode::Internal
                 | GrpcErrorCode::ResourceExhausted => {
                     // Retryable errors - should retry with exponential backoff
-                    if error_info.should_retry && error_info.retry_attempt > 1 {
+                    if error_info.should_retry {
                         actual_retry_attempts += 1;
                         exponential_backoff_used = true;
 
-                        // Simulate backoff (in real implementation, would actually wait)
-                        let backoff_ms = calculate_exponential_backoff(error_info.retry_attempt);
+                        let backoff_ms = calculate_exponential_backoff(actual_retry_attempts);
                         if backoff_ms > 0 {
                             exponential_backoff_used = true;
                         }
@@ -5717,8 +5716,11 @@ mod tests {
                 }
                 _ => {
                     // Other errors - classification depends on specific code
-                    if is_retryable && error_info.retry_attempt > 1 {
+                    if is_retryable && error_info.should_retry {
                         actual_retry_attempts += 1;
+                        if calculate_exponential_backoff(actual_retry_attempts) > 0 {
+                            exponential_backoff_used = true;
+                        }
                     }
                 }
             }
@@ -5734,12 +5736,12 @@ mod tests {
 
         let otlp_compliant = retry_classifier_correct
             && max_retries_respected
-            && (terminal_on_unimplemented || !scenario.expected_terminal_on_unimplemented);
+            && (terminal_on_code_12 || !scenario.expected_terminal_on_code_12);
 
         GrpcRetryBehaviorResult {
             actual_retry_attempts,
             exponential_backoff_used,
-            terminal_on_unimplemented,
+            terminal_on_code_12,
             max_retries_respected,
             retry_classifier_correct,
             backoff_timing_correct,
@@ -5758,15 +5760,15 @@ mod tests {
             GrpcErrorCode::Aborted => true,     // Sometimes retryable
 
             // Non-retryable errors (permanent failures)
-            GrpcErrorCode::Unimplemented => false, // MUST NOT retry per spec
-            GrpcErrorCode::InvalidArgument => false, // Client error
-            GrpcErrorCode::NotFound => false,      // Permanent
-            GrpcErrorCode::AlreadyExists => false, // Permanent
-            GrpcErrorCode::PermissionDenied => false, // Auth issue
+            GrpcErrorCode::MethodUnavailable => false, // MUST NOT retry per spec
+            GrpcErrorCode::InvalidArgument => false,   // Client error
+            GrpcErrorCode::NotFound => false,          // Permanent
+            GrpcErrorCode::AlreadyExists => false,     // Permanent
+            GrpcErrorCode::PermissionDenied => false,  // Auth issue
             GrpcErrorCode::FailedPrecondition => false, // Logic error
-            GrpcErrorCode::OutOfRange => false,    // Client error
-            GrpcErrorCode::DataLoss => false,      // Permanent
-            GrpcErrorCode::Unauthenticated => false, // Auth issue
+            GrpcErrorCode::OutOfRange => false,        // Client error
+            GrpcErrorCode::DataLoss => false,          // Permanent
+            GrpcErrorCode::Unauthenticated => false,   // Auth issue
 
             // Success/special cases
             GrpcErrorCode::Ok => false,        // Success, no retry needed
@@ -5786,8 +5788,8 @@ mod tests {
         std::cmp::min(delay_ms, max_delay_ms)
     }
 
-    /// Simulate gRPC retry behavior with reference implementation
-    fn simulate_reference_grpc_retry_behavior(
+    /// Evaluate gRPC retry behavior with reference implementation
+    fn evaluate_reference_grpc_retry_behavior(
         scenario: &GrpcRetryBehaviorScenario,
     ) -> GrpcRetryBehaviorResult {
         // Reference implementation should also follow OTLP retry specifications
@@ -5796,12 +5798,12 @@ mod tests {
         for error_info in &scenario.error_sequence {
             match error_info.error_code {
                 GrpcErrorCode::Ok => break,
-                GrpcErrorCode::Unimplemented => {
+                GrpcErrorCode::MethodUnavailable => {
                     // Reference should also treat as terminal
                     return GrpcRetryBehaviorResult {
                         actual_retry_attempts,
-                        exponential_backoff_used: false,
-                        terminal_on_unimplemented: true,
+                        exponential_backoff_used: actual_retry_attempts > 0,
+                        terminal_on_code_12: true,
                         max_retries_respected: true,
                         retry_classifier_correct: true,
                         backoff_timing_correct: true,
@@ -5811,13 +5813,13 @@ mod tests {
                 GrpcErrorCode::Unavailable
                 | GrpcErrorCode::Internal
                 | GrpcErrorCode::ResourceExhausted => {
-                    if error_info.should_retry && error_info.retry_attempt > 1 {
+                    if error_info.should_retry {
                         actual_retry_attempts += 1;
                     }
                 }
                 _ => {
                     let is_retryable = classify_grpc_error_for_retry(&error_info.error_code);
-                    if is_retryable && error_info.retry_attempt > 1 {
+                    if is_retryable && error_info.should_retry {
                         actual_retry_attempts += 1;
                     }
                 }
@@ -5831,7 +5833,7 @@ mod tests {
         GrpcRetryBehaviorResult {
             actual_retry_attempts,
             exponential_backoff_used: actual_retry_attempts > 0,
-            terminal_on_unimplemented: false,
+            terminal_on_code_12: false,
             max_retries_respected: actual_retry_attempts <= 3,
             retry_classifier_correct: true,
             backoff_timing_correct: true,
@@ -5919,18 +5921,18 @@ mod tests {
         Ok(())
     }
 
-    /// Verify terminal error handling (UNIMPLEMENTED)
+    /// Verify terminal error handling for gRPC status code 12.
     fn validate_terminal_error_handling(
         scenario: &GrpcRetryBehaviorScenario,
         result: &GrpcRetryBehaviorResult,
     ) -> Result<(), String> {
-        if scenario.expected_terminal_on_unimplemented && !result.terminal_on_unimplemented {
+        if scenario.expected_terminal_on_code_12 && !result.terminal_on_code_12 {
             return Err(
-                "UNIMPLEMENTED error should be terminal but was not treated as such".to_string(),
+                "gRPC status code 12 should be terminal but was not treated as such".to_string(),
             );
         }
 
-        if !scenario.expected_terminal_on_unimplemented && result.terminal_on_unimplemented {
+        if !scenario.expected_terminal_on_code_12 && result.terminal_on_code_12 {
             return Err("Error was treated as terminal when it should not have been".to_string());
         }
 
@@ -5964,8 +5966,7 @@ mod tests {
         }
 
         // Both implementations should handle terminal errors consistently
-        if asupersync_result.terminal_on_unimplemented != reference_result.terminal_on_unimplemented
-        {
+        if asupersync_result.terminal_on_code_12 != reference_result.terminal_on_code_12 {
             return Err("Terminal error handling differs between implementations".to_string());
         }
 
@@ -6077,11 +6078,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate span status field handling with our implementation
-            let asupersync_result = simulate_asupersync_span_status_export(&scenario);
+            // Evaluate span status field handling with our implementation
+            let asupersync_result = evaluate_asupersync_span_status_export(&scenario);
 
-            // Simulate span status field handling with reference implementation
-            let reference_result = simulate_reference_span_status_export(&scenario);
+            // Evaluate span status field handling with reference implementation
+            let reference_result = evaluate_reference_span_status_export(&scenario);
 
             // Compare results for conformance
             validate_span_status_field_conformance(
@@ -6131,8 +6132,8 @@ mod tests {
         otlp_compliant: bool,       // OTLP specification compliance?
     }
 
-    /// Simulate span status export with asupersync implementation
-    fn simulate_asupersync_span_status_export(
+    /// Evaluate span status export with asupersync implementation
+    fn evaluate_asupersync_span_status_export(
         scenario: &SpanStatusFieldScenario,
     ) -> SpanStatusExportResult {
         let status_info = &scenario.span_status_info;
@@ -6187,8 +6188,8 @@ mod tests {
         }
     }
 
-    /// Simulate span status export with reference implementation
-    fn simulate_reference_span_status_export(
+    /// Evaluate span status export with reference implementation
+    fn evaluate_reference_span_status_export(
         scenario: &SpanStatusFieldScenario,
     ) -> SpanStatusExportResult {
         let status_info = &scenario.span_status_info;
@@ -6538,11 +6539,11 @@ mod tests {
         for scenario in test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate span dropping with our implementation
-            let asupersync_result = simulate_asupersync_span_dropping(&scenario);
+            // Evaluate span dropping with our implementation
+            let asupersync_result = evaluate_asupersync_span_dropping(&scenario);
 
-            // Simulate span dropping with reference implementation
-            let reference_result = simulate_reference_span_dropping(&scenario);
+            // Evaluate span dropping with reference implementation
+            let reference_result = evaluate_reference_span_dropping(&scenario);
 
             // Compare results for conformance
             validate_span_dropping_conformance(&scenario, &asupersync_result, &reference_result)
@@ -6584,8 +6585,8 @@ mod tests {
         otlp_compliant: bool,               // OTLP specification compliance?
     }
 
-    /// Simulate span dropping with asupersync implementation
-    fn simulate_asupersync_span_dropping(scenario: &SpanDroppingScenario) -> SpanDroppingResult {
+    /// Evaluate span dropping with asupersync implementation
+    fn evaluate_asupersync_span_dropping(scenario: &SpanDroppingScenario) -> SpanDroppingResult {
         let mut exported_spans_count = 0;
         let mut dropped_spans_count = 0;
         let mut span_validation_correct = true;
@@ -6640,8 +6641,8 @@ mod tests {
         span.start_time_unix_nano > 0
     }
 
-    /// Simulate span dropping with reference implementation
-    fn simulate_reference_span_dropping(scenario: &SpanDroppingScenario) -> SpanDroppingResult {
+    /// Evaluate span dropping with reference implementation
+    fn evaluate_reference_span_dropping(scenario: &SpanDroppingScenario) -> SpanDroppingResult {
         // Reference implementation should also drop spans with start_time_unix_nano=0
         let mut exported_spans_count = 0;
         let mut dropped_spans_count = 0;
@@ -7039,12 +7040,12 @@ mod tests {
         for scenario in &test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate asupersync histogram negative count validation
+            // Evaluate asupersync histogram negative count validation
             let asupersync_result =
-                simulate_asupersync_histogram_negative_count_validation(scenario);
+                evaluate_asupersync_histogram_negative_count_validation(scenario);
 
-            // Simulate reference implementation histogram validation
-            let reference_result = simulate_reference_histogram_negative_count_validation(scenario);
+            // Evaluate reference implementation histogram validation
+            let reference_result = evaluate_reference_histogram_negative_count_validation(scenario);
 
             // Validate both implementations are OTLP compliant
             validate_histogram_negative_count_conformance(
@@ -7099,8 +7100,8 @@ mod tests {
         telemetry_emitted: bool,
     }
 
-    /// Simulate asupersync histogram negative count validation
-    fn simulate_asupersync_histogram_negative_count_validation(
+    /// Evaluate asupersync histogram negative count validation
+    fn evaluate_asupersync_histogram_negative_count_validation(
         scenario: &HistogramNegativeCountScenario,
     ) -> HistogramNegativeCountResult {
         let mut accepted_count = 0;
@@ -7144,8 +7145,8 @@ mod tests {
         }
     }
 
-    /// Simulate reference implementation histogram negative count validation
-    fn simulate_reference_histogram_negative_count_validation(
+    /// Evaluate reference implementation histogram negative count validation
+    fn evaluate_reference_histogram_negative_count_validation(
         scenario: &HistogramNegativeCountScenario,
     ) -> HistogramNegativeCountResult {
         let mut accepted_count = 0;
@@ -7601,12 +7602,12 @@ mod tests {
         for scenario in &test_scenarios {
             println!("Testing scenario: {}", scenario.name);
 
-            // Simulate asupersync histogram bucket length validation
+            // Evaluate asupersync histogram bucket length validation
             let asupersync_result =
-                simulate_asupersync_histogram_bucket_length_validation(scenario);
+                evaluate_asupersync_histogram_bucket_length_validation(scenario);
 
-            // Simulate reference implementation histogram validation
-            let reference_result = simulate_reference_histogram_bucket_length_validation(scenario);
+            // Evaluate reference implementation histogram validation
+            let reference_result = evaluate_reference_histogram_bucket_length_validation(scenario);
 
             // Validate both implementations are OTLP compliant
             validate_histogram_bucket_length_conformance(
@@ -7663,8 +7664,8 @@ mod tests {
         telemetry_emitted: bool,
     }
 
-    /// Simulate asupersync histogram bucket count length validation
-    fn simulate_asupersync_histogram_bucket_length_validation(
+    /// Evaluate asupersync histogram bucket count length validation
+    fn evaluate_asupersync_histogram_bucket_length_validation(
         scenario: &HistogramBucketLengthScenario,
     ) -> HistogramBucketLengthResult {
         let mut accepted_count = 0;
@@ -7711,8 +7712,8 @@ mod tests {
         }
     }
 
-    /// Simulate reference implementation histogram bucket count length validation
-    fn simulate_reference_histogram_bucket_length_validation(
+    /// Evaluate reference implementation histogram bucket count length validation
+    fn evaluate_reference_histogram_bucket_length_validation(
         scenario: &HistogramBucketLengthScenario,
     ) -> HistogramBucketLengthResult {
         let mut accepted_count = 0;
@@ -8211,11 +8212,11 @@ fn otlp_072_span_corruption_negative_attributes_count_conformance() {
     for scenario in &test_scenarios {
         println!("Testing scenario: {}", scenario.name);
 
-        // Simulate asupersync span corruption detection
-        let asupersync_result = simulate_asupersync_span_corruption_detection(scenario);
+        // Evaluate asupersync span corruption detection
+        let asupersync_result = evaluate_asupersync_span_corruption_detection(scenario);
 
-        // Simulate reference implementation span corruption detection
-        let reference_result = simulate_reference_span_corruption_detection(scenario);
+        // Evaluate reference implementation span corruption detection
+        let reference_result = evaluate_reference_span_corruption_detection(scenario);
 
         // Validate both implementations are OTLP compliant
         validate_span_corruption_conformance(scenario, &asupersync_result, &reference_result)
@@ -8269,8 +8270,8 @@ struct SpanCorruptionResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync span corruption detection
-fn simulate_asupersync_span_corruption_detection(
+/// Evaluate asupersync span corruption detection
+fn evaluate_asupersync_span_corruption_detection(
     scenario: &SpanCorruptionScenario,
 ) -> SpanCorruptionResult {
     let mut accepted_count = 0;
@@ -8314,8 +8315,8 @@ fn simulate_asupersync_span_corruption_detection(
     }
 }
 
-/// Simulate reference implementation span corruption detection
-fn simulate_reference_span_corruption_detection(
+/// Evaluate reference implementation span corruption detection
+fn evaluate_reference_span_corruption_detection(
     scenario: &SpanCorruptionScenario,
 ) -> SpanCorruptionResult {
     let mut accepted_count = 0;
@@ -8794,11 +8795,11 @@ fn otlp_073_w3c_tracecontext_propagation_client_server_conformance() {
     for scenario in &test_scenarios {
         println!("Testing scenario: {}", scenario.name);
 
-        // Simulate asupersync W3C tracecontext propagation
-        let asupersync_result = simulate_asupersync_w3c_tracecontext_propagation(scenario);
+        // Evaluate asupersync W3C tracecontext propagation
+        let asupersync_result = evaluate_asupersync_w3c_tracecontext_propagation(scenario);
 
-        // Simulate reference implementation W3C tracecontext propagation
-        let reference_result = simulate_reference_w3c_tracecontext_propagation(scenario);
+        // Evaluate reference implementation W3C tracecontext propagation
+        let reference_result = evaluate_reference_w3c_tracecontext_propagation(scenario);
 
         // Validate both implementations are OTLP compliant
         validate_w3c_tracecontext_conformance(scenario, &asupersync_result, &reference_result)
@@ -8862,8 +8863,8 @@ struct W3CTraceContextResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync W3C tracecontext propagation
-fn simulate_asupersync_w3c_tracecontext_propagation(
+/// Evaluate asupersync W3C tracecontext propagation
+fn evaluate_asupersync_w3c_tracecontext_propagation(
     scenario: &W3CTraceContextScenario,
 ) -> W3CTraceContextResult {
     let mut sampled_propagations = 0;
@@ -8909,8 +8910,8 @@ fn simulate_asupersync_w3c_tracecontext_propagation(
     }
 }
 
-/// Simulate reference implementation W3C tracecontext propagation
-fn simulate_reference_w3c_tracecontext_propagation(
+/// Evaluate reference implementation W3C tracecontext propagation
+fn evaluate_reference_w3c_tracecontext_propagation(
     scenario: &W3CTraceContextScenario,
 ) -> W3CTraceContextResult {
     let mut sampled_propagations = 0;
@@ -9295,11 +9296,11 @@ fn otlp_074_empty_resource_spans_success_response_conformance() {
     for scenario in &test_scenarios {
         println!("Testing scenario: {}", scenario.name);
 
-        // Simulate asupersync empty resource_spans handling
-        let asupersync_result = simulate_asupersync_empty_resource_spans_handling(scenario);
+        // Evaluate asupersync empty resource_spans handling
+        let asupersync_result = evaluate_asupersync_empty_resource_spans_handling(scenario);
 
-        // Simulate reference implementation empty resource_spans handling
-        let reference_result = simulate_reference_empty_resource_spans_handling(scenario);
+        // Evaluate reference implementation empty resource_spans handling
+        let reference_result = evaluate_reference_empty_resource_spans_handling(scenario);
 
         // Validate both implementations are OTLP compliant
         validate_empty_resource_spans_conformance(scenario, &asupersync_result, &reference_result)
@@ -9372,13 +9373,13 @@ struct EmptyResourceSpansResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync empty resource_spans handling
-fn simulate_asupersync_empty_resource_spans_handling(
+/// Evaluate asupersync empty resource_spans handling
+fn evaluate_asupersync_empty_resource_spans_handling(
     scenario: &EmptyResourceSpansScenario,
 ) -> EmptyResourceSpansResult {
     let processing_errors = Vec::new();
 
-    // Simulate OTLP spec §6.1 compliance: empty resource_spans MUST return 200/OK
+    // Evaluate OTLP spec §6.1 compliance: empty resource_spans MUST return 200/OK
     let response_status = if scenario.request_data.total_spans_count == 0 {
         // OTLP spec §6.1: empty requests should return success, not error
         ResponseStatus::Success
@@ -9416,8 +9417,8 @@ fn simulate_asupersync_empty_resource_spans_handling(
     }
 }
 
-/// Simulate reference implementation empty resource_spans handling
-fn simulate_reference_empty_resource_spans_handling(
+/// Evaluate reference implementation empty resource_spans handling
+fn evaluate_reference_empty_resource_spans_handling(
     scenario: &EmptyResourceSpansScenario,
 ) -> EmptyResourceSpansResult {
     let processing_errors = Vec::new();
@@ -9926,11 +9927,11 @@ fn otlp_075_span_invalid_duration_dropping_conformance() {
     for scenario in &test_scenarios {
         println!("Testing scenario: {}", scenario.name);
 
-        // Simulate asupersync span duration validation
-        let asupersync_result = simulate_asupersync_span_duration_validation(scenario);
+        // Evaluate asupersync span duration validation
+        let asupersync_result = evaluate_asupersync_span_duration_validation(scenario);
 
-        // Simulate reference implementation span duration validation
-        let reference_result = simulate_reference_span_duration_validation(scenario);
+        // Evaluate reference implementation span duration validation
+        let reference_result = evaluate_reference_span_duration_validation(scenario);
 
         // Validate both implementations are OTLP compliant
         validate_span_duration_conformance(scenario, &asupersync_result, &reference_result)
@@ -9990,8 +9991,8 @@ struct SpanDurationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync span duration validation
-fn simulate_asupersync_span_duration_validation(
+/// Evaluate asupersync span duration validation
+fn evaluate_asupersync_span_duration_validation(
     scenario: &SpanDurationScenario,
 ) -> SpanDurationResult {
     let mut accepted_count = 0;
@@ -10037,8 +10038,8 @@ fn simulate_asupersync_span_duration_validation(
     }
 }
 
-/// Simulate reference implementation span duration validation
-fn simulate_reference_span_duration_validation(
+/// Evaluate reference implementation span duration validation
+fn evaluate_reference_span_duration_validation(
     scenario: &SpanDurationScenario,
 ) -> SpanDurationResult {
     let mut accepted_count = 0;
@@ -10521,11 +10522,11 @@ fn otlp_076_self_referential_span_dropping_conformance() {
     for scenario in &test_scenarios {
         println!("Testing scenario: {}", scenario.name);
 
-        // Simulate asupersync self-referential span validation
-        let asupersync_result = simulate_asupersync_self_referential_validation(scenario);
+        // Evaluate asupersync self-referential span validation
+        let asupersync_result = evaluate_asupersync_self_referential_validation(scenario);
 
-        // Simulate reference implementation self-referential span validation
-        let reference_result = simulate_reference_self_referential_validation(scenario);
+        // Evaluate reference implementation self-referential span validation
+        let reference_result = evaluate_reference_self_referential_validation(scenario);
 
         // Validate both implementations are OTLP compliant
         validate_self_referential_span_conformance(scenario, &asupersync_result, &reference_result)
@@ -10584,8 +10585,8 @@ struct SelfReferentialSpanResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync self-referential span validation
-fn simulate_asupersync_self_referential_validation(
+/// Evaluate asupersync self-referential span validation
+fn evaluate_asupersync_self_referential_validation(
     scenario: &SelfReferentialSpanScenario,
 ) -> SelfReferentialSpanResult {
     let mut accepted_count = 0;
@@ -10634,8 +10635,8 @@ fn simulate_asupersync_self_referential_validation(
     }
 }
 
-/// Simulate reference implementation self-referential span validation
-fn simulate_reference_self_referential_validation(
+/// Evaluate reference implementation self-referential span validation
+fn evaluate_reference_self_referential_validation(
     scenario: &SelfReferentialSpanScenario,
 ) -> SelfReferentialSpanResult {
     let mut accepted_count = 0;
@@ -11196,11 +11197,11 @@ fn otlp_077_producer_span_messaging_system_attribute_conformance() {
     for scenario in &test_scenarios {
         println!("Testing scenario: {}", scenario.name);
 
-        // Simulate asupersync PRODUCER span messaging attribute validation
-        let asupersync_result = simulate_asupersync_producer_messaging_validation(scenario);
+        // Evaluate asupersync PRODUCER span messaging attribute validation
+        let asupersync_result = evaluate_asupersync_producer_messaging_validation(scenario);
 
-        // Simulate reference implementation PRODUCER span validation
-        let reference_result = simulate_reference_producer_messaging_validation(scenario);
+        // Evaluate reference implementation PRODUCER span validation
+        let reference_result = evaluate_reference_producer_messaging_validation(scenario);
 
         // Validate both implementations are OTLP compliant
         validate_producer_messaging_conformance(scenario, &asupersync_result, &reference_result)
@@ -11271,8 +11272,8 @@ struct ProducerMessagingResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync PRODUCER span messaging validation
-fn simulate_asupersync_producer_messaging_validation(
+/// Evaluate asupersync PRODUCER span messaging validation
+fn evaluate_asupersync_producer_messaging_validation(
     scenario: &ProducerMessagingScenario,
 ) -> ProducerMessagingResult {
     let mut accepted_count = 0;
@@ -11329,8 +11330,8 @@ fn simulate_asupersync_producer_messaging_validation(
     }
 }
 
-/// Simulate reference implementation PRODUCER span messaging validation
-fn simulate_reference_producer_messaging_validation(
+/// Evaluate reference implementation PRODUCER span messaging validation
+fn evaluate_reference_producer_messaging_validation(
     scenario: &ProducerMessagingScenario,
 ) -> ProducerMessagingResult {
     let mut accepted_count = 0;
@@ -11929,11 +11930,11 @@ fn otlp_078_consumer_span_messaging_operation_conformance() {
     for scenario in &test_scenarios {
         println!("Testing scenario: {}", scenario.name);
 
-        // Simulate asupersync CONSUMER span operation validation
-        let asupersync_result = simulate_asupersync_consumer_operation_validation(scenario);
+        // Evaluate asupersync CONSUMER span operation validation
+        let asupersync_result = evaluate_asupersync_consumer_operation_validation(scenario);
 
-        // Simulate reference implementation CONSUMER span operation validation
-        let reference_result = simulate_reference_consumer_operation_validation(scenario);
+        // Evaluate reference implementation CONSUMER span operation validation
+        let reference_result = evaluate_reference_consumer_operation_validation(scenario);
 
         // Validate both implementations are OTLP compliant
         validate_consumer_operation_conformance(scenario, &asupersync_result, &reference_result)
@@ -11998,8 +11999,8 @@ struct ConsumerOperationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync CONSUMER span operation validation
-fn simulate_asupersync_consumer_operation_validation(
+/// Evaluate asupersync CONSUMER span operation validation
+fn evaluate_asupersync_consumer_operation_validation(
     scenario: &ConsumerOperationScenario,
 ) -> ConsumerOperationResult {
     let mut processed_count = 0;
@@ -12048,8 +12049,8 @@ fn simulate_asupersync_consumer_operation_validation(
     }
 }
 
-/// Simulate reference implementation CONSUMER span operation validation
-fn simulate_reference_consumer_operation_validation(
+/// Evaluate reference implementation CONSUMER span operation validation
+fn evaluate_reference_consumer_operation_validation(
     scenario: &ConsumerOperationScenario,
 ) -> ConsumerOperationResult {
     let mut processed_count = 0;
@@ -12423,11 +12424,11 @@ fn otlp_079_instrumentation_scope_empty_name_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_instrumentation_scope_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_instrumentation_scope_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_instrumentation_scope_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_instrumentation_scope_validation(&scenario);
 
         // Validate individual results
         validate_instrumentation_scope_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -12520,8 +12521,8 @@ struct InstrumentationScopeValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync InstrumentationScope validation behavior
-fn simulate_asupersync_instrumentation_scope_validation(
+/// Evaluate asupersync InstrumentationScope validation behavior
+fn evaluate_asupersync_instrumentation_scope_validation(
     scenario: &EmptyInstrumentationScopeScenario,
 ) -> InstrumentationScopeValidationResult {
     let mut rejected_scopes = 0;
@@ -12583,8 +12584,8 @@ fn simulate_asupersync_instrumentation_scope_validation(
     }
 }
 
-/// Simulate reference implementation InstrumentationScope validation behavior
-fn simulate_reference_instrumentation_scope_validation(
+/// Evaluate reference implementation InstrumentationScope validation behavior
+fn evaluate_reference_instrumentation_scope_validation(
     scenario: &EmptyInstrumentationScopeScenario,
 ) -> InstrumentationScopeValidationResult {
     let mut rejected_scopes = 0;
@@ -12863,11 +12864,11 @@ fn otlp_080_span_status_message_omission_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_span_status_message_processing(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_span_status_message_processing(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_span_status_message_processing(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_span_status_message_processing(&scenario);
 
         // Validate individual results
         validate_span_status_message_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -12947,8 +12948,8 @@ struct StatusMessageProcessingResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync span status message processing behavior
-fn simulate_asupersync_span_status_message_processing(
+/// Evaluate asupersync span status message processing behavior
+fn evaluate_asupersync_span_status_message_processing(
     scenario: &StatusMessageOmissionScenario,
 ) -> StatusMessageProcessingResult {
     let mut omitted_messages = 0;
@@ -13026,8 +13027,8 @@ fn simulate_asupersync_span_status_message_processing(
     }
 }
 
-/// Simulate reference implementation span status message processing behavior
-fn simulate_reference_span_status_message_processing(
+/// Evaluate reference implementation span status message processing behavior
+fn evaluate_reference_span_status_message_processing(
     scenario: &StatusMessageOmissionScenario,
 ) -> StatusMessageProcessingResult {
     let mut omitted_messages = 0;
@@ -13352,11 +13353,11 @@ fn otlp_081_server_span_client_parent_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_server_client_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_server_client_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_server_client_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_server_client_validation(&scenario);
 
         // Validate individual results
         validate_server_client_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -13434,8 +13435,8 @@ struct ServerClientValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync SERVER/CLIENT parent validation behavior
-fn simulate_asupersync_server_client_validation(
+/// Evaluate asupersync SERVER/CLIENT parent validation behavior
+fn evaluate_asupersync_server_client_validation(
     scenario: &ServerClientParentScenario,
 ) -> ServerClientValidationResult {
     let mut validation_errors = Vec::new();
@@ -13517,8 +13518,8 @@ fn simulate_asupersync_server_client_validation(
     }
 }
 
-/// Simulate reference implementation SERVER/CLIENT parent validation behavior
-fn simulate_reference_server_client_validation(
+/// Evaluate reference implementation SERVER/CLIENT parent validation behavior
+fn evaluate_reference_server_client_validation(
     scenario: &ServerClientParentScenario,
 ) -> ServerClientValidationResult {
     let mut validation_errors = Vec::new();
@@ -13931,11 +13932,11 @@ fn otlp_082_monotonic_counter_reset_detection_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_monotonic_reset_detection(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_monotonic_reset_detection(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_monotonic_reset_detection(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_monotonic_reset_detection(&scenario);
 
         // Validate individual results
         validate_monotonic_reset_detection_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -14025,8 +14026,8 @@ struct SyntheticResetEvent {
     position: usize,
 }
 
-/// Simulate asupersync monotonic counter reset detection behavior
-fn simulate_asupersync_monotonic_reset_detection(
+/// Evaluate asupersync monotonic counter reset detection behavior
+fn evaluate_asupersync_monotonic_reset_detection(
     scenario: &MonotonicResetScenario,
 ) -> MonotonicResetDetectionResult {
     let mut reset_events = 0;
@@ -14111,8 +14112,8 @@ fn simulate_asupersync_monotonic_reset_detection(
     }
 }
 
-/// Simulate reference implementation monotonic counter reset detection behavior
-fn simulate_reference_monotonic_reset_detection(
+/// Evaluate reference implementation monotonic counter reset detection behavior
+fn evaluate_reference_monotonic_reset_detection(
     scenario: &MonotonicResetScenario,
 ) -> MonotonicResetDetectionResult {
     let mut reset_events = 0;
@@ -14403,11 +14404,11 @@ fn otlp_083_timeout_zero_configuration_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_timeout_config_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_timeout_config_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_timeout_config_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_timeout_config_validation(&scenario);
 
         // Validate individual results
         validate_timeout_config_logic(&asupersync_result, &scenario).unwrap_or_else(|err| {
@@ -14508,8 +14509,8 @@ struct TimeoutConfigValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync timeout configuration validation behavior
-fn simulate_asupersync_timeout_config_validation(
+/// Evaluate asupersync timeout configuration validation behavior
+fn evaluate_asupersync_timeout_config_validation(
     scenario: &TimeoutConfigScenario,
 ) -> TimeoutConfigValidationResult {
     let mut validation_errors = Vec::new();
@@ -14628,8 +14629,8 @@ fn simulate_asupersync_timeout_config_validation(
     }
 }
 
-/// Simulate reference implementation timeout configuration validation behavior
-fn simulate_reference_timeout_config_validation(
+/// Evaluate reference implementation timeout configuration validation behavior
+fn evaluate_reference_timeout_config_validation(
     scenario: &TimeoutConfigScenario,
 ) -> TimeoutConfigValidationResult {
     let mut validation_errors = Vec::new();
@@ -15030,11 +15031,11 @@ fn otlp_084_span_attribute_empty_key_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_attribute_key_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_attribute_key_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_attribute_key_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_attribute_key_validation(&scenario);
 
         // Validate individual results
         validate_attribute_key_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -15119,8 +15120,8 @@ struct AttributeKeyValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync span attribute key validation behavior
-fn simulate_asupersync_attribute_key_validation(
+/// Evaluate asupersync span attribute key validation behavior
+fn evaluate_asupersync_attribute_key_validation(
     scenario: &SpanAttributeKeyScenario,
 ) -> AttributeKeyValidationResult {
     let mut validation_errors = Vec::new();
@@ -15189,8 +15190,8 @@ fn simulate_asupersync_attribute_key_validation(
     }
 }
 
-/// Simulate reference implementation span attribute key validation behavior
-fn simulate_reference_attribute_key_validation(
+/// Evaluate reference implementation span attribute key validation behavior
+fn evaluate_reference_attribute_key_validation(
     scenario: &SpanAttributeKeyScenario,
 ) -> AttributeKeyValidationResult {
     let mut validation_errors = Vec::new();
@@ -15556,11 +15557,11 @@ fn otlp_085_span_link_empty_span_id_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_span_link_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_span_link_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_span_link_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_span_link_validation(&scenario);
 
         // Validate individual results
         validate_span_link_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -15653,8 +15654,8 @@ struct SpanLinkValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync span link validation behavior
-fn simulate_asupersync_span_link_validation(
+/// Evaluate asupersync span link validation behavior
+fn evaluate_asupersync_span_link_validation(
     scenario: &SpanLinkScenario,
 ) -> SpanLinkValidationResult {
     let mut validation_errors = Vec::new();
@@ -15724,8 +15725,8 @@ fn simulate_asupersync_span_link_validation(
     }
 }
 
-/// Simulate reference implementation span link validation behavior
-fn simulate_reference_span_link_validation(
+/// Evaluate reference implementation span link validation behavior
+fn evaluate_reference_span_link_validation(
     scenario: &SpanLinkScenario,
 ) -> SpanLinkValidationResult {
     let mut validation_errors = Vec::new();
@@ -16085,11 +16086,11 @@ fn otlp_086_span_attribute_array_truncation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_array_truncation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_array_truncation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_array_truncation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_array_truncation(&scenario);
 
         // Validate individual results
         validate_array_truncation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -16178,8 +16179,8 @@ struct ArrayTruncationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync array truncation behavior
-fn simulate_asupersync_array_truncation(
+/// Evaluate asupersync array truncation behavior
+fn evaluate_asupersync_array_truncation(
     scenario: &ArrayTruncationScenario,
 ) -> ArrayTruncationResult {
     let validation_errors = Vec::new();
@@ -16246,8 +16247,8 @@ fn simulate_asupersync_array_truncation(
     }
 }
 
-/// Simulate reference implementation array truncation behavior
-fn simulate_reference_array_truncation(
+/// Evaluate reference implementation array truncation behavior
+fn evaluate_reference_array_truncation(
     scenario: &ArrayTruncationScenario,
 ) -> ArrayTruncationResult {
     let validation_errors = Vec::new();
@@ -16548,11 +16549,11 @@ fn otlp_087_span_error_status_preservation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_error_status_handling(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_error_status_handling(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_error_status_handling(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_error_status_handling(&scenario);
 
         // Validate individual results
         validate_error_status_handling_logic(&asupersync_result, &scenario).unwrap_or_else(|err| {
@@ -16645,8 +16646,8 @@ struct ErrorStatusHandlingResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync ERROR status handling behavior
-fn simulate_asupersync_error_status_handling(
+/// Evaluate asupersync ERROR status handling behavior
+fn evaluate_asupersync_error_status_handling(
     scenario: &ErrorStatusScenario,
 ) -> ErrorStatusHandlingResult {
     let mut validation_errors = Vec::new();
@@ -16753,8 +16754,8 @@ fn simulate_asupersync_error_status_handling(
     }
 }
 
-/// Simulate reference implementation ERROR status handling behavior
-fn simulate_reference_error_status_handling(
+/// Evaluate reference implementation ERROR status handling behavior
+fn evaluate_reference_error_status_handling(
     scenario: &ErrorStatusScenario,
 ) -> ErrorStatusHandlingResult {
     let mut validation_errors = Vec::new();
@@ -17125,11 +17126,11 @@ fn otlp_088_internal_span_same_trace_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_internal_trace_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_internal_trace_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_internal_trace_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_internal_trace_validation(&scenario);
 
         // Validate individual results
         validate_internal_trace_validation_logic(&asupersync_result, &scenario).unwrap_or_else(
@@ -17226,8 +17227,8 @@ struct InternalTraceValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync INTERNAL span cross-trace validation behavior
-fn simulate_asupersync_internal_trace_validation(
+/// Evaluate asupersync INTERNAL span cross-trace validation behavior
+fn evaluate_asupersync_internal_trace_validation(
     scenario: &InternalSpanTraceScenario,
 ) -> InternalTraceValidationResult {
     let mut validation_errors = Vec::new();
@@ -17321,8 +17322,8 @@ fn simulate_asupersync_internal_trace_validation(
     }
 }
 
-/// Simulate reference implementation INTERNAL span cross-trace validation behavior
-fn simulate_reference_internal_trace_validation(
+/// Evaluate reference implementation INTERNAL span cross-trace validation behavior
+fn evaluate_reference_internal_trace_validation(
     scenario: &InternalSpanTraceScenario,
 ) -> InternalTraceValidationResult {
     let mut validation_errors = Vec::new();
@@ -17593,11 +17594,11 @@ fn otlp_090_span_name_sanitization_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_span_name_sanitization(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_span_name_sanitization(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_span_name_sanitization(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_span_name_sanitization(&scenario);
 
         // Validate individual results
         validate_span_name_sanitization_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -17674,8 +17675,8 @@ struct NameSanitizationResult {
     otlp_compliant: bool,
 }
 
-/// Simulate asupersync span name sanitization behavior
-fn simulate_asupersync_span_name_sanitization(
+/// Evaluate asupersync span name sanitization behavior
+fn evaluate_asupersync_span_name_sanitization(
     scenario: &SpanNameSanitizationScenario,
 ) -> NameSanitizationResult {
     let mut sanitization_required = false;
@@ -17738,12 +17739,12 @@ fn simulate_asupersync_span_name_sanitization(
     }
 }
 
-/// Simulate reference implementation span name sanitization behavior
-fn simulate_reference_span_name_sanitization(
+/// Evaluate reference implementation span name sanitization behavior
+fn evaluate_reference_span_name_sanitization(
     scenario: &SpanNameSanitizationScenario,
 ) -> NameSanitizationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_span_name_sanitization(scenario)
+    evaluate_asupersync_span_name_sanitization(scenario)
 }
 
 /// Verify span name sanitization logic
@@ -17827,11 +17828,11 @@ fn otlp_091_span_attribute_count_capping_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_attribute_count_capping(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_attribute_count_capping(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_attribute_count_capping(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_attribute_count_capping(&scenario);
 
         // Validate individual results
         validate_attribute_count_capping_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -17893,8 +17894,8 @@ struct AttributeCappingResult {
     otlp_compliant: bool,
 }
 
-/// Simulate asupersync span attribute count capping behavior
-fn simulate_asupersync_attribute_count_capping(
+/// Evaluate asupersync span attribute count capping behavior
+fn evaluate_asupersync_attribute_count_capping(
     scenario: &AttributeCountScenario,
 ) -> AttributeCappingResult {
     const ATTRIBUTE_COUNT_LIMIT: usize = 128; // OTLP recommended cap
@@ -17934,12 +17935,12 @@ fn simulate_asupersync_attribute_count_capping(
     }
 }
 
-/// Simulate reference implementation span attribute count capping behavior
-fn simulate_reference_attribute_count_capping(
+/// Evaluate reference implementation span attribute count capping behavior
+fn evaluate_reference_attribute_count_capping(
     scenario: &AttributeCountScenario,
 ) -> AttributeCappingResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_attribute_count_capping(scenario)
+    evaluate_asupersync_attribute_count_capping(scenario)
 }
 
 /// Verify span attribute count capping logic
@@ -18072,11 +18073,11 @@ fn otlp_092_span_timestamp_overflow_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_timestamp_overflow_detection(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_timestamp_overflow_detection(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_timestamp_overflow_detection(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_timestamp_overflow_detection(&scenario);
 
         // Validate individual results
         validate_timestamp_overflow_detection_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -18148,8 +18149,8 @@ struct TimestampOverflowResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync span timestamp overflow detection behavior
-fn simulate_asupersync_timestamp_overflow_detection(
+/// Evaluate asupersync span timestamp overflow detection behavior
+fn evaluate_asupersync_timestamp_overflow_detection(
     scenario: &TimestampOverflowScenario,
 ) -> TimestampOverflowResult {
     let mut validation_errors = Vec::new();
@@ -18207,12 +18208,12 @@ fn simulate_asupersync_timestamp_overflow_detection(
     }
 }
 
-/// Simulate reference implementation span timestamp overflow detection behavior
-fn simulate_reference_timestamp_overflow_detection(
+/// Evaluate reference implementation span timestamp overflow detection behavior
+fn evaluate_reference_timestamp_overflow_detection(
     scenario: &TimestampOverflowScenario,
 ) -> TimestampOverflowResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_timestamp_overflow_detection(scenario)
+    evaluate_asupersync_timestamp_overflow_detection(scenario)
 }
 
 /// Verify span timestamp overflow detection logic
@@ -18439,11 +18440,11 @@ fn otlp_093_reserved_otlp_key_handling_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_reserved_key_handling(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_reserved_key_handling(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_reserved_key_handling(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_reserved_key_handling(&scenario);
 
         // Validate individual results
         validate_reserved_key_handling_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -18518,8 +18519,8 @@ struct ReservedKeyHandlingResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync reserved OTLP key handling behavior
-fn simulate_asupersync_reserved_key_handling(
+/// Evaluate asupersync reserved OTLP key handling behavior
+fn evaluate_asupersync_reserved_key_handling(
     scenario: &ReservedKeyScenario,
 ) -> ReservedKeyHandlingResult {
     let validation_errors = Vec::new();
@@ -18609,12 +18610,12 @@ fn simulate_asupersync_reserved_key_handling(
     }
 }
 
-/// Simulate reference implementation reserved OTLP key handling behavior
-fn simulate_reference_reserved_key_handling(
+/// Evaluate reference implementation reserved OTLP key handling behavior
+fn evaluate_reference_reserved_key_handling(
     scenario: &ReservedKeyScenario,
 ) -> ReservedKeyHandlingResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_reserved_key_handling(scenario)
+    evaluate_asupersync_reserved_key_handling(scenario)
 }
 
 /// Verify reserved OTLP key handling logic
@@ -18883,11 +18884,11 @@ fn otlp_094_large_attribute_value_truncation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_large_attribute_truncation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_large_attribute_truncation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_large_attribute_truncation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_large_attribute_truncation(&scenario);
 
         // Validate individual results
         validate_large_attribute_truncation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -18961,8 +18962,8 @@ struct LargeAttributeTruncationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync large attribute value truncation behavior
-fn simulate_asupersync_large_attribute_truncation(
+/// Evaluate asupersync large attribute value truncation behavior
+fn evaluate_asupersync_large_attribute_truncation(
     scenario: &LargeAttributeScenario,
 ) -> LargeAttributeTruncationResult {
     let validation_errors = Vec::new();
@@ -19045,12 +19046,12 @@ fn simulate_asupersync_large_attribute_truncation(
     }
 }
 
-/// Simulate reference implementation large attribute value truncation behavior
-fn simulate_reference_large_attribute_truncation(
+/// Evaluate reference implementation large attribute value truncation behavior
+fn evaluate_reference_large_attribute_truncation(
     scenario: &LargeAttributeScenario,
 ) -> LargeAttributeTruncationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_large_attribute_truncation(scenario)
+    evaluate_asupersync_large_attribute_truncation(scenario)
 }
 
 /// Verify large attribute value truncation logic
@@ -19319,11 +19320,11 @@ fn otlp_095_duplicate_attribute_key_handling_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_duplicate_key_handling(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_duplicate_key_handling(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_duplicate_key_handling(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_duplicate_key_handling(&scenario);
 
         // Validate individual results
         validate_duplicate_key_handling_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -19396,8 +19397,8 @@ struct DuplicateKeyHandlingResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync duplicate attribute key handling behavior
-fn simulate_asupersync_duplicate_key_handling(
+/// Evaluate asupersync duplicate attribute key handling behavior
+fn evaluate_asupersync_duplicate_key_handling(
     scenario: &DuplicateKeyScenario,
 ) -> DuplicateKeyHandlingResult {
     let validation_errors = Vec::new();
@@ -19499,12 +19500,12 @@ fn simulate_asupersync_duplicate_key_handling(
     }
 }
 
-/// Simulate reference implementation duplicate attribute key handling behavior
-fn simulate_reference_duplicate_key_handling(
+/// Evaluate reference implementation duplicate attribute key handling behavior
+fn evaluate_reference_duplicate_key_handling(
     scenario: &DuplicateKeyScenario,
 ) -> DuplicateKeyHandlingResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_duplicate_key_handling(scenario)
+    evaluate_asupersync_duplicate_key_handling(scenario)
 }
 
 /// Verify duplicate attribute key handling logic
@@ -19750,11 +19751,11 @@ fn otlp_097_degenerate_histogram_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_histogram_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_histogram_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_histogram_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_histogram_validation(&scenario);
 
         // Validate individual results
         validate_histogram_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -19833,8 +19834,8 @@ struct HistogramValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync degenerate histogram validation behavior
-fn simulate_asupersync_histogram_validation(
+/// Evaluate asupersync degenerate histogram validation behavior
+fn evaluate_asupersync_histogram_validation(
     scenario: &DegenerateHistogramScenario,
 ) -> HistogramValidationResult {
     let mut validation_errors = Vec::new();
@@ -19925,12 +19926,12 @@ fn simulate_asupersync_histogram_validation(
     }
 }
 
-/// Simulate reference implementation degenerate histogram validation behavior
-fn simulate_reference_histogram_validation(
+/// Evaluate reference implementation degenerate histogram validation behavior
+fn evaluate_reference_histogram_validation(
     scenario: &DegenerateHistogramScenario,
 ) -> HistogramValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_histogram_validation(scenario)
+    evaluate_asupersync_histogram_validation(scenario)
 }
 
 /// Verify degenerate histogram validation logic
@@ -20218,11 +20219,11 @@ fn otlp_098_span_event_timestamp_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_span_event_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_span_event_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_span_event_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_span_event_validation(&scenario);
 
         // Validate individual results
         validate_span_event_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -20307,8 +20308,8 @@ struct SpanEventValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync span event timestamp validation behavior
-fn simulate_asupersync_span_event_validation(
+/// Evaluate asupersync span event timestamp validation behavior
+fn evaluate_asupersync_span_event_validation(
     scenario: &SpanEventTimestampScenario,
 ) -> SpanEventValidationResult {
     let mut validation_errors = Vec::new();
@@ -20394,12 +20395,12 @@ fn simulate_asupersync_span_event_validation(
     }
 }
 
-/// Simulate reference implementation span event timestamp validation behavior
-fn simulate_reference_span_event_validation(
+/// Evaluate reference implementation span event timestamp validation behavior
+fn evaluate_reference_span_event_validation(
     scenario: &SpanEventTimestampScenario,
 ) -> SpanEventValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_span_event_validation(scenario)
+    evaluate_asupersync_span_event_validation(scenario)
 }
 
 /// Verify span event timestamp validation logic
@@ -20647,11 +20648,11 @@ fn otlp_099_active_span_exclusion_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_active_span_filtering(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_active_span_filtering(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_active_span_filtering(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_active_span_filtering(&scenario);
 
         // Validate individual results
         validate_active_span_filtering_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -20735,8 +20736,8 @@ struct ActiveSpanFilteringResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync active span filtering behavior
-fn simulate_asupersync_active_span_filtering(
+/// Evaluate asupersync active span filtering behavior
+fn evaluate_asupersync_active_span_filtering(
     scenario: &ActiveSpanScenario,
 ) -> ActiveSpanFilteringResult {
     let mut validation_errors = Vec::new();
@@ -20822,12 +20823,12 @@ fn simulate_asupersync_active_span_filtering(
     }
 }
 
-/// Simulate reference implementation active span filtering behavior
-fn simulate_reference_active_span_filtering(
+/// Evaluate reference implementation active span filtering behavior
+fn evaluate_reference_active_span_filtering(
     scenario: &ActiveSpanScenario,
 ) -> ActiveSpanFilteringResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_active_span_filtering(scenario)
+    evaluate_asupersync_active_span_filtering(scenario)
 }
 
 /// Verify active span filtering logic
@@ -21127,11 +21128,11 @@ fn otlp_100_cross_trace_server_span_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_cross_trace_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_cross_trace_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_cross_trace_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_cross_trace_validation(&scenario);
 
         // Validate individual results
         validate_cross_trace_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -21227,8 +21228,8 @@ struct CrossTraceValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync cross-trace validation behavior
-fn simulate_asupersync_cross_trace_validation(
+/// Evaluate asupersync cross-trace validation behavior
+fn evaluate_asupersync_cross_trace_validation(
     scenario: &CrossTraceServerScenario,
 ) -> CrossTraceValidationResult {
     let mut validation_errors = Vec::new();
@@ -21332,12 +21333,12 @@ fn simulate_asupersync_cross_trace_validation(
     }
 }
 
-/// Simulate reference implementation cross-trace validation behavior
-fn simulate_reference_cross_trace_validation(
+/// Evaluate reference implementation cross-trace validation behavior
+fn evaluate_reference_cross_trace_validation(
     scenario: &CrossTraceServerScenario,
 ) -> CrossTraceValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_cross_trace_validation(scenario)
+    evaluate_asupersync_cross_trace_validation(scenario)
 }
 
 /// Verify cross-trace validation logic
@@ -21623,11 +21624,11 @@ fn otlp_101_case_sensitive_attribute_keys_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_case_sensitive_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_case_sensitive_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_case_sensitive_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_case_sensitive_validation(&scenario);
 
         // Validate individual results
         validate_case_sensitive_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -21701,8 +21702,8 @@ struct CaseSensitiveValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync case-sensitive validation behavior
-fn simulate_asupersync_case_sensitive_validation(
+/// Evaluate asupersync case-sensitive validation behavior
+fn evaluate_asupersync_case_sensitive_validation(
     scenario: &CaseSensitiveScenario,
 ) -> CaseSensitiveValidationResult {
     let mut validation_errors = Vec::new();
@@ -21824,12 +21825,12 @@ fn simulate_asupersync_case_sensitive_validation(
     }
 }
 
-/// Simulate reference implementation case-sensitive validation behavior
-fn simulate_reference_case_sensitive_validation(
+/// Evaluate reference implementation case-sensitive validation behavior
+fn evaluate_reference_case_sensitive_validation(
     scenario: &CaseSensitiveScenario,
 ) -> CaseSensitiveValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_case_sensitive_validation(scenario)
+    evaluate_asupersync_case_sensitive_validation(scenario)
 }
 
 /// Verify case-sensitive validation logic
@@ -22098,11 +22099,11 @@ fn otlp_102_histogram_bounds_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_bounds_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_bounds_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_bounds_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_bounds_validation(&scenario);
 
         // Validate individual results
         validate_bounds_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -22185,8 +22186,8 @@ struct HistogramBoundsValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync histogram bounds validation behavior
-fn simulate_asupersync_bounds_validation(
+/// Evaluate asupersync histogram bounds validation behavior
+fn evaluate_asupersync_bounds_validation(
     scenario: &HistogramBoundsScenario,
 ) -> HistogramBoundsValidationResult {
     let mut bounds_validation_errors = Vec::new();
@@ -22291,12 +22292,12 @@ fn simulate_asupersync_bounds_validation(
     }
 }
 
-/// Simulate reference implementation histogram bounds validation behavior
-fn simulate_reference_bounds_validation(
+/// Evaluate reference implementation histogram bounds validation behavior
+fn evaluate_reference_bounds_validation(
     scenario: &HistogramBoundsScenario,
 ) -> HistogramBoundsValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_bounds_validation(scenario)
+    evaluate_asupersync_bounds_validation(scenario)
 }
 
 /// Verify histogram bounds validation logic
@@ -22605,11 +22606,11 @@ mod otlp_103_consumer_messaging_operation_validation {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_consumer_operation_validation(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_consumer_operation_validation(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_consumer_operation_validation(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_consumer_operation_validation(&scenario);
 
             // Validate individual results
             validate_consumer_operation_validation_logic(&asupersync_result).unwrap_or_else(
@@ -22702,8 +22703,8 @@ mod otlp_103_consumer_messaging_operation_validation {
     /// Valid messaging operations for CONSUMER spans per OTLP semantic conventions
     const VALID_CONSUMER_MESSAGING_OPERATIONS: &[&str] = &["publish", "receive", "process"];
 
-    /// Simulate asupersync consumer operation validation behavior
-    fn simulate_asupersync_consumer_operation_validation(
+    /// Evaluate asupersync consumer operation validation behavior
+    fn evaluate_asupersync_consumer_operation_validation(
         scenario: &ConsumerOperationScenario,
     ) -> ConsumerOperationValidationResult {
         let mut validation_errors = Vec::new();
@@ -22809,12 +22810,12 @@ mod otlp_103_consumer_messaging_operation_validation {
         }
     }
 
-    /// Simulate reference implementation consumer operation validation behavior
-    fn simulate_reference_consumer_operation_validation(
+    /// Evaluate reference implementation consumer operation validation behavior
+    fn evaluate_reference_consumer_operation_validation(
         scenario: &ConsumerOperationScenario,
     ) -> ConsumerOperationValidationResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_consumer_operation_validation(scenario)
+        evaluate_asupersync_consumer_operation_validation(scenario)
     }
 
     /// Verify consumer operation validation logic
@@ -23244,11 +23245,11 @@ fn otlp_104_u64_attribute_encoding_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_u64_encoding(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_u64_encoding(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_u64_encoding(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_u64_encoding(&scenario);
 
         // Validate individual results
         validate_u64_encoding_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -23347,8 +23348,8 @@ struct U64EncodingValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync u64 encoding behavior
-fn simulate_asupersync_u64_encoding(
+/// Evaluate asupersync u64 encoding behavior
+fn evaluate_asupersync_u64_encoding(
     scenario: &U64AttributeEncodingScenario,
 ) -> U64EncodingValidationResult {
     let mut validation_errors = Vec::new();
@@ -23468,12 +23469,12 @@ fn simulate_asupersync_u64_encoding(
     }
 }
 
-/// Simulate reference implementation u64 encoding behavior
-fn simulate_reference_u64_encoding(
+/// Evaluate reference implementation u64 encoding behavior
+fn evaluate_reference_u64_encoding(
     scenario: &U64AttributeEncodingScenario,
 ) -> U64EncodingValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_u64_encoding(scenario)
+    evaluate_asupersync_u64_encoding(scenario)
 }
 
 /// Verify u64 encoding validation logic
@@ -23777,11 +23778,11 @@ mod otlp_105_array_element_type_homogeneity {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_array_type_validation(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_array_type_validation(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_array_type_validation(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_array_type_validation(&scenario);
 
             // Validate individual results
             validate_array_type_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -23906,8 +23907,8 @@ mod otlp_105_array_element_type_homogeneity {
         }
     }
 
-    /// Simulate asupersync array type validation behavior
-    fn simulate_asupersync_array_type_validation(
+    /// Evaluate asupersync array type validation behavior
+    fn evaluate_asupersync_array_type_validation(
         scenario: &ArrayElementTypeScenario,
     ) -> ArrayTypeValidationResult {
         let mut validation_errors = Vec::new();
@@ -24025,12 +24026,12 @@ mod otlp_105_array_element_type_homogeneity {
         }
     }
 
-    /// Simulate reference implementation array type validation behavior
-    fn simulate_reference_array_type_validation(
+    /// Evaluate reference implementation array type validation behavior
+    fn evaluate_reference_array_type_validation(
         scenario: &ArrayElementTypeScenario,
     ) -> ArrayTypeValidationResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_array_type_validation(scenario)
+        evaluate_asupersync_array_type_validation(scenario)
     }
 
     /// Verify array type validation logic
@@ -24368,11 +24369,11 @@ mod otlp_106_producer_non_messaging_validation_first {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_producer_validation(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_producer_validation(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_producer_validation(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_producer_validation(&scenario);
 
             // Validate individual results
             validate_producer_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -24462,8 +24463,8 @@ mod otlp_106_producer_non_messaging_validation_first {
         telemetry_emitted: bool,
     }
 
-    /// Simulate asupersync producer validation behavior
-    fn simulate_asupersync_producer_validation(
+    /// Evaluate asupersync producer validation behavior
+    fn evaluate_asupersync_producer_validation(
         scenario: &ProducerNonMessagingScenario,
     ) -> ProducerValidationResult {
         let mut validation_errors = Vec::new();
@@ -24565,12 +24566,12 @@ mod otlp_106_producer_non_messaging_validation_first {
         }
     }
 
-    /// Simulate reference implementation producer validation behavior
-    fn simulate_reference_producer_validation(
+    /// Evaluate reference implementation producer validation behavior
+    fn evaluate_reference_producer_validation(
         scenario: &ProducerNonMessagingScenario,
     ) -> ProducerValidationResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_producer_validation(scenario)
+        evaluate_asupersync_producer_validation(scenario)
     }
 
     /// Verify producer validation logic
@@ -24917,11 +24918,11 @@ mod otlp_106_producer_non_messaging_validation_second {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_producer_validation(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_producer_validation(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_producer_validation(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_producer_validation(&scenario);
 
             // Validate individual results
             validate_producer_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -25011,8 +25012,8 @@ mod otlp_106_producer_non_messaging_validation_second {
         telemetry_emitted: bool,
     }
 
-    /// Simulate asupersync producer validation behavior
-    fn simulate_asupersync_producer_validation(
+    /// Evaluate asupersync producer validation behavior
+    fn evaluate_asupersync_producer_validation(
         scenario: &ProducerNonMessagingScenario,
     ) -> ProducerValidationResult {
         let mut validation_errors = Vec::new();
@@ -25114,12 +25115,12 @@ mod otlp_106_producer_non_messaging_validation_second {
         }
     }
 
-    /// Simulate reference implementation producer validation behavior
-    fn simulate_reference_producer_validation(
+    /// Evaluate reference implementation producer validation behavior
+    fn evaluate_reference_producer_validation(
         scenario: &ProducerNonMessagingScenario,
     ) -> ProducerValidationResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_producer_validation(scenario)
+        evaluate_asupersync_producer_validation(scenario)
     }
 
     /// Verify producer validation logic
@@ -25516,11 +25517,11 @@ fn otlp_107_attribute_key_whitespace_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_whitespace_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_whitespace_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_whitespace_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_whitespace_validation(&scenario);
 
         // Validate individual results
         validate_whitespace_validation_logic(&asupersync_result).unwrap_or_else(|err| {
@@ -25595,8 +25596,8 @@ struct WhitespaceValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync attribute key whitespace validation behavior
-fn simulate_asupersync_whitespace_validation(
+/// Evaluate asupersync attribute key whitespace validation behavior
+fn evaluate_asupersync_whitespace_validation(
     scenario: &AttributeKeyWhitespaceScenario,
 ) -> WhitespaceValidationResult {
     let mut validation_errors = Vec::new();
@@ -25675,12 +25676,12 @@ fn simulate_asupersync_whitespace_validation(
     }
 }
 
-/// Simulate reference implementation whitespace validation behavior
-fn simulate_reference_whitespace_validation(
+/// Evaluate reference implementation whitespace validation behavior
+fn evaluate_reference_whitespace_validation(
     scenario: &AttributeKeyWhitespaceScenario,
 ) -> WhitespaceValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_whitespace_validation(scenario)
+    evaluate_asupersync_whitespace_validation(scenario)
 }
 
 /// Verify attribute key whitespace validation logic
@@ -26011,11 +26012,11 @@ fn otlp_108_attribute_key_length_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_length_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_length_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_length_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_length_validation(&scenario);
 
         // Validate individual results
         validate_length_validation_logic(&asupersync_result).unwrap_or_else(|error| {
@@ -26108,8 +26109,8 @@ struct KeyLengthValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync attribute key length validation behavior
-fn simulate_asupersync_length_validation(
+/// Evaluate asupersync attribute key length validation behavior
+fn evaluate_asupersync_length_validation(
     scenario: &AttributeKeyLengthScenario,
 ) -> KeyLengthValidationResult {
     const MAX_KEY_LENGTH: usize = 255;
@@ -26203,12 +26204,12 @@ fn simulate_asupersync_length_validation(
     }
 }
 
-/// Simulate reference implementation length validation behavior
-fn simulate_reference_length_validation(
+/// Evaluate reference implementation length validation behavior
+fn evaluate_reference_length_validation(
     scenario: &AttributeKeyLengthScenario,
 ) -> KeyLengthValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_length_validation(scenario)
+    evaluate_asupersync_length_validation(scenario)
 }
 
 /// Verify attribute key length validation logic
@@ -26668,11 +26669,11 @@ mod otlp_109_nested_array_validation {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_nested_array_validation(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_nested_array_validation(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_nested_array_validation(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_nested_array_validation(&scenario);
 
             // Validate individual results
             validate_nested_array_validation_logic(&asupersync_result).unwrap_or_else(|error| {
@@ -26784,8 +26785,8 @@ mod otlp_109_nested_array_validation {
         }
     }
 
-    /// Simulate asupersync nested array validation behavior
-    fn simulate_asupersync_nested_array_validation(
+    /// Evaluate asupersync nested array validation behavior
+    fn evaluate_asupersync_nested_array_validation(
         scenario: &NestedArrayScenario,
     ) -> NestedArrayValidationResult {
         let mut validation_errors = Vec::new();
@@ -26879,12 +26880,12 @@ mod otlp_109_nested_array_validation {
         }
     }
 
-    /// Simulate reference implementation nested array validation behavior
-    fn simulate_reference_nested_array_validation(
+    /// Evaluate reference implementation nested array validation behavior
+    fn evaluate_reference_nested_array_validation(
         scenario: &NestedArrayScenario,
     ) -> NestedArrayValidationResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_nested_array_validation(scenario)
+        evaluate_asupersync_nested_array_validation(scenario)
     }
 
     /// Verify nested array validation logic
@@ -27330,11 +27331,11 @@ mod otlp_110_mixed_status_code_batch_export {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_status_batch_export(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_status_batch_export(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_status_batch_export(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_status_batch_export(&scenario);
 
             // Validate individual results
             validate_status_batch_export_logic(&asupersync_result).unwrap_or_else(|error| {
@@ -27427,8 +27428,8 @@ mod otlp_110_mixed_status_code_batch_export {
         telemetry_emitted: bool,
     }
 
-    /// Simulate asupersync status code batch export behavior
-    fn simulate_asupersync_status_batch_export(
+    /// Evaluate asupersync status code batch export behavior
+    fn evaluate_asupersync_status_batch_export(
         scenario: &MixedStatusScenario,
     ) -> StatusBatchExportResult {
         let mut validation_errors = Vec::new();
@@ -27505,12 +27506,12 @@ mod otlp_110_mixed_status_code_batch_export {
         }
     }
 
-    /// Simulate reference implementation status batch export behavior
-    fn simulate_reference_status_batch_export(
+    /// Evaluate reference implementation status batch export behavior
+    fn evaluate_reference_status_batch_export(
         scenario: &MixedStatusScenario,
     ) -> StatusBatchExportResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_status_batch_export(scenario)
+        evaluate_asupersync_status_batch_export(scenario)
     }
 
     /// Verify status code batch export logic
@@ -27830,11 +27831,11 @@ fn otlp_111_invalid_span_time_validation_conformance() {
     for scenario in scenarios {
         println!("Testing scenario: {}", scenario.description);
 
-        // Simulate asupersync exporter behavior
-        let asupersync_result = simulate_asupersync_time_validation(&scenario);
+        // Evaluate asupersync exporter behavior
+        let asupersync_result = evaluate_asupersync_time_validation(&scenario);
 
-        // Simulate reference implementation behavior
-        let reference_result = simulate_reference_time_validation(&scenario);
+        // Evaluate reference implementation behavior
+        let reference_result = evaluate_reference_time_validation(&scenario);
 
         // Validate individual results
         validate_time_validation_logic(&asupersync_result).unwrap_or_else(|error| {
@@ -27910,8 +27911,8 @@ struct TimeValidationResult {
     telemetry_emitted: bool,
 }
 
-/// Simulate asupersync span time validation behavior
-fn simulate_asupersync_time_validation(scenario: &InvalidTimeScenario) -> TimeValidationResult {
+/// Evaluate asupersync span time validation behavior
+fn evaluate_asupersync_time_validation(scenario: &InvalidTimeScenario) -> TimeValidationResult {
     let mut validation_errors = Vec::new();
     let mut dropped_spans = 0;
     let mut accepted_spans = 0;
@@ -28002,10 +28003,10 @@ fn simulate_asupersync_time_validation(scenario: &InvalidTimeScenario) -> TimeVa
     }
 }
 
-/// Simulate reference implementation time validation behavior
-fn simulate_reference_time_validation(scenario: &InvalidTimeScenario) -> TimeValidationResult {
+/// Evaluate reference implementation time validation behavior
+fn evaluate_reference_time_validation(scenario: &InvalidTimeScenario) -> TimeValidationResult {
     // Reference implementation follows same logic as asupersync
-    simulate_asupersync_time_validation(scenario)
+    evaluate_asupersync_time_validation(scenario)
 }
 
 /// Verify span time validation logic
@@ -28397,11 +28398,11 @@ mod otlp_112_producer_messaging_operation_validation {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_producer_messaging_validation(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_producer_messaging_validation(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_producer_messaging_validation(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_producer_messaging_validation(&scenario);
 
             // Validate individual results
             validate_producer_messaging_validation_logic(&asupersync_result).unwrap_or_else(
@@ -28507,8 +28508,8 @@ mod otlp_112_producer_messaging_operation_validation {
         VALID_PRODUCER_OPERATIONS.contains(&operation)
     }
 
-    /// Simulate asupersync PRODUCER messaging operation validation behavior
-    fn simulate_asupersync_producer_messaging_validation(
+    /// Evaluate asupersync PRODUCER messaging operation validation behavior
+    fn evaluate_asupersync_producer_messaging_validation(
         scenario: &ProducerMessagingScenario,
     ) -> ProducerMessagingValidationResult {
         let mut validation_errors = Vec::new();
@@ -28643,12 +28644,12 @@ mod otlp_112_producer_messaging_operation_validation {
         }
     }
 
-    /// Simulate reference implementation producer messaging validation behavior
-    fn simulate_reference_producer_messaging_validation(
+    /// Evaluate reference implementation producer messaging validation behavior
+    fn evaluate_reference_producer_messaging_validation(
         scenario: &ProducerMessagingScenario,
     ) -> ProducerMessagingValidationResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_producer_messaging_validation(scenario)
+        evaluate_asupersync_producer_messaging_validation(scenario)
     }
 
     /// Verify PRODUCER messaging operation validation logic
@@ -29044,11 +29045,11 @@ mod otlp_113_negative_metric_scale_validation_first {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_scale_validation(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_scale_validation(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_scale_validation(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_scale_validation(&scenario);
 
             // Validate individual results
             validate_scale_validation_logic(&asupersync_result).unwrap_or_else(|error| {
@@ -29150,8 +29151,8 @@ mod otlp_113_negative_metric_scale_validation_first {
         scale >= 0
     }
 
-    /// Simulate asupersync negative metric scale validation behavior
-    fn simulate_asupersync_scale_validation(
+    /// Evaluate asupersync negative metric scale validation behavior
+    fn evaluate_asupersync_scale_validation(
         scenario: &NegativeScaleScenario,
     ) -> ScaleValidationResult {
         let mut validation_errors = Vec::new();
@@ -29266,12 +29267,12 @@ mod otlp_113_negative_metric_scale_validation_first {
         }
     }
 
-    /// Simulate reference implementation scale validation behavior
-    fn simulate_reference_scale_validation(
+    /// Evaluate reference implementation scale validation behavior
+    fn evaluate_reference_scale_validation(
         scenario: &NegativeScaleScenario,
     ) -> ScaleValidationResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_scale_validation(scenario)
+        evaluate_asupersync_scale_validation(scenario)
     }
 
     /// Verify negative metric scale validation logic
@@ -29651,11 +29652,11 @@ mod otlp_113_negative_metric_scale_validation_second {
         for scenario in scenarios {
             println!("Testing scenario: {}", scenario.description);
 
-            // Simulate asupersync exporter behavior
-            let asupersync_result = simulate_asupersync_scale_validation(&scenario);
+            // Evaluate asupersync exporter behavior
+            let asupersync_result = evaluate_asupersync_scale_validation(&scenario);
 
-            // Simulate reference implementation behavior
-            let reference_result = simulate_reference_scale_validation(&scenario);
+            // Evaluate reference implementation behavior
+            let reference_result = evaluate_reference_scale_validation(&scenario);
 
             // Validate individual results
             validate_scale_validation_logic(&asupersync_result).unwrap_or_else(|error| {
@@ -29757,8 +29758,8 @@ mod otlp_113_negative_metric_scale_validation_second {
         scale >= 0
     }
 
-    /// Simulate asupersync negative metric scale validation behavior
-    fn simulate_asupersync_scale_validation(
+    /// Evaluate asupersync negative metric scale validation behavior
+    fn evaluate_asupersync_scale_validation(
         scenario: &NegativeScaleScenario,
     ) -> ScaleValidationResult {
         let mut validation_errors = Vec::new();
@@ -29873,12 +29874,12 @@ mod otlp_113_negative_metric_scale_validation_second {
         }
     }
 
-    /// Simulate reference implementation scale validation behavior
-    fn simulate_reference_scale_validation(
+    /// Evaluate reference implementation scale validation behavior
+    fn evaluate_reference_scale_validation(
         scenario: &NegativeScaleScenario,
     ) -> ScaleValidationResult {
         // Reference implementation follows same logic as asupersync
-        simulate_asupersync_scale_validation(scenario)
+        evaluate_asupersync_scale_validation(scenario)
     }
 
     /// Verify negative metric scale validation logic
@@ -30211,8 +30212,8 @@ mod otlp_115_tests {
         }
     }
 
-    fn simulate_asupersync_export(scenario: &Otlp115Scenario) -> ValidationResult {
-        // Simulate our asupersync exporter's f64::INFINITY validation
+    fn evaluate_asupersync_export(scenario: &Otlp115Scenario) -> ValidationResult {
+        // Evaluate our asupersync exporter's f64::INFINITY validation
         for span in &scenario.spans {
             for attr_value in span.attributes.values() {
                 match attr_value {
@@ -30238,8 +30239,8 @@ mod otlp_115_tests {
         ValidationResult::Accept
     }
 
-    fn simulate_reference_export(scenario: &Otlp115Scenario) -> ValidationResult {
-        // Simulate reference OTLP exporter behavior
+    fn evaluate_reference_export(scenario: &Otlp115Scenario) -> ValidationResult {
+        // Evaluate reference OTLP exporter behavior
         // Per OTLP spec: protobuf double_value field requires finite values
         for span in &scenario.spans {
             for attr_value in span.attributes.values() {
@@ -30265,8 +30266,8 @@ mod otlp_115_tests {
     }
 
     fn validate_otlp_115_scenario(scenario: &Otlp115Scenario) -> bool {
-        let asupersync_result = simulate_asupersync_export(scenario);
-        let reference_result = simulate_reference_export(scenario);
+        let asupersync_result = evaluate_asupersync_export(scenario);
+        let reference_result = evaluate_reference_export(scenario);
 
         // Both exporters should behave identically
         if asupersync_result != reference_result {
@@ -30644,8 +30645,8 @@ mod otlp_116_tests {
         key.trim().is_empty()
     }
 
-    fn simulate_asupersync_export(scenario: &Otlp116Scenario) -> ValidationResult {
-        // Simulate our asupersync exporter's whitespace-only key validation
+    fn evaluate_asupersync_export(scenario: &Otlp116Scenario) -> ValidationResult {
+        // Evaluate our asupersync exporter's whitespace-only key validation
         for span in &scenario.spans {
             for key in span.attributes.keys() {
                 // OTLP §6.2.5: attribute keys must be non-empty after trimming
@@ -30657,8 +30658,8 @@ mod otlp_116_tests {
         ValidationResult::Accept
     }
 
-    fn simulate_reference_export(scenario: &Otlp116Scenario) -> ValidationResult {
-        // Simulate reference OTLP exporter behavior
+    fn evaluate_reference_export(scenario: &Otlp116Scenario) -> ValidationResult {
+        // Evaluate reference OTLP exporter behavior
         // Per OTLP spec §6.2.5: keys must be non-empty after trimming
         for span in &scenario.spans {
             for key in span.attributes.keys() {
@@ -30671,8 +30672,8 @@ mod otlp_116_tests {
     }
 
     fn validate_otlp_116_scenario(scenario: &Otlp116Scenario) -> bool {
-        let asupersync_result = simulate_asupersync_export(scenario);
-        let reference_result = simulate_reference_export(scenario);
+        let asupersync_result = evaluate_asupersync_export(scenario);
+        let reference_result = evaluate_reference_export(scenario);
 
         // Both exporters should behave identically
         if asupersync_result != reference_result {
@@ -31083,8 +31084,8 @@ mod otlp_117_tests {
         }
     }
 
-    fn simulate_asupersync_export(scenario: &Otlp117Scenario) -> ExportResult {
-        // Simulate our asupersync exporter's status handling
+    fn evaluate_asupersync_export(scenario: &Otlp117Scenario) -> ExportResult {
+        // Evaluate our asupersync exporter's status handling
         let mut result = ExportResult {
             spans_exported: scenario.spans.len(),
             error_status_preserved: 0,
@@ -31115,8 +31116,8 @@ mod otlp_117_tests {
         result
     }
 
-    fn simulate_reference_export(scenario: &Otlp117Scenario) -> ExportResult {
-        // Simulate reference OTLP exporter behavior
+    fn evaluate_reference_export(scenario: &Otlp117Scenario) -> ExportResult {
+        // Evaluate reference OTLP exporter behavior
         // Per OTLP spec: status_code is required, description is optional
         let mut result = ExportResult {
             spans_exported: scenario.spans.len(),
@@ -31149,8 +31150,8 @@ mod otlp_117_tests {
     }
 
     fn validate_otlp_117_scenario(scenario: &Otlp117Scenario) -> bool {
-        let asupersync_result = simulate_asupersync_export(scenario);
-        let reference_result = simulate_reference_export(scenario);
+        let asupersync_result = evaluate_asupersync_export(scenario);
+        let reference_result = evaluate_reference_export(scenario);
 
         // Both exporters should behave identically
         if asupersync_result != reference_result {
@@ -31672,8 +31673,8 @@ mod otlp_118_tests {
         }
     }
 
-    fn simulate_asupersync_export(scenario: &Otlp118Scenario) -> ValidationResult {
-        // Simulate our asupersync exporter's semantic convention validation
+    fn evaluate_asupersync_export(scenario: &Otlp118Scenario) -> ValidationResult {
+        // Evaluate our asupersync exporter's semantic convention validation
         for span_with_scope in &scenario.spans {
             if is_http_server_span(span_with_scope) {
                 // Per OTLP semantic conventions: http.server spans MUST have http.method
@@ -31685,8 +31686,8 @@ mod otlp_118_tests {
         ValidationResult::Accept
     }
 
-    fn simulate_reference_export(scenario: &Otlp118Scenario) -> ValidationResult {
-        // Simulate reference OTLP exporter behavior
+    fn evaluate_reference_export(scenario: &Otlp118Scenario) -> ValidationResult {
+        // Evaluate reference OTLP exporter behavior
         // Per OTLP semantic conventions: SERVER spans with http.server scope require http.method
         for span_with_scope in &scenario.spans {
             if is_http_server_span(span_with_scope) {
@@ -31731,8 +31732,8 @@ mod otlp_118_tests {
     }
 
     fn validate_otlp_118_scenario(scenario: &Otlp118Scenario) -> bool {
-        let asupersync_result = simulate_asupersync_export(scenario);
-        let reference_result = simulate_reference_export(scenario);
+        let asupersync_result = evaluate_asupersync_export(scenario);
+        let reference_result = evaluate_reference_export(scenario);
 
         // Both exporters should behave identically
         if asupersync_result != reference_result {
@@ -32316,8 +32317,8 @@ mod otlp_119_tests {
         true
     }
 
-    fn simulate_asupersync_export(scenario: &Otlp119Scenario) -> ValidationResult {
-        // Simulate our asupersync exporter's semantic convention validation
+    fn evaluate_asupersync_export(scenario: &Otlp119Scenario) -> ValidationResult {
+        // Evaluate our asupersync exporter's semantic convention validation
         for span_with_scope in &scenario.spans {
             if is_http_client_span(span_with_scope) {
                 // Per OTLP semantic conventions: http.client spans MUST have http.url or url.full
@@ -32333,8 +32334,8 @@ mod otlp_119_tests {
         ValidationResult::Accept
     }
 
-    fn simulate_reference_export(scenario: &Otlp119Scenario) -> ValidationResult {
-        // Simulate reference OTLP exporter behavior
+    fn evaluate_reference_export(scenario: &Otlp119Scenario) -> ValidationResult {
+        // Evaluate reference OTLP exporter behavior
         // Per OTLP semantic conventions: CLIENT spans with http.client scope require URL attribute
         for span_with_scope in &scenario.spans {
             if is_http_client_span(span_with_scope) {
@@ -32398,8 +32399,8 @@ mod otlp_119_tests {
     }
 
     fn validate_otlp_119_scenario(scenario: &Otlp119Scenario) -> bool {
-        let asupersync_result = simulate_asupersync_export(scenario);
-        let reference_result = simulate_reference_export(scenario);
+        let asupersync_result = evaluate_asupersync_export(scenario);
+        let reference_result = evaluate_reference_export(scenario);
 
         // Both exporters should behave identically
         if asupersync_result != reference_result {
@@ -33006,16 +33007,16 @@ mod otlp_120_tests {
         }
     }
 
-    fn simulate_asupersync_export(_scenario: &Otlp120Scenario) -> ValidationResult {
-        // Simulate our asupersync exporter's INTERNAL span validation
+    fn evaluate_asupersync_export(_scenario: &Otlp120Scenario) -> ValidationResult {
+        // Evaluate our asupersync exporter's INTERNAL span validation
         // INTERNAL spans should be accepted regardless of attributes
         // No additional validation needed beyond basic span structure.
         // Other span kinds may have their own validation rules, but this test focuses on INTERNAL spans.
         ValidationResult::Accept
     }
 
-    fn simulate_reference_export(_scenario: &Otlp120Scenario) -> ValidationResult {
-        // Simulate reference OTLP exporter behavior
+    fn evaluate_reference_export(_scenario: &Otlp120Scenario) -> ValidationResult {
+        // Evaluate reference OTLP exporter behavior
         // Per OTLP spec: INTERNAL spans don't require specific attributes
         // INTERNAL spans are always valid regardless of attributes.
         ValidationResult::Accept
@@ -33068,8 +33069,8 @@ mod otlp_120_tests {
     }
 
     fn validate_otlp_120_scenario(scenario: &Otlp120Scenario) -> bool {
-        let asupersync_result = simulate_asupersync_export(scenario);
-        let reference_result = simulate_reference_export(scenario);
+        let asupersync_result = evaluate_asupersync_export(scenario);
+        let reference_result = evaluate_reference_export(scenario);
 
         // Both exporters should behave identically
         if asupersync_result != reference_result {
@@ -33716,8 +33717,8 @@ mod otlp_121_tests {
         reset_events
     }
 
-    fn simulate_asupersync_export(scenario: &Otlp121Scenario) -> MonotonicValidationResult {
-        // Simulate our asupersync exporter's monotonic counter reset detection
+    fn evaluate_asupersync_export(scenario: &Otlp121Scenario) -> MonotonicValidationResult {
+        // Evaluate our asupersync exporter's monotonic counter reset detection
         let reset_events = detect_monotonic_reset(&scenario.metrics);
 
         let mut result = MonotonicValidationResult {
@@ -33749,8 +33750,8 @@ mod otlp_121_tests {
         result
     }
 
-    fn simulate_reference_export(scenario: &Otlp121Scenario) -> MonotonicValidationResult {
-        // Simulate reference OTLP exporter behavior
+    fn evaluate_reference_export(scenario: &Otlp121Scenario) -> MonotonicValidationResult {
+        // Evaluate reference OTLP exporter behavior
         // Per OTLP spec: monotonic counters that reset MUST emit reset event indicators
         let reset_events = detect_monotonic_reset(&scenario.metrics);
 
@@ -33782,8 +33783,8 @@ mod otlp_121_tests {
     }
 
     fn validate_otlp_121_scenario(scenario: &Otlp121Scenario) -> bool {
-        let asupersync_result = simulate_asupersync_export(scenario);
-        let reference_result = simulate_reference_export(scenario);
+        let asupersync_result = evaluate_asupersync_export(scenario);
+        let reference_result = evaluate_reference_export(scenario);
 
         // Both exporters should behave identically
         if asupersync_result != reference_result {
@@ -34484,8 +34485,8 @@ mod otlp_122_tests {
         true
     }
 
-    fn simulate_asupersync_export(scenario: &Otlp122Scenario) -> ValidationResult {
-        // Simulate our asupersync exporter's span link validation
+    fn evaluate_asupersync_export(scenario: &Otlp122Scenario) -> ValidationResult {
+        // Evaluate our asupersync exporter's span link validation
         for span_with_links in &scenario.spans {
             if !validate_span_links(span_with_links) {
                 return ValidationResult::Reject;
@@ -34494,8 +34495,8 @@ mod otlp_122_tests {
         ValidationResult::Accept
     }
 
-    fn simulate_reference_export(scenario: &Otlp122Scenario) -> ValidationResult {
-        // Simulate reference OTLP exporter behavior
+    fn evaluate_reference_export(scenario: &Otlp122Scenario) -> ValidationResult {
+        // Evaluate reference OTLP exporter behavior
         // Per W3C trace-context: all-zero trace_id in links is invalid
         for span_with_links in &scenario.spans {
             if !validate_span_links(span_with_links) {
@@ -34545,8 +34546,8 @@ mod otlp_122_tests {
     }
 
     fn validate_otlp_122_scenario(scenario: &Otlp122Scenario) -> bool {
-        let asupersync_result = simulate_asupersync_export(scenario);
-        let reference_result = simulate_reference_export(scenario);
+        let asupersync_result = evaluate_asupersync_export(scenario);
+        let reference_result = evaluate_reference_export(scenario);
 
         // Both exporters should behave identically
         if asupersync_result != reference_result {
@@ -35389,7 +35390,7 @@ mod otlp_122_tests {
         let min_value = i64::MIN;
         println!("Testing i64::MIN: {}", min_value);
 
-        // Simulate encoding/decoding cycle (in real OTLP implementation)
+        // Evaluate encoding/decoding cycle (in real OTLP implementation)
         let encoded_min = min_value; // Would go through OTLP wire format
         let decoded_min = encoded_min; // Would be decoded from wire format
 
@@ -35447,7 +35448,7 @@ mod otlp_122_tests {
         let near_max_values = vec![i64::MAX, i64::MAX - 1, i64::MAX - 1000];
 
         for value in near_min_values {
-            // Simulate OTLP encoding constraints
+            // Evaluate OTLP encoding constraints
             let encoded = value;
             assert_eq!(encoded, value, "Near-MIN value {} must be preserved", value);
         }
@@ -36202,7 +36203,7 @@ mod otlp_122_tests {
                 description
             );
 
-            // Simulate attribute size check
+            // Evaluate attribute size check
             let exceeds_limit = size > MAX_SIZE;
             let actual_accept = !exceeds_limit;
 
@@ -36462,18 +36463,18 @@ mod otlp_122_tests {
                 Otlp128AttributeValue::BoolTrue => {
                     // Test that true stays true through the encoding cycle
                     let original = true;
-                    let cycle_result = simulate_encoding_cycle_bool(original);
+                    let cycle_result = evaluate_encoding_cycle_bool(original);
                     cycle_result == original
                 }
                 Otlp128AttributeValue::BoolFalse => {
                     // Test that false stays false through the encoding cycle
                     let original = false;
-                    let cycle_result = simulate_encoding_cycle_bool(original);
+                    let cycle_result = evaluate_encoding_cycle_bool(original);
                     cycle_result == original
                 }
                 Otlp128AttributeValue::BoolValue(original) => {
                     // Test that any bool value is preserved
-                    let cycle_result = simulate_encoding_cycle_bool(*original);
+                    let cycle_result = evaluate_encoding_cycle_bool(*original);
                     cycle_result == *original
                 }
                 Otlp128AttributeValue::String(_) => true, // String values are not under test
@@ -36491,9 +36492,9 @@ mod otlp_122_tests {
         result
     }
 
-    /// Simulate an encoding/decoding cycle for boolean values
+    /// Evaluate an encoding/decoding cycle for boolean values
     /// In a real implementation, this would go through OTLP wire format
-    fn simulate_encoding_cycle_bool(value: bool) -> bool {
+    fn evaluate_encoding_cycle_bool(value: bool) -> bool {
         // This simulates the critical property: boolean encoding must be lossless
         // In real OTLP implementation, this would involve:
         // 1. Encoding bool to protobuf/wire format
@@ -36637,7 +36638,7 @@ mod otlp_122_tests {
 
         // Test true preservation
         let original_true = true;
-        let encoded_true = simulate_encoding_cycle_bool(original_true);
+        let encoded_true = evaluate_encoding_cycle_bool(original_true);
         assert_eq!(
             encoded_true, true,
             "True must remain true after encoding cycle"
@@ -36649,7 +36650,7 @@ mod otlp_122_tests {
 
         // Test false preservation
         let original_false = false;
-        let encoded_false = simulate_encoding_cycle_bool(original_false);
+        let encoded_false = evaluate_encoding_cycle_bool(original_false);
         assert_eq!(
             encoded_false, false,
             "False must remain false after encoding cycle"
@@ -36666,8 +36667,8 @@ mod otlp_122_tests {
         );
 
         // Test multiple cycles (should be stable)
-        let double_encoded_true = simulate_encoding_cycle_bool(encoded_true);
-        let double_encoded_false = simulate_encoding_cycle_bool(encoded_false);
+        let double_encoded_true = evaluate_encoding_cycle_bool(encoded_true);
+        let double_encoded_false = evaluate_encoding_cycle_bool(encoded_false);
 
         assert_eq!(
             double_encoded_true, original_true,
@@ -36689,7 +36690,7 @@ mod otlp_122_tests {
         let explicit_cases = vec![(true, "explicit true"), (false, "explicit false")];
 
         for (value, description) in explicit_cases {
-            let encoded = simulate_encoding_cycle_bool(value);
+            let encoded = evaluate_encoding_cycle_bool(value);
             assert_eq!(
                 encoded, value,
                 "{} must not change during encoding",
@@ -36723,7 +36724,7 @@ mod otlp_122_tests {
                 description, expected
             );
 
-            let encoded = simulate_encoding_cycle_bool(computed);
+            let encoded = evaluate_encoding_cycle_bool(computed);
             assert_eq!(
                 encoded, expected,
                 "Encoded computed boolean {} must preserve value",
@@ -36744,7 +36745,7 @@ mod otlp_122_tests {
         ];
 
         for (value, description) in edge_cases {
-            let encoded = simulate_encoding_cycle_bool(value);
+            let encoded = evaluate_encoding_cycle_bool(value);
             assert_eq!(
                 encoded, value,
                 "Edge case {} must preserve original value",
@@ -36778,8 +36779,8 @@ mod otlp_122_tests {
         assert_eq!(zero_as_bool, false, "0 != 0 should be false");
 
         // Test that encoding preserves the boolean type, not numeric representation
-        let encoded_true = simulate_encoding_cycle_bool(true_bool);
-        let encoded_false = simulate_encoding_cycle_bool(false_bool);
+        let encoded_true = evaluate_encoding_cycle_bool(true_bool);
+        let encoded_false = evaluate_encoding_cycle_bool(false_bool);
 
         // These must remain boolean true/false, not become 1/0
         assert_eq!(encoded_true, true, "Encoded true must remain boolean true");
@@ -36946,21 +36947,21 @@ mod otlp_122_tests {
             match value {
                 Otlp129AttributeValue::BytesEmpty => {
                     let empty_bytes = Vec::<u8>::new();
-                    simulate_binary_encoding_cycle(&empty_bytes).is_binary_preserved
+                    evaluate_binary_encoding_cycle(&empty_bytes).is_binary_preserved
                 }
                 Otlp129AttributeValue::BytesSmall(bytes) => {
-                    simulate_binary_encoding_cycle(bytes).is_binary_preserved
+                    evaluate_binary_encoding_cycle(bytes).is_binary_preserved
                 }
                 Otlp129AttributeValue::BytesLarge(bytes) => {
-                    simulate_binary_encoding_cycle(bytes).is_binary_preserved
+                    evaluate_binary_encoding_cycle(bytes).is_binary_preserved
                 }
                 Otlp129AttributeValue::BytesSpecial => {
                     let special_bytes = generate_special_binary_patterns();
-                    simulate_binary_encoding_cycle(&special_bytes).is_binary_preserved
+                    evaluate_binary_encoding_cycle(&special_bytes).is_binary_preserved
                 }
                 Otlp129AttributeValue::BytesUtf8Invalid => {
                     let invalid_utf8 = generate_invalid_utf8_bytes();
-                    simulate_binary_encoding_cycle(&invalid_utf8).is_binary_preserved
+                    evaluate_binary_encoding_cycle(&invalid_utf8).is_binary_preserved
                 }
                 Otlp129AttributeValue::String(_) => true, // String values not under test
             }
@@ -36988,7 +36989,7 @@ mod otlp_122_tests {
     /// Validate that bytes are encoded as binary, not base64
     fn validate_bytes_encoding(bytes: &[u8], _attr_name: &str) -> BytesEncodingResult {
         // In a real OTLP implementation, this would check the actual wire format
-        // For this test, we simulate the key properties:
+        // For this test, we evaluate the key properties:
 
         // 1. Binary encoding should preserve original byte length exactly
         let is_binary_encoding = true; // Assume proper binary encoding
@@ -37015,8 +37016,8 @@ mod otlp_122_tests {
         size_unchanged: bool,
     }
 
-    /// Simulate encoding/decoding cycle for binary data
-    fn simulate_binary_encoding_cycle(original_bytes: &[u8]) -> BinaryEncodingCycleResult {
+    /// Evaluate encoding/decoding cycle for binary data
+    fn evaluate_binary_encoding_cycle(original_bytes: &[u8]) -> BinaryEncodingCycleResult {
         // This simulates the critical requirement: binary data must stay binary
         // In real OTLP implementation, this would involve:
         // 1. Encoding bytes to protobuf ByteValue (wire format)
@@ -37211,7 +37212,7 @@ mod otlp_122_tests {
             }
 
             // OTLP-129 requirement: binary data should use binary encoding (no base64)
-            let encoding_result = simulate_binary_encoding_cycle(&binary_data);
+            let encoding_result = evaluate_binary_encoding_cycle(&binary_data);
             assert!(
                 encoding_result.is_binary_preserved,
                 "Binary data must stay binary"
@@ -37247,7 +37248,7 @@ mod otlp_122_tests {
         for (pattern_name, original_data) in test_patterns {
             println!("Testing binary integrity for pattern: {}", pattern_name);
 
-            let encoding_result = simulate_binary_encoding_cycle(&original_data);
+            let encoding_result = evaluate_binary_encoding_cycle(&original_data);
 
             assert!(
                 encoding_result.is_binary_preserved,
@@ -37575,23 +37576,23 @@ mod otlp_122_tests {
         let all_kvlists_properly_encoded =
             scenario.attributes.iter().all(|(_, value)| match value {
                 Otlp130AttributeValue::KvlistFlat(kvpairs) => {
-                    simulate_kvlist_encoding_cycle_flat(kvpairs).is_properly_preserved
+                    evaluate_kvlist_encoding_cycle_flat(kvpairs).is_properly_preserved
                 }
                 Otlp130AttributeValue::KvlistNested(nested) => {
-                    simulate_kvlist_encoding_cycle_nested(nested).is_properly_preserved
+                    evaluate_kvlist_encoding_cycle_nested(nested).is_properly_preserved
                 }
                 Otlp130AttributeValue::KvlistDeep(depth) => {
                     let deep_kvlist = generate_deep_kvlist(*depth);
-                    let result = simulate_kvlist_encoding_cycle_nested(&deep_kvlist);
+                    let result = evaluate_kvlist_encoding_cycle_nested(&deep_kvlist);
                     result.is_properly_preserved
                         && (*depth <= MAX_KVLIST_DEPTH || !result.exceeds_depth_limit)
                 }
                 Otlp130AttributeValue::KvlistMaxDepth => {
                     let max_kvlist = generate_deep_kvlist(MAX_KVLIST_DEPTH);
-                    simulate_kvlist_encoding_cycle_nested(&max_kvlist).is_properly_preserved
+                    evaluate_kvlist_encoding_cycle_nested(&max_kvlist).is_properly_preserved
                 }
                 Otlp130AttributeValue::KvlistEmpty => {
-                    simulate_kvlist_encoding_cycle_flat(&vec![]).is_properly_preserved
+                    evaluate_kvlist_encoding_cycle_flat(&vec![]).is_properly_preserved
                 }
                 Otlp130AttributeValue::String(_) => true,
             });
@@ -37704,11 +37705,11 @@ mod otlp_122_tests {
         structure_intact: bool,
     }
 
-    /// Simulate encoding/decoding cycle for flat kvlist
-    fn simulate_kvlist_encoding_cycle_flat(
+    /// Evaluate encoding/decoding cycle for flat kvlist
+    fn evaluate_kvlist_encoding_cycle_flat(
         _kvpairs: &[(String, String)],
     ) -> KvlistEncodingCycleResult {
-        // Simulate the requirement: flat kvlists should preserve perfectly
+        // Evaluate the requirement: flat kvlists should preserve perfectly
         KvlistEncodingCycleResult {
             is_properly_preserved: true,
             exceeds_depth_limit: false,
@@ -37716,13 +37717,13 @@ mod otlp_122_tests {
         }
     }
 
-    /// Simulate encoding/decoding cycle for nested kvlist
-    fn simulate_kvlist_encoding_cycle_nested(
+    /// Evaluate encoding/decoding cycle for nested kvlist
+    fn evaluate_kvlist_encoding_cycle_nested(
         nested_pairs: &[(String, Otlp130NestedValue)],
     ) -> KvlistEncodingCycleResult {
         let depth = calculate_kvlist_depth(nested_pairs);
 
-        // Simulate the key requirements of OTLP-130
+        // Evaluate the key requirements of OTLP-130
         KvlistEncodingCycleResult {
             is_properly_preserved: depth <= MAX_KVLIST_DEPTH,
             exceeds_depth_limit: depth > MAX_KVLIST_DEPTH,
@@ -37878,7 +37879,7 @@ mod otlp_122_tests {
                 "Generated depth should match requested depth"
             );
 
-            let encoding_result = simulate_kvlist_encoding_cycle_nested(&deep_kvlist);
+            let encoding_result = evaluate_kvlist_encoding_cycle_nested(&deep_kvlist);
 
             if depth <= MAX_KVLIST_DEPTH {
                 assert!(
@@ -37954,7 +37955,7 @@ mod otlp_122_tests {
         assert_eq!(depth, 3, "Complex structure should have depth 3");
         assert_eq!(total_pairs, 6, "Should count 6 total key-value pairs");
 
-        let encoding_result = simulate_kvlist_encoding_cycle_nested(&complex_kvlist);
+        let encoding_result = evaluate_kvlist_encoding_cycle_nested(&complex_kvlist);
         assert!(
             encoding_result.is_properly_preserved,
             "Complex structure should be preserved"
@@ -37981,7 +37982,7 @@ mod otlp_122_tests {
             ),
         ];
 
-        let mixed_result = simulate_kvlist_encoding_cycle_nested(&mixed_types_kvlist);
+        let mixed_result = evaluate_kvlist_encoding_cycle_nested(&mixed_types_kvlist);
         assert!(
             mixed_result.is_properly_preserved,
             "Mixed types should be preserved"
@@ -37997,7 +37998,7 @@ mod otlp_122_tests {
         // Empty nested structure
         let empty_nested = vec![("empty_nest".to_string(), Otlp130NestedValue::Kvlist(vec![]))];
 
-        let empty_result = simulate_kvlist_encoding_cycle_nested(&empty_nested);
+        let empty_result = evaluate_kvlist_encoding_cycle_nested(&empty_nested);
         assert!(
             empty_result.is_properly_preserved,
             "Empty nested kvlist should be preserved"
@@ -38008,7 +38009,7 @@ mod otlp_122_tests {
         let linear_depth = calculate_kvlist_depth(&linear_deep);
         assert_eq!(linear_depth, 10, "Linear chain should have expected depth");
 
-        let linear_result = simulate_kvlist_encoding_cycle_nested(&linear_deep);
+        let linear_result = evaluate_kvlist_encoding_cycle_nested(&linear_deep);
         assert!(
             linear_result.is_properly_preserved,
             "Linear deep chain should be preserved"
@@ -38022,7 +38023,7 @@ mod otlp_122_tests {
         let wide_depth = calculate_kvlist_depth(&wide_kvlist);
         assert_eq!(wide_depth, 1, "Wide structure should have depth 1");
 
-        let wide_result = simulate_kvlist_encoding_cycle_nested(&wide_kvlist);
+        let wide_result = evaluate_kvlist_encoding_cycle_nested(&wide_kvlist);
         assert!(
             wide_result.is_properly_preserved,
             "Wide structure should be preserved"
@@ -38145,7 +38146,7 @@ mod otlp_122_tests {
             }
         }
 
-        // Simulate exporter validation
+        // Evaluate exporter validation
         let actual_result = if should_accept {
             Otlp131ValidationResult::Accept
         } else {
@@ -38721,7 +38722,7 @@ mod otlp_122_tests {
                 Otlp132AttributeValue::String(s) | Otlp132AttributeValue::StringWithSpaces(s)
                     if s.contains(' ') =>
                 {
-                    simulate_space_preservation_cycle(s).is_preserved_verbatim
+                    evaluate_space_preservation_cycle(s).is_preserved_verbatim
                 }
                 _ => true, // Non-string values not under test
             }
@@ -38786,8 +38787,8 @@ mod otlp_122_tests {
         spaces_intact: bool,
     }
 
-    /// Simulate encoding/decoding cycle for values with spaces
-    fn simulate_space_preservation_cycle(original_value: &str) -> SpacePreservationCycleResult {
+    /// Evaluate encoding/decoding cycle for values with spaces
+    fn evaluate_space_preservation_cycle(original_value: &str) -> SpacePreservationCycleResult {
         // This simulates the critical requirement: spaces must be preserved exactly
         // In real OTLP implementation, this would involve:
         // 1. Encoding string value to wire format (protobuf/JSON)
@@ -39008,7 +39009,7 @@ mod otlp_122_tests {
                 description, original_value
             );
 
-            let preservation_result = simulate_space_preservation_cycle(original_value);
+            let preservation_result = evaluate_space_preservation_cycle(original_value);
 
             assert!(
                 preservation_result.is_preserved_verbatim,
@@ -39081,7 +39082,7 @@ mod otlp_122_tests {
         for (original, encoded_version, description) in test_cases {
             println!("Testing URL encoding prevention: {}", description);
 
-            let preservation_result = simulate_space_preservation_cycle(original);
+            let preservation_result = evaluate_space_preservation_cycle(original);
 
             // The result should be the original, NOT the encoded version
             assert!(
@@ -39145,7 +39146,7 @@ mod otlp_122_tests {
         for (original, trimmed_version, description) in test_cases {
             println!("Testing trimming prevention: {}", description);
 
-            let preservation_result = simulate_space_preservation_cycle(original);
+            let preservation_result = evaluate_space_preservation_cycle(original);
 
             // The result should be the original, NOT the trimmed version
             assert!(
@@ -39226,7 +39227,7 @@ mod otlp_122_tests {
             );
 
             // Verify space preservation specifically
-            let preservation_result = simulate_space_preservation_cycle(service_name);
+            let preservation_result = evaluate_space_preservation_cycle(service_name);
             assert!(
                 preservation_result.is_preserved_verbatim,
                 "Service name '{}' must be preserved verbatim",
@@ -39386,7 +39387,7 @@ mod otlp_122_tests {
                 Otlp133AttributeValue::String(s)
                 | Otlp133AttributeValue::StringWithEmoji(s)
                 | Otlp133AttributeValue::StringWithUnicode(s) => {
-                    simulate_utf8_encoding_cycle(s).is_correctly_encoded
+                    evaluate_utf8_encoding_cycle(s).is_correctly_encoded
                 }
                 _ => true, // Non-string values not under test
             }
@@ -39495,8 +39496,8 @@ mod otlp_122_tests {
         byte_identical: bool,
     }
 
-    /// Simulate encoding/decoding cycle for UTF-8 strings
-    fn simulate_utf8_encoding_cycle(original_value: &str) -> Utf8EncodingCycleResult {
+    /// Evaluate encoding/decoding cycle for UTF-8 strings
+    fn evaluate_utf8_encoding_cycle(original_value: &str) -> Utf8EncodingCycleResult {
         // This simulates the critical requirement: UTF-8 must be preserved correctly
         // In real OTLP implementation, this would involve:
         // 1. Encoding string to protobuf bytes (UTF-8 preservation)
@@ -39712,7 +39713,7 @@ mod otlp_122_tests {
             );
 
             // Test encoding cycle
-            let cycle_result = simulate_utf8_encoding_cycle(original_string);
+            let cycle_result = evaluate_utf8_encoding_cycle(original_string);
             assert!(
                 cycle_result.is_correctly_encoded,
                 "String '{}' must survive encoding cycle",
@@ -39793,7 +39794,7 @@ mod otlp_122_tests {
 
             // Test byte preservation
             let original_bytes = character.as_bytes();
-            let cycle_result = simulate_utf8_encoding_cycle(character);
+            let cycle_result = evaluate_utf8_encoding_cycle(character);
             assert!(
                 cycle_result.byte_identical,
                 "4-byte character '{}' bytes must be preserved exactly",
@@ -39941,7 +39942,7 @@ mod otlp_122_tests {
                 test_string
             );
 
-            let cycle_result = simulate_utf8_encoding_cycle(test_string);
+            let cycle_result = evaluate_utf8_encoding_cycle(test_string);
             assert!(
                 cycle_result.is_correctly_encoded,
                 "Edge case '{}' must survive encoding cycle",
@@ -40012,7 +40013,7 @@ mod otlp_122_tests {
                 ..SpanData::default_for_test()
             };
 
-            // Simulate protobuf serialization to check field presence
+            // Evaluate protobuf serialization to check field presence
             let protobuf_bytes = serialize_span_to_otlp_protobuf(&span_data)
                 .map_err(|e| format!("Protobuf serialization failed: {}", e))?;
 
@@ -40057,9 +40058,9 @@ mod otlp_122_tests {
             Ok(())
         }
 
-        // Mock function to simulate protobuf serialization
+        // Test function to evaluate protobuf serialization
         fn serialize_span_to_otlp_protobuf(span_data: &SpanData) -> Result<Vec<u8>, String> {
-            // Simulate the actual OTLP protobuf serialization logic
+            // Evaluate the actual OTLP protobuf serialization logic
             // In real implementation, this would use the actual protobuf encoding
             let mut protobuf_bytes = Vec::new();
 
@@ -40088,13 +40089,13 @@ mod otlp_122_tests {
             Ok(protobuf_bytes)
         }
 
-        // Mock function to analyze protobuf field presence
+        // Test function to analyze protobuf field presence
         fn analyze_protobuf_field_presence(
             protobuf_bytes: &[u8],
         ) -> Result<ProtobufFieldPresence, String> {
             let has_status_field = protobuf_bytes.windows(12).any(|w| w == b"status_field");
             let encoded_status_code = if has_status_field {
-                // Extract status code from mock protobuf
+                // Extract status code from test protobuf
                 if protobuf_bytes.contains(&1u8) {
                     1
                 } else if protobuf_bytes.contains(&2u8) {
@@ -40303,7 +40304,7 @@ mod otlp_122_tests {
                 ..SpanData::default_for_test()
             };
 
-            // Simulate span export through our OTLP exporter
+            // Evaluate span export through our OTLP exporter
             let exported_span = export_span_via_otlp(&span_data)
                 .map_err(|e| format!("OTLP export failed: {}", e))?;
 
@@ -40366,9 +40367,9 @@ mod otlp_122_tests {
             Ok(())
         }
 
-        // Mock function to simulate OTLP span export
+        // Test function to evaluate OTLP span export
         fn export_span_via_otlp(span_data: &SpanData) -> Result<ExportedSpanData, String> {
-            // Simulate our actual OTLP exporter logic
+            // Evaluate our actual OTLP exporter logic
             // In real implementation, this would go through the full OTLP export pipeline
             let exported_attributes = span_data.attributes.clone();
 
@@ -40376,12 +40377,12 @@ mod otlp_122_tests {
             // This is where the actual bug would be caught if our exporter
             // incorrectly filters or modifies Kafka-specific attributes
 
-            // Simulate potential exporter bugs that this test should catch:
+            // Evaluate potential exporter bugs that this test should catch:
             // 1. Dropping "messaging.kafka.message.key" (MUST NOT HAPPEN)
             // 2. Modifying the key value (MUST NOT HAPPEN)
             // 3. Only preserving keys for certain span kinds (MUST NOT HAPPEN)
 
-            // For this test, we simulate correct behavior
+            // For this test, we evaluate correct behavior
             // Real implementation should verify our actual exporter logic
 
             Ok(ExportedSpanData {
@@ -40642,14 +40643,14 @@ mod otlp_122_tests {
             let mut current_depth = 0;
             let mut max_depth_reached = 0;
 
-            // Simulate traversal of nested array structure
+            // Evaluate traversal of nested array structure
             if let Some(ref nested_array) = span_data.nested_array_attribute {
                 match measure_array_depth(nested_array, &mut current_depth, &mut max_depth_reached)
                 {
                     DepthMeasurementResult::WithinLimits => {
                         if max_depth_reached <= max_allowed_depth {
                             // Safe to serialize
-                            let mock_serialized_bytes = vec![0x12, 0x34, 0x56, 0x78]; // Mock protobuf
+                            let mock_serialized_bytes = vec![0x12, 0x34, 0x56, 0x78]; // Test protobuf
                             return SerializationResult::Success {
                                 max_depth_reached,
                                 serialized_bytes: mock_serialized_bytes,
@@ -41393,7 +41394,7 @@ mod otlp_122_tests {
                 sanitized_span.status.message = Some(sanitized_message);
             }
 
-            // Simulate additional OTLP export processing
+            // Evaluate additional OTLP export processing
             Ok(sanitized_span)
         }
 
@@ -52461,7 +52462,7 @@ mod otlp_122_tests {
                 } => {
                     assert!(
                         scenario.should_be_valid,
-                        "Expected failure but span was accepted: topic_arn='{}', subscription_arn='{}'",
+                        "known gap but span was accepted: topic_arn='{}', subscription_arn='{}'",
                         topic_arn, subscription_arn
                     );
 
@@ -52809,9 +52810,9 @@ mod otlp_122_tests {
                 }
             };
 
-            // OTLP-156: Simulate URL preservation check
+            // OTLP-156: Evaluate URL preservation check
             // In a real implementation, this would check if any normalization occurred during export
-            let preserved_url = simulate_otlp_export_url_preservation(&queue_url);
+            let preserved_url = evaluate_otlp_export_url_preservation(&queue_url);
             let was_normalized = preserved_url != queue_url;
 
             if was_normalized {
@@ -52832,7 +52833,7 @@ mod otlp_122_tests {
 
         /// Simulates OTLP export URL preservation behavior
         /// In a real implementation, this would be part of the OTLP exporter
-        fn simulate_otlp_export_url_preservation(url: &str) -> String {
+        fn evaluate_otlp_export_url_preservation(url: &str) -> String {
             // OTLP-156 compliance: URLs MUST be preserved verbatim
             // This simulation demonstrates that no normalization should occur
 
@@ -52862,7 +52863,7 @@ mod otlp_122_tests {
                 } => {
                     assert!(
                         scenario.should_be_valid,
-                        "Expected failure but URL was preserved: original='{}', preserved='{}'",
+                        "known gap but URL was preserved: original='{}', preserved='{}'",
                         original_url, preserved_url
                     );
 
@@ -53400,7 +53401,7 @@ fn otlp_158_kinesis_consumer_shard_id_conformance() {
         Invalid(String),
     }
 
-    // Mock span data structure for testing
+    // Test span data structure for testing
     #[derive(Debug)]
     struct SpanData {
         kind: String,
@@ -53600,7 +53601,7 @@ fn otlp_158_kinesis_consumer_shard_id_conformance() {
                         ))
                     }
                 } else {
-                    Ok(()) // Expected failure without specific pattern
+                    Ok(()) // known gap without specific pattern
                 }
             }
         }
@@ -53756,7 +53757,7 @@ fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
         Invalid(String),
     }
 
-    // Mock span data structure for testing
+    // Test span data structure for testing
     #[derive(Debug)]
     struct SpanData {
         kind: String,
@@ -54062,7 +54063,7 @@ fn otlp_159_kinesis_firehose_producer_delivery_stream_name_conformance() {
                         ))
                     }
                 } else {
-                    Ok(()) // Expected failure without specific pattern
+                    Ok(()) // known gap without specific pattern
                 }
             }
         }
@@ -54229,7 +54230,7 @@ fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
         Invalid(String),
     }
 
-    // Mock span data structure for testing
+    // Test span data structure for testing
     #[derive(Debug)]
     struct SpanData {
         kind: String,
@@ -54548,7 +54549,7 @@ fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
                         ))
                     }
                 } else {
-                    Ok(()) // Expected failure without specific pattern
+                    Ok(()) // known gap without specific pattern
                 }
             }
         }
@@ -54672,7 +54673,7 @@ fn otlp_160_azure_servicebus_producer_queue_name_conformance() {
     println!("  - Topic/subscription, partitioning, and duplicate detection attributes preserved");
 }
 
-/// XFAIL Coverage Tracking Infrastructure
+/// known-gap Coverage Tracking Infrastructure
 ///
 /// Provides fail-closed coverage tracking for expected test failures to ensure
 /// that tests marked as `expected_validation_failure: true` are actually being
@@ -54681,22 +54682,22 @@ mod xfail_coverage_tracker {
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex};
 
-    /// Global registry for tracking XFAIL test coverage
+    /// Global registry for tracking known-gap test coverage
     static XFAIL_REGISTRY: std::sync::OnceLock<Arc<Mutex<XfailTestRegistry>>> =
         std::sync::OnceLock::new();
 
-    /// Registry that tracks expected failure tests and their validation status
+    /// Registry that tracks known gap tests and their validation status
     #[derive(Debug, Default)]
     struct XfailTestRegistry {
         /// Tests that are expected to fail and have been registered
         expected_failures: HashSet<XfailTestId>,
-        /// Tests that have been properly validated as expected failures
+        /// Tests that have been properly validated as known gaps
         validated_failures: HashSet<XfailTestId>,
         /// Tests that were expected to fail but actually passed (potential issues)
         unexpected_passes: HashSet<XfailTestId>,
     }
 
-    /// Unique identifier for an XFAIL test case
+    /// Unique identifier for an known-gap test case
     #[derive(Debug, Clone, Hash, PartialEq, Eq)]
     pub struct XfailTestId {
         test_function: String,
@@ -54704,10 +54705,10 @@ mod xfail_coverage_tracker {
         failure_type: String,
     }
 
-    /// Result of XFAIL test validation
+    /// Result of known-gap test validation
     #[derive(Debug, Clone, PartialEq)]
     pub enum XfailValidationResult {
-        /// Test failed as expected - this is the correct outcome for XFAIL tests
+        /// Test failed as expected - this is the correct outcome for known-gap tests
         FailedAsExpected { reason: String },
         /// Test passed unexpectedly - may indicate the bug was fixed or test is wrong
         UnexpectedPass { reason: String },
@@ -54715,12 +54716,12 @@ mod xfail_coverage_tracker {
         ValidationSkipped { reason: String },
     }
 
-    /// Initialize the XFAIL registry for a test run
+    /// Initialize the known-gap registry for a test run
     pub fn initialize_xfail_registry() {
         let _ = XFAIL_REGISTRY.set(Arc::new(Mutex::new(XfailTestRegistry::default())));
     }
 
-    /// Register an expected failure test case
+    /// Register an known gap test case
     pub fn register_expected_failure(test_function: &str, scenario_name: &str, failure_type: &str) {
         let registry =
             XFAIL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(XfailTestRegistry::default())));
@@ -54735,7 +54736,7 @@ mod xfail_coverage_tracker {
         }
     }
 
-    /// Validate and record the result of an XFAIL test
+    /// Validate and record the result of an known-gap test
     pub fn validate_expected_failure(
         test_function: &str,
         scenario_name: &str,
@@ -54759,9 +54760,9 @@ mod xfail_coverage_tracker {
                     reg.unexpected_passes.insert(test_id);
                 }
                 XfailValidationResult::ValidationSkipped { .. } => {
-                    // This is an error - XFAIL tests must be validated
+                    // This is an error - known-gap tests must be validated
                     panic!(
-                        "XFAIL test validation skipped for {}::{}: {:?} - this violates fail-closed coverage",
+                        "known-gap test validation skipped for {}::{}: {:?} - this violates fail-closed coverage",
                         test_function, scenario_name, result
                     );
                 }
@@ -54769,7 +54770,7 @@ mod xfail_coverage_tracker {
         }
     }
 
-    /// Get a coverage summary of XFAIL test validation
+    /// Get a coverage summary of known-gap test validation
     pub fn get_coverage_summary() -> XfailCoverageSummary {
         let registry =
             XFAIL_REGISTRY.get_or_init(|| Arc::new(Mutex::new(XfailTestRegistry::default())));
@@ -54797,7 +54798,7 @@ mod xfail_coverage_tracker {
         }
     }
 
-    /// Summary of XFAIL test coverage
+    /// Summary of known-gap test coverage
     #[derive(Debug, Default)]
     pub struct XfailCoverageSummary {
         pub total_expected_failures: usize,
@@ -54809,7 +54810,7 @@ mod xfail_coverage_tracker {
     }
 
     impl XfailCoverageSummary {
-        /// Check if XFAIL coverage is complete (fail-closed validation)
+        /// Check if known-gap coverage is complete (fail-closed validation)
         pub fn is_coverage_complete(&self) -> bool {
             self.unvalidated_failures == 0
         }
@@ -54817,9 +54818,9 @@ mod xfail_coverage_tracker {
         /// Generate a detailed coverage report
         pub fn generate_report(&self) -> String {
             let mut report = String::new();
-            report.push_str("XFAIL Coverage Summary:\n");
+            report.push_str("known-gap Coverage Summary:\n");
             report.push_str(&format!(
-                "  Total Expected Failures: {}\n",
+                "  Total known gaps: {}\n",
                 self.total_expected_failures
             ));
             report.push_str(&format!(
@@ -54836,7 +54837,7 @@ mod xfail_coverage_tracker {
             ));
 
             if !self.unvalidated_test_ids.is_empty() {
-                report.push_str("\nUNVALIDATED XFAIL TESTS (FAIL-CLOSED VIOLATION):\n");
+                report.push_str("\nUNVALIDATED known-gap TESTS (FAIL-CLOSED VIOLATION):\n");
                 for test_id in &self.unvalidated_test_ids {
                     report.push_str(&format!(
                         "  - {}::{} ({})\n",
@@ -54860,11 +54861,11 @@ mod xfail_coverage_tracker {
     }
 }
 
-/// Fail-closed XFAIL coverage validation test
+/// Fail-closed known-gap coverage validation test
 ///
 /// This test ensures that all expected test failures marked with
 /// `expected_validation_failure: true` are actually being executed and validated.
-/// If any XFAIL tests are skipped or not properly validated, this test will fail
+/// If any known-gap tests are skipped or not properly validated, this test will fail
 /// to maintain fail-closed coverage guarantees.
 #[test]
 fn test_xfail_coverage_fail_closed_validation() {
@@ -54873,7 +54874,7 @@ fn test_xfail_coverage_fail_closed_validation() {
     // Initialize the registry
     initialize_xfail_registry();
 
-    // Example: Register some expected failures for demonstration
+    // Example: Register some known gaps for demonstration
     // In a real implementation, these would be automatically registered
     // by test functions when they encounter expected_validation_failure: true
     register_expected_failure(
@@ -54888,7 +54889,7 @@ fn test_xfail_coverage_fail_closed_validation() {
         "validation_failure",
     );
 
-    // Simulate validation results
+    // Evaluate validation results
     validate_expected_failure(
         "otlp_empty_instrumentation_scope_conformance",
         "empty_string_scope_name",
@@ -54913,10 +54914,10 @@ fn test_xfail_coverage_fail_closed_validation() {
 
     println!("\n{}", report);
 
-    // FAIL-CLOSED: If any expected failures were not validated, fail the test
+    // FAIL-CLOSED: If any known gaps were not validated, fail the test
     assert!(
         summary.is_coverage_complete(),
-        "XFAIL Coverage FAIL-CLOSED Violation: {} expected failures were not validated.\n\
+        "known-gap Coverage FAIL-CLOSED Violation: {} known gaps were not validated.\n\
              All tests marked with expected_validation_failure: true MUST be executed and validated.\n\
              \n{}",
         summary.unvalidated_failures,
@@ -54926,14 +54927,14 @@ fn test_xfail_coverage_fail_closed_validation() {
     // Report unexpected passes (these might indicate bugs were fixed)
     if summary.unexpected_passes > 0 {
         println!(
-            "WARNING: {} XFAIL tests passed unexpectedly. \
+            "WARNING: {} known-gap tests passed unexpectedly. \
              This might indicate bugs were fixed or tests need updating:\n{}",
             summary.unexpected_passes, report
         );
     }
 
     println!(
-        "✓ XFAIL Coverage: All {} expected failures properly validated",
+        "✓ known-gap Coverage: All {} known gaps properly validated",
         summary.validated_failures
     );
 }

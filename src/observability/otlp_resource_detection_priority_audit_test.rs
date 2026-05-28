@@ -82,12 +82,12 @@ impl Drop for ResourceEnvGuard {
     }
 }
 
-/// Mock OTLP resource for testing priority behavior.
+/// OTLP resource fixture for priority behavior.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MockOtlpResource {
+pub struct OtlpResourceFixture {
     /// Final resource attributes after priority resolution.
     pub attributes: HashMap<String, String>,
-    /// Source category assigned by the mock builder.
+    /// Source category assigned by the fixture builder.
     pub source: ResourceSource,
 }
 
@@ -102,15 +102,15 @@ pub enum ResourceSource {
     Defaults,
 }
 
-/// Mock resource builder for testing priority logic.
+/// Resource builder fixture for priority logic.
 #[derive(Debug, Default)]
-pub struct MockResourceBuilder {
+pub struct ResourceBuilderFixture {
     programmatic_attrs: HashMap<String, String>,
     env_attrs: HashMap<String, String>,
     default_attrs: HashMap<String, String>,
 }
 
-impl MockResourceBuilder {
+impl ResourceBuilderFixture {
     /// Create new resource builder with default attributes.
     pub fn new() -> Self {
         let mut default_attrs = HashMap::new();
@@ -139,7 +139,7 @@ impl MockResourceBuilder {
     }
 
     /// Build final resource applying OTLP priority: programmatic > env > defaults.
-    pub fn build(self) -> MockOtlpResource {
+    pub fn build(self) -> OtlpResourceFixture {
         let mut final_attrs = self.default_attrs.clone();
 
         // Apply environment attributes (override defaults)
@@ -152,7 +152,7 @@ impl MockResourceBuilder {
             final_attrs.insert(key, value);
         }
 
-        MockOtlpResource {
+        OtlpResourceFixture {
             attributes: final_attrs,
             source: ResourceSource::Programmatic, // Combined source
         }
@@ -206,7 +206,7 @@ fn audit_programmatic_over_environment_priority() {
     println!("   build.version=prog-2.0");
 
     // Build resource with both sources
-    let resource = MockResourceBuilder::new()
+    let resource = ResourceBuilderFixture::new()
         .with_env_resource_attributes()
         .with_attributes(programmatic_attrs)
         .build();
@@ -263,7 +263,7 @@ fn audit_environment_over_defaults_priority() {
     println!("   telemetry.sdk.name=custom-sdk");
 
     // Build resource with only environment and defaults (no programmatic)
-    let resource = MockResourceBuilder::new()
+    let resource = ResourceBuilderFixture::new()
         .with_env_resource_attributes()
         .build();
 
@@ -304,7 +304,7 @@ fn audit_defaults_fallback_behavior() {
     println!("   service.name=unknown_service");
 
     // Build resource with only defaults
-    let resource = MockResourceBuilder::new().build();
+    let resource = ResourceBuilderFixture::new().build();
 
     println!("📊 Final resource attributes:");
     for (key, value) in &resource.attributes {
@@ -326,7 +326,7 @@ fn audit_defaults_fallback_behavior() {
     println!("✅ DEFAULTS FALLBACK: Correctly uses defaults when no higher priority exists");
 }
 
-/// **AUDIT TEST**: Demonstrate current asupersync implementation gap.
+/// **AUDIT TEST**: Verify current asupersync implementation gap.
 ///
 /// **SCENARIO**: Check if asupersync OtelMetrics handles resource detection.
 /// **FINDING**: asupersync currently does NOT implement resource detection.
@@ -438,7 +438,7 @@ fn audit_attribute_collision_resolution() {
     println!("   Environment:  service.name = env-service");
     println!("   Programmatic: service.name = programmatic-service");
 
-    let resource = MockResourceBuilder::new()
+    let resource = ResourceBuilderFixture::new()
         .with_env_resource_attributes()
         .with_attributes(programmatic_attrs)
         .build();

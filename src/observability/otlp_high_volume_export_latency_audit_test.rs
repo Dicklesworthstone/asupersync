@@ -14,7 +14,7 @@
 #[cfg(test)]
 mod tests {
     use crate::observability::otlp_trace_exporter::{
-        LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
+        InMemoryOtlpHttpExporter, LoadSheddingTraceExporter, OtlpSpan, SpanBatch, TraceExporter,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
@@ -241,13 +241,12 @@ mod tests {
         let test_duration_secs = 10; // 10 second test for sustained load
         let batch_size = 100; // Typical OTLP batch size
 
-        // Create high-performance mock exporter with minimal overhead
-        let mock_exporter = MockOtlpHttpExporter::new(Duration::from_micros(50)); // 50µs mock network delay
+        let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_micros(50));
         let queue_capacity = 500; // Reasonable queue for high throughput
         let batch_timeout = Duration::from_millis(100);
 
         let exporter = Arc::new(LoadSheddingTraceExporter::new(
-            Box::new(mock_exporter.clone()),
+            Box::new(memory_exporter.clone()),
             queue_capacity,
             batch_timeout,
         ));
@@ -400,9 +399,9 @@ mod tests {
         eprintln!("  • Analyze tail latency behavior");
         eprintln!("  • Validate load shedding prevents latency explosion");
 
-        let mock_exporter = MockOtlpHttpExporter::new(Duration::from_micros(100)); // 100µs base latency
+        let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_micros(100));
         let exporter = Arc::new(LoadSheddingTraceExporter::new(
-            Box::new(mock_exporter.clone()),
+            Box::new(memory_exporter.clone()),
             200, // Smaller queue to trigger load shedding
             Duration::from_millis(50),
         ));
@@ -494,9 +493,9 @@ mod tests {
         for capacity in queue_capacities {
             eprintln!("\n📊 Testing queue capacity: {}", capacity);
 
-            let mock_exporter = MockOtlpHttpExporter::new(Duration::from_micros(75));
+            let memory_exporter = InMemoryOtlpHttpExporter::new(Duration::from_micros(75));
             let exporter = Arc::new(LoadSheddingTraceExporter::new(
-                Box::new(mock_exporter.clone()),
+                Box::new(memory_exporter.clone()),
                 capacity,
                 Duration::from_millis(100),
             ));

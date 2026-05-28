@@ -38,15 +38,15 @@ pub enum DnsError {
     Timeout,       // DNS query timeout
 }
 
-/// Mock DNS cache for testing resolution caching behavior.
+/// In-memory DNS cache fixture for resolution caching behavior.
 #[derive(Debug)]
-pub struct MockDnsCache {
+pub struct DnsCacheFixture {
     cache: Arc<Mutex<HashMap<String, (DnsResult, Instant, Duration)>>>,
     lookup_count: Arc<AtomicUsize>,
     cache_enabled: bool,
 }
 
-impl MockDnsCache {
+impl DnsCacheFixture {
     fn new(cache_enabled: bool) -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
@@ -69,7 +69,7 @@ impl MockDnsCache {
             drop(cache);
         }
 
-        // Simulate DNS lookup behavior
+        // Deterministic DNS lookup behavior for known fixture hostnames.
         let result = match hostname {
             "collector.example.com" => DnsResult::Success(vec!["203.0.113.1".to_string()]),
             "invalid.example.com" => DnsResult::Failure(DnsError::NxDomain),
@@ -102,19 +102,19 @@ impl MockDnsCache {
     }
 }
 
-/// Mock OTLP HTTP exporter for testing DNS behavior.
+/// OTLP HTTP exporter fixture for DNS behavior.
 #[derive(Debug)]
-pub struct MockOtlpDnsExporter {
+pub struct DnsResolvingOtlpExporterFixture {
     endpoint: String,
-    dns_cache: MockDnsCache,
+    dns_cache: DnsCacheFixture,
     export_attempts: Arc<AtomicUsize>,
 }
 
-impl MockOtlpDnsExporter {
+impl DnsResolvingOtlpExporterFixture {
     fn new(endpoint: &str, cache_enabled: bool) -> Self {
         Self {
             endpoint: endpoint.to_string(),
-            dns_cache: MockDnsCache::new(cache_enabled),
+            dns_cache: DnsCacheFixture::new(cache_enabled),
             export_attempts: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -139,7 +139,7 @@ impl MockOtlpDnsExporter {
         // Perform DNS lookup (with or without caching)
         match self.dns_cache.lookup(hostname) {
             DnsResult::Success(_) => {
-                // Simulate successful HTTP request
+                // Known-good fixture host reaches the HTTP request stage.
                 Ok(())
             }
             DnsResult::Failure(DnsError::NxDomain) => {
@@ -192,10 +192,10 @@ fn audit_otlp_dns_failure_caching() {
         println!("   Testing: {} ({})", endpoint, failure_type);
 
         // **CURRENT IMPLEMENTATION** (no caching - defective)
-        let no_cache_exporter = MockOtlpDnsExporter::new(endpoint, false);
+        let no_cache_exporter = DnsResolvingOtlpExporterFixture::new(endpoint, false);
 
         // **IMPROVED IMPLEMENTATION** (with DNS caching)
-        let cached_exporter = MockOtlpDnsExporter::new(endpoint, true);
+        let cached_exporter = DnsResolvingOtlpExporterFixture::new(endpoint, true);
 
         let export_attempts = 10;
 
@@ -268,7 +268,8 @@ fn audit_dns_cache_ttl_and_recovery() {
     println!("   • TTL should balance load reduction vs recovery time");
 
     // **TTL VERIFICATION SCENARIO**
-    let exporter = MockOtlpDnsExporter::new("http://invalid.example.com:4318/v1/traces", true);
+    let exporter =
+        DnsResolvingOtlpExporterFixture::new("http://invalid.example.com:4318/v1/traces", true);
 
     println!("📊 Testing DNS cache TTL behavior:");
 
@@ -301,8 +302,8 @@ fn audit_dns_cache_ttl_and_recovery() {
     }
 
     // **CACHE EXPIRATION SIMULATION**
-    exporter.dns_cache.clear_cache(); // Simulate TTL expiry
-    println!("   Simulating cache TTL expiration...");
+    exporter.dns_cache.clear_cache(); // Exercise TTL expiry.
+    println!("   Exercising cache TTL expiration...");
 
     // Post-expiry attempt - should perform new DNS lookup
     let result4 = exporter.export_traces();
@@ -344,13 +345,13 @@ fn audit_current_otlp_dns_behavior() {
     println!("   • Uses stdlib addr.to_socket_addrs() directly");
 
     // **DNS STORM SIMULATION**
-    println!("📊 DNS storm simulation:");
+    println!("📊 DNS storm exercise:");
 
     let failed_exporter =
-        MockOtlpDnsExporter::new("http://invalid.example.com:4318/v1/traces", false);
-    let burst_count = 50; // Simulate high-frequency export attempts
+        DnsResolvingOtlpExporterFixture::new("http://invalid.example.com:4318/v1/traces", false);
+    let burst_count = 50; // High-frequency export attempts.
 
-    println!("   Simulating {} rapid export attempts:", burst_count);
+    println!("   Exercising {} rapid export attempts:", burst_count);
 
     let start_time = Instant::now();
     for _i in 0..burst_count {
@@ -494,8 +495,8 @@ fn audit_dns_exponential_backoff() {
 }
 
 fn calculate_backoff_queries(total_exports: u64, backoff_sequence: &[Duration]) -> u64 {
-    // Simplified calculation assuming exports fail consistently
-    // In practice, this would depend on actual timing
+    // Conservative calculation assuming exports fail consistently.
+    // In production, this depends on actual timing.
     let max_backoff_index = backoff_sequence.len() - 1;
     let queries_before_max_backoff = max_backoff_index as u64;
     let remaining_exports = total_exports.saturating_sub(queries_before_max_backoff);

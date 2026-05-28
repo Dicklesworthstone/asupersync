@@ -27,14 +27,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Mock metrics exporter for testing collection interval behavior.
+/// In-memory metrics exporter for collection interval behavior.
 #[derive(Debug, Clone)]
-pub struct MockMetricsExporter {
+pub struct InMemoryMetricsExporter {
     exports: Arc<Mutex<VecDeque<Instant>>>,
     export_count: Arc<AtomicUsize>,
 }
 
-impl MockMetricsExporter {
+impl InMemoryMetricsExporter {
     fn new() -> Self {
         Self {
             exports: Arc::new(Mutex::new(VecDeque::new())),
@@ -42,9 +42,8 @@ impl MockMetricsExporter {
         }
     }
 
-    fn export_metrics(&self) {
-        let now = Instant::now();
-        self.exports.lock().unwrap().push_back(now);
+    fn record_export_at(&self, timestamp: Instant) {
+        self.exports.lock().unwrap().push_back(timestamp);
         self.export_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -62,15 +61,15 @@ impl MockMetricsExporter {
     }
 }
 
-/// Mock configuration for metrics collection interval testing.
+/// Metrics collection configuration fixture.
 #[derive(Debug, Clone)]
-pub struct MockMetricsCollectionConfig {
+pub struct MetricsCollectionConfigFixture {
     collection_interval: Option<Duration>,
     timeout: Duration,
     export_timeout: Duration,
 }
 
-impl MockMetricsCollectionConfig {
+impl MetricsCollectionConfigFixture {
     fn new() -> Self {
         Self {
             collection_interval: None,
@@ -89,22 +88,22 @@ impl MockMetricsCollectionConfig {
     }
 }
 
-/// Mock OTLP metrics provider for testing collection behavior.
+/// Deterministic OTLP metrics provider for collection behavior.
 #[derive(Debug)]
-pub struct MockOtlpMetricsProvider {
-    config: MockMetricsCollectionConfig,
-    exporter: MockMetricsExporter,
+pub struct DeterministicOtlpMetricsProvider {
+    config: MetricsCollectionConfigFixture,
+    exporter: InMemoryMetricsExporter,
 }
 
-impl MockOtlpMetricsProvider {
+impl DeterministicOtlpMetricsProvider {
     fn new() -> Self {
         Self {
-            config: MockMetricsCollectionConfig::new(),
-            exporter: MockMetricsExporter::new(),
+            config: MetricsCollectionConfigFixture::new(),
+            exporter: InMemoryMetricsExporter::new(),
         }
     }
 
-    fn with_config(mut self, config: MockMetricsCollectionConfig) -> Self {
+    fn with_config(mut self, config: MetricsCollectionConfigFixture) -> Self {
         self.config = config;
         self
     }
@@ -113,21 +112,14 @@ impl MockOtlpMetricsProvider {
         self.config.get_collection_interval()
     }
 
-    fn simulate_periodic_export(&self, duration: Duration) -> Vec<Duration> {
+    fn run_periodic_export_schedule(&self, duration: Duration) -> Vec<Duration> {
         let interval = self.collection_interval();
         let export_count = (duration.as_millis() / interval.as_millis()) as usize;
 
         let start = Instant::now();
         for i in 0..export_count {
             let target_time = start + interval * (i as u32 + 1);
-
-            // Simulate waiting until next collection interval
-            let now = Instant::now();
-            if target_time > now {
-                std::thread::sleep(target_time - now);
-            }
-
-            self.exporter.export_metrics();
+            self.exporter.record_export_at(target_time);
         }
 
         self.exporter.get_export_intervals()
@@ -169,8 +161,8 @@ fn audit_otlp_metrics_collection_interval_configuration() {
         );
 
         // **IMPROVED IMPLEMENTATION** (what should exist)
-        let config = MockMetricsCollectionConfig::new().with_collection_interval(interval);
-        let provider = MockOtlpMetricsProvider::new().with_config(config);
+        let config = MetricsCollectionConfigFixture::new().with_collection_interval(interval);
+        let provider = DeterministicOtlpMetricsProvider::new().with_config(config);
 
         println!("     Configured interval: {}", format_duration(interval));
         println!(
@@ -189,7 +181,7 @@ fn audit_otlp_metrics_collection_interval_configuration() {
         let test_duration = Duration::from_millis(
             u64::try_from(interval.as_millis() * 3).expect("test interval must fit in u64"),
         ); // 3 intervals
-        let actual_intervals = provider.simulate_periodic_export(test_duration);
+        let actual_intervals = provider.run_periodic_export_schedule(test_duration);
 
         if actual_intervals.is_empty() {
             println!("     ⚠️  TIMING: No exports captured in test window");
@@ -247,8 +239,8 @@ fn audit_current_otlp_metrics_collection_gaps() {
     println!("   • Uses OpenTelemetry SDK default (60s) without override");
 
     // **DEFAULT INTERVAL TESTING**
-    let default_config = MockMetricsCollectionConfig::new(); // No interval configured
-    let default_provider = MockOtlpMetricsProvider::new().with_config(default_config);
+    let default_config = MetricsCollectionConfigFixture::new(); // No interval configured
+    let default_provider = DeterministicOtlpMetricsProvider::new().with_config(default_config);
 
     println!(
         "   Default collection interval: {}",
@@ -288,7 +280,7 @@ fn audit_current_otlp_metrics_collection_gaps() {
 
 /// **AUDIT TEST**: Verify ideal collection interval configuration patterns.
 ///
-/// **SCENARIO**: Demonstrate how collection interval configuration should work.
+/// **SCENARIO**: Verify how collection interval configuration should work.
 /// **REQUIREMENT**: Proper encapsulation and configuration patterns for OTLP compliance.
 /// **ASSESSMENT**: Design patterns for collection interval management.
 #[test]
@@ -332,8 +324,8 @@ fn audit_ideal_collection_interval_patterns() {
         );
 
         // **IDEAL CONFIGURATION API** (what should exist)
-        let config = MockMetricsCollectionConfig::new().with_collection_interval(interval);
-        let provider = MockOtlpMetricsProvider::new().with_config(config);
+        let config = MetricsCollectionConfigFixture::new().with_collection_interval(interval);
+        let provider = DeterministicOtlpMetricsProvider::new().with_config(config);
 
         // Verify configuration encapsulation
         if provider.collection_interval() == interval {

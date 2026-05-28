@@ -18,12 +18,12 @@ use crate::observability::w3c_trace_context::*;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-/// Simulates HTTP request with W3C trace context.
-struct MockHttpRequest {
+/// HTTP request fixture with W3C trace context headers.
+struct HeaderFixtureRequest {
     headers: HashMap<String, String>,
 }
 
-impl MockHttpRequest {
+impl HeaderFixtureRequest {
     fn new() -> Self {
         Self {
             headers: HashMap::new(),
@@ -43,12 +43,12 @@ impl MockHttpRequest {
     }
 }
 
-/// Simulates gRPC request with metadata.
-struct MockGrpcRequest {
+/// gRPC request fixture with metadata.
+struct GrpcMetadataFixture {
     metadata: HashMap<String, String>,
 }
 
-impl MockGrpcRequest {
+impl GrpcMetadataFixture {
     fn new() -> Self {
         Self {
             metadata: HashMap::new(),
@@ -71,7 +71,7 @@ fn audit_http_to_grpc_span_context_propagation() {
     let original_span_id = "00f067aa0ba902b7";
     let original_traceparent = format!("00-{}-{}-01", original_trace_id, original_span_id);
 
-    let http_request = MockHttpRequest::new()
+    let http_request = HeaderFixtureRequest::new()
         .with_traceparent(&original_traceparent)
         .with_tracestate("vendor1=value1,vendor2=value2");
 
@@ -110,7 +110,7 @@ fn audit_http_to_grpc_span_context_propagation() {
     );
 
     // WHEN: Inject child context into gRPC request
-    let mut grpc_request = MockGrpcRequest::new();
+    let mut grpc_request = GrpcMetadataFixture::new();
     inject_to_grpc(&child_context, grpc_request.metadata_mut());
 
     // THEN: gRPC metadata contains correct traceparent
@@ -158,7 +158,7 @@ fn audit_http_to_grpc_span_context_propagation() {
 #[test]
 fn audit_graceful_handling_of_missing_trace_context() {
     // GIVEN: HTTP request without trace context headers
-    let http_request = MockHttpRequest::new();
+    let http_request = HeaderFixtureRequest::new();
 
     // WHEN: Attempt to extract trace context
     let extracted_context = extract_from_http(&http_request.headers)
@@ -174,7 +174,7 @@ fn audit_graceful_handling_of_missing_trace_context() {
     let root_context = W3CTraceContext::new_root();
 
     // THEN: Root context is valid for downstream propagation
-    let mut grpc_request = MockGrpcRequest::new();
+    let mut grpc_request = GrpcMetadataFixture::new();
     inject_to_grpc(&root_context, grpc_request.metadata_mut());
 
     assert!(
@@ -193,7 +193,7 @@ fn audit_graceful_handling_of_missing_trace_context() {
 fn audit_security_bounds_prevent_amplification() {
     // GIVEN: HTTP request with maliciously large traceparent
     let malicious_traceparent = "00-".to_string() + &"a".repeat(200);
-    let http_request = MockHttpRequest::new().with_traceparent(&malicious_traceparent);
+    let http_request = HeaderFixtureRequest::new().with_traceparent(&malicious_traceparent);
 
     // WHEN: Attempt to extract oversized context
     let result = extract_from_http(&http_request.headers);
@@ -237,7 +237,7 @@ fn audit_malformed_trace_context_handling() {
     ];
 
     for (invalid_traceparent, description) in test_cases {
-        let http_request = MockHttpRequest::new().with_traceparent(invalid_traceparent);
+        let http_request = HeaderFixtureRequest::new().with_traceparent(invalid_traceparent);
 
         let result = extract_from_http(&http_request.headers);
 
@@ -254,7 +254,7 @@ fn audit_malformed_trace_context_handling() {
 
 /// **INTEGRATION TEST**: Full HTTP → gRPC → HTTP round trip.
 ///
-/// Simulates: Client → API Gateway → Service A → Service B → Response
+/// Exercises: Client → API Gateway → Service A → Service B → Response
 /// Verifies: Complete trace chain with proper parent-child relationships.
 #[test]
 fn integration_test_full_trace_round_trip() {
@@ -264,14 +264,14 @@ fn integration_test_full_trace_round_trip() {
     let client_traceparent = format!("00-{}-{}-01", client_trace_id, client_span_id);
 
     // STEP 2: API Gateway extracts context
-    let gateway_request = MockHttpRequest::new().with_traceparent(&client_traceparent);
+    let gateway_request = HeaderFixtureRequest::new().with_traceparent(&client_traceparent);
     let gateway_context = extract_from_http(&gateway_request.headers)
         .unwrap()
         .unwrap();
 
     // STEP 3: API Gateway → Service A (gRPC call)
     let service_a_context = gateway_context.create_child();
-    let mut service_a_request = MockGrpcRequest::new();
+    let mut service_a_request = GrpcMetadataFixture::new();
     inject_to_grpc(&service_a_context, service_a_request.metadata_mut());
 
     // STEP 4: Service A → Service B (another gRPC call)
@@ -279,7 +279,7 @@ fn integration_test_full_trace_round_trip() {
         .unwrap()
         .unwrap();
     let service_b_context = service_a_extracted.create_child();
-    let mut service_b_request = MockGrpcRequest::new();
+    let mut service_b_request = GrpcMetadataFixture::new();
     inject_to_grpc(&service_b_context, service_b_request.metadata_mut());
 
     // VERIFICATION: Complete trace chain
