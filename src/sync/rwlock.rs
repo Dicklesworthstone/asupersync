@@ -74,7 +74,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use super::waiter::WaiterChain;
-use crate::cx::Cx;
+use crate::cx::{Cx, cap};
 use crate::sync::lock_ordering::{self, LockRank};
 
 /// br-asupersync-4j40bb: bound on consecutive writers served from the queue
@@ -1454,11 +1454,11 @@ mod tests {
         poll_until_ready(lock.write(cx)).expect("write failed")
     }
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         test_cx_with_slot(0)
     }
 
-    fn test_cx_with_slot(slot: u32) -> Cx {
+    fn test_cx_with_slot(slot: u32) -> Cx<cap::All> {
         Cx::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, slot)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, slot)),
@@ -3250,7 +3250,7 @@ mod tests {
 #[cfg(test)]
 mod metamorphic_tests {
     use super::*;
-    use crate::cx::Cx;
+    use crate::cx::{Cx, cap};
     use crate::lab::{LabConfig, LabRuntime};
     use crate::types::{Budget, RegionId, TaskId};
     use crate::util::{ArenaIndex, DetRng};
@@ -3271,11 +3271,11 @@ mod metamorphic_tests {
     }
 
     /// Create a test context for deterministic scheduling.
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         test_cx_with_slot(0)
     }
 
-    fn test_cx_with_slot(slot: u32) -> Cx {
+    fn test_cx_with_slot(slot: u32) -> Cx<cap::All> {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, slot)),
             TaskId::from_arena(ArenaIndex::new(0, slot)),

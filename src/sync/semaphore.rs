@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use crate::cx::Cx;
+use crate::cx::{Cx, cap};
 use crate::obligation::graded::{ObligationToken, SemaphorePermitKind};
 use crate::sync::lock_ordering::{self, LockRank};
 
@@ -970,7 +970,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
