@@ -10,12 +10,26 @@
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::env;
-use std::sync::{Mutex, MutexGuard};
 
 use super::*;
 use crate::runtime::config::RuntimeConfig;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+const ENV_CONFIG_VARS: &[&str] = &[
+    ENV_WORKER_THREADS,
+    ENV_TASK_QUEUE_DEPTH,
+    ENV_THREAD_STACK_SIZE,
+    ENV_THREAD_NAME_PREFIX,
+    ENV_STEAL_BATCH_SIZE,
+    ENV_BLOCKING_MIN_THREADS,
+    ENV_BLOCKING_MAX_THREADS,
+    ENV_ENABLE_PARKING,
+    ENV_POLL_BUDGET,
+    ENV_CANCEL_LANE_MAX_STREAK,
+    ENV_ENABLE_GOVERNOR,
+    ENV_GOVERNOR_INTERVAL,
+    ENV_ENABLE_ADAPTIVE_CANCEL_STREAK,
+    ENV_ADAPTIVE_CANCEL_EPOCH_STEPS,
+];
 
 fn apply_env_overrides(config: &mut RuntimeConfig) -> Result<(), BuildError> {
     super::apply_env_overrides(config, &SystemEnvReader::new())
@@ -132,18 +146,24 @@ fn arb_config_operation() -> impl Strategy<Value = ConfigOperation> {
 
 /// Helper to set environment variables with cleanup.
 struct EnvGuard {
-    _lock: MutexGuard<'static, ()>,
+    _lock: parking_lot::MutexGuard<'static, ()>,
     vars_to_unset: Vec<String>,
     vars_to_restore: HashMap<String, String>,
 }
 
 impl EnvGuard {
     fn new() -> Self {
-        Self {
-            _lock: ENV_LOCK.lock().unwrap(),
+        let mut guard = Self {
+            _lock: crate::test_utils::env_lock(),
             vars_to_unset: Vec::new(),
             vars_to_restore: HashMap::new(),
+        };
+
+        for &name in ENV_CONFIG_VARS {
+            guard.unset(name);
         }
+
+        guard
     }
 
     #[allow(unsafe_code)]
@@ -154,9 +174,9 @@ impl EnvGuard {
         } else {
             self.vars_to_unset.push(name.to_string());
         }
-        // SAFETY: These tests serialize all environment mutation through
-        // ENV_LOCK, use crate-scoped variable names, and do not spawn worker
-        // threads while the guard is live.
+        // SAFETY: These tests serialize all environment mutation through the
+        // crate-wide env_lock, use crate-scoped variable names, and do not
+        // spawn worker threads while the guard is live.
         unsafe { env::set_var(name, value) };
     }
 
