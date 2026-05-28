@@ -3892,7 +3892,7 @@ mod tests {
         // This simulates the scenario where verification would recurse deeply.
         token = token.add_third_party_caveat("test_location", "discharge_0", &root_key);
 
-        let ctx = VerificationContext::new();
+        let ctx = VerificationContext::new().with_time(1_000_000_000);
         // Verification should fail with depth exceeded error before stack overflow
         let result = token.verify_with_discharges(&root_key, &ctx, &discharges);
 
