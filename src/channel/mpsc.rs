@@ -1147,9 +1147,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::types::{Budget, CancelKind};
-    use crate::util::ArenaIndex;
-    use crate::{RegionId, TaskId};
+    use crate::types::CancelKind;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
@@ -1157,7 +1155,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn test_cx() -> Cx<cap::All> {
+    fn test_cx() -> Cx<crate::cx::cap::All> {
         Cx::for_testing()
     }
 

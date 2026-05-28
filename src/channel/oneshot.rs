@@ -994,7 +994,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn test_cx() -> Cx<cap::All> {
+    fn test_cx() -> Cx<crate::cx::cap::All> {
         Cx::for_testing()
     }
 

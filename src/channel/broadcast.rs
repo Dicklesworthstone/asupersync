@@ -792,8 +792,6 @@ mod tests {
     use crate::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
     use crate::runtime::yield_now;
     use crate::types::Budget;
-    use crate::util::ArenaIndex;
-    use crate::{RegionId, TaskId};
     use serde_json::Value;
     use std::future::Future;
     use std::sync::Arc;
@@ -806,7 +804,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn test_cx() -> Cx<cap::All> {
+    fn test_cx() -> Cx<crate::cx::cap::All> {
         Cx::for_testing()
     }
 

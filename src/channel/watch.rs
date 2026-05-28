@@ -910,9 +910,6 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::types::Budget;
-    use crate::util::ArenaIndex;
-    use crate::{RegionId, TaskId};
     use std::sync::atomic::AtomicUsize;
 
     fn init_test(name: &str) {
@@ -920,12 +917,8 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    fn test_cx() -> Cx {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
-        )
+    fn test_cx() -> Cx<crate::cx::cap::All> {
+        Cx::for_testing()
     }
 
     /// Polls a future that should be immediately ready (e.g., after send).
