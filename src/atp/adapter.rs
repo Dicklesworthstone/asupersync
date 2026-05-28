@@ -541,6 +541,12 @@ impl AdapterManager {
             }
         }
 
+        if !downgrade_reasons.is_empty() {
+            return Err(Error::new(ErrorKind::ConnectionRefused).with_message(format!(
+                "{adapter_type} does not satisfy required ATP adapter features: {downgrade_reasons:?}"
+            )));
+        }
+
         // Add adapter-specific performance caveats
         self.add_adapter_caveats(adapter_type, &mut performance_caveats);
 
@@ -811,6 +817,34 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
+        });
+    }
+
+    #[test]
+    fn adapter_negotiation_skips_unmet_feature_requirements() {
+        block_on(async {
+            let mut manager = AdapterManager::new(AdapterConfig::default());
+            manager.config.preferred_adapters =
+                vec![AdapterType::NativeQuic, AdapterType::WebTransport];
+            manager
+                .parity_matrix
+                .get_mut(&AdapterType::NativeQuic)
+                .expect("native parity")
+                .object_support = FeatureSupport::Unsupported;
+
+            let negotiation = manager
+                .negotiate_adapter(
+                    &[RequiredFeature::ObjectVerification],
+                    TraceId::from_parts(1, 1),
+                )
+                .await
+                .expect("compatible fallback should be selected");
+
+            assert_eq!(negotiation.selected_adapter, AdapterType::WebTransport);
+            assert!(
+                negotiation.downgrade_reasons.is_empty(),
+                "selected adapter should satisfy the requested features"
+            );
         });
     }
 
