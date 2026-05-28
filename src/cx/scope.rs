@@ -1837,14 +1837,14 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
+        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).expect("should spawn async task");
 
         // Task should exist in state
         let task = state.task(handle.task_id());
         assert!(task.is_some());
 
         // Task should be owned by the region
-        let task = task.unwrap();
+        let task = task.expect("task should exist in state");
         assert_eq!(task.owner, region);
     }
 
@@ -1878,7 +1878,7 @@ mod tests {
 
                 (same_registry, origin)
             })
-            .unwrap();
+            .expect("should spawn registered task for capability inheritance test");
 
         let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
@@ -1988,12 +1988,12 @@ mod tests {
         // spawn_registered should both create and store the task
         let handle = scope
             .spawn_registered(&mut state, &cx, |_| async { 42_i32 })
-            .unwrap();
+            .expect("should spawn and register task");
 
         // Task record should exist
         let task = state.task(handle.task_id());
         assert!(task.is_some());
-        assert_eq!(task.unwrap().owner, region);
+        assert_eq!(task.expect("task should exist in state").owner, region);
 
         // StoredTask should be registered (can be retrieved for polling)
         let stored = state.get_stored_future(handle.task_id());
@@ -2011,13 +2011,13 @@ mod tests {
 
         let mut handle = scope
             .spawn_registered(&mut state, &cx, |_| async { 42_i32 })
-            .unwrap();
+            .expect("should spawn registered task for polling test");
 
         // Get the stored future and poll it
         let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
 
-        let stored = state.get_stored_future(handle.task_id()).unwrap();
+        let stored = state.get_stored_future(handle.task_id()).expect("should retrieve stored future for polling");
         let poll_result = stored.poll(&mut poll_cx);
         assert!(
             poll_result.is_ready(),
@@ -2039,12 +2039,12 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn_blocking(&mut state, &cx, |_| 42_i32).unwrap();
+        let (handle, _stored) = scope.spawn_blocking(&mut state, &cx, |_| 42_i32).expect("should spawn blocking task");
 
         // Task should exist
         let task = state.task(handle.task_id());
         assert!(task.is_some());
-        assert_eq!(task.unwrap().owner, region);
+        assert_eq!(task.expect("blocking task should exist in state").owner, region);
     }
 
     #[test]
