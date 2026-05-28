@@ -131,10 +131,10 @@ mod tests {
         async fn finalize(
             &self,
             server_addr: SocketAddr,
+            h3_ws_stats: H3WebSocketStats,
             result: bool,
             error: Option<String>,
         ) -> H3WebSocketTestResult {
-            let stats = self.stats.read().await.clone();
             H3WebSocketTestResult {
                 test_name: self.test_name.clone(),
                 server_addr,
@@ -142,7 +142,7 @@ mod tests {
                 success: result,
                 error,
                 duration_ms: self.start_time.elapsed().as_millis() as u64,
-                h3_ws_stats: stats,
+                h3_ws_stats,
             }
         }
     }
@@ -646,25 +646,37 @@ mod tests {
         let test_result = match result {
             Ok(()) => {
                 // Verify stats
-                let server_stats = server.stats.read().await;
-                let client_stats = client.stats.read().await;
+                let observed_stats = {
+                    let server_stats = server.stats.read().await;
+                    let client_stats = client.stats.read().await;
 
-                assert_eq!(server_stats.connect_requests, 1);
-                assert_eq!(server_stats.websocket_upgrades, 1);
-                assert!(server_stats.websocket_frames_received >= 2); // ping + text
-                assert!(server_stats.websocket_frames_sent >= 1); // pong
-                assert_eq!(server_stats.stream_closes, 1);
+                    assert_eq!(server_stats.connect_requests, 1);
+                    assert_eq!(server_stats.websocket_upgrades, 1);
+                    assert!(server_stats.websocket_frames_received >= 2); // ping + text
+                    assert!(server_stats.websocket_frames_sent >= 1); // pong
+                    assert_eq!(server_stats.stream_closes, 1);
 
-                assert_eq!(client_stats.quic_connections, 1);
-                assert_eq!(client_stats.connect_requests, 1);
-                assert!(client_stats.websocket_frames_sent >= 2); // ping + text
-                assert!(client_stats.websocket_frames_received >= 1); // pong
+                    assert_eq!(client_stats.quic_connections, 1);
+                    assert_eq!(client_stats.connect_requests, 1);
+                    assert!(client_stats.websocket_frames_sent >= 2); // ping + text
+                    assert!(client_stats.websocket_frames_received >= 1); // pong
 
-                logger.finalize(server.addr, true, None).await
+                    server_stats.clone()
+                };
+
+                logger
+                    .finalize(server.addr, observed_stats, true, None)
+                    .await
             }
             Err(e) => {
+                let observed_stats = server.stats.read().await.clone();
                 logger
-                    .finalize(server.addr, false, Some(format!("Test failed: {e}")))
+                    .finalize(
+                        server.addr,
+                        observed_stats,
+                        false,
+                        Some(format!("Test failed: {e}")),
+                    )
                     .await
             }
         };
@@ -727,6 +739,7 @@ mod tests {
         let test_result = logger
             .finalize(
                 server.addr,
+                server.stats.read().await.clone(),
                 result.is_ok(),
                 result.err().map(|e| format!("{e}")),
             )
@@ -790,9 +803,7 @@ mod tests {
                 Err(H3NativeError::StreamProtocol(_))
             ));
 
-            logger
-                .increment_stat(|stats| stats.protocol_errors += 3)
-                .await;
+            server.stats.write().await.protocol_errors += 3;
 
             Ok::<(), H3NativeError>(())
         }
@@ -801,6 +812,7 @@ mod tests {
         let test_result = logger
             .finalize(
                 server.addr,
+                server.stats.read().await.clone(),
                 result.is_ok(),
                 result.err().map(|e| format!("{e}")),
             )
@@ -907,22 +919,30 @@ mod tests {
 
         let test_result = match result {
             Ok(()) => {
-                let stats = server.stats.read().await;
+                let observed_stats = {
+                    let stats = server.stats.read().await;
 
-                assert_eq!(stats.connect_requests, NUM_STREAMS as u64);
-                assert_eq!(stats.websocket_upgrades, NUM_STREAMS as u64);
-                assert_eq!(
-                    stats.websocket_frames_received,
-                    (NUM_STREAMS * FRAMES_PER_STREAM) as u64
-                );
-                assert_eq!(stats.stream_closes, NUM_STREAMS as u64);
+                    assert_eq!(stats.connect_requests, NUM_STREAMS as u64);
+                    assert_eq!(stats.websocket_upgrades, NUM_STREAMS as u64);
+                    assert_eq!(
+                        stats.websocket_frames_received,
+                        (NUM_STREAMS * FRAMES_PER_STREAM) as u64
+                    );
+                    assert_eq!(stats.stream_closes, NUM_STREAMS as u64);
 
-                logger.finalize(server.addr, true, None).await
+                    stats.clone()
+                };
+
+                logger
+                    .finalize(server.addr, observed_stats, true, None)
+                    .await
             }
             Err(e) => {
+                let observed_stats = server.stats.read().await.clone();
                 logger
                     .finalize(
                         server.addr,
+                        observed_stats,
                         false,
                         Some(format!("High load test failed: {e}")),
                     )
@@ -1014,32 +1034,40 @@ mod tests {
 
         let test_result = match result {
             Ok(()) => {
-                let server_stats = server.stats.read().await;
-                let client_stats = client.stats.read().await;
+                let observed_stats = {
+                    let server_stats = server.stats.read().await;
+                    let client_stats = client.stats.read().await;
 
-                // Verify server stats
-                assert_h3_websocket_stats!(server_stats, {
-                    connect_requests: 1,
-                    websocket_upgrades: 1,
-                    frames_sent: 2,
-                    frames_received: 3,
-                    stream_closes: 1,
-                });
+                    // Verify server stats
+                    assert_h3_websocket_stats!(server_stats, {
+                        connect_requests: 1,
+                        websocket_upgrades: 1,
+                        frames_sent: 2,
+                        frames_received: 3,
+                        stream_closes: 1,
+                    });
 
-                // Verify client stats
-                assert_h3_websocket_stats!(client_stats, {
-                    connect_requests: 1,
-                    websocket_upgrades: 0,
-                    frames_sent: 3,
-                    frames_received: 2,
-                });
+                    // Verify client stats
+                    assert_h3_websocket_stats!(client_stats, {
+                        connect_requests: 1,
+                        websocket_upgrades: 0,
+                        frames_sent: 3,
+                        frames_received: 2,
+                    });
 
-                logger.finalize(server.addr, true, None).await
+                    server_stats.clone()
+                };
+
+                logger
+                    .finalize(server.addr, observed_stats, true, None)
+                    .await
             }
             Err(e) => {
+                let observed_stats = server.stats.read().await.clone();
                 logger
                     .finalize(
                         server.addr,
+                        observed_stats,
                         false,
                         Some(format!("Stats accuracy test failed: {e}")),
                     )
