@@ -1,18 +1,19 @@
 ---
 source: src/lab/explorer.rs
+assertion_line: 1841
 expression: value
 ---
 {
   "certificate_divergences": [
     [
-      "[seed]",
-      "[seed]"
+      "[SEED]",
+      "[SEED]"
     ]
   ],
   "coverage": {
     "class_run_counts": {
-      "7001": 2,
-      "7002": 1
+      "[FINGERPRINT_0]": 2,
+      "[FINGERPRINT_1]": 1
     },
     "equivalence_classes": 2,
     "new_class_discoveries": 2,
@@ -30,54 +31,54 @@ expression: value
   },
   "runs": [
     {
-      "certificate_hash": 17001,
-      "fingerprint": 7001,
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
       "is_new_class": true,
-      "seed": "[seed]",
-      "steps": 21,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
       "violation_count": 1
     },
     {
-      "certificate_hash": 17002,
-      "fingerprint": 7001,
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
       "is_new_class": false,
-      "seed": "[seed]",
-      "steps": 13,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
       "violation_count": 0
     },
     {
-      "certificate_hash": 17099,
-      "fingerprint": 7002,
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
       "is_new_class": true,
-      "seed": "[seed]",
-      "steps": 8,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
       "violation_count": 0
     }
   ],
   "top_unexplored": [
     {
       "score": {
-        "fingerprint": 991,
+        "fingerprint": "[FINGERPRINT]",
         "novelty": 3,
         "persistence_sum": 15
       },
-      "seed": "[seed]"
+      "seed": "[SEED]"
     },
     {
       "score": null,
-      "seed": "[seed]"
+      "seed": "[SEED]"
     }
   ],
   "total_runs": 3,
   "unique_classes": 2,
   "violation_seeds": [
-    "[seed]"
+    "[SEED]"
   ],
   "violations": [
     {
-      "fingerprint": 7001,
-      "seed": "[seed]",
-      "steps": 21,
+      "fingerprint": "[FINGERPRINT]",
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
       "violations": [
         "2 tasks leaked"
       ]
