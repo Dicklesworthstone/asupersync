@@ -5718,16 +5718,16 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, server, 32)
-            .unwrap();
+            .expect("should spawn accumulator gen_server");
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
         let server_ref = handle.server_ref();
 
         // Queue up several casts.
-        server_ref.try_cast(AccumCast::Add(10)).unwrap();
-        server_ref.try_cast(AccumCast::Add(20)).unwrap();
-        server_ref.try_cast(AccumCast::Add(30)).unwrap();
+        server_ref.try_cast(AccumCast::Add(10)).expect("should cast Add(10)");
+        server_ref.try_cast(AccumCast::Add(20)).expect("should cast Add(20)");
+        server_ref.try_cast(AccumCast::Add(30)).expect("should cast Add(30)");
 
         // Start the server (init runs, then it will process casts).
         {
@@ -5811,7 +5811,7 @@ mod tests {
                 32,
                 now,
             )
-            .unwrap();
+            .expect("should spawn named gen_server 'my_counter'");
 
         let task_id = named_handle.task_id();
         runtime.state.store_spawned_task(task_id, stored);
@@ -5908,7 +5908,7 @@ mod tests {
                 8,
                 now,
             )
-            .unwrap();
+            .expect("should spawn named gen_server 'still_running'");
         runtime.state.store_spawned_task(handle.task_id(), stored);
 
         assert!(
@@ -6005,7 +6005,7 @@ mod tests {
                 8,
                 now,
             )
-            .unwrap();
+            .expect("first spawn of 'singleton' should succeed");
         runtime.state.store_spawned_task(h1.task_id(), s1);
 
         // Second spawn with same name fails.
@@ -6029,7 +6029,7 @@ mod tests {
         // Verify the orphaned task record from the failed spawn was cleaned up.
         // The region should only contain the first task; no leaked task record
         // that would prevent region quiescence.
-        let region_tasks = runtime.state.region(region).unwrap().task_ids();
+        let region_tasks = runtime.state.region(region).expect("region should exist for task validation").task_ids();
         assert_eq!(
             region_tasks,
             vec![h1.task_id()],
