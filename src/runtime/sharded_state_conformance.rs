@@ -23,8 +23,6 @@
 use crate::observability::ObservabilityConfig;
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::runtime::config::ObligationLeakResponse;
-#[cfg(any(debug_assertions, feature = "lock-metrics"))]
-use crate::runtime::sharded_state::lock_order::{held_count, held_labels};
 use crate::runtime::sharded_state::{
     ShardGuard, ShardedConfig, ShardedObservability, ShardedState,
 };
@@ -35,6 +33,9 @@ use crate::util::{ArenaIndex, OsEntropy};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use crate::runtime::sharded_state::lock_order::{held_count, held_labels};
 
 #[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
 fn held_count() -> usize {

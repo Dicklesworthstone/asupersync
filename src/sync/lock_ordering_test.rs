@@ -3,15 +3,20 @@
 #[cfg(test)]
 mod tests {
     use super::super::contended_mutex::ContendedMutex;
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     use super::super::rwlock::RwLock;
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     use crate::cx::{Cx, cap};
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     use crate::types::{Budget, RegionId, TaskId};
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     use crate::util::ArenaIndex;
     use std::sync::Arc;
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     use std::thread;
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_correct_lock_ordering() {
         // Test correct ordering: Config -> Instrumentation -> Regions -> Tasks -> Obligations
         let config_lock = Arc::new(ContendedMutex::new("config_cache", 0));
@@ -27,7 +32,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[should_panic(expected = "Lock ordering violation")]
     fn test_lock_ordering_violation() {
         // Test incorrect ordering: acquire Tasks before Config (violates hierarchy)
@@ -42,7 +47,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_same_rank_locks_allowed() {
         // Multiple locks of the same rank should be allowed
         let tasks_lock1 = Arc::new(ContendedMutex::new("tasks_queue1", 0));
@@ -67,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_lock_release_and_reacquire() {
         // Test that lock ordering is reset after locks are released
         let config_lock = Arc::new(ContendedMutex::new("config_cache", 0));
@@ -87,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_cross_thread_lock_ordering_isolation() {
         // Test that lock ordering is tracked per-thread
         let config_lock = Arc::new(ContendedMutex::new("config_cache", 0));
@@ -172,6 +177,7 @@ mod tests {
     }
 
     /// Helper function for RwLock tests
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_cx() -> Cx<cap::All> {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -181,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[should_panic(expected = "Lock ordering violation")]
     fn test_rwlock_owned_futures_respect_lock_ordering() {
         //! Regression test for asupersync-vm1044: RwLock owned futures bypass lock ordering checks.
@@ -206,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[should_panic(expected = "Lock ordering violation")]
     fn test_rwlock_owned_write_futures_respect_lock_ordering() {
         //! Regression test for asupersync-vm1044: Ensure OwnedWriteFuture also respects lock ordering.

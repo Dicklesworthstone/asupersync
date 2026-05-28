@@ -506,7 +506,7 @@ pub fn lock_order_atlas_snapshot() -> LockOrderAtlasSnapshot {
         }
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
     {
         LockOrderAtlasSnapshot {
             order_edges_exercised: Vec::new(),
