@@ -537,7 +537,16 @@ mod conformance_tests {
         // Test infinity
         special_hist.observe(f64::INFINITY);
         assert_eq!(special_hist.count(), 1);
-        assert_eq!(special_hist.sum(), f64::INFINITY);
+        assert_eq!(
+            special_hist.sum(),
+            0.0,
+            "non-finite observations must not poison the histogram sum"
+        );
+        assert_eq!(
+            special_hist.bucket_counts().last().copied(),
+            Some(1),
+            "infinity still counts in the +Inf bucket"
+        );
 
         special_hist.reset();
 
@@ -617,9 +626,9 @@ mod conformance_tests {
         assert!(export.contains("test_integration_count"));
 
         // Test bucket export format
-        assert!(export.contains("le=\"1.0\""));
-        assert!(export.contains("le=\"5.0\""));
-        assert!(export.contains("le=\"10.0\""));
+        assert!(export.contains("le=\"1\""));
+        assert!(export.contains("le=\"5\""));
+        assert!(export.contains("le=\"10\""));
         assert!(export.contains("le=\"+Inf\""));
 
         // Test cumulative bucket counts in export

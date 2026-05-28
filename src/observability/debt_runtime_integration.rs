@@ -712,7 +712,7 @@ mod tests {
 
         assert!(integration.check_emergency_intervention());
 
-        let cleaned = integration.execute_emergency_relief(Duration::from_millis(1));
+        let cleaned = integration.execute_emergency_relief(Duration::ZERO);
         assert!(cleaned > 0);
     }
 

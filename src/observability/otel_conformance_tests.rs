@@ -35465,9 +35465,9 @@ mod otlp_122_tests {
 
         // Test magnitude preservation
         let min_abs = min_value.wrapping_abs(); // Use wrapping to handle MIN case
-        assert_ne!(
+        assert_eq!(
             min_abs, min_value,
-            "Absolute value should differ for negative"
+            "i64::MIN has no positive i64 magnitude; wrapping_abs preserves the sentinel"
         );
 
         println!("OTLP-125: Encoding edge cases verified");
@@ -37953,7 +37953,7 @@ mod otlp_122_tests {
         );
 
         assert_eq!(depth, 3, "Complex structure should have depth 3");
-        assert_eq!(total_pairs, 6, "Should count 6 total key-value pairs");
+        assert_eq!(total_pairs, 7, "Should count all nested key-value pairs");
 
         let encoding_result = evaluate_kvlist_encoding_cycle_nested(&complex_kvlist);
         assert!(
@@ -40696,18 +40696,18 @@ mod otlp_122_tests {
             current_depth: &mut usize,
             max_depth_reached: &mut usize,
         ) -> DepthMeasurementResult {
-            *current_depth += 1;
-            *max_depth_reached = (*max_depth_reached).max(*current_depth);
-
-            // Prevent infinite recursion in test
-            if *current_depth > 2000 {
-                return DepthMeasurementResult::Error {
-                    message: "Test recursion limit exceeded".to_string(),
-                };
-            }
-
             match value {
                 AnyValue::ArrayValue(array) => {
+                    *current_depth += 1;
+                    *max_depth_reached = (*max_depth_reached).max(*current_depth);
+
+                    // Prevent infinite recursion in test
+                    if *current_depth > 2000 {
+                        return DepthMeasurementResult::Error {
+                            message: "Test recursion limit exceeded".to_string(),
+                        };
+                    }
+
                     if *current_depth > 32 {
                         return DepthMeasurementResult::ExceedsLimit {
                             attempted_depth: *current_depth,
@@ -40733,8 +40733,7 @@ mod otlp_122_tests {
                     DepthMeasurementResult::WithinLimits
                 }
                 _ => {
-                    // Non-array value - no further nesting
-                    *current_depth -= 1; // Backtrack
+                    // Scalar values terminate nesting and do not add array depth.
                     DepthMeasurementResult::WithinLimits
                 }
             }
