@@ -8,7 +8,7 @@ use super::{
     StreamPriority, StreamResetCode,
 };
 use crate::bytes::Bytes;
-use crate::cx::{Cx, cap};
+use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use std::collections::VecDeque;
 

@@ -691,7 +691,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_sender_drop_notifies_all_receivers() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -757,7 +757,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_numbers_preserved_across_sender_drop() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -818,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_receivers_notification_consistency() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -873,7 +873,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_immediate_sender_drop_notification() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -920,7 +920,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_slow_receiver_notification_during_drop() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -965,7 +965,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_channel_capacity_impact_on_notifications() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         // Test with small capacity

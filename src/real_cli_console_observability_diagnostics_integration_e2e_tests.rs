@@ -1051,7 +1051,7 @@ pub struct OutputBuffer {
 /// Test 1: Basic level filtering with console formatter
 #[tokio::test]
 async fn test_basic_level_filtering() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = ConsoleFilterConfig {
         global_level: DiagnosticLevel::Warn,
         ..ConsoleFilterConfig::default()
@@ -1091,7 +1091,7 @@ async fn test_basic_level_filtering() -> Result<(), Box<dyn std::error::Error>> 
 /// Test 2: Deeply nested span hierarchies with mixed levels
 #[tokio::test]
 async fn test_nested_span_hierarchies() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = ConsoleFilterConfig {
         global_level: DiagnosticLevel::Info,
         max_nesting_depth: 5,
@@ -1136,7 +1136,7 @@ async fn test_nested_span_hierarchies() -> Result<(), Box<dyn std::error::Error>
 /// Test 3: Level override propagation in parent-child spans
 #[tokio::test]
 async fn test_level_override_propagation() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = ConsoleFilterConfig {
         global_level: DiagnosticLevel::Debug,
         ..ConsoleFilterConfig::default()
@@ -1182,7 +1182,7 @@ async fn test_level_override_propagation() -> Result<(), Box<dyn std::error::Err
 /// Test 4: Context boundary filtering across span transitions
 #[tokio::test]
 async fn test_context_boundary_filtering() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = ConsoleFilterConfig {
         global_level: DiagnosticLevel::Info,
         ..ConsoleFilterConfig::default()
@@ -1228,7 +1228,7 @@ async fn test_context_boundary_filtering() -> Result<(), Box<dyn std::error::Err
 /// Test 5: Mixed level scenarios with complex hierarchies
 #[tokio::test]
 async fn test_mixed_level_scenarios() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let mut config = ConsoleFilterConfig {
         global_level: DiagnosticLevel::Warn,
         max_nesting_depth: 8,
@@ -1286,7 +1286,7 @@ async fn test_mixed_level_scenarios() -> Result<(), Box<dyn std::error::Error>> 
 /// Test 6: Performance under load with high-frequency nested spans
 #[tokio::test]
 async fn test_performance_under_load() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = ConsoleFilterConfig {
         global_level: DiagnosticLevel::Debug,
         max_nesting_depth: 6,

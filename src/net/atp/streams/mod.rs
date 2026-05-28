@@ -14,7 +14,7 @@ pub use scheduler::*;
 pub use stream::*;
 
 use crate::bytes::Bytes;
-use crate::cx::{Cx, cap};
+use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::types::outcome::Outcome;
@@ -455,6 +455,7 @@ fn quic_stream_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::cap;
     use crate::net::atp::protocol::packet_assembly::{
         PacketAssembler, PacketConstraints, PacketNumberSpace,
     };

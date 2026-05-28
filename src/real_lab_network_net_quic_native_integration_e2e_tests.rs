@@ -1480,7 +1480,7 @@ pub enum NetworkTopology {
 /// Test 1: Normal packet delivery without reordering baseline
 #[tokio::test]
 async fn test_normal_packet_delivery() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = LabQuicPtoConfig::default();
     let system = MockLabQuicPtoSystem::new(&cx, config).await?;
 
@@ -1510,7 +1510,7 @@ async fn test_normal_packet_delivery() -> Result<(), Box<dyn std::error::Error>>
 /// Test 2: Simple packet reordering triggering PTO
 #[tokio::test]
 async fn test_simple_packet_reordering_pto() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = LabQuicPtoConfig::default();
     let system = MockLabQuicPtoSystem::new(&cx, config).await?;
 
@@ -1543,7 +1543,7 @@ async fn test_simple_packet_reordering_pto() -> Result<(), Box<dyn std::error::E
 /// Test 3: Burst reordering with multiple consecutive packets
 #[tokio::test]
 async fn test_burst_reordering() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = LabQuicPtoConfig::default();
     let system = MockLabQuicPtoSystem::new(&cx, config).await?;
 
@@ -1577,7 +1577,7 @@ async fn test_burst_reordering() -> Result<(), Box<dyn std::error::Error>> {
 /// Test 4: Long-delay reordering beyond PTO threshold
 #[tokio::test]
 async fn test_long_delay_reordering() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = LabQuicPtoConfig::default();
     let system = MockLabQuicPtoSystem::new(&cx, config).await?;
 
@@ -1610,7 +1610,7 @@ async fn test_long_delay_reordering() -> Result<(), Box<dyn std::error::Error>> 
 /// Test 5: Persistent reordering patterns over time
 #[tokio::test]
 async fn test_persistent_reordering() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let mut config = LabQuicPtoConfig::default();
     config.test_packet_count = 200; // More packets for persistent test
     let system = MockLabQuicPtoSystem::new(&cx, config).await?;
@@ -1643,7 +1643,7 @@ async fn test_persistent_reordering() -> Result<(), Box<dyn std::error::Error>> 
 /// Test 6: Recovery verification after reordering scenarios
 #[tokio::test]
 async fn test_recovery_verification() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = LabQuicPtoConfig::default();
     let system = MockLabQuicPtoSystem::new(&cx, config).await?;
 

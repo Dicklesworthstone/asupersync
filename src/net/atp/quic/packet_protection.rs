@@ -4,7 +4,7 @@
 //! implementation, providing the crypto boundary that keeps ATP protocol state separate
 //! from cryptographic primitive operations.
 
-use crate::cx::{Cx, cap};
+use crate::cx::Cx;
 use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, ProtocolError};
 use crate::net::quic_native::tls::{
     HeaderProtectionMask, PacketProtectionRequest, PacketProtectionSpace, ProtectedPacket,
