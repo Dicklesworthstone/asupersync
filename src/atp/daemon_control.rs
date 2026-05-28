@@ -534,7 +534,7 @@ impl SecureDaemonController {
             };
             let mut system = System::new_all();
             system.refresh_processes(ProcessesToUpdate::All, true);
-            return match system
+            match system
                 .process(Pid::from_u32(pid))
                 .and_then(|process| process.kill_with(signal))
             {
@@ -545,7 +545,7 @@ impl SecureDaemonController {
                     "Signal {:?} is unsupported or pid {} no longer exists",
                     signal, pid
                 ))),
-            };
+            }
         }
 
         #[cfg(windows)]
@@ -562,12 +562,12 @@ impl SecureDaemonController {
             })?;
 
             if output.status.success() {
-                return Ok(());
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(Error::new(ErrorKind::Internal)
+                    .with_message(format!("taskkill failed for pid {}: {}", pid, stderr)))
             }
-
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::new(ErrorKind::Internal)
-                .with_message(format!("taskkill failed for pid {}: {}", pid, stderr)));
         }
 
         #[cfg(not(any(unix, windows)))]
@@ -592,15 +592,15 @@ impl SecureDaemonController {
         {
             use std::os::unix::fs::PermissionsExt;
 
-            return Ok(metadata.permissions().mode() & 0o111 != 0);
+            Ok(metadata.permissions().mode() & 0o111 != 0)
         }
 
         #[cfg(windows)]
         {
-            return Ok(path_has_windows_executable_extension(
+            Ok(path_has_windows_executable_extension(
                 path,
                 std::env::var_os("PATHEXT").as_deref(),
-            ));
+            ))
         }
 
         #[cfg(not(any(unix, windows)))]

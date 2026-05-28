@@ -13,6 +13,95 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+const REPAIR_AUTH_UNSUPPORTED_OWNER_BEAD: &str = "asupersync-to7e65.6";
+
+/// Structured authentication failure details for repair-symbol admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepairAuthenticationFailure {
+    /// The symbol carried no authentication tag.
+    MissingTag,
+    /// No active authenticated session exists for the repair group.
+    NoActiveSession {
+        /// Repair group that lacks an active session.
+        group_id: RepairGroupId,
+    },
+    /// The configured authentication key is unusable.
+    InvalidAuthKey,
+    /// The supplied authentication tag did not verify.
+    VerificationFailed {
+        /// Algorithm used for verification.
+        algorithm: AuthenticationAlgorithm,
+        /// Authentication domain identifier.
+        domain_id: String,
+    },
+    /// The manifest requested an algorithm this receive lane must reject.
+    UnsupportedAlgorithm {
+        /// Unsupported algorithm requested by the manifest.
+        algorithm: AuthenticationAlgorithm,
+        /// Authentication domain identifier.
+        domain_id: String,
+        /// Bead that owns the current fail-closed contract.
+        owner_bead: &'static str,
+    },
+}
+
+impl RepairAuthenticationFailure {
+    /// Stable machine-readable failure code for logs and proof artifacts.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::MissingTag => "missing_auth_tag",
+            Self::NoActiveSession { .. } => "no_active_repair_auth_session",
+            Self::InvalidAuthKey => "invalid_repair_auth_key",
+            Self::VerificationFailed { .. } => "repair_auth_verification_failed",
+            Self::UnsupportedAlgorithm { .. } => "unsupported_repair_auth_algorithm",
+        }
+    }
+
+    /// Owner bead when this diagnostic intentionally represents deferred work.
+    #[must_use]
+    pub const fn owner_bead(&self) -> Option<&'static str> {
+        match self {
+            Self::UnsupportedAlgorithm { owner_bead, .. } => Some(owner_bead),
+            Self::MissingTag
+            | Self::NoActiveSession { .. }
+            | Self::InvalidAuthKey
+            | Self::VerificationFailed { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RepairAuthenticationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingTag => write!(f, "{}: missing authentication tag", self.code()),
+            Self::NoActiveSession { group_id } => write!(
+                f,
+                "{}: no active session for repair group {group_id}",
+                self.code()
+            ),
+            Self::InvalidAuthKey => write!(f, "{}: invalid authentication key", self.code()),
+            Self::VerificationFailed {
+                algorithm,
+                domain_id,
+            } => write!(
+                f,
+                "{}: {algorithm:?} verification failed for domain {domain_id}",
+                self.code()
+            ),
+            Self::UnsupportedAlgorithm {
+                algorithm,
+                domain_id,
+                owner_bead,
+            } => write!(
+                f,
+                "{}: {algorithm:?} is fail-closed for repair auth domain {domain_id}; owner bead {owner_bead}",
+                self.code()
+            ),
+        }
+    }
+}
+
 /// Errors specific to repair symbol reception and validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepairReceiveError {
@@ -28,7 +117,7 @@ pub enum RepairReceiveError {
         received: String,
     },
     /// Authentication tag verification failed.
-    AuthenticationFailed(String),
+    AuthenticationFailed(RepairAuthenticationFailure),
     /// Symbol is replayed (already received).
     ReplayedSymbol {
         /// Symbol ESI.
@@ -77,8 +166,8 @@ impl std::fmt::Display for RepairReceiveError {
                     "parameter mismatch in {field}: expected {expected}, got {received}"
                 )
             }
-            Self::AuthenticationFailed(msg) => {
-                write!(f, "authentication failed: {msg}")
+            Self::AuthenticationFailed(reason) => {
+                write!(f, "authentication failed: {reason}")
             }
             Self::ReplayedSymbol {
                 esi,
@@ -513,16 +602,30 @@ impl RepairReceiver {
         // Validate symbol parameters against repair group
         self.validate_symbol_parameters(symbol, repair_group)?;
 
-        // Check session and replay protection
-        let _session_valid = if let Some(session) = self.sessions.get_mut(group_id) {
-            Self::validate_session_and_replay_static(symbol, session)?;
-            true
-        } else {
-            false
-        };
+        // Check session and replay protection before authentication, but only
+        // commit the ESI after the tag verifies.
+        let session = self.sessions.get(group_id).ok_or_else(|| {
+            RepairReceiveError::AuthenticationFailed(RepairAuthenticationFailure::NoActiveSession {
+                group_id: group_id.clone(),
+            })
+        })?;
+        Self::validate_session_and_replay_static(symbol, session)?;
 
         // Validate authentication tag
         self.validate_authentication(symbol, repair_group)?;
+
+        let session = self.sessions.get_mut(group_id).ok_or_else(|| {
+            RepairReceiveError::AuthenticationFailed(RepairAuthenticationFailure::NoActiveSession {
+                group_id: group_id.clone(),
+            })
+        })?;
+        if let Some(previous_timestamp) = session.was_received(symbol.esi) {
+            return Err(RepairReceiveError::ReplayedSymbol {
+                esi: symbol.esi,
+                previous_timestamp,
+            });
+        }
+        session.mark_received(symbol.esi);
 
         Ok(())
     }
@@ -569,7 +672,7 @@ impl RepairReceiver {
     /// Validate session status and check for replay attacks.
     fn validate_session_and_replay_static(
         symbol: &RaptorQSymbol,
-        session: &mut RepairSessionContext,
+        session: &RepairSessionContext,
     ) -> Result<(), RepairReceiveError> {
         let current_time = SystemTime::now(); // ubs:ignore - time check, not crypto randomness // ubs:ignore
 
@@ -589,9 +692,6 @@ impl RepairReceiver {
             });
         }
 
-        // Mark as received
-        session.mark_received(symbol.esi);
-
         Ok(())
     }
 
@@ -601,13 +701,15 @@ impl RepairReceiver {
         symbol: &RaptorQSymbol,
         repair_group: &RepairGroup,
     ) -> Result<(), RepairReceiveError> {
-        let auth_tag = symbol.auth_tag.as_ref().ok_or_else(|| {
-            RepairReceiveError::AuthenticationFailed("missing authentication tag".to_string())
+        let auth_tag = symbol.auth_tag.as_ref().ok_or({
+            RepairReceiveError::AuthenticationFailed(RepairAuthenticationFailure::MissingTag)
         })?;
 
         // Get session for auth key
         let session = self.sessions.get(&repair_group.group_id).ok_or_else(|| {
-            RepairReceiveError::AuthenticationFailed("no active session for group".to_string())
+            RepairReceiveError::AuthenticationFailed(RepairAuthenticationFailure::NoActiveSession {
+                group_id: repair_group.group_id.clone(),
+            })
         })?;
 
         match repair_group.auth_domain.auth_algorithm {
@@ -617,18 +719,20 @@ impl RepairReceiver {
                     subtle::ConstantTimeEq::ct_eq(&auth_tag[..], &expected_tag[..]).into();
                 if !tags_match {
                     return Err(RepairReceiveError::AuthenticationFailed(
-                        "HMAC-SHA256 verification failed".to_string(),
+                        RepairAuthenticationFailure::VerificationFailed {
+                            algorithm: AuthenticationAlgorithm::HmacSha256,
+                            domain_id: repair_group.auth_domain.domain_id.clone(),
+                        },
                     ));
                 }
             }
-            AuthenticationAlgorithm::EdDsa => {
+            AuthenticationAlgorithm::EdDsa | AuthenticationAlgorithm::X25519Ecdh => {
                 return Err(RepairReceiveError::AuthenticationFailed(
-                    "EdDSA authentication is disabled for this repair lane".to_string(),
-                ));
-            }
-            AuthenticationAlgorithm::X25519Ecdh => {
-                return Err(RepairReceiveError::AuthenticationFailed(
-                    "X25519-ECDH authentication is disabled for this repair lane".to_string(),
+                    RepairAuthenticationFailure::UnsupportedAlgorithm {
+                        algorithm: repair_group.auth_domain.auth_algorithm,
+                        domain_id: repair_group.auth_domain.domain_id.clone(),
+                        owner_bead: REPAIR_AUTH_UNSUPPORTED_OWNER_BEAD,
+                    },
                 ));
             }
         }
@@ -647,7 +751,7 @@ impl RepairReceiver {
         type HmacSha256 = Hmac<Sha256>;
 
         let mut mac = HmacSha256::new_from_slice(&session.auth_key).map_err(|_| {
-            RepairReceiveError::AuthenticationFailed("invalid auth key".to_string())
+            RepairReceiveError::AuthenticationFailed(RepairAuthenticationFailure::InvalidAuthKey)
         })?;
 
         // Include all critical symbol and group parameters in the MAC
@@ -799,6 +903,70 @@ mod tests {
                 privacy_level: PrivacyLevel::FullPrivacy,
             },
         }
+    }
+
+    fn build_receiver(
+        repair_group: RepairGroup,
+    ) -> (RepairGroupId, MerkleRoot, ObjectId, RepairReceiver) {
+        let group_id = repair_group.group_id.clone();
+        let manifest_root = repair_group.manifest_root.clone();
+        let object_id = repair_group.object_id.clone();
+
+        let mut repair_groups = BTreeMap::new();
+        repair_groups.insert(group_id.clone(), repair_group);
+
+        (
+            group_id,
+            manifest_root.clone(),
+            object_id,
+            RepairReceiver::new(manifest_root, repair_groups),
+        )
+    }
+
+    fn source_symbol_for_group(group_id: &RepairGroupId) -> RaptorQSymbol {
+        RaptorQSymbol {
+            index: 0,
+            esi: 500,
+            size_bytes: 1024,
+            content_hash: [7u8; 32],
+            is_source: true,
+            repair_group_id: Some(group_id.clone()),
+            auth_tag: None,
+        }
+    }
+
+    fn hmac_tag_for(
+        receiver: &RepairReceiver,
+        symbol: &RaptorQSymbol,
+        repair_group: &RepairGroup,
+        auth_key: &[u8],
+        session_binding: Option<Vec<u8>>,
+    ) -> [u8; 32] {
+        let session = RepairSessionContext::new(
+            repair_group.group_id.clone(),
+            Duration::from_secs(3600),
+            auth_key.to_vec(),
+            session_binding,
+        );
+        receiver
+            .compute_hmac_sha256_tag(symbol, repair_group, &session)
+            .expect("test key should produce an HMAC tag")
+    }
+
+    fn start_receiver_session(
+        receiver: &mut RepairReceiver,
+        group_id: &RepairGroupId,
+        auth_key: &[u8],
+        session_binding: Option<Vec<u8>>,
+    ) {
+        receiver
+            .start_session(
+                group_id.clone(),
+                Duration::from_secs(3600),
+                auth_key.to_vec(),
+                session_binding,
+            )
+            .expect("test repair group should accept a session");
     }
 
     #[test]
@@ -981,6 +1149,195 @@ mod tests {
             RepairPeerRejection::SourceSymbolsMismatch.as_str(),
             "source_symbols_mismatch"
         );
+    }
+
+    #[test]
+    fn test_hmac_authenticated_symbol_is_accepted_and_recorded() {
+        let (_, repair_group) = create_test_repair_group();
+        let (group_id, manifest_root, object_id, mut receiver) =
+            build_receiver(repair_group.clone());
+        let auth_key = b"receiver-auth-key";
+        let session_binding = Some(b"peer-a-session".to_vec());
+
+        start_receiver_session(&mut receiver, &group_id, auth_key, session_binding.clone());
+        let mut symbol = source_symbol_for_group(&group_id);
+        symbol.auth_tag = Some(hmac_tag_for(
+            &receiver,
+            &symbol,
+            &repair_group,
+            auth_key,
+            session_binding,
+        ));
+
+        let result =
+            receiver.validate_repair_symbol(&symbol, &manifest_root, &object_id.to_string());
+
+        assert_eq!(result, Ok(()));
+        assert!(
+            receiver
+                .sessions
+                .get(&group_id)
+                .and_then(|session| session.was_received(symbol.esi))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_missing_auth_tag_is_structured_and_does_not_poison_replay() {
+        let (_, repair_group) = create_test_repair_group();
+        let (group_id, manifest_root, object_id, mut receiver) =
+            build_receiver(repair_group.clone());
+        let auth_key = b"receiver-auth-key";
+        let session_binding = Some(b"peer-a-session".to_vec());
+
+        start_receiver_session(&mut receiver, &group_id, auth_key, session_binding.clone());
+        let mut symbol = source_symbol_for_group(&group_id);
+
+        let error = receiver
+            .validate_repair_symbol(&symbol, &manifest_root, &object_id.to_string())
+            .expect_err("missing tag must fail closed");
+
+        match error {
+            RepairReceiveError::AuthenticationFailed(reason) => {
+                assert_eq!(reason, RepairAuthenticationFailure::MissingTag);
+                assert_eq!(reason.code(), "missing_auth_tag");
+                assert_eq!(reason.owner_bead(), None);
+            }
+            other => panic!("expected missing auth tag, got {other:?}"),
+        }
+        assert!(
+            receiver
+                .sessions
+                .get(&group_id)
+                .and_then(|session| session.was_received(symbol.esi))
+                .is_none()
+        );
+
+        symbol.auth_tag = Some(hmac_tag_for(
+            &receiver,
+            &symbol,
+            &repair_group,
+            auth_key,
+            session_binding,
+        ));
+        assert_eq!(
+            receiver.validate_repair_symbol(&symbol, &manifest_root, &object_id.to_string()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_wrong_key_and_cross_peer_hmac_are_rejected_without_replay_poisoning() {
+        let (_, repair_group) = create_test_repair_group();
+        let (group_id, manifest_root, object_id, mut receiver) =
+            build_receiver(repair_group.clone());
+        let auth_key = b"receiver-auth-key";
+        let session_binding = Some(b"peer-a-session".to_vec());
+
+        start_receiver_session(&mut receiver, &group_id, auth_key, session_binding.clone());
+        let mut symbol = source_symbol_for_group(&group_id);
+        symbol.auth_tag = Some(hmac_tag_for(
+            &receiver,
+            &symbol,
+            &repair_group,
+            b"other-peer-key",
+            Some(b"peer-b-session".to_vec()),
+        ));
+
+        let error = receiver
+            .validate_repair_symbol(&symbol, &manifest_root, &object_id.to_string())
+            .expect_err("wrong key and peer binding must fail closed");
+
+        match error {
+            RepairReceiveError::AuthenticationFailed(
+                RepairAuthenticationFailure::VerificationFailed {
+                    algorithm,
+                    domain_id,
+                },
+            ) => {
+                assert_eq!(algorithm, AuthenticationAlgorithm::HmacSha256);
+                assert_eq!(domain_id, "test-auth");
+            }
+            other => panic!("expected HMAC verification failure, got {other:?}"),
+        }
+        assert!(
+            receiver
+                .sessions
+                .get(&group_id)
+                .and_then(|session| session.was_received(symbol.esi))
+                .is_none()
+        );
+
+        symbol.auth_tag = Some(hmac_tag_for(
+            &receiver,
+            &symbol,
+            &repair_group,
+            auth_key,
+            session_binding,
+        ));
+        assert_eq!(
+            receiver.validate_repair_symbol(&symbol, &manifest_root, &object_id.to_string()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_eddsa_and_x25519_are_typed_fail_closed_with_owner_bead() {
+        for algorithm in [
+            AuthenticationAlgorithm::EdDsa,
+            AuthenticationAlgorithm::X25519Ecdh,
+        ] {
+            let (_, mut repair_group) = create_test_repair_group();
+            repair_group.auth_domain.auth_algorithm = algorithm;
+            repair_group.auth_domain.peer_identity_required = true;
+            repair_group.auth_domain.transfer_identity_binding = true;
+
+            let (group_id, manifest_root, object_id, mut receiver) =
+                build_receiver(repair_group.clone());
+            start_receiver_session(
+                &mut receiver,
+                &group_id,
+                b"receiver-auth-key",
+                Some(b"peer-a-session".to_vec()),
+            );
+
+            let mut symbol = source_symbol_for_group(&group_id);
+            symbol.auth_tag = Some([9u8; 32]);
+
+            let error = receiver
+                .validate_repair_symbol(&symbol, &manifest_root, &object_id.to_string())
+                .expect_err("unsupported repair auth algorithms must fail closed");
+
+            match error {
+                RepairReceiveError::AuthenticationFailed(
+                    RepairAuthenticationFailure::UnsupportedAlgorithm {
+                        algorithm: observed_algorithm,
+                        domain_id,
+                        owner_bead,
+                    },
+                ) => {
+                    assert_eq!(observed_algorithm, algorithm);
+                    assert_eq!(domain_id, "test-auth");
+                    assert_eq!(owner_bead, REPAIR_AUTH_UNSUPPORTED_OWNER_BEAD);
+                    let reason = RepairAuthenticationFailure::UnsupportedAlgorithm {
+                        algorithm: observed_algorithm,
+                        domain_id,
+                        owner_bead,
+                    };
+                    assert_eq!(reason.code(), "unsupported_repair_auth_algorithm");
+                    assert_eq!(reason.owner_bead(), Some("asupersync-to7e65.6"));
+                    assert!(reason.to_string().contains("fail-closed"));
+                }
+                other => panic!("expected typed unsupported algorithm, got {other:?}"),
+            }
+            assert!(
+                receiver
+                    .sessions
+                    .get(&group_id)
+                    .and_then(|session| session.was_received(symbol.esi))
+                    .is_none()
+            );
+        }
     }
 
     #[test]
