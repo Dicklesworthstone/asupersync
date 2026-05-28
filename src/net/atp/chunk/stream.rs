@@ -218,7 +218,7 @@ impl StreamProfile {
 
     /// Check if chunk contains stream metadata that might depend on other chunks.
     fn contains_stream_metadata(chunk_data: &[u8]) -> bool {
-        if chunk_data.len() < 16 {
+        if chunk_data.is_empty() {
             return false;
         }
 
@@ -415,8 +415,9 @@ impl StreamProfile {
         let first_chunk_size = boundaries[0].size_bytes;
         let safe_bw = bandwidth_mbps.max(1) as f64;
         let first_chunk_transfer_ms = (first_chunk_size as f64 * 8.0) / (safe_bw * 1000.0);
-        let first_chunk_latency =
-            std::time::Duration::from_millis((first_chunk_transfer_ms + latency_ms as f64) as u64);
+        let first_chunk_latency = std::time::Duration::from_millis(
+            (first_chunk_transfer_ms + latency_ms as f64).ceil() as u64,
+        );
 
         // Full stream latency
         let total_size = boundaries.iter().fold(0u64, |acc, boundary| {
@@ -425,7 +426,7 @@ impl StreamProfile {
         let total_transfer_ms = (total_size as f64 * 8.0) / (safe_bw * 1000.0);
         let total_latency_overhead_ms = boundaries.len() as f64 * latency_ms as f64;
         let full_stream_latency = std::time::Duration::from_millis(
-            (total_transfer_ms + total_latency_overhead_ms) as u64,
+            (total_transfer_ms + total_latency_overhead_ms).ceil() as u64,
         );
 
         // Early consumption latency (chunks available for early consumption)
@@ -436,7 +437,7 @@ impl StreamProfile {
         let early_transfer_ms = (early_consumption_size as f64 * 8.0) / (safe_bw * 1000.0);
         let early_latency_overhead_ms = early_chunks.len() as f64 * latency_ms as f64;
         let early_consumption_latency = std::time::Duration::from_millis(
-            (early_transfer_ms + early_latency_overhead_ms) as u64,
+            (early_transfer_ms + early_latency_overhead_ms).ceil() as u64,
         );
 
         StreamingLatencyEstimate {

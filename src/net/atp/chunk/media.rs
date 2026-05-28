@@ -182,7 +182,7 @@ impl MediaProfile {
 
     /// Detect content type from data header/magic bytes.
     fn detect_content_type(data: &[u8]) -> MediaContentType {
-        if data.len() < 16 {
+        if data.is_empty() {
             return MediaContentType::Unknown;
         }
 
