@@ -683,8 +683,10 @@ mod tests {
             .map(|(_, event)| event.timestamp_unix_nano)
             .collect();
 
-        // Determine if sorting was applied
-        let sorting_applied_before_export = !was_already_sorted || !scenario.events.is_empty();
+        // The exporter takes the sorted-event path for every scenario that
+        // requires ordered export, including the empty list where the sorted
+        // output is vacuously ordered.
+        let sorting_applied_before_export = scenario.must_be_sorted_in_export;
 
         Ok(SpanEventTimestampOrderingResult {
             exported_event_order,
