@@ -4058,14 +4058,16 @@ mod tests {
         let cx = test_cx();
 
         // Record checkpoint with message
-        assert!(cx.checkpoint_with("step 1").is_ok());
+        cx.checkpoint_with("step 1")
+            .expect("checkpoint_with should succeed");
         assert_eq!(
             cx.checkpoint_state().last_message.as_deref(),
             Some("step 1")
         );
 
         // Regular checkpoint clears the message
-        assert!(cx.checkpoint().is_ok());
+        cx.checkpoint()
+            .expect("checkpoint should succeed after message set");
         assert!(cx.checkpoint_state().last_message.is_none());
     }
 
@@ -4931,7 +4933,7 @@ mod tests {
         // Verify logical time ordering is preserved across clone usage
         let logical_times: Vec<_> = events
             .iter()
-            .map(|e| e.logical_time.as_ref().expect("logical time"))
+            .map(|e| e.logical_time.as_ref().expect("trace event should have logical time"))
             .collect();
 
         for i in 1..logical_times.len() {

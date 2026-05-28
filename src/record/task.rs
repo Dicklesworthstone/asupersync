@@ -1911,7 +1911,7 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_created",
             scrub_task_record_state(
-                serde_json::to_value(&record_created).expect("serialize created")
+                serde_json::to_value(&record_created).expect("should serialize created task record")
             )
         );
 
@@ -1922,7 +1922,7 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_running",
             scrub_task_record_state(
-                serde_json::to_value(&record_running).expect("serialize running")
+                serde_json::to_value(&record_running).expect("should serialize running task record")
             )
         );
 
@@ -1937,7 +1937,7 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_cancel_requested",
             scrub_task_record_state(
-                serde_json::to_value(&record_cancel_requested).expect("serialize cancel_requested")
+                serde_json::to_value(&record_cancel_requested).expect("should serialize cancel_requested task record")
             )
         );
 
@@ -1949,7 +1949,7 @@ mod tests {
         insta::assert_json_snapshot!(
             "task_record_state_cancelling",
             scrub_task_record_state(
-                serde_json::to_value(&record_cancelling).expect("serialize cancelling")
+                serde_json::to_value(&record_cancelling).expect("should serialize cancelling task record")
             )
         );
 
