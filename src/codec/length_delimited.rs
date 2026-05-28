@@ -1347,34 +1347,38 @@ mod tests {
         // Format the trace and compare to the golden file. Doing this in
         // a stable plaintext format keeps the rejection contract reviewable
         // by humans and machines without an extra serialization framework.
-        let actual_trace = "# LengthDelimitedCodec FrameTooBig rejection trace\n\
-             # Regression contract for br-asupersync-o7e5xu (framing recovery on\n\
-             # max_frame_length violation). Re-generate by running:\n\
-             #   cargo test --lib codec::length_delimited::ld_goldens_frame_too_big\n\
-             # (with INSTA_UPDATE=auto-equivalent: write expected bytes here verbatim).\n\
-             \n\
-             codec.length_field_length: 4\n\
-             codec.length_field_offset: 0\n\
-             codec.length_adjustment: 0\n\
-             codec.num_skip: 4\n\
-             codec.max_frame_length: 10\n\
-             codec.big_endian: true\n\
-             \n\
-             input.hex: ffffffff\n\
-             input.len: 4\n\
-             \n\
-             decode.result: Err\n\
-             error.kind: InvalidData\n\
-             error.message: frame length exceeds max_frame_length\n\
-             \n\
-             # Framing-recovery contract (br-asupersync-o7e5xu):\n\
-             # - the offending header MUST be consumed from the source buffer\n\
-             # - the codec MUST transition into Skip(raw_len) state, draining the\n\
-             #   advertised body across subsequent decode() calls\n\
-             buffer.len_after_error: 0\n\
-             followup.decode.returns_none: true\n\
-             followup.decode.error: none\n"
-            .to_string();
+        let actual_trace = format!(
+            "# LengthDelimitedCodec FrameTooBig rejection trace\n\
+# Regression contract for br-asupersync-o7e5xu (framing recovery on\n\
+# max_frame_length violation). Re-generate by running:\n\
+#   cargo test --lib codec::length_delimited::ld_goldens_frame_too_big\n\
+# (with INSTA_UPDATE=auto-equivalent: write expected bytes here verbatim).\n\
+\n\
+codec.length_field_length: 4\n\
+codec.length_field_offset: 0\n\
+codec.length_adjustment: 0\n\
+codec.num_skip: 4\n\
+codec.max_frame_length: 10\n\
+codec.big_endian: true\n\
+\n\
+input.hex: ffffffff\n\
+input.len: 4\n\
+\n\
+decode.result: Err\n\
+error.kind: InvalidData\n\
+error.message: {}\n\
+\n\
+# Framing-recovery contract (br-asupersync-o7e5xu):\n\
+# - the offending header MUST be consumed from the source buffer\n\
+# - the codec MUST transition into Skip(raw_len) state, draining the\n\
+#   advertised body across subsequent decode() calls\n\
+buffer.len_after_error: {}\n\
+followup.decode.returns_none: {}\n\
+followup.decode.error: none\n",
+            err.to_string(),
+            buf.len(),
+            followup.is_none()
+        );
 
         let expected: &str =
             include_str!("../../tests/goldens/length_delim/frame_too_big_trace.txt");
