@@ -219,7 +219,7 @@ fn positive_ttl_millis(ttl: Duration) -> Result<u64, RedisError> {
 fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
     if bytes.is_empty() {
         return Err(RedisError::Protocol(
-            "expected integer, got empty".to_string(),
+            "invalid integer: expected digits, got empty".to_string(),
         ));
     }
 
@@ -230,7 +230,7 @@ fn parse_i64_ascii(bytes: &[u8]) -> Result<i64, RedisError> {
         i = 1;
         if i == bytes.len() {
             return Err(RedisError::Protocol(
-                "expected integer after '-'".to_string(),
+                "invalid integer: expected digits after '-'".to_string(),
             ));
         }
     }
@@ -741,9 +741,7 @@ impl RespValue {
                         return Ok(Some(end + 2));
                     }
                     if n < 0 {
-                        return Err(RedisError::Protocol(format!(
-                            "invalid {label} length: {n}"
-                        )));
+                        return Err(RedisError::Protocol(format!("invalid {label} length: {n}")));
                     }
                     let n = usize::try_from(n).map_err(|_| {
                         RedisError::Protocol(format!("invalid {label} length: {n}"))
@@ -980,9 +978,7 @@ impl RespValue {
                         });
                     }
                     if n < 0 {
-                        return Err(RedisError::Protocol(format!(
-                            "invalid {label} length: {n}"
-                        )));
+                        return Err(RedisError::Protocol(format!("invalid {label} length: {n}")));
                     }
                     let n = usize::try_from(n).map_err(|_| {
                         RedisError::Protocol(format!("invalid {label} length: {n}"))
@@ -1078,9 +1074,7 @@ impl RespValue {
                     }
                     let n = parse_i64_ascii(&buf[i + 1..end])?;
                     if n < 0 {
-                        return Err(RedisError::Protocol(format!(
-                            "invalid {label} length: {n}"
-                        )));
+                        return Err(RedisError::Protocol(format!("invalid {label} length: {n}")));
                     }
                     let n = usize::try_from(n).map_err(|_| {
                         RedisError::Protocol(format!("invalid {label} length: {n}"))
