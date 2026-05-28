@@ -4865,6 +4865,25 @@ fn atp_bench(args: &AtpBenchArgs, output: &mut Output) -> Result<(), CliError> {
     Ok(())
 }
 
+fn parse_timeline_second_bound(value: f64, label: &str) -> Result<u64, CliError> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(
+            CliError::new("invalid_argument", "Invalid timeline window range")
+                .detail(format!("{} must be a finite non-negative second value", label))
+                .exit_code(ExitCode::USER_ERROR),
+        );
+    }
+    let nanos = value * 1_000_000_000.0;
+    if nanos > u64::MAX as f64 {
+        return Err(
+            CliError::new("invalid_argument", "Timeline window bound is too large")
+                .detail(format!("{}: {}", label, value))
+                .exit_code(ExitCode::USER_ERROR),
+        );
+    }
+    Ok(nanos as u64)
+}
+
 fn parse_timeline_window_nanos(window: Option<&str>) -> Result<Option<(u64, u64)>, CliError> {
     let Some(window) = window else {
         return Ok(None);
@@ -4887,17 +4906,16 @@ fn parse_timeline_window_nanos(window: Option<&str>) -> Result<Option<(u64, u64)
             .detail(err.to_string())
             .exit_code(ExitCode::USER_ERROR)
     })?;
-    if !(start_secs.is_finite() && end_secs.is_finite()) || end_secs < start_secs {
+    let start_nanos = parse_timeline_second_bound(start_secs, "start")?;
+    let end_nanos = parse_timeline_second_bound(end_secs, "end")?;
+    if end_nanos < start_nanos {
         return Err(
             CliError::new("invalid_argument", "Invalid timeline window range")
                 .detail(format!("Window: {}", window))
                 .exit_code(ExitCode::USER_ERROR),
         );
     }
-    Ok(Some((
-        (start_secs * 1_000_000_000.0) as u64,
-        (end_secs * 1_000_000_000.0) as u64,
-    )))
+    Ok(Some((start_nanos, end_nanos)))
 }
 
 fn filter_timeline_rows(
@@ -4911,6 +4929,14 @@ fn filter_timeline_rows(
             (None, _) => true,
         })
         .collect()
+}
+
+fn csv_escape_field(field: &str) -> String {
+    if field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
 }
 
 fn atp_trace(args: &AtpTraceArgs, output: &mut Output) -> Result<(), CliError> {
@@ -5002,14 +5028,17 @@ fn atp_trace(args: &AtpTraceArgs, output: &mut Output) -> Result<(), CliError> {
                                 .detail(format!("Error: {}", err))
                                 .exit_code(ExitCode::RUNTIME_ERROR)
                         })?;
+                        let index = event["index"].as_u64().unwrap_or(0).to_string();
+                        let event_type = event["event_type"].as_str().unwrap_or("unknown");
+                        let time_nanos = event["time_nanos"]
+                            .as_u64()
+                            .map_or_else(String::new, |v| v.to_string());
                         println!(
                             "{},{},{},{}",
-                            event["index"].as_u64().unwrap_or(0),
-                            event["event_type"].as_str().unwrap_or("unknown"),
-                            event["time_nanos"]
-                                .as_u64()
-                                .map_or_else(String::new, |v| v.to_string()),
-                            event_json.replace(',', "\\,")
+                            csv_escape_field(&index),
+                            csv_escape_field(event_type),
+                            csv_escape_field(&time_nanos),
+                            csv_escape_field(&event_json)
                         );
                     }
                 }
@@ -15838,6 +15867,76 @@ lab:
             format!("{}{}", "█".repeat(10), "░".repeat(10))
         );
         assert_eq!(create_progress_bar(100), "█".repeat(20));
+    }
+
+    #[test]
+    fn progress_chunks_handles_u64_max_without_overflow() {
+        let chunks = progress_chunks(u64::MAX);
+
+        assert_eq!(chunks[0], 0);
+        assert_eq!(chunks[1], u64::MAX / 4);
+        assert_eq!(chunks[2], u64::MAX / 2);
+        assert_eq!(chunks[3], u64::try_from((u128::from(u64::MAX) * 3) / 4).unwrap());
+        assert_eq!(chunks[4], u64::MAX);
+    }
+
+    #[test]
+    fn atp_progress_percentage_handles_large_values() {
+        let progress = AtpProgressUpdate::new("large", "huge.bin", u64::MAX, u64::MAX);
+
+        assert!(progress.human_format().contains("100%"));
+    }
+
+    #[test]
+    fn progress_bar_clamps_overfull_percentages() {
+        assert_eq!(create_progress_bar(101), "█".repeat(20));
+        assert_eq!(create_progress_bar(u8::MAX), "█".repeat(20));
+    }
+
+    #[test]
+    fn atp_share_revocation_url_handles_short_share_codes() {
+        let args = AtpShareArgs {
+            source: PathBuf::from("short"),
+            expires_seconds: 60,
+            max_downloads: 1,
+            policy: "peers-only".to_string(),
+            capabilities: vec!["read".to_string()],
+            quota_bytes: 0,
+            peer_id: None,
+            destination_policy: "auto".to_string(),
+            single_use: false,
+            revocable: true,
+        };
+        let output = AtpShareOutput::new(&args, "short".to_string());
+
+        assert!(output
+            .revocation_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("atp://revoke/")));
+    }
+
+    #[test]
+    fn benchmark_profiles_keep_zero_duration_throughput_finite() {
+        for profile in ["throughput", "latency", "repair", "stress", "mixed"] {
+            let result = AtpBenchResults::for_profile(profile, 0, 8, u64::MAX, false);
+
+            assert_eq!(result.throughput_mbps, 0.0);
+            assert!(result.throughput_mbps.is_finite());
+        }
+    }
+
+    #[test]
+    fn timeline_window_rejects_negative_bounds() {
+        assert!(parse_timeline_window_nanos(Some("-1:5")).is_err());
+        assert!(parse_timeline_window_nanos(Some("1:-5")).is_err());
+    }
+
+    #[test]
+    fn csv_escape_field_uses_rfc_compatible_quotes() {
+        assert_eq!(csv_escape_field("plain"), "plain");
+        assert_eq!(csv_escape_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape_field("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_escape_field("a\nb"), "\"a\nb\"");
     }
 
     #[test]
