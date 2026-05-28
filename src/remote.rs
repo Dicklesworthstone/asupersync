@@ -2847,7 +2847,7 @@ mod tests {
 
         fn deliver(
             &self,
-            cx: &Cx,
+            _cx: &Cx,
             task_id: RemoteTaskId,
             result: Result<RemoteOutcome, RemoteError>,
         ) {
@@ -2867,7 +2867,7 @@ mod tests {
                 .lock()
                 .remove(&task_id)
                 .expect("pending remote task");
-            if tx.send(cx, result).is_err() {
+            if tx.send_blocking(result).is_err() {
                 self.states.lock().remove(&task_id);
             }
         }
