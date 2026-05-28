@@ -3875,23 +3875,33 @@ mod tests {
     fn test_discharge_depth_protection() {
         let root_key = test_root_key();
 
-        // Create a chain of macaroons that would cause deep recursion
-        let mut discharges = Vec::new();
+        let chain_len = MacaroonToken::MAX_DISCHARGE_DEPTH + 5;
+        let discharge_keys: Vec<_> = (0..chain_len)
+            .map(|i| AuthKey::from_seed(i as u64 + 1000))
+            .collect();
 
-        // Create MAX_DISCHARGE_DEPTH + 5 discharges to exceed limit
-        for i in 0..(MacaroonToken::MAX_DISCHARGE_DEPTH + 5) {
-            let discharge_key = AuthKey::from_seed(i as u64 + 1000);
-            let discharge =
-                MacaroonToken::mint(&discharge_key, &format!("discharge_{i}"), "test_location");
-            discharges.push(discharge);
-        }
+        let token = MacaroonToken::mint(&root_key, "test:capability", "test_location")
+            .add_third_party_caveat("test_location", "discharge_0", &discharge_keys[0]);
 
-        // Create a root macaroon with deep third-party caveats
-        let mut token = MacaroonToken::mint(&root_key, "test:capability", "test_location");
-
-        // Add a third-party caveat that would trigger deep recursion.
-        // This simulates the scenario where verification would recurse deeply.
-        token = token.add_third_party_caveat("test_location", "discharge_0", &root_key);
+        let discharges: Vec<_> = (0..chain_len)
+            .map(|i| {
+                let mut discharge = MacaroonToken::mint(
+                    &discharge_keys[i],
+                    &format!("discharge_{i}"),
+                    "test_location",
+                );
+                if let Some(next_key) = discharge_keys.get(i + 1) {
+                    discharge = discharge.add_third_party_caveat(
+                        "test_location",
+                        &format!("discharge_{}", i + 1),
+                        next_key,
+                    );
+                }
+                token
+                    .bind_for_request(&discharge)
+                    .expect("generated discharge should bind once")
+            })
+            .collect();
 
         let ctx = VerificationContext::new().with_time(1_000_000_000);
         // Verification should fail with depth exceeded error before stack overflow
