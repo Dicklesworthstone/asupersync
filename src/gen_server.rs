@@ -2485,7 +2485,9 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         // Cast a reset (fire-and-forget)
-        handle.try_cast(CounterCast::Reset).expect("should cast reset message");
+        handle
+            .try_cast(CounterCast::Reset)
+            .expect("should cast reset message");
 
         // Drop handle to disconnect
         drop(handle);
@@ -2516,7 +2518,10 @@ mod tests {
         let server_ref = handle.server_ref();
         let (mut client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
-                server_ref.call(&cx, CounterCall::Add(5)).await.expect("should call Add(5)")
+                server_ref
+                    .call(&cx, CounterCall::Add(5))
+                    .await
+                    .expect("should call Add(5)")
             })
             .expect("should spawn client task for call test");
         let client_task_id = client_handle.task_id();
@@ -4562,9 +4567,13 @@ mod tests {
     /// task budget when the guard restores.
     #[test]
     fn init_budget_consumption_propagates_to_main_budget() {
+        const MAIN_POLL_QUOTA: u32 = 100_000;
+        const INIT_POLL_COST: u32 = 7;
+
         #[allow(clippy::items_after_statements)]
         struct BudgetCheckProbe {
             loop_quota: Arc<AtomicU64>,
+            init_poll_cost: u32,
         }
 
         #[allow(clippy::items_after_statements)]
@@ -4575,10 +4584,9 @@ mod tests {
             type Info = SystemMsg;
 
             fn on_start(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-                // "Consume" some budget by using polls
-                // In practice, the poll_quota is decremented by the runtime
-                // but we can verify the budget baseline is properly set.
-                let _ = cx.budget();
+                let mut guard = cx.inner.write();
+                guard.budget.poll_quota =
+                    guard.budget.poll_quota.saturating_sub(self.init_poll_cost);
                 Box::pin(async {})
             }
 
@@ -4603,7 +4611,9 @@ mod tests {
 
         init_test("init_budget_consumption_propagates_to_main_budget");
 
-        let budget = Budget::new().with_poll_quota(100_000).with_priority(10);
+        let budget = Budget::new()
+            .with_poll_quota(MAIN_POLL_QUOTA)
+            .with_priority(10);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4613,6 +4623,7 @@ mod tests {
 
         let server = BudgetCheckProbe {
             loop_quota: Arc::clone(&loop_quota),
+            init_poll_cost: INIT_POLL_COST,
         };
 
         let (handle, stored) = scope
@@ -4641,11 +4652,13 @@ mod tests {
         runtime.run_until_quiescent();
 
         // After init, the main budget should have the original quota minus
-        // whatever was consumed during init. It should be <= 10_000.
+        // whatever was consumed during init. Pin the bound to the configured
+        // main quota so future quota changes cannot leave a stale assertion.
         let remaining = loop_quota.load(Ordering::SeqCst);
+        let max_remaining = u64::from(MAIN_POLL_QUOTA.saturating_sub(INIT_POLL_COST));
         assert!(
-            remaining <= 10_000,
-            "main budget after init must be <= original ({remaining} <= 10000)"
+            remaining <= max_remaining,
+            "main budget after init must subtract init usage ({remaining} <= {max_remaining})"
         );
         assert!(
             remaining > 0,
@@ -5725,9 +5738,15 @@ mod tests {
         let server_ref = handle.server_ref();
 
         // Queue up several casts.
-        server_ref.try_cast(AccumCast::Add(10)).expect("should cast Add(10)");
-        server_ref.try_cast(AccumCast::Add(20)).expect("should cast Add(20)");
-        server_ref.try_cast(AccumCast::Add(30)).expect("should cast Add(30)");
+        server_ref
+            .try_cast(AccumCast::Add(10))
+            .expect("should cast Add(10)");
+        server_ref
+            .try_cast(AccumCast::Add(20))
+            .expect("should cast Add(20)");
+        server_ref
+            .try_cast(AccumCast::Add(30))
+            .expect("should cast Add(30)");
 
         // Start the server (init runs, then it will process casts).
         {
@@ -6029,7 +6048,11 @@ mod tests {
         // Verify the orphaned task record from the failed spawn was cleaned up.
         // The region should only contain the first task; no leaked task record
         // that would prevent region quiescence.
-        let region_tasks = runtime.state.region(region).expect("region should exist for task validation").task_ids();
+        let region_tasks = runtime
+            .state
+            .region(region)
+            .expect("region should exist for task validation")
+            .task_ids();
         assert_eq!(
             region_tasks,
             vec![h1.task_id()],
