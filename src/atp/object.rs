@@ -433,7 +433,9 @@ impl Object {
 
     /// Create a new directory object.
     #[must_use]
-    pub fn directory(children: Vec<ObjectEdge>) -> Self {
+    pub fn directory(mut children: Vec<ObjectEdge>) -> Self {
+        children.sort();
+
         // Compute manifest ID from canonical representation of children
         let manifest_bytes = Self::canonical_children_bytes(&children);
         let manifest_id = ManifestId::from_manifest_bytes(&manifest_bytes);
@@ -695,9 +697,9 @@ impl ObjectGraph {
         let mut visiting = BTreeSet::new();
         let mut visited = BTreeSet::new();
 
-        for root_id in &self.roots {
-            if !visited.contains(root_id) {
-                self.detect_cycles(root_id, &mut visiting, &mut visited)?;
+        for object_id in self.objects.keys() {
+            if !visited.contains(object_id) {
+                self.detect_cycles(object_id, &mut visiting, &mut visited)?;
             }
         }
 
@@ -882,9 +884,10 @@ mod tests {
         assert!(graph.contains_object(&file1_id));
         assert!(graph.contains_object(&file2_id));
 
-        let roots: Vec<_> = graph.roots().cloned().collect();
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0], file1_id);
+        let roots: BTreeSet<_> = graph.roots().cloned().collect();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.contains(&file1_id));
+        assert!(roots.contains(&file2_id));
     }
 
     #[test]
@@ -1130,15 +1133,15 @@ mod tests {
             "directory should not have a parent"
         );
 
-        // Check roots - file should be removed, directory should not be in roots yet
+        // Check roots - file should be removed, directory remains a parentless root
         let roots: Vec<_> = graph.roots().cloned().collect();
         assert!(
             !roots.contains(&file_id),
             "file should be removed from roots"
         );
         assert!(
-            !roots.contains(&dir_id),
-            "directory should not be auto-added to roots"
+            roots.contains(&dir_id),
+            "directory should be a root until another object parents it"
         );
     }
 
