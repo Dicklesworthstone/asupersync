@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use crate::cx::{Cx, cap};
+use crate::cx::Cx;
 use crate::obligation::graded::{ObligationToken, SemaphorePermitKind};
 use crate::sync::lock_ordering::{self, LockRank};
 
@@ -959,6 +959,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::cx::cap;
     use crate::test_utils::init_test_logging;
     use crate::types::Budget;
     use crate::util::ArenaIndex;

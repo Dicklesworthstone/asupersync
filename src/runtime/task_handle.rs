@@ -364,8 +364,9 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::cx::cap;
     use crate::test_utils::init_test_logging;
-    use crate::types::{Budget, CancelKind};
+    use crate::types::CancelKind;
     use crate::util::ArenaIndex;
     use serde_json::{Value, json};
     use std::future::Future;

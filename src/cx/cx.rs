@@ -74,9 +74,9 @@ use crate::observability::{
 use crate::remote::RemoteCap;
 use crate::runtime::blocking_pool::BlockingPoolHandle;
 use crate::runtime::io_driver::IoDriverHandle;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 use crate::runtime::io_driver::IoRegistration;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 use crate::runtime::reactor::{Interest, Source};
 use crate::runtime::state::LoserDrainHistoryHandle;
 use crate::runtime::task_handle::JoinError;

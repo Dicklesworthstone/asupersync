@@ -18,7 +18,7 @@ use crate::atp::transfer::{
     TransferId, TransferManifestRef, TransferState,
 };
 use crate::atp::writer::{AtpSink, AtpWriter, ResumeToken, TransferProof, WriterConfig};
-use crate::cx::{Cx, cap};
+use crate::cx::Cx;
 use crate::net::atp::protocol::outcome::{
     AtpError, AtpOutcome, ManifestError, PathError, PolicyError, ProtocolError,
 };

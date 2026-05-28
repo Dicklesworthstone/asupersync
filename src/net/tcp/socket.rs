@@ -23,7 +23,7 @@ struct TcpSocketState {
     family: TcpSocketFamily,
     bound: Option<SocketAddr>,
     reuseaddr: bool,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(unix)]
     reuseport: bool,
 }
 
@@ -36,6 +36,7 @@ impl TcpSocket {
                 family: TcpSocketFamily::V4,
                 bound: None,
                 reuseaddr: false,
+                #[cfg(unix)]
                 reuseport: false,
             }),
         })
@@ -49,6 +50,7 @@ impl TcpSocket {
                 family: TcpSocketFamily::V6,
                 bound: None,
                 reuseaddr: false,
+                #[cfg(unix)]
                 reuseport: false,
             }),
         })

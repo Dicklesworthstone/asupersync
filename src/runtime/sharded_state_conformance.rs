@@ -23,9 +23,10 @@
 use crate::observability::ObservabilityConfig;
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::runtime::config::ObligationLeakResponse;
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use crate::runtime::sharded_state::lock_order::{held_count, held_labels};
 use crate::runtime::sharded_state::{
     ShardGuard, ShardedConfig, ShardedObservability, ShardedState,
-    lock_order::{held_count, held_labels},
 };
 use crate::trace::TraceBufferHandle;
 use crate::trace::distributed::LogicalClockMode;
@@ -34,6 +35,27 @@ use crate::util::{ArenaIndex, OsEntropy};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
+
+#[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
+fn held_count() -> usize {
+    0
+}
+
+#[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
+fn held_labels() -> Vec<&'static str> {
+    Vec::new()
+}
+
+fn lock_order_tracking_skip() -> Option<ConformanceResult> {
+    if cfg!(any(debug_assertions, feature = "lock-metrics")) {
+        None
+    } else {
+        Some(ConformanceResult::Skip {
+            reason: "lock-order tracking is compiled out in release builds without lock-metrics"
+                .to_string(),
+        })
+    }
+}
 
 /// Conformance test result for structured reporting.
 #[derive(Debug, Clone, PartialEq)]
@@ -292,6 +314,10 @@ impl ShardedStateConformanceSuite {
     // ─── Lock Ordering Compliance Tests ───
 
     fn test_tasks_only_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 
@@ -315,6 +341,10 @@ impl ShardedStateConformanceSuite {
     }
 
     fn test_regions_only_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 
@@ -338,6 +368,10 @@ impl ShardedStateConformanceSuite {
     }
 
     fn test_obligations_only_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 
@@ -361,6 +395,10 @@ impl ShardedStateConformanceSuite {
     }
 
     fn test_for_spawn_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 
@@ -385,6 +423,10 @@ impl ShardedStateConformanceSuite {
     }
 
     fn test_for_obligation_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 
@@ -409,6 +451,10 @@ impl ShardedStateConformanceSuite {
     }
 
     fn test_for_task_completed_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 
@@ -436,6 +482,10 @@ impl ShardedStateConformanceSuite {
     }
 
     fn test_for_cancel_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 
@@ -463,6 +513,10 @@ impl ShardedStateConformanceSuite {
     }
 
     fn test_for_obligation_resolve_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 
@@ -490,6 +544,10 @@ impl ShardedStateConformanceSuite {
     }
 
     fn test_all_lock_order() -> ConformanceResult {
+        if let Some(result) = lock_order_tracking_skip() {
+            return result;
+        }
+
         let fixture = ConformanceFixture::new();
         assert_eq!(held_count(), 0, "no locks held before test");
 

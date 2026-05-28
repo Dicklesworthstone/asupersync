@@ -5,13 +5,15 @@
 
 #![cfg(test)]
 
+use super::lock_ordering::LockModule;
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use super::lock_ordering::{
-    LockModule, LockRank, check_acquire_with_module, clear_held_locks, record_acquire_with_module,
+    LockRank, check_acquire_with_module, clear_held_locks, record_acquire_with_module,
     record_release_with_module,
 };
 
 #[test]
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn test_cross_module_enforcement_example() {
     clear_held_locks();
 
@@ -41,7 +43,7 @@ fn test_cross_module_enforcement_example() {
 }
 
 #[test]
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[should_panic(expected = "CROSS-MODULE DEADLOCK PREVENTION")]
 fn test_cross_module_violation_obligation_while_holding_cancel() {
     clear_held_locks();
@@ -58,7 +60,7 @@ fn test_cross_module_violation_obligation_while_holding_cancel() {
 }
 
 #[test]
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[should_panic(expected = "CROSS-MODULE DEADLOCK PREVENTION")]
 fn test_cross_module_violation_runtime_while_holding_obligation() {
     clear_held_locks();
@@ -105,7 +107,7 @@ fn test_module_detection_from_names() {
 /// Example of how the enhanced API could be used in practice.
 /// This test shows the intended usage pattern for the LockOrderEnforcer.
 #[test]
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn test_lock_order_enforcer_usage_example() {
     use super::lock_ordering::LockOrderEnforcer;
 

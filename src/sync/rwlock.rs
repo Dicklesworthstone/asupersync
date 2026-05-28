@@ -74,7 +74,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use super::waiter::WaiterChain;
-use crate::cx::{Cx, cap};
+use crate::cx::Cx;
 use crate::sync::lock_ordering::{self, LockRank};
 
 /// br-asupersync-4j40bb: bound on consecutive writers served from the queue
@@ -1414,6 +1414,7 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
 #[allow(dead_code)]
 mod tests {
     use super::*;
+    use crate::cx::cap;
     use crate::test_utils::init_test_logging;
     use crate::util::ArenaIndex;
     use std::sync::Arc as StdArc;

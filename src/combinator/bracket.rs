@@ -13,7 +13,7 @@
 //! noop waker complete during this drop path; futures that require external
 //! wakeups fail closed if they exhaust the bounded drop loop.
 
-use crate::cx::{Cx, cap};
+use crate::cx::Cx;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
@@ -540,6 +540,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::cx::cap;
     use crate::types::{Budget, RegionId, TaskId};
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
