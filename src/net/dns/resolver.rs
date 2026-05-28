@@ -999,8 +999,11 @@ fn build_dns_query(name: &str, query_type: DnsQueryType, id: u16) -> Result<Vec<
 
 fn encode_dns_name(name: &str, out: &mut Vec<u8>) -> Result<(), DnsError> {
     let canonical = name.strip_suffix('.').unwrap_or(name);
+    if canonical.is_empty() || canonical.len() > 253 {
+        return Err(DnsError::InvalidHost(name.to_string()));
+    }
     for label in canonical.split('.') {
-        if label.is_empty() {
+        if label.is_empty() || label.len() > 63 {
             return Err(DnsError::InvalidHost(name.to_string()));
         }
         let len = u8::try_from(label.len()).map_err(|_| DnsError::InvalidHost(name.to_string()))?;
