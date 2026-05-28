@@ -42,16 +42,16 @@ fn test_small_file_first_policy() {
     scheduler.schedule(medium_file.clone());
 
     // Small file should come first (highest efficiency: 10.0)
-    let (next, evidence) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, evidence) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, small_file.id);
     assert_eq!(evidence.reason, ScheduleReason::EfficiencyOptimal);
 
     // Medium file second (efficiency: 4.0)
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, medium_file.id);
 
     // Large file last (efficiency: 5.0, but scheduled after medium due to generation)
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, large_file.id);
 }
 
@@ -70,14 +70,14 @@ fn test_metadata_first_prioritization() {
     scheduler.schedule(control_msg.clone());
 
     // Should prioritize: Control > Manifest > Data
-    let (next, evidence) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, evidence) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, control_msg.id);
     assert_eq!(evidence.reason, ScheduleReason::PriorityClass);
 
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, manifest.id);
 
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, data_chunk.id);
 }
 
@@ -104,7 +104,7 @@ fn test_prefix_first_delivery() {
     scheduler.schedule(prefix_chunk.clone());
 
     // Prefix should come first due to highest utility
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, prefix_chunk.id);
     assert_eq!(next.metadata.get("chunk_type"), Some(&"prefix".to_string()));
 }
@@ -127,7 +127,7 @@ fn test_sparse_missing_handling() {
     scheduler.schedule(rare_chunk.clone());
 
     // Rare chunk should be prioritized due to higher utility
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, rare_chunk.id);
     assert_eq!(next.metadata.get("rarity"), Some(&"rare".to_string()));
 }
@@ -148,7 +148,7 @@ fn test_relay_expensive_repair() {
     scheduler.schedule(direct_repair.clone());
 
     // Direct repair should be prioritized (higher efficiency: 5.0 vs 0.5)
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, direct_repair.id);
     assert_eq!(next.metadata.get("path_type"), Some(&"direct".to_string()));
 }
@@ -171,7 +171,7 @@ fn test_multi_peer_rarity() {
     scheduler.schedule(scarce_chunk.clone());
 
     // Scarce chunk prioritized due to higher utility
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, scarce_chunk.id);
 }
 
@@ -190,7 +190,7 @@ fn test_disk_stalled_receiver() {
     };
     scheduler.update_pressure(normal_pressure);
 
-    let result = scheduler.next_content(Time::ZERO);
+    let result = scheduler.next_content(Time::from_nanos(1_000_000_000));
     assert!(result.is_some());
 
     // Reset scheduler for high disk pressure test
@@ -204,7 +204,7 @@ fn test_disk_stalled_receiver() {
     };
     scheduler.update_pressure(high_disk_pressure);
 
-    let result = scheduler.next_content(Time::ZERO);
+    let result = scheduler.next_content(Time::from_nanos(1_000_000_000));
     assert!(result.is_none()); // Should be throttled
 }
 
@@ -224,10 +224,10 @@ fn test_cancellation_behavior() {
     assert_eq!(scheduler.pending_count(), 1);
 
     // Should only get second content
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, content2.id);
 
-    assert!(scheduler.next_content(Time::ZERO).is_none());
+    assert!(scheduler.next_content(Time::from_nanos(1_000_000_000)).is_none());
 }
 
 /// Tests deterministic tie-breaking.
@@ -246,14 +246,14 @@ fn test_deterministic_tie_breaking() {
     scheduler.schedule(item2.clone());
 
     // Should come out in FIFO order (3, 1, 2)
-    let (next, evidence) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, evidence) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, item3.id);
     assert_eq!(evidence.reason, ScheduleReason::FifoOrder);
 
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, item1.id);
 
-    let (next, _) = scheduler.next_content(Time::ZERO).unwrap();
+    let (next, _) = scheduler.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(next.id, item2.id);
 }
 
@@ -265,16 +265,16 @@ fn test_stream_priority_integration() {
     let control = test_content(1, PriorityClass::Control, 100, 1.0, 5.0);
     let data = test_content(2, PriorityClass::Data, 1000, 1.0, 3.0);
 
-    integrated.schedule_content(control.clone(), Time::ZERO);
-    integrated.schedule_content(data.clone(), Time::ZERO);
+    integrated.schedule_content(control.clone(), Time::from_nanos(1_000_000_000));
+    integrated.schedule_content(data.clone(), Time::from_nanos(1_000_000_000));
 
     // Control should get critical stream priority
-    let (content, assignment, _evidence) = integrated.next_content(Time::ZERO).unwrap();
+    let (content, assignment, _evidence) = integrated.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(content.id, control.id);
     assert_eq!(assignment.priority, StreamPriority::Critical);
 
     // Data should get normal stream priority
-    let (content, assignment, _evidence) = integrated.next_content(Time::ZERO).unwrap();
+    let (content, assignment, _evidence) = integrated.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(content.id, data.id);
     assert_eq!(assignment.priority, StreamPriority::Normal);
 }
@@ -293,7 +293,7 @@ fn test_evidence_logging_completeness() {
     }
 
     let mut decisions = Vec::new();
-    while let Some((content, evidence)) = scheduler.next_content(Time::ZERO) {
+    while let Some((content, evidence)) = scheduler.next_content(Time::from_nanos(1_000_000_000)) {
         decisions.push((content.id, evidence));
     }
 
@@ -321,7 +321,7 @@ fn test_fifo_ordering_invariant() {
 
     // Should come out in FIFO order
     let mut results = Vec::new();
-    while let Some((content, _)) = scheduler.next_content(Time::ZERO) {
+    while let Some((content, _)) = scheduler.next_content(Time::from_nanos(1_000_000_000)) {
         results.push(content.id.value());
     }
 
@@ -349,7 +349,7 @@ fn test_priority_class_ordering_invariant() {
 
     // Should come out in priority order (highest first)
     let mut results = Vec::new();
-    while let Some((content, _)) = scheduler.next_content(Time::ZERO) {
+    while let Some((content, _)) = scheduler.next_content(Time::from_nanos(1_000_000_000)) {
         results.push(content.priority_class);
     }
 
@@ -375,23 +375,23 @@ fn test_directory_transfer_simulation() {
     let large_file = test_content(3, PriorityClass::Data, 1_048_576, 20.0, 50.0);
     let readme = test_content(4, PriorityClass::Data, 512, 0.2, 15.0); // High utility (readable)
 
-    integrated.schedule_content(large_file.clone(), Time::ZERO);
-    integrated.schedule_content(manifest.clone(), Time::ZERO);
-    integrated.schedule_content(readme.clone(), Time::ZERO);
-    integrated.schedule_content(small_file.clone(), Time::ZERO);
+    integrated.schedule_content(large_file.clone(), Time::from_nanos(1_000_000_000));
+    integrated.schedule_content(manifest.clone(), Time::from_nanos(1_000_000_000));
+    integrated.schedule_content(readme.clone(), Time::from_nanos(1_000_000_000));
+    integrated.schedule_content(small_file.clone(), Time::from_nanos(1_000_000_000));
 
     // Should prioritize: manifest > readme > small_file > large_file
-    let (content, assignment, _) = integrated.next_content(Time::ZERO).unwrap();
+    let (content, assignment, _) = integrated.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(content.id, manifest.id);
     assert_eq!(assignment.priority, StreamPriority::Critical);
 
-    let (content, _, _) = integrated.next_content(Time::ZERO).unwrap();
+    let (content, _, _) = integrated.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(content.id, readme.id); // Highest efficiency for data
 
-    let (content, _, _) = integrated.next_content(Time::ZERO).unwrap();
+    let (content, _, _) = integrated.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(content.id, small_file.id);
 
-    let (content, _, _) = integrated.next_content(Time::ZERO).unwrap();
+    let (content, _, _) = integrated.next_content(Time::from_nanos(1_000_000_000)).unwrap();
     assert_eq!(content.id, large_file.id);
 }
 
@@ -411,7 +411,7 @@ fn test_scheduler_performance() {
     // Process all items
     let start = std::time::Instant::now();
     let mut count = 0;
-    while scheduler.next_content(Time::ZERO).is_some() {
+    while scheduler.next_content(Time::from_nanos(1_000_000_000)).is_some() {
         count += 1;
     }
     let process_time = start.elapsed();
