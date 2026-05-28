@@ -1,0 +1,74 @@
+---
+source: src/lab/explorer.rs
+assertion_line: 2046
+expression: transcript
+---
+{
+  "certificate_divergences": [],
+  "coverage": {
+    "class_run_counts": {
+      "[FINGERPRINT_0]": 3,
+      "[FINGERPRINT_1]": 2,
+      "[FINGERPRINT_2]": 2,
+      "[FINGERPRINT_3]": 2,
+      "[FINGERPRINT_4]": 1
+    },
+    "equivalence_classes": 5,
+    "new_class_discoveries": 5,
+    "novelty_histogram": {
+      "0": 5,
+      "1": 5
+    },
+    "saturation": {
+      "existing_class_hits": 5,
+      "runs_since_last_new_class": 2,
+      "saturated": false,
+      "window": 10
+    },
+    "total_runs": 10
+  },
+  "runs": [
+    {
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
+      "is_new_class": true,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
+      "violation_count": 0
+    },
+    {
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
+      "is_new_class": true,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
+      "violation_count": 2
+    }
+  ],
+  "top_unexplored": [
+    {
+      "score": {
+        "fingerprint": "[FINGERPRINT]",
+        "novelty": 2,
+        "persistence_sum": 100
+      },
+      "seed": "[SEED]"
+    }
+  ],
+  "total_runs": 10,
+  "unique_classes": 5,
+  "violation_seeds": [
+    "[SEED]"
+  ],
+  "violations": [
+    {
+      "fingerprint": "[FINGERPRINT]",
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
+      "violations": [
+        "2 tasks leaked",
+        "0 obligations leaked"
+      ]
+    }
+  ]
+}
