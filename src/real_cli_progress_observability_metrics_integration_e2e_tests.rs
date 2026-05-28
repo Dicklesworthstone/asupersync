@@ -29,6 +29,12 @@ mod tests {
         },
     };
 
+    const PROGRESS_ITEMS_COUNTER: &str = "progress_items_processed";
+    const PROGRESS_E2E_COMMAND: &str =
+        "LabRuntime::run DeterministicInstrumentedProgressBar::update_progress";
+    const PROGRESS_E2E_ARTIFACT_PATH: &str =
+        "in-memory://progress_metrics_tracker/metric_snapshots";
+
     /// Deterministic long-running operation for testing progress reporting.
     #[derive(Debug)]
     struct DeterministicLongRunningOperation {
@@ -184,18 +190,20 @@ mod tests {
             self.eta_estimates.lock().unwrap().push(estimate);
         }
 
-        fn get_progress_summary(&self) -> ProgressIntegrationSummary {
+        fn get_progress_summary(&self, scenario_id: &'static str) -> ProgressIntegrationSummary {
             let updates = self.progress_updates.lock().unwrap();
             let snapshots = self.metric_snapshots.lock().unwrap();
             let throughput = self.throughput_measurements.lock().unwrap();
             let etas = self.eta_estimates.lock().unwrap();
+            let metrics_collection_consistency = validate_metrics_consistency(&snapshots);
+            let final_percentage = updates.last().map(|u| u.percentage).unwrap_or(0.0);
 
             ProgressIntegrationSummary {
                 total_progress_updates: updates.len(),
                 total_metric_snapshots: snapshots.len(),
                 total_throughput_measurements: throughput.len(),
                 total_eta_estimates: etas.len(),
-                final_percentage: updates.last().map(|u| u.percentage).unwrap_or(0.0),
+                final_percentage,
                 average_throughput: if !throughput.is_empty() {
                     throughput.iter().map(|t| t.items_per_second).sum::<f64>()
                         / throughput.len() as f64
@@ -204,9 +212,33 @@ mod tests {
                 },
                 throughput_variance: calculate_throughput_variance(&throughput),
                 eta_accuracy: calculate_eta_accuracy(&etas),
-                metrics_collection_consistency: validate_metrics_consistency(&snapshots),
+                metrics_collection_consistency,
+                proof_output: build_progress_metrics_proof_output(
+                    scenario_id,
+                    &snapshots,
+                    metrics_collection_consistency,
+                    final_percentage,
+                ),
             }
         }
+    }
+
+    #[derive(Debug, Clone)]
+    struct MetricSnapshotProof {
+        snapshot_index: usize,
+        progress_items_processed: Option<u64>,
+        counter_count: usize,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ProgressMetricsProofOutput {
+        scenario_id: &'static str,
+        command: &'static str,
+        exit_status: &'static str,
+        before_metric_snapshot: MetricSnapshotProof,
+        after_metric_snapshot: MetricSnapshotProof,
+        artifact_path: &'static str,
+        failure_detail: Option<String>,
     }
 
     #[derive(Debug)]
@@ -220,6 +252,7 @@ mod tests {
         throughput_variance: f64,
         eta_accuracy: f64,
         metrics_collection_consistency: f64,
+        proof_output: ProgressMetricsProofOutput,
     }
 
     fn calculate_throughput_variance(measurements: &[ThroughputMeasurement]) -> f64 {
@@ -270,9 +303,76 @@ mod tests {
         }
     }
 
+    fn build_progress_metrics_proof_output(
+        scenario_id: &'static str,
+        snapshots: &[MetricsSnapshot],
+        consistency_score: f64,
+        final_percentage: f64,
+    ) -> ProgressMetricsProofOutput {
+        let before_metric_snapshot = snapshot_proof(snapshots.first(), 0);
+        let after_index = snapshots.len().saturating_sub(1);
+        let after_metric_snapshot = snapshot_proof(snapshots.last(), after_index);
+        let missing_counter_index = snapshots
+            .iter()
+            .position(|snapshot| !snapshot.counter_values.contains_key(PROGRESS_ITEMS_COUNTER));
+
+        let failure_detail = if snapshots.len() < 2 {
+            Some(format!(
+                "expected at least two metric snapshots, observed {}",
+                snapshots.len()
+            ))
+        } else if let Some(index) = missing_counter_index {
+            Some(format!(
+                "snapshot {} did not include the {} counter",
+                index, PROGRESS_ITEMS_COUNTER
+            ))
+        } else if consistency_score < 1.0 {
+            Some(format!(
+                "observed metric snapshots were not monotonic; consistency={:.3}",
+                consistency_score
+            ))
+        } else if final_percentage < 99.9 {
+            Some(format!(
+                "progress stopped at {:.1}% before completion",
+                final_percentage
+            ))
+        } else {
+            None
+        };
+
+        ProgressMetricsProofOutput {
+            scenario_id,
+            command: PROGRESS_E2E_COMMAND,
+            exit_status: if failure_detail.is_none() {
+                "ok"
+            } else {
+                "failed"
+            },
+            before_metric_snapshot,
+            after_metric_snapshot,
+            artifact_path: PROGRESS_E2E_ARTIFACT_PATH,
+            failure_detail,
+        }
+    }
+
+    fn snapshot_proof(
+        snapshot: Option<&MetricsSnapshot>,
+        snapshot_index: usize,
+    ) -> MetricSnapshotProof {
+        MetricSnapshotProof {
+            snapshot_index,
+            progress_items_processed: snapshot
+                .and_then(|snapshot| snapshot.counter_values.get(PROGRESS_ITEMS_COUNTER))
+                .copied(),
+            counter_count: snapshot
+                .map(|snapshot| snapshot.counter_values.len())
+                .unwrap_or(0),
+        }
+    }
+
     fn validate_metrics_consistency(snapshots: &[MetricsSnapshot]) -> f64 {
         if snapshots.len() < 2 {
-            return 1.0;
+            return 0.0;
         }
 
         let mut consistent_pairs = 0;
@@ -282,9 +382,8 @@ mod tests {
             let earlier = &window[0];
             let later = &window[1];
 
-            // Check that counters are monotonically increasing
-            let counters_consistent = validate_counter_monotonicity(earlier, later);
-            // Check that timestamps are increasing
+            let counters_consistent = validate_counter_monotonicity(earlier, later)
+                && validate_required_counter_monotonicity(earlier, later, PROGRESS_ITEMS_COUNTER);
             let time_consistent = later.timestamp >= earlier.timestamp;
 
             if counters_consistent && time_consistent {
@@ -296,7 +395,7 @@ mod tests {
         if total_pairs > 0 {
             consistent_pairs as f64 / total_pairs as f64
         } else {
-            1.0
+            0.0
         }
     }
 
@@ -307,6 +406,20 @@ mod tests {
                 .get(name)
                 .is_some_and(|later_value| later_value >= earlier_value)
         })
+    }
+
+    fn validate_required_counter_monotonicity(
+        earlier: &MetricsSnapshot,
+        later: &MetricsSnapshot,
+        counter_name: &str,
+    ) -> bool {
+        match (
+            earlier.counter_values.get(counter_name),
+            later.counter_values.get(counter_name),
+        ) {
+            (Some(earlier_value), Some(later_value)) => later_value >= earlier_value,
+            _ => false,
+        }
     }
 
     /// Deterministic progress bar that integrates with metrics.
@@ -344,8 +457,7 @@ mod tests {
                 last_update: Time::now().into(),
             }));
 
-            let items_counter =
-                Arc::new(metrics_registry.create_counter("progress_items_processed"));
+            let items_counter = Arc::new(metrics_registry.create_counter(PROGRESS_ITEMS_COUNTER));
             let throughput_histogram =
                 Arc::new(metrics_registry.create_histogram("progress_throughput_items_per_sec"));
             let eta_gauge = Arc::new(metrics_registry.create_gauge("progress_eta_seconds"));
@@ -415,12 +527,17 @@ mod tests {
         }
 
         fn update_progress_sync(&self, current: u64, message: String) -> Result<()> {
-            // Synchronous version for testing
             let mut state = self.state.lock().unwrap();
+            let now = Time::now().into();
+
             state.current = current;
             state.message = message.clone();
+            state.last_update = now;
+            self.items_counter.set(current);
             self.tracker
                 .record_progress_update(current, self.config.total, message);
+            let snapshot = self.metrics_registry.snapshot();
+            self.tracker.record_metrics_snapshot(snapshot);
             Ok(())
         }
     }
@@ -813,12 +930,16 @@ mod tests {
 
     async fn run_progress_metrics_integration_test(
         cx: &Cx,
+        scenario_id: &'static str,
         operation: Arc<DeterministicLongRunningOperation>,
         tracker: Arc<ProgressMetricsTracker>,
         progress_bar: Arc<DeterministicInstrumentedProgressBar>,
     ) -> Result<ProgressIntegrationSummary> {
         let mut last_update = 0;
         let update_interval = 50; // Update every 50 items
+        progress_bar
+            .update_progress(0, "Starting progress metrics run".to_string())
+            .await?;
 
         while !operation.is_complete() {
             // Process a batch
@@ -849,7 +970,39 @@ mod tests {
         }
 
         progress_bar.finish()?;
-        Ok(tracker.get_progress_summary())
+        Ok(tracker.get_progress_summary(scenario_id))
+    }
+
+    fn assert_progress_metrics_proof(
+        summary: &ProgressIntegrationSummary,
+        scenario_id: &str,
+        expected_total_items: u64,
+    ) {
+        let proof = &summary.proof_output;
+        assert_eq!(proof.scenario_id, scenario_id);
+        assert_eq!(proof.command, PROGRESS_E2E_COMMAND);
+        assert_eq!(proof.exit_status, "ok", "{:?}", proof.failure_detail);
+        assert_eq!(proof.artifact_path, PROGRESS_E2E_ARTIFACT_PATH);
+
+        let before_counter = proof
+            .before_metric_snapshot
+            .progress_items_processed
+            .expect("before metric snapshot should include progress counter");
+        let after_counter = proof
+            .after_metric_snapshot
+            .progress_items_processed
+            .expect("after metric snapshot should include progress counter");
+
+        assert_eq!(proof.before_metric_snapshot.snapshot_index, 0);
+        assert!(
+            proof.after_metric_snapshot.snapshot_index
+                >= proof.before_metric_snapshot.snapshot_index
+        );
+        assert!(proof.before_metric_snapshot.counter_count > 0);
+        assert!(proof.after_metric_snapshot.counter_count > 0);
+        assert!(after_counter >= before_counter);
+        assert!(after_counter >= expected_total_items);
+        assert!(proof.failure_detail.is_none());
     }
 
     #[tokio::test]
@@ -875,9 +1028,15 @@ mod tests {
                     ));
 
                     // Run the integration test
-                    let summary =
-                        run_progress_metrics_integration_test(cx, operation, tracker, progress_bar)
-                            .await?;
+                    let scenario_id = "cli-progress-basic-metrics-e2e";
+                    let summary = run_progress_metrics_integration_test(
+                        cx,
+                        scenario_id,
+                        operation,
+                        tracker,
+                        progress_bar,
+                    )
+                    .await?;
 
                     // Verify basic integration metrics
                     assert!(
@@ -905,6 +1064,7 @@ mod tests {
                         summary.metrics_collection_consistency > 0.8,
                         "Metrics should be consistent"
                     );
+                    assert_progress_metrics_proof(&summary, scenario_id, total_items);
 
                     Ok(summary)
                 })
@@ -939,9 +1099,15 @@ mod tests {
                         metrics_registry.clone(),
                     ));
 
-                    let summary =
-                        run_progress_metrics_integration_test(cx, operation, tracker, progress_bar)
-                            .await?;
+                    let scenario_id = "cli-progress-throughput-accuracy-e2e";
+                    let summary = run_progress_metrics_integration_test(
+                        cx,
+                        scenario_id,
+                        operation,
+                        tracker,
+                        progress_bar,
+                    )
+                    .await?;
 
                     // Verify throughput calculation accuracy
                     let throughput_error = (summary.average_throughput - expected_rate as f64)
@@ -955,6 +1121,7 @@ mod tests {
                         summary.throughput_variance < 20.0,
                         "Throughput variance should be reasonable"
                     );
+                    assert_progress_metrics_proof(&summary, scenario_id, total_items);
 
                     Ok(summary)
                 })
@@ -989,9 +1156,15 @@ mod tests {
                         metrics_registry.clone(),
                     ));
 
-                    let summary =
-                        run_progress_metrics_integration_test(cx, operation, tracker, progress_bar)
-                            .await?;
+                    let scenario_id = "cli-progress-eta-quality-e2e";
+                    let summary = run_progress_metrics_integration_test(
+                        cx,
+                        scenario_id,
+                        operation,
+                        tracker,
+                        progress_bar,
+                    )
+                    .await?;
 
                     // Verify ETA estimation quality
                     assert!(
@@ -1002,6 +1175,7 @@ mod tests {
                         summary.total_eta_estimates >= 3,
                         "Should generate multiple ETA estimates"
                     );
+                    assert_progress_metrics_proof(&summary, scenario_id, total_items);
 
                     Ok(summary)
                 })
@@ -1036,9 +1210,15 @@ mod tests {
                         metrics_registry.clone(),
                     ));
 
-                    let summary =
-                        run_progress_metrics_integration_test(cx, operation, tracker, progress_bar)
-                            .await?;
+                    let scenario_id = "cli-progress-metrics-consistency-e2e";
+                    let summary = run_progress_metrics_integration_test(
+                        cx,
+                        scenario_id,
+                        operation,
+                        tracker,
+                        progress_bar,
+                    )
+                    .await?;
 
                     // Verify metrics collection consistency
                     assert!(
@@ -1049,6 +1229,7 @@ mod tests {
                         summary.total_metric_snapshots >= summary.total_progress_updates,
                         "Should have at least as many metric snapshots as progress updates"
                     );
+                    assert_progress_metrics_proof(&summary, scenario_id, total_items);
 
                     Ok(summary)
                 })
@@ -1095,9 +1276,15 @@ mod tests {
                         })
                     });
 
-                    let summary =
-                        run_progress_metrics_integration_test(cx, operation, tracker, progress_bar)
-                            .await?;
+                    let scenario_id = "cli-progress-variable-rate-e2e";
+                    let summary = run_progress_metrics_integration_test(
+                        cx,
+                        scenario_id,
+                        operation,
+                        tracker,
+                        progress_bar,
+                    )
+                    .await?;
 
                     let _ = pause_task.await;
 
@@ -1114,6 +1301,7 @@ mod tests {
                         summary.final_percentage >= 99.0,
                         "Should complete despite rate changes"
                     );
+                    assert_progress_metrics_proof(&summary, scenario_id, total_items);
 
                     Ok(summary)
                 })
@@ -1148,9 +1336,15 @@ mod tests {
                         metrics_registry.clone(),
                     ));
 
-                    let summary =
-                        run_progress_metrics_integration_test(cx, operation, tracker, progress_bar)
-                            .await?;
+                    let scenario_id = "cli-progress-comprehensive-e2e";
+                    let summary = run_progress_metrics_integration_test(
+                        cx,
+                        scenario_id,
+                        operation,
+                        tracker,
+                        progress_bar,
+                    )
+                    .await?;
 
                     // Comprehensive validation
                     assert!(
@@ -1207,6 +1401,7 @@ mod tests {
                         summary.total_eta_estimates > 0,
                         "ETA estimation integration working"
                     );
+                    assert_progress_metrics_proof(&summary, scenario_id, total_items);
 
                     Ok(summary)
                 })

@@ -2587,17 +2587,11 @@ mod tests {
             .store_spawned_task(client_task_id, client_stored);
 
         {
-            runtime.scheduler.lock().schedule(client_task_id, 0);
+            let mut sched = runtime.scheduler.lock();
+            sched.schedule(client_task_id, 0);
+            sched.schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
-        {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_idle();
-        {
-            runtime.scheduler.lock().schedule(client_task_id, 0);
-        }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         let call_saw_initialized =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
@@ -2747,7 +2741,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         handle.stop();
         {
@@ -2903,7 +2897,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         let task = runtime.state.task(task_id).expect("task exists");
         crate::assert_with_log!(
@@ -3111,7 +3105,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
         handle.stop();
 
         let call_err =
@@ -3402,7 +3396,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Queue a handful of casts, then disconnect. Shutdown must drain the mailbox
         // before running on_stop, so the final count reflects the cast effects.
@@ -4352,7 +4346,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // First cast fills the mailbox
         handle.try_cast(TaggedCast::Set(1)).unwrap();
@@ -5267,7 +5261,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // The final value should be 100 (last Set wins).
         let result_ref = handle.server_ref();
@@ -5288,13 +5282,7 @@ mod tests {
             sched.schedule(server_task_id, 0);
             sched.schedule(cid, 0);
         }
-        runtime.run_until_idle();
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
-            sched.schedule(cid, 0);
-        }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // The server should have processed Set(2), then Set(100).
         // Set(1) was evicted. Final count = 100.
@@ -5374,13 +5362,7 @@ mod tests {
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
-        runtime.run_until_idle();
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
-            sched.schedule(client_id, 0);
-        }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // The client should have received an error since the server aborted.
         if let Some(ref result) = *call_result.lock() {
@@ -5468,13 +5450,7 @@ mod tests {
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
-        runtime.run_until_idle();
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
-            sched.schedule(client_id, 0);
-        }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Verify reply was committed (not CallerGone).
         assert_eq!(
@@ -5565,13 +5541,7 @@ mod tests {
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
-        runtime.run_until_idle();
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
-            sched.schedule(client_id, 0);
-        }
-        runtime.run_until_idle();
+        runtime.run_until_quiescent();
 
         // Server should have aborted.
         assert_eq!(

@@ -148,25 +148,25 @@ fn test_path_traversal_protection() {
 
 ## Implementation Status
 
-### ✅ Completed
+### Verified Coverage
 - `atp_config.rs` - Configuration file I/O
 - `atp_workflows.rs` - CI artifact reading
 - `path_security.rs` - Core validation utilities
 - Error types and logging
 
-### 🚧 Still Needs Work
-- `upgrade.rs` - Backup/restore operations (45+ file operations)
-- Other CLI modules with file I/O
-- Comprehensive CLI argument validation
-- Integration tests
+### Tracked Coverage Ledger
 
-### 📋 Remaining Security Work
-1. Audit all `PathBuf` fields in CLI args
-2. Add secure wrappers for `upgrade.rs` operations
-3. Create CLI-wide path validation policy
-4. Add integration tests with malicious payloads
-5. Security review of base directory choices
-6. Documentation for security team
+All CLI path-security expansion is tracked through `asupersync-to7e65.16` and its child
+proof beads. Each coverage row must name the CLI surface, the expected validation
+primitive, the malicious payload class, and the proof command before the row can be
+marked complete.
+
+| Selector | Surface | Required proof |
+|----------|---------|----------------|
+| `CLI-PATH-UPGRADE-BACKUP-RESTORE` | `upgrade.rs` backup/restore file operations | Malicious relative and absolute-path payloads are rejected before any backup or restore I/O begins. |
+| `CLI-PATH-ARGS-PATHBUF` | CLI argument structs with `PathBuf` fields | Every user-controlled path is routed through `SecurePath` or an equivalent typed validator. |
+| `CLI-PATH-BASE-DIR-POLICY` | Base-directory selection for config, artifacts, and upgrade state | Tests demonstrate that user-controlled bases cannot widen the allowed filesystem boundary. |
+| `CLI-PATH-MALICIOUS-E2E` | CLI integration harnesses | E2E logs include selector id, command, exit status, rejected payload, artifact path, and failure detail. |
 
 ## Performance Impact
 

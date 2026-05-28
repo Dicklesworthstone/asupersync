@@ -779,7 +779,7 @@ mod tests {
         fn build_causality_chain(&self, events: &[TraceEvent]) -> CausalityChain {
             CausalityChain {
                 events: events.iter().map(|e| e.id).collect(),
-                dependencies: HashMap::new(), // Would be properly built in real implementation
+                dependencies: HashMap::new(),
             }
         }
     }
@@ -792,6 +792,25 @@ mod tests {
         detection_patterns: Vec<DivergencePattern>,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum DivergencePatternFixtureSelector {
+        SharedStateReadBeforeInitialize,
+        EventTimestampRegression,
+        TaskLifecycleRollback,
+        FileHandleLeakOnExit,
+        TwoLockCircularWait,
+    }
+
+    impl DivergencePatternFixtureSelector {
+        const ALL: [Self; 5] = [
+            Self::SharedStateReadBeforeInitialize,
+            Self::EventTimestampRegression,
+            Self::TaskLifecycleRollback,
+            Self::FileHandleLeakOnExit,
+            Self::TwoLockCircularWait,
+        ];
+    }
+
     impl DeterministicDivergenceDetector {
         fn new(detector_id: String, trace_analyzer: Arc<DeterministicTraceAnalyzer>) -> Self {
             Self {
@@ -802,13 +821,58 @@ mod tests {
         }
 
         fn initialize_detection_patterns() -> Vec<DivergencePattern> {
-            vec![
-                DivergencePattern::CausalityViolation(CausalityViolation::default()),
-                DivergencePattern::TemporalInconsistency(TemporalInconsistency::default()),
-                DivergencePattern::StateDiscrepancy(StateDiscrepancy::default()),
-                DivergencePattern::ResourceLeak(ResourceLeak::default()),
-                DivergencePattern::DeadlockCycle(DeadlockCycle::default()),
-            ]
+            DivergencePatternFixtureSelector::ALL
+                .into_iter()
+                .map(Self::pattern_from_selector)
+                .collect()
+        }
+
+        fn pattern_from_selector(selector: DivergencePatternFixtureSelector) -> DivergencePattern {
+            match selector {
+                DivergencePatternFixtureSelector::SharedStateReadBeforeInitialize => {
+                    DivergencePattern::CausalityViolation(CausalityViolation {
+                        dependent_event: EventId::new(),
+                        prerequisite_event: EventId::new(),
+                        violation_location:
+                            "fixture://cli-doctor/shared-state-read-before-initialize".to_string(),
+                    })
+                }
+                DivergencePatternFixtureSelector::EventTimestampRegression => {
+                    DivergencePattern::TemporalInconsistency(TemporalInconsistency {
+                        expected_duration: Duration::from_millis(1),
+                        observed_duration: Duration::from_millis(0),
+                        affected_component: "TraceEventSequencer".to_string(),
+                        operation: "monotonic_timestamp_ordering".to_string(),
+                    })
+                }
+                DivergencePatternFixtureSelector::TaskLifecycleRollback => {
+                    DivergencePattern::StateDiscrepancy(StateDiscrepancy {
+                        component: "TaskLifecycleState".to_string(),
+                        expected_state: "RunningAfterSpawn".to_string(),
+                        actual_state: "ExitedBeforeSpawnObserved".to_string(),
+                    })
+                }
+                DivergencePatternFixtureSelector::FileHandleLeakOnExit => {
+                    DivergencePattern::ResourceLeak(ResourceLeak {
+                        resource_type: "FileDescriptor".to_string(),
+                        leak_location: "fixture://cli-doctor/task-exit-with-open-file".to_string(),
+                    })
+                }
+                DivergencePatternFixtureSelector::TwoLockCircularWait => {
+                    DivergencePattern::DeadlockCycle(DeadlockCycle {
+                        involved_resources: vec![
+                            "LockOrderA".to_string(),
+                            "LockOrderB".to_string(),
+                        ],
+                        blocking_operations: vec![
+                            "task-a waits for LockOrderB while holding LockOrderA".to_string(),
+                            "task-b waits for LockOrderA while holding LockOrderB".to_string(),
+                        ],
+                        cycle_description: "fixture://cli-doctor/two-lock-circular-wait"
+                            .to_string(),
+                    })
+                }
+            }
         }
 
         async fn analyze_for_divergences(
@@ -1370,7 +1434,7 @@ mod tests {
         }
     }
 
-    // Additional types that would be fully implemented in a real system
+    // Local deterministic model types for the real-service E2E harness.
     type AnalysisConfig = ();
     type DiagnosticReport = ();
     type DiagnosticSeverity = ();
@@ -1712,56 +1776,5 @@ mod tests {
             matches!(outcome, Outcome::Ok(_)),
             "Comprehensive doctor-trace integration should succeed"
         );
-    }
-
-    // Helper types and deterministic implementations.
-    impl Default for CausalityViolation {
-        fn default() -> Self {
-            Self {
-                dependent_event: EventId::new(),
-                prerequisite_event: EventId::new(),
-                violation_location: "test_location".to_string(),
-            }
-        }
-    }
-
-    impl Default for TemporalInconsistency {
-        fn default() -> Self {
-            Self {
-                expected_duration: Duration::from_millis(100),
-                observed_duration: Duration::from_millis(50),
-                affected_component: "TestComponent".to_string(),
-                operation: "TestOperation".to_string(),
-            }
-        }
-    }
-
-    impl Default for StateDiscrepancy {
-        fn default() -> Self {
-            Self {
-                component: "TestComponent".to_string(),
-                expected_state: "Expected".to_string(),
-                actual_state: "Actual".to_string(),
-            }
-        }
-    }
-
-    impl Default for ResourceLeak {
-        fn default() -> Self {
-            Self {
-                resource_type: "TestResource".to_string(),
-                leak_location: "TestLocation".to_string(),
-            }
-        }
-    }
-
-    impl Default for DeadlockCycle {
-        fn default() -> Self {
-            Self {
-                involved_resources: vec!["Resource1".to_string(), "Resource2".to_string()],
-                blocking_operations: vec!["Operation1".to_string(), "Operation2".to_string()],
-                cycle_description: "Test deadlock cycle".to_string(),
-            }
-        }
     }
 }
