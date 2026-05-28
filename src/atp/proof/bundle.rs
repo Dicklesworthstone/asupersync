@@ -2189,6 +2189,7 @@ mod tests {
 
         let manifest_root = crate::atp::manifest::MerkleRoot::new([1; 32]);
         let object_id = ObjectId::content(crate::atp::object::ContentId::from_bytes(b"test"));
+        let repair_object = SerializableObjectId::from(&object_id);
         let chunk_bitmap = ChunkBitmap::new(1);
 
         let peer_identity = PeerIdentityInfo {
@@ -2230,6 +2231,14 @@ mod tests {
             .peer_identity(peer_identity)
             .path_summary(path_summary)
             .journal(journal)
+            .add_repair_group(RepairGroupMetadata {
+                group_id: "group1".to_string(),
+                covered_objects: vec![repair_object],
+                repair_strategy: "raptorq".to_string(),
+                redundancy_factor: 1.5,
+                repair_activated: true,
+                repair_completed_at: Some(12_500),
+            })
             .build()
             .expect("bundle should build");
 
