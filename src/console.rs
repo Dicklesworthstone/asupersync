@@ -539,8 +539,8 @@ impl Text {
 /// Sanitize ANSI escape sequences from user-provided content.
 ///
 /// **Security**: This function prevents ANSI injection attacks by filtering out
-/// escape sequences that could manipulate the terminal. Only printable characters
-/// and safe whitespace are preserved.
+/// escape sequences that could manipulate the terminal. Only printable
+/// characters, tabs, and newlines are preserved.
 #[must_use]
 fn sanitize_ansi_escape_sequences(input: &str) -> String {
     let mut sanitized = String::with_capacity(input.len());
@@ -548,40 +548,47 @@ fn sanitize_ansi_escape_sequences(input: &str) -> String {
 
     while let Some(ch) = chars.next() {
         match ch {
-            // ANSI escape sequence starts
-            '\x1b' => {
-                // Skip the entire ANSI sequence
-                // Common patterns: \x1b[...m, \x1b[...H, \x1b[...J, etc.
-                if chars.peek() == Some(&'[') {
-                    chars.next(); // consume '['
-                    // Skip until we find the terminating character (typically a letter)
-                    for next_ch in chars.by_ref() {
-                        if next_ch.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                } else {
-                    // Other ANSI sequences (e.g., \x1b7, \x1b8)
-                    chars.next(); // consume one more character
+            '\x1b' => match chars.next() {
+                Some('[') => consume_csi_sequence(&mut chars),
+                Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+                    consume_string_control_sequence(&mut chars);
                 }
-                // ANSI sequence filtered out - don't add to output
+                Some(_) | None => {}
+            },
+            '\u{9b}' => consume_csi_sequence(&mut chars),
+            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => {
+                consume_string_control_sequence(&mut chars);
             }
-            // Control characters (except safe whitespace)
-            '\x00'..='\x08'
-            | '\u{b}'..='\u{c}'
-            | '\x0E'..='\x1F'
-            | '\x7F'
-            | '\u{80}'..='\u{9f}' => {
+            '\x00'..='\x08' | '\x0b'..='\x1f' | '\x7F' | '\u{80}'..='\u{9f}' => {
                 // Filter out control characters that could be dangerous
             }
-            // Safe characters: printable + safe whitespace (\t, \n, \r, space)
-            '\t' | '\n' | '\r' | ' '..='\x7E' | '\u{A0}'..=char::MAX => {
+            '\t' | '\n' | ' '..='\x7e' | '\u{A0}'..=char::MAX => {
                 sanitized.push(ch);
             }
         }
     }
 
     sanitized
+}
+
+fn consume_csi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    for ch in chars.by_ref() {
+        if matches!(ch, '\u{40}'..='\u{7e}') {
+            break;
+        }
+    }
+}
+
+fn consume_string_control_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(ch) = chars.next() {
+        if ch == '\x07' {
+            break;
+        }
+        if ch == '\x1b' && chars.peek() == Some(&'\\') {
+            chars.next();
+            break;
+        }
+    }
 }
 
 pub trait Render {
@@ -607,7 +614,8 @@ impl Render for Text {
                 }
             }
         };
-        self.style.render_to(out, &self.content, support, emit_ansi);
+        let sanitized = sanitize_ansi_escape_sequences(&self.content);
+        self.style.render_to(out, &sanitized, support, emit_ansi);
     }
 }
 
@@ -1545,18 +1553,23 @@ mod tests {
     #[test]
     fn ansi_injection_prevention() {
         // Test various ANSI injection attacks
-        let malicious_inputs = vec![
-            "\x1b[2J\x1b[H",                    // Clear screen and home cursor
-            "\x1b[31mRED TEXT\x1b[0m",          // Color injection
-            "Hello\x1b[1000D\x1b[KEvil",        // Cursor movement + line clear
-            "\x1b]0;Forged Title\x07",          // Terminal title manipulation
-            "\x1b[?25l\x1b[?25h",               // Hide/show cursor
-            "\x1b[s\x1b[u",                     // Save/restore cursor
-            "Normal\x1b[3J\x1b[1;1HEvil",       // Clear all + position
-            "\x1b[2K\rOverwrite previous line", // Clear line + carriage return
+        let malicious_inputs = [
+            ("\x1b[2J\x1b[H", ""),                           // Clear screen and home cursor
+            ("\x1b[31mRED TEXT\x1b[0m", "RED TEXT"),         // Color injection
+            ("Hello\x1b[1000D\x1b[KEvil", "HelloEvil"),      // Cursor movement + line clear
+            ("\x1b]0;Forged Title\x07", ""),                 // Terminal title manipulation
+            ("\x1b]0;Forged Title\x1b\\Visible", "Visible"), // OSC terminated by ST
+            ("\x1b[?25l\x1b[?25h", ""),                      // Hide/show cursor
+            ("\x1b[s\x1b[u", ""),                            // Save/restore cursor
+            ("Normal\x1b[3J\x1b[1;1HEvil", "NormalEvil"),    // Clear all + position
+            (
+                "\x1b[2K\rOverwrite previous line",
+                "Overwrite previous line",
+            ),
+            ("\u{9b}31mRED\u{9b}0m", "RED"), // UTF-8 C1 CSI form
         ];
 
-        for (i, malicious_input) in malicious_inputs.iter().enumerate() {
+        for (i, (malicious_input, expected)) in malicious_inputs.iter().enumerate() {
             let sanitized = sanitize_ansi_escape_sequences(malicious_input);
 
             // Verify no ANSI escape sequences made it through
@@ -1567,26 +1580,14 @@ mod tests {
                 malicious_input
             );
 
-            // Verify legitimate content is preserved
-            let expected_legitimate = malicious_input
-                .chars()
-                .filter(|&c| matches!(c, '\t' | '\n' | '\r' | ' '..='\x7E' | '\u{A0}'..=char::MAX))
-                .filter(|&c| !matches!(c, '\x00'..='\x08' | '\x0E'..='\x1F' | '\x7F'))
-                .collect::<String>();
-
-            if !expected_legitimate.is_empty() {
-                assert!(
-                    sanitized.contains(&expected_legitimate) || sanitized == expected_legitimate,
-                    "Test case {}: Legitimate content missing: expected to contain {:?}, got {:?}",
-                    i,
-                    expected_legitimate,
-                    sanitized
-                );
-            }
+            assert_eq!(
+                sanitized, *expected,
+                "Test case {i}: sanitized content mismatch"
+            );
         }
 
         // Test that legitimate content is preserved
-        let legitimate_inputs = vec![
+        let legitimate_inputs = [
             "Hello, World!",
             "Multi\nLine\nText",
             "Tabs\tand\tspaces work fine",
@@ -1604,9 +1605,27 @@ mod tests {
             );
         }
 
-        println!("✓ ANSI injection prevention test passed");
-        println!("  - Malicious ANSI sequences filtered: ✓");
-        println!("  - Legitimate content preserved: ✓");
-        println!("  - Terminal manipulation attacks blocked: ✓");
+        crate::test_complete!("ansi_injection_prevention");
+    }
+
+    #[test]
+    fn styled_text_sanitizes_user_escape_sequences() {
+        init_test("styled_text_sanitizes_user_escape_sequences");
+
+        let caps = Capabilities {
+            is_tty: true,
+            color_support: ColorSupport::Basic,
+            unicode: true,
+        };
+        let text = Text::new("\x1b]0;Forged Title\x07hello\x1b[31mred\x1b[0m").fg(Color::Red);
+        let mut buf = String::new();
+        text.render(&mut buf, &caps, ColorMode::Always);
+
+        assert_eq!(
+            buf, "\x1b[31mhellored\x1b[0m",
+            "styled rendering may emit its own ANSI wrapper but must sanitize user content"
+        );
+
+        crate::test_complete!("styled_text_sanitizes_user_escape_sequences");
     }
 }
