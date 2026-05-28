@@ -1123,7 +1123,38 @@ mod tests {
 
     #[test]
     fn canonical_assignment_mapping() {
-        insta::assert_json_snapshot!(canonical_assignment_mapping_snapshot());
+        assert_eq!(
+            canonical_assignment_mapping_snapshot(),
+            json!({
+                "assignments": [
+                    {
+                        "can_decode": true,
+                        "replica_id": "r0",
+                        "symbol_indices": [0, 1, 2, 3, 4, 5],
+                    },
+                    {
+                        "can_decode": true,
+                        "replica_id": "r1",
+                        "symbol_indices": [0, 1, 2, 3, 4, 5],
+                    },
+                    {
+                        "can_decode": true,
+                        "replica_id": "r2",
+                        "symbol_indices": [0, 1, 2, 3, 4, 5],
+                    },
+                    {
+                        "can_decode": true,
+                        "replica_id": "r3",
+                        "symbol_indices": [0, 1, 2, 3, 4, 5],
+                    },
+                ],
+                "consistency": "quorum",
+                "repair_count": 2,
+                "replica_count": 4,
+                "required_acks": 3,
+                "source_count": 4,
+            })
+        );
     }
 
     #[test]
