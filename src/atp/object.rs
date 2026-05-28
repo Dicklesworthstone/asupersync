@@ -877,7 +877,7 @@ mod tests {
         let file2_id = file2.id.clone();
 
         graph.add_root(file1).unwrap();
-        graph.add_object(file2).unwrap();
+        graph.add_root(file2).unwrap();
 
         assert_eq!(graph.object_count(), 2);
         assert!(!graph.is_empty());
