@@ -570,10 +570,30 @@ fn execute_mailbox_scenario(scenario: &MultiPeerScenario) -> Result<MultiPeerRes
         transfer_bytes,
     );
     add_peer_flow(&mut peer_results, &receiver.peer_id, 0, verified_bytes);
-    add_connection(&mut peer_results, &sender.peer_id, &mailbox.peer_id, "connect");
-    add_connection(&mut peer_results, &mailbox.peer_id, &sender.peer_id, "connect");
-    add_connection(&mut peer_results, &receiver.peer_id, &mailbox.peer_id, "connect");
-    add_connection(&mut peer_results, &mailbox.peer_id, &receiver.peer_id, "connect");
+    add_connection(
+        &mut peer_results,
+        &sender.peer_id,
+        &mailbox.peer_id,
+        "connect",
+    );
+    add_connection(
+        &mut peer_results,
+        &mailbox.peer_id,
+        &sender.peer_id,
+        "connect",
+    );
+    add_connection(
+        &mut peer_results,
+        &receiver.peer_id,
+        &mailbox.peer_id,
+        "connect",
+    );
+    add_connection(
+        &mut peer_results,
+        &mailbox.peer_id,
+        &receiver.peer_id,
+        "connect",
+    );
 
     let transfer_metrics = TransferMetrics {
         total_bytes: transfer_bytes,
@@ -590,7 +610,10 @@ fn execute_mailbox_scenario(scenario: &MultiPeerScenario) -> Result<MultiPeerRes
         failed_verification(
             "mailbox_tamper",
             "mailbox relay tampering rejected before plaintext exposure",
-            [("peer_id", mailbox.peer_id.as_str()), ("exposure_decision", "denied")],
+            [
+                ("peer_id", mailbox.peer_id.as_str()),
+                ("exposure_decision", "denied"),
+            ],
         )
     };
 
@@ -621,17 +644,28 @@ fn execute_swarm_scenario(scenario: &MultiPeerScenario) -> Result<MultiPeerResul
     let mut source_selections = Vec::new();
 
     for (index, seed) in seeds.iter().enumerate() {
-        add_connection(&mut peer_results, &receiver.peer_id, &seed.peer_id, "connect");
-        add_connection(&mut peer_results, &seed.peer_id, &receiver.peer_id, "connect");
+        add_connection(
+            &mut peer_results,
+            &receiver.peer_id,
+            &seed.peer_id,
+            "connect",
+        );
+        add_connection(
+            &mut peer_results,
+            &seed.peer_id,
+            &receiver.peer_id,
+            "connect",
+        );
         let seed_bytes = split_bytes_across_peers(transfer_bytes, seeds.len(), index);
         add_peer_flow(&mut peer_results, &seed.peer_id, seed_bytes, 0);
         add_peer_flow(&mut peer_results, &receiver.peer_id, 0, seed_bytes);
     }
 
     for chunk_index in 0..chunk_count {
-        let seed = seeds
-            .get(chunk_index as usize % seeds.len())
-            .expect("seed index modulo seed count");
+        let seed_index = usize::try_from(chunk_index)
+            .map_err(|_| format!("chunk index {chunk_index} does not fit usize"))?
+            % seeds.len();
+        let seed = seeds[seed_index];
         source_selections.push(SourceSelection {
             chunk_id: format!("chunk-{chunk_index:06}"),
             selected_peer: seed.peer_id.clone(),
@@ -697,7 +731,12 @@ fn execute_cache_scenario(scenario: &MultiPeerScenario) -> Result<MultiPeerResul
         add_peer_flow(&mut peer_results, &receiver.peer_id, 0, transfer_bytes);
         add_connection(&mut peer_results, &receiver.peer_id, &cache_peer, "connect");
     }
-    add_peer_flow(&mut peer_results, &cache_peer, transfer_bytes, transfer_bytes);
+    add_peer_flow(
+        &mut peer_results,
+        &cache_peer,
+        transfer_bytes,
+        transfer_bytes,
+    );
 
     let success = scenario.expectations.success;
     let transfer_metrics = TransferMetrics {
@@ -741,18 +780,26 @@ fn execute_adversarial_scenario(scenario: &MultiPeerScenario) -> Result<MultiPee
     let honest_sources: Vec<_> = scenario
         .peers
         .iter()
-        .filter(|peer| matches!(peer.role, PeerRole::Sender | PeerRole::Seed | PeerRole::Mailbox))
+        .filter(|peer| {
+            matches!(
+                peer.role,
+                PeerRole::Sender | PeerRole::Seed | PeerRole::Mailbox
+            )
+        })
         .collect();
     let malicious = scenario.peers_by_role(&PeerRole::Malicious);
     let peer_rejections = scenario
         .expectations
         .peer_rejections
-        .unwrap_or_else(|| malicious.len() as u32);
+        .unwrap_or_else(|| u32::try_from(malicious.len()).unwrap_or(u32::MAX));
 
     let mut peer_results = baseline_peer_results(scenario);
     let mut rejected_peers = HashMap::new();
     for peer in malicious {
-        rejected_peers.insert(peer.peer_id.clone(), "cryptographic verification failed".to_string());
+        rejected_peers.insert(
+            peer.peer_id.clone(),
+            "cryptographic verification failed".to_string(),
+        );
         if let Some(peer_result) = peer_results.get_mut(&peer.peer_id) {
             peer_result.success = false;
             peer_result.error = Some("rejected malicious chunk source".to_string());
@@ -764,7 +811,12 @@ fn execute_adversarial_scenario(scenario: &MultiPeerScenario) -> Result<MultiPee
         .first()
         .map(|peer| peer.peer_id.clone())
         .unwrap_or_else(|| receiver.peer_id.clone());
-    add_connection(&mut peer_results, &receiver.peer_id, &selected_source, "connect");
+    add_connection(
+        &mut peer_results,
+        &receiver.peer_id,
+        &selected_source,
+        "connect",
+    );
     add_peer_flow(&mut peer_results, &selected_source, transfer_bytes, 0);
     add_peer_flow(&mut peer_results, &receiver.peer_id, 0, transfer_bytes);
 
@@ -820,9 +872,9 @@ fn directory_size(path: &Path, recursive: bool) -> Result<u64, String> {
         .map_err(|error| format!("failed to read source directory {path:?}: {error}"))?
     {
         let entry = entry.map_err(|error| format!("failed to read directory entry: {error}"))?;
-        let metadata = entry
-            .metadata()
-            .map_err(|error| format!("failed to read entry metadata {:?}: {error}", entry.path()))?;
+        let metadata = entry.metadata().map_err(|error| {
+            format!("failed to read entry metadata {:?}: {error}", entry.path())
+        })?;
         if metadata.is_file() {
             total = total.saturating_add(metadata.len());
         } else if recursive && metadata.is_dir() {
@@ -845,9 +897,7 @@ fn run_mailbox_encryption_roundtrip(
     transfer_bytes: u64,
 ) -> Result<(), String> {
     let key = MailboxKey::generate();
-    let chunk_size = usize::try_from(scenario.transfer.chunk_size)
-        .map_err(|_| "transfer chunk_size does not fit usize".to_string())?;
-    if chunk_size == 0 {
+    if scenario.transfer.chunk_size == 0 {
         return Err("transfer chunk_size must be nonzero".to_string());
     }
 
@@ -859,7 +909,9 @@ fn run_mailbox_encryption_roundtrip(
         let encrypted = EncryptedChunk::encrypt(&payload, &key)?;
         let decrypted = encrypted.decrypt(&key)?;
         if decrypted != payload {
-            return Err(format!("mailbox chunk {chunk_index} failed encryption roundtrip"));
+            return Err(format!(
+                "mailbox chunk {chunk_index} failed encryption roundtrip"
+            ));
         }
         if scenario.transfer.encrypted && encrypted.data == payload {
             return Err(format!("mailbox chunk {chunk_index} was not encrypted"));
@@ -882,7 +934,7 @@ fn deterministic_chunk(
         seed ^= seed << 13;
         seed ^= seed >> 7;
         seed ^= seed << 17;
-        out.push(seed as u8);
+        out.push(seed.to_le_bytes()[0]);
     }
     Ok(out)
 }
@@ -901,10 +953,12 @@ fn run_real_cache_operations(
     let expected_misses = expected.misses.unwrap_or(0);
     let expected_evictions = expected.evictions.unwrap_or(0);
     let retained_entries = expected_misses.saturating_sub(expected_evictions).max(1);
+    let retained_entries = usize::try_from(retained_entries)
+        .map_err(|_| "cache retained entry count does not fit usize".to_string())?;
     let mut config = CacheConfig {
         max_size_bytes: u64::MAX / 4,
         max_entries: if expected_evictions > 0 {
-            retained_entries as usize
+            retained_entries
         } else {
             usize::MAX / 4
         },
@@ -923,7 +977,9 @@ fn run_real_cache_operations(
             .get(&key)
             .map_err(|error| format!("cache miss lookup failed: {error}"))?;
         if missing.is_some() {
-            return Err(format!("cache key {index} unexpectedly existed before store"));
+            return Err(format!(
+                "cache key {index} unexpectedly existed before store"
+            ));
         }
         cache
             .put(key, &content)
@@ -1012,10 +1068,9 @@ fn baseline_peer_results(scenario: &MultiPeerScenario) -> HashMap<String, PeerRe
                     bytes_sent: 0,
                     bytes_received: 0,
                     connections: Vec::new(),
-                    log_path: artifact_root(scenario).join("logs").join(format!(
-                        "{}.log",
-                        peer.peer_id
-                    )),
+                    log_path: artifact_root(scenario)
+                        .join("logs")
+                        .join(format!("{}.log", peer.peer_id)),
                 },
             )
         })
