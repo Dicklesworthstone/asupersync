@@ -1405,14 +1405,8 @@ mod tests {
         marking.increment(ObligationKind::SendPermit, r(0));
         let nonempty_str = format!("{marking}");
         let rendered = format!("empty: {empty_str}\nnonempty: {nonempty_str}");
-        insta::assert_snapshot!(
-            "marking_display",
-            &rendered,
-            @r###"
-empty: M = [0]
-nonempty: M = [(send_permit, RegionId(0:0))=1]
-"###
-        );
+        let expected = "empty: M = [0]\nnonempty: M = [(send_permit, RegionId(0:0))=1]";
+        assert_eq!(rendered, expected);
         crate::test_complete!("marking_display");
     }
 
@@ -1438,11 +1432,8 @@ nonempty: M = [(send_permit, RegionId(0:0))=1]
 
         let max = result.timeline.max_pending();
         crate::assert_with_log!(max == 2, "max pending", 2, max);
-        insta::assert_snapshot!(
-            "marking_timeline_display",
-            &format!("{}", result.timeline),
-            @r###"
-Marking Timeline (7 snapshots):
+        let rendered = format!("{}", result.timeline);
+        let expected = r#"Marking Timeline (7 snapshots):
   t=0ns: M = [0] (initial)
   t=0ns: M = [(send_permit, RegionId(0:0))=1] (reserve(send_permit, RegionId(0:0)))
   t=5ns: M = [(send_permit, RegionId(0:0))=1, (ack, RegionId(0:0))=1] (reserve(ack, RegionId(0:0)))
@@ -1450,8 +1441,8 @@ Marking Timeline (7 snapshots):
   t=15ns: M = [0] (commit(ack, RegionId(0:0)))
   t=20ns: M = [0] (region_close(RegionId(0:0)))
   t=20ns: M = [0] (final)
-"###
-        );
+"#;
+        assert_eq!(rendered, expected);
         crate::test_complete!("timeline_tracks_evolution");
     }
 
@@ -1555,11 +1546,7 @@ Marking Timeline (7 snapshots):
             "leak: {}\ninvalid: {}\n\n{}",
             result.leaks[0], result.invalid_transitions[0], result
         );
-        insta::assert_snapshot!(
-            "marking_analysis_result_display",
-            &rendered,
-            @r###"
-leak: leak: 1 ack obligation(s) in RegionId(0:0) at 15ns
+        let expected = r#"leak: leak: 1 ack obligation(s) in RegionId(0:0) at 15ns
 invalid: invalid at 20ns: abort(lease, RegionId(1:0)) but marking is already zero
 
 VASS Marking Analysis Result
@@ -1581,8 +1568,8 @@ Leak violations (1):
 
 Invalid transitions (1):
   invalid at 20ns: abort(lease, RegionId(1:0)) but marking is already zero
-"###
-        );
+"#;
+        assert_eq!(rendered, expected);
         crate::test_complete!("marking_display_impls");
     }
 
@@ -1754,11 +1741,8 @@ Invalid transitions (1):
             must_pass
         );
 
-        insta::assert_snapshot!(
-            "marking_vass_conformance_matrix",
-            &MarkingConformanceHarness::render_matrix(&results),
-            @r###"
-# Obligation Marking VASS Conformance Matrix
+        let rendered = MarkingConformanceHarness::render_matrix(&results);
+        let expected = r#"# Obligation Marking VASS Conformance Matrix
 
 | Req ID | Level | Status | Description | Evidence |
 |--------|-------|--------|-------------|----------|
@@ -1771,8 +1755,8 @@ Summary:
 - MUST: 3/3
 - SHOULD: 1/1
 - Overall: CONFORMANT
-"###
-        );
+"#;
+        assert_eq!(rendered, expected);
         crate::test_complete!("marking_vass_conformance_matrix");
     }
 

@@ -2059,11 +2059,8 @@ mod tests {
             frame_checks: 2,
         };
 
-        insta::assert_snapshot!(
-            "no_aliasing_proof_result_display",
-            &format!("{result}"),
-            @r###"
-SendPermit No-Aliasing Proof
+        let rendered = format!("{result}");
+        let expected = r#"SendPermit No-Aliasing Proof
 ============================
 Events processed:      2
 SendPermit events:     2
@@ -2072,8 +2069,8 @@ Verified steps:        2
 Frame checks:          2
 Peak active permits:   1
 Verified:              true
-"###
-        );
+"#;
+        assert_eq!(rendered, expected);
         crate::test_complete!("proof_result_display");
     }
 
@@ -2086,10 +2083,9 @@ Verified:              true
             time: Time::from_nanos(42),
             description: "test counterexample".to_string(),
         };
-        insta::assert_snapshot!(
-            "no_aliasing_counterexample_display",
-            &format!("{ce}"),
-            @"[duplicate-allocation] obligation ObligationId(0:0) at t=42ns: test counterexample"
+        assert_eq!(
+            format!("{ce}"),
+            "[duplicate-allocation] obligation ObligationId(0:0) at t=42ns: test counterexample"
         );
         crate::test_complete!("counterexample_display");
     }
@@ -2109,17 +2105,12 @@ Verified:              true
             .map(|lemma| lemma.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        insta::assert_snapshot!(
-            "no_aliasing_lemma_display",
-            &rendered,
-            @r###"
-Lemma 1 (Allocation Freshness)
+        let expected = "Lemma 1 (Allocation Freshness)
 Lemma 2 (Transfer Exclusivity)
 Lemma 3 (Release Consumption)
 Lemma 4 (Concurrent Independence)
-Lemma 5 (Drop Safety)
-"###
-        );
+Lemma 5 (Drop Safety)";
+        assert_eq!(rendered, expected);
         crate::test_complete!("lemma_display");
     }
 
