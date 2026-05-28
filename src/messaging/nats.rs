@@ -3182,20 +3182,40 @@ mod tests {
         format!("authNonceValid-{suffix}")
     }
 
+    fn deterministic_operator_key(label: &str) -> KeyPair {
+        let mut raw = [0u8; 32];
+        for (index, byte) in label.bytes().enumerate() {
+            let slot = index % raw.len();
+            let offset = u8::try_from(index % 251).expect("bounded offset");
+            raw[slot] = raw[slot].wrapping_add(byte).wrapping_add(offset);
+        }
+        if label.is_empty() {
+            raw[0] = 1;
+        }
+        KeyPair::new_from_raw(KeyPairType::Operator, raw).expect("deterministic operator key")
+    }
+
     fn test_user_jwt_for_seed(seed: &str, issuer: &str, name: &str) -> String {
         let public_key = KeyPair::from_seed(seed).expect("seed").public_key();
+        let issuer_key = deterministic_operator_key(issuer);
+        let issuer_public_key = issuer_key.public_key();
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ed25519-nkey","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(
             serde_json::json!({
                 "sub": public_key,
-                "iss": issuer,
+                "iss": issuer_public_key,
                 "name": name,
                 "exp": 4_102_444_800_u64,
             })
             .to_string()
             .as_bytes(),
         );
-        format!("{header}.{payload}.signature")
+        let signed_data = format!("{header}.{payload}");
+        let signature = issuer_key
+            .sign(signed_data.as_bytes())
+            .expect("sign deterministic user JWT");
+        let signature = URL_SAFE_NO_PAD.encode(signature);
+        format!("{signed_data}.{signature}")
     }
 
     fn test_creds_document(jwt: &str, seed: &str) -> String {
