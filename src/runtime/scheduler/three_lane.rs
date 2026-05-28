@@ -13181,8 +13181,7 @@ mod tests {
 
             // Sample queue state every 20 tasks
             if i % 20 == 0 {
-                let workers = scheduler.take_workers();
-                if let Some(worker) = workers.first() {
+                if let Some(worker) = scheduler.workers.first() {
                     // Check current ready queue size
                     let ready_queue_size = {
                         let global_ready_count = scheduler.global_injector().ready_count();
@@ -13209,9 +13208,6 @@ mod tests {
                         );
                     }
                 }
-
-                // Put workers back
-                let _ = scheduler.take_workers();
             }
         }
 
