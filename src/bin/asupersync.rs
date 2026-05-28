@@ -4869,7 +4869,10 @@ fn parse_timeline_second_bound(value: f64, label: &str) -> Result<u64, CliError>
     if !value.is_finite() || value < 0.0 {
         return Err(
             CliError::new("invalid_argument", "Invalid timeline window range")
-                .detail(format!("{} must be a finite non-negative second value", label))
+                .detail(format!(
+                    "{} must be a finite non-negative second value",
+                    label
+                ))
                 .exit_code(ExitCode::USER_ERROR),
         );
     }
@@ -15876,7 +15879,10 @@ lab:
         assert_eq!(chunks[0], 0);
         assert_eq!(chunks[1], u64::MAX / 4);
         assert_eq!(chunks[2], u64::MAX / 2);
-        assert_eq!(chunks[3], u64::try_from((u128::from(u64::MAX) * 3) / 4).unwrap());
+        assert_eq!(
+            chunks[3],
+            u64::try_from((u128::from(u64::MAX) * 3) / 4).unwrap()
+        );
         assert_eq!(chunks[4], u64::MAX);
     }
 
@@ -15909,10 +15915,12 @@ lab:
         };
         let output = AtpShareOutput::new(&args, "short".to_string());
 
-        assert!(output
-            .revocation_url
-            .as_deref()
-            .is_some_and(|url| url.starts_with("atp://revoke/")));
+        assert!(
+            output
+                .revocation_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("atp://revoke/"))
+        );
     }
 
     #[test]
