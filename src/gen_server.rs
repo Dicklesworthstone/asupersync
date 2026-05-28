@@ -5433,7 +5433,7 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, server, 32)
-            .unwrap();
+            .expect("should spawn reply linearity server");
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
