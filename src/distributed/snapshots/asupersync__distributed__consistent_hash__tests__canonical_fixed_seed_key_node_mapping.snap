@@ -1,16 +1,9 @@
 ---
 source: src/distributed/consistent_hash.rs
+assertion_line: 751
 expression: canonical_fixed_seed_key_node_mapping_snapshot()
 ---
 {
-  "seed": 1592642302,
-  "vnodes_per_node": 32,
-  "nodes": [
-    "node-a",
-    "node-b",
-    "node-c",
-    "node-d"
-  ],
   "assignments": [
     {
       "key": "blob:deadbeef",
@@ -76,5 +69,13 @@ expression: canonical_fixed_seed_key_node_mapping_snapshot()
       "key": "user:zoe",
       "node": "node-a"
     }
-  ]
+  ],
+  "nodes": [
+    "node-a",
+    "node-b",
+    "node-c",
+    "node-d"
+  ],
+  "seed": 1592642302,
+  "vnodes_per_node": 32
 }
