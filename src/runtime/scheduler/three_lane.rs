@@ -11246,21 +11246,23 @@ mod tests {
     }
 
     fn adaptive_cancel_flood_replay_artifact(seed: u64) -> AdaptiveCancelFloodReplayArtifact {
-        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut state = RuntimeState::new();
+        state.now = Time::from_nanos(1_000_000_000);
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
         scheduler.set_adaptive_cancel_streak(true, 1);
 
         let timed_task = TaskId::new_for_test(77, 1);
         let ready_task = TaskId::new_for_test(77, 2);
-        for i in 0..24u32 {
-            scheduler.inject_cancel(TaskId::new_for_test(77, 100 + i), 100);
-        }
-        scheduler.inject_timed(timed_task, Time::from_nanos(1_000_000_000));
-        scheduler.inject_ready(ready_task, 50);
-
         let mut workers = scheduler.take_workers().into_iter();
         let mut worker = workers.next().expect("worker");
         worker.rng = crate::util::DetRng::new(seed);
+        for i in 0..24u32 {
+            worker.schedule_local_cancel(TaskId::new_for_test(77, 100 + i), 100);
+        }
+        worker.schedule_local_timed(timed_task, Time::from_nanos(1_000_000_000));
+        worker.fast_queue.push(ready_task);
+
         let adaptive_limit = {
             let policy = worker
                 .adaptive_cancel_policy

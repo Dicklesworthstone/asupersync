@@ -382,10 +382,10 @@ mod tests {
         let all_result = poll_bool(&mut all_with_no_counterexample);
         let any_negated_result = poll_bool(&mut any_counterexample);
         crate::assert_with_log!(
-            all_result == !any_negated_result,
+            all_result != any_negated_result,
             "all(p) equals !any(!p) when all items satisfy p",
             true,
-            all_result == !any_negated_result
+            all_result != any_negated_result
         );
 
         let mut all_with_counterexample = All::new(iter(data.clone()), |&x: &i32| x < 5);
@@ -393,10 +393,10 @@ mod tests {
         let all_result = poll_bool(&mut all_with_counterexample);
         let any_negated_result = poll_bool(&mut any_counterexample);
         crate::assert_with_log!(
-            all_result == !any_negated_result,
+            all_result != any_negated_result,
             "all(p) equals !any(!p) when a counterexample exists",
             true,
-            all_result == !any_negated_result
+            all_result != any_negated_result
         );
 
         crate::test_complete!("any_all_duality_matches_negated_predicate");

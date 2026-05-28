@@ -13178,6 +13178,7 @@ mod tests {
         init_test("read_biased_region_snapshot_disabled_matches_authoritative_scan");
 
         let mut state = RuntimeState::new();
+        state.set_read_biased_region_snapshot(false);
         let root = state.create_root_region(Budget::INFINITE);
         let child = create_child_region(&mut state, root);
         let _grandchild = create_child_region(&mut state, child);
