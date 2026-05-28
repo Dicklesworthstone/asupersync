@@ -683,15 +683,26 @@ mod tests {
 
     #[test]
     fn golden_cache_config_default_serialization() {
-        use insta::assert_json_snapshot;
-
         let config = CacheConfig::default();
-        assert_json_snapshot!("cache_config_default", config);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::json!({
+                "max_size_bytes": 1_073_741_824_u64,
+                "max_entries": 10_000,
+                "default_ttl": {
+                    "secs": 86_400,
+                    "nanos": 0,
+                },
+                "eviction_policy": "least_recently_used",
+                "allow_plaintext_shared": false,
+                "storage_root": ".cache",
+                "compression_enabled": true,
+            })
+        );
     }
 
     #[test]
     fn golden_cache_config_custom_serialization() {
-        use insta::assert_json_snapshot;
         use std::path::PathBuf;
 
         let config = CacheConfig {
@@ -703,20 +714,39 @@ mod tests {
             storage_root: PathBuf::from("/var/cache/atp"),
             compression_enabled: false,
         };
-        assert_json_snapshot!("cache_config_custom", config);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::json!({
+                "max_size_bytes": 536_870_912_u64,
+                "max_entries": 5_000,
+                "default_ttl": {
+                    "secs": 43_200,
+                    "nanos": 0,
+                },
+                "eviction_policy": "hybrid",
+                "allow_plaintext_shared": true,
+                "storage_root": "/var/cache/atp",
+                "compression_enabled": false,
+            })
+        );
     }
 
     #[test]
     fn golden_cache_key_serialization() {
-        use insta::assert_json_snapshot;
-
         // Test cache key with scope
         let key_with_scope = CacheKey::new(
             "sha256:a1b2c3d4e5f6g7h8".to_string(),
             "sha256:1234567890abcdef".to_string(),
             Some("team:engineering".to_string()),
         );
-        assert_json_snapshot!("cache_key_with_scope", key_with_scope);
+        assert_eq!(
+            serde_json::to_value(&key_with_scope).unwrap(),
+            serde_json::json!({
+                "manifest_hash": "sha256:a1b2c3d4e5f6g7h8",
+                "content_hash": "sha256:1234567890abcdef",
+                "grant_scope": "team:engineering",
+            })
+        );
 
         // Test cache key without scope
         let key_no_scope = CacheKey::new(
@@ -724,13 +754,18 @@ mod tests {
             "sha256:abcdef1234567890".to_string(),
             None,
         );
-        assert_json_snapshot!("cache_key_no_scope", key_no_scope);
+        assert_eq!(
+            serde_json::to_value(&key_no_scope).unwrap(),
+            serde_json::json!({
+                "manifest_hash": "sha256:fedcba0987654321",
+                "content_hash": "sha256:abcdef1234567890",
+                "grant_scope": null,
+            })
+        );
     }
 
     #[test]
     fn golden_eviction_policy_serialization() {
-        use insta::assert_json_snapshot;
-
         let policies = vec![
             EvictionPolicy::LeastRecentlyUsed,
             EvictionPolicy::LeastFrequentlyUsed,
@@ -739,13 +774,20 @@ mod tests {
             EvictionPolicy::Hybrid,
         ];
 
-        assert_json_snapshot!("eviction_policies", policies);
+        assert_eq!(
+            serde_json::to_value(&policies).unwrap(),
+            serde_json::json!([
+                "least_recently_used",
+                "least_frequently_used",
+                "shortest_ttl",
+                "largest_first",
+                "hybrid",
+            ])
+        );
     }
 
     #[test]
     fn golden_cache_metrics_serialization() {
-        use insta::assert_json_snapshot;
-
         let mut metrics = CacheMetrics::default();
         metrics.hits = 1500;
         metrics.misses = 300;
@@ -755,6 +797,17 @@ mod tests {
         metrics.entry_count = 150;
         metrics.update_hit_ratio();
 
-        assert_json_snapshot!("cache_metrics_sample", metrics);
+        assert_eq!(
+            serde_json::to_value(&metrics).unwrap(),
+            serde_json::json!({
+                "hits": 1_500,
+                "misses": 300,
+                "evictions": 25,
+                "verification_failures": 2,
+                "total_bytes": 1_048_576_u64,
+                "entry_count": 150,
+                "hit_ratio": 0.8333333333333334,
+            })
+        );
     }
 }
