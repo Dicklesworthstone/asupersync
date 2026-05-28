@@ -290,17 +290,12 @@ impl RaceConnections {
             in_flight: Vec::new(),
             completed: false,
             last_error: None,
-            // br-asupersync-pnwx3t: Sleep::with_time_getter is a known
-            // footgun — when the timer driver is absent from the ambient
-            // Cx, the poll path returns Pending without registering a
-            // wakeup, so the future never wakes. Sleep::new uses the
-            // ambient/bound timer driver and falls back to the background
-            // waiter thread when needed, so wakeups are always scheduled.
-            // The `time_getter` field on RaceConnections is preserved
-            // because it's passed to `connect_one` and used elsewhere;
-            // only the Sleep constructors change.
-            stagger_sleep: Sleep::new(Time::ZERO),
-            timeout_sleep: Sleep::new(deadline),
+            // These sleeps must share RaceConnections' logical clock. In
+            // tests and lab runs the deadline may be in a virtual epoch, so
+            // using wall-clock Sleep::new would make stale wall time expire
+            // the race before the supplied time source reaches the deadline.
+            stagger_sleep: Sleep::with_time_getter(Time::ZERO, time_getter),
+            timeout_sleep: Sleep::with_time_getter(deadline, time_getter),
             time_getter,
             config,
             stagger_active: false,
@@ -331,9 +326,8 @@ impl RaceConnections {
             in_flight: Vec::new(),
             completed: false,
             last_error: None,
-            // See note on `Sleep::new` above (br-asupersync-pnwx3t).
-            stagger_sleep: Sleep::new(Time::ZERO),
-            timeout_sleep: Sleep::new(deadline),
+            stagger_sleep: Sleep::with_time_getter(Time::ZERO, time_getter),
+            timeout_sleep: Sleep::with_time_getter(deadline, time_getter),
             time_getter,
             config,
             stagger_active: false,
@@ -405,6 +399,10 @@ impl RaceConnections {
         }
 
         loop {
+            if self.timeout_sleep.is_elapsed(now) {
+                return self.finish_overall_timeout();
+            }
+
             let mut made_progress = false;
 
             let mut i = 0;
