@@ -26,6 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// In-memory exporter that tracks export calls during shutdown.
+#[derive(Clone)]
 struct ShutdownTrackingExporter {
     exported_batches: Arc<Mutex<Vec<SpanBatch>>>,
     export_delay: Duration,
@@ -138,9 +139,10 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
     println!("   • NOT: block forever (shutdown deadlock)");
 
     let export_delay = Duration::from_millis(50);
-    let tracking_exporter = Arc::new(ShutdownTrackingExporter::new(export_delay));
+    let tracking_exporter = ShutdownTrackingExporter::new(export_delay);
+    let tracking_handle = tracking_exporter.clone();
     let exporter = LoadSheddingTraceExporter::new(
-        Box::new(ShutdownTrackingExporter::new(export_delay)),
+        Box::new(tracking_exporter),
         10,                     // Queue capacity
         Duration::from_secs(1), // Batch timeout
     );
@@ -168,7 +170,7 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
     );
 
     // Mark shutdown start for tracking
-    tracking_exporter.start_shutdown();
+    tracking_handle.start_shutdown();
 
     // **CRITICAL TEST**: Drop the exporter while spans are still pending.
     let drop_start = Instant::now();
@@ -179,14 +181,14 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
     println!("   Drop duration: {:?}", drop_duration);
 
     // **ASSESSMENT**: Check if graceful shutdown happened
-    let exported_span_count = tracking_exporter.exported_span_count();
+    let exported_span_count = tracking_handle.exported_span_count();
     let total_expected = batch_count as usize * spans_per_batch;
 
     println!("   Spans exported during drop: {}", exported_span_count);
     println!("   Total expected spans: {}", total_expected);
     println!(
         "   Export call count: {}",
-        tracking_exporter.export_call_count()
+        tracking_handle.export_call_count()
     );
 
     // **OTLP COMPLIANCE ANALYSIS**
@@ -224,18 +226,17 @@ fn audit_graceful_shutdown_flushes_pending_spans() {
         println!("✅ BOUNDED TIMEOUT: Drop completed in reasonable time");
     }
 
-    // **CURRENT IMPLEMENTATION EXPECTATION**
-    // LoadSheddingTraceExporter has no Drop impl, so we expect immediate drop
+    // Current implementation expectation: Drop attempts a bounded graceful flush.
     assert!(
-        drop_duration < Duration::from_millis(100),
-        "Without Drop impl, drop should be immediate - if this fails, Drop was added!"
+        drop_duration <= reasonable_timeout,
+        "graceful shutdown must remain bounded"
     );
     assert_eq!(
-        exported_span_count, 0,
-        "Without Drop impl, no spans should be exported during drop"
+        exported_span_count, total_expected,
+        "Drop should flush pending spans before returning when collector latency fits timeout"
     );
 
-    println!("📊 AUDIT RESULT: DEFECTIVE - Missing graceful shutdown");
+    println!("📊 AUDIT RESULT: PASS - Bounded graceful shutdown flushes pending spans");
 }
 
 /// **AUDIT TEST**: Verify bounded timeout prevents shutdown deadlock.
@@ -286,9 +287,10 @@ fn audit_bounded_timeout_prevents_shutdown_deadlock() {
         panic!("Shutdown timeout exceeded - potential deadlock detected!");
     }
 
-    // **CURRENT EXPECTATION**: Without Drop impl, should be immediate
-    assert!(drop_duration < Duration::from_millis(100));
-    println!("📊 CURRENT STATE: No Drop impl = immediate drop (missing feature)");
+    // **CURRENT EXPECTATION**: Drop may spend collector time flushing, but must
+    // still return within the bounded shutdown budget.
+    assert!(drop_duration <= max_acceptable_timeout);
+    println!("📊 CURRENT STATE: Drop flushes with bounded shutdown timeout");
 }
 
 /// **AUDIT TEST**: Verify concurrent operations during shutdown are handled safely.
