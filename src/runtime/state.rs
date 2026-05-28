@@ -866,7 +866,7 @@ impl RuntimeState {
             regions: RegionTable::with_capacity(capacity_hints.region_capacity),
             tasks: TaskTable::with_capacity(capacity_hints.task_capacity),
             obligations: ObligationTable::with_capacity(capacity_hints.obligation_capacity),
-            now: Time::ZERO,
+            now: Time::from_nanos(1_000_000_000),
             root_region: None,
             trace: TraceBufferHandle::new(trace_capacity),
             metrics,
@@ -6778,7 +6778,7 @@ mod tests {
     fn snapshot_preserves_event_version() {
         init_test("snapshot_preserves_event_version");
         let state = RuntimeState::new();
-        let event = TraceEvent::new(1, Time::ZERO, TraceEventKind::UserTrace, TraceData::None);
+        let event = TraceEvent::new(1, Time::from_nanos(1_000_000_000), TraceEventKind::UserTrace, TraceData::None);
         state.trace.push_event(event);
 
         let snapshot = state.snapshot();
@@ -7178,7 +7178,7 @@ mod tests {
                 TaskId::from_arena(idx),
                 region,
                 Budget::INFINITE,
-                Time::ZERO,
+                Time::from_nanos(1_000_000_000),
             )
         });
         state
@@ -7549,7 +7549,7 @@ mod tests {
 
         let root = state.create_root_region(Budget::INFINITE);
         let idx_root = state.insert_task_with(|idx| {
-            TaskRecord::new_with_time(TaskId::from_arena(idx), root, Budget::INFINITE, Time::ZERO)
+            TaskRecord::new_with_time(TaskId::from_arena(idx), root, Budget::INFINITE, Time::from_nanos(1_000_000_000))
         });
         state
             .regions
@@ -7559,7 +7559,7 @@ mod tests {
             .unwrap();
         let child = create_child_region(&mut state, root);
         let idx_child = state.insert_task_with(|idx| {
-            TaskRecord::new_with_time(TaskId::from_arena(idx), child, Budget::INFINITE, Time::ZERO)
+            TaskRecord::new_with_time(TaskId::from_arena(idx), child, Budget::INFINITE, Time::from_nanos(1_000_000_000))
         });
         state
             .regions
@@ -7573,7 +7573,7 @@ mod tests {
                 TaskId::from_arena(idx),
                 grandchild,
                 Budget::INFINITE,
-                Time::ZERO,
+                Time::from_nanos(1_000_000_000),
             )
         });
         state
@@ -8782,7 +8782,7 @@ mod tests {
                 TaskId::from_arena(idx),
                 region,
                 Budget::INFINITE,
-                Time::ZERO,
+                Time::from_nanos(1_000_000_000),
             )
         });
         state
