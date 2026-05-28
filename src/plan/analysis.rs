@@ -955,7 +955,20 @@ impl PlanAnalyzer {
                 } else if child_cancel.is_safe()
                     && child_analyses.iter().all(|a| a.obligation.is_safe())
                 {
-                    CancelSafety::Safe
+                    // Additional check for simple dedup patterns: if all children
+                    // are joins or leaves with no complex nesting, the pattern is safe
+                    let all_simple = children.iter().all(|&child_id| {
+                        if let Some(child_node) = dag.node(child_id) {
+                            matches!(child_node, PlanNode::Leaf { .. } | PlanNode::Join { .. })
+                        } else {
+                            false
+                        }
+                    });
+                    if all_simple {
+                        CancelSafety::Safe
+                    } else {
+                        child_cancel.join(CancelSafety::MayOrphan)
+                    }
                 } else {
                     child_cancel.join(CancelSafety::MayOrphan)
                 };
