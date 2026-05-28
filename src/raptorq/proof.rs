@@ -414,6 +414,7 @@ pub struct ProofArtifactRecovery {
 
 /// Error while packaging or recovering a distributed proof artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
 pub enum ProofArtifactDistributionError {
     /// Proof artifact bytes were empty.
     EmptyArtifact,
@@ -425,6 +426,13 @@ pub enum ProofArtifactDistributionError {
         requested: usize,
         /// Maximum supported source-symbol count.
         max_supported: usize,
+    },
+    /// RFC 6330 table data violates an invariant required for proof distribution.
+    RfcTableInvariantViolation {
+        /// Description of the violated invariant.
+        invariant: &'static str,
+        /// Problematic RFC table values or derived parameters.
+        details: String,
     },
     /// The systematic encoder could not solve the source block.
     EncoderUnavailable,
@@ -495,6 +503,10 @@ impl fmt::Display for ProofArtifactDistributionError {
             } => write!(
                 f,
                 "proof artifact needs {requested} source symbols; maximum supported is {max_supported}"
+            ),
+            Self::RfcTableInvariantViolation { invariant, details } => write!(
+                f,
+                "proof artifact RFC 6330 table invariant violation: {invariant}; {details}"
             ),
             Self::EncoderUnavailable => {
                 f.write_str("systematic RaptorQ encoder could not solve proof artifact block")
@@ -785,12 +797,8 @@ fn map_systematic_param_error(err: SystematicParamError) -> ProofArtifactDistrib
                 max_supported: max_u32,
             }
         }
-        SystematicParamError::RfcTableInvariantViolation {
-            invariant: _,
-            details: _,
-        } => ProofArtifactDistributionError::UnsupportedSourceBlock {
-            requested: 0,
-            max_supported: 0, // Sentinel values because this is a table corruption error.
+        SystematicParamError::RfcTableInvariantViolation { invariant, details } => {
+            ProofArtifactDistributionError::RfcTableInvariantViolation { invariant, details }
         },
     }
 }
