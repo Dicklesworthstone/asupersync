@@ -84,7 +84,7 @@ POTENTIAL STUCK TASKS:
       "polls_remaining": 6,
       "created_at": 5000000000,
       "age_nanos": 40000000000,
-      "time_since_last_poll_nanos": null,
+      "time_since_last_poll_nanos": 10000000000,
       "wake_pending": true,
       "obligations": [
         {
