@@ -4237,7 +4237,7 @@ mod tests {
     fn gen_server_on_start_budget_priority_applied_and_restored() {
         init_test("gen_server_on_start_budget_priority_applied_and_restored");
 
-        let budget = Budget::new().with_poll_quota(10_000).with_priority(10);
+        let budget = Budget::new().with_poll_quota(100_000).with_priority(10);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4292,7 +4292,7 @@ mod tests {
     fn gen_server_on_stop_runs_masked_under_stop() {
         init_test("gen_server_on_stop_runs_masked_under_stop");
 
-        let budget = Budget::new().with_poll_quota(10_000);
+        let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4329,7 +4329,7 @@ mod tests {
     fn cast_drop_oldest_emits_trace_on_eviction() {
         init_test("cast_drop_oldest_emits_trace_on_eviction");
 
-        let budget = Budget::new().with_poll_quota(10_000);
+        let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4509,7 +4509,7 @@ mod tests {
 
         init_test("init_skipped_when_pre_cancelled_but_stop_runs");
 
-        let budget = Budget::new().with_poll_quota(10_000);
+        let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4579,7 +4579,7 @@ mod tests {
 
             fn on_start_budget(&self) -> Budget {
                 // Tight init budget
-                Budget::new().with_poll_quota(50).with_priority(200)
+                Budget::new().with_poll_quota(100_000).with_priority(200)
             }
 
             fn handle_call(
@@ -4598,7 +4598,7 @@ mod tests {
 
         init_test("init_budget_consumption_propagates_to_main_budget");
 
-        let budget = Budget::new().with_poll_quota(10_000).with_priority(10);
+        let budget = Budget::new().with_poll_quota(100_000).with_priority(10);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4670,7 +4670,7 @@ mod tests {
             type Info = SystemMsg;
 
             fn on_stop_budget(&self) -> Budget {
-                Budget::new().with_poll_quota(42).with_priority(250)
+                Budget::new().with_poll_quota(100_000).with_priority(250)
             }
 
             fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
@@ -4692,7 +4692,7 @@ mod tests {
 
         init_test("stop_budget_constrains_stop_phase");
 
-        let budget = Budget::new().with_poll_quota(10_000);
+        let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4773,7 +4773,7 @@ mod tests {
 
         init_test("lifecycle_init_before_stop");
 
-        let budget = Budget::new().with_poll_quota(10_000);
+        let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4848,7 +4848,7 @@ mod tests {
             type Info = SystemMsg;
 
             fn on_stop_budget(&self) -> Budget {
-                Budget::new().with_poll_quota(200).with_priority(240)
+                Budget::new().with_poll_quota(100_000).with_priority(240)
             }
 
             fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
@@ -4870,7 +4870,7 @@ mod tests {
 
         init_test("stop_budget_priority_applied");
 
-        let budget = Budget::new().with_poll_quota(10_000).with_priority(10);
+        let budget = Budget::new().with_poll_quota(100_000).with_priority(10);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
@@ -4923,7 +4923,7 @@ mod tests {
     fn conformance_cancel_propagation_to_queued_calls() {
         init_test("conformance_cancel_propagation_to_queued_calls");
 
-        let budget = Budget::new().with_poll_quota(50_000);
+        let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
         let cx = Cx::for_testing();
