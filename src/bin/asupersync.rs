@@ -1220,7 +1220,16 @@ struct AtpShareOutput {
 impl AtpShareOutput {
     fn new(args: &AtpShareArgs, share_code: String) -> Self {
         let revocation_url = if args.revocable {
-            Some(format!("atp://revoke/{}", &share_code[12..20]))
+            let mut hasher = Sha256::new();
+            hash_len_prefixed(&mut hasher, share_code.as_bytes());
+            let digest = hasher.finalize();
+            Some(format!(
+                "atp://revoke/{:016x}",
+                u64::from_be_bytes([
+                    digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
+                    digest[7],
+                ])
+            ))
         } else {
             None
         };
@@ -1334,7 +1343,7 @@ impl AtpSeedOutput {
         let summary = summarize_source_path(&args.source)?;
         let tree_digest = digest_path_tree(&args.source)?;
         let mut hasher = Sha256::new();
-        hasher.update(args.policy.as_bytes());
+        hash_len_prefixed(&mut hasher, args.policy.as_bytes());
         hasher.update(tree_digest);
         hasher.update(summary.total_bytes.to_be_bytes());
         hasher.update((summary.object_count as u64).to_be_bytes());
@@ -1406,19 +1415,6 @@ impl Outputtable for AtpSeedOutput {
         }
 
         output
-    }
-}
-
-impl Outputtable for AtpShareOutput {
-    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
-        serde_json::to_value(self)
-    }
-
-    fn human_format(&self) -> String {
-        format!(
-            "Share code generated:\n  Source: {}\n  Code: {}\n  Expires in: {} seconds",
-            self.source, self.share_code, self.expires_seconds
-        )
     }
 }
 
@@ -1814,7 +1810,12 @@ impl Outputtable for AtpProgressUpdate {
 
     fn human_format(&self) -> String {
         let percentage = if self.total_bytes > 0 {
-            (self.bytes_received * 100) / self.total_bytes
+            u64::try_from(
+                (u128::from(self.bytes_received.min(self.total_bytes)) * 100)
+                    / u128::from(self.total_bytes),
+            )
+            .unwrap_or(100)
+            .min(100)
         } else {
             0
         };
@@ -2112,6 +2113,7 @@ fn active_transfers_from_local_state(transfer_id: Option<&str>) -> Vec<AtpTransf
 
 fn create_progress_bar(percent: u8) -> String {
     const BAR_WIDTH: usize = 20;
+    let percent = percent.min(100);
     let filled = (percent as usize * BAR_WIDTH) / 100;
     let empty = BAR_WIDTH - filled;
     format!("{}{}", "█".repeat(filled), "░".repeat(empty))
@@ -2156,9 +2158,11 @@ impl AtpBenchResults {
     }
 
     fn new_throughput_measurement(duration: u64, concurrency: u16, transfer_size: u64) -> Self {
-        let transfers = (concurrency as u64) * duration * 10; // 10 transfers per second per worker
-        let total_bytes = transfers * transfer_size;
-        let throughput_mbps = (total_bytes as f64 * 8.0) / (duration as f64 * 1_000_000.0);
+        let transfers = u64::from(concurrency)
+            .saturating_mul(duration)
+            .saturating_mul(10); // 10 transfers per second per worker
+        let total_bytes = transfers.saturating_mul(transfer_size);
+        let throughput_mbps = throughput_mbps(total_bytes, duration, 1.0);
 
         Self {
             profile: "throughput".to_string(),
@@ -2175,13 +2179,16 @@ impl AtpBenchResults {
     }
 
     fn new_latency_measurement(duration: u64, concurrency: u16) -> Self {
-        let transfers = (concurrency as u64) * duration * 50; // Focus on latency, more frequent small transfers
+        let transfers = u64::from(concurrency)
+            .saturating_mul(duration)
+            .saturating_mul(50); // Focus on latency, more frequent small transfers
+        let total_bytes = transfers.saturating_mul(4096); // Small 4KB transfers for latency testing
         Self {
             profile: "latency".to_string(),
             duration_seconds: duration,
             total_transfers: transfers,
-            total_bytes: transfers * 4096, // Small 4KB transfers for latency testing
-            throughput_mbps: 25.6,         // Lower throughput due to small transfers
+            total_bytes,
+            throughput_mbps: throughput_mbps(total_bytes, duration, 1.0),
             avg_latency_ms: 3.1,
             p95_latency_ms: 6.8,
             p99_latency_ms: 12.4,
@@ -2191,9 +2198,9 @@ impl AtpBenchResults {
     }
 
     fn new_repair_measurement(duration: u64, transfer_size: u64) -> Self {
-        let transfers = duration * 5; // Slower due to repair overhead
-        let total_bytes = transfers * transfer_size;
-        let throughput_mbps = (total_bytes as f64 * 8.0) / (duration as f64 * 1_000_000.0) * 0.7; // 70% due to repair
+        let transfers = duration.saturating_mul(5); // Slower due to repair overhead
+        let total_bytes = transfers.saturating_mul(transfer_size);
+        let throughput_mbps = throughput_mbps(total_bytes, duration, 0.7); // 70% due to repair
 
         Self {
             profile: "repair".to_string(),
@@ -2210,9 +2217,11 @@ impl AtpBenchResults {
     }
 
     fn new_stress_measurement(duration: u64, concurrency: u16) -> Self {
-        let transfers = (concurrency as u64) * duration * 8; // High load
-        let total_bytes = transfers * 524_288; // 512KB transfers
-        let throughput_mbps = (total_bytes as f64 * 8.0) / (duration as f64 * 1_000_000.0) * 0.85; // 85% due to stress
+        let transfers = u64::from(concurrency)
+            .saturating_mul(duration)
+            .saturating_mul(8); // High load
+        let total_bytes = transfers.saturating_mul(524_288); // 512KB transfers
+        let throughput_mbps = throughput_mbps(total_bytes, duration, 0.85); // 85% due to stress
 
         Self {
             profile: "stress".to_string(),
@@ -2233,11 +2242,7 @@ impl AtpBenchResults {
             .saturating_mul(duration)
             .saturating_mul(6);
         let total_bytes = transfers.saturating_mul(transfer_size.max(4096));
-        let throughput_mbps = if duration == 0 {
-            0.0
-        } else {
-            (total_bytes as f64 * 8.0) / (duration as f64 * 1_000_000.0) * 0.75
-        };
+        let throughput_mbps = throughput_mbps(total_bytes, duration, 0.75);
 
         Self {
             profile: "mixed".to_string(),
@@ -2256,6 +2261,14 @@ impl AtpBenchResults {
     fn with_detailed_metrics(mut self) -> Self {
         self.detailed_metrics = Some(AtpBenchDetailedMetrics::from_host_snapshot());
         self
+    }
+}
+
+fn throughput_mbps(total_bytes: u64, duration_seconds: u64, efficiency: f64) -> f64 {
+    if duration_seconds == 0 {
+        0.0
+    } else {
+        (total_bytes as f64 * 8.0) / (duration_seconds as f64 * 1_000_000.0) * efficiency
     }
 }
 
