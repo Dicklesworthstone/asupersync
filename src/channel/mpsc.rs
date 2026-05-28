@@ -230,6 +230,24 @@ impl<T> ChannelInner<T> {
         self.used_slots() < capacity
     }
 
+    /// Drops stale FIFO tokens whose slab entry has already been removed.
+    #[inline]
+    fn prune_stale_waiter_front(&mut self) {
+        while let Some(&token) = self.waiter_queue.front() {
+            if self.send_wakers.get(token).is_some() {
+                break;
+            }
+            self.waiter_queue.pop_front();
+        }
+    }
+
+    /// Returns true when at least one live sender is queued.
+    #[inline]
+    fn has_waiting_sender(&mut self) -> bool {
+        self.prune_stale_waiter_front();
+        !self.waiter_queue.is_empty()
+    }
+
     /// Returns the waker for the next waiting sender, if any.
     /// The caller must invoke `waker.wake()` **after** releasing the channel
     /// lock to avoid wake-under-lock deadlocks.
@@ -237,7 +255,8 @@ impl<T> ChannelInner<T> {
     /// This does NOT remove the waiter from the queue. The waiter is responsible
     /// for removing itself upon successfully acquiring a permit.
     #[inline]
-    fn take_next_sender_waker(&self) -> Option<Waker> {
+    fn take_next_sender_waker(&mut self) -> Option<Waker> {
+        self.prune_stale_waiter_front();
         self.waiter_queue
             .front()
             .and_then(|&token| self.send_wakers.get(token))
@@ -280,11 +299,15 @@ impl<T> ChannelShared<T> {
     /// Builds an opt-in redacted telemetry snapshot.
     #[inline]
     fn telemetry_snapshot(&self, channel_id: u64) -> MpscTelemetrySnapshot {
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
         let sender_count = self.sender_count.load(Ordering::Acquire);
         let receiver_dropped = self.receiver_dropped.load(Ordering::Acquire);
         let queued_messages = inner.queue.len();
         let recv_waiter_count = usize::from(inner.recv_waker.is_some());
+        let send_waiter_count = {
+            inner.prune_stale_waiter_front();
+            inner.waiter_queue.len()
+        };
         let closed = receiver_dropped || sender_count == 0;
 
         let receiver_health = if receiver_dropped {
@@ -305,7 +328,7 @@ impl<T> ChannelShared<T> {
             capacity: self.capacity,
             queued_messages,
             reserved_uncommitted_obligations: inner.reserved,
-            send_waiter_count: inner.send_wakers.len(),
+            send_waiter_count,
             recv_waiter_count,
             receiver_health,
             lagged_receiver_count: None,
@@ -380,7 +403,7 @@ impl<T> Sender<T> {
             return Err(SendError::<()>::Disconnected(()));
         }
 
-        if !inner.send_wakers.is_empty() {
+        if inner.has_waiting_sender() {
             return Err(SendError::<()>::Full(()));
         }
 
@@ -554,7 +577,7 @@ impl<T> Sender<T> {
         }
 
         let has_physical_capacity = inner.has_capacity(self.shared.capacity);
-        let waiter_owns_available_slot = has_physical_capacity && !inner.send_wakers.is_empty();
+        let waiter_owns_available_slot = has_physical_capacity && inner.has_waiting_sender();
 
         let evicted = if waiter_owns_available_slot {
             return Err(SendError::Full(value));
@@ -615,12 +638,11 @@ impl<T> Reserve<'_, T> {
                     inner.send_wakers.remove(token);
                     None
                 } else if inner.send_wakers.remove(token).is_some() {
-                    // We are in the slab. We haven't been granted a reservation.
-                    // Remove from FIFO queue as well.
-                    inner.remove_waiter_token(token);
-                    // CASCADE: A receiver may have freed capacity and woken us,
-                    // but we never polled. Pass the baton to the next waiter.
-                    if inner.has_capacity(self.sender.shared.capacity) {
+                    // We were still registered in the slab. Only pass the baton
+                    // if we also owned a FIFO position; a slab-only stale token
+                    // must not fabricate a capacity handoff.
+                    let removed_from_queue = inner.remove_waiter_token(token);
+                    if removed_from_queue && inner.has_capacity(self.sender.shared.capacity) {
                         inner.take_next_sender_waker()
                     } else {
                         None
@@ -2557,6 +2579,81 @@ mod tests {
 
         drop(reserve_b);
         crate::test_complete!("stale_missing_waiter_drop_does_not_wake_next_sender");
+    }
+
+    #[test]
+    fn stale_fifo_front_token_does_not_starve_next_sender_wake() {
+        init_test("stale_fifo_front_token_does_not_starve_next_sender_wake");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(1);
+
+        tx.try_send(1).expect("fill capacity");
+
+        let mut reserve_a = Box::pin(tx.reserve(&cx));
+        let waker_a = noop_waker();
+        let mut ctx_a = Context::from_waker(&waker_a);
+        assert!(reserve_a.as_mut().poll(&mut ctx_a).is_pending());
+
+        let wake_count_b = Arc::new(AtomicUsize::new(0));
+        let mut reserve_b = Box::pin(tx.reserve(&cx));
+        let waker_b = counting_waker(Arc::clone(&wake_count_b));
+        let mut ctx_b = Context::from_waker(&waker_b);
+        assert!(reserve_b.as_mut().poll(&mut ctx_b).is_pending());
+
+        {
+            let mut inner = tx.shared.inner.lock();
+            let token_a = reserve_a.waiter_token.expect("waiter token for A");
+            inner.send_wakers.remove(token_a).expect("A queued in slab");
+        }
+
+        let value = rx.try_recv().expect("free capacity");
+        crate::assert_with_log!(value == 1, "freed value", 1, value);
+
+        let wakes_after_recv = wake_count_b.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            wakes_after_recv > 0,
+            "stale front token does not starve next waiter",
+            "woken",
+            wakes_after_recv
+        );
+
+        drop(reserve_a);
+        drop(reserve_b);
+        crate::test_complete!("stale_fifo_front_token_does_not_starve_next_sender_wake");
+    }
+
+    #[test]
+    fn slab_only_stale_waiter_does_not_block_try_reserve() {
+        init_test("slab_only_stale_waiter_does_not_block_try_reserve");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(1);
+
+        tx.try_send(1).expect("fill capacity");
+
+        let mut reserve = Box::pin(tx.reserve(&cx));
+        let waker = noop_waker();
+        let mut ctx = Context::from_waker(&waker);
+        assert!(reserve.as_mut().poll(&mut ctx).is_pending());
+
+        {
+            let mut inner = tx.shared.inner.lock();
+            let token = reserve.waiter_token.expect("waiter token");
+            assert!(
+                inner.remove_waiter_token(token),
+                "test setup removes FIFO entry"
+            );
+        }
+
+        let value = rx.try_recv().expect("free capacity");
+        crate::assert_with_log!(value == 1, "freed value", 1, value);
+
+        let permit = tx
+            .try_reserve()
+            .expect("slab-only stale waiter must not block reservation");
+        permit.abort();
+
+        drop(reserve);
+        crate::test_complete!("slab_only_stale_waiter_does_not_block_try_reserve");
     }
 }
 
