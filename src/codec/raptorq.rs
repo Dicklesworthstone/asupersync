@@ -747,7 +747,8 @@ mod golden_tests {
                 assert_eq!(
                     &padded[..orig_len],
                     &logical_data[i],
-                    "MR2 violation: zero-padding changes recovered data at symbol {i}"
+                    "MR2 violation: zero-padding changes recovered data at symbol {i}. Expected: {:?}, Got: {:?}",
+                    logical_data[i], &padded[..orig_len]
                 );
                 assert!(
                     padded[orig_len..].iter().all(|byte| *byte == 0),
