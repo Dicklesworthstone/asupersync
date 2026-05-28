@@ -5656,7 +5656,7 @@ mod tests {
         // Simulate an attacker opening many connections with multiple streams each
         let server = Server::builder()
             .max_concurrent_streams(3)
-            .stream_idle_timeout(Some(std::time::Duration::from_millis(100)))
+            .stream_idle_timeout(Some(std::time::Duration::from_secs(60)))
             .build();
 
         // Register multiple "attacker" connections
