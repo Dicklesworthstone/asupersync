@@ -7,7 +7,9 @@ mod atp;
 
 use crate::atp::multi_peer::{
     MULTI_PEER_REPORT_SCHEMA, MultiPeerScenario, PeerRole, ScenarioType,
-    contracts::{CacheContract, MailboxContract, MultiPeerContract, SwarmContract},
+    contracts::{
+        AdversarialContract, CacheContract, MailboxContract, MultiPeerContract, SwarmContract,
+    },
     harness::{MultiPeerHarness, ScenarioExecutor, TestReportGenerator},
     scenarios::AllScenarios,
 };
@@ -60,8 +62,11 @@ fn test_mailbox_scenarios_validation() {
             scenario.scenario_id
         );
 
-        // Should pass contract validation
-        let validation_result = contract.validate_scenario(scenario);
+        let validation_result = if matches!(scenario.scenario_type, ScenarioType::Adversarial) {
+            AdversarialContract.validate_scenario(scenario)
+        } else {
+            contract.validate_scenario(scenario)
+        };
         assert!(
             validation_result.is_ok(),
             "Mailbox scenario {} should pass contract validation: {:?}",

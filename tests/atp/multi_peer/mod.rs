@@ -118,7 +118,7 @@ pub struct PeerCapabilities {
 }
 
 /// Network configuration for the scenario
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct NetworkConfig {
     /// Network latency between peers (ms)
     pub latency_ms: HashMap<(String, String), u64>,
@@ -128,6 +128,75 @@ pub struct NetworkConfig {
     pub bandwidth: HashMap<(String, String), u64>,
     /// Network partitions (list of peer groups)
     pub partitions: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NetworkPairMetric<T> {
+    from: String,
+    to: String,
+    value: T,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NetworkConfigWire {
+    latency_ms: Vec<NetworkPairMetric<u64>>,
+    packet_loss: Vec<NetworkPairMetric<f64>>,
+    bandwidth: Vec<NetworkPairMetric<u64>>,
+    partitions: Vec<Vec<String>>,
+}
+
+impl Serialize for NetworkConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        NetworkConfigWire {
+            latency_ms: sorted_pair_metrics(&self.latency_ms),
+            packet_loss: sorted_pair_metrics(&self.packet_loss),
+            bandwidth: sorted_pair_metrics(&self.bandwidth),
+            partitions: self.partitions.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for NetworkConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = NetworkConfigWire::deserialize(deserializer)?;
+        Ok(Self {
+            latency_ms: pair_metrics_to_map(wire.latency_ms),
+            packet_loss: pair_metrics_to_map(wire.packet_loss),
+            bandwidth: pair_metrics_to_map(wire.bandwidth),
+            partitions: wire.partitions,
+        })
+    }
+}
+
+fn sorted_pair_metrics<T: Clone>(map: &HashMap<(String, String), T>) -> Vec<NetworkPairMetric<T>> {
+    let mut metrics: Vec<_> = map
+        .iter()
+        .map(|((from, to), value)| NetworkPairMetric {
+            from: from.clone(),
+            to: to.clone(),
+            value: value.clone(),
+        })
+        .collect();
+    metrics.sort_by(|left, right| {
+        left.from
+            .cmp(&right.from)
+            .then_with(|| left.to.cmp(&right.to))
+    });
+    metrics
+}
+
+fn pair_metrics_to_map<T>(metrics: Vec<NetworkPairMetric<T>>) -> HashMap<(String, String), T> {
+    metrics
+        .into_iter()
+        .map(|metric| ((metric.from, metric.to), metric.value))
+        .collect()
 }
 
 /// Transfer configuration

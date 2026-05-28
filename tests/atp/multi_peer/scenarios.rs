@@ -3,6 +3,9 @@
 //! Provides access to all scenario types and utilities for scenario management.
 
 use crate::atp::multi_peer::cache::CacheScenarios;
+use crate::atp::multi_peer::contracts::{
+    AdversarialContract, CacheContract, MailboxContract, MultiPeerContract, SwarmContract,
+};
 use crate::atp::multi_peer::mailbox::MailboxScenarios;
 use crate::atp::multi_peer::swarm::SwarmScenarios;
 use crate::atp::multi_peer::*;
@@ -131,24 +134,11 @@ impl ScenarioFilters {
             .collect()
     }
 
-    /// Filter scenarios that don't require unimplemented features
+    /// Filter scenarios with executable deterministic ATP contracts
     pub fn implementable_now(scenarios: Vec<MultiPeerScenario>) -> Vec<MultiPeerScenario> {
-        // For now, all scenarios require unimplemented ATP features
-        // This filter will be updated as features are implemented
         scenarios
             .into_iter()
-            .filter(|s| {
-                // Currently all multi-peer scenarios depend on unimplemented features
-                // This is a placeholder that will be updated as ATP-J* features are implemented
-                match s.scenario_type {
-                    ScenarioType::Mailbox => false,     // Requires ATP-J1
-                    ScenarioType::Swarm => false,       // Requires ATP-J2
-                    ScenarioType::Cache => false,       // Requires ATP-J3
-                    ScenarioType::PeerChurn => false,   // Requires swarm infrastructure
-                    ScenarioType::Adversarial => false, // Requires verification infrastructure
-                    ScenarioType::Hybrid(_) => false,   // Requires multiple features
-                }
-            })
+            .filter(scenario_has_executable_contract)
             .collect()
     }
 
@@ -167,6 +157,18 @@ impl ScenarioFilters {
             })
             .collect()
     }
+}
+
+fn scenario_has_executable_contract(scenario: &MultiPeerScenario) -> bool {
+    match scenario.scenario_type {
+        ScenarioType::Mailbox => MailboxContract.validate_scenario(scenario),
+        ScenarioType::Swarm | ScenarioType::PeerChurn => SwarmContract.validate_scenario(scenario),
+        ScenarioType::Cache => CacheContract.validate_scenario(scenario),
+        ScenarioType::Adversarial | ScenarioType::Hybrid(_) => {
+            AdversarialContract.validate_scenario(scenario)
+        }
+    }
+    .is_ok()
 }
 
 /// Scenario validation utilities

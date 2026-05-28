@@ -1,7 +1,7 @@
 //! Multi-peer test harness for scenario execution
 //!
-//! Provides the infrastructure to execute multi-peer scenarios when the underlying
-//! ATP implementations become available.
+//! Provides deterministic infrastructure to execute multi-peer scenarios against
+//! the ATP contract implementations.
 
 use crate::atp::multi_peer::contracts::{
     AdversarialContract, CacheContract, MailboxContract, MultiPeerContract, SwarmContract,
@@ -147,8 +147,8 @@ impl MultiPeerHarness {
         &self,
         scenarios: &[MultiPeerScenario],
     ) -> Vec<Result<MultiPeerResult, String>> {
-        // For now, execute sequentially since we don't have resource isolation
-        // This would be enhanced to run truly parallel when the infrastructure supports it
+        // A single harness owns one artifact root, so sequential execution keeps
+        // report paths deterministic and avoids cross-scenario filesystem races.
         self.execute_scenarios(scenarios).await
     }
 
@@ -469,31 +469,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scenario_execution_placeholder() {
+    async fn test_scenario_execution_returns_deterministic_result() {
         let harness = MultiPeerHarness::new().unwrap();
         let scenarios = AllScenarios::smoke_test();
 
         assert!(!scenarios.is_empty(), "Should have smoke test scenarios");
 
-        // Execute one scenario (will fail since ATP features aren't implemented)
         let result = harness.execute_scenario(&scenarios[0]).await;
-        assert!(
-            result.is_ok(),
-            "Should return result even if execution fails"
-        );
+        assert!(result.is_ok(), "Scenario execution should return a result");
 
         let result = result.unwrap();
+        assert!(result.success, "Contract execution should succeed");
+        assert!(result.error.is_none(), "Successful result should be clean");
         assert!(
-            !result.success,
-            "Should fail since ATP features not implemented"
+            result.transfer_metrics.verified_bytes > 0,
+            "Execution should verify transferred bytes"
         );
-        assert!(result.error.is_some(), "Should have error message");
     }
 
     #[test]
     fn test_report_generation() {
-        // Create mock results for testing
-        let mock_results = vec![
+        let report_rows = vec![
             MultiPeerResult {
                 schema_version: MULTI_PEER_REPORT_SCHEMA.to_string(),
                 scenario: MultiPeerScenario {
@@ -568,7 +564,7 @@ mod tests {
             },
         ];
 
-        let report = TestReportGenerator::generate_report(&mock_results);
+        let report = TestReportGenerator::generate_report(&report_rows);
 
         assert_eq!(report.total_scenarios, 2);
         assert_eq!(report.successful, 1);

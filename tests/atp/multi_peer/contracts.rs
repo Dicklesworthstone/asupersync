@@ -809,8 +809,7 @@ fn execute_adversarial_scenario(scenario: &MultiPeerScenario) -> Result<MultiPee
 
     let selected_source = honest_sources
         .first()
-        .map(|peer| peer.peer_id.clone())
-        .unwrap_or_else(|| receiver.peer_id.clone());
+        .map_or_else(|| receiver.peer_id.clone(), |peer| peer.peer_id.clone());
     add_connection(
         &mut peer_results,
         &receiver.peer_id,
