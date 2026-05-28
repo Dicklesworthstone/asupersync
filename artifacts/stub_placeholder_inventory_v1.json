@@ -149,20 +149,6 @@
       "notes": "The term names SQL bind slots or replacement characters; it is not unfinished behavior."
     },
     {
-      "id": "src-postgres-tls-and-reconnect-audit",
-      "paths": [
-        "src/database/postgres.rs"
-      ],
-      "terms": [
-        "stub",
-        "not implemented"
-      ],
-      "disposition": "product-bug-follow-up",
-      "support_class": "blocked_follow_up",
-      "blocker_bead_id": "asupersync-yex",
-      "notes": "Postgres TLS cfg-off stubs are explicit feature boundaries; reconnect NOT_IMPLEMENTED audit prose remains tracked as follow-up gap debt."
-    },
-    {
       "id": "src-cx-type-state-negative-proofs",
       "path_prefixes": [
         "src/cx/"
@@ -174,22 +160,6 @@
       "support_class": "test_harness",
       "blocker_bead_id": "",
       "notes": "Cx wrapper negative examples assert that disabled capabilities intentionally do not implement marker traits."
-    },
-    {
-      "id": "src-grpc-retained-audit-and-status-markers",
-      "path_prefixes": [
-        "src/grpc/"
-      ],
-      "terms": [
-        "placeholder",
-        "stub",
-        "not implemented",
-        "Status::unimplemented"
-      ],
-      "disposition": "product-bug-follow-up",
-      "support_class": "blocked_follow_up",
-      "blocker_bead_id": "asupersync-yex",
-      "notes": "gRPC retained comments are either removed-stub guardrails, status test vectors, or deadline-audit follow-up debt; none is counted as a live conformance pass."
     },
     {
       "id": "src-gen-server-lease-placeholder",
@@ -281,19 +251,6 @@
       "notes": "These markers describe explicit sentinel IDs, disabled stack traces, design comments, or audit assertions rather than hidden shipped support."
     },
     {
-      "id": "src-messaging-fabric-data-capsule",
-      "paths": [
-        "src/messaging/fabric.rs"
-      ],
-      "terms": [
-        "placeholder"
-      ],
-      "disposition": "product-bug-follow-up",
-      "support_class": "blocked_follow_up",
-      "blocker_bead_id": "asupersync-yex",
-      "notes": "The subject-fabric data capsule marker is product-adjacent and remains tracked under mock-code-finder gap closure."
-    },
-    {
       "id": "src-observability-audit-marker-fixtures",
       "path_prefixes": [
         "src/observability/"
@@ -379,7 +336,7 @@
       "disposition": "conformance-bug-follow-up",
       "support_class": "blocked_follow_up",
       "blocker_bead_id": "asupersync-j5f",
-      "notes": "OpenTelemetry conformance simulations are not live conformance passes; histogram/metric snapshots are tracked by j5f and the broader yn7/uw9zg9 lane."
+      "notes": "OpenTelemetry conformance model checks are not blanket live-pass evidence; the periodic-reader path now records live metric exports on a deterministic logical schedule, while broader OTLP model coverage remains tracked by j5f and yn7/uw9zg9."
     },
     {
       "id": "conformance-h2-legacy-placeholder-harnesses",

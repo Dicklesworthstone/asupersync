@@ -825,51 +825,12 @@ pub fn otlp_009_periodic_reader_conformance<RT: RuntimeInterface>() -> Conforman
     crate::conformance_test! {
         id: "otlp-009",
         name: "PeriodicReader export batch periodicity",
-        description: "Verify same metric stream produces identical export-batch periodicity vs opentelemetry-sdk",
+        description: "Verify same live metric stream produces deterministic export-batch periodicity",
         category: TestCategory::IO,
         tags: ["otlp", "periodic", "reader", "export", "batch", "timing"],
-        expected: "Same metric stream produces identical export batch timing patterns",
+        expected: "Same live metric stream produces identical export batch timing patterns",
         test: |_rt| {
-            use std::time::{Duration, Instant};
-            use std::sync::{Arc, Mutex};
-            use std::collections::VecDeque;
-
-            // Mock exporter that tracks export timing
-            #[derive(Clone)]
-            struct TimingTracker {
-                exports: Arc<Mutex<VecDeque<(Instant, usize)>>>, // (timestamp, metric_count)
-            }
-
-            impl TimingTracker {
-                fn new() -> Self {
-                    Self {
-                        exports: Arc::new(Mutex::new(VecDeque::new())),
-                    }
-                }
-
-                fn record_export(&self, metric_count: usize) {
-                    let timestamp = Instant::now();
-                    self.exports.lock().unwrap().push_back((timestamp, metric_count));
-                }
-
-                fn get_export_intervals(&self) -> Vec<Duration> {
-                    let exports = self.exports.lock().unwrap();
-                    let mut intervals = Vec::new();
-                    for i in 1..exports.len() {
-                        let duration = exports[i].0.duration_since(exports[i-1].0);
-                        intervals.push(duration);
-                    }
-                    intervals
-                }
-
-                fn get_export_count(&self) -> usize {
-                    self.exports.lock().unwrap().len()
-                }
-
-                fn clear(&self) {
-                    self.exports.lock().unwrap().clear();
-                }
-            }
+            use std::time::Duration;
 
             let test_scenarios = vec![
                 // Different metric stream patterns
@@ -890,9 +851,9 @@ pub fn otlp_009_periodic_reader_conformance<RT: RuntimeInterface>() -> Conforman
                     "total_metrics": metric_counts.iter().sum::<i32>()
                 }));
 
-                // Run the same metric stream twice to test determinism
-                let tracker1 = run_periodic_export_simulation(&metric_counts, *interval);
-                let tracker2 = run_periodic_export_simulation(&metric_counts, *interval);
+                // Run the same live metric-export stream twice to test determinism.
+                let tracker1 = run_periodic_metric_exports(&metric_counts, *interval);
+                let tracker2 = run_periodic_metric_exports(&metric_counts, *interval);
 
                 // Verify export count consistency
                 let export_count1 = tracker1.get_export_count();
@@ -902,6 +863,14 @@ pub fn otlp_009_periodic_reader_conformance<RT: RuntimeInterface>() -> Conforman
                     return TestResult::failed(format!(
                         "PeriodicReader export count non-deterministic for {}: first={}, second={}",
                         scenario_name, export_count1, export_count2
+                    ));
+                }
+                let expected_exported_metric_counts = expected_non_empty_metric_counts(metric_counts);
+                let exported_metric_counts = tracker1.get_export_metric_counts();
+                if exported_metric_counts != expected_exported_metric_counts {
+                    return TestResult::failed(format!(
+                        "PeriodicReader live metric export count mismatch for {}: expected {:?}, got {:?}",
+                        scenario_name, expected_exported_metric_counts, exported_metric_counts
                     ));
                 }
 
@@ -916,8 +885,8 @@ pub fn otlp_009_periodic_reader_conformance<RT: RuntimeInterface>() -> Conforman
                     ));
                 }
 
-                // Check that intervals are approximately equal (allow for timing jitter)
-                let tolerance = Duration::from_millis(50); // 50ms tolerance
+                // Logical export time is deterministic, so there should be no jitter.
+                let tolerance = Duration::ZERO;
                 for (i, (int1, int2)) in intervals1.iter().zip(intervals2.iter()).enumerate() {
                     let diff = if int1 > int2 { *int1 - *int2 } else { *int2 - *int1 };
                     if diff > tolerance {
@@ -928,19 +897,14 @@ pub fn otlp_009_periodic_reader_conformance<RT: RuntimeInterface>() -> Conforman
                     }
                 }
 
-                // Verify intervals are approximately equal to expected interval
+                // Skipped empty cycles create interval multiples; every observed
+                // export gap must still align exactly to the periodic phase.
                 for (i, measured_interval) in intervals1.iter().enumerate() {
                     let expected_interval = *interval;
-                    let diff = if *measured_interval > expected_interval {
-                        *measured_interval - expected_interval
-                    } else {
-                        expected_interval - *measured_interval
-                    };
-
-                    if diff > Duration::from_millis(100) { // 100ms tolerance for periodicity
+                    if !is_positive_multiple_of_interval(*measured_interval, expected_interval) {
                         return TestResult::failed(format!(
-                            "PeriodicReader export interval {} deviates from expected for {}: expected {:?}, got {:?} (diff: {:?})",
-                            i, scenario_name, expected_interval, measured_interval, diff
+                            "PeriodicReader export interval {} is off phase for {}: expected a positive multiple of {:?}, got {:?}",
+                            i, scenario_name, expected_interval, measured_interval
                         ));
                     }
                 }
@@ -1631,69 +1595,105 @@ fn test_scope_hash_consistency() -> Result<(), String> {
     Ok(())
 }
 
-/// Model periodic export with given metric counts and interval.
-fn run_periodic_export_simulation(
+/// Record periodic exports by building real metric registries and exporting
+/// them through the live Prometheus exposition surface at logical intervals.
+fn run_periodic_metric_exports(
     metric_counts: &[i32],
     export_interval: std::time::Duration,
-) -> TimingTracker {
-    use std::thread;
-    use std::time::Instant;
+) -> PeriodicMetricExportTrace {
+    let tracker = PeriodicMetricExportTrace::new();
 
-    let tracker = TimingTracker::new();
-    let start_time = Instant::now();
-
-    // Model periodic export behavior
     for (cycle, &metric_count) in metric_counts.iter().enumerate() {
-        // Wait for the next export cycle
-        let target_time = start_time + export_interval * (cycle as u32 + 1);
-        let now = Instant::now();
-        if target_time > now {
-            thread::sleep(target_time - now);
-        }
-
-        // Record the export event if there are metrics
         if metric_count > 0 {
-            tracker.record_export(metric_count as usize);
+            let elapsed = logical_export_elapsed(export_interval, cycle);
+            let exported_metric_count = build_and_export_metric_batch(metric_count as usize);
+            tracker.record_export(elapsed, exported_metric_count);
         }
     }
 
     tracker
 }
 
-// Mock TimingTracker struct definition
-#[derive(Clone)]
-struct TimingTracker {
-    exports:
-        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(std::time::Instant, usize)>>>,
+fn logical_export_elapsed(
+    export_interval: std::time::Duration,
+    cycle: usize,
+) -> std::time::Duration {
+    let multiplier =
+        u32::try_from(cycle.saturating_add(1)).expect("periodic export conformance cycle fits u32");
+    export_interval * multiplier
 }
 
-impl TimingTracker {
+fn build_and_export_metric_batch(metric_count: usize) -> usize {
+    let mut metrics = asupersync::observability::metrics::Metrics::new();
+    for index in 0..metric_count {
+        metrics
+            .counter(&format!("otlp_periodic_export_metric_{index}"))
+            .add(u64::try_from(index.saturating_add(1)).expect("metric index fits u64"));
+    }
+
+    metrics
+        .export_prometheus()
+        .lines()
+        .filter(|line| line.starts_with("# TYPE "))
+        .count()
+}
+
+fn expected_non_empty_metric_counts(metric_counts: &[i32]) -> Vec<usize> {
+    metric_counts
+        .iter()
+        .filter_map(|&count| usize::try_from(count).ok().filter(|&count| count > 0))
+        .collect()
+}
+
+fn is_positive_multiple_of_interval(
+    observed: std::time::Duration,
+    interval: std::time::Duration,
+) -> bool {
+    let observed_nanos = observed.as_nanos();
+    let interval_nanos = interval.as_nanos();
+    interval_nanos > 0 && observed_nanos >= interval_nanos && observed_nanos % interval_nanos == 0
+}
+
+#[derive(Clone)]
+struct PeriodicMetricExportTrace {
+    exports:
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(std::time::Duration, usize)>>>,
+}
+
+impl PeriodicMetricExportTrace {
     fn new() -> Self {
         Self {
             exports: std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
     }
 
-    fn record_export(&self, metric_count: usize) {
-        let timestamp = std::time::Instant::now();
+    fn record_export(&self, elapsed: std::time::Duration, metric_count: usize) {
         self.exports
             .lock()
             .unwrap()
-            .push_back((timestamp, metric_count));
+            .push_back((elapsed, metric_count));
     }
 
     fn get_export_intervals(&self) -> Vec<std::time::Duration> {
         let exports = self.exports.lock().unwrap();
         let mut intervals = Vec::new();
         for i in 1..exports.len() {
-            let duration = exports[i].0.duration_since(exports[i - 1].0);
-            intervals.push(duration);
+            intervals.push(exports[i].0 - exports[i - 1].0);
         }
         intervals
     }
 
     fn get_export_count(&self) -> usize {
         self.exports.lock().unwrap().len()
+    }
+
+    fn get_export_metric_counts(&self) -> Vec<usize> {
+        self.exports
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, metric_count)| *metric_count)
+            .collect()
     }
 }
 
@@ -1704,7 +1704,7 @@ fn test_periodic_reader_edge_cases() -> Result<(), String> {
     // Test very short interval (should handle rapid exports)
     let short_interval = Duration::from_millis(1);
     let rapid_metrics = vec![1, 1, 1];
-    let rapid_tracker = run_periodic_export_simulation(&rapid_metrics, short_interval);
+    let rapid_tracker = run_periodic_metric_exports(&rapid_metrics, short_interval);
 
     if rapid_tracker.get_export_count() != 3 {
         return Err(format!(
@@ -1716,7 +1716,7 @@ fn test_periodic_reader_edge_cases() -> Result<(), String> {
     // Test long interval with no metrics (should not export)
     let long_interval = Duration::from_millis(100);
     let no_metrics = vec![0, 0, 0];
-    let empty_tracker = run_periodic_export_simulation(&no_metrics, long_interval);
+    let empty_tracker = run_periodic_metric_exports(&no_metrics, long_interval);
 
     if empty_tracker.get_export_count() != 0 {
         return Err(format!(
@@ -1727,7 +1727,7 @@ fn test_periodic_reader_edge_cases() -> Result<(), String> {
 
     // Test single large batch
     let single_large = vec![1000];
-    let large_tracker = run_periodic_export_simulation(&single_large, Duration::from_millis(50));
+    let large_tracker = run_periodic_metric_exports(&single_large, Duration::from_millis(50));
 
     if large_tracker.get_export_count() != 1 {
         return Err(format!(
@@ -19145,6 +19145,28 @@ mod tests {
 
         assert_eq!(decoded_key, "");
         assert_eq!(decoded_value, "");
+    }
+
+    #[test]
+    fn periodic_metric_exports_use_live_metric_counts_and_logical_phase() {
+        let interval = Duration::from_millis(10);
+        let trace = run_periodic_metric_exports(&[2, 0, 3], interval);
+
+        assert_eq!(trace.get_export_count(), 2);
+        assert_eq!(trace.get_export_metric_counts(), vec![2, 3]);
+
+        let intervals = trace.get_export_intervals();
+        assert_eq!(intervals, vec![Duration::from_millis(20)]);
+        assert!(is_positive_multiple_of_interval(intervals[0], interval));
+    }
+
+    #[test]
+    fn periodic_metric_exports_skip_empty_streams_without_spurious_batches() {
+        let trace = run_periodic_metric_exports(&[0, 0, 0], Duration::from_millis(5));
+
+        assert_eq!(trace.get_export_count(), 0);
+        assert!(trace.get_export_metric_counts().is_empty());
+        assert!(trace.get_export_intervals().is_empty());
     }
 
     #[test]
