@@ -589,7 +589,7 @@ impl CancelReason {
 
     /// Creates a new cancellation reason with minimal attribution (for testing/defaults).
     ///
-    /// Uses `RegionId::testing_default()` and `Time::ZERO` for attribution.
+    /// Uses `RegionId::testing_default()` and `Time::from_nanos(1_000_000_000)` for attribution.
     /// Prefer `with_origin` in production code.
     #[inline]
     #[must_use]
@@ -598,7 +598,7 @@ impl CancelReason {
             kind,
             origin_region: RegionId::testing_default(),
             origin_task: None,
-            timestamp: Time::ZERO,
+            timestamp: Time::from_nanos(1_000_000_000),
             message: None,
             cause: None,
             truncated: false,
@@ -614,7 +614,7 @@ impl CancelReason {
             kind: CancelKind::User,
             origin_region: RegionId::testing_default(),
             origin_task: None,
-            timestamp: Time::ZERO,
+            timestamp: Time::from_nanos(1_000_000_000),
             message: Some(message.to_string()),
             cause: None,
             truncated: false,
