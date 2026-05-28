@@ -1615,6 +1615,8 @@ mod tests {
         let caps = Capabilities {
             is_tty: true,
             color_support: ColorSupport::Basic,
+            width: 80,
+            height: 24,
             unicode: true,
         };
         let text = Text::new("\x1b]0;Forged Title\x07hello\x1b[31mred\x1b[0m").fg(Color::Red);
