@@ -4,7 +4,7 @@
 //! CLI flags > local config > daemon policy > defaults
 
 use crate::cli::atp_command_tree::{AtpConfig as CommandAtpConfig, AtpProfile};
-use crate::util::path_security::{PathSecurityError, SecurePath};
+use crate::util::path_security::SecurePath;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

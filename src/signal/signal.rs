@@ -72,6 +72,7 @@ impl SignalSlot {
         }
     }
 
+    #[cfg(any(unix, test))]
     fn record_delivery(&self) {
         self.deliveries.fetch_add(1, Ordering::Release);
         self.notify.notify_waiters();
@@ -254,7 +255,7 @@ impl SignalDispatcher {
         use std::ptr;
         use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::{
-            CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects,
+            CreateEventW, INFINITE, WaitForMultipleObjects,
         };
 
         let mut slots = HashMap::with_capacity(4);
@@ -472,7 +473,7 @@ fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
     if raw == libc::SIGINT {
         Some(SignalKind::Interrupt)

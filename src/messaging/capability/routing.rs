@@ -636,21 +636,14 @@ mod tests {
     )]
     use super::super::{EventFamily, PublishPermit};
     use super::*;
-    use crate::Budget;
     use crate::messaging::class::DeliveryClass;
     use crate::messaging::ir::{
         CapabilityPermission, CapabilityTokenSchema, MorphismPlan, MorphismTransform,
         SubjectFamily, SubjectPattern as IrSubjectPattern,
     };
-    use crate::types::{RegionId, TaskId};
-    use crate::util::ArenaIndex;
 
-    fn test_cx() -> Cx {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
-        )
+    fn test_cx() -> Cx<crate::cx::cap::All> {
+        Cx::for_testing()
     }
 
     fn publish_schema() -> CapabilityTokenSchema {

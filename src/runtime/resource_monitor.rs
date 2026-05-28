@@ -2655,7 +2655,15 @@ mod platform {
     /// Falls back to a large finite value (16 GiB) when the platform
     /// reports `RLIM_INFINITY` so downstream `usage_ratio()` arithmetic
     /// stays well-defined.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
     const ADDRESS_SPACE_FALLBACK: u64 = 16 * 1024 * 1024 * 1024;
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -2839,7 +2847,69 @@ mod platform {
         process_fd_count()
     }
 
-    // ----- Unsupported platforms (Windows / others) -------------------------
+    // ----- Windows ----------------------------------------------------------
+
+    #[cfg(windows)]
+    pub fn process_rss_bytes() -> std::io::Result<u64> {
+        let pid = sysinfo::get_current_pid()
+            .map_err(|err| std::io::Error::other(format!("current pid unavailable: {err}")))?;
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        system.process(pid).map(|process| process.memory()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "current process was not present in sysinfo process table",
+            )
+        })
+    }
+
+    #[cfg(windows)]
+    pub fn memory_max_bytes() -> std::io::Result<u64> {
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        let total = system.total_memory();
+        if total == 0 {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "sysinfo reported zero total memory",
+            ))
+        } else {
+            Ok(total)
+        }
+    }
+
+    #[cfg(windows)]
+    fn unsupported_windows<T>(what: &'static str) -> std::io::Result<T> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "resource_monitor: {what} is not implemented on Windows yet. \
+                 Wire a platform-specific collector via \
+                 ResourceMonitor::register_resource."
+            ),
+        ))
+    }
+
+    #[cfg(windows)]
+    pub fn process_fd_count() -> std::io::Result<u64> {
+        unsupported_windows("process_fd_count")
+    }
+
+    #[cfg(windows)]
+    pub fn load_avg_1min_scaled() -> std::io::Result<u64> {
+        unsupported_windows("load_avg_1min_scaled")
+    }
+
+    #[cfg(windows)]
+    pub fn process_connection_count() -> std::io::Result<u64> {
+        unsupported_windows("process_connection_count")
+    }
+
+    // ----- Unsupported platforms (others) -----------------------------------
 
     #[cfg(not(any(
         target_os = "linux",
@@ -2848,7 +2918,8 @@ mod platform {
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     )))]
     fn unsupported<T>(what: &'static str) -> std::io::Result<T> {
         Err(std::io::Error::new(
@@ -2869,7 +2940,8 @@ mod platform {
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     )))]
     pub fn process_rss_bytes() -> std::io::Result<u64> {
         unsupported("process_rss_bytes")
@@ -2881,7 +2953,8 @@ mod platform {
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     )))]
     pub fn memory_max_bytes() -> std::io::Result<u64> {
         unsupported("memory_max_bytes")
@@ -2893,7 +2966,8 @@ mod platform {
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     )))]
     pub fn process_fd_count() -> std::io::Result<u64> {
         unsupported("process_fd_count")
@@ -2905,7 +2979,8 @@ mod platform {
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     )))]
     pub fn load_avg_1min_scaled() -> std::io::Result<u64> {
         unsupported("load_avg_1min_scaled")
@@ -2917,7 +2992,8 @@ mod platform {
         target_os = "freebsd",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "dragonfly"
+        target_os = "dragonfly",
+        windows
     )))]
     pub fn process_connection_count() -> std::io::Result<u64> {
         unsupported("process_connection_count")
@@ -2975,13 +3051,21 @@ mod platform {
         Ok((512, 1024))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(target_arch = "wasm32")]
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn address_space_rlimit() -> std::io::Result<(u64, u64)> {
         Ok((u64::MAX, u64::MAX))
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
     pub fn num_cpus() -> u64 {
         std::thread::available_parallelism().map_or(1, |n| n.get() as u64)
     }

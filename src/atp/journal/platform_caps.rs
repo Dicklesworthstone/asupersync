@@ -437,11 +437,13 @@ impl PlatformCapabilities {
 
         #[cfg(target_os = "windows")]
         {
+            let _ = path;
             Outcome::Ok(FS_TYPE_NTFS.to_string()) // Assume NTFS on Windows
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
+            let _ = path;
             Outcome::Ok(FS_TYPE_UNKNOWN.to_string())
         }
     }
@@ -491,6 +493,7 @@ impl PlatformCapabilities {
 
         #[cfg(not(unix))]
         {
+            let _ = path;
             // Default block size for non-Unix systems
             Outcome::Ok(4096)
         }

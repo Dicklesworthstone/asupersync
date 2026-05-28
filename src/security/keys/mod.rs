@@ -611,6 +611,8 @@ fn harden_key_file(path: &Path) -> Result<(), KeyStoreError> {
             source,
         })?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

@@ -34,10 +34,13 @@
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::runtime::io_driver::IoRegistration;
+#[cfg(unix)]
 use crate::runtime::reactor::Interest;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process as std_process;
@@ -71,6 +74,7 @@ fn set_nonblocking() -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn drain_nonblocking<R: Read>(reader: &mut R, out: &mut Vec<u8>) -> io::Result<(bool, bool)> {
     let mut any = false;
     let mut buf = [0u8; 4096];
@@ -93,6 +97,7 @@ fn drain_nonblocking<R: Read>(reader: &mut R, out: &mut Vec<u8>) -> io::Result<(
     }
 }
 
+#[cfg(unix)]
 fn register_interest(
     registration: &mut Option<IoRegistration>,
     source: &dyn crate::runtime::reactor::Source,
@@ -991,86 +996,90 @@ impl Child {
     /// # Errors
     ///
     /// Returns an error if waiting or reading fails.
-    pub fn wait_with_output(mut self) -> Result<Output, ProcessError> {
+    pub fn wait_with_output(self) -> Result<Output, ProcessError> {
         #[cfg(windows)]
         {
-            return self.wait_with_output_windows();
+            self.wait_with_output_windows()
         }
 
-        // Take the handles before waiting
-        let mut stdout_handle = self.stdout.take();
-        let mut stderr_handle = self.stderr.take();
-        drop(self.stdin.take()); // Close stdin
+        #[cfg(not(windows))]
+        {
+            let mut child = self;
+            // Take the handles before waiting
+            let mut stdout_handle = child.stdout.take();
+            let mut stderr_handle = child.stderr.take();
+            drop(child.stdin.take()); // Close stdin
 
-        let mut stdout_buf = Vec::new();
-        let mut stderr_buf = Vec::new();
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
 
-        // Avoid deadlocks: interleave drain attempts with `try_wait`.
-        let mut status = None;
-        let mut stdout_done = stdout_handle.is_none();
-        let mut stderr_done = stderr_handle.is_none();
+            // Avoid deadlocks: interleave drain attempts with `try_wait`.
+            let mut status = None;
+            let mut stdout_done = stdout_handle.is_none();
+            let mut stderr_done = stderr_handle.is_none();
 
-        while status.is_none() || !stdout_done || !stderr_done {
-            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                return Err(ProcessError::Io(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "cancelled",
-                )));
-            }
+            while status.is_none() || !stdout_done || !stderr_done {
+                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                    return Err(ProcessError::Io(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "cancelled",
+                    )));
+                }
 
-            let mut progressed = false;
+                let mut progressed = false;
 
-            if status.is_none() {
-                match self.try_wait() {
-                    Ok(Some(s)) => {
-                        status = Some(s);
-                        progressed = true;
+                if status.is_none() {
+                    match child.try_wait() {
+                        Ok(Some(s)) => {
+                            status = Some(s);
+                            progressed = true;
+                        }
+                        Ok(None) => {}
+                        // Some environments can surface EAGAIN for non-blocking waitpid
+                        // style checks. Treat it as "still running" and keep draining.
+                        Err(ProcessError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(e) => return Err(e),
                     }
-                    Ok(None) => {}
-                    // Some environments can surface EAGAIN for non-blocking waitpid
-                    // style checks. Treat it as "still running" and keep draining.
-                    Err(ProcessError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(e) => return Err(e),
+                }
+
+                if let Some(handle) = stdout_handle.as_mut() {
+                    let (done, any) = drain_nonblocking(&mut handle.inner, &mut stdout_buf)?;
+                    if done {
+                        stdout_handle = None;
+                        stdout_done = true;
+                    }
+                    progressed |= any || done;
+                }
+
+                if let Some(handle) = stderr_handle.as_mut() {
+                    let (done, any) = drain_nonblocking(&mut handle.inner, &mut stderr_buf)?;
+                    if done {
+                        stderr_handle = None;
+                        stderr_done = true;
+                    }
+                    progressed |= any || done;
+                }
+
+                if status.is_some() && stdout_done && stderr_done {
+                    break;
+                }
+
+                if !progressed {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
 
-            if let Some(handle) = stdout_handle.as_mut() {
-                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stdout_buf)?;
-                if done {
-                    stdout_handle = None;
-                    stdout_done = true;
-                }
-                progressed |= any || done;
-            }
+            let status = match status {
+                Some(s) => s,
+                None => child.wait()?,
+            };
 
-            if let Some(handle) = stderr_handle.as_mut() {
-                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stderr_buf)?;
-                if done {
-                    stderr_handle = None;
-                    stderr_done = true;
-                }
-                progressed |= any || done;
-            }
-
-            if status.is_some() && stdout_done && stderr_done {
-                break;
-            }
-
-            if !progressed {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
+            Ok(Output {
+                status,
+                stdout: stdout_buf,
+                stderr: stderr_buf,
+            })
         }
-
-        let status = match status {
-            Some(s) => s,
-            None => self.wait()?,
-        };
-
-        Ok(Output {
-            status,
-            stdout: stdout_buf,
-            stderr: stderr_buf,
-        })
     }
 
     /// Async variant of [`wait_with_output`](Self::wait_with_output).
@@ -1079,97 +1088,102 @@ impl Child {
     /// process exit and pipe drain progress. Takes the parent task's [`Cx`]
     /// so cancellation propagates to the child via the SIGTERM-then-SIGKILL
     /// drain escalation in [`wait_async`]. (br-asupersync-nhk8ur)
-    pub async fn wait_with_output_async(mut self, cx: &Cx) -> Result<Output, ProcessError> {
+    pub async fn wait_with_output_async(self, cx: &Cx) -> Result<Output, ProcessError> {
         #[cfg(windows)]
         {
-            return crate::runtime::spawn_blocking_io(move || {
+            let _ = cx;
+            crate::runtime::spawn_blocking_io(move || {
                 self.wait_with_output_windows().map_err(io::Error::from)
             })
             .await
-            .map_err(ProcessError::Io);
+            .map_err(ProcessError::Io)
         }
 
-        // Take the handles before waiting
-        let mut stdout_handle = self.stdout.take();
-        let mut stderr_handle = self.stderr.take();
-        drop(self.stdin.take()); // Close stdin
+        #[cfg(not(windows))]
+        {
+            let mut child = self;
+            // Take the handles before waiting
+            let mut stdout_handle = child.stdout.take();
+            let mut stderr_handle = child.stderr.take();
+            drop(child.stdin.take()); // Close stdin
 
-        let mut stdout_buf = Vec::new();
-        let mut stderr_buf = Vec::new();
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
 
-        let mut status = None;
-        let mut stdout_done = stdout_handle.is_none();
-        let mut stderr_done = stderr_handle.is_none();
-        let mut backoff_ms = 1u64;
+            let mut status = None;
+            let mut stdout_done = stdout_handle.is_none();
+            let mut stderr_done = stderr_handle.is_none();
+            let mut backoff_ms = 1u64;
 
-        while status.is_none() || !stdout_done || !stderr_done {
-            if cx.checkpoint().is_err() {
-                // br-asupersync-nhk8ur: drain the child via the same
-                // escalation wait_async uses so wait_with_output_async also
-                // leaves no zombie behind on parent-task cancel.
-                self.cancel_drain_child().await;
-                return Err(ProcessError::Io(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "cancelled",
-                )));
-            }
+            while status.is_none() || !stdout_done || !stderr_done {
+                if cx.checkpoint().is_err() {
+                    // br-asupersync-nhk8ur: drain the child via the same
+                    // escalation wait_async uses so wait_with_output_async also
+                    // leaves no zombie behind on parent-task cancel.
+                    child.cancel_drain_child().await;
+                    return Err(ProcessError::Io(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "cancelled",
+                    )));
+                }
 
-            let mut progressed = false;
+                let mut progressed = false;
 
-            if status.is_none() {
-                match self.try_wait() {
-                    Ok(Some(s)) => {
-                        status = Some(s);
-                        progressed = true;
+                if status.is_none() {
+                    match child.try_wait() {
+                        Ok(Some(s)) => {
+                            status = Some(s);
+                            progressed = true;
+                        }
+                        Ok(None) => {}
+                        Err(ProcessError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(e) => return Err(e),
                     }
-                    Ok(None) => {}
-                    Err(ProcessError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(e) => return Err(e),
+                }
+
+                if let Some(handle) = stdout_handle.as_mut() {
+                    let (done, any) = drain_nonblocking(&mut handle.inner, &mut stdout_buf)?;
+                    if done {
+                        stdout_handle = None;
+                        stdout_done = true;
+                    }
+                    progressed |= any || done;
+                }
+
+                if let Some(handle) = stderr_handle.as_mut() {
+                    let (done, any) = drain_nonblocking(&mut handle.inner, &mut stderr_buf)?;
+                    if done {
+                        stderr_handle = None;
+                        stderr_done = true;
+                    }
+                    progressed |= any || done;
+                }
+
+                if status.is_some() && stdout_done && stderr_done {
+                    break;
+                }
+
+                if progressed {
+                    backoff_ms = 1;
+                    crate::runtime::yield_now().await;
+                } else {
+                    let now = crate::time::wall_now();
+                    crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(50);
                 }
             }
 
-            if let Some(handle) = stdout_handle.as_mut() {
-                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stdout_buf)?;
-                if done {
-                    stdout_handle = None;
-                    stdout_done = true;
-                }
-                progressed |= any || done;
-            }
+            let status = match status {
+                Some(s) => s,
+                None => child.wait_async(cx).await?,
+            };
 
-            if let Some(handle) = stderr_handle.as_mut() {
-                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stderr_buf)?;
-                if done {
-                    stderr_handle = None;
-                    stderr_done = true;
-                }
-                progressed |= any || done;
-            }
-
-            if status.is_some() && stdout_done && stderr_done {
-                break;
-            }
-
-            if progressed {
-                backoff_ms = 1;
-                crate::runtime::yield_now().await;
-            } else {
-                let now = crate::time::wall_now();
-                crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(50);
-            }
+            Ok(Output {
+                status,
+                stdout: stdout_buf,
+                stderr: stderr_buf,
+            })
         }
-
-        let status = match status {
-            Some(s) => s,
-            None => self.wait_async(cx).await?,
-        };
-
-        Ok(Output {
-            status,
-            stdout: stdout_buf,
-            stderr: stderr_buf,
-        })
     }
 
     /// Sends SIGKILL to the child process.
@@ -1661,6 +1675,7 @@ impl AsyncWrite for ChildStdin {
 #[derive(Debug)]
 pub struct ChildStdout {
     inner: std_process::ChildStdout,
+    #[cfg(unix)]
     registration: Option<IoRegistration>,
 }
 
@@ -1677,10 +1692,7 @@ impl ChildStdout {
     #[cfg(not(unix))]
     fn from_std(stdout: std_process::ChildStdout) -> io::Result<Self> {
         set_nonblocking()?;
-        Ok(Self {
-            inner: stdout,
-            registration: None,
-        })
+        Ok(Self { inner: stdout })
     }
 
     /// Returns the raw file descriptor.
@@ -1763,6 +1775,7 @@ impl AsyncRead for ChildStdout {
 #[derive(Debug)]
 pub struct ChildStderr {
     inner: std_process::ChildStderr,
+    #[cfg(unix)]
     registration: Option<IoRegistration>,
 }
 
@@ -1779,10 +1792,7 @@ impl ChildStderr {
     #[cfg(not(unix))]
     fn from_std(stderr: std_process::ChildStderr) -> io::Result<Self> {
         set_nonblocking()?;
-        Ok(Self {
-            inner: stderr,
-            registration: None,
-        })
+        Ok(Self { inner: stderr })
     }
 
     /// Returns the raw file descriptor.
