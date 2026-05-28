@@ -377,6 +377,11 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
             .checked_add(self.builder.length_field_length)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "header length overflow"))?;
 
+        // br-asupersync-ooqkxe: validate total reservation overflow (header + frame)
+        let _total_reservation = header_len
+            .checked_add(frame_len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "total reservation overflow"))?;
+
         // Calculate the adjusted length to write in the length field
         let adjustment = i64::try_from(self.builder.length_adjustment).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "length adjustment exceeds i64")
