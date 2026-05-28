@@ -1634,33 +1634,7 @@ impl SwarmPressureGovernor {
         }
 
         let expires_at = self.workload_lease_expiry(now, request.deadline)?;
-        let lease_id =
-            SwarmWorkloadLeaseId(self.next_workload_lease_id.fetch_add(1, Ordering::Relaxed));
-        let lease = SwarmWorkloadLease {
-            lease_id,
-            workload_id: request.workload_id.trim().to_string(),
-            owner: normalized_owner_metadata(&request.owner),
-            proof_lane: request.proof_lane,
-            priority: request.priority,
-            region_id,
-            state: SwarmWorkloadLeaseState::Active,
-            reserved_memory_bytes: request.requested_memory_bytes,
-            reserved_cpu_ns_per_sec: request.requested_cpu_ns_per_sec,
-            reserved_io_ops_per_sec: request.requested_io_ops_per_sec,
-            cancellation_budget: request.cancellation_budget,
-            issued_at: now,
-            expires_at,
-            last_renewed_at: None,
-            terminal_at: None,
-            renewal_count: 0,
-        };
-
-        let receipt = Self::lease_receipt(
-            &lease,
-            SwarmWorkloadLeaseTransition::Acquired,
-            "workload lease acquired",
-        );
-        let expired_receipts = {
+        let (receipt, expired_receipts) = {
             let mut leases = self.workload_leases.lock().unwrap();
             let expired_receipts = self.expire_stale_workload_leases_locked(&mut leases, now);
             if let Some(reason) = leases
@@ -1695,8 +1669,33 @@ impl SwarmPressureGovernor {
                 return Err(workload_lease_error(reason));
             }
 
+            let lease_id =
+                SwarmWorkloadLeaseId(self.next_workload_lease_id.fetch_add(1, Ordering::Relaxed));
+            let lease = SwarmWorkloadLease {
+                lease_id,
+                workload_id: request.workload_id.trim().to_string(),
+                owner: normalized_owner_metadata(&request.owner),
+                proof_lane: request.proof_lane,
+                priority: request.priority,
+                region_id,
+                state: SwarmWorkloadLeaseState::Active,
+                reserved_memory_bytes: request.requested_memory_bytes,
+                reserved_cpu_ns_per_sec: request.requested_cpu_ns_per_sec,
+                reserved_io_ops_per_sec: request.requested_io_ops_per_sec,
+                cancellation_budget: request.cancellation_budget,
+                issued_at: now,
+                expires_at,
+                last_renewed_at: None,
+                terminal_at: None,
+                renewal_count: 0,
+            };
+            let receipt = Self::lease_receipt(
+                &lease,
+                SwarmWorkloadLeaseTransition::Acquired,
+                "workload lease acquired",
+            );
             leases.insert(lease_id, lease);
-            expired_receipts
+            (receipt, expired_receipts)
         };
         self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
         self.workload_leases_acquired
