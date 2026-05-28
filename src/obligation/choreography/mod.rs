@@ -948,100 +948,109 @@ impl GlobalProtocol {
         target_label: &str,
     ) -> LoopProgressAnalysis {
         let mut analysis = LoopProgressAnalysis::new();
-        Self::analyze_progress_recursive(interaction, target_label, &mut analysis, false);
+        let _fallthrough_paths =
+            Self::analyze_progress_recursive(interaction, target_label, &mut analysis, false);
         analysis
     }
 
     /// Recursively analyze interaction for progress guarantees.
+    ///
+    /// Returns the set of progress states for paths that fall through this
+    /// interaction without jumping to the target loop label. `true` means that
+    /// path has observed at least one communication action. Target `continue`
+    /// paths are terminal for this analysis and are recorded directly in
+    /// `analysis`.
     fn analyze_progress_recursive(
         interaction: &Interaction,
         target_label: &str,
         analysis: &mut LoopProgressAnalysis,
-        in_choice_branch: bool,
-    ) {
+        progress_seen: bool,
+    ) -> BTreeSet<bool> {
         match interaction {
             Interaction::Comm { then, .. } => {
                 analysis.comm_count += 1;
-                // Communication is progress - if we must go through this to reach Continue,
-                // then we have a progress guarantee
-                if !in_choice_branch {
-                    analysis.has_progress_guarantee = true;
-                }
-                Self::analyze_progress_recursive(then, target_label, analysis, in_choice_branch);
+                // Communication is progress for every downstream path,
+                // including paths inside a choice branch.
+                Self::analyze_progress_recursive(then, target_label, analysis, true)
             }
             Interaction::Continue { label } => {
                 if label == target_label {
                     analysis.has_continue_path = true;
+                    if !progress_seen {
+                        analysis.has_progress_guarantee = false;
+                    }
                 }
+                BTreeSet::new()
             }
             Interaction::Choice {
                 then_branch,
                 else_branch,
                 ..
             } => {
-                // Both branches need to be analyzed separately
-                // Progress is only guaranteed if ALL paths have progress
-                let mut then_analysis = LoopProgressAnalysis::new();
-                let mut else_analysis = LoopProgressAnalysis::new();
-
-                Self::analyze_progress_recursive(
+                // Both branches need to be analyzed separately. A choice is
+                // progress-safe only if every branch that can continue has
+                // already observed communication on that path.
+                let mut fallthrough = Self::analyze_progress_recursive(
                     then_branch,
                     target_label,
-                    &mut then_analysis,
-                    true,
+                    analysis,
+                    progress_seen,
                 );
-                Self::analyze_progress_recursive(
+                fallthrough.extend(Self::analyze_progress_recursive(
                     else_branch,
                     target_label,
-                    &mut else_analysis,
-                    true,
-                );
-
-                // Merge results: we have continue path if either branch has it
-                analysis.has_continue_path |=
-                    then_analysis.has_continue_path || else_analysis.has_continue_path;
-                analysis.comm_count += then_analysis.comm_count + else_analysis.comm_count;
-
-                // Progress is guaranteed only if both branches that lead to Continue have progress
-                if then_analysis.has_continue_path && else_analysis.has_continue_path {
-                    analysis.has_progress_guarantee = then_analysis.has_progress_guarantee
-                        && else_analysis.has_progress_guarantee;
-                } else if then_analysis.has_continue_path {
-                    analysis.has_progress_guarantee = then_analysis.has_progress_guarantee;
-                } else if else_analysis.has_continue_path {
-                    analysis.has_progress_guarantee = else_analysis.has_progress_guarantee;
-                }
+                    analysis,
+                    progress_seen,
+                ));
+                fallthrough
             }
             Interaction::Loop { body, .. } => {
                 // Nested loops - analyze their body
-                Self::analyze_progress_recursive(body, target_label, analysis, in_choice_branch);
+                Self::analyze_progress_recursive(body, target_label, analysis, progress_seen)
             }
             Interaction::Seq { first, second } => {
-                Self::analyze_progress_recursive(first, target_label, analysis, in_choice_branch);
-                Self::analyze_progress_recursive(second, target_label, analysis, in_choice_branch);
+                let first_fallthrough =
+                    Self::analyze_progress_recursive(first, target_label, analysis, progress_seen);
+                let mut fallthrough = BTreeSet::new();
+                for path_progress in first_fallthrough {
+                    fallthrough.extend(Self::analyze_progress_recursive(
+                        second,
+                        target_label,
+                        analysis,
+                        path_progress,
+                    ));
+                }
+                fallthrough
             }
             Interaction::Par { left, right } => {
-                Self::analyze_progress_recursive(left, target_label, analysis, in_choice_branch);
-                Self::analyze_progress_recursive(right, target_label, analysis, in_choice_branch);
+                let mut fallthrough =
+                    Self::analyze_progress_recursive(left, target_label, analysis, progress_seen);
+                fallthrough.extend(Self::analyze_progress_recursive(
+                    right,
+                    target_label,
+                    analysis,
+                    progress_seen,
+                ));
+                fallthrough
             }
             Interaction::Compensate {
                 forward,
                 compensate,
             } => {
-                Self::analyze_progress_recursive(forward, target_label, analysis, in_choice_branch);
-                Self::analyze_progress_recursive(
-                    compensate,
-                    target_label,
-                    analysis,
-                    in_choice_branch,
-                );
-            }
-            Interaction::End => {
-                // End provides progress (termination)
-                if !in_choice_branch {
-                    analysis.has_progress_guarantee = true;
+                let forward_fallthrough =
+                    Self::analyze_progress_recursive(forward, target_label, analysis, progress_seen);
+                let mut fallthrough = BTreeSet::new();
+                for path_progress in forward_fallthrough {
+                    fallthrough.extend(Self::analyze_progress_recursive(
+                        compensate,
+                        target_label,
+                        analysis,
+                        path_progress,
+                    ));
                 }
+                fallthrough
             }
+            Interaction::End => BTreeSet::from([progress_seen]),
         }
     }
 
@@ -1096,7 +1105,7 @@ impl LoopProgressAnalysis {
     fn new() -> Self {
         Self {
             has_continue_path: false,
-            has_progress_guarantee: false,
+            has_progress_guarantee: true,
             comm_count: 0,
         }
     }
