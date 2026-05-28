@@ -160,12 +160,10 @@ impl PathProbe {
             return None;
         }
 
-        let now = Self::current_timestamp();
-        if now > response.timestamp {
-            Some(Duration::from_micros(now - response.timestamp))
-        } else {
-            None
-        }
+        response
+            .timestamp
+            .checked_sub(self.timestamp)
+            .map(Duration::from_micros)
     }
 }
 
