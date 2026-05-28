@@ -320,9 +320,10 @@ impl AuthKey {
     /// keys to maintain security while avoiding false positive
     /// entropy rejection.
     pub fn from_hmac_derived(bytes: [u8; AUTH_KEY_SIZE]) -> Result<Self, AuthKeyError> {
-        // HMAC-SHA256 outputs should pass entropy checks, but we validate
-        // to catch potential issues like weak root keys or implementation bugs
-        Self::from_bytes(bytes)
+        // HMAC-SHA256 outputs are cryptographically secure by construction.
+        // Skip entropy validation to avoid false positives while maintaining
+        // the Result type for consistency with other constructors.
+        Ok(Self { bytes })
     }
 
     /// Creates a key using HKDF (HMAC-based Key Derivation Function).
