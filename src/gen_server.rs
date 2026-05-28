@@ -5304,10 +5304,19 @@ mod tests {
         let cid = ch.task_id();
         runtime.state.store_spawned_task(cid, cs);
 
+        // Drive the caller first so the call envelope is definitely queued
+        // before the server is expected to observe it under deterministic lab scheduling.
         {
             let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
             sched.schedule(cid, 0);
+        }
+        runtime.run_until_quiescent();
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        runtime.run_until_quiescent();
+        {
+            runtime.scheduler.lock().schedule(cid, 0);
         }
         runtime.run_until_quiescent();
 
@@ -5472,10 +5481,20 @@ mod tests {
         let client_id = ch.task_id();
         runtime.state.store_spawned_task(client_id, cs);
 
+        // Let the client enqueue its call before polling the server. If the
+        // server polls an empty mailbox first, this conformance check becomes
+        // scheduler-order dependent rather than testing reply linearity.
         {
             let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
+        }
+        runtime.run_until_quiescent();
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        runtime.run_until_quiescent();
+        {
+            runtime.scheduler.lock().schedule(client_id, 0);
         }
         runtime.run_until_quiescent();
 
