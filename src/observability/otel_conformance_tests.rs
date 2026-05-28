@@ -34181,12 +34181,12 @@ mod otlp_121_tests {
                     metrics
                 },
                 MonotonicValidationResult {
-                    metrics_processed: 17,
-                    monotonic_counters_found: 17,
+                    metrics_processed: 18,
+                    monotonic_counters_found: 18,
                     reset_events_detected: 1,
                     reset_events_emitted: 1,
                     monotonic_violations: 1,
-                    valid_monotonic_sequences: 16,
+                    valid_monotonic_sequences: 17,
                     non_monotonic_metrics: 0,
                     export_successful: true,
                 },
