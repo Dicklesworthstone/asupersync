@@ -412,9 +412,6 @@ impl AtpLossDetector {
         let packet_threshold = self.get_adaptive_packet_threshold(space);
         let time_threshold = self.calculate_time_threshold(*transport_state);
 
-        // Check for packet threshold losses
-        let packet_threshold_boundary = largest_acked.saturating_sub(packet_threshold as u64);
-
         // Check for time threshold losses
         let time_threshold_boundary = now_micros.saturating_sub(time_threshold);
 
@@ -427,7 +424,11 @@ impl AtpLossDetector {
             let mut loss_reason = None;
 
             // Packet threshold loss
-            if packet.packet_number < packet_threshold_boundary {
+            if packet
+                .packet_number
+                .checked_add(u64::from(packet_threshold))
+                .is_some_and(|threshold_packet| threshold_packet <= largest_acked)
+            {
                 is_lost = true;
                 loss_reason = Some(LossReason::PacketThreshold {
                     threshold: packet_threshold,
@@ -845,7 +846,7 @@ impl ReorderingTracker {
     }
 
     fn adapt_threshold(&mut self) {
-        self.record_reordering(1);
+        self.record_reordering(self.current_threshold);
     }
 
     fn record_reordering(&mut self, depth: u32) {
