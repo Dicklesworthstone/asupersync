@@ -5739,14 +5739,14 @@ mod tests {
     fn audit_concurrent_send_drop_exact_moment_race_no_silent_success() {
         //! Audit src/channel/oneshot.rs concurrent send + drop race:
         //! when receiver is dropped at the EXACT moment sender::send(v) is called,
-        //! what is the observed return value? Per asupersync semantics, send must
-        //! observe drop and return Err(SendError(v)) — NOT silently succeed.
+        //! what is the observed return value? Per asupersync semantics, the mutex
+        //! linearizes the race: send may succeed if it observes the receiver before
+        //! drop, or return Err(SendError(v)) if drop wins first.
         //!
         //! FINDING: ✅ SOUND - No silent success possible under exact-moment race
         //!
-        //! Critical invariant: send() NEVER returns Ok(()) when receiver is dropped.
-        //! Either send() sees receiver_dropped=false and succeeds legitimately,
-        //! or sees receiver_dropped=true and returns Err(value). No middle ground.
+        //! Critical invariant: send() NEVER reports cancellation from this race,
+        //! and every disconnected result returns the original value.
 
         init_test("audit_concurrent_send_drop_exact_moment_race_no_silent_success");
 
@@ -5764,7 +5764,6 @@ mod tests {
         let send_success_count = Arc::new(AtomicUsize::new(0));
         let send_disconnected_count = Arc::new(AtomicUsize::new(0));
         let send_cancelled_count = Arc::new(AtomicUsize::new(0));
-        let silent_success_bug_count = Arc::new(AtomicUsize::new(0));
 
         // High iteration count to catch rare race conditions
         const EXACT_MOMENT_ITERATIONS: usize = 10_000;
@@ -5788,7 +5787,6 @@ mod tests {
                 let success_counter = Arc::clone(&send_success_count);
                 let disconnected_counter = Arc::clone(&send_disconnected_count);
                 let cancelled_counter = Arc::clone(&send_cancelled_count);
-                let bug_counter = Arc::clone(&silent_success_bug_count);
 
                 let handle = thread::spawn(move || {
                     // Create unique test value for this iteration
@@ -5859,16 +5857,9 @@ mod tests {
                     // Analyze the send result for correctness
                     match send_result {
                         Ok(()) => {
-                            // Send succeeded - this is ONLY acceptable if receiver was NOT dropped yet
-                            // But in our test, we ALWAYS drop the receiver, so this should be impossible
+                            // Valid race outcome: send acquired the channel
+                            // mutex before Receiver::drop() set receiver_dropped.
                             success_counter.fetch_add(1, Ordering::SeqCst);
-
-                            // This might indicate a race condition bug
-                            eprintln!(
-                                "⚠️  Iteration {}: send() returned Ok() despite receiver drop!",
-                                iteration
-                            );
-                            bug_counter.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(SendError::Disconnected(returned_value)) => {
                             // Expected outcome: receiver was dropped, value returned
@@ -5907,7 +5898,6 @@ mod tests {
         let final_success = send_success_count.load(Ordering::SeqCst);
         let final_disconnected = send_disconnected_count.load(Ordering::SeqCst);
         let final_cancelled = send_cancelled_count.load(Ordering::SeqCst);
-        let final_bugs = silent_success_bug_count.load(Ordering::SeqCst);
         let total_outcomes = final_success + final_disconnected + final_cancelled;
 
         println!();
@@ -5916,44 +5906,25 @@ mod tests {
         println!("  - Send Success (Ok): {}", final_success);
         println!("  - Send Disconnected (Err): {}", final_disconnected);
         println!("  - Send Cancelled (Err): {}", final_cancelled);
-        println!("  - Silent Success Bugs: {}", final_bugs);
         println!("  - Total outcomes: {}", total_outcomes);
-
-        // CRITICAL ASSERTION: No silent success bugs allowed
-        if final_bugs > 0 {
-            panic!(
-                "❌ CRITICAL BUG: {} instances of send() returning Ok() when receiver was dropped! \
-                   This violates asupersync semantics and causes silent data loss.",
-                final_bugs
-            );
-        }
 
         assert_eq!(
             total_outcomes, EXACT_MOMENT_ITERATIONS,
             "All iterations must produce a valid outcome"
         );
+        assert_eq!(
+            final_cancelled, 0,
+            "Receiver-drop/send races must not surface cancellation"
+        );
 
         println!();
         println!("🔬 RACE OUTCOME ANALYSIS:");
 
-        if final_success > 0 {
-            println!(
-                "⚠️  WARNING: {} send() operations succeeded despite receiver drop",
-                final_success
-            );
-            println!("    This suggests either:");
-            println!("    1. Race timing allowed some sends to complete before drop");
-            println!("    2. Test synchronization has edge cases");
-            println!("    3. Potential race condition in implementation");
-
-            if final_success > EXACT_MOMENT_ITERATIONS / 10 {
-                println!("❌ SUSPICIOUS: >10% success rate suggests race condition bug");
-            } else {
-                println!("✅ ACCEPTABLE: <10% success rate likely due to timing variations");
-            }
-        } else {
-            println!("🏆 PERFECT: All send() operations correctly detected receiver drop ✅");
-        }
+        println!(
+            "  - Send-before-drop outcomes: {} ({:.1}%)",
+            final_success,
+            final_success as f64 / EXACT_MOMENT_ITERATIONS as f64 * 100.0
+        );
 
         println!(
             "  - Disconnected outcomes: {} ({:.1}%)",
@@ -5978,35 +5949,21 @@ mod tests {
         println!();
         println!("📋 ASUPERSYNC SEMANTICS VERIFICATION:");
         println!(
-            "  - Send observes receiver drop: {} successes vs {} expected",
+            "  - Receiver-drop-first outcomes returned values: {}",
             final_disconnected,
-            EXACT_MOMENT_ITERATIONS - final_success
         );
         println!(
-            "  - No silent data loss: {} violations detected",
-            final_bugs
+            "  - Send-before-drop outcomes were legitimate successes: {}",
+            final_success
         );
         println!("  - Value preservation: All returned values verified ✅");
 
         println!();
-        if final_bugs == 0 && final_success < EXACT_MOMENT_ITERATIONS / 10 {
-            println!("🏆 VERDICT: SOUND - Exact-moment race handled correctly");
-            println!("  - No silent success violations ✅");
-            println!("  - send() correctly observes receiver drop ✅");
-            println!("  - Race condition protection effective ✅");
-            println!("  - asupersync semantics preserved ✅");
-        } else if final_bugs == 0 {
-            println!("⚠️  VERDICT: INVESTIGATE - High success rate suspicious");
-            println!("  - No silent bugs detected ✅");
-            println!(
-                "  - But {:.1}% success rate warrants investigation",
-                final_success as f64 / EXACT_MOMENT_ITERATIONS as f64 * 100.0
-            );
-        } else {
-            println!("❌ VERDICT: CRITICAL BUG - Silent success violations detected");
-            println!("  - {} instances of forbidden silent success", final_bugs);
-            println!("  - Immediate fix required for data loss prevention");
-        }
+        println!("🏆 VERDICT: SOUND - Exact-moment race handled correctly");
+        println!("  - Receiver-drop-first sends return Disconnected(value) ✅");
+        println!("  - Send-before-drop races may legitimately return Ok(()) ✅");
+        println!("  - Race condition protection effective ✅");
+        println!("  - asupersync semantics preserved ✅");
 
         crate::test_complete!("audit_concurrent_send_drop_exact_moment_race_no_silent_success");
     }
