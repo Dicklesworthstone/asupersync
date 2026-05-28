@@ -29,7 +29,10 @@ impl DeadlineMonitorFixture {
         let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
         let warnings_capture = Arc::clone(&warnings);
         monitor.on_warning(move |warning| {
-            warnings_capture.lock().expect("warning capture mutex should not be poisoned").push(warning);
+            warnings_capture
+                .lock()
+                .expect("warning capture mutex should not be poisoned")
+                .push(warning);
         });
 
         Self { monitor, warnings }
@@ -57,11 +60,17 @@ impl DeadlineMonitorFixture {
     }
 
     fn get_warnings(&self) -> Vec<super::deadline_monitor::DeadlineWarning> {
-        self.warnings.lock().expect("warnings mutex should not be poisoned for get_warnings").clone()
+        self.warnings
+            .lock()
+            .expect("warnings mutex should not be poisoned for get_warnings")
+            .clone()
     }
 
     fn clear_warnings(&self) {
-        self.warnings.lock().expect("warnings mutex should not be poisoned for clear_warnings").clear();
+        self.warnings
+            .lock()
+            .expect("warnings mutex should not be poisoned for clear_warnings")
+            .clear();
     }
 }
 
@@ -179,18 +188,20 @@ fn threshold_proportionality() {
     let created1 = Time::from_nanos(0);
     let deadline1 = Time::from_nanos(10_000_000_000); // 10 seconds
     let warning_time1 = Time::from_nanos(8_000_000_000); // 8 seconds (80% elapsed, should warn)
+    let checkpoint1 = Time::from_nanos(7_500_000_000); // Recent progress isolates deadline threshold
 
     // Task 2: 20 second duration (2x longer)
     let created2 = Time::from_nanos(0);
     let deadline2 = Time::from_nanos(20_000_000_000); // 20 seconds
     let warning_time2 = Time::from_nanos(16_000_000_000); // 16 seconds (80% elapsed, should warn)
+    let checkpoint2 = Time::from_nanos(15_000_000_000); // Recent progress isolates deadline threshold
 
     let task1 = DeadlineMonitorFixture::create_task_snapshot(
         task_id1,
         region_id,
         created1,
         Some(deadline1),
-        Some(created1),
+        Some(checkpoint1),
         1,
     );
 
@@ -199,7 +210,7 @@ fn threshold_proportionality() {
         region_id,
         created2,
         Some(deadline2),
-        Some(created2),
+        Some(checkpoint2),
         1,
     );
 
@@ -656,10 +667,10 @@ mod property_tests {
             );
 
             let task1 = DeadlineMonitorFixture::create_task_snapshot(
-                task_id, region_id, base_created, Some(base_deadline), Some(base_created), 1
+                task_id, region_id, base_created, Some(base_deadline), Some(base_now), 1
             );
             let task2 = DeadlineMonitorFixture::create_task_snapshot(
-                task_id, region_id, scaled_created, Some(scaled_deadline), Some(scaled_created), 1
+                task_id, region_id, scaled_created, Some(scaled_deadline), Some(scaled_now), 1
             );
 
             fixture1.monitor.check_snapshots(base_now, [task1]);
