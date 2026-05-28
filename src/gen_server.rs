@@ -2480,12 +2480,12 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
-            .unwrap();
+            .expect("should spawn counter gen_server");
         let task_id = handle.task_id();
         runtime.state.store_spawned_task(task_id, stored);
 
         // Cast a reset (fire-and-forget)
-        handle.try_cast(CounterCast::Reset).unwrap();
+        handle.try_cast(CounterCast::Reset).expect("should cast reset message");
 
         // Drop handle to disconnect
         drop(handle);
@@ -2509,16 +2509,16 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
-            .unwrap();
+            .expect("should spawn counter gen_server for call test");
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
         let server_ref = handle.server_ref();
         let (mut client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
-                server_ref.call(&cx, CounterCall::Add(5)).await.unwrap()
+                server_ref.call(&cx, CounterCall::Add(5)).await.expect("should call Add(5)")
             })
-            .unwrap();
+            .expect("should spawn client task for call test");
         let client_task_id = client_handle.task_id();
         runtime
             .state
@@ -2813,7 +2813,7 @@ mod tests {
 
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
-            .unwrap();
+            .expect("should spawn counter gen_server for cancellation test");
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
@@ -2829,7 +2829,7 @@ mod tests {
                 }
                 server_ref.call(&cx, CounterCall::Get).await
             })
-            .unwrap();
+            .expect("should spawn client task for cancellation test");
         let client_task_id = client_handle.task_id();
         runtime
             .state
@@ -2945,7 +2945,7 @@ mod tests {
         // Use a tiny mailbox and pre-fill it so the next cast blocks and is cancelable.
         let (handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 1)
-            .unwrap();
+            .expect("should spawn counter gen_server with tiny mailbox");
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
@@ -2964,7 +2964,7 @@ mod tests {
                 }
                 server_ref.cast(&cx, CounterCast::Reset).await
             })
-            .unwrap();
+            .expect("should spawn client task for cast cancellation test");
         let client_task_id = client_handle.task_id();
         runtime
             .state
