@@ -3314,8 +3314,8 @@ mod tests {
             // All tokens should have the same verification behavior
             let test_contexts = vec![
                 VerificationContext::new().with_time(5000).with_use_count(10),
-                VerificationContext::new().with_region(42).with_task(100),
-                VerificationContext::new().with_resource("data/test"),
+                VerificationContext::new().with_time(5000).with_region(42).with_task(100),
+                VerificationContext::new().with_time(5000).with_resource("data/test"),
             ];
 
             let reference_token = &tokens[0];
@@ -3850,7 +3850,7 @@ mod tests {
         let token_with_caveat = token.add_caveat(caveat);
 
         // Verification should succeed with proper key derivation
-        let ctx = VerificationContext::new();
+        let ctx = VerificationContext::new().with_time(1_000_000_000);
         assert!(
             token_with_caveat
                 .verify_for_identifier(&root_key, "test:capability", &ctx)
