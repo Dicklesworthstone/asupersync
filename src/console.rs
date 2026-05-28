@@ -1549,7 +1549,7 @@ mod tests {
             "\x1b[2J\x1b[H",                    // Clear screen and home cursor
             "\x1b[31mRED TEXT\x1b[0m",          // Color injection
             "Hello\x1b[1000D\x1b[KEvil",        // Cursor movement + line clear
-            "\x1b]0;Fake Title\x07",            // Terminal title manipulation
+            "\x1b]0;Forged Title\x07",          // Terminal title manipulation
             "\x1b[?25l\x1b[?25h",               // Hide/show cursor
             "\x1b[s\x1b[u",                     // Save/restore cursor
             "Normal\x1b[3J\x1b[1;1HEvil",       // Clear all + position

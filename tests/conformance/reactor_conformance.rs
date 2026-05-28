@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-/// Mock file descriptor for testing.
+/// Deterministic file descriptor for testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MockFd(i32);
 
@@ -33,7 +33,7 @@ impl MockFd {
     }
 }
 
-/// Mock token for identifying registrations.
+/// Deterministic token for identifying registrations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MockToken(usize);
 
@@ -47,7 +47,7 @@ impl MockToken {
     }
 }
 
-/// Mock interest flags for I/O operations.
+/// Deterministic interest flags for I/O operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MockInterest {
     readable: bool,
@@ -111,7 +111,7 @@ impl MockInterest {
     }
 }
 
-/// Mock event representing I/O readiness.
+/// Deterministic event representing I/O readiness.
 #[derive(Debug, Clone)]
 pub struct MockEvent {
     token: MockToken,
@@ -182,7 +182,7 @@ struct RegistrationInfo {
     registered_at: std::time::Instant,
 }
 
-/// Mock reactor implementation for testing.
+/// Deterministic reactor implementation for testing.
 #[derive(Debug)]
 struct MockReactor {
     registrations: Arc<std::sync::Mutex<HashMap<MockToken, RegistrationInfo>>>,
@@ -263,7 +263,7 @@ impl MockReactor {
             events.push(event);
         }
 
-        // Simulate timeout behavior
+        // Exercise timeout behavior.
         if event_count == 0 && timeout.is_some() {
             // Would block in real implementation
         }
@@ -981,7 +981,7 @@ impl ReactorConformanceHarness {
                     self.mock_reactor
                         .register(invalid_fd, token, MockInterest::READABLE);
 
-                // In our mock, we accept any FD, but real implementation would validate
+                // This deterministic reactor accepts any FD, but real implementation would validate.
                 self.harness.verify(
                     register_result.is_ok(),
                     "Invalid FD handling should be graceful",

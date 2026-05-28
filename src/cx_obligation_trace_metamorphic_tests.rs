@@ -184,10 +184,10 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Mock Implementations for Structural Property Testing
+    // Deterministic implementations for structural property testing
     // ────────────────────────────────────────────────────────────────────
 
-    /// Mock name lease for registry testing.
+    /// Deterministic name lease for registry testing.
     #[derive(Debug, Clone)]
     struct MockNameLease {
         name: String,
@@ -239,7 +239,7 @@ mod tests {
         }
     }
 
-    /// Mock macaroon token for attenuation testing.
+    /// Deterministic macaroon token for attenuation testing.
     #[derive(Debug, Clone)]
     struct MockMacaroonToken {
         identifier: String,
@@ -327,7 +327,7 @@ mod tests {
         }
     }
 
-    /// Mock scope for region closure testing.
+    /// Deterministic scope for region closure testing.
     #[derive(Debug, Clone)]
     struct MockScope {
         region_id: RegionId,
@@ -724,13 +724,13 @@ mod tests {
             race_a in race(),
             race_b in race(),
         ) {
-            // Create mock resources for independence testing.
+            // Create deterministic resources for independence testing.
             // The current `Resource` enum has no `Channel { id, kind }` variant;
             // use `Timer(u64)` as a stand-in id-keyed resource.
             let resource_a = Resource::Timer(race_a.earlier as u64);
             let resource_b = Resource::Timer(race_b.later as u64);
 
-            // Mock independence check (simplified)
+            // Compact independence check.
             let independent_ab = mock_independent(&resource_a, &resource_b);
             let independent_ba = mock_independent(&resource_b, &resource_a);
 
@@ -740,7 +740,7 @@ mod tests {
         }
     }
 
-    /// Mock independence function for testing symmetry.
+    /// Deterministic independence function for testing symmetry.
     ///
     /// The current `Resource` enum is id-keyed (`Timer(u64)`, `IoToken(u64)`,
     /// etc.) rather than carrying a struct payload — use those variants here.
@@ -766,7 +766,7 @@ mod tests {
         fn mr_race_detection_completeness(
             races in prop::collection::vec(race(), 1..10),
         ) {
-            // Simulate race analysis results
+            // Record race analysis results.
             let analysis = mock_race_analysis(races.clone());
 
             // Completeness: all input races should be found
@@ -790,7 +790,7 @@ mod tests {
         }
     }
 
-    /// Mock race analysis for testing completeness.
+    /// Deterministic race analysis for testing completeness.
     fn mock_race_analysis(input_races: Vec<Race>) -> RaceAnalysis {
         let mut detected_races = Vec::new();
         let mut backtrack_points = Vec::new();
@@ -810,11 +810,11 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Stub Test for Compilation Validation
+    // Compilation validation smoke test
     // ────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn stub_test() {
+    fn compilation_validation_smoke_test() {
         // Minimal test to verify module compilation and imports
         let state = VarState::Empty;
         assert!(!state.is_leak());

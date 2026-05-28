@@ -67,6 +67,11 @@ fn u64_value(value: &JsonValue, key: &str) -> u64 {
         .unwrap_or_else(|| panic!("{key} must be an unsigned integer"))
 }
 
+fn i64_threshold(value: &JsonValue, key: &str) -> i64 {
+    i64::try_from(u64_value(value, key))
+        .unwrap_or_else(|_| panic!("{key} must fit in a signed 64-bit integer"))
+}
+
 fn string_set(value: &JsonValue, key: &str) -> BTreeSet<String> {
     array(value, key)
         .iter()
@@ -258,11 +263,11 @@ fn max_latency_regression_bps(before: &JsonValue, after: &JsonValue, percentile_
 fn non_regression_holds(before: &JsonValue, after: &JsonValue, artifact: &JsonValue) -> bool {
     let thresholds = nested(artifact, "non_regression_thresholds");
     let p95_ok = max_latency_regression_bps(before, after, "p95_ns")
-        <= u64_value(thresholds, "max_p95_regression_bps") as i64;
+        <= i64_threshold(thresholds, "max_p95_regression_bps");
     let p99_ok = max_latency_regression_bps(before, after, "p99_ns")
-        <= u64_value(thresholds, "max_p99_regression_bps") as i64;
+        <= i64_threshold(thresholds, "max_p99_regression_bps");
     let p999_ok = max_latency_regression_bps(before, after, "p999_ns")
-        <= u64_value(thresholds, "max_p999_regression_bps") as i64;
+        <= i64_threshold(thresholds, "max_p999_regression_bps");
     let drain_ok = u64_value(
         nested(after, "cancel_drain_evidence"),
         "drain_regression_bps",
@@ -366,10 +371,10 @@ fn evaluate_gate(scenario: &JsonValue, artifact: &JsonValue) -> GateDecision {
         "scheduler/three_lane_decision/global_ready_burst/64",
     );
     if improvement
-        < u64_value(
+        < i64_threshold(
             nested(artifact, "non_regression_thresholds"),
             "required_throughput_improvement_bps",
-        ) as i64
+        )
         || !non_regression_holds(before, after, artifact)
     {
         return GateDecision {

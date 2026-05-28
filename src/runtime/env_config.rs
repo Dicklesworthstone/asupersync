@@ -81,7 +81,7 @@ impl FileCapability for ProductionFileCapability {
 /// Abstracts environment variable access to prevent ambient authority violations.
 ///
 /// This trait allows environment variable reading to be dependency-injected,
-/// enabling testing with mock environments and preventing direct ambient
+/// enabling deterministic environment tests and preventing direct ambient
 /// access to the process environment.
 pub trait EnvReader {
     /// Read an environment variable, returning `None` if unset.

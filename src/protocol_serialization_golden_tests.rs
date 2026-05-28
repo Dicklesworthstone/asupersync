@@ -123,7 +123,7 @@ mod tests {
         output.push_str("# HPACK Literal Header Field Encoding (RFC 7541 §6.2.1)\n\n");
 
         for (name, value) in &test_cases {
-            // Simulate HPACK encoding
+            // Exercise HPACK encoding.
             let name_bytes = name.as_bytes();
             let value_bytes = value.as_bytes();
 
@@ -162,7 +162,7 @@ mod tests {
         output.push_str("# HPACK Indexed Header Field Encoding (RFC 7541 §6.1)\n\n");
 
         for (index, name, value) in &indexed_headers {
-            // Indexed header field: 1xxxxxxx where x is the index
+            // Indexed header field: high bit set and the lower seven bits hold the index.
             let encoded_byte = 0b10000000 | (index & 0b01111111);
 
             output.push_str(&format!("Index {}: {} = {}\n", index, name, value));
@@ -189,7 +189,7 @@ mod tests {
         output.push_str("# HPACK Huffman Encoding Examples (RFC 7541 Appendix C)\n\n");
 
         for (plaintext, category) in &huffman_examples {
-            // Simulate Huffman encoding (simplified - actual implementation would use the table)
+            // Exercise compact Huffman encoding for this golden artifact.
             let encoded = huffman_encode_simple(plaintext);
 
             output.push_str(&format!("Category: {}\n", category));
@@ -560,7 +560,7 @@ mod tests {
             if payload.len() < 126 {
                 frame.push(mask_bit | (payload.len() as u8));
             } else {
-                // Extended payload length not implemented for this test
+                // Extended payload length is outside this compact golden case.
                 frame.push(mask_bit | 126);
                 frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
             }

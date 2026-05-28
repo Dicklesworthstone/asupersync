@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Mock controller for testing registration contracts.
+/// Deterministic controller for testing registration contracts.
 #[derive(Debug)]
 struct MockController {
     id: String,
@@ -69,7 +69,7 @@ impl MockController {
     }
 }
 
-/// Mock controller registry for testing.
+/// Deterministic controller registry for testing.
 #[derive(Debug)]
 struct MockControllerRegistry {
     controllers: BTreeMap<String, MockController>,

@@ -8,14 +8,14 @@ use std::sync::{Arc, Mutex};
 use super::pbft::{PbftConfig, PbftConsensus, PbftMessage, PbftNode, PbftTransport};
 use super::types::{ConsensusRequest, ReplicaId, SequenceNumber, ViewNumber};
 
-/// Mock transport for testing PBFT.
+/// Deterministic transport for testing PBFT.
 #[derive(Debug)]
 pub struct MockTransport {
     /// Messages sent by this replica.
     pub sent_messages: Arc<Mutex<Vec<PbftMessage>>>,
     /// Messages to be received by this replica.
     pub received_messages: Arc<Mutex<Vec<PbftMessage>>>,
-    /// Whether to simulate network failures.
+    /// Whether to inject network failures.
     pub fail_sends: bool,
 }
 
@@ -94,7 +94,7 @@ impl PbftTransport for MockTransport {
             if let Some(message) = messages.pop() {
                 Ok(message)
             } else {
-                // Simulate no message available.
+                // No message is currently available.
                 Err(crate::error::Error::new(
                     crate::error::ErrorKind::ChannelEmpty,
                 ))
@@ -177,7 +177,7 @@ fn test_mock_transport_message_tracking_helpers() {
     let message = PbftMessage::Request(request);
 
     futures_lite::future::block_on(transport.send_to_replica(&replica_id, message.clone()))
-        .expect("mock send should record message");
+        .expect("deterministic send should record message");
     assert_eq!(transport.get_sent_messages().len(), 1);
 
     transport.clear_sent_messages();
@@ -185,7 +185,7 @@ fn test_mock_transport_message_tracking_helpers() {
 
     transport.add_received_message(message);
     let received = futures_lite::future::block_on(transport.receive())
-        .expect("mock receive should return queued message");
+        .expect("deterministic receive should return queued message");
     assert!(matches!(received, PbftMessage::Request(_)));
 }
 

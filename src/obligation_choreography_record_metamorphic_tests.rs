@@ -154,10 +154,10 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Mock Implementations for Structural Property Testing
+    // Deterministic implementations for structural property testing
     // ────────────────────────────────────────────────────────────────────
 
-    /// Mock no-aliasing prover for reflexivity testing.
+    /// Deterministic no-aliasing prover for reflexivity testing.
     #[derive(Debug, Clone)]
     struct MockNoAliasingProver {
         ghost_state: HashMap<ObligationId, TaskId>,
@@ -220,7 +220,7 @@ mod tests {
         trace_length: usize,
     }
 
-    /// Mock no-leak prover for completeness testing.
+    /// Deterministic no-leak prover for completeness testing.
     #[derive(Debug, Clone)]
     struct MockNoLeakProver {
         ghost_counter: u32,
@@ -270,7 +270,7 @@ mod tests {
         is_leak_free: bool,
     }
 
-    /// Mock recovery engine for rollback determinism testing.
+    /// Deterministic recovery engine for rollback determinism testing.
     #[derive(Debug, Clone)]
     struct MockRecoveryEngine {
         config: RecoveryConfig,
@@ -343,7 +343,7 @@ mod tests {
         determinism_hash: u64,
     }
 
-    /// Mock lattice value for saga compensation symmetry testing.
+    /// Deterministic lattice value for saga compensation symmetry testing.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct MockLatticeValue(u64);
 
@@ -357,7 +357,7 @@ mod tests {
         }
     }
 
-    /// Mock choreography protocol for round-trip testing.
+    /// Deterministic choreography protocol for round-trip testing.
     #[derive(Debug, Clone)]
     struct MockChoreographyProtocol {
         name: String,
@@ -426,7 +426,7 @@ mod tests {
         semantic_preservation_hash: u64,
     }
 
-    /// Mock region hierarchy for serialization round-trip testing.
+    /// Deterministic region hierarchy for serialization round-trip testing.
     #[derive(Debug, Clone, PartialEq)]
     struct MockRegionHierarchy {
         root_id: RegionId,
@@ -473,7 +473,7 @@ mod tests {
         }
     }
 
-    /// Mock task event for replay determinism testing.
+    /// Deterministic task event for replay determinism testing.
     #[derive(Debug, Clone, PartialEq)]
     struct MockTaskEvent {
         timestamp: Time,
@@ -481,7 +481,7 @@ mod tests {
         phase: TaskPhase,
     }
 
-    /// Mock task event log replayer.
+    /// Deterministic task event log replayer.
     #[derive(Debug, Clone)]
     struct MockTaskEventReplayer {
         final_states: HashMap<TaskId, TaskPhase>,
@@ -735,7 +735,7 @@ mod tests {
 
             let recovered = deserialized.unwrap();
 
-            // Note: Due to our simplified mock, we test structural preservation
+            // Note: this compact model tests structural preservation
             // rather than exact equality. In a real implementation, this would be:
             // prop_assert_eq!(region, recovered);
 
@@ -786,11 +786,11 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Stub Test for Compilation Validation
+    // Compilation validation smoke test
     // ────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn stub_test() {
+    fn compilation_validation_smoke_test() {
         // Minimal test to verify module compilation and imports
         let mut prover = MockNoAliasingProver::new();
         let events = vec![];

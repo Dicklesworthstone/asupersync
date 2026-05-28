@@ -38,7 +38,7 @@
 
 ### DISC-CAP-001: Global state access prevention tracked
 - **Reference:** ATP Capability Model Section 7.1.2 - No ambient authority requirements
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Operations may access global state without capability validation
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N capability gates; add executable no-ambient-authority tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-002
@@ -46,7 +46,7 @@
 
 ### DISC-CAP-002: Capability validation tracked
 - **Reference:** ATP Capability Model Section 7.1.3 - Cx capability validation
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Missing runtime validation of Cx capabilities before operations
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N capability gates; add executable Cx-capability validation tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-003
@@ -54,7 +54,7 @@
 
 ### DISC-CAP-003: Cache operation scoping missing
 - **Reference:** ATP Capability Model Section 7.2.1 - Cache authorization scoping
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Cache operations not scoped to authorized regions - privilege escalation risk
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N capability gates; add executable cache-scope authorization tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-004
@@ -62,7 +62,7 @@
 
 ### DISC-CAP-004: Seeding operation scoping missing
 - **Reference:** ATP Capability Model Section 7.2.2 - Seeding capability scoping
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Unauthorized seeding operations possible without capability validation
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N capability gates; add executable seeding-scope tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-005
@@ -70,7 +70,7 @@
 
 ### DISC-CAP-005: Relay operation scoping missing  
 - **Reference:** ATP Capability Model Section 7.2.3 - Relay trust boundary scoping
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Relay operations not scoped to trust boundaries - trust domain violations
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N capability gates; add executable relay-boundary tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-006
@@ -78,7 +78,7 @@
 
 ### DISC-CAP-006: Trust chain validation missing
 - **Reference:** ATP Capability Model Section 7.3.2 - Cross-boundary trust chain validation
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Cross-boundary operations bypass trust chain validation
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N capability gates; add executable trust-chain validation tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-008
@@ -86,7 +86,7 @@
 
 ### DISC-CAP-007: Transfer capability validation missing
 - **Reference:** ATP Capability Model Section 7.4.1 - Transfer capability requirements
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Transfer operations proceed without required capability validation
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N capability gates; add executable transfer-capability tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-009
@@ -110,7 +110,7 @@
 
 ### DISC-CAP-010: Authorization audit missing
 - **Reference:** ATP Capability Model Section 7.5.2 - Authorization failure auditing
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Authorization failures not audited - security visibility gap
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N observability/capability gates; add executable audit-emission tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-012
@@ -118,7 +118,7 @@
 
 ### DISC-CAP-011: Resource isolation missing
 - **Reference:** ATP Capability Model Section 7.6.1 - Capability-based resource isolation
-- **Our impl:** ATP-NR linked coverage gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked coverage gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Resource access not isolated by capability scope
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N capability gates; add executable resource-isolation tests before counting as production conformance evidence.
 - **Tests affected:** ATP-CAP-013
@@ -128,7 +128,7 @@
 
 ### DISC-OBJ-001: Transfer atomicity tracked
 - **Reference:** ATP Object Graph Transfer Section 4.1 - Atomic transfer operations
-- **Our impl:** ATP-NR linked object-transfer gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked object-transfer gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Object graph transfers may leave system in inconsistent state on failure
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N object-transfer gates; add executable atomicity tests before counting as production conformance evidence.
 - **Tests affected:** OBJ-ATOMIC-001
@@ -136,7 +136,7 @@
 
 ### DISC-OBJ-002: Partial transfer rollback missing
 - **Reference:** ATP Object Graph Transfer Section 4.2 - Rollback safety for partial transfers
-- **Our impl:** ATP-NR linked object-transfer gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked object-transfer gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Partial transfers cannot be safely rolled back on errors
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N object-transfer gates; add executable rollback tests before counting as production conformance evidence.
 - **Tests affected:** OBJ-ATOMIC-002
@@ -144,7 +144,7 @@
 
 ### DISC-OBJ-003: Incremental transfer progress missing
 - **Reference:** ATP Object Graph Transfer Section 4.3 - Incremental progress support
-- **Our impl:** ATP-NR linked object-transfer gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked object-transfer gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Large transfers have no progress tracking or resumption capability
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N object-transfer gates; add executable progress/resumption tests before counting as production conformance evidence.
 - **Tests affected:** OBJ-ATOMIC-003
@@ -160,7 +160,7 @@
 
 ### DISC-OBJ-005: Manifest corruption detection missing
 - **Reference:** ATP Object Graph Transfer Section 5.2 - Manifest verification
-- **Our impl:** ATP-NR linked object-transfer gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked object-transfer gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Manifest tampering may go undetected - integrity risk
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N object-transfer gates; add executable manifest-corruption tests before counting as production conformance evidence.
 - **Tests affected:** OBJ-CORRUPT-002
@@ -168,7 +168,7 @@
 
 ### DISC-OBJ-006: Detailed corruption error reporting missing
 - **Reference:** ATP Object Graph Transfer Section 5.3 - Corruption error details
-- **Our impl:** ATP-NR linked object-transfer gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked object-transfer gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Poor debugging experience for corruption issues
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N object-transfer gates; add executable detailed-error tests before counting as production conformance evidence.
 - **Tests affected:** OBJ-CORRUPT-003
@@ -176,7 +176,7 @@
 
 ### DISC-OBJ-007: Duplicate child name validation missing
 - **Reference:** ATP Object Graph Transfer Section 7.2 - Graph structure validation
-- **Our impl:** ATP-NR linked object-transfer gap; no mock or configuration-only assertion may count as pass evidence.
+- **Our impl:** ATP-NR linked object-transfer gap; no test-double or configuration-only assertion may count as pass evidence.
 - **Impact:** Invalid object graphs with duplicate child names may be accepted
 - **Resolution:** TRACKED - owned by `asupersync-vk4kcf` ATP-N object-transfer gates; add executable graph-structure validation tests before counting as production conformance evidence.
 - **Tests affected:** OBJ-VALID-002

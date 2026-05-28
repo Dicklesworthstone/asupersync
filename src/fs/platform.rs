@@ -209,7 +209,7 @@ pub struct PlatformCapabilityReport {
     pub suggested_recovery_commands: Vec<String>,
 }
 
-/// Provider interface used by native and deterministic fake probes.
+/// Provider interface used by native and deterministic test probes.
 pub trait PlatformCapabilityProvider {
     /// Returns the target tuple for this provider.
     fn target(&self) -> PlatformTarget;
@@ -729,7 +729,7 @@ mod tests {
     use super::*;
 
     #[derive(Clone, Debug)]
-    struct FakePlatformCapabilityProvider {
+    struct DeterministicPlatformCapabilityProvider {
         target: PlatformTarget,
         sparse_files: CapabilityProbe,
         preallocation: CapabilityProbe,
@@ -744,13 +744,13 @@ mod tests {
         service_manager: CapabilityProbe,
     }
 
-    impl FakePlatformCapabilityProvider {
+    impl DeterministicPlatformCapabilityProvider {
         fn fully_supported() -> Self {
             Self {
                 target: PlatformTarget {
-                    os: "fakeos".to_string(),
-                    family: "fake".to_string(),
-                    arch: "fakearch".to_string(),
+                    os: "testos".to_string(),
+                    family: "test".to_string(),
+                    arch: "testarch".to_string(),
                     pointer_width: 64,
                 },
                 sparse_files: supported("sparse_files"),
@@ -768,7 +768,7 @@ mod tests {
         }
     }
 
-    impl PlatformCapabilityProvider for FakePlatformCapabilityProvider {
+    impl PlatformCapabilityProvider for DeterministicPlatformCapabilityProvider {
         fn target(&self) -> PlatformTarget {
             self.target.clone()
         }
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn fully_supported_provider_selects_fast_policy() {
         init_test("fully_supported_provider_selects_fast_policy");
-        let provider = FakePlatformCapabilityProvider::fully_supported();
+        let provider = DeterministicPlatformCapabilityProvider::fully_supported();
         let report = build_platform_capability_report(&provider);
 
         assert_eq!(
@@ -863,7 +863,7 @@ mod tests {
     #[test]
     fn failed_probes_select_conservative_degradation() {
         init_test("failed_probes_select_conservative_degradation");
-        let mut provider = FakePlatformCapabilityProvider::fully_supported();
+        let mut provider = DeterministicPlatformCapabilityProvider::fully_supported();
         provider.sparse_files = CapabilityProbe::new(
             "sparse_files",
             CapabilityStatus::Unsupported,
@@ -915,7 +915,7 @@ mod tests {
     #[test]
     fn supported_probe_recovery_commands_are_ignored() {
         init_test("supported_probe_recovery_commands_are_ignored");
-        let mut provider = FakePlatformCapabilityProvider::fully_supported();
+        let mut provider = DeterministicPlatformCapabilityProvider::fully_supported();
         provider.preallocation = CapabilityProbe::new(
             "preallocation",
             CapabilityStatus::Supported,

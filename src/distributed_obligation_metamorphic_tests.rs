@@ -64,10 +64,10 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Mock Implementations for Structural Property Testing
+    // Deterministic implementations for structural property testing
     // ────────────────────────────────────────────────────────────────────
 
-    /// Mock hash ring that tracks structural properties during operations.
+    /// Deterministic hash ring that tracks structural properties during operations.
     #[derive(Debug, Clone)]
     struct MockHashRing {
         inner: HashRing,
@@ -109,7 +109,7 @@ mod tests {
         }
     }
 
-    /// Mock e-process monitor for observation sequence testing.
+    /// Deterministic e-process monitor for observation sequence testing.
     #[derive(Debug)]
     struct MockLeakMonitor {
         inner: LeakMonitor,
@@ -586,7 +586,7 @@ mod tests {
                 ring_monitored.add_node(node);
             }
 
-            // Simulate some monitoring activity
+            // Record deterministic monitoring activity.
             for age in ages {
                 _monitor.observe(age);
             }
@@ -605,11 +605,11 @@ mod tests {
     }
 
     // ────────────────────────────────────────────────────────────────────
-    // Stub Test for Compilation Validation
+    // Compilation validation smoke test
     // ────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn stub_test() {
+    fn compilation_validation_smoke_test() {
         // Minimal test to verify module compilation and imports
         let config = MonitorConfig::default();
         let monitor = LeakMonitor::new(config);

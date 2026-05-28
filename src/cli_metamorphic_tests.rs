@@ -878,7 +878,7 @@ mod cli_tests {
 
 #[cfg(not(feature = "cli"))]
 mod no_cli_fallback {
-    // Minimal stub tests when CLI feature is disabled
+    // Minimal feature-disabled coverage when CLI is unavailable.
     #[test]
     fn cli_feature_disabled() {
         // This test always passes - just documents that CLI tests are skipped

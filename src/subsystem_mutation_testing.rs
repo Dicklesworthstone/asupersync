@@ -88,7 +88,7 @@ impl SubsystemMutationTester {
                         for req_id in 0..total_requests {
                             let start_time = Instant::now();
 
-                            // Simulate request processing with mutations
+                            // Exercise request processing with mutations.
                             sleep(Duration::from_millis(10)).await;
 
                             // MUTATION 1: Skip counter increment for some requests
@@ -99,7 +99,7 @@ impl SubsystemMutationTester {
                                 request_counter.inc();
                             }
 
-                            // Simulate error conditions with mutations
+                            // Exercise error conditions with mutations.
                             if req_id % 15 == 0 {
                                 // MUTATION 2: Increment wrong counter for errors
                                 if req_id % 30 == 0 {
@@ -309,7 +309,7 @@ impl SubsystemMutationTester {
                     if msg_id % 4 == 0 {
                         tag_flip_mutations.fetch_add(1, Ordering::Relaxed);
 
-                        // Flip random bits in auth tag (simulate bit-level tampering)
+                        // Flip random bits in auth tag to model bit-level tampering.
                         let tag_bytes = corrupted_tag.as_mut_bytes();
                         if !tag_bytes.is_empty() {
                             let flip_position = msg_id % tag_bytes.len();
@@ -981,7 +981,7 @@ impl SubsystemMutationTester {
 
                 let task = scope.spawn(async move {
                 for rpc_idx in 0..rpc_call_count {
-                    // Simulate various gRPC responses with status codes
+                    // Exercise various gRPC responses with status codes.
                     let expected_status = match rpc_idx % 7 {
                         0 => StatusCode::Ok,
                         1 => StatusCode::InvalidArgument,
@@ -1116,7 +1116,7 @@ impl SubsystemMutationTester {
                         }
                     }
 
-                    // Simulate message processing and offset commit
+                    // Exercise message processing and offset commit.
                     let partition = Partition::new(partition_id);
                     let commit_result = consumer.commit_offset(partition.clone(), actual_offset);
 
@@ -1557,7 +1557,7 @@ impl SubsystemMutationTester {
                     // Start supervised child
                     let child_handle = supervisor.start_child(child_spec).expect("Should start child");
 
-                    // Simulate child lifecycle with mutations
+                    // Exercise child lifecycle with mutations.
                     sleep(Duration::from_millis(20)).await;
 
                     // MUTATION: Corrupt supervision restart policy
@@ -1848,7 +1848,7 @@ impl SubsystemMutationTester {
                         }
                     }
 
-                    // Run scheduler simulation
+                    // Run scheduler model.
                     let mut execution_order = Vec::new();
                     let mut scheduling_rounds = 0;
                     const MAX_ROUNDS: usize = 50;
@@ -2949,7 +2949,7 @@ impl SubsystemMutationTester {
                                             "hedge_result"
                                         };
 
-                                        // Simulate race with double cancellation
+                                        // Exercise race with double cancellation.
                                         let result =
                                             race([Box::pin(primary_task), Box::pin(hedge_task)])
                                                 .await;
@@ -3761,7 +3761,7 @@ impl SubsystemMutationTester {
                     if test_idx % 3 == 0 {
                         tls_corruptions.fetch_add(1, Ordering::Relaxed);
 
-                        // Setup mock TLS acceptor and connector for testing
+                        // Set up TLS acceptor and connector for testing.
                         let mut tls_acceptor = TlsAcceptor::builder()
                             .with_test_certificate()
                             .build()
@@ -3780,7 +3780,7 @@ impl SubsystemMutationTester {
                                 tls_acceptor.replace_certificate(wrong_cert);
 
                                 let handshake_result = scope.spawn(async move {
-                                    // Simulate client connection to "correct.example.com"
+                                    // Exercise client connection to "correct.example.com".
                                     match tls_connector.connect("correct.example.com", mock_tcp_stream()).await {
                                         Ok(_) => {
                                             // Certificate mismatch not detected
@@ -3997,7 +3997,7 @@ impl SubsystemMutationTester {
                                             ScramAuth::new("test_user", "test_password");
                                         let client_first = scram_auth.client_first_message();
 
-                                        // Mock server response with corrupted salt
+                                        // Deterministic server response with corrupted salt.
                                         let mut server_first = format!(
                                             "r={},s={},i=4096",
                                             scram_auth.generate_server_nonce(),
@@ -5568,7 +5568,7 @@ impl SubsystemMutationTester {
                                         // Create task that will block quiescence
                                         let _blocking_task = region
                                             .spawn_task("blocking_task", async move {
-                                                // Simulate task that doesn't respond to cancellation
+                                                // Exercise a task that doesn't respond to cancellation.
                                                 loop {
                                                     sleep(Duration::from_millis(10)).await;
                                                 }
@@ -6312,7 +6312,7 @@ impl SubsystemMutationTester {
 
                                         dns_cache.insert(record).await;
 
-                                        // MUTATION: Simulate system clock going backwards
+                                        // MUTATION: Drive system clock backwards.
                                         dns_cache
                                             .simulate_clock_drift(Duration::from_secs(-60))
                                             .await;
@@ -8482,7 +8482,7 @@ impl SubsystemMutationTester {
                                         let mut coordinator = ShutdownCoordinator::new();
                                         let graceful_shutdown = GracefulShutdown::new();
 
-                                        let stubborn_service = coordinator.register_component_with_behavior("stubborn_service", ComponentLifecycle::Normal, "refuses_shutdown");
+                                        let _shutdown_resistant_service = coordinator.register_component_with_behavior("shutdown_resistant_service", ComponentLifecycle::Normal, "refuses_shutdown");
                                         let cooperative_service = coordinator.register_component_with_behavior("cooperative_service", ComponentLifecycle::Normal, "graceful_shutdown");
 
                                         // Set graceful timeout before forceful

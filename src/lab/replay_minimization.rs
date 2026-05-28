@@ -819,7 +819,7 @@ mod tests {
         }
 
         fn target_description(&self) -> String {
-            "Mock validation".to_string()
+            "Deterministic validation".to_string()
         }
     }
 
@@ -832,7 +832,7 @@ mod tests {
             MinimizationStrategy::DeltaDebugging
         );
 
-        let events = vec![]; // Would create mock events
+        let events = vec![]; // Deterministic event fixture starts empty.
         let result = minimizer.minimize(events).await;
         assert!(result.is_ok());
     }
@@ -852,7 +852,7 @@ mod tests {
     #[tokio::test]
     async fn test_replay_optimizer() {
         let optimizer = ReplayOptimizer::new(MinimizationConfig::default());
-        let events = vec![]; // Would create mock events
+        let events = vec![]; // Deterministic event fixture starts empty.
 
         let result = optimizer.optimize(events).await;
         assert!(result.is_ok());

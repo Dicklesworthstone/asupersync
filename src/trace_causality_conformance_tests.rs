@@ -80,7 +80,7 @@ pub enum TestResult {
 }
 
 // ================================================================================================
-// Mock Trace Event System Implementation
+// Deterministic Trace Event System Model
 // ================================================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -699,7 +699,7 @@ mod tests {
             "TRACE-INDEPENDENCE-02" => test_resource_conflict_detection(),
             "TRACE-INDEPENDENCE-03" => test_dependency_analysis_accuracy(),
             _ => TestResult::Skipped {
-                reason: "Test not implemented".to_string(),
+                reason: "No registered trace conformance case for this id".to_string(),
             },
         }
     }

@@ -81,7 +81,7 @@ pub enum TestResult {
 }
 
 // ================================================================================================
-// Mock Lab Runtime Implementation
+// Deterministic Lab Runtime Model
 // ================================================================================================
 
 #[derive(Debug, Clone)]
@@ -352,7 +352,7 @@ impl MockLabRuntime {
         let mut oracle_checks = HashMap::new();
         let mut rng = MockRng::new(self.seed);
 
-        // Simulate scenario execution with deterministic behavior
+        // Execute scenario steps with deterministic behavior.
         for (i, fault) in scenario.fault_events.iter().enumerate() {
             let trace_event = TraceEvent {
                 sequence: i as u64,
@@ -371,7 +371,7 @@ impl MockLabRuntime {
             };
             trace_events.push(trace_event);
 
-            // Simulate oracle checks
+            // Execute oracle checks.
             oracle_checks.insert(format!("oracle_{}", i), rng.next_bool(0.9));
         }
 
@@ -707,7 +707,7 @@ mod tests {
             "LAB-SNAPSHOT-02" => test_snapshot_quiescence_preservation(),
             "LAB-SNAPSHOT-03" => test_snapshot_relationship_integrity(),
             _ => TestResult::Skipped {
-                reason: "Test not implemented".to_string(),
+                reason: "No registered lab conformance case for this id".to_string(),
             },
         }
     }

@@ -12,9 +12,9 @@ mod bytes_io_time_tests {
     use std::collections::VecDeque;
     use std::io::{self, Cursor};
 
-    // ═══ Mock Bytes Implementation ═══════════════════════════════════════════════
+    // ═══ Deterministic Bytes Model ═══════════════════════════════════════════════
 
-    /// Mock bytes implementation for testing split/freeze metamorphic relations.
+    /// Deterministic bytes implementation for testing split/freeze metamorphic relations.
     #[derive(Debug, Clone)]
     pub struct MockBytesBuffer {
         data: Vec<u8>,
@@ -30,7 +30,7 @@ mod bytes_io_time_tests {
             Self { data, offset }
         }
 
-        /// Split off a portion at the given position (mock BytesMut::split_off).
+        /// Split off a portion at the given position.
         pub fn mock_split_off(&mut self, at: usize) -> Self {
             if at > self.len() {
                 panic!("split_off out of bounds: at={}, len={}", at, self.len());
@@ -45,7 +45,7 @@ mod bytes_io_time_tests {
             }
         }
 
-        /// Split to a given position (mock BytesMut::split_to).
+        /// Split to a given position.
         pub fn mock_split_to(&mut self, at: usize) -> Self {
             if at > self.len() {
                 panic!("split_to out of bounds: at={}, len={}", at, self.len());
@@ -60,7 +60,7 @@ mod bytes_io_time_tests {
             }
         }
 
-        /// Freeze to immutable bytes (mock BytesMut::freeze).
+        /// Freeze to immutable bytes.
         pub fn mock_freeze(self) -> Vec<u8> {
             if self.offset >= self.data.len() {
                 Vec::new()
@@ -100,9 +100,9 @@ mod bytes_io_time_tests {
         }
     }
 
-    // ═══ Mock Buf Chain Implementation ═══════════════════════════════════════════
+    // ═══ Deterministic Buf Chain Model ═══════════════════════════════════════════
 
-    /// Mock buf chain for testing associativity.
+    /// Deterministic buf chain for testing associativity.
     #[derive(Debug, Clone)]
     pub struct MockBufChain {
         buffers: Vec<Vec<u8>>,
@@ -186,9 +186,9 @@ mod bytes_io_time_tests {
         }
     }
 
-    // ═══ Mock I/O Split Implementation ═══════════════════════════════════════════
+    // ═══ Deterministic I/O Split Model ═══════════════════════════════════════════
 
-    /// Mock split stream for testing split→unsplit identity.
+    /// Deterministic split stream for testing split-to-unsplit identity.
     #[derive(Debug)]
     pub struct MockSplitStream {
         read_data: Cursor<Vec<u8>>,
@@ -272,9 +272,9 @@ mod bytes_io_time_tests {
         }
     }
 
-    // ═══ Mock I/O Copy Implementation ════════════════════════════════════════════
+    // ═══ Deterministic I/O Copy Model ════════════════════════════════════════════
 
-    /// Mock I/O copy for testing bytes conservation.
+    /// Deterministic I/O copy for testing bytes conservation.
     #[derive(Debug)]
     pub struct MockCopyOperation {
         source: Cursor<Vec<u8>>,
@@ -321,9 +321,9 @@ mod bytes_io_time_tests {
         }
     }
 
-    // ═══ Mock Lines Reader Implementation ════════════════════════════════════════
+    // ═══ Deterministic Lines Reader Model ════════════════════════════════════════
 
-    /// Mock lines reader for testing termination correctness.
+    /// Deterministic lines reader for testing termination correctness.
     #[derive(Debug)]
     pub struct MockLinesReader {
         data: String,
@@ -372,9 +372,9 @@ mod bytes_io_time_tests {
         }
     }
 
-    // ═══ Mock Timer Implementation ═══════════════════════════════════════════════
+    // ═══ Deterministic Timer Model ═══════════════════════════════════════════════
 
-    /// Mock timer wheel for testing timeout monotonicity.
+    /// Deterministic timer wheel for testing timeout monotonicity.
     #[derive(Debug, Clone)]
     pub struct MockTimerWheel {
         current_time: u64,
@@ -448,9 +448,9 @@ mod bytes_io_time_tests {
         }
     }
 
-    // ═══ Mock Sleep/Interval Implementation ══════════════════════════════════════
+    // ═══ Deterministic Sleep/Interval Model ══════════════════════════════════════
 
-    /// Mock sleep for testing wakeup ordering.
+    /// Deterministic sleep for testing wakeup ordering.
     #[derive(Debug, Clone)]
     pub struct MockSleep {
         deadline: u64,
@@ -480,7 +480,7 @@ mod bytes_io_time_tests {
         }
     }
 
-    /// Mock interval for testing skip-on-late behavior.
+    /// Deterministic interval for testing skip-on-late behavior.
     #[derive(Debug)]
     pub struct MockInterval {
         period: u64,
@@ -714,13 +714,13 @@ mod bytes_io_time_tests {
             limit2 in 0usize..=512
         )| {
             if !data.is_empty() {
-                // Simulate take(limit1).take(limit2)
+                // Exercise take(limit1).take(limit2).
                 let effective_limit1 = limit1.min(data.len());
                 let intermediate = &data[..effective_limit1];
                 let effective_limit2 = limit2.min(intermediate.len());
                 let double_take_result = &intermediate[..effective_limit2];
 
-                // Simulate take(min(limit1, limit2))
+                // Exercise take(min(limit1, limit2)).
                 let combined_limit = limit1.min(limit2).min(data.len());
                 let direct_take_result = &data[..combined_limit];
 
@@ -1037,7 +1037,7 @@ mod bytes_io_time_tests {
             let mut interval_skip = MockInterval::new(period, start_time, true);
             let mut interval_no_skip = MockInterval::new(period, start_time, false);
 
-            // Simulate being late
+            // Advance past the deadline.
             let late_time = start_time + delay_before_poll;
 
             let tick_skip = interval_skip.tick(late_time);
@@ -1185,7 +1185,7 @@ mod bytes_io_time_tests {
 
 #[cfg(not(all(test, feature = "test-internals")))]
 mod no_bytes_io_time_fallback {
-    // Minimal stub tests when test-internals feature is disabled
+    // Minimal feature-disabled coverage when test-internals is unavailable.
     #[test]
     fn bytes_io_time_feature_disabled() {
         // This test always passes - just documents that bytes/io/time tests are skipped

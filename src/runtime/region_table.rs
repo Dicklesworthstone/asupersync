@@ -1358,11 +1358,16 @@ mod tests {
 
             // MR: Close should block if and only if work remains
             let should_block = has_any_work;
-            prop_assert_eq!(root_record.complete_close(), !should_block,
+            let completed_immediately = root_record.complete_close();
+            prop_assert_eq!(completed_immediately, !should_block,
                 "Close completion should be inverse of work presence");
 
             if should_block {
                 prop_assert_eq!(root_record.state(), RegionState::Finalizing);
+            } else {
+                prop_assert_eq!(root_record.state(), RegionState::Closed);
+                prop_assert_eq!(table.pending_obligations(root), Some(0));
+                return Ok(());
             }
 
             // Remove all work

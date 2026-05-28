@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Mock task identifier.
+/// Deterministic task identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MockTaskId(u64);
 
@@ -34,7 +34,7 @@ impl MockTaskId {
     }
 }
 
-/// Mock worker identifier.
+/// Deterministic worker identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MockWorkerId(usize);
 
@@ -75,7 +75,7 @@ pub enum SchedulerLane {
     Finalize,
 }
 
-/// Mock task for testing.
+/// Deterministic task for testing.
 #[derive(Debug)]
 struct MockTask {
     id: MockTaskId,
@@ -107,7 +107,7 @@ impl Clone for MockTask {
 }
 
 // `MockTask` is placed into `BinaryHeap<(TaskPriority, MockTaskId, MockTask)>`
-// in the mock intrusive heap below; the heap orders by the full tuple, so
+// in the deterministic intrusive heap below; the heap orders by the full tuple, so
 // every element type must be `Ord`. Order by `id`; atomics make a content
 // ordering meaningless and the id alone uniquely identifies the task.
 impl PartialEq for MockTask {
@@ -161,7 +161,7 @@ impl MockTask {
 
         self.execution_count.fetch_add(1, Ordering::SeqCst);
 
-        // Simulate work
+        // Execute deterministic work.
         std::thread::sleep(self.execution_duration);
 
         Ok(())
@@ -172,7 +172,7 @@ impl MockTask {
     }
 }
 
-/// Mock local queue for worker-local tasks.
+/// Deterministic local queue for worker-local tasks.
 #[derive(Debug)]
 struct MockLocalQueue {
     worker_id: MockWorkerId,
@@ -244,7 +244,7 @@ impl MockLocalQueue {
     }
 }
 
-/// Mock global queue for cross-worker task distribution.
+/// Deterministic global queue for cross-worker task distribution.
 #[derive(Debug)]
 struct MockGlobalQueue {
     ready_tasks: std::sync::Mutex<VecDeque<MockTask>>,
@@ -334,7 +334,7 @@ impl MockGlobalQueue {
     }
 }
 
-/// Mock intrusive heap for priority scheduling.
+/// Deterministic intrusive heap for priority scheduling.
 #[derive(Debug)]
 struct MockIntrusiveHeap {
     heap: std::sync::Mutex<std::collections::BinaryHeap<(TaskPriority, MockTaskId, MockTask)>>,
@@ -374,7 +374,7 @@ impl MockIntrusiveHeap {
     }
 }
 
-/// Mock worker for task execution.
+/// Deterministic worker for task execution.
 #[derive(Debug)]
 struct MockWorker {
     id: MockWorkerId,
@@ -470,7 +470,7 @@ impl MockWorker {
     }
 }
 
-/// Mock scheduler coordinating workers and queues.
+/// Deterministic scheduler coordinating workers and queues.
 #[derive(Debug)]
 struct MockScheduler {
     workers: Vec<MockWorker>,

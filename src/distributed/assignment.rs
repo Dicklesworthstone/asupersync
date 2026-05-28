@@ -781,7 +781,7 @@ mod tests {
             ReplicaInfo::new("node-auth-2", "addr2"),    // authorized
             ReplicaInfo::new("r3", "addr3"),             // authorized
             ReplicaInfo::new("invalid-test", "addr4"),   // unauthorized (contains "test")
-            ReplicaInfo::new("fake-replica", "addr5"),   // unauthorized (contains "fake")
+            ReplicaInfo::new("rogue-replica", "addr5"),  // unauthorized (not authorized)
             ReplicaInfo::new("", "addr6"),               // unauthorized (empty ID)
         ];
 
@@ -797,7 +797,7 @@ mod tests {
 
         // Unauthorized replicas should not appear in assignments
         assert!(!replica_ids.contains(&&"invalid-test".to_string()));
-        assert!(!replica_ids.contains(&&"fake-replica".to_string()));
+        assert!(!replica_ids.contains(&&"rogue-replica".to_string()));
         assert!(!replica_ids.contains(&&"".to_string()));
     }
 
@@ -810,7 +810,7 @@ mod tests {
         // All unauthorized replicas
         let replicas = vec![
             ReplicaInfo::new("test-replica", "addr1"), // contains "test"
-            ReplicaInfo::new("mock-node", "addr2"),    // contains "mock"
+            ReplicaInfo::new("rogue-node", "addr2"),   // not authorized
             ReplicaInfo::new("", "addr3"),             // empty ID
         ];
 

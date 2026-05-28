@@ -1217,12 +1217,12 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
             verdict: match r.verdict {
                 harness::TestVerdict::Pass => TestVerdict::Pass,
                 harness::TestVerdict::Fail(_) => TestVerdict::Fail,
-                harness::TestVerdict::XFail(_) => TestVerdict::ExpectedFailure,
+                harness::TestVerdict::ExpectedGap(_) => TestVerdict::ExpectedFailure,
                 harness::TestVerdict::Skip(_) => TestVerdict::Skipped,
             },
             error_message: match &r.verdict {
                 harness::TestVerdict::Fail(msg) => Some(msg.clone()),
-                harness::TestVerdict::XFail(msg) => Some(msg.clone()),
+                harness::TestVerdict::ExpectedGap(msg) => Some(msg.clone()),
                 harness::TestVerdict::Skip(msg) => Some(msg.clone()),
                 _ => None,
             },

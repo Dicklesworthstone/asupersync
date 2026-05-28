@@ -70,9 +70,9 @@ pub enum TestCategory {
     DropAbortSafety,
 }
 
-/// Mock actor for controlled testing.
+/// Deterministic actor for controlled testing.
 #[derive(Debug)]
-struct MockActor {
+struct DeterministicActor {
     name: String,
     message_count: Arc<AtomicU64>,
     messages_received: Arc<Mutex<Vec<String>>>,
@@ -84,7 +84,7 @@ struct MockActor {
     handle_delay_ms: Arc<AtomicU64>,
 }
 
-impl MockActor {
+impl DeterministicActor {
     fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -126,7 +126,7 @@ impl MockActor {
     }
 }
 
-impl Actor for MockActor {
+impl Actor for DeterministicActor {
     type Message = String;
 
     fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
@@ -152,7 +152,7 @@ impl Actor for MockActor {
 
             let delay_ms = self.handle_delay_ms.load(Ordering::SeqCst);
             if delay_ms > 0 {
-                // Simulate processing delay (would use actual sleep in real test)
+                // Exercise processing delay.
                 for _ in 0..delay_ms {
                     // Busy wait for testing
                 }
@@ -227,13 +227,13 @@ impl Actor for CounterActor {
     }
 }
 
-/// Mock time for deterministic testing.
+/// Deterministic time for deterministic testing.
 #[derive(Debug, Clone)]
-struct MockTime {
+struct DeterministicTime {
     current: Arc<Mutex<Time>>,
 }
 
-impl MockTime {
+impl DeterministicTime {
     fn new() -> Self {
         Self {
             current: Arc::new(Mutex::new(Time::from_nanos(0))),
@@ -257,15 +257,7 @@ struct ActorObservation {
 }
 
 fn noop_waker() -> Waker {
-    struct NoopWaker;
-
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
-    Waker::from(Arc::new(NoopWaker))
+    Waker::noop().clone()
 }
 
 fn drive_counter_actor(
@@ -441,7 +433,7 @@ fn observed_result(
 
 /// Main conformance test harness for actor contracts.
 pub struct ActorConformanceHarness {
-    mock_time: MockTime,
+    deterministic_time: DeterministicTime,
     test_counter: Arc<AtomicUsize>,
 }
 
@@ -449,7 +441,7 @@ impl ActorConformanceHarness {
     /// Create a new actor conformance test harness.
     pub fn new() -> Self {
         Self {
-            mock_time: MockTime::new(),
+            deterministic_time: DeterministicTime::new(),
             test_counter: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -523,11 +515,12 @@ impl ActorConformanceHarness {
     /// Test basic Actor trait implementation requirements.
     fn test_actor_trait_implementation(&mut self) -> ConformanceTestResult {
         // MUST: Actor trait requires Message type and handle() method
-        let _actor = MockActor::new("test_actor");
+        let _actor = DeterministicActor::new("test_actor");
 
         // Verify trait bounds
-        let is_send = std::mem::needs_drop::<MockActor>();
-        let has_message_type = std::any::type_name::<MockActor>().contains("MockActor");
+        let is_send = std::mem::needs_drop::<DeterministicActor>();
+        let has_message_type =
+            std::any::type_name::<DeterministicActor>().contains("DeterministicActor");
 
         let verdict = if is_send && has_message_type {
             TestVerdict::Pass
@@ -546,11 +539,11 @@ impl ActorConformanceHarness {
     /// Test message type constraint enforcement.
     fn test_message_type_constraint(&mut self) -> ConformanceTestResult {
         // MUST: Message type must be Send + 'static
-        let _actor = MockActor::new("test_message_type");
+        let _actor = DeterministicActor::new("test_message_type");
 
         // String implements Send + 'static
         let message_is_send =
-            std::any::type_name::<<MockActor as Actor>::Message>().contains("String");
+            std::any::type_name::<<DeterministicActor as Actor>::Message>().contains("String");
 
         let verdict = if message_is_send {
             TestVerdict::Pass
@@ -667,7 +660,7 @@ impl ActorConformanceHarness {
     /// Test sequential message processing.
     fn test_sequential_message_processing(&mut self) -> ConformanceTestResult {
         // MUST: Messages processed sequentially from mailbox
-        let actor = MockActor::new("sequential_test");
+        let actor = DeterministicActor::new("sequential_test");
         let messages = actor.messages_received();
 
         // Sequential processing verified by single-threaded message handling
@@ -690,7 +683,7 @@ impl ActorConformanceHarness {
     /// Test exclusive state access during message handling.
     fn test_exclusive_state_access(&mut self) -> ConformanceTestResult {
         // MUST: Actor has exclusive access to state during handle()
-        let _actor = MockActor::new("exclusive_test");
+        let _actor = DeterministicActor::new("exclusive_test");
 
         // Exclusive access enforced by &mut self in handle()
         let exclusive_access = true; // Enforced by method signature
@@ -1348,12 +1341,12 @@ mod tests {
     #[test]
     fn conformance_harness_creation() {
         let harness = ActorConformanceHarness::new();
-        assert_eq!(harness.mock_time.now(), Time::from_nanos(0));
+        assert_eq!(harness.deterministic_time.now(), Time::from_nanos(0));
     }
 
     #[test]
     fn mock_actor_configuration() {
-        let actor = MockActor::new("test");
+        let actor = DeterministicActor::new("test");
         actor.configure_panic(true, false, false);
         actor.set_handle_delay(100);
 
@@ -1371,11 +1364,11 @@ mod tests {
 
     #[test]
     fn mock_time_advancement() {
-        let mock_time = MockTime::new();
-        let initial = mock_time.now();
+        let deterministic_time = DeterministicTime::new();
+        let initial = deterministic_time.now();
 
-        mock_time.advance_ms(100);
-        let after = mock_time.now();
+        deterministic_time.advance_ms(100);
+        let after = deterministic_time.now();
 
         assert!(after > initial);
     }

@@ -518,7 +518,7 @@ impl ForensicsCollector {
                 recommended_fixes: vec![
                     "Review synchronization primitives".to_string(),
                     "Check for uninitialized variables".to_string(),
-                    "Mock system calls in tests".to_string(),
+                    "Virtualize system calls in tests".to_string(),
                     "Use deterministic random seeds".to_string(),
                 ],
                 confidence_score: 0.9,

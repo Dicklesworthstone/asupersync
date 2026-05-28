@@ -44,7 +44,7 @@ fn test_region_id(index: u32) -> RegionId {
     RegionId::new_for_test(index, 0)
 }
 
-/// Mock task for testing scheduler behavior.
+/// Deterministic task for testing scheduler behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TestTask {
     id: TaskId,
@@ -139,7 +139,7 @@ fn priority_to_order(priority: PriorityClass) -> u8 {
 /// Property: Fairness counters should advance monotonically and reset appropriately.
 /// Cancel streaks should not exceed configured limits.
 ///
-/// Transformation: Simulate dispatch sequences
+/// Transformation: evaluate dispatch sequences
 /// Relation: cancel_streak ≤ effective_limit at all times
 #[test]
 fn mr2_fairness_counter_monotonicity() {
@@ -149,7 +149,7 @@ fn mr2_fairness_counter_monotonicity() {
     )| {
         prop_assume!(!dispatch_sequence.is_empty() && dispatch_sequence.len() <= 50);
 
-        // Simulate fairness counter logic
+        // Evaluate fairness counter logic.
         let mut cancel_streak = 0u32;
         let effective_limit = cancel_limit;
         for &dispatch_type in &dispatch_sequence {
@@ -277,7 +277,7 @@ fn mr4_queue_consistency() {
         prop_assume!(!push_sequence.is_empty() && push_sequence.len() <= 20);
         prop_assume!(pop_count <= push_sequence.len());
 
-        // Simulate FIFO queue behavior
+        // Evaluate FIFO queue behavior.
         let mut queue = VecDeque::new();
         let mut pushed_order = Vec::new();
 
@@ -325,7 +325,7 @@ fn mr4_queue_consistency() {
 /// Property: Work stealing should prefer same-cohort workers when possible,
 /// preserving cache locality.
 ///
-/// Transformation: Simulate stealing with cohort preferences
+/// Transformation: evaluate stealing with cohort preferences
 /// Relation: preferred_cohort_steals ≥ cross_cohort_steals when both available
 #[test]
 fn mr5_stealing_locality_preservation() {
@@ -537,7 +537,7 @@ mod integration_tests {
         let cancel_limit = 5u32;
         let mut cancel_streak = 0u32;
 
-        // Simulate mixed priority dispatch with fairness enforcement
+        // Evaluate mixed priority dispatch with fairness enforcement.
         let dispatch_sequence = [
             PriorityClass::Cancel,
             PriorityClass::Cancel,

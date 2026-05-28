@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-/// Mock remote runtime for testing.
+/// Deterministic remote runtime for testing.
 #[derive(Debug)]
 struct MockRemoteRuntime {
     node_reachability: HashMap<String, bool>,
@@ -147,7 +147,7 @@ impl RemoteConformanceHarness {
         results.push(self.test_phase0_fallback_determinism());
         results.push(self.test_no_runtime_failure_modes());
         results.push(self.test_retry_policy_configuration());
-        results.push(self.test_simulation_config_defaults());
+        results.push(self.test_execution_model_config_defaults());
 
         // Remote Task Lifecycle
         results.push(self.test_remote_task_id_uniqueness());
@@ -567,15 +567,15 @@ impl RemoteConformanceHarness {
         )
     }
 
-    /// Test simulation config defaults.
-    fn test_simulation_config_defaults(&mut self) -> ConformanceTestResult {
+    /// Test execution model config defaults.
+    fn test_execution_model_config_defaults(&mut self) -> ConformanceTestResult {
         self.harness.run_test(
             || {
                 let config = Phase0SimulationConfig::default();
                 let has_defaults = config.timeout > Duration::ZERO;
                 self.harness.verify(
                     has_defaults,
-                    "Simulation config should have reasonable defaults",
+                    "Execution model config should have reasonable defaults",
                 )
             },
             "simulation_config_defaults",

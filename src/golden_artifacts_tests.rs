@@ -154,7 +154,7 @@ mod tests {
             output.push_str(&format!("{} + {} = {}\n", a, b, result));
         }
 
-        // Multiplication examples using simulated operations
+        // Multiplication examples using deterministic operations.
         output.push_str("\n# Multiplication examples:\n");
         output.push_str("0 * 42 = 0  # zero property\n");
         output.push_str("1 * 42 = 42  # identity property\n");
@@ -279,7 +279,7 @@ mod tests {
         let mut output = String::new();
         output.push_str("# Trace Event Debug Format Examples\n\n");
 
-        // Mock trace event structures for testing
+        // Canonical trace event structures for testing.
         output.push_str("# TaskSpawn Event:\n");
         output.push_str("TaskSpawn {\n");
         output.push_str("  task_id: TaskId(1),\n");
@@ -615,7 +615,7 @@ mod tests {
 
         let mut total_bytes = 0;
         for (i, (event_id, event_type, payload)) in events_data.iter().enumerate() {
-            // Simulate canonical byte generation
+            // Generate canonical bytes.
             let event_id_bytes = event_id.as_bytes();
             let event_type_bytes = event_type.as_bytes();
             let payload_bytes = payload.to_string().as_bytes().to_vec();
@@ -756,7 +756,7 @@ mod tests {
         let mut output = String::new();
         output.push_str("# RaptorQ Decoder Deterministic Trace\n\n");
 
-        // Simulation of decoder progress with fixed parameters
+        // Decoder progress model with fixed parameters.
         let k = 8; // Source symbols
         let n = 12; // Total symbols (K + overhead)
         let symbol_size = 64; // bytes per symbol
@@ -767,7 +767,7 @@ mod tests {
         output.push_str(&format!("Symbol size: {} bytes\n", symbol_size));
         output.push_str("\n");
 
-        // Simulated systematic symbol reception
+        // Deterministic systematic symbol reception.
         output.push_str("Systematic Symbol Reception:\n");
         for i in 0..k {
             let symbol_id = i;
@@ -780,7 +780,7 @@ mod tests {
         }
         output.push_str("\n");
 
-        // Simulated repair symbol reception
+        // Deterministic repair symbol reception.
         output.push_str("Repair Symbol Reception:\n");
         for i in k..n {
             let symbol_id = i;
@@ -793,7 +793,7 @@ mod tests {
         }
         output.push_str("\n");
 
-        // Decode process simulation
+        // Decode process model.
         output.push_str("Decode Process:\n");
         output.push_str("Phase 1: Gaussian Elimination\n");
         for step in 0..k {
@@ -1176,8 +1176,8 @@ mod tests {
         ));
         output.push_str("\n");
 
-        // Key distribution simulation
-        output.push_str("## Key Distribution Simulation\n");
+        // Key distribution model.
+        output.push_str("## Key Distribution Model\n");
         let test_keys = vec![
             "user:12345",
             "session:abcdef",
@@ -1362,7 +1362,7 @@ debug_mode = false
         let mut output = String::new();
         output.push_str("# TLS Handshake Transcript Bytes (Deterministic)\n\n");
 
-        // TLS handshake message simulation
+        // TLS handshake message model.
         let handshake_messages = vec![
             (
                 "client_hello",
@@ -1613,7 +1613,7 @@ debug_mode = false
             output.push_str("\n");
         }
 
-        // HPACK table state simulation
+        // HPACK table state model.
         output.push_str("## Dynamic Table State\n");
         output.push_str("Dynamic Table Size: 4096 bytes\n");
         output.push_str("Current Used Size: 55 bytes\n");
@@ -1653,7 +1653,7 @@ debug_mode = false
         output.push_str("Test Type: Sequential Obligation Leak Detection\n");
         output.push_str("\n");
 
-        // E-value trajectory simulation
+        // E-value trajectory model.
         output.push_str("## E-Value Trajectory\n");
         let trajectory_points = vec![
             (0, 1.000000, "Initial", "Process start"),
@@ -1708,7 +1708,7 @@ debug_mode = false
 
         // Trajectory points: Step (4 bytes) + E-value (8 bytes) + Event type (1 byte).
         // Cast e_value to f64 so to_be_bytes resolves; tuple literal otherwise
-        // leaves the float as an untyped `{float}` placeholder that has no methods.
+        // leaves the float as an untyped `{float}` literal that has no methods.
         for (step, e_value, event_type, _) in &trajectory_points {
             trajectory_bytes.extend_from_slice(&(*step as u32).to_be_bytes());
             trajectory_bytes.extend_from_slice(&(*e_value as f64).to_be_bytes());
@@ -1824,7 +1824,7 @@ debug_mode = false
         output.push_str(&format!("Hash Algorithm: deterministic_hash_v1\n"));
         output.push_str("\n");
 
-        // HTTP response simulation
+        // HTTP response model.
         output.push_str("## HTTP Response (Set-Cookie)\n");
         let response_headers = "HTTP/1.1 200 OK\r\n\
             Content-Type: application/json\r\n\
@@ -1873,7 +1873,7 @@ debug_mode = false
                     0x05, 0x00, 0x00, 0x00, // fd: 5
                     0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset: 4096
                     0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, // addr: buffer address (simulated)
+                    0x00, // addr: deterministic buffer address
                     0x00, 0x10, 0x00, 0x00, // len: 4096 bytes
                     0x00, 0x00, 0x00, 0x00, // rw_flags
                     0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 1
@@ -1889,7 +1889,7 @@ debug_mode = false
                     0x06, 0x00, 0x00, 0x00, // fd: 6
                     0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset: 8192
                     0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x00, // addr: buffer address (simulated)
+                    0x00, // addr: deterministic buffer address
                     0x00, 0x08, 0x00, 0x00, // len: 2048 bytes
                     0x00, 0x00, 0x00, 0x00, // rw_flags
                     0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 2
@@ -2054,8 +2054,8 @@ debug_mode = false
         }
         output.push_str("\n");
 
-        // Frame parsing simulation
-        output.push_str("## Frame Parsing Simulation\n");
+        // Frame parsing model.
+        output.push_str("## Frame Parsing Model\n");
         let mut total_bytes = 0;
         let mut frame_count = 0;
 

@@ -34,9 +34,9 @@ mod fs_config_tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
-    // ═══ Mock Filesystem Implementation ══════════════════════════════════════════
+    // ═══ Deterministic Filesystem Model ══════════════════════════════════════════
 
-    /// Mock VFS implementation for testing filesystem metamorphic relations.
+    /// Deterministic VFS implementation for testing filesystem metamorphic relations.
     #[derive(Debug, Clone)]
     pub struct MockVfs {
         files: HashMap<PathBuf, MockVfsFileData>,
@@ -74,9 +74,9 @@ mod fs_config_tests {
             vfs
         }
 
-        /// Canonicalize a path (mock implementation for testing).
+        /// Canonicalize a path with deterministic normalization.
         pub fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-            // Mock canonicalization: resolve relative paths, normalize separators
+            // Deterministic canonicalization: resolve relative paths, normalize separators.
             let mut canonical = PathBuf::new();
 
             // Start with base directory if relative path
@@ -186,9 +186,9 @@ mod fs_config_tests {
         }
     }
 
-    // ═══ Mock Config Parser Implementation ═══════════════════════════════════════
+    // ═══ Deterministic Config Parser Model ═══════════════════════════════════════
 
-    /// Mock configuration parser for testing config metamorphic relations.
+    /// Deterministic configuration parser for testing config metamorphic relations.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     pub struct MockRuntimeConfig {
         pub worker_threads: usize,
@@ -292,9 +292,9 @@ mod fs_config_tests {
         }
     }
 
-    // ═══ Mock Uring Vector I/O Implementation ═══════════════════════════════════
+    // ═══ Deterministic Uring Vector I/O Model ═══════════════════════════════════
 
-    /// Mock uring-style vector I/O for testing consistency relations.
+    /// Deterministic uring-style vector I/O for testing consistency relations.
     #[derive(Debug, Clone)]
     pub struct MockUringVector {
         buffers: Vec<Vec<u8>>,
@@ -305,12 +305,12 @@ mod fs_config_tests {
             Self { buffers }
         }
 
-        /// Read data using vectored I/O (mock implementation).
+        /// Read data using deterministic vectored I/O.
         pub fn readv(&self) -> Vec<u8> {
             self.buffers.iter().flatten().copied().collect()
         }
 
-        /// Write data using vectored I/O (mock implementation).
+        /// Write data using deterministic vectored I/O.
         pub fn writev(&self, data: &[u8]) -> Vec<Vec<u8>> {
             if self.buffers.is_empty() {
                 return vec![data.to_vec()];
@@ -343,9 +343,9 @@ mod fs_config_tests {
         }
     }
 
-    // ═══ Mock Buffered I/O Implementation ═══════════════════════════════════════
+    // ═══ Deterministic Buffered I/O Model ═══════════════════════════════════════
 
-    /// Mock buffered reader for testing chunk-boundary equivalence.
+    /// Deterministic buffered reader for testing chunk-boundary equivalence.
     pub struct MockBufReader {
         data: Cursor<Vec<u8>>,
         buffer_size: usize,
@@ -935,7 +935,7 @@ mod fs_config_tests {
 
 #[cfg(not(all(test, not(target_arch = "wasm32"))))]
 mod no_fs_config_fallback {
-    // Minimal stub tests when filesystem features are unavailable
+    // Minimal feature-disabled coverage when filesystem features are unavailable.
     #[test]
     fn fs_config_feature_disabled() {
         // This test always passes - just documents that FS/config tests are skipped

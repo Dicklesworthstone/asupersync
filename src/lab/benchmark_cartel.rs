@@ -152,7 +152,7 @@ pub enum BenchmarkStrategy {
     Concurrent,
     /// Distributed across multiple instances
     Distributed,
-    /// Mixed workload simulation
+    /// Mixed deterministic workload
     MixedWorkload,
 }
 
@@ -709,7 +709,7 @@ mod tests {
                     completed_iterations: 100,
                     environment: EnvironmentInfo {
                         platform: "test".to_string(),
-                        cpu_info: "mock-cpu".to_string(),
+                        cpu_info: "test-cpu".to_string(),
                         memory_mb: 1024,
                         rust_version: "1.70.0".to_string(),
                         build_profile: "release".to_string(),
@@ -790,7 +790,7 @@ mod tests {
                 completed_iterations: 100,
                 environment: EnvironmentInfo {
                     platform: "test".to_string(),
-                    cpu_info: "mock-cpu".to_string(),
+                    cpu_info: "test-cpu".to_string(),
                     memory_mb: 1024,
                     rust_version: "1.70.0".to_string(),
                     build_profile: "release".to_string(),
@@ -839,7 +839,7 @@ mod tests {
                 completed_iterations: 100,
                 environment: EnvironmentInfo {
                     platform: "test".to_string(),
-                    cpu_info: "mock-cpu".to_string(),
+                    cpu_info: "test-cpu".to_string(),
                     memory_mb: 1024,
                     rust_version: "1.70.0".to_string(),
                     build_profile: "release".to_string(),

@@ -13,7 +13,7 @@ pub enum TestVerdict {
     Pass,
     Fail(String),
     Skip(String),
-    XFail(String), // Expected failure (documented divergence)
+    ExpectedGap(String), // Documented divergence.
 }
 
 /// RFC-style requirement levels for coverage tracking.
@@ -111,8 +111,8 @@ impl ConformanceTestResult {
         }
     }
 
-    /// Creates a new expected failure test result.
-    pub fn xfail(
+    /// Creates a new documented-gap test result.
+    pub fn expected_gap(
         test_name: &'static str,
         level: RequirementLevel,
         category: TestCategory,
@@ -122,7 +122,7 @@ impl ConformanceTestResult {
             test_name,
             requirement_level: level,
             category,
-            verdict: TestVerdict::XFail(reason.into()),
+            verdict: TestVerdict::ExpectedGap(reason.into()),
             spec_section: None,
             duration_micros: None,
         }
@@ -140,9 +140,12 @@ impl ConformanceTestResult {
         self
     }
 
-    /// Returns true if this test passed or is an expected failure.
+    /// Returns true if this test passed or is a documented gap.
     pub fn is_successful(&self) -> bool {
-        matches!(self.verdict, TestVerdict::Pass | TestVerdict::XFail(_))
+        matches!(
+            self.verdict,
+            TestVerdict::Pass | TestVerdict::ExpectedGap(_)
+        )
     }
 
     /// Returns true if this is a hard failure (not expected).
@@ -178,7 +181,7 @@ impl CoverageStats {
             .count();
         let expected_failures = results
             .iter()
-            .filter(|r| matches!(r.verdict, TestVerdict::XFail(_)))
+            .filter(|r| matches!(r.verdict, TestVerdict::ExpectedGap(_)))
             .count();
         let skipped = results
             .iter()
@@ -280,7 +283,7 @@ impl CoverageStats {
     }
 }
 
-/// Mock time provider for deterministic testing.
+/// Deterministic time provider for testing.
 #[derive(Debug, Clone)]
 pub struct MockTime {
     current: Arc<std::sync::Mutex<asupersync::types::Time>>,
@@ -325,7 +328,7 @@ impl RuntimeConformanceHarness {
         self.test_counter.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Get the mock time provider.
+    /// Get the deterministic time provider.
     pub fn time(&self) -> &MockTime {
         &self.mock_time
     }
@@ -421,7 +424,7 @@ mod tests {
                 TestCategory::TaskExecution,
                 "failed",
             ),
-            ConformanceTestResult::xfail(
+            ConformanceTestResult::expected_gap(
                 "test3",
                 RequirementLevel::Should,
                 TestCategory::WorkStealing,
