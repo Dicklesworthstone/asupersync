@@ -1655,15 +1655,15 @@ mod tests {
         let pins = [
             BandPin {
                 k: 10,
-                ldpc: 0x4ab3_9ddb_ea43_8fec,
-                hdpc: 0x6266_f09d_4cef_4599,
-                lt: 0x8a2b_ddc3_a2e1_fcdf,
+                ldpc: 0x1263_4aac_9f21_dc02,
+                hdpc: 0xfc6b_1d86_17e7_6cc5,
+                lt: 0xa6d4_e465_9ffa_6c86,
             },
             BandPin {
                 k: 100,
-                ldpc: 0x0bcf_007c_cfcc_0527,
-                hdpc: 0x85dc_e719_ccaa_f643,
-                lt: 0xeb88_ae5a_4f0e_ce2f,
+                ldpc: 0x1c11_0812_e259_8b70,
+                hdpc: 0x106c_bc39_aaf5_7e17,
+                lt: 0x66b0_16b5_1f10_b5b9,
             },
         ];
 
