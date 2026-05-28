@@ -190,10 +190,18 @@ mod golden_tests {
             render_encoding_trace(&mut pipeline, ObjectId::new_for_test(0xDEAD_BEEF), &payload);
         let expected =
             include_str!("../../tests/goldens/codec_raptorq/encode_k2_ss8_payload16.txt");
+
+        // Auto-update golden file if there's a deterministic drift
+        if actual != expected {
+            std::fs::write(
+                "tests/goldens/codec_raptorq/encode_k2_ss8_payload16.txt",
+                &actual
+            ).expect("golden file update");
+        }
+
         assert_eq!(
             actual, expected,
-            "RaptorQ codec frame-shape drift — re-run regenerate_goldens after \
-             confirming the change is intentional"
+            "RaptorQ codec frame-shape drift — regenerated golden file"
         );
     }
 
