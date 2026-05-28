@@ -1230,7 +1230,12 @@ mod tests {
             violation_type: Option<String>,
         }
         impl tracing::field::Visit for VisitField {
-            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "violation_type" && self.violation_type.is_none() {
+                    let rendered = format!("{value:?}");
+                    self.violation_type = Some(rendered.trim_matches('"').to_string());
+                }
+            }
             fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
                 if field.name() == "violation_type" {
                     self.violation_type = Some(value.to_string());
