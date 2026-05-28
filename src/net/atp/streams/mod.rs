@@ -14,7 +14,7 @@ pub use scheduler::*;
 pub use stream::*;
 
 use crate::bytes::Bytes;
-use crate::cx::Cx;
+use crate::cx::{Cx, cap};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::types::outcome::Outcome;
@@ -459,7 +459,7 @@ mod tests {
         PacketAssembler, PacketConstraints, PacketNumberSpace,
     };
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         Cx::for_testing()
     }
 

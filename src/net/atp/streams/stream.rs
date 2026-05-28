@@ -8,7 +8,7 @@ use super::{
     StreamPriority, StreamResetCode,
 };
 use crate::bytes::Bytes;
-use crate::cx::Cx;
+use crate::cx::{Cx, cap};
 use crate::types::outcome::Outcome;
 use std::collections::VecDeque;
 
@@ -518,9 +518,9 @@ pub struct StreamStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cx::Cx;
+    use crate::cx::{Cx, cap};
 
-    fn test_cx() -> Cx {
+    fn test_cx() -> Cx<cap::All> {
         Cx::for_testing()
     }
 
