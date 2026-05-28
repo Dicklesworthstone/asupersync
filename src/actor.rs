@@ -1065,7 +1065,6 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             record.set_cx(child_cx.clone());
         }
 
-        let cx_for_send = child_cx.clone();
         let inner_weak = Arc::downgrade(&child_cx.inner);
         let state_for_task = Arc::clone(&actor_state);
 
@@ -1082,16 +1081,14 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             .await;
             let outcome = match result {
                 Ok(actor_final) => {
-                    let _ = result_tx.send(&cx_for_send, Ok(actor_final));
+                    let _ = result_tx.send_blocking(Ok(actor_final));
                     Outcome::Ok(())
                 }
                 Err(payload) => {
                     let msg = crate::cx::scope::payload_to_string(&payload);
                     let panic_payload = crate::types::PanicPayload::new(msg);
-                    let _ = result_tx.send(
-                        &cx_for_send,
-                        Err(JoinError::Panicked(panic_payload.clone())),
-                    );
+                    let _ =
+                        result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     Outcome::Panicked(panic_payload)
                 }
             };
@@ -1178,7 +1175,6 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             record.set_cx(child_cx.clone());
         }
 
-        let cx_for_send = child_cx.clone();
         let inner_weak = Arc::downgrade(&child_cx.inner);
         let region_id = self.region_id();
         let state_for_task = Arc::clone(&actor_state);
@@ -1200,7 +1196,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             )
             .await;
             let outcome = join_result_to_task_outcome(&result).map_err(|_| ());
-            let _ = result_tx.send(&cx_for_send, result);
+            let _ = result_tx.send_blocking(result);
             state_for_task.store(ActorState::Stopped);
             outcome
         };
