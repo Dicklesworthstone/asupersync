@@ -516,9 +516,9 @@ mod tests {
 
     #[test]
     fn parse_usize_valid() {
-        assert_eq!(super::parse_usize("TEST", "42").unwrap(), 42);
-        assert_eq!(super::parse_usize("TEST", " 100 ").unwrap(), 100);
-        assert_eq!(super::parse_usize("TEST", "0").unwrap(), 0);
+        assert_eq!(super::parse_usize("TEST", "42").expect("should parse valid usize '42'"), 42);
+        assert_eq!(super::parse_usize("TEST", " 100 ").expect("should parse valid usize ' 100 ' with whitespace"), 100);
+        assert_eq!(super::parse_usize("TEST", "0").expect("should parse valid usize '0'"), 0);
     }
 
     #[test]
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn parse_u32_valid() {
-        assert_eq!(super::parse_u32("TEST", "128").unwrap(), 128);
+        assert_eq!(super::parse_u32("TEST", "128").expect("should parse valid u32 '128'"), 128);
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
     fn parse_bool_all_truthy() {
         for val in &["true", "1", "yes", "on", "TRUE", "Yes", "ON"] {
             assert!(
-                super::parse_bool("TEST", val).unwrap(),
+                super::parse_bool("TEST", val).expect(&format!("should parse truthy value '{}'", val)),
                 "expected true for {val}"
             );
         }
@@ -553,7 +553,7 @@ mod tests {
     fn parse_bool_all_falsy() {
         for val in &["false", "0", "no", "off", "FALSE", "No", "OFF"] {
             assert!(
-                !super::parse_bool("TEST", val).unwrap(),
+                !super::parse_bool("TEST", val).expect(&format!("should parse falsy value '{}'", val)),
                 "expected false for {val}"
             );
         }
@@ -572,7 +572,7 @@ mod tests {
     fn env_overrides_worker_threads() {
         with_env(ENV_WORKER_THREADS, "8", || {
             let mut config = RuntimeConfig::default();
-            apply_env_overrides(&mut config).unwrap();
+            apply_env_overrides(&mut config).expect("should apply worker_threads env override");
             assert_eq!(config.worker_threads, 8);
         });
     }
@@ -581,7 +581,7 @@ mod tests {
     fn env_overrides_task_queue_depth() {
         with_env(ENV_TASK_QUEUE_DEPTH, "2048", || {
             let mut config = RuntimeConfig::default();
-            apply_env_overrides(&mut config).unwrap();
+            apply_env_overrides(&mut config).expect("should apply task_queue_depth env override");
             assert_eq!(config.global_queue_limit, 2048);
         });
     }
@@ -590,7 +590,7 @@ mod tests {
     fn env_overrides_thread_stack_size() {
         with_env(ENV_THREAD_STACK_SIZE, "4194304", || {
             let mut config = RuntimeConfig::default();
-            apply_env_overrides(&mut config).unwrap();
+            apply_env_overrides(&mut config).expect("should apply thread_stack_size env override");
             assert_eq!(config.thread_stack_size, 4_194_304);
         });
     }
@@ -599,7 +599,7 @@ mod tests {
     fn env_overrides_thread_name_prefix() {
         with_env(ENV_THREAD_NAME_PREFIX, "myapp-worker", || {
             let mut config = RuntimeConfig::default();
-            apply_env_overrides(&mut config).unwrap();
+            apply_env_overrides(&mut config).expect("should apply thread_name_prefix env override");
             assert_eq!(config.thread_name_prefix, "myapp-worker");
         });
     }
