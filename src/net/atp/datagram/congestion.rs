@@ -176,10 +176,15 @@ impl CongestionController {
         priority_queues.insert(DatagramPriority::Low, VecDeque::new());
         priority_queues.insert(DatagramPriority::Background, VecDeque::new());
 
+        let mut state = CongestionState::new();
+        if let Some(initial_last_send) = state.last_send.checked_sub(config.min_send_interval) {
+            state.last_send = initial_last_send;
+        }
+
         Self {
             config,
             priority_queues,
-            state: CongestionState::new(),
+            state,
             stats: CongestionStats::default(),
         }
     }

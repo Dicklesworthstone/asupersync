@@ -295,10 +295,6 @@ impl ProbeManager {
         probe_type: ProbeType,
         path_id: u64,
     ) -> Outcome<DatagramFrame, DatagramError> {
-        if !self.transport.is_enabled() {
-            return Outcome::err(DatagramError::NotSupported);
-        }
-
         let probe_id = self.next_probe_id();
         let sequence = self.next_sequence(probe_type);
 
