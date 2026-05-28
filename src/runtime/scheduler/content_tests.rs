@@ -44,21 +44,21 @@ fn test_small_file_first_policy() {
     // Small file should come first (highest efficiency: 10.0)
     let (next, evidence) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("scheduler should return small_file first");
     assert_eq!(next.id, small_file.id);
     assert_eq!(evidence.reason, ScheduleReason::EfficiencyOptimal);
 
-    // Medium file second (efficiency: 4.0)
+    // Large file second (efficiency: 5.0)
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
-    assert_eq!(next.id, medium_file.id);
-
-    // Large file last (efficiency: 5.0, but scheduled after medium due to generation)
-    let (next, _) = scheduler
-        .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("scheduler should return large_file second");
     assert_eq!(next.id, large_file.id);
+
+    // Medium file last (efficiency: 4.0)
+    let (next, _) = scheduler
+        .next_content(Time::from_nanos(1_000_000_000))
+        .expect("scheduler should return medium_file last");
+    assert_eq!(next.id, medium_file.id);
 }
 
 /// Tests metadata-first prioritization.
@@ -118,7 +118,7 @@ fn test_prefix_first_delivery() {
     // Prefix should come first due to highest utility
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("scheduler should return prefix_chunk first");
     assert_eq!(next.id, prefix_chunk.id);
     assert_eq!(next.metadata.get("chunk_type"), Some(&"prefix".to_string()));
 }
@@ -166,7 +166,7 @@ fn test_relay_expensive_repair() {
     // Direct repair should be prioritized (higher efficiency: 5.0 vs 0.5)
     let (next, _) = scheduler
         .next_content(Time::from_nanos(1_000_000_000))
-        .unwrap();
+        .expect("scheduler should return direct_repair first");
     assert_eq!(next.id, direct_repair.id);
     assert_eq!(next.metadata.get("path_type"), Some(&"direct".to_string()));
 }
