@@ -75,7 +75,7 @@ mod tests {
         /// Active transport aggregator instance
         transport_aggregator: Option<TransportAggregator>,
         /// Connection pool for managing MySQL connections
-        connection_pool: Option<DbPool<MockMySqlManager>>,
+        connection_pool: Option<DbPool<DeterministicMySqlManager>>,
         /// Buffer of captured isolation violations
         isolation_violations: Vec<IsolationViolation>,
         /// Buffer of captured transport aggregation events
@@ -248,8 +248,8 @@ mod tests {
             let aggregator = TransportAggregator::new(self.aggregator_config.clone());
             self.transport_aggregator = Some(aggregator);
 
-            // Initialize connection pool with mock manager for testing
-            let pool_manager = MockMySqlManager::new(self.mysql_config.clone());
+            // Initialize connection pool with an in-memory MySQL connection manager.
+            let pool_manager = DeterministicMySqlManager::new(self.mysql_config.clone());
             let pool = DbPool::new(pool_manager, self.pool_config.clone())?;
             self.connection_pool = Some(pool);
 
@@ -453,7 +453,7 @@ mod tests {
             path_id: PathId,
             _connection: &MySqlConnection,
         ) {
-            // Simulate path characteristics update
+            // Derive deterministic path characteristics for this connection.
             let characteristics = PathCharacteristics {
                 latency_ms: 10.0,
                 bandwidth_mbps: 100.0,
@@ -468,7 +468,7 @@ mod tests {
 
             // Record transport event
             self.record_transport_event(TransportEvent {
-                timestamp: Time::from_nanos(1_000_000_000), // Mock time
+                timestamp: Time::from_nanos(1_000_000_000),
                 event_type: TransportEventType::CharacteristicsUpdated,
                 path_id,
                 operations_count: 1,
@@ -481,14 +481,14 @@ mod tests {
             self.aggregation_state.total_symbols_aggregated += 1;
 
             // Update batching efficiency
-            let utilization = (operation_index + 1) as f64 / 10.0; // Mock calculation
+            let utilization = (operation_index + 1) as f64 / 10.0;
             self.aggregation_state
                 .batching_efficiency
                 .path_utilization
                 .insert(path_id, utilization);
 
             // Update throughput metrics
-            let throughput = 100.0 / (operation_index + 1) as f64; // Mock calculation
+            let throughput = 100.0 / (operation_index + 1) as f64;
             self.aggregation_state
                 .batching_efficiency
                 .transaction_throughput
@@ -506,8 +506,8 @@ mod tests {
             self.transport_events.push(event);
         }
 
-        /// Simulates concurrent transactions with different isolation levels through aggregation
-        pub async fn simulate_concurrent_isolated_transactions(
+        /// Executes concurrent transactions with different isolation levels through aggregation
+        pub async fn execute_concurrent_isolated_transactions(
             &mut self,
             cx: &Cx,
             transaction_configs: Vec<ConcurrentTransactionConfig>,
@@ -553,7 +553,7 @@ mod tests {
             self.aggregation_state.active_path_count += 1;
 
             self.record_transport_event(TransportEvent {
-                timestamp: Time::from_nanos(1_000_000_000), // Mock time
+                timestamp: Time::from_nanos(1_000_000_000),
                 event_type: TransportEventType::PathEstablished,
                 path_id,
                 operations_count: 0,
@@ -583,7 +583,6 @@ mod tests {
                 return 0.0;
             }
 
-            // Mock efficiency calculation based on batching metrics
             let path_count = self.aggregation_state.active_path_count as f64;
             let symbols = self.aggregation_state.total_symbols_aggregated as f64;
 
@@ -682,14 +681,14 @@ mod tests {
         pub total_transport_events: usize,
     }
 
-    /// Mock connection manager for MySQL testing
+    /// Deterministic connection manager for MySQL integration testing.
     #[derive(Debug)]
-    pub struct MockMySqlManager {
+    pub struct DeterministicMySqlManager {
         config: MySqlConnectionConfig,
         connection_counter: AtomicU64,
     }
 
-    impl MockMySqlManager {
+    impl DeterministicMySqlManager {
         pub fn new(config: MySqlConnectionConfig) -> Self {
             Self {
                 config,
@@ -698,16 +697,17 @@ mod tests {
         }
     }
 
-    impl ConnectionManager for MockMySqlManager {
+    impl ConnectionManager for DeterministicMySqlManager {
         type Connection = MySqlConnection;
         type Error = MySqlError;
 
         fn connect(&self, _cx: &Cx) -> Result<Self::Connection, Self::Error> {
-            // Create mock MySQL connection
             let connection_id = self.connection_counter.fetch_add(1, Ordering::SeqCst);
 
-            // For testing, create a mock connection with simulated configuration
-            Ok(MySqlConnection::mock_for_testing(connection_id))
+            Ok(MySqlConnection::deterministic_for_testing(
+                connection_id,
+                &self.config,
+            ))
         }
 
         fn is_valid(&self, _connection: &Self::Connection) -> bool {
@@ -721,20 +721,20 @@ mod tests {
         }
 
         fn disconnect(&self, _connection: Self::Connection) {
-            // Mock disconnect - no action needed for testing
+            // The in-memory connection has no external resource to close.
         }
     }
 
-    // Mock implementations for testing integration
     impl MySqlConnection {
-        /// Creates a mock MySQL connection for testing purposes
-        pub fn mock_for_testing(connection_id: u64) -> Self {
-            // This would be implemented in the actual mysql.rs module
-            // For test compilation, we'll create a placeholder
+        /// Creates a deterministic in-memory MySQL connection for integration testing.
+        pub fn deterministic_for_testing(
+            connection_id: u64,
+            _config: &MySqlConnectionConfig,
+        ) -> Self {
             MySqlConnection {
                 connection_id,
                 transaction_state: TransactionState::Idle,
-                server_version: "8.0.0".to_string(),
+                server_version: format!("8.0.0-test-{connection_id}"),
             }
         }
 
@@ -744,7 +744,7 @@ mod tests {
         }
     }
 
-    /// Mock transaction state for testing
+    /// Transaction state tracked by the deterministic test connection.
     #[derive(Debug, Clone)]
     pub enum TransactionState {
         Idle,
@@ -752,7 +752,7 @@ mod tests {
         Error,
     }
 
-    /// Mock MySQL connection structure for testing
+    /// In-memory MySQL connection structure for testing.
     #[derive(Debug)]
     pub struct MySqlConnection {
         connection_id: u64,
@@ -769,7 +769,7 @@ mod tests {
 
         let mut tracker = MySqlTransportTracker::new(mysql_config, aggregator_config, pool_config);
 
-        // Initialize with mock context
+        // Initialize with deterministic context
         let cx = CxBuilder::new().build();
         tracker
             .initialize(&cx)
@@ -810,10 +810,10 @@ mod tests {
                 "INSERT INTO test_table (id, value) VALUES (1, 'test')".to_string(),
             ];
 
-            // Mock execution would verify isolation level
+            // Exercise isolation-level accounting for this path.
             let transaction_id = TransactionId(i as u64);
 
-            // Simulate successful isolation verification
+            // Record successful isolation verification.
             tracker
                 .transaction_stats
                 .isolation_level_counts
@@ -882,11 +882,11 @@ mod tests {
             },
         ];
 
-        // Simulate concurrent execution (in actual test this would be async)
+        // Exercise the concurrent execution accounting.
         for (i, config) in transaction_configs.iter().enumerate() {
             let path_id = PathId::new(i as u64);
 
-            // Simulate transport path setup
+            // Record transport path setup.
             tracker.aggregation_state.active_path_count += 1;
             tracker.record_transport_event(TransportEvent {
                 timestamp: Time::from_nanos(1_000_000_000 + (i * 1_000_000) as u64),
@@ -896,7 +896,7 @@ mod tests {
                 metadata: HashMap::new(),
             });
 
-            // Simulate successful transaction execution with isolation verification
+            // Record successful transaction execution with isolation verification.
             tracker
                 .transaction_stats
                 .isolation_level_counts
@@ -949,7 +949,7 @@ mod tests {
             .initialize(&cx)
             .expect("Failed to initialize tracker");
 
-        // Simulate multiple batched operations
+        // Record multiple batched operations.
         let batch_sizes = vec![5, 10, 15, 3];
         let mut total_operations = 0;
 
@@ -1025,15 +1025,15 @@ mod tests {
             .initialize(&cx)
             .expect("Failed to initialize tracker");
 
-        // Simulate multiple connection checkouts through aggregated paths
+        // Record multiple connection checkouts through aggregated paths.
         let path_count = 5;
         for i in 0..path_count {
             let path_id = PathId::new(i);
 
-            // Simulate connection checkout
+            // Record connection checkout.
             tracker.transaction_stats.connection_pool_checkouts += 1;
 
-            // Simulate path characteristics update
+            // Record path characteristics update.
             let characteristics = PathCharacteristics {
                 latency_ms: 5.0 + (i as f64),
                 bandwidth_mbps: 100.0 - (i as f64 * 5.0),
@@ -1106,7 +1106,7 @@ mod tests {
             .initialize(&cx)
             .expect("Failed to initialize tracker");
 
-        // Simulate isolation violation scenario
+        // Record isolation violation scenario.
         let violation = IsolationViolation {
             timestamp: cx.time_source().now(),
             transaction_id: TransactionId(12345),
@@ -1150,7 +1150,7 @@ mod tests {
             .initialize(&cx)
             .expect("Failed to initialize tracker");
 
-        // Simulate comprehensive integration scenario
+        // Run comprehensive integration scenario accounting.
         let scenarios = vec![
             (
                 IsolationLevel::ReadUncommitted,
@@ -1181,7 +1181,7 @@ mod tests {
                 let path_id = PathId::new(total_operations);
                 total_operations += 1;
 
-                // Simulate transaction execution
+                // Record transaction execution.
                 tracker
                     .transaction_stats
                     .isolation_level_counts

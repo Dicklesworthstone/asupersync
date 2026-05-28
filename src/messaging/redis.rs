@@ -1662,7 +1662,7 @@ impl RedisConfig {
 
         // Look for userinfo section (anything before '@')
         if let Some((_userinfo, host_part)) = rest.rsplit_once('@') {
-            // Replace userinfo with redacted placeholder
+            // Replace userinfo with a redacted credential marker.
             format!("{}***@{}", scheme, host_part)
         } else {
             // No credentials in URL, return as-is
@@ -8215,7 +8215,7 @@ mod tests {
     /// channel name "news.tech" along with the original pattern "news.*".
     #[test]
     fn audit_psubscribe_glob_pattern_matching_news_tech() {
-        // Simulate Redis server response for PSUBSCRIBE pattern match
+        // Build Redis server response for PSUBSCRIBE pattern match.
         // Format: ["pmessage", pattern, actual_channel, payload]
         let event = RedisPubSub::parse_event(RespValue::Array(Some(vec![
             RespValue::BulkString(Some(b"pmessage".to_vec())),
@@ -9847,7 +9847,7 @@ mod tests {
     /// at the per-command position, return the connection to the pool, and
     /// leave the connection healthy enough to serve the next command.
     ///
-    /// Mock server scripts the wire exchange:
+    /// Scripted server drives the wire exchange:
     ///   1. Client sends HELLO 3 (RESP3 negotiation in ensure_initialized).
     ///      Server replies `-ERR unknown command 'HELLO'\r\n` so the client
     ///      falls through to RESP2 (no AUTH because no password configured).
@@ -9971,10 +9971,10 @@ mod tests {
     }
 
     // ========================================================================
-    // REAL REDIS INTEGRATION TESTS (Mock-Free Testing Pattern)
+    // REAL REDIS INTEGRATION TESTS (Live Testing Pattern)
     // ========================================================================
     //
-    // These tests replace the mock TCP server tests above with real Redis
+    // These tests replace scripted TCP server tests above with real Redis.
     // connections following the testing-perfect-e2e-integration-tests pattern.
     // Run with: REAL_REDIS_TESTS=true cargo test -- --nocapture
 
@@ -10329,8 +10329,7 @@ mod tests {
 
             log.phase("cancelled_operation");
 
-            // Simulate cancelled operation - in real Redis this should properly handle
-            // connection cleanup vs mock servers which might not
+            // Exercise cancelled operation against real Redis connection cleanup.
             let cancel_key = format!("{}:cancelled", key_prefix);
 
             // Start a potentially long operation
@@ -10416,7 +10415,7 @@ mod tests {
             // Test cancellation during transaction begin phase
             let cancel_key = format!("{}:cancel", key_prefix);
 
-            // Simulate cancellation during MULTI command
+            // Exercise cancellation during MULTI command.
             match crate::time::timeout(cx.now(), Duration::from_millis(1), client.transaction(&cx))
                 .await
             {

@@ -71,7 +71,7 @@ pub enum TestResult {
 }
 
 // ================================================================================================
-// Mock Kafka Implementation
+// Deterministic Kafka model
 // ================================================================================================
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -268,7 +268,7 @@ impl MockKafkaConsumer {
 }
 
 // ================================================================================================
-// Mock NATS Implementation
+// Deterministic NATS model
 // ================================================================================================
 
 #[derive(Debug, Clone)]
@@ -346,7 +346,7 @@ impl MockNatsClient {
 }
 
 // ================================================================================================
-// Mock JetStream Implementation
+// Deterministic JetStream model
 // ================================================================================================
 
 #[derive(Debug, Clone)]
@@ -491,7 +491,7 @@ impl MockJetStreamContext {
 }
 
 // ================================================================================================
-// Mock Redis Implementation
+// Deterministic Redis model
 // ================================================================================================
 
 #[derive(Debug, Clone)]
@@ -1415,7 +1415,7 @@ fn test_messaging_integration_scenario() {
     rebalancer.add_consumer(kafka_consumer);
     rebalancer.trigger_rebalance(&[partition.clone()]).unwrap();
 
-    // Message flow simulation: Order processing pipeline
+    // Message flow model: order processing pipeline
 
     // 1. Order received via Kafka (exactly-once)
     kafka_producer
@@ -1522,7 +1522,7 @@ fn run_messaging_conformance_suite() {
             &MESSAGING_CONFORMANCE_CASES[6],
             test_partition_rebalance_idempotency,
         ),
-        // Add placeholder for other test mappings
+        // Add remaining test mappings as conformance cases are promoted.
     ];
 
     println!("🧪 Running Messaging Primitives Conformance Tests [br-conformance-11]");

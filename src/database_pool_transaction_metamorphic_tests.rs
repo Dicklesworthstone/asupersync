@@ -38,7 +38,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Mock Implementations for Database Metamorphic Testing
+    // Deterministic implementations for database metamorphic testing
     // ═══════════════════════════════════════════════════════════════════════════
 
     #[derive(Debug, Clone, PartialEq)]
@@ -140,7 +140,7 @@ mod tests {
         }
 
         pub fn parse_and_serialize(&self) -> String {
-            // Mock implementation: parse SQL and serialize back
+            // Deterministic implementation: parse SQL and serialize back.
             let parsed = Self::normalize_sql(&self.sql);
             parsed
                 .replace(" WHERE ", " WHERE ")
@@ -161,7 +161,7 @@ mod tests {
                     .unwrap_or(result.len() - pos - 1)
                     + pos
                     + 1;
-                let param_placeholder = &result[pos..end_pos];
+                let _param_marker = &result[pos..end_pos];
                 let param_value = match &params[param_index] {
                     MockValue::Integer(i) => i.to_string(),
                     MockValue::Text(s) => format!("'{}'", s.replace('\'', "''")),

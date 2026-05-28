@@ -11,10 +11,11 @@ use super::{
     DEFAULT_MAX_PREPARED_STATEMENTS, DEFAULT_MAX_RESULT_ROWS, Format, FrontendMessage,
     FuzzCopyInEnd, PgConnection, PgConnectionInner, PgError, PgErrorDiagnostic, PgStream,
     PreparedStatementCache, fuzz_parse_copy_in_sequence, test_cancel_target,
+    test_pg_connect_options,
 };
 use crate::Cx;
 use crate::types::Outcome;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 
 struct CopyErrorProbe {
@@ -41,14 +42,17 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
         PgConnection {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
+                options: test_pg_connect_options(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: test_cancel_target(),
                 parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
+                explicitly_closed: false,
                 needs_rollback: false,
                 needs_discard: false,
+                subscribed_channels: BTreeSet::new(),
                 next_stmt_id: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),

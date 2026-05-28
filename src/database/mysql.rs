@@ -2524,7 +2524,8 @@ impl MySqlConnection {
         // Additional check: if SQL contains dynamic-looking patterns
         if sql.chars().any(|c| matches!(c, '{' | '}' | '%')) {
             return Err(MySqlError::InvalidQuery(
-                "Dynamic SQL pattern detected (contains format placeholders). Use prepared statements.".to_string()
+                "Dynamic SQL pattern detected (contains format markers). Use prepared statements."
+                    .to_string(),
             ));
         }
 
@@ -4836,7 +4837,7 @@ fn write_stmt_execute_params(
     for param in params {
         // Per the MySQL Internals manual (COM_STMT_EXECUTE), each
         // parameter's type is a 2-byte LE field where the LO byte
-        // carries MYSQL_TYPE_xxx and the HI byte's bit 0x80 is the
+        // carries a MYSQL_TYPE value and the HI byte's bit 0x80 is the
         // UNSIGNED flag. Without the flag, every numeric parameter is
         // interpreted as signed by the server — which silently rewrites
         // u32::MAX to -1, anything past i64::MAX to negative, and

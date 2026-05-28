@@ -1212,12 +1212,7 @@ impl<M: ConnectionManager> DbPool<M> {
     }
 
     /// Return a connection to the pool, preserving its original creation time.
-    fn return_connection(
-        &self,
-        mut conn: M::Connection,
-        created_at: Time,
-        client_id: Option<String>,
-    ) {
+    fn return_connection(&self, conn: M::Connection, created_at: Time, client_id: Option<String>) {
         // br-asupersync-gb3rck: Determine authentication state for this connection
         let authenticated_for = if self.config.validate_authentication_state {
             // If authentication validation is enabled, check current auth state
@@ -2320,11 +2315,6 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
             self.manager.disconnect(conn);
         }
-    }
-
-    /// Discard a connection instead of returning it to the pool.
-    fn discard_connection(&self, conn: M::Connection) {
-        self.discard_connection_with_client(conn, None);
     }
 
     /// br-asupersync-80525g: Internal method to discard connection with client tracking.

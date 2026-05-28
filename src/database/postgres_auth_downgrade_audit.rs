@@ -10,12 +10,16 @@
 
 use super::{
     DEFAULT_MAX_PREPARED_STATEMENTS, DEFAULT_MAX_RESULT_ROWS, PgConnectOptions, PgConnection,
-    PgConnectionInner, PgError, PgStream, PreparedStatementCache, SslMode,
+    PgConnectionInner, PgError, PgStream, PreparedStatementCache, SslMode, test_pg_connect_options,
 };
 use crate::cx::Cx;
 use crate::security::SecretString;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{ErrorKind, Read};
+
+fn run<F: std::future::Future>(future: F) -> F::Output {
+    futures_lite::future::block_on(future)
+}
 
 fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -27,14 +31,17 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
         PgConnection {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
+                options: test_pg_connect_options(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: super::test_cancel_target(),
                 parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
+                explicitly_closed: false,
                 needs_rollback: false,
                 needs_discard: false,
+                subscribed_channels: BTreeSet::new(),
                 next_stmt_id: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
@@ -144,7 +151,7 @@ fn audit_auth_method_downgrade_attack_prevention() {
     std::io::Write::write_all(&mut peer, &auth_request(3, &[])).unwrap();
 
     let cx = Cx::for_testing();
-    let err = super::run(conn.authenticate(&cx, &options_with_password()))
+    let err = run(conn.authenticate(&cx, &options_with_password()))
         .expect_err("cleartext auth must be rejected");
 
     match err {
@@ -189,7 +196,7 @@ fn audit_md5_auth_rejection_reference_pattern() {
     std::io::Write::write_all(&mut peer, &auth_request(5, b"salt")).unwrap();
 
     let cx = Cx::for_testing();
-    let err = super::run(conn.authenticate(&cx, &options_with_password()))
+    let err = run(conn.authenticate(&cx, &options_with_password()))
         .expect_err("MD5 auth must be rejected");
 
     match err {

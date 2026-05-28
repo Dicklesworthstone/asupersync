@@ -3149,6 +3149,20 @@ fn validate_notification_channel_name(channel: &str) -> Result<(), PgError> {
             "notification channel name cannot contain NUL bytes".to_string(),
         ));
     }
+    if channel.starts_with('.') || channel.ends_with('.') || channel.contains("..") {
+        return Err(PgError::Protocol(
+            "notification channel name must not contain empty path segments".to_string(),
+        ));
+    }
+    if !channel
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.')
+    {
+        return Err(PgError::Protocol(
+            "notification channel name may contain only ASCII letters, digits, underscores, and dots"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -3324,7 +3338,7 @@ impl PgConnection {
                 Ok(sql) => sql,
                 Err(err) => return Outcome::Err(err),
             };
-            match fresh.execute_unchecked(cx, &sql).await {
+            match fresh.execute_unchecked_on_open(cx, &sql).await {
                 Outcome::Ok(_) => {}
                 Outcome::Err(err) => return Outcome::Err(err),
                 Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -4159,6 +4173,7 @@ impl PgConnection {
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
+
         match self.flush_pending_deallocates_before_request(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
@@ -4353,6 +4368,11 @@ impl PgConnection {
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
+
+        self.execute_unchecked_on_open(cx, sql).await
+    }
+
+    async fn execute_unchecked_on_open(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
         match self.flush_pending_deallocates_before_request(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
@@ -6849,23 +6869,35 @@ mod typed_query_parameter_audit_tests {
 
         let test_cases = [
             (
-                MockPgConnection::extract_parameter_oids(&[&bool_val])[0],
+                ParameterOidProbe::extract_parameter_oids(&[&bool_val])[0],
                 16,
             ), // BOOL
-            (MockPgConnection::extract_parameter_oids(&[&i16_val])[0], 21), // INT2
-            (MockPgConnection::extract_parameter_oids(&[&i32_val])[0], 23), // INT4
-            (MockPgConnection::extract_parameter_oids(&[&i64_val])[0], 20), // INT8
             (
-                MockPgConnection::extract_parameter_oids(&[&f32_val])[0],
+                ParameterOidProbe::extract_parameter_oids(&[&i16_val])[0],
+                21,
+            ), // INT2
+            (
+                ParameterOidProbe::extract_parameter_oids(&[&i32_val])[0],
+                23,
+            ), // INT4
+            (
+                ParameterOidProbe::extract_parameter_oids(&[&i64_val])[0],
+                20,
+            ), // INT8
+            (
+                ParameterOidProbe::extract_parameter_oids(&[&f32_val])[0],
                 700,
             ), // FLOAT4
             (
-                MockPgConnection::extract_parameter_oids(&[&f64_val])[0],
+                ParameterOidProbe::extract_parameter_oids(&[&f64_val])[0],
                 701,
             ), // FLOAT8
-            (MockPgConnection::extract_parameter_oids(&[&str_val])[0], 25), // TEXT
             (
-                MockPgConnection::extract_parameter_oids(&[&string_val])[0],
+                ParameterOidProbe::extract_parameter_oids(&[&str_val])[0],
+                25,
+            ), // TEXT
+            (
+                ParameterOidProbe::extract_parameter_oids(&[&string_val])[0],
                 25,
             ), // TEXT
         ];
@@ -6995,7 +7027,7 @@ mod typed_query_parameter_audit_tests {
         // Rust: &"1000.50"  -- String that looks like a number
 
         let string_value = "1000.50";
-        let oids = MockPgConnection::extract_parameter_oids(&[&string_value]);
+        let oids = ParameterOidProbe::extract_parameter_oids(&[&string_value]);
 
         // AUDIT: Client must send TEXT OID, not NUMERIC OID
         assert_eq!(
@@ -14594,7 +14626,6 @@ mod tests {
     /// with realistic PostgreSQL protocol responses.
     #[test]
     fn prepared_cache_eviction_with_real_statements() {
-        use std::collections::VecDeque;
         use std::io::Write;
 
         run(async {
@@ -14756,7 +14787,7 @@ mod tests {
         use std::io::Write;
 
         run(async {
-            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let (mut conn, peer) = make_test_connection_with_peer();
             let cx = Cx::for_testing();
             let sql = "SELECT $1::text AS value";
             let param_value = "same-bytes";
@@ -15123,7 +15154,7 @@ mod tests {
         }
 
         run(async {
-            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let (mut conn, peer) = make_test_connection_with_peer();
             let cx = Cx::for_testing();
             let sql = "SELECT $1::text AS value";
             let other_sql = "SELECT $1::text AS value /* second stmt */";
@@ -16835,7 +16866,7 @@ mod tests {
 
         // Process rows one at a time - this should use O(1) memory per iteration
         let mut processed_count = 0;
-        let mut total_memory_should_be_bounded = true;
+        let total_memory_should_be_bounded = true;
 
         loop {
             match run(stream.next(&cx)) {
@@ -17625,7 +17656,7 @@ mod tests {
             init_test("audit_connection_error_detection_is_sound");
 
             // Test connection errors that should trigger reconnection
-            let connection_errors = vec![
+            let transient_connection_errors = vec![
                 PgError::ConnectionClosed,
                 PgError::Io(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -17635,10 +17666,9 @@ mod tests {
                     std::io::ErrorKind::ConnectionAborted,
                     "aborted",
                 )),
-                PgError::TlsRequired,
             ];
 
-            for error in &connection_errors {
+            for error in &transient_connection_errors {
                 assert!(
                     error.is_connection_error(),
                     "Error {:?} must be classified as connection error",
@@ -17651,6 +17681,16 @@ mod tests {
                     error
                 );
             }
+
+            let tls_required = PgError::TlsRequired;
+            assert!(
+                tls_required.is_connection_error(),
+                "TLS-required negotiation failure is connection-level"
+            );
+            assert!(
+                !tls_required.is_transient(),
+                "TLS-required negotiation failure should not be retried without configuration changes"
+            );
 
             // Test non-connection errors that should NOT trigger reconnection
             let non_connection_errors = vec![
