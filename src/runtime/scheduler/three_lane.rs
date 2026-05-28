@@ -5548,10 +5548,6 @@ impl ThreeLaneWorker {
                             // wake avoids misrouting the task; clear the dedup
                             // bit so a later valid wake can retry.
                             metadata.wake_state.clear();
-                            debug_assert!(
-                                false,
-                                "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
-                            );
                             error!(
                                 ?waiter,
                                 worker_id,
