@@ -11157,7 +11157,10 @@ mod tests {
 
             match result {
                 Ok(None) => {
-                    // Incomplete parse - acceptable for truncated input
+                    panic!(
+                        "Test case {i}: Complete malformed push frame length must return \
+                         structured Protocol error, not incomplete parse"
+                    );
                 }
                 Ok(Some(_)) => {
                     panic!(
@@ -11230,10 +11233,6 @@ mod tests {
                 "Extreme test {i}: Parser panicked on malformed input - should return Result::Err"
             );
         }
-
-        eprintln!(
-            "{{\"audit\":\"RESP3_PUSH_FRAME_MALFORMED_INPUT\",\"behavior\":\"structured_parse_error\",\"status\":\"SOUND\",\"spec_compliance\":\"actionable_errors\"}}"
-        );
 
         // BEHAVIOR VERIFICATION COMPLETE:
         // ✅ Option (b): Structured ParseError with actionable messages
