@@ -2433,7 +2433,43 @@ mod tests {
                     .collect::<String>()
             );
 
-            insta::assert_snapshot!(format!("cancel_token_serialization_{}", name), hex_output);
+            let expected = match name {
+                "fresh_token" => concat!(
+                    "Token: fresh_token\n",
+                    "Token ID: 0xc35d712d21a92850\n",
+                    "Object ID: 0x1111222233334444:0x5555666677778888\n",
+                    "Cancelled: false\n",
+                    "Wire bytes: [c3, 5d, 71, 2d, 21, a9, 28, 50, 11, 11, 22, 22, 33, 33, 44, 44, 55, 55, 66, 66, 77, 77, 88, 88, 00]\n",
+                    "Hex: c35d712d21a928501111222233334444555566667777888800"
+                ),
+                "cancelled_token" => concat!(
+                    "Token: cancelled_token\n",
+                    "Token ID: 0x24c64de6e8aa6e00\n",
+                    "Object ID: 0xaaaabbbbccccdddd:0xeeeeffff00001111\n",
+                    "Cancelled: true\n",
+                    "Wire bytes: [24, c6, 4d, e6, e8, aa, 6e, 00, aa, aa, bb, bb, cc, cc, dd, dd, ee, ee, ff, ff, 00, 00, 11, 11, 01]\n",
+                    "Hex: 24c64de6e8aa6e00aaaabbbbccccddddeeeeffff0000111101"
+                ),
+                "test_token_minimal" => concat!(
+                    "Token: test_token_minimal\n",
+                    "Token ID: 0x123456789abcdef0\n",
+                    "Object ID: 0x0000000000000000:0x0000000000000001\n",
+                    "Cancelled: false\n",
+                    "Wire bytes: [12, 34, 56, 78, 9a, bc, de, f0, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 01, 00]\n",
+                    "Hex: 123456789abcdef00000000000000000000000000000000100"
+                ),
+                "test_token_max_values" => concat!(
+                    "Token: test_token_max_values\n",
+                    "Token ID: 0xffffffffffffffff\n",
+                    "Object ID: 0xdeadbeefcafebabe:0x1337133713371337\n",
+                    "Cancelled: true\n",
+                    "Wire bytes: [ff, ff, ff, ff, ff, ff, ff, ff, de, ad, be, ef, ca, fe, ba, be, 13, 37, 13, 37, 13, 37, 13, 37, 01]\n",
+                    "Hex: ffffffffffffffffdeadbeefcafebabe133713371337133701"
+                ),
+                _ => unreachable!("unknown cancel token serialization scenario: {name}"),
+            };
+
+            assert_eq!(hex_output, expected);
         }
     }
 
