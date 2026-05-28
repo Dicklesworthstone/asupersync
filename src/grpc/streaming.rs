@@ -3403,7 +3403,7 @@ mod tests {
         let binary_complex = MetadataValue::Binary(Bytes::from_static(b"\x00\xFF\x7F\x80\x42\x24"));
         outputs.push(format!("Binary Complex: {binary_complex:?}"));
 
-        let combined_output = outputs.join("\n");
+        let combined_output = format!("{}\n", outputs.join("\n"));
         assert_golden("metadata_value_debug_formatting", &combined_output);
     }
 
@@ -3469,12 +3469,12 @@ mod tests {
         for (input_key, binary, description) in test_cases {
             let result = normalize_metadata_key(input_key, binary);
             outputs.push(format!(
-                "{}: \"{}\" (binary={}) -> {:?}",
+                "{}: {:?} (binary={}) -> {:?}",
                 description, input_key, binary, result
             ));
         }
 
-        let combined_output = outputs.join("\n");
+        let combined_output = format!("{}\n", outputs.join("\n"));
         assert_golden("metadata_key_normalization", &combined_output);
     }
 

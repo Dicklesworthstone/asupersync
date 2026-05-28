@@ -1,0 +1,14 @@
+=== Empty Metadata ===
+Metadata { entries: [] }
+
+=== Single ASCII Entry ===
+Metadata { entries: [("content-type", Ascii("application/json"))] }
+
+=== Multiple ASCII Entries ===
+Metadata { entries: [("authorization", Ascii("Bearer token123")), ("x-request-id", Ascii("req-456-789")), ("user-agent", Ascii("asupersync/1.0"))] }
+
+=== Binary Entry ===
+Metadata { entries: [("trace-context-bin", Binary(Bytes { len: 4, start: 0, data: [1, 2, 3, 4] }))] }
+
+=== Mixed ASCII and Binary ===
+Metadata { entries: [("content-type", Ascii("application/grpc")), ("custom-data-bin", Binary(Bytes { len: 3, start: 0, data: [0, 255, 66] })), ("grpc-timeout", Ascii("30s"))] }

@@ -1,0 +1,6 @@
+ASCII Simple: Ascii("hello")
+ASCII Complex: Ascii("Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9")
+ASCII Special Chars: Ascii("value with spaces and symbols!@#$%")
+Binary Empty: Binary(Bytes { len: 0, start: 0, data: [] })
+Binary Simple: Binary(Bytes { len: 3, start: 0, data: [1, 2, 3] })
+Binary Complex: Binary(Bytes { len: 6, start: 0, data: [0, 255, 127, 128, 66, 36] })

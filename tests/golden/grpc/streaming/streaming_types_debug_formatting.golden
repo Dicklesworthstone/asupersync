@@ -1,0 +1,8 @@
+=== Server Streaming ===
+ServerStreaming { inner: ResponseStream { items: [], closed: false, graceful_terminal: false, terminal_status: None, waiter: None }, _marker: PhantomData<alloc::string::String> }
+
+=== Client Streaming ===
+ClientStreaming { _marker: PhantomData<u32> }
+
+=== Request Sink ===
+RequestSink { closed: false, sent_count: 0, _marker: PhantomData<bool> }

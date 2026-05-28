@@ -1,0 +1,12 @@
+ASCII uppercase: "Content-Type" (binary=false) -> Some("content-type")
+ASCII mixed case: "x-REQUEST-id" (binary=false) -> Some("x-request-id")
+ASCII with underscore: "user_agent" (binary=false) -> Some("user_agent")
+ASCII with dot: "trace.id" (binary=false) -> Some("trace.id")
+ASCII with numbers: "CUSTOM-HEADER-123" (binary=false) -> Some("custom-header-123")
+Binary without -bin suffix: "Trace-Context" (binary=true) -> Some("trace-context-bin")
+Binary with -BIN suffix: "Custom-Data-BIN" (binary=true) -> Some("custom-data-bin")
+Binary with correct suffix: "trace-context-bin" (binary=true) -> Some("trace-context-bin")
+Empty key: "" (binary=false) -> None
+Key with space: "invalid key" (binary=false) -> None
+Key with control char: "invalid\rkeyyyy" (binary=false) -> None
+Pseudo header: ":authority" (binary=false) -> None
