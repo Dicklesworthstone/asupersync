@@ -405,7 +405,7 @@ impl TaskRecord {
     /// Creates a new task record.
     #[must_use]
     pub fn new(id: TaskId, owner: RegionId, budget: Budget) -> Self {
-        Self::new_with_time(id, owner, budget, Time::ZERO)
+        Self::new_with_time(id, owner, budget, Time::from_nanos(1_000_000_000))
     }
 
     /// Creates a new task record with an explicit creation time.
@@ -1060,7 +1060,7 @@ impl crate::util::Recyclable for TaskRecord {
         self.cx = None;
 
         // Reset timing and metrics
-        self.created_at = Time::ZERO;
+        self.created_at = Time::from_nanos(1_000_000_000);
         self.deadline = None;
         self.polls_remaining = 0;
         self.total_polls = 0;
