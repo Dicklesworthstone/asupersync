@@ -147,6 +147,15 @@ impl ColorChoice {
 ///
 /// Implementors must be serializable via serde and provide human-readable formatting.
 pub trait Outputtable: Serialize {
+    /// JSON representation for machine-readable output.
+    ///
+    /// Defaults to serde serialization. Implementors can override this when the
+    /// stable CLI JSON shape intentionally differs from the internal Rust
+    /// wrapper type.
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+
     /// Human-readable representation.
     fn human_format(&self) -> String;
 
@@ -223,17 +232,23 @@ impl Output {
                 writeln!(self.writer, "{}", value.human_format())?;
             }
             OutputFormat::Json => {
-                let json = serde_json::to_string(value)
+                let json = value
+                    .json()
+                    .and_then(|json| serde_json::to_string(&json))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
             }
             OutputFormat::JsonPretty => {
-                let json = serde_json::to_string_pretty(value)
+                let json = value
+                    .json()
+                    .and_then(|json| serde_json::to_string_pretty(&json))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
             }
             OutputFormat::StreamJson => {
-                let json = serde_json::to_string(value)
+                let json = value
+                    .json()
+                    .and_then(|json| serde_json::to_string(&json))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
                 self.writer.flush()?; // Flush for streaming
@@ -261,18 +276,30 @@ impl Output {
                 }
             }
             OutputFormat::Json => {
-                let json = serde_json::to_string(values)
+                let values = values
+                    .iter()
+                    .map(Outputtable::json)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let json = serde_json::to_string(&values)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
             }
             OutputFormat::JsonPretty => {
-                let json = serde_json::to_string_pretty(values)
+                let values = values
+                    .iter()
+                    .map(Outputtable::json)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let json = serde_json::to_string_pretty(&values)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
             }
             OutputFormat::StreamJson => {
                 for value in values {
-                    let json = serde_json::to_string(value)
+                    let json = value
+                        .json()
+                        .and_then(|json| serde_json::to_string(&json))
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                     writeln!(self.writer, "{json}")?;
                     self.writer.flush()?;

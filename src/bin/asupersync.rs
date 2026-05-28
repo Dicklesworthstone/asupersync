@@ -22,7 +22,6 @@ use asupersync::atp::object::{ObjectGraph, ObjectId};
 use asupersync::atp::safety::{
     DestinationPolicy, ReceiveConsentSource, ReceiveMetadataPolicy, ReceivePlan,
     ReceivePreflightInput, RollbackResumePolicy, StorageEvidence, build_receive_plan,
-    consent_token,
 };
 use asupersync::atp::sdk::StreamEarlyUsabilityReport;
 use asupersync::atp::stream_object::ByteRange;
@@ -734,7 +733,7 @@ impl Outputtable for AtpGetPlanOutput {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 struct AtpGetPlanHumanOutput {
     lines: Vec<String>,
 }
@@ -759,7 +758,7 @@ impl Outputtable for AtpGetPlanHumanOutput {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 struct AtpGetStatusMessage {
     message: String,
 }
@@ -3757,10 +3756,14 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
 
     if args.dry_run || args.verbose {
         if output.format() == OutputFormat::Json {
-            output.write(&AtpGetPlanOutput { plan: plan.clone() })?;
+            output
+                .write(&AtpGetPlanOutput { plan: plan.clone() })
+                .map_err(output_write_error("ATP get plan"))?;
         } else {
             let plan_output = AtpGetPlanHumanOutput::new(&plan);
-            output.write(&plan_output)?;
+            output
+                .write(&plan_output)
+                .map_err(output_write_error("ATP get plan"))?;
         }
     }
 
@@ -4332,7 +4335,7 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
 
         // Show explain report if requested
         if args.explain {
-            let explain_report = AtpExplainReport::new(transfer_id);
+            let explain_report = AtpExplainReport::new(&transfer_id);
             output
                 .write(&explain_report)
                 .map_err(output_write_error("ATP send explain report"))?;
@@ -4349,7 +4352,7 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
             let total_bytes = source_summary.total_bytes;
             for chunk in progress_chunks(total_bytes) {
                 let progress =
-                    AtpProgressUpdate::new(transfer_id, &source_name, chunk, total_bytes);
+                    AtpProgressUpdate::new(&transfer_id, &source_name, chunk, total_bytes);
                 output
                     .write(&progress)
                     .map_err(output_write_error("ATP send progress"))?;
@@ -4361,7 +4364,7 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
         }
 
         // Final result
-        let payload = AtpSendResultOutput::new(&args.source, &args.target, transfer_id);
+        let payload = AtpSendResultOutput::new(&args.source, &args.target, &transfer_id);
         output
             .write(&payload)
             .map_err(output_write_error("ATP send result"))?;
@@ -4380,7 +4383,7 @@ fn atp_sync(args: &AtpSyncArgs, output: &mut Output) -> Result<(), CliError> {
         let transfer_id = stable_transfer_id("sync", &args.source, &args.target, &source_summary);
 
         if args.explain {
-            let explain_report = AtpExplainReport::new(transfer_id);
+            let explain_report = AtpExplainReport::new(&transfer_id);
             output
                 .write(&explain_report)
                 .map_err(output_write_error("ATP sync explain report"))?;
@@ -4396,7 +4399,7 @@ fn atp_sync(args: &AtpSyncArgs, output: &mut Output) -> Result<(), CliError> {
             let total_bytes = source_summary.total_bytes;
             for chunk in progress_chunks(total_bytes) {
                 let progress =
-                    AtpProgressUpdate::new(transfer_id, &source_name, chunk, total_bytes);
+                    AtpProgressUpdate::new(&transfer_id, &source_name, chunk, total_bytes);
                 output
                     .write(&progress)
                     .map_err(output_write_error("ATP sync progress"))?;
@@ -12221,29 +12224,6 @@ fn write_cli_error(err: &CliError, format: OutputFormat, color: ColorChoice) -> 
             writeln!(stderr, "{}\t{}\t{}", err.error_type, title, detail)
         }
     }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * 1024;
-    const GB: u64 = 1024 * 1024 * 1024;
-
-    if bytes >= GB {
-        format_scaled(bytes, GB, "GB")
-    } else if bytes >= MB {
-        format_scaled(bytes, MB, "MB")
-    } else if bytes >= KB {
-        format_scaled(bytes, KB, "KB")
-    } else {
-        format!("{bytes} bytes")
-    }
-}
-
-fn format_scaled(bytes: u64, unit: u64, label: &str) -> String {
-    let whole = bytes / unit;
-    let rem = bytes % unit;
-    let decimals = (rem * 100) / unit;
-    format!("{whole}.{decimals:02} {label} ({bytes} bytes)")
 }
 
 #[cfg(test)]
