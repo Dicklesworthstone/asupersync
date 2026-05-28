@@ -790,7 +790,7 @@ fn map_systematic_param_error(err: SystematicParamError) -> ProofArtifactDistrib
             details: _,
         } => ProofArtifactDistributionError::UnsupportedSourceBlock {
             requested: 0,
-            max_supported: 0, // Placeholder values since this is a table corruption error
+            max_supported: 0, // Sentinel values because this is a table corruption error.
         },
     }
 }
