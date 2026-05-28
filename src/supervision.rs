@@ -5943,7 +5943,7 @@ mod tests {
         assert!(table.by_region.is_empty());
 
         let _mref = table.monitor(watcher, region, monitored);
-        let _downs = table.notify_down(monitored, &Outcome::Ok(()), Time::ZERO);
+        let _downs = table.notify_down(monitored, &Outcome::Ok(()), Time::from_nanos(1_000_000_000));
         assert!(table.by_monitored.is_empty());
         assert!(table.by_region.is_empty());
 
@@ -5978,7 +5978,7 @@ mod tests {
         let mut table = MonitorTable::new();
         let task = task_id(99, 0);
 
-        let downs = table.notify_down(task, &Outcome::Ok(()), Time::ZERO);
+        let downs = table.notify_down(task, &Outcome::Ok(()), Time::from_nanos(1_000_000_000));
         assert!(downs.is_empty());
 
         crate::test_complete!("notify_down_no_monitors_returns_empty");

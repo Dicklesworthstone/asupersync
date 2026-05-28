@@ -1410,7 +1410,7 @@ mod tests {
         if !reason.is_normal() {
             for (lref, _peer) in &peers {
                 batch.push(
-                    Time::ZERO,
+                    Time::from_nanos(1_000_000_000),
                     ExitSignal {
                         from: t1,
                         reason: reason.clone(),
