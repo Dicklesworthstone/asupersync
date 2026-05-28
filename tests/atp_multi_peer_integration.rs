@@ -1,7 +1,7 @@
 //! ATP Multi-Peer Integration Tests
 //!
-//! Integration tests for the ATP multi-peer test infrastructure framework.
-//! Tests the framework itself rather than ATP implementations.
+//! Integration tests for the ATP multi-peer test infrastructure and deterministic
+//! contract execution.
 
 mod atp;
 
@@ -297,46 +297,69 @@ async fn test_harness_infrastructure() {
                 },
                 work_dir: None,
             },
+            crate::atp::multi_peer::PeerConfig {
+                peer_id: "seed2".to_string(),
+                role: PeerRole::Seed,
+                availability: crate::atp::multi_peer::AvailabilitySchedule {
+                    initially_online: true,
+                    schedule: vec![],
+                },
+                capabilities: crate::atp::multi_peer::PeerCapabilities {
+                    storage_quota: Some(5 * 1024 * 1024),
+                    bandwidth_limit: Some(512 * 1024),
+                    cache_enabled: true,
+                    seeding_enabled: true,
+                    relay_enabled: false,
+                },
+                work_dir: None,
+            },
         ],
         ..Default::default()
     };
 
-    // Execute scenario (will fail since ATP not implemented, but should return result)
+    // Execute scenario through the real deterministic contract path.
     let result = harness.execute_scenario(&simple_scenario).await;
     assert!(
         result.is_ok(),
-        "Harness should return result even if execution fails"
+        "Harness should return a successful contract execution result"
     );
 
     let result = result.unwrap();
     assert_eq!(result.schema_version, MULTI_PEER_REPORT_SCHEMA);
     assert_eq!(result.scenario.scenario_id, "test-harness-validation");
-    assert!(!result.success, "Should fail since ATP not implemented");
+    assert!(result.success, "Swarm contract execution should succeed");
     assert!(
-        result.error.is_some(),
-        "Should have error message about unimplemented features"
+        result.error.is_none(),
+        "Successful execution should not carry an error"
     );
+    assert_eq!(result.transfer_metrics.verified_bytes, 1024 * 1024);
+    assert_eq!(result.transfer_metrics.chunks_transferred, 16);
 
     println!("✅ Verified test harness infrastructure");
 }
 
 #[tokio::test]
 async fn test_scenario_executor_smoke_test() {
-    // This will fail since ATP features aren't implemented, but should test the infrastructure
     let result = ScenarioExecutor::smoke_test().await;
     assert!(
-        result.is_err(),
-        "Should fail since ATP features not implemented"
+        result.is_ok(),
+        "Smoke scenarios should execute through deterministic ATP contracts"
     );
 
-    let error = result.unwrap_err();
+    let results = result.unwrap();
+    assert!(!results.is_empty(), "Smoke execution should return results");
     assert!(
-        error.contains("not yet implemented") || error.contains("waiting for"),
-        "Error should indicate features not implemented: {}",
-        error
+        results.iter().all(|result| result.success),
+        "All smoke scenarios should pass contract execution"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result.transfer_metrics.verified_bytes > 0),
+        "Smoke execution should verify transferred bytes"
     );
 
-    println!("✅ Verified scenario executor handles unimplemented features gracefully");
+    println!("✅ Verified scenario executor smoke-test execution");
 }
 
 #[test]
@@ -370,9 +393,9 @@ fn test_schema_validation() {
 
 #[test]
 fn test_report_generation() {
-    // Create some mock results for testing report generation
+    // Create deterministic report rows for testing report generation.
     let scenarios = AllScenarios::smoke_test();
-    let mut mock_results = Vec::new();
+    let mut report_rows = Vec::new();
 
     for (i, scenario) in scenarios.iter().enumerate() {
         let result = crate::atp::multi_peer::MultiPeerResult {
@@ -415,11 +438,11 @@ fn test_report_generation() {
                 destinations: Vec::new(),
             },
         };
-        mock_results.push(result);
+        report_rows.push(result);
     }
 
     // Generate report
-    let report = TestReportGenerator::generate_report(&mock_results);
+    let report = TestReportGenerator::generate_report(&report_rows);
 
     assert_eq!(report.total_scenarios, scenarios.len());
     assert!(
