@@ -1715,7 +1715,7 @@ mod tests {
     }
 
     fn rid(n: u32) -> RegionId {
-        RegionId::from_arena(ArenaIndex::new(n, 0))
+        RegionId::from_arena(ArenaIndex::new(n + 1, 0))
     }
 
     // ---------------------------------------------------------------
