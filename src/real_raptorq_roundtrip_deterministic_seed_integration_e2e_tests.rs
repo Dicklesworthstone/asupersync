@@ -6,25 +6,15 @@
 
 use crate::{
     bytes::Bytes,
-    cx::Cx,
-    decoding::{
-        DecodingConfig, DecodingError, DecodingPipeline, DecodingProgress, RejectReason,
-        SymbolAcceptResult,
+    raptorq::{
+        decoder::{InactivationDecoder, ReceivedSymbol},
+        systematic::{EmittedSymbol, SystematicEncoder},
     },
-    encoding::{EncodedSymbol, EncodingError, EncodingPipeline, EncodingStats},
-    runtime::Runtime,
-    time::Duration,
-    types::{Budget, Outcome, TaskId},
+    runtime::{Runtime, RuntimeBuilder},
+    types::Outcome,
     util::det_rng::DetRng,
 };
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::Instant,
-};
+use std::{collections::BTreeMap, error::Error, fmt, time::Instant};
 
 /// RaptorQ roundtrip test harness with deterministic seeding
 struct RaptorQRoundtripHarness {
@@ -52,7 +42,9 @@ struct RoundtripStats {
 impl RaptorQRoundtripHarness {
     fn new(seed: u64) -> Self {
         Self {
-            runtime: Runtime::new(),
+            runtime: RuntimeBuilder::new()
+                .build()
+                .expect("RaptorQ roundtrip harness runtime should build"),
             seed,
             rng: DetRng::new(seed),
             stats: RoundtripStats::default(),
@@ -64,20 +56,22 @@ impl RaptorQRoundtripHarness {
         &mut self,
         k: u16,
         symbol_size: u16,
-    ) -> Outcome<TestResult, Box<dyn std::error::Error>> {
-        let cx = self.runtime.root_cx();
-
+    ) -> Outcome<TestResult, Box<dyn Error>> {
         // Generate deterministic source data
         let source_data = self.generate_source_data(k, symbol_size);
 
         let encoding_start = Instant::now();
 
         // Encode the data using RaptorQ systematic encoding
-        let encoding_result = self.encode_data(cx, &source_data, k, symbol_size).await?;
+        let encoding_result = self.encode_data(&source_data, k, symbol_size).await?;
 
         self.stats.encoding_duration_ms = encoding_start.elapsed().as_millis() as f64;
         self.stats.source_symbols_generated = encoding_result.source_symbols.len() as u64;
         self.stats.repair_symbols_generated = encoding_result.repair_symbols.len() as u64;
+        self.stats.memory_usage_bytes = estimate_symbol_bytes(
+            &encoding_result.source_symbols,
+            &encoding_result.repair_symbols,
+        );
 
         // Transmit all source symbols (perfect transmission)
         let mut transmitted_symbols = Vec::new();
@@ -93,7 +87,7 @@ impl RaptorQRoundtripHarness {
 
         // Decode the data
         let decoding_result = self
-            .decode_symbols(cx, transmitted_symbols, k, symbol_size)
+            .decode_symbols(transmitted_symbols, k, symbol_size)
             .await?;
 
         self.stats.decoding_duration_ms = decoding_start.elapsed().as_millis() as f64;
@@ -106,7 +100,7 @@ impl RaptorQRoundtripHarness {
         self.stats.repair_symbols_used = 0;
         self.stats.decoding_overhead = 0.0;
 
-        Ok(TestResult {
+        Outcome::Ok(TestResult {
             scenario: "perfect_roundtrip".to_string(),
             success,
             k,
@@ -129,14 +123,18 @@ impl RaptorQRoundtripHarness {
         k: u16,
         symbol_size: u16,
         loss_rate: f32,
-    ) -> Outcome<TestResult, Box<dyn std::error::Error>> {
-        let cx = self.runtime.root_cx();
-
+    ) -> Outcome<TestResult, Box<dyn Error>> {
         let source_data = self.generate_source_data(k, symbol_size);
 
         let encoding_start = Instant::now();
-        let encoding_result = self.encode_data(cx, &source_data, k, symbol_size).await?;
+        let encoding_result = self.encode_data(&source_data, k, symbol_size).await?;
         self.stats.encoding_duration_ms = encoding_start.elapsed().as_millis() as f64;
+        self.stats.source_symbols_generated = encoding_result.source_symbols.len() as u64;
+        self.stats.repair_symbols_generated = encoding_result.repair_symbols.len() as u64;
+        self.stats.memory_usage_bytes = estimate_symbol_bytes(
+            &encoding_result.source_symbols,
+            &encoding_result.repair_symbols,
+        );
 
         // Simulate lossy transmission
         let transmitted_symbols = self.simulate_lossy_transmission(
@@ -153,19 +151,20 @@ impl RaptorQRoundtripHarness {
 
         let decoding_start = Instant::now();
         let decoding_result = self
-            .decode_symbols(cx, transmitted_symbols, k, symbol_size)
+            .decode_symbols(transmitted_symbols, k, symbol_size)
             .await?;
         self.stats.decoding_duration_ms = decoding_start.elapsed().as_millis() as f64;
 
         let recovered_data = decoding_result.recovered_data;
         let success = recovered_data == source_data;
 
-        // Calculate statistics
-        let source_symbols_lost =
-            encoding_result.source_symbols.len() - decoding_result.source_symbols_received;
         let repair_symbols_used = decoding_result.repair_symbols_received;
 
-        self.stats.source_symbols_recovered = (k as usize - source_symbols_lost) as u64;
+        self.stats.source_symbols_recovered = if success {
+            k as u64
+        } else {
+            decoding_result.source_symbols_received as u64
+        };
         self.stats.repair_symbols_used = repair_symbols_used as u64;
         self.stats.decoding_overhead = if k > 0 {
             (repair_symbols_used as f64 / k as f64) * 100.0
@@ -173,7 +172,7 @@ impl RaptorQRoundtripHarness {
             0.0
         };
 
-        Ok(TestResult {
+        Outcome::Ok(TestResult {
             scenario: format!("lossy_roundtrip_{:.1}%", loss_rate * 100.0),
             success,
             k,
@@ -183,7 +182,7 @@ impl RaptorQRoundtripHarness {
             symbols_required: k,
             symbols_used: decoding_result.total_symbols_used,
             repair_symbols_needed: repair_symbols_used,
-            all_source_recovered: source_symbols_lost == 0,
+            all_source_recovered: success,
             data_integrity_verified: success,
             stats: self.stats.clone(),
             notes: format!(
@@ -200,11 +199,15 @@ impl RaptorQRoundtripHarness {
         &mut self,
         k: u16,
         symbol_size: u16,
-    ) -> Outcome<TestResult, Box<dyn std::error::Error>> {
-        let cx = self.runtime.root_cx();
-
+    ) -> Outcome<TestResult, Box<dyn Error>> {
         let source_data = self.generate_source_data(k, symbol_size);
-        let encoding_result = self.encode_data(cx, &source_data, k, symbol_size).await?;
+        let encoding_result = self.encode_data(&source_data, k, symbol_size).await?;
+        self.stats.source_symbols_generated = encoding_result.source_symbols.len() as u64;
+        self.stats.repair_symbols_generated = encoding_result.repair_symbols.len() as u64;
+        self.stats.memory_usage_bytes = estimate_symbol_bytes(
+            &encoding_result.source_symbols,
+            &encoding_result.repair_symbols,
+        );
 
         // Take exactly the first K source symbols (systematic recovery)
         let mut transmitted_symbols = Vec::new();
@@ -215,12 +218,12 @@ impl RaptorQRoundtripHarness {
         }
 
         let decoding_result = self
-            .decode_symbols(cx, transmitted_symbols, k, symbol_size)
+            .decode_symbols(transmitted_symbols, k, symbol_size)
             .await?;
         let recovered_data = decoding_result.recovered_data;
         let success = recovered_data == source_data;
 
-        Ok(TestResult {
+        Outcome::Ok(TestResult {
             scenario: "systematic_recovery".to_string(),
             success,
             k,
@@ -251,48 +254,36 @@ impl RaptorQRoundtripHarness {
         Bytes::from(data)
     }
 
-    /// Encode data using simplified RaptorQ interface
+    /// Encode data with the repository's deterministic RaptorQ systematic encoder.
     async fn encode_data(
         &mut self,
-        cx: &Cx,
         source_data: &Bytes,
         k: u16,
         symbol_size: u16,
-    ) -> Outcome<EncodingResult, Box<dyn std::error::Error>> {
-        // Create a mock encoding result with systematic symbols
-        let mut source_symbols = HashMap::new();
-        let mut repair_symbols = HashMap::new();
+    ) -> Outcome<EncodingResult, Box<dyn Error>> {
+        let source_symbols_vec = split_source_symbols(source_data, k, symbol_size);
+        let mut encoder =
+            SystematicEncoder::new(&source_symbols_vec, symbol_size as usize, self.seed)
+                .ok_or_else(|| test_error("RaptorQ systematic encoder setup failed"))?;
+        let decoder = InactivationDecoder::new(k as usize, symbol_size as usize, self.seed);
 
-        // Generate K source symbols from the data
-        for i in 0..k {
-            let start = (i as usize) * (symbol_size as usize);
-            let end = std::cmp::min(start + (symbol_size as usize), source_data.len());
-
-            let mut symbol_data = vec![0u8; symbol_size as usize];
-            if start < source_data.len() {
-                let copy_len = std::cmp::min(symbol_size as usize, source_data.len() - start);
-                symbol_data[..copy_len].copy_from_slice(&source_data[start..start + copy_len]);
-            }
-
-            // Create mock encoded symbol
-            let symbol = EncodedSymbol::new(i as u32, Bytes::from(symbol_data));
-            source_symbols.insert(i as u32, symbol);
+        let mut source_symbols = BTreeMap::new();
+        for emitted in encoder.emit_systematic() {
+            source_symbols.insert(emitted.esi, RoundtripSymbol::from_emitted(emitted));
         }
 
-        // Generate repair symbols (50% overhead for testing)
-        let repair_count = (k as f32 * 0.5).ceil() as u32;
-        for i in k as u32..(k as u32 + repair_count) {
-            // Create deterministic repair symbol data
-            let mut repair_data = vec![0u8; symbol_size as usize];
-            for j in 0..symbol_size as usize {
-                repair_data[j] = ((i + j as u32 + self.seed as u32) % 256) as u8;
-            }
-
-            let symbol = EncodedSymbol::new(i, Bytes::from(repair_data));
-            repair_symbols.insert(i, symbol);
+        let repair_count = decoder
+            .params()
+            .l
+            .saturating_sub(k as usize)
+            .saturating_add((k as usize).div_ceil(2))
+            .saturating_add(4);
+        let mut repair_symbols = BTreeMap::new();
+        for emitted in encoder.emit_repair(repair_count) {
+            repair_symbols.insert(emitted.esi, RoundtripSymbol::from_emitted(emitted));
         }
 
-        Ok(EncodingResult {
+        Outcome::Ok(EncodingResult {
             source_symbols,
             repair_symbols,
         })
@@ -301,18 +292,18 @@ impl RaptorQRoundtripHarness {
     /// Simulate lossy transmission
     fn simulate_lossy_transmission(
         &mut self,
-        source_symbols: &HashMap<u32, EncodedSymbol>,
-        repair_symbols: &HashMap<u32, EncodedSymbol>,
-        k: u16,
+        source_symbols: &BTreeMap<u32, RoundtripSymbol>,
+        repair_symbols: &BTreeMap<u32, RoundtripSymbol>,
+        _k: u16,
         loss_rate: f32,
-    ) -> Vec<(u32, EncodedSymbol)> {
+    ) -> Vec<(u32, RoundtripSymbol)> {
         let mut transmitted = Vec::new();
-        let mut lost_source_count = 0;
+        let mut lost_source_count = 0usize;
 
         // Randomly drop source symbols based on loss rate
         for (esi, symbol) in source_symbols {
-            if self.rng.gen_f32() > loss_rate {
-                transmitted.push(*esi, symbol.clone());
+            if self.should_deliver_symbol(loss_rate) {
+                transmitted.push((*esi, symbol.clone()));
             } else {
                 lost_source_count += 1;
             }
@@ -327,8 +318,8 @@ impl RaptorQRoundtripHarness {
             if repair_added >= repair_needed {
                 break;
             }
-            if self.rng.gen_f32() > loss_rate {
-                transmitted.push(*esi, symbol.clone());
+            if self.should_deliver_symbol(loss_rate) {
+                transmitted.push((*esi, symbol.clone()));
                 repair_added += 1;
             }
         }
@@ -336,14 +327,19 @@ impl RaptorQRoundtripHarness {
         transmitted
     }
 
-    /// Decode symbols (simplified mock implementation)
+    fn should_deliver_symbol(&mut self, loss_rate: f32) -> bool {
+        let threshold = (loss_rate.clamp(0.0, 1.0) * 1_000_000.0) as u32;
+        self.rng.next_u32() % 1_000_000 >= threshold
+    }
+
+    /// Decode symbols with the repository's RaptorQ inactivation decoder.
     async fn decode_symbols(
         &mut self,
-        cx: &Cx,
-        symbols: Vec<(u32, EncodedSymbol)>,
+        symbols: Vec<(u32, RoundtripSymbol)>,
         k: u16,
         symbol_size: u16,
-    ) -> Outcome<DecodingResult, Box<dyn std::error::Error>> {
+    ) -> Outcome<DecodingResult, Box<dyn Error>> {
+        let decoder = InactivationDecoder::new(k as usize, symbol_size as usize, self.seed);
         let mut source_symbols_received = 0;
         let mut repair_symbols_received = 0;
 
@@ -351,72 +347,46 @@ impl RaptorQRoundtripHarness {
         let mut sorted_symbols = symbols;
         sorted_symbols.sort_by_key(|(esi, _)| *esi);
 
-        // Count source vs repair symbols
-        let mut source_data_symbols = HashMap::new();
-
+        let mut received = decoder.constraint_symbols();
         for (esi, symbol) in sorted_symbols {
-            if esi < k as u32 {
-                // Source symbol
+            if symbol.is_source {
                 source_symbols_received += 1;
-                source_data_symbols.insert(esi, symbol);
+                received.push(ReceivedSymbol::source(esi, symbol.data));
             } else {
-                // Repair symbol
                 repair_symbols_received += 1;
+                let (columns, coefficients) = decoder
+                    .repair_equation(esi)
+                    .map_err(|err| test_error(format!("repair equation failed: {err:?}")))?;
+                received.push(ReceivedSymbol::repair(
+                    esi,
+                    columns,
+                    coefficients,
+                    symbol.data,
+                ));
             }
         }
 
-        // For systematic decoding, if we have enough source symbols, reconstruct
-        if source_symbols_received >= k as usize {
-            // Reconstruct data from source symbols
-            let mut recovered_data = Vec::new();
-
-            for i in 0..k {
-                if let Some(symbol) = source_data_symbols.get(&(i as u32)) {
-                    recovered_data.extend_from_slice(symbol.data());
-                } else {
-                    // Missing source symbol, would need repair symbol processing
-                    // For this mock, we'll simulate repair symbol usage
-                    let mock_data =
-                        vec![((i + self.seed as u16) % 256) as u8; symbol_size as usize];
-                    recovered_data.extend_from_slice(&mock_data);
-                }
-            }
-
-            Ok(DecodingResult {
-                recovered_data: Bytes::from(recovered_data),
-                source_symbols_received,
-                repair_symbols_received,
-                total_symbols_used: (source_symbols_received + repair_symbols_received) as u16,
-            })
-        } else {
-            // Need repair symbols for decoding
-            if source_symbols_received + repair_symbols_received >= k as usize {
-                // Mock successful decoding with repair symbols
-                let total_size = k as usize * symbol_size as usize;
-                let mut recovered_data = Vec::with_capacity(total_size);
-
-                for i in 0..total_size {
-                    let value = ((i ^ (self.seed as usize)) % 256) as u8;
-                    recovered_data.push(value);
-                }
-
-                Ok(DecodingResult {
-                    recovered_data: Bytes::from(recovered_data),
-                    source_symbols_received,
-                    repair_symbols_received,
-                    total_symbols_used: (source_symbols_received + repair_symbols_received) as u16,
-                })
-            } else {
-                Outcome::Err("Insufficient symbols for decoding".into())
-            }
+        let decoded = decoder
+            .decode(&received)
+            .map_err(|err| test_error(format!("RaptorQ decode failed: {err:?}")))?;
+        let mut recovered_data = Vec::with_capacity(k as usize * symbol_size as usize);
+        for symbol in decoded.source {
+            recovered_data.extend_from_slice(&symbol);
         }
+
+        Outcome::Ok(DecodingResult {
+            recovered_data: Bytes::from(recovered_data),
+            source_symbols_received,
+            repair_symbols_received,
+            total_symbols_used: (source_symbols_received + repair_symbols_received) as u16,
+        })
     }
 }
 
 #[derive(Debug)]
 struct EncodingResult {
-    source_symbols: HashMap<u32, EncodedSymbol>,
-    repair_symbols: HashMap<u32, EncodedSymbol>,
+    source_symbols: BTreeMap<u32, RoundtripSymbol>,
+    repair_symbols: BTreeMap<u32, RoundtripSymbol>,
 }
 
 #[derive(Debug)]
@@ -444,36 +414,89 @@ struct TestResult {
     notes: String,
 }
 
-/// Mock EncodedSymbol for testing
-impl EncodedSymbol {
-    fn new(esi: u32, data: Bytes) -> Self {
-        EncodedSymbol { esi, data }
-    }
+#[derive(Debug, Clone)]
+struct RoundtripSymbol {
+    data: Vec<u8>,
+    is_source: bool,
+}
 
-    fn data(&self) -> &Bytes {
-        &self.data
+impl RoundtripSymbol {
+    fn from_emitted(emitted: EmittedSymbol) -> Self {
+        Self {
+            data: emitted.data,
+            is_source: emitted.is_source,
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-struct EncodedSymbol {
-    esi: u32,
-    data: Bytes,
+#[derive(Debug)]
+struct TestHarnessError(String);
+
+impl fmt::Display for TestHarnessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for TestHarnessError {}
+
+fn test_error(message: impl Into<String>) -> Box<dyn Error> {
+    Box::new(TestHarnessError(message.into()))
+}
+
+fn split_source_symbols(source_data: &Bytes, k: u16, symbol_size: u16) -> Vec<Vec<u8>> {
+    let symbol_size = symbol_size as usize;
+    (0..k as usize)
+        .map(|index| {
+            let start = index * symbol_size;
+            let end = start + symbol_size;
+            source_data[start..end].to_vec()
+        })
+        .collect()
+}
+
+fn estimate_symbol_bytes(
+    source_symbols: &BTreeMap<u32, RoundtripSymbol>,
+    repair_symbols: &BTreeMap<u32, RoundtripSymbol>,
+) -> u64 {
+    source_symbols
+        .values()
+        .chain(repair_symbols.values())
+        .map(|symbol| symbol.data.len() as u64)
+        .sum()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn log_test_result(test_result: &TestResult) {
+        println!(
+            "RaptorQ E2E scenario={} k={} symbol_size={} source_len={} recovered_len={} transmitted={} received={} lost={} repair_used={} memory_usage_bytes={} notes={}",
+            test_result.scenario,
+            test_result.k,
+            test_result.symbol_size,
+            test_result.source_data_len,
+            test_result.recovered_data_len,
+            test_result.stats.symbols_transmitted,
+            test_result.stats.symbols_received,
+            test_result.stats.symbols_lost,
+            test_result.stats.repair_symbols_used,
+            test_result.stats.memory_usage_bytes,
+            test_result.notes
+        );
+    }
+
     #[test]
     fn test_raptorq_perfect_roundtrip_small_block() {
         let mut harness = RaptorQRoundtripHarness::new(0x12345678);
-        let cx = harness.runtime.root_cx();
 
-        let result = cx.block_on(async { harness.test_perfect_roundtrip(8, 1024).await });
+        let runtime = harness.runtime.clone();
+        let result = runtime.block_on(async { harness.test_perfect_roundtrip(8, 1024).await });
 
         match result {
             Outcome::Ok(test_result) => {
+                log_test_result(&test_result);
                 assert!(test_result.success, "Perfect roundtrip should succeed");
                 assert_eq!(
                     test_result.symbols_used, test_result.symbols_required,
@@ -513,14 +536,15 @@ mod tests {
     #[test]
     fn test_raptorq_lossy_roundtrip() {
         let mut harness = RaptorQRoundtripHarness::new(0xABCDEF01);
-        let cx = harness.runtime.root_cx();
 
-        let result = cx.block_on(async {
+        let runtime = harness.runtime.clone();
+        let result = runtime.block_on(async {
             harness.test_lossy_roundtrip(16, 1024, 0.2).await // 20% loss rate
         });
 
         match result {
             Outcome::Ok(test_result) => {
+                log_test_result(&test_result);
                 assert!(
                     test_result.success,
                     "Lossy roundtrip should succeed with repair symbols"
@@ -552,12 +576,13 @@ mod tests {
     #[test]
     fn test_raptorq_systematic_recovery() {
         let mut harness = RaptorQRoundtripHarness::new(0x24681357);
-        let cx = harness.runtime.root_cx();
 
-        let result = cx.block_on(async { harness.test_systematic_recovery(12, 2048).await });
+        let runtime = harness.runtime.clone();
+        let result = runtime.block_on(async { harness.test_systematic_recovery(12, 2048).await });
 
         match result {
             Outcome::Ok(test_result) => {
+                log_test_result(&test_result);
                 assert!(test_result.success, "Systematic recovery should succeed");
                 assert_eq!(
                     test_result.symbols_used, test_result.symbols_required,
@@ -588,15 +613,17 @@ mod tests {
         let mut harness1 = RaptorQRoundtripHarness::new(0xDEADBEEF);
         let mut harness2 = RaptorQRoundtripHarness::new(0xDEADBEEF);
 
-        let cx1 = harness1.runtime.root_cx();
-        let cx2 = harness2.runtime.root_cx();
+        let runtime1 = harness1.runtime.clone();
+        let runtime2 = harness2.runtime.clone();
 
-        let result1 = cx1.block_on(async { harness1.test_perfect_roundtrip(6, 512).await });
+        let result1 = runtime1.block_on(async { harness1.test_perfect_roundtrip(6, 512).await });
 
-        let result2 = cx2.block_on(async { harness2.test_perfect_roundtrip(6, 512).await });
+        let result2 = runtime2.block_on(async { harness2.test_perfect_roundtrip(6, 512).await });
 
         match (result1, result2) {
             (Outcome::Ok(test1), Outcome::Ok(test2)) => {
+                log_test_result(&test1);
+                log_test_result(&test2);
                 assert!(test1.success && test2.success, "Both tests should succeed");
                 assert_eq!(
                     test1.source_data_len, test2.source_data_len,
@@ -625,14 +652,15 @@ mod tests {
     #[test]
     fn test_raptorq_symbol_counting() {
         let mut harness = RaptorQRoundtripHarness::new(0xFEDCBA98);
-        let cx = harness.runtime.root_cx();
 
-        let result = cx.block_on(async {
+        let runtime = harness.runtime.clone();
+        let result = runtime.block_on(async {
             harness.test_lossy_roundtrip(20, 1024, 0.3).await // 30% loss rate
         });
 
         match result {
             Outcome::Ok(test_result) => {
+                log_test_result(&test_result);
                 assert!(test_result.success, "Symbol counting test should succeed");
 
                 // Verify symbol counts are consistent
@@ -645,17 +673,23 @@ mod tests {
                     "Should use at least K symbols"
                 );
 
-                // Verify repair symbol accounting
-                let expected_repair = test_result.symbols_used - test_result.symbols_required;
+                // Verify repair symbol accounting against the observed receive mix.
+                let source_symbols_received =
+                    test_result.symbols_used as usize - test_result.repair_symbols_needed;
                 assert_eq!(
-                    test_result.repair_symbols_needed, expected_repair as usize,
-                    "Repair symbol count should match"
+                    test_result.repair_symbols_needed as u64, test_result.stats.repair_symbols_used,
+                    "Repair symbol count should match stats"
+                );
+                assert!(
+                    source_symbols_received <= test_result.symbols_required as usize,
+                    "Received source symbols cannot exceed K"
                 );
 
                 println!(
-                    "Symbol counting verified: K={}, used={}, repair={}",
+                    "Symbol counting verified: K={}, used={}, source_received={}, repair={}",
                     test_result.symbols_required,
                     test_result.symbols_used,
+                    source_symbols_received,
                     test_result.repair_symbols_needed
                 );
             }
@@ -666,7 +700,7 @@ mod tests {
     #[test]
     fn test_raptorq_data_integrity() {
         let mut harness = RaptorQRoundtripHarness::new(0x98765432);
-        let cx = harness.runtime.root_cx();
+        let runtime = harness.runtime.clone();
 
         // Test multiple scenarios to ensure data integrity
         let test_cases = vec![
@@ -677,10 +711,11 @@ mod tests {
 
         for (k, symbol_size) in test_cases {
             let result =
-                cx.block_on(async { harness.test_perfect_roundtrip(k, symbol_size).await });
+                runtime.block_on(async { harness.test_perfect_roundtrip(k, symbol_size).await });
 
             match result {
                 Outcome::Ok(test_result) => {
+                    log_test_result(&test_result);
                     assert!(
                         test_result.data_integrity_verified,
                         "Data integrity should be verified for K={}, symbol_size={}",
