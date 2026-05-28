@@ -1,61 +1,13 @@
 ---
 source: src/distributed/distribution.rs
+assertion_line: 1096
 expression: canonical_assignment_mapping_snapshot()
 ---
 {
+  "assignments": [],
   "consistency": "quorum",
-  "required_acks": 3,
-  "source_count": 4,
   "repair_count": 2,
   "replica_count": 4,
-  "assignments": [
-    {
-      "replica_id": "r0",
-      "symbol_indices": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5
-      ],
-      "can_decode": true
-    },
-    {
-      "replica_id": "r1",
-      "symbol_indices": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5
-      ],
-      "can_decode": true
-    },
-    {
-      "replica_id": "r2",
-      "symbol_indices": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5
-      ],
-      "can_decode": true
-    },
-    {
-      "replica_id": "r3",
-      "symbol_indices": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5
-      ],
-      "can_decode": true
-    }
-  ]
+  "required_acks": 3,
+  "source_count": 4
 }
