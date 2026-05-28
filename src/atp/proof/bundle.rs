@@ -2026,10 +2026,9 @@ mod tests {
         assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Enhanced);
 
         // Add cryptographic evidence
-        bundle.extensions.insert(
-            "cryptographic_signatures".to_string(),
-            serde_json::json!({"type": "ed25519"}),
-        );
+        bundle
+            .sign_bundle("source", "key1", &AuthKey::from_seed(12_345))
+            .expect("source signature should satisfy cryptographic proof strength");
         assert_eq!(
             bundle.calculate_proof_strength(),
             ProofStrength::Cryptographic
@@ -2148,7 +2147,7 @@ mod tests {
             finalized_at_micros: Some(12500),
         };
 
-        // Create bundle without signatures - should be Enhanced strength
+        // Create bundle without repair metadata or signatures - peer identity alone is Basic.
         let mut bundle = AtpProofBundleBuilder::new("test-transfer")
             .manifest_root(manifest_root.clone())
             .object_roots(vec![object_id.clone()])
@@ -2169,8 +2168,7 @@ mod tests {
             .build()
             .expect("bundle should build");
 
-        // Should be Enhanced strength (has repair evidence and peer verification)
-        assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Enhanced);
+        assert_eq!(bundle.calculate_proof_strength(), ProofStrength::Basic);
 
         // Sign the bundle
         let auth_key = AuthKey::from_seed(12345);

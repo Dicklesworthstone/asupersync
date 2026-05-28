@@ -184,6 +184,15 @@ impl CapabilityVerifier {
         &self,
         capability: &Capability,
     ) -> CapabilityResult<ValidationResult> {
+        self.validate_capability_at(capability, std::time::SystemTime::now())
+    }
+
+    /// Verify and validate a capability at an explicit evaluation time.
+    pub fn validate_capability_at(
+        &self,
+        capability: &Capability,
+        now: std::time::SystemTime,
+    ) -> CapabilityResult<ValidationResult> {
         let mut issues = Vec::new();
 
         // Check signature
@@ -203,10 +212,7 @@ impl CapabilityVerifier {
         }
 
         // Check temporal validity
-        if !capability
-            .temporal
-            .is_valid_at(std::time::SystemTime::now())
-        {
+        if !capability.temporal.is_valid_at(now) {
             issues.push(ValidationIssue::TemporalViolation);
         }
 
@@ -347,8 +353,24 @@ mod tests {
     use crate::atp::policy::{CapabilityAction, ResourceScope, ScopeConstraints, TemporalScope};
     use crate::net::atp::protocol::PeerId;
     use std::collections::HashSet;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tempfile::tempdir;
+
+    fn fixed_time(seconds_since_epoch: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(seconds_since_epoch)
+    }
+
+    fn fixed_issued_at() -> SystemTime {
+        fixed_time(1_800_000_000)
+    }
+
+    fn fixed_validation_time() -> SystemTime {
+        fixed_time(1_800_000_100)
+    }
+
+    fn fixed_valid_temporal_scope() -> TemporalScope {
+        TemporalScope::window(fixed_time(1_799_999_900), fixed_time(1_800_003_700))
+    }
 
     fn create_test_signer() -> CapabilitySigner {
         let dir = tempdir().expect("tempdir");
@@ -361,15 +383,17 @@ mod tests {
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::Read);
 
-        Capability::new(
+        let mut capability = Capability::new(
             "test-grant-12345".to_string(),
             PeerId::test(1),
             signer.identity().peer_id(),
             ResourceScope::Any,
             actions,
-            TemporalScope::expires_in(Duration::from_secs(3600)),
+            fixed_valid_temporal_scope(),
             ScopeConstraints::default(),
-        )
+        );
+        capability.issued_at = fixed_issued_at();
+        capability
     }
 
     #[test]
@@ -413,7 +437,7 @@ mod tests {
         assert!(!valid);
 
         let result = verifier
-            .validate_capability(&capability)
+            .validate_capability_at(&capability, fixed_validation_time())
             .expect("validate tampered capability"); // ubs:ignore - test oracle
         assert!(!result.valid);
         assert!(result.issues.contains(&ValidationIssue::InvalidSignature));
@@ -452,7 +476,7 @@ mod tests {
         assert!(!valid);
 
         let result = verifier
-            .validate_capability(&capability)
+            .validate_capability_at(&capability, fixed_validation_time())
             .expect("validate unsigned capability"); // ubs:ignore - test oracle
         assert!(!result.valid);
         assert!(result.issues.contains(&ValidationIssue::InvalidSignature));
@@ -474,7 +498,7 @@ mod tests {
         verifier.add_trusted_peer(signer.identity().clone());
 
         let result = verifier
-            .validate_capability(&capability)
+            .validate_capability_at(&capability, fixed_validation_time())
             .expect("validate capability");
         assert!(!result.valid);
         assert!(result.issues.contains(&ValidationIssue::NoActions));
@@ -486,7 +510,7 @@ mod tests {
         let mut capability = create_test_capability(&signer);
 
         // Set capability to expire in the past
-        let past = SystemTime::now() - Duration::from_secs(100);
+        let past = fixed_validation_time() - Duration::from_secs(100);
         capability.temporal = TemporalScope::window(past - Duration::from_secs(100), past);
 
         signer
@@ -497,7 +521,7 @@ mod tests {
         verifier.add_trusted_peer(signer.identity().clone());
 
         let result = verifier
-            .validate_capability(&capability)
+            .validate_capability_at(&capability, fixed_validation_time())
             .expect("validate capability");
         assert!(!result.valid);
         assert!(result.issues.contains(&ValidationIssue::TemporalViolation));
