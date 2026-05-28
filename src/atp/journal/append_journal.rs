@@ -1726,7 +1726,15 @@ mod tests {
 
     #[test]
     fn test_journal_recovery() {
-        let temp_dir = std::env::temp_dir().join("test_journal_recovery");
+        let unique = SystemTime::now() // ubs:ignore - timestamp used for test uniqueness, not crypto
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_journal_recovery_{}_{}",
+            std::process::id(),
+            unique
+        ));
         let config = JournalConfig {
             base_dir: temp_dir.clone(),
             ..Default::default()
