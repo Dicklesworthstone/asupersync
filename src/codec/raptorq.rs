@@ -20,8 +20,8 @@ pub use crate::encoding::{EncodedSymbol, EncodingError, EncodingPipeline, Encodi
 #[cfg(test)]
 mod golden_tests {
     use super::*;
-    use crate::types::ObjectId;
     use crate::types::resource::{PoolConfig, SymbolPool};
+    use crate::types::ObjectId;
     use crate::util::DetRng;
     use std::fmt::Write as _;
 
@@ -195,8 +195,9 @@ mod golden_tests {
         if actual != expected {
             std::fs::write(
                 "tests/goldens/codec_raptorq/encode_k2_ss8_payload16.txt",
-                &actual
-            ).expect("golden file update");
+                &actual,
+            )
+            .expect("golden file update");
         }
 
         assert_eq!(
@@ -264,8 +265,9 @@ mod golden_tests {
         if actual != expected {
             std::fs::write(
                 "tests/goldens/codec_raptorq/encode_seeded_fec_payload_format.txt",
-                &actual
-            ).expect("golden file update");
+                &actual,
+            )
+            .expect("golden file update");
         }
 
         assert_eq!(
@@ -636,7 +638,7 @@ mod golden_tests {
                 assert_eq!(
                     original_source, re_encoded_source,
                     "MR1 violation: source symbol {esi} differs after round-trip. Original: {:?}, Re-encoded: {:?}",
-                    esi, original_source, re_encoded_source
+                    original_source, re_encoded_source
                 );
             }
 
@@ -663,8 +665,11 @@ mod golden_tests {
             let symbol_size = 16;
             let seed = 0x5678DCBA;
 
-            // Original data (short)
-            let original_data: Vec<Vec<u8>> = (0..k)
+            // Logical payload fragments are shorter than the fixed RaptorQ
+            // source-symbol width. Padding to symbol_size is a caller-side
+            // preprocessing step; the encoder itself requires exact-width
+            // source symbols.
+            let logical_data: Vec<Vec<u8>> = (0..k)
                 .map(|i| {
                     let len = 8 + (i % 4); // Variable length 8-11 bytes
                     (0..len)
@@ -673,8 +678,8 @@ mod golden_tests {
                 })
                 .collect();
 
-            // Zero-padded data (extended to full symbol_size)
-            let padded_data: Vec<Vec<u8>> = original_data
+            // Zero-padded data (extended to full symbol_size).
+            let padded_data: Vec<Vec<u8>> = logical_data
                 .iter()
                 .map(|data| {
                     let mut padded = data.clone();
@@ -683,45 +688,31 @@ mod golden_tests {
                 })
                 .collect();
 
-            // Encode original data
-            let original_encoder = SystematicEncoder::new(&original_data, symbol_size, seed)
-                .expect("Original encoder must construct");
-
-            // Encode zero-padded data
+            // Encode the fixed-width source block. Passing the shorter logical
+            // rows directly would violate the encoder contract and fail before
+            // the metamorphic relation is exercised.
             let padded_encoder = SystematicEncoder::new(&padded_data, symbol_size, seed)
                 .expect("Padded encoder must construct");
 
-            // Generate symbols for both variants
-            let mut original_symbols = Vec::new();
+            // Generate symbols for the padded source block.
             let mut padded_symbols = Vec::new();
 
             for esi in 0..(k as u32 + 2) {
                 if (esi as usize) < k {
-                    // Source symbols: original should match padded after truncation
-                    original_symbols.push(ReceivedSymbol::source(
-                        esi,
-                        original_data[esi as usize].clone(),
-                    ));
+                    // Source symbols: logical payload plus zero suffix.
                     padded_symbols.push(ReceivedSymbol::source(
                         esi,
                         padded_data[esi as usize].clone(),
                     ));
                 } else {
-                    // Repair symbols: should be deterministically related
+                    // Repair symbols: generated from the same fixed-width block.
                     let decoder = InactivationDecoder::new(k, symbol_size, seed);
                     let (columns, coefficients) = decoder
                         .repair_equation(esi)
                         .expect("Repair equation must be valid");
 
-                    let original_repair = original_encoder.repair_symbol(esi);
                     let padded_repair = padded_encoder.repair_symbol(esi);
 
-                    original_symbols.push(ReceivedSymbol::repair(
-                        esi,
-                        columns.clone(),
-                        coefficients.clone(),
-                        original_repair,
-                    ));
                     padded_symbols.push(ReceivedSymbol::repair(
                         esi,
                         columns,
@@ -735,45 +726,32 @@ mod golden_tests {
             let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
             let original_constraints = decoder.constraint_symbols();
-            let mut original_all = original_constraints.clone();
-            original_all.extend(original_symbols);
-
             let mut padded_all = original_constraints;
             padded_all.extend(padded_symbols);
 
-            let original_result = decoder
-                .decode(&original_all)
-                .expect("Original data decode must succeed");
             let padded_result = decoder
                 .decode(&padded_all)
                 .expect("Padded data decode must succeed");
 
-            // METAMORPHIC VERIFICATION: After truncating padding, results must match
+            // METAMORPHIC VERIFICATION: Decoding after caller-side zero padding
+            // recovers the logical payload prefix and preserves a zero suffix.
             assert_eq!(
-                original_result.source.len(),
                 padded_result.source.len(),
+                k,
                 "MR2 violation: decoded symbol counts differ with zero-padding"
             );
 
-            for (i, (orig, padded)) in original_result
-                .source
-                .iter()
-                .zip(padded_result.source.iter())
-                .enumerate()
-            {
+            for (i, padded) in padded_result.source.iter().enumerate() {
                 // Compare up to original data length (before padding)
-                let orig_len = original_data[i].len();
-                assert_eq!(
-                    &orig[..orig_len],
-                    &original_data[i],
-                    "MR2 violation: original data mismatch at symbol {i}"
-                );
-
-                // Padded version should match after truncation
+                let orig_len = logical_data[i].len();
                 assert_eq!(
                     &padded[..orig_len],
-                    &original_data[i],
+                    &logical_data[i],
                     "MR2 violation: zero-padding changes recovered data at symbol {i}"
+                );
+                assert!(
+                    padded[orig_len..].iter().all(|byte| *byte == 0),
+                    "MR2 violation: recovered padding suffix is non-zero at symbol {i}"
                 );
             }
         }
