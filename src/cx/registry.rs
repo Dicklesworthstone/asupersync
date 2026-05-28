@@ -3232,8 +3232,10 @@ mod tests {
 
         let mut lease = reg.commit_permit(fresh_permit).expect("fresh commit ok");
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
-        reg.unregister("svc", tid(1)).unwrap();
-        lease.release().unwrap();
+        reg.unregister("svc", tid(1))
+            .expect("should unregister svc after stale permit test");
+        lease.release()
+            .expect("should release lease after stale permit test");
 
         crate::test_complete!("cancel_permit_rejects_stale_same_identity_replay");
     }
