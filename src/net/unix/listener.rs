@@ -120,6 +120,18 @@ pub(crate) fn socket_file_identity(path: &Path) -> io::Result<Option<SocketFileI
     }
 }
 
+pub(crate) fn reject_non_socket_bind_path(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if FileTypeExt::is_socket(&metadata.file_type()) => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("refusing to bind over non-socket path: {}", path.display()),
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
@@ -323,6 +335,7 @@ impl UnixListener {
     pub async fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let path = path.as_ref();
 
+        reject_non_socket_bind_path(path)?;
         let inner = net::UnixListener::bind(path)?;
         Self::from_bound_with(path, inner, |socket| socket.set_nonblocking(true))
     }

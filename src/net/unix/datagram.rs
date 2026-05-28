@@ -135,6 +135,7 @@ impl UnixDatagram {
     pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let path = path.as_ref();
 
+        super::listener::reject_non_socket_bind_path(path)?;
         let inner = net::UnixDatagram::bind(path)?;
         Self::from_bound_with(path, inner, |socket| socket.set_nonblocking(true))
     }
