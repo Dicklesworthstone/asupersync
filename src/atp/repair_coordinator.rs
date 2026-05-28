@@ -573,7 +573,7 @@ impl RepairCoordinator {
         let mut modes = vec![RepairMode::Off]; // Always consider no repair
 
         // Tail repair for nearly complete transfers
-        if transfer.bytes_transferred as f64 / transfer.object_size_bytes as f64 > 0.8 {
+        if transfer.bytes_transferred as f64 / transfer.object_size_bytes as f64 >= 0.8 {
             modes.push(RepairMode::Tail);
         }
 

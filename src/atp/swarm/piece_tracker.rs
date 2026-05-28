@@ -636,7 +636,7 @@ mod tests {
         let peer2 = PeerId::new("peer2");
 
         piece_map.add_peer_pieces(peer1, (0..5).map(PieceId::new).collect());
-        piece_map.add_peer_pieces(peer2, (3..8).map(PieceId::new).collect());
+        piece_map.add_peer_pieces(peer2, (3..10).map(PieceId::new).collect());
 
         piece_map
     }
