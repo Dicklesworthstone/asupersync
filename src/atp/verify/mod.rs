@@ -931,7 +931,8 @@ mod tests {
     fn create_test_bundle() -> AtpProofBundle {
         let manifest_root = crate::atp::manifest::MerkleRoot::new([1; 32]);
         let object_id = Object::file(b"test".to_vec()).id;
-        let chunk_bitmap = ChunkBitmap::new(10);
+        let mut chunk_bitmap = ChunkBitmap::new(10);
+        chunk_bitmap.mark_received(0);
 
         AtpProofBundleBuilder::new("test-transfer")
             .manifest_root(manifest_root)

@@ -725,11 +725,14 @@ impl AtpVerifier {
         graph: &ObjectGraph,
     ) -> Result<VerificationEvidence, VerificationError> {
         self.verify_manifest(manifest)?;
-        self.verify_graph(graph, &manifest.merkle_root)?;
+        graph.validate().map_err(map_graph_error)?;
 
         let computed = Manifest::from_graph(graph, manifest.metadata_policy.clone())
             .map_err(map_manifest_error)?;
-        if computed.roots != manifest.roots || computed.objects != manifest.objects {
+        if computed.merkle_root != manifest.merkle_root
+            || computed.roots != manifest.roots
+            || computed.objects != manifest.objects
+        {
             return Err(VerificationError::ManifestGraphMismatch {
                 reason: "manifest canonical graph differs from object graph".to_string(),
             });
