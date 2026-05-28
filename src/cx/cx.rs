@@ -4357,8 +4357,12 @@ mod tests {
             cx.macaroon().expect("cx should have macaroon after with_macaroon").identifier(),
             cx2.macaroon().expect("cloned cx should have macaroon").identifier()
         );
+
+        // Test attenuation to verify the attenuation mechanism works
+        let attenuated_cx = cx.attenuate(CaveatPredicate::TimeBefore(u64::MAX / 2))
+            .expect("attenuation should succeed");
         assert!(
-            cx2.macaroon().expect("cloned cx should have macaroon for attenuation check").is_direct_attenuation_of(
+            attenuated_cx.macaroon().expect("attenuated cx should have macaroon").is_direct_attenuation_of(
                 cx.macaroon().expect("cx should have macaroon for attenuation check"),
                 &CaveatPredicate::TimeBefore(u64::MAX / 2)
             ),
