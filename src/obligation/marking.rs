@@ -281,6 +281,8 @@ const ALL_KINDS: [ObligationKind; 5] = [
     ObligationKind::SemaphorePermit,
 ];
 
+const OBLIGATION_KIND_COUNT: usize = ALL_KINDS.len();
+
 // ============================================================================
 // MarkingDimension
 // ============================================================================
@@ -377,7 +379,7 @@ impl ObligationMarking {
         self.counts.values().all(|&c| c == 0)
     }
 
-    /// Returns all non-zero dimensions (sorted by kind index for determinism).
+    /// Returns all non-zero dimensions (sorted for deterministic output).
     #[must_use]
     pub fn non_zero(&self) -> Vec<(MarkingDimension, u32)> {
         let mut result: Vec<_> = self
@@ -394,8 +396,7 @@ impl ObligationMarking {
                 )
             })
             .collect();
-        // Sort by kind index for deterministic output.
-        result.sort_by_key(|(dim, _)| kind_index(dim.kind));
+        result.sort_by_key(|(dim, _)| (kind_index(dim.kind), dim.region));
         result
     }
 
@@ -630,7 +631,7 @@ pub struct MarkingAnalyzer {
     /// All regions seen.
     all_regions: HashSet<RegionId>,
     /// Kinds seen (indexed by kind_index).
-    kinds_seen: [bool; 4],
+    kinds_seen: [bool; OBLIGATION_KIND_COUNT],
 }
 
 impl MarkingAnalyzer {
@@ -693,7 +694,7 @@ impl MarkingAnalyzer {
         self.closed_regions.clear();
         self.stats = AnalysisStats::default();
         self.all_regions.clear();
-        self.kinds_seen = [false; 4];
+        self.kinds_seen = [false; OBLIGATION_KIND_COUNT];
     }
 
     fn snapshot(&mut self, cause: &str, time: Time) {
@@ -1407,7 +1408,10 @@ mod tests {
         insta::assert_snapshot!(
             "marking_display",
             &rendered,
-            @"marking_display"
+            @r###"
+        empty: M = [0]
+        nonempty: M = [(send_permit, RegionId(0:0))=1]
+        "###
         );
         crate::test_complete!("marking_display");
     }
@@ -1473,6 +1477,27 @@ mod tests {
         crate::test_complete!("stats_are_accurate");
     }
 
+    #[test]
+    fn stats_track_semaphore_permit_kind() {
+        init_test("stats_track_semaphore_permit_kind");
+        let events = vec![
+            reserve(0, o(0), ObligationKind::SemaphorePermit, t(0), r(0)),
+            commit(1, o(0), r(0), ObligationKind::SemaphorePermit),
+            close(2, r(0)),
+        ];
+
+        let mut analyzer = MarkingAnalyzer::new();
+        let result = analyzer.analyze(&events);
+
+        let is_safe = result.is_safe();
+        crate::assert_with_log!(is_safe, "semaphore permit trace is safe", true, is_safe);
+        let reserved = result.stats.total_reserved;
+        crate::assert_with_log!(reserved == 1, "reserved", 1, reserved);
+        let kinds = result.stats.distinct_kinds;
+        crate::assert_with_log!(kinds == 1, "kinds", 1, kinds);
+        crate::test_complete!("stats_track_semaphore_permit_kind");
+    }
+
     // ---- Analyzer reuse ----------------------------------------------------
 
     #[test]
@@ -1524,7 +1549,30 @@ mod tests {
         insta::assert_snapshot!(
             "marking_analysis_result_display",
             &rendered,
-            @"marking_analysis_result_display"
+            @r###"
+        leak: leak: 1 ack obligation(s) in RegionId(0:0) at 15ns
+        invalid: invalid at 20ns: abort(lease, RegionId(1:0)) but marking is already zero
+
+        VASS Marking Analysis Result
+        ============================
+        Events processed: 5
+        Safe: false
+
+        Statistics:
+          Reserved:  2
+          Committed: 1
+          Aborted:   1
+          Leaked:    0
+          Max pending: 2
+          Regions:   1
+          Kinds:     2
+
+        Leak violations (1):
+          leak: 1 ack obligation(s) in RegionId(0:0) at 15ns
+
+        Invalid transitions (1):
+          invalid at 20ns: abort(lease, RegionId(1:0)) but marking is already zero
+        "###
         );
         crate::test_complete!("marking_display_impls");
     }
@@ -1700,7 +1748,7 @@ mod tests {
         insta::assert_snapshot!(
             "marking_vass_conformance_matrix",
             &MarkingConformanceHarness::render_matrix(&results),
-            @r"
+            @r###"
         # Obligation Marking VASS Conformance Matrix
 
         | Req ID | Level | Status | Description | Evidence |
@@ -1714,7 +1762,7 @@ mod tests {
         - MUST: 3/3
         - SHOULD: 1/1
         - Overall: CONFORMANT
-        "
+        "###
         );
         crate::test_complete!("marking_vass_conformance_matrix");
     }
