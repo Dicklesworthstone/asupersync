@@ -50,23 +50,36 @@
 use crate::channel::{mpsc, oneshot};
 use crate::cx::Cx;
 use crate::obligation::graded::{AbortedProof, CommittedProof, ObligationToken, SendPermit};
+use crate::types::RegionId;
 
 fn reserve_tracked_send_obligation(description: &'static str) -> ObligationToken<SendPermit> {
     if let Some(cx) = crate::cx::Cx::current() {
-        ObligationToken::<SendPermit>::reserve(description, cx.region_id())
+        reserve_tracked_send_obligation_for_region(description, cx.region_id())
     } else {
         reserve_tracked_send_obligation_without_current(description)
     }
 }
 
-#[cfg(test)]
+fn reserve_tracked_send_obligation_for_region(
+    description: &'static str,
+    region: RegionId,
+) -> ObligationToken<SendPermit> {
+    #[cfg(any(test, feature = "test-internals"))]
+    if region.as_u64() == 0 {
+        return ObligationToken::<SendPermit>::reserve_test(description);
+    }
+
+    ObligationToken::<SendPermit>::reserve(description, region)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
 fn reserve_tracked_send_obligation_without_current(
     description: &'static str,
 ) -> ObligationToken<SendPermit> {
     ObligationToken::<SendPermit>::reserve_test(description)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-internals")))]
 fn reserve_tracked_send_obligation_without_current(
     description: &'static str,
 ) -> ObligationToken<SendPermit> {
@@ -207,7 +220,7 @@ impl<T> TrackedSender<T> {
     ) -> Result<TrackedPermit<'a, T>, mpsc::SendError<()>> {
         let permit = self.inner.reserve(cx).await?;
         let obligation =
-            ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)", cx.region_id());
+            reserve_tracked_send_obligation_for_region("TrackedPermit(mpsc)", cx.region_id());
         Ok(TrackedPermit { permit, obligation })
     }
 
@@ -385,7 +398,7 @@ impl<T> TrackedOneshotSender<T> {
     pub fn reserve(self, cx: &Cx) -> Result<TrackedOneshotPermit<T>, oneshot::SendError<()>> {
         let permit = self.inner.reserve(cx)?;
         let obligation =
-            ObligationToken::<SendPermit>::reserve("TrackedOneshotPermit", cx.region_id());
+            reserve_tracked_send_obligation_for_region("TrackedOneshotPermit", cx.region_id());
         Ok(TrackedOneshotPermit { permit, obligation })
     }
 
