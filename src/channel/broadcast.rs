@@ -763,11 +763,12 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
+        let was_last_receiver = self.channel.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1;
         let mut to_drop = None;
         {
             let mut inner = self.channel.inner.lock();
             inner.receiver_cursors.remove(self.receiver_token);
-            if self.channel.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            if was_last_receiver {
                 // Re-check under lock in case a sender concurrently called `subscribe`.
                 if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
                     to_drop = Some(std::mem::take(&mut inner.buffer));
