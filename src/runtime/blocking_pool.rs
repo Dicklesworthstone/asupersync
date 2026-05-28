@@ -1840,12 +1840,9 @@ mod tests {
     }
 
     #[test]
-    fn min_max_normalization() {
-        // max < min should be normalized to max = min
-        let pool = BlockingPool::new(4, 2);
-
-        // Should work, max is clamped to 4
-        assert!(pool.active_threads() >= 4);
+    #[should_panic(expected = "min_threads must be less than or equal to max_threads")]
+    fn new_rejects_min_threads_above_max_threads() {
+        let _pool = BlockingPool::new(4, 2);
     }
 
     #[test]
