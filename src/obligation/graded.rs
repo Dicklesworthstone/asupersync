@@ -1371,12 +1371,15 @@ mod tests {
 
         let _proof = ch.abort_send(first);
         let retry = ch.reserve_send();
+        let retry_present = retry.is_some();
         crate::assert_with_log!(
-            retry.is_some(),
+            retry_present,
             "capacity should reopen after abort",
             true,
-            retry.is_some()
+            retry_present
         );
+        let retry = retry.expect("retry permit should be present after abort");
+        let _retry_proof = ch.abort_send(retry);
         crate::test_complete!("toy_channel_reservation_tracks_outstanding_capacity");
     }
 
