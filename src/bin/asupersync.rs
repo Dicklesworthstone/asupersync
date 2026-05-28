@@ -856,9 +856,9 @@ fn summarize_source_path_inner(
 
 fn stable_transfer_id(prefix: &str, source: &Path, target: &str, summary: &PathSummary) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(prefix.as_bytes());
-    hasher.update(source.as_os_str().as_encoded_bytes());
-    hasher.update(target.as_bytes());
+    hash_len_prefixed(&mut hasher, prefix.as_bytes());
+    hash_len_prefixed(&mut hasher, source.as_os_str().as_encoded_bytes());
+    hash_len_prefixed(&mut hasher, target.as_bytes());
     hasher.update(summary.total_bytes.to_be_bytes());
     hasher.update((summary.object_count as u64).to_be_bytes());
     let digest = hasher.finalize();
@@ -871,15 +871,22 @@ fn stable_transfer_id(prefix: &str, source: &Path, target: &str, summary: &PathS
     )
 }
 
+fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(len.to_be_bytes());
+    hasher.update(bytes);
+}
+
 fn progress_chunks(total_bytes: u64) -> Vec<u64> {
     if total_bytes == 0 {
         return vec![0];
     }
+    let three_quarters = u64::try_from((u128::from(total_bytes) * 3) / 4).unwrap_or(u64::MAX);
     let mut chunks = vec![
         0,
         total_bytes / 4,
         total_bytes / 2,
-        (total_bytes * 3) / 4,
+        three_quarters,
         total_bytes,
     ];
     chunks.dedup();
@@ -923,9 +930,9 @@ fn digest_path_tree_inner(
             .exit_code(ExitCode::USER_ERROR)
     })?;
 
-    hasher.update(relative_path.as_os_str().as_encoded_bytes());
+    hash_len_prefixed(hasher, relative_path.as_os_str().as_encoded_bytes());
     if metadata.is_dir() {
-        hasher.update(b"dir");
+        hash_len_prefixed(hasher, b"dir");
         let mut entries = fs::read_dir(path)
             .map_err(|err| {
                 CliError::new("directory_read_error", "Failed to read source directory")
@@ -947,7 +954,7 @@ fn digest_path_tree_inner(
             digest_path_tree_inner(&entry.path(), &relative_path.join(child_name), hasher)?;
         }
     } else if metadata.is_file() {
-        hasher.update(b"file");
+        hash_len_prefixed(hasher, b"file");
         hasher.update(metadata.len().to_be_bytes());
         let mut file = File::open(path).map_err(|err| {
             CliError::new("source_read_error", "Failed to read source file")
@@ -967,15 +974,15 @@ fn digest_path_tree_inner(
             hasher.update(&buffer[..read]);
         }
     } else if metadata.file_type().is_symlink() {
-        hasher.update(b"symlink");
+        hash_len_prefixed(hasher, b"symlink");
         let target = fs::read_link(path).map_err(|err| {
             CliError::new("source_read_error", "Failed to read source symlink")
                 .detail(format!("Path: {}, Error: {}", path.display(), err))
                 .exit_code(ExitCode::USER_ERROR)
         })?;
-        hasher.update(target.as_os_str().as_encoded_bytes());
+        hash_len_prefixed(hasher, target.as_os_str().as_encoded_bytes());
     } else {
-        hasher.update(b"special");
+        hash_len_prefixed(hasher, b"special");
         hasher.update(metadata.len().to_be_bytes());
     }
     Ok(())
