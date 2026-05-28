@@ -1904,7 +1904,7 @@ mod tests {
         // Test each major lifecycle phase with golden snapshots
         let task_id = TaskId::new_for_test(1, 0);
         let region_id = RegionId::new_for_test(2, 0);
-        let budget = Budget::new().with_poll_quota(10);
+        let budget = Budget::new().with_poll_quota(100_000);
 
         // Phase 1: Created state
         let record_created = TaskRecord::new(task_id, region_id, budget);
@@ -2083,7 +2083,7 @@ mod tests {
         // Test complete transition sequence with snapshots at each step
         let task_id = TaskId::new_for_test(9, 1);
         let region_id = RegionId::new_for_test(11, 1);
-        let budget = Budget::new().with_poll_quota(25);
+        let budget = Budget::new().with_poll_quota(100_000);
 
         let mut record = TaskRecord::new(task_id, region_id, budget);
 

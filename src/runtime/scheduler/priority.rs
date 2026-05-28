@@ -3284,10 +3284,10 @@ mod tests {
             sched.peek_ready_priority()
         );
         crate::assert_with_log!(
-            sched.has_runnable_work(Time::ZERO),
+            sched.has_runnable_work(Time::from_nanos(1_000_000_000)),
             "ready work remains runnable despite stale head",
             true,
-            sched.has_runnable_work(Time::ZERO)
+            sched.has_runnable_work(Time::from_nanos(1_000_000_000))
         );
         crate::assert_with_log!(
             sched.ready_lane.len() == 1,

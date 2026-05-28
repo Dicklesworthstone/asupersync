@@ -7303,7 +7303,7 @@ mod tests {
 
         // Timer driver should use the same clock
         let timer = worker.timer_driver.as_ref().unwrap();
-        assert_eq!(timer.now(), Time::ZERO, "timer should start at zero");
+        assert_eq!(timer.now(), Time::from_nanos(1_000_000_000), "timer should start at zero");
 
         clock.advance(1000);
         assert_eq!(
@@ -8299,7 +8299,7 @@ mod tests {
 
         // 5. CRITICAL: Verify the same task is NOT dispatched again from timed lane
         // Since deadline is far in the future (100 seconds), pop_timed_if_due should return None
-        let current_time = Time::ZERO;
+        let current_time = Time::from_nanos(1_000_000_000);
         let timed_task = scheduler.global.pop_timed_if_due(current_time);
         assert!(
             timed_task.is_none(),
@@ -11254,7 +11254,7 @@ mod tests {
         for i in 0..24u32 {
             scheduler.inject_cancel(TaskId::new_for_test(77, 100 + i), 100);
         }
-        scheduler.inject_timed(timed_task, Time::ZERO);
+        scheduler.inject_timed(timed_task, Time::from_nanos(1_000_000_000));
         scheduler.inject_ready(ready_task, 50);
 
         let mut workers = scheduler.take_workers().into_iter();

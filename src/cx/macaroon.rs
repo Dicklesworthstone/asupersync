@@ -3033,7 +3033,7 @@ mod tests {
     fn arb_predicate() -> impl Strategy<Value = CaveatPredicate> {
         prop_oneof![
             (u64::MAX / 2..u64::MAX).prop_map(CaveatPredicate::TimeBefore),
-            (0u64..1000u64).prop_map(CaveatPredicate::TimeAfter),
+            (2_000_000_000u64..u64::MAX / 2).prop_map(CaveatPredicate::TimeAfter),
             any::<u64>().prop_map(CaveatPredicate::RegionScope),
             any::<u64>().prop_map(CaveatPredicate::TaskScope),
             any::<u32>().prop_map(CaveatPredicate::MaxUses),
@@ -3178,7 +3178,7 @@ mod tests {
             seed in 1u64..u64::MAX,
             base_preds in proptest::collection::vec(arb_predicate(), 0..3),
             extra_pred in arb_predicate(),
-            time_ms in 0u64..20000,
+            time_ms in 2_000_000_000u64..u64::MAX / 4,
             region in proptest::option::of(0u64..100),
             task in proptest::option::of(0u64..100),
             use_count in 0u32..20,
