@@ -1065,7 +1065,7 @@ mod tests {
             let events = vec![commit(10, o(2), r(0), ObligationKind::Ack)];
             let mut analyzer = MarkingAnalyzer::new();
             let result = analyzer.analyze(&events);
-            let passes = result.invalid_transitions.len() == 1 && result.is_safe();
+            let passes = result.invalid_transitions.len() == 1 && !result.is_safe();
 
             MarkingConformanceResult {
                 requirement_id: "VASS-003",
@@ -1748,7 +1748,7 @@ Invalid transitions (1):
 |--------|-------|--------|-------------|----------|
 | VASS-001 | MUST | PASS | reserve/commit/close returns to zero marking | safe=true leaks=0 final_zero=true |
 | VASS-002 | MUST | PASS | region close surfaces pending obligations as leaks | safe=false leaks=1 first_kind=Some(SendPermit) |
-| VASS-003 | MUST | PASS | commit below zero is recorded as invalid transition | invalid=1 safe=true |
+| VASS-003 | MUST | PASS | commit below zero is recorded as invalid transition | invalid=1 safe=false |
 | VASS-004 | SHOULD | PASS | trace projection keeps only obligation and close events | projected=3 safe=true |
 
 Summary:
