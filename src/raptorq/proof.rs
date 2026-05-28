@@ -3815,6 +3815,61 @@ mod tests {
     }
 
     #[test]
+    fn proof_artifact_table_invariant_error_preserves_corruption_evidence() {
+        let err =
+            map_systematic_param_error(SystematicParamError::RfcTableInvariantViolation {
+                invariant: "K' >= K",
+                details: "K=10 K'=9 from RFC systematic index table".to_string(),
+            });
+
+        assert_eq!(
+            err,
+            ProofArtifactDistributionError::RfcTableInvariantViolation {
+                invariant: "K' >= K",
+                details: "K=10 K'=9 from RFC systematic index table".to_string(),
+            }
+        );
+        assert!(
+            !matches!(
+                &err,
+                ProofArtifactDistributionError::UnsupportedSourceBlock { .. }
+            ),
+            "table corruption must not be reported as an unsupported source block"
+        );
+
+        let display = err.to_string();
+        assert!(display.contains("RFC 6330 table invariant violation"));
+        assert!(display.contains("K' >= K"));
+        assert!(display.contains("K=10 K'=9"));
+        assert!(
+            !display.contains("maximum supported is 0"),
+            "display must not preserve the old unsupported-K sentinel contract"
+        );
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn proof_artifact_table_invariant_error_serializes_as_explicit_corruption() {
+        let err = ProofArtifactDistributionError::RfcTableInvariantViolation {
+            invariant: "L = K' + S + H",
+            details: "K'=20 S=4 H=2 L=21".to_string(),
+        };
+
+        let value =
+            serde_json::to_value(&err).expect("distribution errors should serialize for proofs");
+
+        assert_eq!(
+            value,
+            json!({
+                "RfcTableInvariantViolation": {
+                    "invariant": "L = K' + S + H",
+                    "details": "K'=20 S=4 H=2 L=21",
+                }
+            })
+        );
+    }
+
+    #[test]
     fn test_atp_proof_distribution_error_coverage() {
         let errors = vec![
             ProofArtifactDistributionError::EmptyArtifact,
@@ -3822,6 +3877,10 @@ mod tests {
             ProofArtifactDistributionError::UnsupportedSourceBlock {
                 requested: 100000,
                 max_supported: 56403,
+            },
+            ProofArtifactDistributionError::RfcTableInvariantViolation {
+                invariant: "P = L - W",
+                details: "L=8 W=13 P underflow".to_string(),
             },
             ProofArtifactDistributionError::EncoderUnavailable,
             ProofArtifactDistributionError::ManifestHashMismatch {
