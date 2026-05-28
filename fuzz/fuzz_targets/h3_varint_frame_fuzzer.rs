@@ -194,14 +194,19 @@ fn test_frame_type_varint(
         }
     }
 
-    // Add frame length and dummy payload
+    // Add frame length and deterministic payload bytes tied to the frame type.
     let limited_payload_size = (payload_size as usize).min(MAX_FRAME_PAYLOAD_SIZE);
     assert!(observe_encode_varint(
         limited_payload_size as u64,
         &mut buf,
         "frame payload length"
     ));
-    buf.resize(buf.len() + limited_payload_size, 0x41);
+    let payload_start = buf.len();
+    buf.resize(payload_start + limited_payload_size, 0);
+    let frame_type_bytes = effective_frame_type.to_le_bytes();
+    for (offset, byte) in buf[payload_start..].iter_mut().enumerate() {
+        *byte = frame_type_bytes[offset % frame_type_bytes.len()].wrapping_add(offset as u8);
+    }
 
     // Test decoding - should not panic
     observe_h3_frame_decode(&buf, config, "frame type test");
