@@ -2241,7 +2241,7 @@ followup.decode.error: none\n",
             },
             MetamorphicTestConfig {
                 length_field_offset: 2,
-                num_skip: 6,
+                num_skip: 2 + 4, // length_field_offset + length_field_length
                 ..base_config.clone()
             },
         ];
