@@ -438,7 +438,7 @@ impl FrameCodec {
             }
         }
         if frame.opcode == Opcode::Close {
-            validate_close_payload(&frame.payload)?;
+            validate_close_payload_for_send(&frame.payload)?;
         }
 
         // Determine if we need to mask (based on role)
@@ -777,7 +777,7 @@ impl FrameCodec {
                     }
 
                     if *opcode == Opcode::Close {
-                        validate_close_payload(&payload)?;
+                        validate_close_payload_for_receive(&payload)?;
                     }
 
                     let frame = Frame {
@@ -829,13 +829,16 @@ fn generate_mask_key(entropy: &dyn EntropySource) -> [u8; 4] {
     key
 }
 
-fn validate_close_payload(payload: &[u8]) -> Result<(), WsError> {
+fn validate_close_payload(
+    payload: &[u8],
+    is_valid_code: impl FnOnce(u16) -> bool,
+) -> Result<(), WsError> {
     match payload.len() {
         0 => Ok(()),
         1 => Err(WsError::InvalidClosePayload),
         _ => {
             let code = u16::from_be_bytes([payload[0], payload[1]]);
-            if !CloseCode::is_valid_received_code(code) {
+            if !is_valid_code(code) {
                 return Err(WsError::InvalidClosePayload);
             }
             if payload.len() > 2 {
@@ -844,6 +847,14 @@ fn validate_close_payload(payload: &[u8]) -> Result<(), WsError> {
             Ok(())
         }
     }
+}
+
+fn validate_close_payload_for_send(payload: &[u8]) -> Result<(), WsError> {
+    validate_close_payload(payload, CloseCode::is_valid_code)
+}
+
+fn validate_close_payload_for_receive(payload: &[u8]) -> Result<(), WsError> {
+    validate_close_payload(payload, CloseCode::is_valid_received_code)
 }
 
 /// Close codes defined by RFC 6455.
