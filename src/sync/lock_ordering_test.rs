@@ -179,11 +179,7 @@ mod tests {
     /// Helper function for RwLock tests
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_cx() -> Cx<cap::All> {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
-        )
+        Cx::for_testing()
     }
 
     #[test]
