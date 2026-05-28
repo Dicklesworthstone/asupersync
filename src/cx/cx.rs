@@ -4354,12 +4354,12 @@ mod tests {
         let cx2 = cx.clone();
 
         assert_eq!(
-            cx.macaroon().unwrap().identifier(),
-            cx2.macaroon().unwrap().identifier()
+            cx.macaroon().expect("cx should have macaroon after with_macaroon").identifier(),
+            cx2.macaroon().expect("cloned cx should have macaroon").identifier()
         );
         assert!(
-            cx2.macaroon().unwrap().is_direct_attenuation_of(
-                cx.macaroon().unwrap(),
+            cx2.macaroon().expect("cloned cx should have macaroon for attenuation check").is_direct_attenuation_of(
+                cx.macaroon().expect("cx should have macaroon for attenuation check"),
                 &CaveatPredicate::TimeBefore(u64::MAX / 2)
             ),
             "Cx::attenuate must install only a direct child of the parent token"
