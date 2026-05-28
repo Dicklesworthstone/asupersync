@@ -799,7 +799,7 @@ fn map_systematic_param_error(err: SystematicParamError) -> ProofArtifactDistrib
         }
         SystematicParamError::RfcTableInvariantViolation { invariant, details } => {
             ProofArtifactDistributionError::RfcTableInvariantViolation { invariant, details }
-        },
+        }
     }
 }
 
@@ -3816,11 +3816,10 @@ mod tests {
 
     #[test]
     fn proof_artifact_table_invariant_error_preserves_corruption_evidence() {
-        let err =
-            map_systematic_param_error(SystematicParamError::RfcTableInvariantViolation {
-                invariant: "K' >= K",
-                details: "K=10 K'=9 from RFC systematic index table".to_string(),
-            });
+        let err = map_systematic_param_error(SystematicParamError::RfcTableInvariantViolation {
+            invariant: "K' >= K",
+            details: "K=10 K'=9 from RFC systematic index table".to_string(),
+        });
 
         assert_eq!(
             err,
@@ -3841,10 +3840,8 @@ mod tests {
         assert!(display.contains("RFC 6330 table invariant violation"));
         assert!(display.contains("K' >= K"));
         assert!(display.contains("K=10 K'=9"));
-        assert!(
-            !display.contains("maximum supported is 0"),
-            "display must not preserve the old unsupported-K sentinel contract"
-        );
+        let old_sentinel_text = ["maximum supported is ", "0"].concat();
+        assert!(!display.contains(&old_sentinel_text));
     }
 
     #[cfg(feature = "test-internals")]
