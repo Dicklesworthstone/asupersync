@@ -2424,7 +2424,7 @@ mod tests {
             .add_caveat(CaveatPredicate::MaxUses(10));
         let bound = token.bind_for_request(&discharge).unwrap();
 
-        let ctx = VerificationContext::new();
+        let ctx = VerificationContext::new().with_use_count(5);
         assert!(
             token
                 .verify_with_discharges(&root_key, &ctx, &[bound])
