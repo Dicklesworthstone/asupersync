@@ -2398,15 +2398,22 @@ mod tests {
         assert_eq!(stats_d.total_aborted, 1, "from branch (b), unchanged here");
         assert_eq!(stats_d.pending, 0);
 
-        // (e) Region finalized: the same fail-closed Ok(0) sentinel as
-        // abort_by_id, surfaced through the Result. mark_region_finalized
-        // is intentionally idempotent so this can run after branch (d).
+        // (e) Region finalized: fallible drain callers observe the fence
+        // explicitly instead of silently mutating a closed region.
+        // mark_region_finalized is intentionally idempotent so this can run
+        // after branch (d).
         let token_e = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
         let id_e = token_e.id();
         ledger.mark_region_finalized(region);
         match ledger.try_abort_by_id(id_e, Time::from_nanos(60), ObligationAbortReason::Cancel) {
-            Ok(0) => {}
-            other => panic!("expected Ok(0) after finalize, got {other:?}"),
+            Err(LedgerError::RegionFinalized {
+                region: err_region,
+                obligation,
+            }) => {
+                assert_eq!(err_region, region);
+                assert_eq!(obligation, id_e);
+            }
+            other => panic!("expected RegionFinalized after finalize, got {other:?}"),
         }
         // The pending count for id_e MUST stay >0 — the fence prevented
         // the abort path from running, so the obligation is still
@@ -3540,8 +3547,22 @@ mod tests {
         assert_eq!(ledger.stats().total_aborted, 2);
         assert_eq!(ledger.stats().total_leaked, 1);
 
-        // Phase 3: reset zeros all five counters simultaneously. Conservation
-        // must hold trivially (0 == 0) and the ledger must be clean.
+        let tok_pending_commit = live_tokens.remove(0);
+        ledger.commit(tok_pending_commit, Time::from_nanos(140));
+        check_conservation(&ledger, "phase2.resolve_pending_commit");
+
+        let tok_pending_abort = live_tokens.remove(0);
+        ledger.abort(
+            tok_pending_abort,
+            Time::from_nanos(150),
+            ObligationAbortReason::Explicit,
+        );
+        check_conservation(&ledger, "phase2.resolve_pending_abort");
+        assert!(live_tokens.is_empty());
+        assert_eq!(ledger.stats().pending, 0);
+
+        // Phase 3: reset requires a clean ledger, then zeros all five counters
+        // simultaneously. Conservation must hold trivially (0 == 0).
         ledger.reset();
         check_conservation(&ledger, "phase3.reset");
         assert_eq!(ledger.stats().total_acquired, 0);
