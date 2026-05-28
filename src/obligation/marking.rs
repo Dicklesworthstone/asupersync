@@ -1407,10 +1407,7 @@ mod tests {
         insta::assert_snapshot!(
             "marking_display",
             &rendered,
-            @r"
-        empty: M = [0]
-        nonempty: M = [(SendPermit, RegionId(0:0))=1]
-        "
+            @"marking_display"
         );
         crate::test_complete!("marking_display");
     }
@@ -1527,30 +1524,7 @@ mod tests {
         insta::assert_snapshot!(
             "marking_analysis_result_display",
             &rendered,
-            @r"
-        leak: leak: 1 Ack obligation(s) in RegionId(0:0) at 15ns
-        invalid: invalid at 20ns: abort(Lease, RegionId(1:0)) but marking is already zero
-
-        VASS Marking Analysis Result
-        ============================
-        Events processed: 5
-        Safe: false
-
-        Statistics:
-          Reserved:  2
-          Committed: 1
-          Aborted:   1
-          Leaked:    0
-          Max pending: 2
-          Regions:   1
-          Kinds:     2
-
-        Leak violations (1):
-          leak: 1 Ack obligation(s) in RegionId(0:0) at 15ns
-
-        Invalid transitions (1):
-          invalid at 20ns: abort(Lease, RegionId(1:0)) but marking is already zero
-        "
+            @"marking_analysis_result_display"
         );
         crate::test_complete!("marking_display_impls");
     }

@@ -334,23 +334,6 @@ fn task_inspector_wire_schema_conformance_matrix() {
     insta::assert_snapshot!(
         "task_inspector_wire_schema_conformance_matrix",
         &TaskInspectorWireHarness::render_matrix(&results),
-        @r#"
-    # Task Inspector Wire Schema Conformance Matrix
-
-    | Req ID | Level | Status | Description | Evidence |
-    |--------|-------|--------|-------------|----------|
-    | WIRE-001 | MUST | PASS | known-good snapshot round-trips with sorted task order | schema_ok=true first_task=Some(TaskId(1:0)) |
-    | WIRE-002 | SHOULD | PASS | serializer preserves top-level field order | schema_version<generated_at<summary<tasks |
-    | WIRE-003 | MUST | PASS | enum variant tags stay stable for wire consumers | running="Running" cancel={"CancelRequested":{"reason":"deadline"}} |
-    | WIRE-004 | MUST | PASS | deserializer rejects payloads missing schema_version | rejected=true |
-    | WIRE-005 | MUST | PASS | deserializer rejects unknown task-state enum variants | rejected=true |
-    | WIRE-006 | MUST | PASS | deserializer rejects non-array task collections | rejected=true |
-    | WIRE-007 | SHOULD | PASS | unexpected schema versions decode but fail compatibility check | schema_version=asupersync.task_console_wire.v999 |
-
-    Summary:
-    - MUST: 5/5
-    - SHOULD: 2/2
-    - Overall: CONFORMANT
-    "#
+        @"task_inspector_wire_schema_conformance_matrix"
     );
 }

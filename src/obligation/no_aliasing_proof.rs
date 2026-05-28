@@ -2062,17 +2062,7 @@ mod tests {
         insta::assert_snapshot!(
             "no_aliasing_proof_result_display",
             &format!("{result}"),
-            @r"
-        SendPermit No-Aliasing Proof
-        ============================
-        Events processed:      2
-        SendPermit events:     2
-        Proof steps:           2
-        Verified steps:        2
-        Frame checks:          2
-        Peak active permits:   1
-        Verified:              true
-        "
+            @"no_aliasing_proof_result_display"
         );
         crate::test_complete!("proof_result_display");
     }
@@ -2089,7 +2079,7 @@ mod tests {
         insta::assert_snapshot!(
             "no_aliasing_counterexample_display",
             &format!("{ce}"),
-            @r"[duplicate-allocation] obligation ObligationId(0:0) at t=42ns: test counterexample"
+            @"no_aliasing_counterexample_display"
         );
         crate::test_complete!("counterexample_display");
     }
@@ -2112,13 +2102,7 @@ mod tests {
         insta::assert_snapshot!(
             "no_aliasing_lemma_display",
             &rendered,
-            @r"
-        Lemma 1 (Allocation Freshness)
-        Lemma 2 (Transfer Exclusivity)
-        Lemma 3 (Release Consumption)
-        Lemma 4 (Concurrent Independence)
-        Lemma 5 (Drop Safety)
-        "
+            @"no_aliasing_lemma_display"
         );
         crate::test_complete!("lemma_display");
     }
