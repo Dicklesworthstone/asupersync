@@ -399,6 +399,7 @@ pub fn detect_ambient_violations(source_code: &str) -> Vec<AmbientViolation> {
 fn detect_ambient_violations_impl(source_code: &str) -> Vec<AmbientViolation> {
     let mut violations = Vec::new();
     let mut line_filter = AmbientDetectionLineFilter::default();
+    let mut suspicious_aliases: Vec<(String, AmbientCategory)> = Vec::new();
 
     // Split into lines for line number reporting
     let lines: Vec<&str> = source_code.lines().collect();
@@ -418,6 +419,18 @@ fn detect_ambient_violations_impl(source_code: &str) -> Vec<AmbientViolation> {
                 category,
                 violation_type: ViolationType::DirectUsage,
             });
+        }
+
+        for (alias, category) in &suspicious_aliases {
+            if let Some(pattern) = ambient_alias_usage_pattern(&code_line, alias, *category) {
+                violations.push(AmbientViolation {
+                    line_number: line_num + 1,
+                    line_content: (*line).to_string(),
+                    pattern,
+                    category: *category,
+                    violation_type: ViolationType::IndirectUsage,
+                });
+            }
         }
 
         // Check for suspicious aliases
@@ -454,6 +467,17 @@ fn detect_ambient_violations_impl(source_code: &str) -> Vec<AmbientViolation> {
 
                 if is_suspicious && !alias_categories_seen.contains(category) {
                     alias_categories_seen.push(*category);
+                    if let Some(alias) = alias_identifier_after_as(&code_line) {
+                        let already_tracked =
+                            suspicious_aliases
+                                .iter()
+                                .any(|(known_alias, known_category)| {
+                                    known_alias == &alias && known_category == category
+                                });
+                        if !already_tracked {
+                            suspicious_aliases.push((alias, *category));
+                        }
+                    }
                     violations.push(AmbientViolation {
                         line_number: line_num + 1,
                         line_content: (*line).to_string(),
@@ -499,6 +523,56 @@ fn matching_grep_patterns(line: &str) -> Vec<(&'static str, AmbientCategory)> {
         }
     }
     matches
+}
+
+fn alias_identifier_after_as(line: &str) -> Option<String> {
+    let (_, alias_and_rest) = line.split_once(" as ")?;
+    let alias: String = alias_and_rest
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    if alias.is_empty() { None } else { Some(alias) }
+}
+
+fn ambient_alias_usage_pattern(
+    line: &str,
+    alias: &str,
+    category: AmbientCategory,
+) -> Option<String> {
+    let qualified_methods: &[&str] = match category {
+        AmbientCategory::Time => &["now"],
+        AmbientCategory::Spawn => &["spawn", "new"],
+        AmbientCategory::Entropy => &["random", "thread_rng", "fill", "fill_bytes"],
+        AmbientCategory::Io => &["open", "create", "read", "write", "connect", "bind"],
+        AmbientCategory::Env => &["var", "var_os", "vars", "set_var", "remove_var"],
+        AmbientCategory::Output => &[],
+    };
+    for method in qualified_methods {
+        let pattern = format!("{alias}::{method}(");
+        if line_contains_alias_call(line, &pattern) {
+            return Some(pattern);
+        }
+    }
+
+    if matches!(
+        category,
+        AmbientCategory::Spawn | AmbientCategory::Entropy | AmbientCategory::Env
+    ) {
+        let pattern = format!("{alias}(");
+        if line_contains_alias_call(line, &pattern) {
+            return Some(pattern);
+        }
+    }
+
+    None
+}
+
+fn line_contains_alias_call(line: &str, pattern: &str) -> bool {
+    line.match_indices(pattern).any(|(idx, _)| {
+        let before = line[..idx].chars().next_back();
+        !matches!(before, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_')
+    })
 }
 
 fn ambient_raw_string_start(bytes: &[u8], idx: usize) -> Option<(usize, usize)> {
@@ -1027,6 +1101,30 @@ fn good_function(cx: &Cx) {
             alias_violations
                 .iter()
                 .any(|v| v.category == AmbientCategory::Spawn)
+        );
+
+        let indirect_violations: Vec<_> = violations
+            .iter()
+            .filter(|v| v.violation_type == ViolationType::IndirectUsage)
+            .collect();
+
+        assert!(
+            indirect_violations.iter().any(|v| {
+                v.category == AmbientCategory::Time && v.line_content.contains("Clock::now")
+            }),
+            "Should detect use of time alias"
+        );
+        assert!(
+            indirect_violations
+                .iter()
+                .any(|v| v.category == AmbientCategory::Spawn && v.line_content.contains("fork")),
+            "Should detect use of spawn alias"
+        );
+        assert!(
+            indirect_violations.iter().any(|v| {
+                v.category == AmbientCategory::Io && v.line_content.contains("FileHandle::open")
+            }),
+            "Should detect use of IO alias"
         );
     }
 
