@@ -328,8 +328,9 @@ impl ProbeManager {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
-        // Validate size
-        match self.transport.validate_size(probe_data.len()) {
+        // Validate local frame construction size. The actual send path still
+        // validates against negotiated peer DATAGRAM support.
+        match Self::validate_local_datagram_size(&self.transport, probe_data.len()) {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -410,8 +411,9 @@ impl ProbeManager {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
-        // Validate size
-        match self.transport.validate_size(response_data.len()) {
+        // Validate local frame construction size. The actual send path still
+        // validates against negotiated peer DATAGRAM support.
+        match Self::validate_local_datagram_size(&self.transport, response_data.len()) {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -424,6 +426,23 @@ impl ProbeManager {
             .with_path_id(response.path_id);
 
         Outcome::ok(Some(DatagramFrame::with_length(response_data)))
+    }
+
+    fn validate_local_datagram_size(
+        transport: &DatagramTransport,
+        size: usize,
+    ) -> Outcome<(), DatagramError> {
+        let local_max_size = transport.local_max_size();
+        if local_max_size == 0 {
+            return Outcome::err(DatagramError::NotSupported);
+        }
+
+        let max = local_max_size as usize;
+        if size > max {
+            return Outcome::err(DatagramError::PayloadTooLarge { size, max });
+        }
+
+        Outcome::ok(())
     }
 
     /// Clean up expired pending probes
