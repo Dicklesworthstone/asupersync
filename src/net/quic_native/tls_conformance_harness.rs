@@ -136,6 +136,9 @@ impl RefKeyUpdateMachine {
         if phase == self.remote_key_phase {
             return Ok(KeyUpdateEvent::NoChange);
         }
+        if self.remote_generation > 0 && !phase {
+            return Err(QuicTlsError::StalePeerKeyPhase(phase));
+        }
 
         self.remote_key_phase = phase;
         self.remote_generation += 1;
@@ -180,7 +183,7 @@ mod rfc9001_conformance {
 
                 // Test actual implementation
                 let result = match level {
-                    CryptoLevel::Initial => Ok(()), // No-op
+                    CryptoLevel::Initial => implementation.on_initial_keys_available(),
                     CryptoLevel::Handshake => implementation.on_handshake_keys_available(),
                     CryptoLevel::OneRtt => implementation.on_1rtt_keys_available(),
                 };
@@ -510,9 +513,21 @@ mod property_conformance {
             let mut expected_remote_phase = false;
             for &new_phase in &peer_updates {
                 if new_phase != machine.remote_key_phase() {
-                    let result = machine.on_peer_key_phase(new_phase).unwrap();
-                    if let KeyUpdateEvent::RemoteUpdateAccepted { new_phase: accepted_phase, .. } = result {
-                        expected_remote_phase = accepted_phase;
+                    match machine.on_peer_key_phase(new_phase) {
+                        Ok(KeyUpdateEvent::RemoteUpdateAccepted {
+                            new_phase: accepted_phase,
+                            ..
+                        }) => {
+                            expected_remote_phase = accepted_phase;
+                        }
+                        Ok(KeyUpdateEvent::NoChange) => {}
+                        Ok(KeyUpdateEvent::LocalUpdateScheduled { .. }) => {
+                            prop_assert!(false, "peer update returned a local update event");
+                        }
+                        Err(QuicTlsError::StalePeerKeyPhase(_)) => {}
+                        Err(err) => {
+                            prop_assert!(false, "unexpected peer key update error: {err:?}");
+                        }
                     }
                 }
             }

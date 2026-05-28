@@ -1383,6 +1383,15 @@ impl QuicTlsMachine {
         self.remote.phase
     }
 
+    /// Observe that Initial keys are available.
+    ///
+    /// The machine starts at `Initial`, so this is normally a no-op. Keeping it
+    /// as an explicit transition lets conformance tests exercise the same
+    /// monotonic transition guard used by later levels.
+    pub fn on_initial_keys_available(&mut self) -> Result<(), QuicTlsError> {
+        self.advance_to(CryptoLevel::Initial)
+    }
+
     /// Transition to `Handshake` level.
     pub fn on_handshake_keys_available(&mut self) -> Result<(), QuicTlsError> {
         self.advance_to(CryptoLevel::Handshake)
