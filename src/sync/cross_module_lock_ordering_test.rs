@@ -7,13 +7,15 @@
 
 use super::lock_ordering::LockModule;
 
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+use super::lock_ordering::{
+    LockRank, check_acquire_with_module, clear_held_locks, record_acquire_with_module,
+    record_release_with_module, LockOrderEnforcer,
+};
+
 #[test]
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn test_cross_module_enforcement_example() {
-    use super::lock_ordering::{
-        LockRank, check_acquire_with_module, clear_held_locks, record_acquire_with_module,
-        record_release_with_module,
-    };
     clear_held_locks();
 
     // Scenario: Task in runtime module needs to coordinate with obligation tracking
@@ -108,7 +110,6 @@ fn test_module_detection_from_names() {
 #[test]
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn test_lock_order_enforcer_usage_example() {
-    use super::lock_ordering::LockOrderEnforcer;
 
     clear_held_locks();
 
