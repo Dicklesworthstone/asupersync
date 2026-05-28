@@ -190,12 +190,6 @@ impl CongestionController {
         frame: DatagramFrame,
         metadata: DatagramMetadata,
     ) -> Outcome<(), DatagramError> {
-        // Check if datagram has expired
-        if metadata.is_expired() {
-            self.stats.expired_count += 1;
-            return Outcome::err(DatagramError::Expired);
-        }
-
         // Check queue depth limit
         let total_queued = self.total_queued_count();
         if total_queued >= self.config.max_queue_depth {
