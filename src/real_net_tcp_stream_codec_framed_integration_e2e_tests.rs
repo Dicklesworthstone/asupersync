@@ -168,14 +168,14 @@ mod tests {
         segment_boundary_crossings: AtomicU64,
     }
 
-    /// Simulates partial TCP reads
-    struct PartialReadSimulator {
+    /// Models partial TCP reads
+    struct PartialReadModel {
         read_pattern: ReadPattern,
         current_position: AtomicU64,
-        simulation_config: PartialReadConfig,
+        read_config: PartialReadConfig,
     }
 
-    /// Patterns for simulating partial reads
+    /// Patterns for partial reads
     #[derive(Debug, Clone)]
     enum ReadPattern {
         RandomSizes(Vec<usize>),
@@ -192,7 +192,7 @@ mod tests {
         nagle_delay: Duration,
     }
 
-    /// Configuration for partial read simulation
+    /// Configuration for partial read modeling
     #[derive(Debug, Clone)]
     struct PartialReadConfig {
         enabled: bool,
@@ -404,8 +404,10 @@ mod tests {
             let encoder = TestEncoder::new(self.config.custom_codec.clone());
             let mut framed = Framed::new(stream, decoder, encoder);
 
-            // Create partial read simulator
-            let simulator = PartialReadSimulator::new(ReadPattern::Realistic(RealisticPattern {
+            let client_start = Instant::now();
+
+            // Create partial read model.
+            let read_model = PartialReadModel::new(ReadPattern::Realistic(RealisticPattern {
                 mtu_size: 1500,
                 congestion_window: 4096,
                 nagle_delay: Duration::from_millis(1),
@@ -422,7 +424,7 @@ mod tests {
                         cx,
                         &mut framed,
                         &message,
-                        &simulator,
+                        &read_model,
                         tracker,
                         monitor,
                     )
@@ -459,7 +461,7 @@ mod tests {
             Ok(ClientResults {
                 sent_messages,
                 received_messages,
-                connection_duration: Duration::from_secs(1), // Placeholder
+                connection_duration: client_start.elapsed(),
             })
         }
 
@@ -469,7 +471,7 @@ mod tests {
             cx: &Cx,
             framed: &mut Framed<TcpStream, TestDecoder, TestEncoder>,
             message: &TestMessage,
-            simulator: &PartialReadSimulator,
+            read_model: &PartialReadModel,
             tracker: &Arc<FragmentationTracker>,
             monitor: &Arc<CodecStateMonitor>,
         ) -> Result<u32, Error> {
@@ -488,8 +490,7 @@ mod tests {
             let mut sent_fragments = 0u32;
 
             for fragment in fragments {
-                // Simulate partial writes based on TCP segment boundaries
-                let partial_write_size = simulator.calculate_write_size(&fragment.data).await;
+                let partial_write_size = read_model.calculate_write_size(&fragment.data).await;
 
                 // Send fragment with potential partial writes
                 let chunk_results = self
@@ -510,7 +511,7 @@ mod tests {
                         .fetch_add(1, Ordering::Relaxed);
                 }
 
-                // Brief delay to simulate network latency
+                // Brief delay for deterministic network latency modeling.
                 Sleep::new(Duration::from_millis(1)).await;
             }
 
@@ -873,11 +874,17 @@ mod tests {
             let mut active = self.active_messages.lock().await;
             if let Some(fragments) = active.remove(&message_id) {
                 let reassembly_time = fragments.first_fragment_time.elapsed();
+                let mut ordered_fragments = fragments.received_fragments.clone();
+                ordered_fragments.sort_by_key(|fragment| fragment.sequence);
+                let mut payload = BytesMut::with_capacity(fragments.total_bytes_received);
+                for fragment in &ordered_fragments {
+                    payload.extend_from_slice(&fragment.data);
+                }
 
                 let reassembled = ReassembledMessage {
                     original_message: TestMessage {
                         id: message_id,
-                        payload: Bytes::new(), // Placeholder
+                        payload: payload.freeze(),
                         timestamp: fragments.first_fragment_time,
                         expected_fragments: Some(fragments.received_fragments.len() as u32),
                     },
@@ -930,12 +937,12 @@ mod tests {
         }
     }
 
-    impl PartialReadSimulator {
+    impl PartialReadModel {
         fn new(pattern: ReadPattern) -> Self {
             Self {
                 read_pattern: pattern,
                 current_position: AtomicU64::new(0),
-                simulation_config: PartialReadConfig {
+                read_config: PartialReadConfig {
                     enabled: true,
                     probability: 0.3,
                     min_read_size: 64,
@@ -945,7 +952,7 @@ mod tests {
         }
 
         async fn calculate_write_size(&self, data: &Bytes) -> usize {
-            if !self.simulation_config.enabled {
+            if !self.read_config.enabled {
                 return data.len();
             }
 

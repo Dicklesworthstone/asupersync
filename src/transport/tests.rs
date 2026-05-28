@@ -350,7 +350,7 @@ mod tests {
             PathSelectionPolicy, PathSet, ReordererConfig, SymbolDeduplicator, SymbolReorderer,
             TransportPath,
         };
-        use crate::transport::mock::{SimNetwork, SimTransportConfig, sim_channel};
+        use crate::transport::deterministic::{SimNetwork, SimTransportConfig, sim_channel};
         use crate::transport::router::{
             DispatchConfig, DispatchStrategy, Endpoint, EndpointId, LoadBalanceStrategy, RouteKey,
             RoutingEntry, RoutingTable, SymbolDispatcher, SymbolRouter,
@@ -507,7 +507,7 @@ mod tests {
         fn test_multipath_dedup_across_paths() {
             init_test("test_multipath_dedup_across_paths");
 
-            // Create simulated network with 3 nodes
+            // Create a deterministic network with 3 nodes.
             let config = SimTransportConfig::reliable();
             let network = SimNetwork::fully_connected(3, config);
 
@@ -1898,7 +1898,7 @@ mod tests {
             let _ = reorderer.process(sym2.symbol().clone(), path, Time::ZERO);
 
             // Flush should deliver buffered symbols after timeout
-            // Simulate time passing by passing future time to flush_timeouts
+            // Advance virtual time by passing a future instant to flush_timeouts.
             let flushed = reorderer.flush_timeouts(Time::from_millis(20));
             crate::assert_with_log!(
                 !flushed.is_empty(),

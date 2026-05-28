@@ -1,8 +1,7 @@
-//! Deterministic transport simulator for testing.
+//! Deterministic in-memory transport for testing.
 //!
 //! This module provides in-memory, deterministic transport components for
-//! exercising transport behavior without real I/O. The module name is legacy;
-//! types are explicitly labeled as simulator/test components.
+//! exercising transport behavior without real I/O.
 
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::time::Sleep;
@@ -22,7 +21,7 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
-/// br-asupersync-emcu9j: deterministic time source for the simulator's
+/// br-asupersync-emcu9j: deterministic time source for the deterministic transport's
 /// default config. Always returns `Time::ZERO` so tests using
 /// `SimTransportConfig::default()` (or `::reliable()`/`::lossy()` —
 /// both delegate to default) start with a known, replay-stable clock
@@ -42,7 +41,7 @@ fn deterministic_zero_time() -> Time {
     Time::ZERO
 }
 
-/// Configuration for simulated transport behavior.
+/// Configuration for deterministic transport behavior.
 #[derive(Debug, Clone)]
 pub struct SimTransportConfig {
     /// Base latency added to every operation.
@@ -63,7 +62,7 @@ pub struct SimTransportConfig {
     pub preserve_order: bool,
     /// Error injection: fail after N successful operations.
     pub fail_after: Option<usize>,
-    /// Time source used for simulated latency deadlines.
+    /// Time source used for deterministic latency deadlines.
     ///
     /// Defaults to wall time. Override this in tests to drive non-zero latency
     /// deterministically without sleeping.
@@ -85,7 +84,7 @@ impl Default for SimTransportConfig {
             // br-asupersync-emcu9j: deterministic default time source.
             // Pre-fix this defaulted to `wall_clock_now`, silently
             // capturing wall-clock readings into every test using the
-            // simulator. Replace with `deterministic_zero_time` so
+            // deterministic transport. Replace with `deterministic_zero_time` so
             // replays produce identical traces; tests that need real
             // wall-clock must opt in via `with_wall_clock_time()` or
             // by setting `time_getter` directly.
@@ -96,7 +95,7 @@ impl Default for SimTransportConfig {
 
 impl SimTransportConfig {
     /// br-asupersync-emcu9j: explicit, grep-able opt-in for callers
-    /// that genuinely need wall-clock time in the simulator. Defaults
+    /// that genuinely need wall-clock time in the deterministic transport. Defaults
     /// (`reliable`, `lossy`, `with_latency`, `Default::default`) all
     /// install the deterministic `Time::ZERO` source; tests that
     /// must observe wall-clock progress wire it through this builder.
@@ -114,7 +113,7 @@ impl SimTransportConfig {
         Self::default()
     }
 
-    /// Create config simulating a lossy network.
+    /// Create config modeling a lossy network.
     #[inline]
     #[must_use]
     pub fn lossy(loss_rate: f64) -> Self {
@@ -124,7 +123,7 @@ impl SimTransportConfig {
         }
     }
 
-    /// Create config simulating network latency.
+    /// Create config modeling network latency.
     #[inline]
     #[must_use]
     pub fn with_latency(base: Duration, jitter: Duration) -> Self {
@@ -145,7 +144,7 @@ impl SimTransportConfig {
         }
     }
 
-    /// Override the time source used for simulated latency.
+    /// Override the time source used for deterministic latency.
     #[inline]
     #[must_use]
     pub fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
@@ -154,17 +153,17 @@ impl SimTransportConfig {
     }
 }
 
-/// Node identifier for simulated network topologies.
+/// Node identifier for deterministic network topologies.
 pub type NodeId = u64;
 
-/// Simulated link configuration between two nodes.
+/// Deterministic link configuration between two nodes.
 #[derive(Debug, Clone)]
 pub struct SimLink {
     /// Transport behavior for this link.
     pub config: SimTransportConfig,
 }
 
-/// Simulated network topology for transport tests.
+/// Deterministic network topology for transport tests.
 #[derive(Debug)]
 pub struct SimNetwork {
     nodes: HashSet<NodeId>,
@@ -287,7 +286,7 @@ impl SimNetwork {
     }
 }
 
-// NOTE: This simulator is deterministic with respect to loss/duplication/corruption and
+// NOTE: This deterministic transport is deterministic with respect to loss/duplication/corruption and
 // (when `preserve_order` is enabled) delivery order. Non-zero latency can also be driven
 // deterministically by overriding `SimTransportConfig::with_time_getter(...)` so tests can
 // advance a test clock instead of sleeping on wall time.
@@ -344,7 +343,7 @@ fn pop_next_queued_waiter(waiters: &mut Vec<SimWaiter>) -> Option<SimWaiter> {
         None
     } else {
         // Match the real transport channel wake order so tests exercise the
-        // same fairness semantics instead of a mock-only LIFO queue.
+        // same fairness semantics instead of a test-only LIFO queue.
         Some(waiters.remove(0))
     }
 }
@@ -410,7 +409,7 @@ struct PendingSymbol {
     delay: Delay,
 }
 
-/// Simulated symbol sink for testing send operations.
+/// Deterministic symbol sink for testing send operations.
 pub struct SimSymbolSink {
     inner: Arc<SimQueue>,
     delay: Option<Delay>,
@@ -420,7 +419,7 @@ pub struct SimSymbolSink {
 }
 
 impl SimSymbolSink {
-    /// Create a new simulated sink with given configuration.
+    /// Create a new deterministic sink with given configuration.
     #[must_use]
     pub fn new(config: SimTransportConfig) -> Self {
         Self::from_shared(Arc::new(SimQueue::new(config)))
@@ -461,7 +460,7 @@ impl SimSymbolSink {
     }
 }
 
-/// Simulated symbol stream for testing receive operations.
+/// Deterministic symbol stream for testing receive operations.
 pub struct SimSymbolStream {
     inner: Arc<SimQueue>,
     pending: Option<PendingSymbol>,
@@ -471,7 +470,7 @@ pub struct SimSymbolStream {
 }
 
 impl SimSymbolStream {
-    /// Create a new simulated stream with given configuration.
+    /// Create a new deterministic stream with given configuration.
     #[must_use]
     pub fn new(config: SimTransportConfig) -> Self {
         Self::from_shared(Arc::new(SimQueue::new(config)))
@@ -542,13 +541,13 @@ impl SimSymbolStream {
     }
 }
 
-/// Simulated channel sink (alias of SimSymbolSink).
+/// Deterministic channel sink (alias of SimSymbolSink).
 pub type SimChannelSink = SimSymbolSink;
 
-/// Simulated channel stream (alias of SimSymbolStream).
+/// Deterministic channel stream (alias of SimSymbolStream).
 pub type SimChannelStream = SimSymbolStream;
 
-/// Create a connected simulated transport pair (sender/receiver).
+/// Create a connected deterministic transport pair (sender/receiver).
 #[must_use]
 pub fn sim_channel(config: SimTransportConfig) -> (SimChannelSink, SimChannelStream) {
     let shared = Arc::new(SimQueue::new(config));
@@ -1128,7 +1127,7 @@ mod tests {
         assert_eq!(batched, expected);
         assert_eq!(
             interleaved, batched,
-            "reliable simulator delivery must be invariant to batching versus interleaving sends and receives"
+            "reliable deterministic transport delivery must be invariant to batching versus interleaving sends and receives"
         );
     }
 

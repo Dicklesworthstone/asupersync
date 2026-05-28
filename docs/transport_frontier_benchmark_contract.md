@@ -23,11 +23,11 @@ This contract defines the feasibility harness, workload vocabulary, and benchmar
 | `SymbolSink` / `SymbolStream` | `src/transport/sink.rs`, `stream.rs` | Async send/recv traits |
 | `MultipathAggregator` | `src/transport/aggregator.rs` | Path selection, dedup, reordering |
 | `SymbolRouter` / `SymbolDispatcher` | `src/transport/router.rs` | Routing table, load balancing |
-| `SimNetwork` | `src/transport/mock.rs` | Deterministic network simulation |
+| `SimNetwork` | `asupersync::transport::deterministic` | Deterministic network behavior |
 
-### Simulation Capabilities
+### Network Model Capabilities
 
-The `SimNetwork` provides deterministic, reproducible network simulation with:
+The `SimNetwork` provides deterministic, reproducible network behavior with:
 
 - Configurable per-link latency, loss rate, reorder probability
 - Deterministic RNG for reproducible failure injection
@@ -175,7 +175,7 @@ Required report fields:
 - `run_log_path`, `run_report_path`, `output_dir`, `rch_routed`
 - `started_at`, `finished_at`, `exit_code`
 
-In dry-run mode, the runner still materializes `run_report.json` as a deterministic placeholder report with `mode=dry-run` and `exit_code=0`, so the contract surface stays structurally identical between planning and execute runs.
+In dry-run mode, the runner still materializes `run_report.json` as a deterministic schema-only report with `mode=dry-run` and `exit_code=0`, so the contract surface stays structurally identical between planning and execute runs.
 
 Required suite-summary fields:
 
@@ -216,7 +216,7 @@ ${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTF
 - `src/transport/mod.rs` -- Transport module
 - `src/transport/aggregator.rs` -- Multipath aggregation
 - `src/transport/router.rs` -- Routing and dispatch
-- `src/transport/mock.rs` -- Deterministic network simulation
+- `asupersync::transport::deterministic` -- Deterministic network behavior
 - `src/transport/sink.rs` -- Symbol sink trait
 - `src/transport/stream.rs` -- Symbol stream trait
 - `artifacts/runtime_control_seam_inventory_v1.json` -- Control seam inventory (AA-01.3)

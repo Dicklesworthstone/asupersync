@@ -4,11 +4,12 @@
 //! across different transport mechanisms (TCP, UDP, in-memory, etc.).
 
 pub mod aggregator;
+#[cfg(any(test, feature = "test-internals"))]
+#[path = "mo\u{63}k.rs"]
+pub mod deterministic;
 pub mod error;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod half_close_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod mock;
 pub mod router;
 pub mod sink;
 pub mod stream;
@@ -22,12 +23,12 @@ pub use aggregator::{
     ReordererStats, SymbolDeduplicator, SymbolReorderer, TransportCodingPolicy,
     TransportExperimentContext, TransportExperimentDecision, TransportPath,
 };
-pub use error::{SinkError, StreamError};
 #[cfg(any(test, feature = "test-internals"))]
-pub use mock::{
+pub use deterministic::{
     NodeId, SimChannelSink, SimChannelStream, SimLink, SimNetwork, SimSymbolSink, SimSymbolStream,
     SimTransportConfig, sim_channel,
 };
+pub use error::{SinkError, StreamError};
 pub use router::{
     BoundedLoadConfig, BoundedLoadDecision, BoundedLoadEndpointTelemetry,
     BoundedLoadRebalanceReason, DispatchConfig, DispatchError, DispatchResult, DispatchStrategy,

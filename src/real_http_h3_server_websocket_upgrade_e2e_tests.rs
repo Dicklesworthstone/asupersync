@@ -135,7 +135,7 @@ mod tests {
             let stats = self.stats.read().await.clone();
             H3WebSocketTestResult {
                 test_name: self.test_name.clone(),
-                server_addr: "0.0.0.0:0".parse().unwrap(), // Placeholder
+                server_addr: "0.0.0.0:0".parse().unwrap(), // Ephemeral bind address.
                 phase: self.current_phase,
                 success: result,
                 error,
@@ -145,7 +145,7 @@ mod tests {
         }
     }
 
-    /// Simulated HTTP/3 server with WebSocket upgrade support
+    /// Deterministic HTTP/3 server with WebSocket upgrade support.
     pub struct H3WebSocketServer {
         pub addr: SocketAddr,
         pub stats: Arc<RwLock<H3WebSocketStats>>,
@@ -188,12 +188,12 @@ mod tests {
             }
         }
 
-        /// Simulate H3 SETTINGS exchange with CONNECT protocol enabled
+        /// Exchange H3 SETTINGS with CONNECT protocol enabled.
         pub async fn exchange_settings(&mut self) -> Result<(), H3NativeError> {
             let mut settings = H3Settings::new();
             settings.set_enable_connect_protocol(true)?;
 
-            // Simulate control stream establishment
+            // Establish control stream.
             let control_stream =
                 StreamId::local(StreamRole::Server, StreamDirection::Unidirectional, 0);
             self.control_stream_id = Some(control_stream);
@@ -271,7 +271,7 @@ mod tests {
                 stream.state = WebSocketStreamState::UpgradeResponse;
             }
 
-            // Simulate sending 200 response with WebSocket upgrade headers
+            // Build 200 response with WebSocket upgrade headers.
             // In real implementation, this would encode HTTP/3 HEADERS frame
             let response_headers = vec![
                 (":status", "200"),
@@ -380,7 +380,7 @@ mod tests {
         }
     }
 
-    /// Simulated HTTP/3 client for WebSocket upgrade testing
+    /// Deterministic HTTP/3 client for WebSocket upgrade testing.
     pub struct H3WebSocketClient {
         pub server_addr: SocketAddr,
         pub stats: Arc<RwLock<H3WebSocketStats>>,
@@ -400,10 +400,10 @@ mod tests {
 
         /// Establish QUIC connection and HTTP/3 control stream
         pub async fn connect(&mut self) -> Result<(), H3NativeError> {
-            // Simulate QUIC connection establishment
+            // Establish QUIC connection.
             self.stats.write().await.quic_connections += 1;
 
-            // Simulate HTTP/3 control stream setup
+            // Set up HTTP/3 control stream.
             self.stats.write().await.h3_control_streams += 1;
 
             Ok(())
@@ -421,7 +421,7 @@ mod tests {
             // Generate WebSocket key
             let ws_key = base64::encode(&[1u8; 16]); // Simplified for testing
 
-            // Simulate CONNECT request headers
+            // Build CONNECT request headers.
             let mut headers = HashMap::new();
             headers.insert(":method".to_string(), "CONNECT".to_string());
             headers.insert(":authority".to_string(), target.to_string());

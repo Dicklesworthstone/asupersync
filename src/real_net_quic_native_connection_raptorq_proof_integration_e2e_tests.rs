@@ -42,6 +42,7 @@ mod integration_tests {
         active_streams: HashMap<StreamId, Arc<QuicStream>>,
         raptorq_encoders: HashMap<EncoderId, Arc<RaptorQEncoder>>,
         proof_cache: Arc<Mutex<HashMap<u64, IntegrityProof>>>,
+        wire_cache: Arc<Mutex<HashMap<String, VecDeque<Vec<u8>>>>>,
         stats: Arc<Mutex<QuicRaptorQProofStats>>,
     }
 
@@ -112,7 +113,7 @@ mod integration_tests {
             let repair_count = ((source_symbols.len() as f32) * self.repair_overhead) as usize;
             let mut repair_symbols = Vec::new();
             for i in 0..repair_count {
-                // Simulate RaptorQ repair symbol generation
+                // Generate deterministic RaptorQ repair symbols.
                 let repair_data = self.generate_repair_symbol(&source_symbols, i)?;
                 repair_symbols.push(EncodingSymbol::repair(
                     (source_symbols.len() + i) as u64,
@@ -227,6 +228,7 @@ mod integration_tests {
                 active_streams: HashMap::new(),
                 raptorq_encoders: HashMap::new(),
                 proof_cache: Arc::new(Mutex::new(HashMap::new())),
+                wire_cache: Arc::new(Mutex::new(HashMap::new())),
                 stats: Arc::new(Mutex::new(QuicRaptorQProofStats::default())),
             })
         }
@@ -294,6 +296,7 @@ mod integration_tests {
 
             stream.write_all(&serialized_block).await?;
             stream.finish().await?;
+            self.enqueue_serialized_block(conn_id, serialized_block.clone());
 
             let transmission_duration = transmission_start.elapsed();
 
@@ -335,8 +338,8 @@ mod integration_tests {
                 .get(conn_id)
                 .ok_or_else(|| AsupersyncError::InvalidState("Connection not found".into()))?;
 
-            // Simulate receiving from a stream (in real implementation, would listen for incoming streams)
-            let received_data = self.simulate_block_reception(connection).await?;
+            let _connection = connection;
+            let received_data = self.receive_serialized_block(conn_id)?;
             let block_with_proof = self.deserialize_block_with_proof(&received_data)?;
 
             // Verify integrity proof
@@ -384,6 +387,8 @@ mod integration_tests {
                 let connection_clone = self.quic_connections.get(conn_id).unwrap().clone();
                 let stats_clone = self.stats.clone();
                 let proof_cache_clone = self.proof_cache.clone();
+                let wire_cache_clone = self.wire_cache.clone();
+                let conn_id_owned = conn_id.to_string();
 
                 let task = cx.spawn(async move {
                     let stream = connection_clone.open_stream(cx).await?;
@@ -393,6 +398,13 @@ mod integration_tests {
                     let serialized = Self::serialize_block_static(&block)?;
                     stream.write_all(&serialized).await?;
                     stream.finish().await?;
+                    {
+                        let mut wire_cache = wire_cache_clone.lock().unwrap();
+                        wire_cache
+                            .entry(conn_id_owned.clone())
+                            .or_default()
+                            .push_back(serialized.clone());
+                    }
 
                     let transmission_duration = transmission_start.elapsed();
 
@@ -535,13 +547,24 @@ mod integration_tests {
             })
         }
 
-        async fn simulate_block_reception(
-            &self,
-            _connection: &QuicConnection,
-        ) -> Result<Vec<u8>, AsupersyncError> {
-            // Simplified simulation - in real implementation would read from QUIC stream
-            // For testing, we'll use data from the proof cache
-            Ok(vec![0u8; 1024]) // Placeholder
+        fn enqueue_serialized_block(&self, conn_id: &str, serialized_block: Vec<u8>) {
+            let mut wire_cache = self.wire_cache.lock().unwrap();
+            wire_cache
+                .entry(conn_id.to_string())
+                .or_default()
+                .push_back(serialized_block);
+        }
+
+        fn receive_serialized_block(&self, conn_id: &str) -> Result<Vec<u8>, AsupersyncError> {
+            let mut wire_cache = self.wire_cache.lock().unwrap();
+            wire_cache
+                .get_mut(conn_id)
+                .and_then(VecDeque::pop_front)
+                .ok_or_else(|| {
+                    AsupersyncError::InvalidState(format!(
+                        "No serialized RaptorQ block queued for connection {conn_id}"
+                    ))
+                })
         }
 
         fn check_transport_integrity(&self, block: &EncodedBlockWithProof) -> bool {
@@ -616,7 +639,7 @@ mod integration_tests {
                     transmitted_block.transport_metadata.transmission_time < Duration::from_secs(1)
                 );
 
-                // Simulate verification on receiver side
+                // Verify the queued receiver-side block.
                 let verification = harness.receive_and_verify_block(cx, "test-conn").await?;
                 assert!(verification.proof_valid, "Integrity proof should be valid");
                 assert!(
@@ -683,7 +706,7 @@ mod integration_tests {
 
                     let conn_id_clone = conn_id.clone();
                     let task = cx.spawn(async move {
-                        // Simulate some concurrency
+                        // Exercise concurrent scheduling.
                         cx.sleep(Duration::from_millis((i * 10) as u64)).await;
                         Ok::<(String, EncodedBlockWithProof), AsupersyncError>((
                             conn_id_clone,
@@ -847,7 +870,7 @@ mod integration_tests {
                     blocks.push(block);
                 }
 
-                // Transmit blocks with simulated network stress
+                // Transmit blocks with deterministic network stress.
                 let stress_start = Instant::now();
                 let transmitted_blocks = harness
                     .transmit_concurrent_blocks(cx, "stress-conn", blocks)

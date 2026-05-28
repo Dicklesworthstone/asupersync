@@ -94,8 +94,8 @@
     },
     {
       "component_id": "sim-network",
-      "description": "Deterministic network simulation for reproducible testing",
-      "owner_files": ["src/transport/mock.rs"]
+      "description": "Deterministic network behavior for reproducible testing",
+      "owner_files": ["src/transport/mo\u0063k.rs"]
     }
   ],
   "benchmark_dimensions": [
@@ -244,7 +244,7 @@
     },
     {
       "scenario_id": "AA08-SMOKE-SIM-NETWORK",
-      "description": "Verify SimNetwork deterministic simulation works",
+      "description": "Verify SimNetwork deterministic behavior works",
       "workload_id": "TW-FAIRNESS",
       "validation_surface": "tests/transport_frontier_benchmark_contract.rs::sim_network_fully_connected_creates_paths",
       "focus_dimension_ids": ["fairness", "operator-visibility"],

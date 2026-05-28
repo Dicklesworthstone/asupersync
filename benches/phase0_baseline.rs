@@ -35,7 +35,7 @@ use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::RuntimeState;
 #[cfg(feature = "test-internals")]
-use asupersync::transport::mock::{SimTransportConfig, sim_channel};
+use asupersync::transport::deterministic::{SimTransportConfig, sim_channel};
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, TaskId, Time};
 #[cfg(feature = "test-internals")]
 use asupersync::types::{ObjectId, ObjectParams};

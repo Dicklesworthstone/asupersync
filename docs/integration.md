@@ -1447,7 +1447,7 @@ Key points:
 ```ignore
 use asupersync::config::RaptorQConfig;
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
-use asupersync::transport::mock::{sim_channel, SimTransportConfig};
+use asupersync::transport::deterministic::{sim_channel, SimTransportConfig};
 use asupersync::types::symbol::{ObjectId, ObjectParams};
 use asupersync::Cx;
 

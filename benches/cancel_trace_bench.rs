@@ -29,7 +29,7 @@ use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::trace::event_structure::TracePoset;
 use asupersync::trace::scoring::{score_persistence, seed_fingerprint};
 #[cfg(feature = "test-internals")]
-use asupersync::transport::mock::{SimTransportConfig, sim_channel};
+use asupersync::transport::deterministic::{SimTransportConfig, sim_channel};
 use asupersync::types::{Budget, CancelKind, CancelReason, RegionId, TaskId, Time};
 #[cfg(feature = "test-internals")]
 use asupersync::types::{ObjectId, ObjectParams};

@@ -40,14 +40,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ────────────────────────────────────────────────────────────────────────────────
-// Mock HTTP/H2 Server Infrastructure
+// Deterministic HTTP/H2 Server Infrastructure
 // ────────────────────────────────────────────────────────────────────────────────
 
 /// HTTP/H2 server that integrates with Kafka producer for message publishing
 #[derive(Debug)]
 struct HttpKafkaServer {
     /// Kafka producer for publishing messages
-    kafka_producer: Arc<MockKafkaProducer>,
+    kafka_producer: Arc<DeterministicKafkaProducer>,
     /// HTTP/H2 connection management
     connections: Arc<Mutex<Vec<H2Connection>>>,
     /// Server configuration
@@ -111,7 +111,7 @@ struct PendingRequest {
     /// Timestamp when request was queued
     queued_at: Instant,
     /// Response sender (in real implementation)
-    response_channel: Option<()>, // Placeholder for response channel
+    response_channel: Option<()>, // Response channel omitted for this queue-only test.
 }
 
 #[derive(Debug)]
@@ -153,17 +153,17 @@ enum StreamState {
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
-// Mock Kafka Producer with Acknowledgment Control
+// Deterministic Kafka Producer with Acknowledgment Control
 // ────────────────────────────────────────────────────────────────────────────────
 
-/// Mock Kafka producer that simulates acknowledgment delays for backpressure testing
+/// Deterministic Kafka producer that models acknowledgment delays for backpressure testing.
 #[derive(Debug)]
-struct MockKafkaProducer {
+struct DeterministicKafkaProducer {
     /// Producer configuration
     config: ProducerConfig,
     /// Producer state
     state: Arc<Mutex<ProducerState>>,
-    /// Acknowledgment delay simulator
+    /// Acknowledgment delay model.
     ack_delay_config: AckDelayConfig,
 }
 
@@ -177,8 +177,8 @@ struct ProducerState {
     stats: ProducerStats,
     /// Current acknowledgment delay
     current_ack_delay: Duration,
-    /// Whether producer is simulating failure
-    simulating_failure: bool,
+    /// Whether producer is injecting failure
+    injecting_failure: bool,
 }
 
 #[derive(Debug)]
@@ -227,9 +227,9 @@ struct AckDelayConfig {
     base_delay: Duration,
     /// Additional delay variance
     delay_variance: Duration,
-    /// Simulate slow acknowledgments
+    /// Exercise slow acknowledgments
     slow_acks: bool,
-    /// Failure simulation rate (0.0 = no failures, 1.0 = all fail)
+    /// Failure injection rate (0.0 = no failures, 1.0 = all fail)
     failure_rate: f64,
 }
 
@@ -279,7 +279,7 @@ struct HttpResponse {
 impl HttpKafkaServer {
     fn new(config: ServerConfig) -> Self {
         Self {
-            kafka_producer: Arc::new(MockKafkaProducer::new(ProducerConfig::default())),
+            kafka_producer: Arc::new(DeterministicKafkaProducer::new(ProducerConfig::default())),
             connections: Arc::new(Mutex::new(Vec::new())),
             config,
             stats: Arc::new(Mutex::new(ServerStats::default())),
@@ -287,7 +287,7 @@ impl HttpKafkaServer {
         }
     }
 
-    fn with_kafka_producer(mut self, producer: MockKafkaProducer) -> Self {
+    fn with_kafka_producer(mut self, producer: DeterministicKafkaProducer) -> Self {
         self.kafka_producer = Arc::new(producer);
         self
     }
@@ -438,7 +438,7 @@ impl HttpKafkaServer {
     }
 }
 
-impl MockKafkaProducer {
+impl DeterministicKafkaProducer {
     fn new(config: ProducerConfig) -> Self {
         Self {
             config,
@@ -447,7 +447,7 @@ impl MockKafkaProducer {
                 next_message_id: 1,
                 stats: ProducerStats::default(),
                 current_ack_delay: Duration::from_millis(50),
-                simulating_failure: false,
+                injecting_failure: false,
             })),
             ack_delay_config: AckDelayConfig::default(),
         }
@@ -458,7 +458,7 @@ impl MockKafkaProducer {
         self
     }
 
-    /// Send a message with simulated acknowledgment delay
+    /// Send a message with deterministic acknowledgment delay.
     async fn send(
         &self,
         cx: &Cx,
@@ -487,26 +487,26 @@ impl MockKafkaProducer {
             id
         };
 
-        // Simulate acknowledgment delay in background
+        // Complete acknowledgment after a deterministic delay in the background.
         let state_clone = Arc::clone(&self.state);
         let ack_config = self.ack_delay_config.clone();
 
         crate::lab::runtime::spawn(async move {
-            Self::simulate_acknowledgment(state_clone, message_id, ack_config).await;
+            Self::complete_acknowledgment_after_delay(state_clone, message_id, ack_config).await;
         });
 
         // For immediate failures, check failure rate
         if self.ack_delay_config.failure_rate > 0.0 {
             let random_value: f64 = (message_id % 100) as f64 / 100.0; // Simple deterministic "randomness"
             if random_value < self.ack_delay_config.failure_rate {
-                return Err(KafkaError::Broker("Simulated broker error".to_string()));
+                return Err(KafkaError::Broker("Injected broker error".to_string()));
             }
         }
 
         Ok(())
     }
 
-    async fn simulate_acknowledgment(
+    async fn complete_acknowledgment_after_delay(
         state: Arc<Mutex<ProducerState>>,
         message_id: u64,
         ack_config: AckDelayConfig,
@@ -659,7 +659,7 @@ mod tests {
         };
 
         // Configure Kafka producer with slow acknowledgments
-        let kafka_producer = MockKafkaProducer::new(ProducerConfig::default())
+        let kafka_producer = DeterministicKafkaProducer::new(ProducerConfig::default())
             .with_ack_delay_config(AckDelayConfig {
                 slow_acks: true,
                 base_delay: Duration::from_millis(1000),
@@ -754,7 +754,7 @@ mod tests {
         };
 
         // Configure Kafka producer with very slow acknowledgments
-        let kafka_producer = MockKafkaProducer::new(ProducerConfig::default())
+        let kafka_producer = DeterministicKafkaProducer::new(ProducerConfig::default())
             .with_ack_delay_config(AckDelayConfig {
                 slow_acks: true,
                 base_delay: Duration::from_millis(500), // Longer than timeout
@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn test_kafka_producer_error_handling() {
         // Configure Kafka producer with high failure rate
-        let kafka_producer = MockKafkaProducer::new(ProducerConfig::default())
+        let kafka_producer = DeterministicKafkaProducer::new(ProducerConfig::default())
             .with_ack_delay_config(AckDelayConfig {
                 failure_rate: 0.5, // 50% failure rate
                 ..Default::default()
@@ -838,7 +838,7 @@ mod tests {
             ..Default::default()
         };
 
-        let kafka_producer = MockKafkaProducer::new(ProducerConfig::default())
+        let kafka_producer = DeterministicKafkaProducer::new(ProducerConfig::default())
             .with_ack_delay_config(AckDelayConfig {
                 slow_acks: true,
                 base_delay: Duration::from_millis(200),
@@ -960,7 +960,7 @@ mod tests {
         let cx = Cx::root();
 
         crate::lab::runtime::block_on(async {
-            // Simulate sustained load
+            // Exercise sustained load.
             for batch in 0..5 {
                 let futures = (1..=10)
                     .map(|i| {

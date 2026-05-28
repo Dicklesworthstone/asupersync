@@ -83,7 +83,7 @@ fn doc_references_artifact_runner_and_test() {
         "scripts/run_transport_frontier_benchmark_smoke.sh",
         "tests/transport_frontier_benchmark_contract.rs",
         "src/transport/aggregator.rs",
-        "src/transport/mock.rs",
+        "asupersync::transport::deterministic",
     ] {
         assert!(doc.contains(reference), "doc must reference {reference}");
     }
@@ -1061,7 +1061,7 @@ fn downstream_beads_stay_in_aa_track_namespace() {
 #[cfg(feature = "test-internals")]
 #[test]
 fn sim_network_fully_connected_creates_paths() {
-    use asupersync::transport::mock::{SimNetwork, SimTransportConfig};
+    use asupersync::transport::deterministic::{SimNetwork, SimTransportConfig};
 
     let config = SimTransportConfig::reliable();
     let net = SimNetwork::fully_connected(3, config);
@@ -1076,7 +1076,7 @@ fn sim_network_fully_connected_creates_paths() {
 #[cfg(feature = "test-internals")]
 #[test]
 fn sim_network_ring_topology_creates_paths() {
-    use asupersync::transport::mock::{SimNetwork, SimTransportConfig};
+    use asupersync::transport::deterministic::{SimNetwork, SimTransportConfig};
 
     let config = SimTransportConfig::reliable();
     let net = SimNetwork::ring(4, config);

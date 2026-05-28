@@ -51,7 +51,7 @@ use asupersync::obligation::ledger::ObligationLedger;
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::remote::NodeId;
 #[cfg(feature = "test-internals")]
-use asupersync::transport::mock::{SimTransportConfig, sim_channel};
+use asupersync::transport::deterministic::{SimTransportConfig, sim_channel};
 use asupersync::types::policy::FailFast;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 #[cfg(feature = "test-internals")]
