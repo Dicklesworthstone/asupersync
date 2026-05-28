@@ -946,7 +946,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_write_increments_ledger_generation() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1012,7 +1012,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rollback_correctly_increments_ledger_generation() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1071,7 +1071,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ledger_generation_ordering_across_transactions() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_transactions_generation_isolation() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1177,7 +1177,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mixed_commit_rollback_generation_behavior() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {
@@ -1240,7 +1240,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_transaction_isolation_preserves_generation_ordering() {
-        let runtime = init_test_runtime(&Cx::new()).await.unwrap();
+        let runtime = init_test_runtime(&Cx::for_testing()).await.unwrap();
         let cx = runtime.cx();
 
         let config = IntegrationConfig {

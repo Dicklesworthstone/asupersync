@@ -778,7 +778,7 @@ impl ObligationState {
 /// Test 1: Normal WAL operations with obligation tracking
 #[tokio::test]
 async fn test_normal_wal_operations_with_obligations() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = SqliteWalRecoveryConfig::default();
     let system = MockSqliteWalRecoverySystem::new(&cx, config).await?;
 
@@ -822,7 +822,7 @@ async fn test_normal_wal_operations_with_obligations() -> Result<(), Box<dyn std
 /// Test 2: Crash after commit - verify committed obligations survive recovery
 #[tokio::test]
 async fn test_crash_after_commit_recovery() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = SqliteWalRecoveryConfig {
         crash_probability: 1.0, // Always crash for this test
         ..SqliteWalRecoveryConfig::default()
@@ -868,7 +868,7 @@ async fn test_crash_after_commit_recovery() -> Result<(), Box<dyn std::error::Er
 /// Test 3: Crash during transaction - verify incomplete transactions are rolled back
 #[tokio::test]
 async fn test_crash_during_transaction_rollback() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = SqliteWalRecoveryConfig {
         crash_probability: 1.0,
         ..SqliteWalRecoveryConfig::default()
@@ -907,7 +907,7 @@ async fn test_crash_during_transaction_rollback() -> Result<(), Box<dyn std::err
 /// Test 4: WAL checkpoint recovery with complex obligation state
 #[tokio::test]
 async fn test_wal_checkpoint_recovery() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = SqliteWalRecoveryConfig {
         checkpoint_interval: 5, // Frequent checkpoints
         ..SqliteWalRecoveryConfig::default()
@@ -947,7 +947,7 @@ async fn test_wal_checkpoint_recovery() -> Result<(), Box<dyn std::error::Error>
 /// Test 5: Multi-transaction recovery with mixed obligation types
 #[tokio::test]
 async fn test_multi_transaction_recovery() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = SqliteWalRecoveryConfig::default();
     let system = MockSqliteWalRecoverySystem::new(&cx, config).await?;
 
@@ -1002,7 +1002,7 @@ async fn test_multi_transaction_recovery() -> Result<(), Box<dyn std::error::Err
 /// Test 6: Corruption detection and handling during recovery
 #[tokio::test]
 async fn test_corruption_detection_handling() -> Result<(), Box<dyn std::error::Error>> {
-    let cx = Cx::new();
+    let cx = Cx::for_testing();
     let config = SqliteWalRecoveryConfig::default();
     let system = MockSqliteWalRecoverySystem::new(&cx, config).await?;
 
