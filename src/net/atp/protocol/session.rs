@@ -2236,7 +2236,7 @@ mod tests {
         assert!(warned.contains(&AtpFeature::Compression));
         assert!(warned.contains(&AtpFeature::H3Adapter));
         assert!(warned.contains(&AtpFeature::WebTransportAdapter));
-        assert_eq!(proof.selected_features, vec!["encryption_policy", "repair"]);
+        assert_eq!(proof.selected_features, vec!["repair", "encryption_policy"]);
     }
 
     #[test]
