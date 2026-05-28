@@ -449,8 +449,10 @@ mod tests {
         let echo = EchoService;
         reflection.register_handler(&echo);
 
-        // br-asupersync-3tzd9v: default = no auth, list_services Oks.
-        let services = reflection.list_services().expect("no auth installed");
+        // Anonymous mode is an explicit dev/test opt-in; `new()` itself is locked.
+        let services = reflection
+            .list_services()
+            .expect("anonymous mode permits list");
         crate::assert_with_log!(
             services == vec!["pkg.Echo".to_string()],
             "service list",
@@ -577,16 +579,19 @@ mod tests {
     // br-asupersync-3tzd9v: opt-in auth callback regression tests.
 
     #[test]
-    fn auth_default_is_open() {
-        init_test("auth_default_is_open");
+    fn auth_allow_anonymous_is_open() {
+        init_test("auth_allow_anonymous_is_open");
         let reflection = ReflectionService::new().allow_anonymous();
         reflection.register_handler(&EchoService);
-        assert!(!reflection.auth_installed(), "default must be no auth");
-        // Both entry points succeed without an ambient Cx because no auth
-        // callback is installed.
+        assert!(
+            !reflection.auth_installed(),
+            "anonymous mode must not report a production auth callback",
+        );
+        // Both entry points succeed without an ambient Cx because anonymous
+        // mode was explicitly selected.
         assert!(reflection.list_services().is_ok());
         assert!(reflection.describe_service("pkg.Echo").is_ok());
-        crate::test_complete!("auth_default_is_open");
+        crate::test_complete!("auth_allow_anonymous_is_open");
     }
 
     #[test]
