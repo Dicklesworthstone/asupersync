@@ -447,26 +447,26 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
         if self.builder.big_endian {
             match self.builder.length_field_length {
                 1 => dst.put_u8(length_to_encode as u8),
-                2 => dst.put_u16(length_to_encode as u16),
+                2 => dst.put_u16_be(length_to_encode as u16),
                 3 => {
                     dst.put_u8((length_to_encode >> 16) as u8);
-                    dst.put_u16(length_to_encode as u16);
+                    dst.put_u16_be(length_to_encode as u16);
                 }
-                4 => dst.put_u32(length_to_encode as u32),
+                4 => dst.put_u32_be(length_to_encode as u32),
                 5 => {
                     dst.put_u8((length_to_encode >> 32) as u8);
-                    dst.put_u32(length_to_encode as u32);
+                    dst.put_u32_be(length_to_encode as u32);
                 }
                 6 => {
-                    dst.put_u16((length_to_encode >> 32) as u16);
-                    dst.put_u32(length_to_encode as u32);
+                    dst.put_u16_be((length_to_encode >> 32) as u16);
+                    dst.put_u32_be(length_to_encode as u32);
                 }
                 7 => {
                     dst.put_u8((length_to_encode >> 48) as u8);
-                    dst.put_u16((length_to_encode >> 32) as u16);
-                    dst.put_u32(length_to_encode as u32);
+                    dst.put_u16_be((length_to_encode >> 32) as u16);
+                    dst.put_u32_be(length_to_encode as u32);
                 }
-                8 => dst.put_u64(length_to_encode),
+                8 => dst.put_u64_be(length_to_encode),
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
