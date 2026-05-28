@@ -15289,12 +15289,14 @@ mod tests {
             guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
         }
 
-        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 32);
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
+        worker.set_cached_suggestion(SchedulingSuggestion::MeetDeadlines);
+        worker.steps_since_snapshot = 0;
 
-        // Force MeetDeadlines suggestion (EDF priority mode)
-        // Create deadline pressure to trigger EDF mode
+        // Pin MeetDeadlines suggestion (EDF priority mode) long enough to
+        // exercise the timed-lane fairness path rather than governor inference.
         let _root = {
             let mut guard = state
                 .lock()
