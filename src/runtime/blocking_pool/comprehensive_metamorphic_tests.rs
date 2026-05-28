@@ -289,13 +289,18 @@ fn mr_thread_count_bounds() {
 
             let snapshot = PoolSnapshot::capture(&pool, &config, &tracked_tasks);
 
-            prop_assert!(snapshot.active_threads >= snapshot.min_threads,
-                "Active threads {} below minimum {} after operation {:?}",
-                snapshot.active_threads, snapshot.min_threads, op);
+            if snapshot.is_shutdown {
+                prop_assert_eq!(snapshot.active_threads, 0,
+                    "Shutdown pool should retire all threads after operation {:?}", op);
+            } else {
+                prop_assert!(snapshot.active_threads >= snapshot.min_threads,
+                    "Active threads {} below minimum {} after operation {:?}",
+                    snapshot.active_threads, snapshot.min_threads, op);
 
-            prop_assert!(snapshot.active_threads <= snapshot.max_threads,
-                "Active threads {} exceeds maximum {} after operation {:?}",
-                snapshot.active_threads, snapshot.max_threads, op);
+                prop_assert!(snapshot.active_threads <= snapshot.max_threads,
+                    "Active threads {} exceeds maximum {} after operation {:?}",
+                    snapshot.active_threads, snapshot.max_threads, op);
+            }
         }
 
         // Cleanup
