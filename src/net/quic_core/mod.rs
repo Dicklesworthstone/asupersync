@@ -12,6 +12,8 @@ use std::fmt;
 
 /// Maximum value representable by QUIC varint (2^62 - 1).
 pub const QUIC_VARINT_MAX: u64 = (1u64 << 62) - 1;
+/// Maximum QUIC packet number value (2^62 - 1).
+pub const QUIC_PACKET_NUMBER_MAX: u64 = QUIC_VARINT_MAX;
 
 /// Transport parameter: max_idle_timeout.
 pub const TP_MAX_IDLE_TIMEOUT: u64 = 0x01;
@@ -755,8 +757,10 @@ fn validate_pn_len(packet_number_len: u8) -> Result<u8, QuicCoreError> {
 }
 
 fn ensure_pn_fits(packet_number: u64, packet_number_len: u8) -> Result<(), QuicCoreError> {
+    validate_pn_len(packet_number_len)?;
+
     // RFC 9000 §17.1: packet numbers are limited to 62 bits
-    if packet_number >= (1u64 << 62) {
+    if packet_number > QUIC_PACKET_NUMBER_MAX {
         return Err(QuicCoreError::PacketNumberTooLarge {
             packet_number: (packet_number & 0xFFFFFFFF) as u32, // Truncate for error display
             width: packet_number_len,
@@ -768,7 +772,7 @@ fn ensure_pn_fits(packet_number: u64, packet_number_len: u8) -> Result<(), QuicC
         2 => 0xffff,
         3 => 0x00ff_ffff,
         4 => 0xffff_ffff,
-        _ => return Err(QuicCoreError::InvalidHeader("invalid packet number length")),
+        _ => unreachable!("packet_number_len validated above"),
     };
     if packet_number <= max {
         Ok(())
@@ -776,6 +780,47 @@ fn ensure_pn_fits(packet_number: u64, packet_number_len: u8) -> Result<(), QuicC
         Err(QuicCoreError::PacketNumberTooLarge {
             packet_number: (packet_number & 0xFFFFFFFF) as u32, // Truncate for error display
             width: packet_number_len,
+        })
+    }
+}
+
+/// Determine the minimum packet-number wire width for a new packet.
+///
+/// RFC 9000 section 17.1 requires the chosen packet-number encoding to cover
+/// more than twice the range between the new packet number and the largest
+/// acknowledged packet number.
+///
+/// # Errors
+///
+/// Returns [`QuicCoreError::PacketNumberTooLarge`] when the packet number is
+/// outside QUIC's 62-bit range or no 1- to 4-byte truncated encoding can
+/// disambiguate it from `largest_acked`.
+pub fn packet_number_len_for_encoding(
+    packet_number: u64,
+    largest_acked: u64,
+) -> Result<u8, QuicCoreError> {
+    if packet_number > QUIC_PACKET_NUMBER_MAX {
+        return Err(QuicCoreError::PacketNumberTooLarge {
+            packet_number: (packet_number & 0xFFFFFFFF) as u32,
+            width: 4,
+        });
+    }
+
+    let gap = packet_number.saturating_sub(largest_acked);
+    let required_range = gap.saturating_mul(2).saturating_add(1);
+
+    if required_range <= (1u64 << 8) {
+        Ok(1)
+    } else if required_range <= (1u64 << 16) {
+        Ok(2)
+    } else if required_range <= (1u64 << 24) {
+        Ok(3)
+    } else if required_range <= (1u64 << 32) {
+        Ok(4)
+    } else {
+        Err(QuicCoreError::PacketNumberTooLarge {
+            packet_number: (packet_number & 0xFFFFFFFF) as u32,
+            width: 4,
         })
     }
 }
@@ -813,25 +858,41 @@ pub fn decode_packet_number_reconstruct(
     // Validate packet number length
     validate_pn_len(pn_len)?;
 
+    if largest_pn > QUIC_PACKET_NUMBER_MAX {
+        return Err(QuicCoreError::PacketNumberTooLarge {
+            packet_number: (largest_pn & 0xFFFFFFFF) as u32,
+            width: pn_len,
+        });
+    }
+
     // RFC 9000 §A.2 algorithm
-    let expected_pn = largest_pn.wrapping_add(1);
+    let expected_pn = largest_pn + 1;
     let pn_nbits = (pn_len as u32) * 8;
     let pn_win = 1u64 << pn_nbits;
     let pn_hwin = pn_win / 2;
     let pn_mask = pn_win - 1;
 
+    if u64::from(truncated_pn) > pn_mask {
+        return Err(QuicCoreError::PacketNumberTooLarge {
+            packet_number: truncated_pn,
+            width: pn_len,
+        });
+    }
+
     // Reconstruct candidate packet number
     let mut candidate_pn = (expected_pn & !pn_mask) | (truncated_pn as u64);
 
     // Adjust candidate based on RFC 9000 §A.2 conditions
-    if candidate_pn <= expected_pn.saturating_sub(pn_hwin) && candidate_pn < (1u64 << 62) - pn_win {
-        candidate_pn = candidate_pn.wrapping_add(pn_win);
-    } else if candidate_pn > expected_pn.wrapping_add(pn_hwin) && candidate_pn >= pn_win {
-        candidate_pn = candidate_pn.wrapping_sub(pn_win);
+    if candidate_pn <= expected_pn.saturating_sub(pn_hwin)
+        && candidate_pn < (QUIC_PACKET_NUMBER_MAX + 1) - pn_win
+    {
+        candidate_pn += pn_win;
+    } else if candidate_pn > expected_pn + pn_hwin && candidate_pn >= pn_win {
+        candidate_pn -= pn_win;
     }
 
     // RFC 9000 §17.1: packet numbers are limited to 62 bits
-    if candidate_pn >= (1u64 << 62) {
+    if candidate_pn > QUIC_PACKET_NUMBER_MAX {
         return Err(QuicCoreError::PacketNumberTooLarge {
             packet_number: truncated_pn,
             width: pn_len,
@@ -1690,7 +1751,7 @@ mod tests {
         let test_cases = [
             // (largest_acked, full_packet_number, expected_min_width)
             (0, 1, 1),         // First packet after initial
-            (0, 255, 1),       // Can still use 1 byte
+            (0, 255, 2),       // Needs 2 bytes to disambiguate from packet 0
             (0, 256, 2),       // Need 2 bytes for wider gap
             (100, 101, 1),     // Small increment from acked
             (100, 356, 2),     // Larger gap requires 2 bytes
@@ -1701,31 +1762,32 @@ mod tests {
         ];
 
         for (largest_acked, full_pn, expected_min_width) in test_cases {
-            // Calculate unacked range
-            let num_unacked = (full_pn - largest_acked) + 1;
-            let space_needed = 2 * num_unacked + 1;
-
-            // Determine minimum width needed
-            let calculated_width = if space_needed <= 256 {
-                1
-            } else if space_needed <= 65536 {
-                2
-            } else if space_needed <= 16777216 {
-                3
-            } else {
-                4
-            };
+            let calculated_width =
+                packet_number_len_for_encoding(full_pn, largest_acked).expect("valid width");
 
             assert_eq!(
                 calculated_width, expected_min_width,
                 "Truncation algorithm: largest_acked={largest_acked}, full_pn={full_pn}, \
-                 unacked_range={num_unacked}, space_needed={space_needed}"
+                 calculated_width={calculated_width}"
             );
 
-            // Test that this width actually works
+            let mask = (1u64 << (u32::from(calculated_width) * 8)) - 1;
+            let truncated = full_pn & mask;
+
+            // Test that this width carries the truncated wire value.
             assert!(
-                ensure_pn_fits(full_pn, calculated_width).is_ok(),
-                "Calculated width {calculated_width} should accommodate packet number {full_pn}"
+                ensure_pn_fits(truncated, calculated_width).is_ok(),
+                "Calculated width {calculated_width} should accommodate truncated packet number {truncated}"
+            );
+
+            let truncated_wire =
+                u32::try_from(truncated).expect("truncated packet number fits u32");
+            let reconstructed =
+                decode_packet_number_reconstruct(truncated_wire, calculated_width, largest_acked)
+                    .expect("truncated packet number should reconstruct");
+            assert_eq!(
+                reconstructed, full_pn,
+                "Calculated width {calculated_width} should reconstruct packet number {full_pn}"
             );
         }
     }
@@ -2048,8 +2110,8 @@ mod tests {
                     0xa82f30ea,
                     0xac5c02,
                     3,
-                    0xa82fac5c02,
-                    "RFC 9000 §A.2 Example 2",
+                    0xa8ac5c02,
+                    "Three-byte reconstruction near largest packet number",
                 ),
             ];
 
@@ -2077,8 +2139,8 @@ mod tests {
                 (0xffffff, 0x000000, 3, 0x1000000, "Three byte wrap"),
                 (0x100000000, 0x00000000, 4, 0x100000000, "Four byte wrap"),
                 // Test reconstruction with gaps
-                (1000, 50, 1, 1050, "Small forward gap"),
-                (1000, 200, 1, 1000 + 200, "Forward within window"),
+                (1000, 1050 & 0xff, 1, 1050, "Small forward gap"),
+                (1000, 1200, 2, 1200, "Forward within two-byte window"),
                 // Test backward reconstruction
                 (1000, 950 & 0xff, 1, 950, "Backward within window"),
             ];
