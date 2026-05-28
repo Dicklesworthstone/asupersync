@@ -127,12 +127,16 @@ fn audit_w3c_span_id_generation_is_secure() {
 fn audit_span_id_collision_probability_analysis() {
     println!("🔍 AUDIT: Span ID collision probability analysis");
 
-    // Birthday paradox calculation for 64-bit span IDs
-    // P(collision) ≈ n² / (2 * 2^64) for n spans
-    // 50% collision at n ≈ sqrt(2^64) ≈ 4.3 billion spans
+    // Birthday paradox calculation for 64-bit span IDs.
+    // P(collision) ≈ 1 - exp(-n² / (2 * 2^64)) for n spans, so the
+    // inverse threshold is n ≈ sqrt(-2 * 2^64 * ln(1 - p)).
 
     let span_space: f64 = 2_f64.powi(64); // 2^64
-    let fifty_percent_collision: f64 = (span_space.ln() * 2.0).sqrt(); // sqrt(2 * ln(2) * 2^64)
+    let collision_threshold =
+        |probability: f64| (-2.0 * span_space * (1.0_f64 - probability).ln()).sqrt();
+    let fifty_percent_collision = collision_threshold(0.50);
+    let one_percent_collision = collision_threshold(0.01);
+    let tenth_percent_collision = collision_threshold(0.001);
 
     println!("📊 Collision probability analysis:");
     println!("   • Span ID space: 2^64 = {:.2e}", span_space);
@@ -142,11 +146,11 @@ fn audit_span_id_collision_probability_analysis() {
     );
     println!(
         "   • 1% collision probability at: {:.0} spans",
-        fifty_percent_collision * 0.15
+        one_percent_collision
     );
     println!(
         "   • 0.1% collision probability at: {:.0} spans",
-        fifty_percent_collision * 0.05
+        tenth_percent_collision
     );
 
     // For weak monotonic counter, collision is guaranteed after 2^64 spans
