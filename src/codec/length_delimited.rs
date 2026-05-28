@@ -453,7 +453,7 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
         if self.builder.big_endian {
             match self.builder.length_field_length {
                 1 => dst.put_u8(length_to_encode as u8),
-                2 => dst.put_slice(&(length_to_encode as u16).to_be_bytes()),
+                2 => dst.put_u16(length_to_encode as u16),
                 3 => {
                     dst.put_u8((length_to_encode >> 16) as u8);
                     dst.put_slice(&(length_to_encode as u16).to_be_bytes());
