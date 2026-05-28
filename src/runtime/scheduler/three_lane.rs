@@ -15808,7 +15808,7 @@ mod tests {
             snapshot_path => "../../tests/snapshots/scheduler",
             prepend_module_to_snapshot => false,
         }, {
-            let state_dump_snapshot = format!("{state_dump:#?}");
+            let state_dump_snapshot = format!("\n{state_dump:#?}\n");
             insta::assert_snapshot!(
                 "three_lane_scheduler_deadline_ordering_state",
                 state_dump_snapshot.as_str(),
