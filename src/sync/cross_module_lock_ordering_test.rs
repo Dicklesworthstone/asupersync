@@ -9,8 +9,8 @@ use super::lock_ordering::LockModule;
 
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use super::lock_ordering::{
-    LockRank, check_acquire_with_module, clear_held_locks, record_acquire_with_module,
-    record_release_with_module, LockOrderEnforcer,
+    LockOrderEnforcer, LockRank, check_acquire_with_module, clear_held_locks,
+    record_acquire_with_module, record_release_with_module,
 };
 
 #[test]
@@ -110,7 +110,6 @@ fn test_module_detection_from_names() {
 #[test]
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn test_lock_order_enforcer_usage_example() {
-
     clear_held_locks();
 
     // Create enforcers for different locks

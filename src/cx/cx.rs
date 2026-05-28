@@ -1753,7 +1753,10 @@ impl<Caps> Cx<Caps> {
             let has_message = guard.checkpoint_state.last_message.is_some();
             // First checkpoint must go through slow path for proper initialization
             let is_first_checkpoint = guard.checkpoint_state.checkpoint_count == 0
-                && guard.fast_path_count.load(std::sync::atomic::Ordering::Relaxed) == 0;
+                && guard
+                    .fast_path_count
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    == 0;
             if !cancelled && !exhausted && !has_message && !is_first_checkpoint {
                 guard.fast_path_last_checkpoint_ns.store(
                     checkpoint_time.as_nanos(),

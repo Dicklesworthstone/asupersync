@@ -7,10 +7,6 @@ mod tests {
     use super::super::rwlock::RwLock;
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     use crate::cx::{Cx, cap};
-    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-    use crate::types::{Budget, RegionId, TaskId};
-    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-    use crate::util::ArenaIndex;
     use std::sync::Arc;
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     use std::thread;

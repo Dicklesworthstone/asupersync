@@ -356,11 +356,7 @@ impl AtpPathLabHarness {
             }
             AtpLabRegime::ExplicitPublicUdp => {
                 candidates_evaluated += self
-                    .test_path_kind(
-                        PathKind::ExplicitPublicUdp,
-                        trace_events,
-                        validation,
-                    )
+                    .test_path_kind(PathKind::ExplicitPublicUdp, trace_events, validation)
                     .await?;
             }
             AtpLabRegime::Ipv6Direct => {
@@ -409,11 +405,7 @@ impl AtpPathLabHarness {
             }
             AtpLabRegime::RelayTcpTls443 => {
                 candidates_evaluated += self
-                    .test_path_kind(
-                        PathKind::AtpRelayTcpTls443,
-                        trace_events,
-                        validation,
-                    )
+                    .test_path_kind(PathKind::AtpRelayTcpTls443, trace_events, validation)
                     .await?;
             }
             AtpLabRegime::TailscalePrivateRoute => {
@@ -423,11 +415,7 @@ impl AtpPathLabHarness {
             }
             AtpLabRegime::MasqueConnectUdpProxy => {
                 candidates_evaluated += self
-                    .test_path_kind(
-                        PathKind::MasqueConnectUdp,
-                        trace_events,
-                        validation,
-                    )
+                    .test_path_kind(PathKind::MasqueConnectUdp, trace_events, validation)
                     .await?;
             }
             AtpLabRegime::OfflineMailbox => {
@@ -524,7 +512,7 @@ impl AtpPathLabHarness {
         if success {
             trace_events.push(AtpPathTraceEvent {
                 timestamp: self.next_timestamp(),
-                self.next_trace_id(),
+                trace_id: self.next_trace_id(),
                 event: AtpPathEventKind::PathSucceeded {
                     path_kind,
                     latency_micros: 5000, // Deterministic 5ms latency.
@@ -542,7 +530,7 @@ impl AtpPathLabHarness {
             };
             trace_events.push(AtpPathTraceEvent {
                 timestamp: self.next_timestamp(),
-                self.next_trace_id(),
+                trace_id: self.next_trace_id(),
                 event: AtpPathEventKind::PathFailed {
                     path_kind,
                     reason: reason.to_string(),

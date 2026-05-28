@@ -3178,6 +3178,10 @@ mod tests {
             .expect("seed encoding")
     }
 
+    fn deterministic_valid_nonce(suffix: &str) -> String {
+        format!("authNonceValid-{suffix}")
+    }
+
     fn test_user_jwt_for_seed(seed: &str, issuer: &str, name: &str) -> String {
         let public_key = KeyPair::from_seed(seed).expect("seed").public_key();
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ed25519-nkey","typ":"JWT"}"#);
@@ -3606,7 +3610,7 @@ mod tests {
         config.user_jwt = Some("a.b.c".to_string());
         let err = config
             .resolve_connect_auth(Some(&ServerInfo {
-                nonce: Some("nonce-1".to_string()),
+                nonce: Some(deterministic_valid_nonce("jwt-no-seed")),
                 ..ServerInfo::default()
             }))
             .expect_err("JWT without seed must fail closed");
@@ -3622,7 +3626,7 @@ mod tests {
         config.nkey_seed = Some(deterministic_cluster_seed(4));
         let err = config
             .resolve_connect_auth(Some(&ServerInfo {
-                nonce: Some("nonce-2".to_string()),
+                nonce: Some(deterministic_valid_nonce("cluster-seed")),
                 ..ServerInfo::default()
             }))
             .expect_err("non-user seed must fail closed");
@@ -3638,7 +3642,7 @@ mod tests {
         config.nkey_seed = Some("not-a-valid-seed".to_string());
         let err = config
             .resolve_connect_auth(Some(&ServerInfo {
-                nonce: Some("nonce-3".to_string()),
+                nonce: Some(deterministic_valid_nonce("malformed-seed")),
                 ..ServerInfo::default()
             }))
             .expect_err("malformed seed must fail closed");
@@ -3655,7 +3659,7 @@ mod tests {
         config.nkey_seed = Some(deterministic_user_seed(12));
         let err = config
             .resolve_connect_auth(Some(&ServerInfo {
-                nonce: Some("nonce-4".to_string()),
+                nonce: Some(deterministic_valid_nonce("malformed-jwt")),
                 ..ServerInfo::default()
             }))
             .expect_err("malformed JWT must fail closed");

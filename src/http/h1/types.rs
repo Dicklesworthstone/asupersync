@@ -1132,7 +1132,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn scrub_snapshot_header_value(name: &str, value: &str) -> String {
         match name.to_ascii_lowercase().as_str() {
