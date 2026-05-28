@@ -248,8 +248,17 @@ fn test_buf_operations(data: &[u8], operations: &[BufReadOperation]) {
                 assert_eq!(dest.len(), *len);
             }
             BufReadOperation::GetSlice { len } => {
-                // This is not a standard Buf method, skip for now
+                let remaining_before = buf.remaining();
+                let chunk = buf.chunk();
+                assert!(
+                    chunk.len() >= *len,
+                    "Bytes reader should expose the requested contiguous slice"
+                );
+                let mut observed = vec![0u8; *len];
+                observed.copy_from_slice(&chunk[..*len]);
                 buf.advance(*len);
+                assert_eq!(buf.remaining(), remaining_before - *len);
+                std::hint::black_box(observed);
             }
         }
 
