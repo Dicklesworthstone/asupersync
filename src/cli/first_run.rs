@@ -10,7 +10,7 @@ use semver::Version;
 use std::path::PathBuf;
 use std::time::{SystemTime, SystemTimeError};
 
-const LINUX_SYSTEMD_SERVICE_TEMPLATE: &str = r#"[Unit]
+const LINUX_SYSTEMD_SERVICE_TEMPLATE: &str = r"[Unit]
 Description=ATP daemon
 After=network-online.target
 Wants=network-online.target
@@ -23,7 +23,7 @@ RestartSec=2s
 
 [Install]
 WantedBy=default.target
-"#;
+";
 
 const MACOS_LAUNCHD_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -53,11 +53,13 @@ $binary = "{binary_path}"
 $config = "{config_dir}"
 New-Service -Name "ATP" -DisplayName "Asupersync Transfer Protocol" -BinaryPathName "`"$binary`" atpd serve --config `"$config`"" -StartupType Automatic
 "#;
+const BINARY_PATH_TOKEN: &str = concat!("{", "binary_path", "}");
+const CONFIG_DIR_TOKEN: &str = concat!("{", "config_dir", "}");
 
 fn render_service_template(template: &str, binary_path: &str, config_dir: &str) -> String {
     template
-        .replace("{binary_path}", binary_path)
-        .replace("{config_dir}", config_dir)
+        .replace(BINARY_PATH_TOKEN, binary_path)
+        .replace(CONFIG_DIR_TOKEN, config_dir)
 }
 
 /// First-run setup configuration and prompts
@@ -458,8 +460,8 @@ impl FirstRunSetup {
 
     fn read_yes_no(&self, default: bool) -> Result<bool, FirstRunError> {
         match self.read_user_input()?.as_deref() {
-            Some("y") | Some("Y") | Some("yes") | Some("Yes") => Ok(true),
-            Some("n") | Some("N") | Some("no") | Some("No") => Ok(false),
+            Some("y" | "Y" | "yes" | "Yes") => Ok(true),
+            Some("n" | "N" | "no" | "No") => Ok(false),
             None => Ok(default),
             Some(_) => Ok(default), // Invalid input, use default
         }

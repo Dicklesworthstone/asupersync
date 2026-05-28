@@ -282,7 +282,7 @@ impl ConfigPaths {
 
         // On Windows, basic drive letter validation
         #[cfg(windows)]
-        if !raw_path.chars().nth(1).map_or(false, |c| c == ':') && raw_path != default {
+        if raw_path.chars().nth(1) != Some(':') && raw_path != default {
             eprintln!(
                 "Security warning: {} is not a valid Windows path, using default",
                 env_var
@@ -356,7 +356,7 @@ impl AtpConfigManager {
         let mut merged = CommandAtpConfig::default();
 
         // Apply layers in precedence order (lowest to highest)
-        for (_source, config) in &self.layers {
+        for config in self.layers.values() {
             merged = merge_configs(merged, config.clone());
         }
 
@@ -426,7 +426,7 @@ impl AtpConfigManager {
             .iter()
             .map(|(source, path)| ConfigSourceInfo {
                 source: *source,
-                path: path.to_path_buf(),
+                path: (*path).clone(),
                 exists: path.exists(),
                 loaded: self.layers.contains_key(source),
             })

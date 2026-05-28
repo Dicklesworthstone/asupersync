@@ -13,7 +13,21 @@
 use crate::atp::cache::{AtpCache, CacheConfig, CacheKey};
 use crate::atp::seeding::{AtpSeedingService, SeedingConfig};
 use crate::cli::ExitCode;
-use crate::cli::atp_command_tree::*;
+use crate::cli::atp_command_tree::{
+    AtpArchiveAction, AtpArchiveArgs, AtpArchiveCompactArgs, AtpArchiveEntry, AtpArchiveExportArgs,
+    AtpArchiveListArgs, AtpArchiveOutput, AtpArchiveRetrieveArgs, AtpArchiveStorageStats,
+    AtpArchiveStoreArgs, AtpArchiveSummary, AtpArchiveVerifyArgs, AtpCiAction, AtpCiArgs,
+    AtpCiArtifact, AtpCiCacheStats, AtpCiCleanArgs, AtpCiListArgs, AtpCiOutput, AtpCiPullArgs,
+    AtpCiPushArgs, AtpCiStatusArgs, AtpCiSummary, AtpDatasetAction, AtpDatasetArgs,
+    AtpDatasetGetArgs, AtpDatasetInfo, AtpDatasetListArgs, AtpDatasetOutput, AtpDatasetPinArgs,
+    AtpDatasetSeedArgs, AtpDatasetStatusArgs, AtpDatasetSummary, AtpDatasetUnpinArgs,
+    AtpFuzzAction, AtpFuzzArgs, AtpFuzzCorpusStats, AtpFuzzCoverage, AtpFuzzMergeArgs,
+    AtpFuzzMinimizeArgs, AtpFuzzOutput, AtpFuzzPullArgs, AtpFuzzPushArgs, AtpFuzzStatsArgs,
+    AtpFuzzSummary, AtpFuzzSyncArgs, AtpIntegrityStatus, AtpNodeRegion, AtpReleaseAction,
+    AtpReleaseArgs, AtpReleaseDiffArgs, AtpReleaseInfo, AtpReleaseInfoArgs, AtpReleaseInstallArgs,
+    AtpReleaseListArgs, AtpReleaseOutput, AtpReleasePublishArgs, AtpReleaseSummary,
+    AtpReleaseVerifyArgs, AtpSwarmHealth, AtpTierStats,
+};
 use crate::cli::error::CliError;
 use crate::cli::output::{Output, OutputFormat, Outputtable};
 use crate::cx::Cx;
@@ -21,7 +35,7 @@ use crate::util::path_security::SecurePath;
 use chrono::Utc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -144,7 +158,7 @@ impl AtpWorkflowCoordinator {
                 "path_security_error",
                 "Failed to get current working directory",
             )
-            .detail(&format!("IO error: {}", e))
+            .detail(format!("IO error: {}", e))
             .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
 
@@ -153,7 +167,7 @@ impl AtpWorkflowCoordinator {
                 "path_security_error",
                 "Failed to create secure path validator",
             )
-            .detail(&format!("Security error: {}", e))
+            .detail(format!("Security error: {}", e))
             .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
 
@@ -166,18 +180,18 @@ impl AtpWorkflowCoordinator {
             let validated_path = secure_path.validate_path(path).map_err(|e| {
                 CliError::new(
                     "path_security_error",
-                    &format!("Path traversal validation failed for: {}", path.display()),
+                    format!("Path traversal validation failed for: {}", path.display()),
                 )
-                .detail(&format!("Security error: {}", e))
+                .detail(format!("Security error: {}", e))
                 .exit_code(ExitCode::RUNTIME_ERROR)
             })?;
 
             let content = std::fs::read(validated_path.as_path()).map_err(|e| {
                 CliError::new(
                     "file_read_error",
-                    &format!("Failed to read artifact: {}", path.display()),
+                    format!("Failed to read artifact: {}", path.display()),
                 )
-                .detail(&format!("IO error: {}", e))
+                .detail(format!("IO error: {}", e))
                 .exit_code(ExitCode::RUNTIME_ERROR)
             })?;
 
@@ -196,7 +210,7 @@ impl AtpWorkflowCoordinator {
             // Store in cache with deduplication
             self.cache.put(cache_key.clone(), &content).map_err(|e| {
                 CliError::new("cache_error", "Failed to store artifact in cache")
-                    .detail(&format!("Cache error: {}", e))
+                    .detail(format!("Cache error: {}", e))
                     .exit_code(ExitCode::RUNTIME_ERROR)
             })?;
 
@@ -210,7 +224,7 @@ impl AtpWorkflowCoordinator {
                     )
                     .map_err(|e| {
                         CliError::new("seeding_error", "Failed to authorize artifact for seeding")
-                            .detail(&format!("Seeding error: {}", e))
+                            .detail(format!("Seeding error: {}", e))
                             .exit_code(ExitCode::RUNTIME_ERROR)
                     })?;
             }
@@ -327,7 +341,7 @@ impl AtpWorkflowCoordinator {
             if args.verify {
                 let content = std::fs::read(&source).map_err(|e| {
                     CliError::new("file_read_error", "Failed to verify cached artifact")
-                        .detail(&format!("{}: {e}", source.display()))
+                        .detail(format!("{}: {e}", source.display()))
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?;
                 if self.compute_content_hash(&content) != artifact.content_hash {
@@ -342,7 +356,7 @@ impl AtpWorkflowCoordinator {
             if destination.exists() {
                 std::fs::copy(&source, &destination).map_err(|e| {
                     CliError::new("file_write_error", "Failed to update destination artifact")
-                        .detail(&format!(
+                        .detail(format!(
                             "{} -> {}: {e}",
                             source.display(),
                             destination.display()
@@ -410,7 +424,7 @@ impl AtpWorkflowCoordinator {
                 if index_path.exists() {
                     std::fs::remove_file(&index_path).map_err(|e| {
                         CliError::new("file_write_error", "Failed to remove CI index record")
-                            .detail(&format!("{}: {e}", index_path.display()))
+                            .detail(format!("{}: {e}", index_path.display()))
                             .exit_code(ExitCode::RUNTIME_ERROR)
                     })?;
                 }
@@ -509,7 +523,7 @@ impl AtpWorkflowCoordinator {
             Some(text) => serde_json::from_str::<BTreeMap<String, serde_json::Value>>(text)
                 .map_err(|e| {
                     CliError::new("metadata_error", "Dataset metadata must be a JSON object")
-                        .detail(&e.to_string())
+                        .detail(e.to_string())
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?,
             None => BTreeMap::new(),
@@ -571,7 +585,7 @@ impl AtpWorkflowCoordinator {
                     && args
                         .version
                         .as_ref()
-                        .map_or(true, |version| dataset.version.as_ref() == Some(version))
+                        .is_none_or(|version| dataset.version.as_ref() == Some(version))
             })
             .ok_or_else(|| {
                 CliError::new("not_found", "Dataset is not present in the local ATP index")
@@ -863,17 +877,17 @@ impl AtpWorkflowCoordinator {
     }
 
     async fn fuzz_merge(&mut self, _cx: &Cx, args: AtpFuzzMergeArgs) -> Result<(), CliError> {
-        let mut seen = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         let mut duplicates_removed = 0u32;
         for source in &args.sources {
             for file in self.collect_files(source)? {
                 let bytes = std::fs::read(&file).map_err(|e| {
                     CliError::new("file_read_error", "Failed to read fuzz corpus case")
-                        .detail(&format!("{}: {e}", file.display()))
+                        .detail(format!("{}: {e}", file.display()))
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?;
                 let hash = self.compute_content_hash(&bytes);
-                if seen.insert(hash.clone(), file.clone()).is_some() {
+                if !seen.insert(hash.clone()) {
                     duplicates_removed = duplicates_removed.saturating_add(1);
                     continue;
                 }
@@ -915,17 +929,17 @@ impl AtpWorkflowCoordinator {
 
     async fn fuzz_minimize(&mut self, _cx: &Cx, args: AtpFuzzMinimizeArgs) -> Result<(), CliError> {
         let files = self.collect_files(&args.corpus_path)?;
-        let mut seen = BTreeMap::new();
+        let mut seen = BTreeSet::new();
         let mut duplicates_removed = 0u32;
         let output_dir = args.corpus_path.with_extension("minimized");
         for file in files {
             let bytes = std::fs::read(&file).map_err(|e| {
                 CliError::new("file_read_error", "Failed to read fuzz corpus case")
-                    .detail(&format!("{}: {e}", file.display()))
+                    .detail(format!("{}: {e}", file.display()))
                     .exit_code(ExitCode::RUNTIME_ERROR)
             })?;
             let hash = self.compute_content_hash(&bytes);
-            if seen.insert(hash.clone(), ()).is_some() {
+            if !seen.insert(hash.clone()) {
                 duplicates_removed = duplicates_removed.saturating_add(1);
                 continue;
             }
@@ -1110,7 +1124,7 @@ impl AtpWorkflowCoordinator {
         if destination.exists() && !args.force {
             return Err(
                 CliError::new("file_write_error", "Release destination already exists")
-                    .detail(&destination.display().to_string())
+                    .detail(destination.display().to_string())
                     .exit_code(ExitCode::RUNTIME_ERROR),
             );
         }
@@ -1213,7 +1227,7 @@ impl AtpWorkflowCoordinator {
             summary: AtpReleaseSummary {
                 operation: "verify".to_string(),
                 releases_processed: release.is_some() as u32,
-                total_size_bytes: source.metadata().map(|meta| meta.len()).unwrap_or(0),
+                total_size_bytes: source.metadata().map_or(0, |meta| meta.len()),
                 success_rate: if strict_failure { 0.0 } else { 1.0 },
                 success: !strict_failure,
                 error: strict_failure
@@ -1419,11 +1433,7 @@ impl AtpWorkflowCoordinator {
         let archives: Vec<_> = self
             .read_archive_index()?
             .into_iter()
-            .filter(|archive| {
-                args.tier
-                    .as_ref()
-                    .map_or(true, |tier| &archive.tier == tier)
-            })
+            .filter(|archive| args.tier.as_ref().is_none_or(|tier| &archive.tier == tier))
             .collect();
         let total_size_bytes = archives.iter().map(|archive| archive.size_bytes).sum();
         let _ = args.dry_run;
@@ -1483,7 +1493,7 @@ impl AtpWorkflowCoordinator {
     fn write_output<T: Outputtable>(&mut self, output: &T) -> Result<(), CliError> {
         self.output.write(output).map_err(|e| {
             CliError::new("output_error", "Failed to write output")
-                .detail(&format!("Output error: {e}"))
+                .detail(format!("Output error: {e}"))
                 .exit_code(ExitCode::INTERNAL_ERROR)
         })
     }
@@ -1494,7 +1504,7 @@ impl AtpWorkflowCoordinator {
         }
         let cwd = std::env::current_dir().map_err(|e| {
             CliError::new("path_error", "Failed to resolve current directory")
-                .detail(&format!("IO error: {e}"))
+                .detail(format!("IO error: {e}"))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
         Ok(cwd.join(".asupersync").join("atp"))
@@ -1503,7 +1513,7 @@ impl AtpWorkflowCoordinator {
     fn ensure_dir(&self, path: &Path) -> Result<(), CliError> {
         std::fs::create_dir_all(path).map_err(|e| {
             CliError::new("file_write_error", "Failed to create workflow directory")
-                .detail(&format!("{}: {e}", path.display()))
+                .detail(format!("{}: {e}", path.display()))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })
     }
@@ -1511,12 +1521,12 @@ impl AtpWorkflowCoordinator {
     fn read_json<T: DeserializeOwned>(&self, path: &Path) -> Result<T, CliError> {
         let bytes = std::fs::read(path).map_err(|e| {
             CliError::new("file_read_error", "Failed to read workflow metadata")
-                .detail(&format!("{}: {e}", path.display()))
+                .detail(format!("{}: {e}", path.display()))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })?;
         serde_json::from_slice(&bytes).map_err(|e| {
             CliError::new("metadata_error", "Failed to parse workflow metadata")
-                .detail(&format!("{}: {e}", path.display()))
+                .detail(format!("{}: {e}", path.display()))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })
     }
@@ -1527,12 +1537,12 @@ impl AtpWorkflowCoordinator {
         }
         let bytes = serde_json::to_vec_pretty(value).map_err(|e| {
             CliError::new("metadata_error", "Failed to encode workflow metadata")
-                .detail(&format!("{}: {e}", path.display()))
+                .detail(format!("{}: {e}", path.display()))
                 .exit_code(ExitCode::INTERNAL_ERROR)
         })?;
         std::fs::write(path, bytes).map_err(|e| {
             CliError::new("file_write_error", "Failed to write workflow metadata")
-                .detail(&format!("{}: {e}", path.display()))
+                .detail(format!("{}: {e}", path.display()))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })
     }
@@ -1559,7 +1569,7 @@ impl AtpWorkflowCoordinator {
                 "path_error",
                 "Workflow input path is not a file or directory",
             )
-            .detail(&path.display().to_string())
+            .detail(path.display().to_string())
             .exit_code(ExitCode::RUNTIME_ERROR));
         }
 
@@ -1568,18 +1578,18 @@ impl AtpWorkflowCoordinator {
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).map_err(|e| {
                 CliError::new("file_read_error", "Failed to scan workflow directory")
-                    .detail(&format!("{}: {e}", dir.display()))
+                    .detail(format!("{}: {e}", dir.display()))
                     .exit_code(ExitCode::RUNTIME_ERROR)
             })? {
                 let entry = entry.map_err(|e| {
                     CliError::new("file_read_error", "Failed to read workflow directory entry")
-                        .detail(&format!("{}: {e}", dir.display()))
+                        .detail(format!("{}: {e}", dir.display()))
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?;
                 let path = entry.path();
                 let metadata = entry.metadata().map_err(|e| {
                     CliError::new("file_read_error", "Failed to stat workflow path")
-                        .detail(&format!("{}: {e}", path.display()))
+                        .detail(format!("{}: {e}", path.display()))
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?;
                 if metadata.is_dir() {
@@ -1602,7 +1612,7 @@ impl AtpWorkflowCoordinator {
         for file in &files {
             let bytes = std::fs::read(file).map_err(|e| {
                 CliError::new("file_read_error", "Failed to read workflow file")
-                    .detail(&format!("{}: {e}", file.display()))
+                    .detail(format!("{}: {e}", file.display()))
                     .exit_code(ExitCode::RUNTIME_ERROR)
             })?;
             total_bytes = total_bytes.saturating_add(bytes.len() as u64);
@@ -1621,7 +1631,7 @@ impl AtpWorkflowCoordinator {
         if destination.exists() {
             return Err(
                 CliError::new("file_write_error", "Destination file already exists")
-                    .detail(&destination.display().to_string())
+                    .detail(destination.display().to_string())
                     .exit_code(ExitCode::RUNTIME_ERROR),
             );
         }
@@ -1630,7 +1640,7 @@ impl AtpWorkflowCoordinator {
         }
         std::fs::copy(source, destination).map_err(|e| {
             CliError::new("file_write_error", "Failed to copy workflow file")
-                .detail(&format!(
+                .detail(format!(
                     "{} -> {}: {e}",
                     source.display(),
                     destination.display()
@@ -1644,7 +1654,7 @@ impl AtpWorkflowCoordinator {
         if source.is_file() {
             let file_name = source.file_name().ok_or_else(|| {
                 CliError::new("path_error", "Source file has no file name")
-                    .detail(&source.display().to_string())
+                    .detail(source.display().to_string())
                     .exit_code(ExitCode::RUNTIME_ERROR)
             })?;
             return self.copy_file_no_overwrite(source, &destination.join(file_name));
@@ -1652,7 +1662,7 @@ impl AtpWorkflowCoordinator {
         for file in self.collect_files(source)? {
             let relative = file.strip_prefix(source).map_err(|e| {
                 CliError::new("path_error", "Failed to relativize workflow file")
-                    .detail(&format!("{}: {e}", file.display()))
+                    .detail(format!("{}: {e}", file.display()))
                     .exit_code(ExitCode::RUNTIME_ERROR)
             })?;
             self.copy_file_no_overwrite(&file, &destination.join(relative))?;
@@ -1668,13 +1678,13 @@ impl AtpWorkflowCoordinator {
         let mut artifacts: Vec<AtpCiArtifact> = Vec::new();
         for entry in std::fs::read_dir(&index_dir).map_err(|e| {
             CliError::new("file_read_error", "Failed to read CI artifact index")
-                .detail(&format!("{}: {e}", index_dir.display()))
+                .detail(format!("{}: {e}", index_dir.display()))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })? {
             let path = entry
                 .map_err(|e| {
                     CliError::new("file_read_error", "Failed to read CI artifact index entry")
-                        .detail(&format!("{}: {e}", index_dir.display()))
+                        .detail(format!("{}: {e}", index_dir.display()))
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?
                 .path();
@@ -1707,13 +1717,13 @@ impl AtpWorkflowCoordinator {
         let mut datasets: Vec<AtpDatasetInfo> = Vec::new();
         for entry in std::fs::read_dir(&index_dir).map_err(|e| {
             CliError::new("file_read_error", "Failed to read dataset index")
-                .detail(&format!("{}: {e}", index_dir.display()))
+                .detail(format!("{}: {e}", index_dir.display()))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })? {
             let path = entry
                 .map_err(|e| {
                     CliError::new("file_read_error", "Failed to read dataset index entry")
-                        .detail(&format!("{}: {e}", index_dir.display()))
+                        .detail(format!("{}: {e}", index_dir.display()))
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?
                 .path();
@@ -1727,13 +1737,13 @@ impl AtpWorkflowCoordinator {
 
     fn local_swarm_health(&self, item_count: usize, total_bytes: u64) -> AtpSwarmHealth {
         AtpSwarmHealth {
-            active_nodes: if item_count == 0 { 0 } else { 1 },
+            active_nodes: u32::from(item_count != 0),
             avg_uptime_hours: 0.0,
             bandwidth_utilization: 0.0,
             chunk_availability: if item_count == 0 { 0.0 } else { 1.0 },
             geo_distribution: vec![AtpNodeRegion {
                 region: "local".to_string(),
-                node_count: if item_count == 0 { 0 } else { 1 },
+                node_count: u32::from(item_count != 0),
                 bandwidth_capacity_bps: total_bytes,
             }],
         }
@@ -1747,13 +1757,13 @@ impl AtpWorkflowCoordinator {
         let mut releases: Vec<AtpReleaseInfo> = Vec::new();
         for entry in std::fs::read_dir(&index_dir).map_err(|e| {
             CliError::new("file_read_error", "Failed to read release index")
-                .detail(&format!("{}: {e}", index_dir.display()))
+                .detail(format!("{}: {e}", index_dir.display()))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })? {
             let path = entry
                 .map_err(|e| {
                     CliError::new("file_read_error", "Failed to read release index entry")
-                        .detail(&format!("{}: {e}", index_dir.display()))
+                        .detail(format!("{}: {e}", index_dir.display()))
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?
                 .path();
@@ -1774,7 +1784,7 @@ impl AtpWorkflowCoordinator {
             .into_iter()
             .find(|release| {
                 (release.id == release_id || release.version == release_id)
-                    && version.map_or(true, |version| release.version == version)
+                    && version.is_none_or(|version| release.version == version)
             })
             .ok_or_else(|| {
                 CliError::new("not_found", "Release is not present in the local ATP index")
@@ -1791,13 +1801,13 @@ impl AtpWorkflowCoordinator {
         let mut archives: Vec<AtpArchiveEntry> = Vec::new();
         for entry in std::fs::read_dir(&archive_root).map_err(|e| {
             CliError::new("file_read_error", "Failed to read archive index")
-                .detail(&format!("{}: {e}", archive_root.display()))
+                .detail(format!("{}: {e}", archive_root.display()))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         })? {
             let metadata_path = entry
                 .map_err(|e| {
                     CliError::new("file_read_error", "Failed to read archive index entry")
-                        .detail(&format!("{}: {e}", archive_root.display()))
+                        .detail(format!("{}: {e}", archive_root.display()))
                         .exit_code(ExitCode::RUNTIME_ERROR)
                 })?
                 .path()

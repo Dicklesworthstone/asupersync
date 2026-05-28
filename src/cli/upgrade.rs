@@ -158,8 +158,7 @@ impl UpgradeManager {
                         });
                     }
                     Err(_) => {
-                        // Skip invalid backups
-                        continue;
+                        // Skip invalid backups.
                     }
                 }
             }
@@ -195,13 +194,13 @@ impl UpgradeManager {
         // Copy peer directory
         let peer_dir = self.config_dir.join("peers");
         if peer_dir.exists() {
-            self.copy_directory_recursive(&peer_dir, &backup_path.join("peers"))?;
+            Self::copy_directory_recursive(&peer_dir, &backup_path.join("peers"))?;
         }
 
         // Copy daemon state (excluding logs)
         let daemon_dir = self.config_dir.join("daemon");
         if daemon_dir.exists() {
-            self.copy_directory_selective(&daemon_dir, &backup_path.join("daemon"), &["*.log"])?;
+            Self::copy_directory_selective(&daemon_dir, &backup_path.join("daemon"), &["*.log"])?;
         }
 
         // Create backup metadata
@@ -210,7 +209,7 @@ impl UpgradeManager {
             version: installed_version,
             timestamp: SystemTime::now(),
             schema_version: ConfigVersion::current(),
-            size_bytes: self.calculate_directory_size(&backup_path)?,
+            size_bytes: Self::calculate_directory_size(&backup_path)?,
         };
 
         let metadata_path = backup_path.join("metadata.json");
@@ -331,7 +330,7 @@ impl UpgradeManager {
         Ok(())
     }
 
-    fn copy_directory_recursive(&self, src: &Path, dst: &Path) -> Result<(), UpgradeError> {
+    fn copy_directory_recursive(src: &Path, dst: &Path) -> Result<(), UpgradeError> {
         std::fs::create_dir_all(dst)?;
 
         for entry in std::fs::read_dir(src)? {
@@ -341,7 +340,7 @@ impl UpgradeManager {
             let dst_path = dst.join(entry.file_name());
 
             if file_type.is_dir() {
-                self.copy_directory_recursive(&src_path, &dst_path)?;
+                Self::copy_directory_recursive(&src_path, &dst_path)?;
             } else {
                 std::fs::copy(&src_path, &dst_path)?;
             }
@@ -351,7 +350,6 @@ impl UpgradeManager {
     }
 
     fn copy_directory_selective(
-        &self,
         src: &Path,
         dst: &Path,
         excludes: &[&str],
@@ -376,7 +374,7 @@ impl UpgradeManager {
             let dst_path = dst.join(entry.file_name());
 
             if file_type.is_dir() {
-                self.copy_directory_selective(&src_path, &dst_path, excludes)?;
+                Self::copy_directory_selective(&src_path, &dst_path, excludes)?;
             } else {
                 std::fs::copy(&src_path, &dst_path)?;
             }
@@ -385,7 +383,7 @@ impl UpgradeManager {
         Ok(())
     }
 
-    fn calculate_directory_size(&self, path: &Path) -> Result<u64, UpgradeError> {
+    fn calculate_directory_size(path: &Path) -> Result<u64, UpgradeError> {
         let mut size = 0u64;
 
         if path.is_dir() {
@@ -394,7 +392,7 @@ impl UpgradeManager {
                 let metadata = entry.metadata()?;
 
                 if metadata.is_dir() {
-                    size += self.calculate_directory_size(&entry.path())?;
+                    size += Self::calculate_directory_size(&entry.path())?;
                 } else {
                     size += metadata.len();
                 }
@@ -468,7 +466,7 @@ impl UpgradeManager {
         if temp_target.exists() {
             return Err(UpgradeError::RestoreCollision(temp_target));
         }
-        self.copy_directory_recursive(backup_dir, &temp_target)?;
+        Self::copy_directory_recursive(backup_dir, &temp_target)?;
         self.preserve_existing_path(target)?;
         std::fs::rename(&temp_target, target)?;
         Ok(())

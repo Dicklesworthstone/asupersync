@@ -30,7 +30,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use toml;
 use tracing::{info, warn};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -618,7 +617,7 @@ fn create_identity_store(store_path: &Path) -> Result<DurablePeerIdentity> {
                 write_peer_id_sidecar(&peer_id_path, &identity)?;
                 return Ok(identity);
             }
-            Err(KeyStoreError::WeakSeed(_)) => continue,
+            Err(KeyStoreError::WeakSeed(_)) => {}
             Err(err) => return Err(Box::new(err)),
         }
     }
@@ -721,19 +720,25 @@ fn export_identity_store_without_overwrite(
     Ok(identity)
 }
 
+#[cfg(unix)]
 fn harden_identity_file(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_identity_file(_path: &Path) -> Result<()> {
     Ok(())
 }
 
 fn process_is_running(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let Some(pid) = libc::pid_t::try_from(pid).ok() else {
+            return false;
+        };
+        let result = unsafe { libc::kill(pid, 0) };
         if result == 0 {
             return true;
         }
@@ -743,9 +748,16 @@ fn process_is_running(pid: u32) -> bool {
 
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        false
+        let mut system = sysinfo::System::new_all();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        system.process(sysinfo::Pid::from_u32(pid)).is_some()
     }
+}
+
+#[cfg(unix)]
+fn native_pid(pid: u32) -> Result<libc::pid_t> {
+    libc::pid_t::try_from(pid)
+        .map_err(|_| cli_error(format!("PID {pid} is outside the native pid_t range")))
 }
 
 fn read_pid_file(path: &Path) -> Result<u32> {
@@ -806,7 +818,35 @@ fn install_signal_listener() -> Result<mpsc::Receiver<DaemonSignal>> {
 
     #[cfg(not(unix))]
     {
-        let _ = sender;
+        use signal_hook::consts::signal::{SIGBREAK, SIGINT, SIGTERM};
+        use signal_hook::flag;
+
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let terminate = Arc::new(AtomicBool::new(false));
+        let reload = Arc::new(AtomicBool::new(false));
+
+        flag::register(SIGINT, Arc::clone(&interrupt))?;
+        flag::register(SIGTERM, Arc::clone(&terminate))?;
+        flag::register(SIGBREAK, Arc::clone(&reload))?;
+
+        thread::spawn(move || {
+            loop {
+                if reload.swap(false, Ordering::SeqCst) {
+                    if sender.send(DaemonSignal::Reload).is_err() {
+                        break;
+                    }
+                }
+                if interrupt.load(Ordering::SeqCst) {
+                    let _ = sender.send(DaemonSignal::Interrupt);
+                    break;
+                }
+                if terminate.load(Ordering::SeqCst) {
+                    let _ = sender.send(DaemonSignal::Terminate);
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
     }
 
     Ok(receiver)
@@ -932,7 +972,7 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
 
     // Override config with command line arguments
     config.network.bind_addr = args.bind;
-    config.storage.data_dir = args.data_dir.clone();
+    config.storage.data_dir.clone_from(&args.data_dir);
     config.storage.cache_dir = args.data_dir.join("cache");
     config.storage.journal.journal_path = args.data_dir.join("journal");
     config.identity.private_key_path = init_identity_store_path(&args.data_dir);
@@ -1138,7 +1178,8 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
         info!("Sending SIGTERM to process {}", pid);
 
         // SECURITY FIX: Use native libc::kill instead of external command to prevent injection
-        let term_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        let native_pid = native_pid(pid)?;
+        let term_result = unsafe { libc::kill(native_pid, libc::SIGTERM) };
 
         if term_result == 0 {
             println!("Sent shutdown signal to ATP daemon (PID: {})", pid);
@@ -1149,7 +1190,7 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
 
             loop {
                 // Check if process still exists using native libc call (signal 0)
-                let check_result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+                let check_result = unsafe { libc::kill(native_pid, 0) };
 
                 if check_result != 0 {
                     // Process has stopped (kill returns -1 if process doesn't exist)
@@ -1158,7 +1199,7 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
 
                 if start.elapsed() > timeout {
                     warn!("Graceful shutdown timeout, sending SIGKILL");
-                    let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    let _ = unsafe { libc::kill(native_pid, libc::SIGKILL) };
                     break;
                 }
 
@@ -1198,7 +1239,67 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        use std::time::Instant;
+
+        if !process_is_running(pid) {
+            println!("Process {} not found (may have already stopped)", pid);
+            if let Err(err) = std::fs::remove_file(&cli.pid_file) {
+                warn!("Failed to remove stale PID file: {}", err);
+            }
+            return Ok(());
+        }
+
+        info!("Stopping Windows ATP daemon process {}", pid);
+        let status = Command::new("taskkill.exe")
+            .arg("/PID")
+            .arg(pid.to_string())
+            .arg("/T")
+            .status()
+            .map_err(|err| cli_error(format!("failed to invoke taskkill.exe: {err}")))?;
+
+        if !status.success() {
+            return Err(cli_error(format!(
+                "taskkill.exe failed to request graceful shutdown for process {pid}: {status}"
+            )));
+        }
+
+        println!("Sent shutdown request to ATP daemon (PID: {})", pid);
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(10);
+        while process_is_running(pid) && start.elapsed() <= timeout {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        if process_is_running(pid) {
+            warn!("Graceful Windows shutdown timeout, forcing termination");
+            let force_status = Command::new("taskkill.exe")
+                .arg("/PID")
+                .arg(pid.to_string())
+                .arg("/T")
+                .arg("/F")
+                .status()
+                .map_err(|err| cli_error(format!("failed to invoke taskkill.exe /F: {err}")))?;
+            if !force_status.success() {
+                return Err(cli_error(format!(
+                    "taskkill.exe /F failed for process {pid}: {force_status}"
+                )));
+            }
+        }
+
+        if let Err(err) = std::fs::remove_file(&cli.pid_file) {
+            warn!("Failed to remove PID file: {}", err);
+        } else {
+            info!("Removed PID file");
+        }
+
+        println!("ATP daemon stopped successfully");
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         println!("Daemon stop not supported on this platform");
         println!("Manual process termination required for PID: {}", pid);
@@ -1218,28 +1319,13 @@ fn show_status(cli: AtpdCli) -> Result<()> {
 
     let pid = read_pid_file(&cli.pid_file)?;
 
-    // Check if process is actually running using native libc call
-    #[cfg(unix)]
-    {
-        let is_running = process_is_running(pid);
-
-        if is_running {
-            println!("ATP daemon: RUNNING (PID: {})", pid);
-            println!("PID file: {}", cli.pid_file.display());
-            println!("Config file: {}", cli.config.display());
-        } else {
-            println!("ATP daemon: STOPPED (stale PID file)");
-            warn!("PID file exists but process {} is not running", pid);
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        println!(
-            "ATP daemon: UNKNOWN (PID: {}) - status check not supported on this platform",
-            pid
-        );
+    if process_is_running(pid) {
+        println!("ATP daemon: RUNNING (PID: {})", pid);
         println!("PID file: {}", cli.pid_file.display());
+        println!("Config file: {}", cli.config.display());
+    } else {
+        println!("ATP daemon: STOPPED (stale PID file)");
+        warn!("PID file exists but process {} is not running", pid);
     }
 
     Ok(())
@@ -1257,32 +1343,34 @@ fn reload_daemon(cli: AtpdCli) -> Result<()> {
     }
     let pid = read_pid_file(&cli.pid_file)?;
 
-    #[cfg(unix)]
-    {
-        let signal_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGHUP) };
-        if signal_result == 0 {
-            println!(
-                "Sent reload signal to ATP daemon (PID: {}, config: {})",
-                pid,
-                cli.config.display()
-            );
-        } else {
-            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            return Err(cli_error(format!(
-                "failed to send SIGHUP to ATP daemon process {pid}: errno {errno}"
-            )));
-        }
-    }
+    reload_daemon_by_platform(pid, &cli.config)
+}
 
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        return Err(cli_error(
-            "daemon reload by signal is only supported on Unix platforms",
-        ));
+#[cfg(unix)]
+fn reload_daemon_by_platform(pid: u32, config_path: &Path) -> Result<()> {
+    let native_pid = native_pid(pid)?;
+    let signal_result = unsafe { libc::kill(native_pid, libc::SIGHUP) };
+    if signal_result == 0 {
+        println!(
+            "Sent reload signal to ATP daemon (PID: {}, config: {})",
+            pid,
+            config_path.display()
+        );
+        Ok(())
+    } else {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        Err(cli_error(format!(
+            "failed to send SIGHUP to ATP daemon process {pid}: errno {errno}"
+        )))
     }
+}
 
-    Ok(())
+#[cfg(not(unix))]
+fn reload_daemon_by_platform(pid: u32, _config_path: &Path) -> Result<()> {
+    let _ = pid;
+    Err(cli_error(
+        "daemon reload by external signal is only supported on Unix platforms; on Windows, use Ctrl-Break in the daemon console",
+    ))
 }
 
 fn init_daemon(_cli: AtpdCli, args: InitArgs) -> Result<()> {
@@ -1340,19 +1428,10 @@ fn show_diagnostics(cli: AtpdCli) -> Result<()> {
         match std::fs::read_to_string(&cli.pid_file) {
             Ok(pid_content) => {
                 if let Ok(pid) = pid_content.trim().parse::<u32>() {
-                    #[cfg(unix)]
-                    {
-                        let running = process_is_running(pid);
-
-                        if running {
-                            println!("  Status: ✅ RUNNING (PID: {})", pid);
-                        } else {
-                            println!("  Status: ❌ STOPPED (stale PID file)");
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        println!("  Status: ❓ UNKNOWN (PID: {})", pid);
+                    if process_is_running(pid) {
+                        println!("  Status: ✅ RUNNING (PID: {})", pid);
+                    } else {
+                        println!("  Status: ❌ STOPPED (stale PID file)");
                     }
                 } else {
                     println!("  Status: ❌ INVALID PID file");

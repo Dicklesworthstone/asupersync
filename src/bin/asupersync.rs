@@ -960,7 +960,7 @@ fn digest_path_tree_inner(
                 .detail(format!("Path: {}, Error: {}", path.display(), err))
                 .exit_code(ExitCode::USER_ERROR)
         })?;
-        let mut buffer = [0u8; 64 * 1024];
+        let mut buffer = vec![0u8; 64 * 1024].into_boxed_slice();
         loop {
             let read = file.read(&mut buffer).map_err(|err| {
                 CliError::new("source_read_error", "Failed to read source file")
@@ -3375,7 +3375,7 @@ impl Outputtable for TraceCompressOutput {
 /// like "Failed to write trace info" or "Failed to write verification results".
 fn output_write_error<E: std::fmt::Display>(context: &str) -> impl Fn(E) -> CliError + '_ {
     move |err| {
-        CliError::new("output_error", &format!("Failed to write {}", context))
+        CliError::new("output_error", format!("Failed to write {}", context))
             .detail(err.to_string())
     }
 }
@@ -4189,14 +4189,14 @@ fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError>
     let bundle_data = std::fs::read(&args.bundle_path).map_err(|e| {
         CliError::new(
             "file_read_error",
-            &format!("failed to read proof bundle: {e}"),
+            format!("failed to read proof bundle: {e}"),
         )
         .exit_code(ExitCode::USER_ERROR)
     })?;
 
     let serializable_bundle: asupersync::atp::proof::bundle::SerializableAtpProofBundle =
         serde_json::from_slice(&bundle_data).map_err(|e| {
-            CliError::new("parse_error", &format!("failed to parse proof bundle: {e}"))
+            CliError::new("parse_error", format!("failed to parse proof bundle: {e}"))
                 .exit_code(ExitCode::USER_ERROR)
         })?;
 
@@ -4204,7 +4204,7 @@ fn atp_verify(args: &AtpVerifyArgs, output: &mut Output) -> Result<(), CliError>
         serializable_bundle.try_into().map_err(|e| {
             CliError::new(
                 "conversion_error",
-                &format!("failed to convert proof bundle: {e}"),
+                format!("failed to convert proof bundle: {e}"),
             )
             .exit_code(ExitCode::USER_ERROR)
         })?;
@@ -4267,14 +4267,14 @@ fn atp_proof(args: &AtpProofArgs, output: &mut Output) -> Result<(), CliError> {
     let bundle_data = std::fs::read(&args.bundle_path).map_err(|e| {
         CliError::new(
             "file_read_error",
-            &format!("failed to read proof bundle: {e}"),
+            format!("failed to read proof bundle: {e}"),
         )
         .exit_code(ExitCode::USER_ERROR)
     })?;
 
     let serializable_bundle: asupersync::atp::proof::bundle::SerializableAtpProofBundle =
         serde_json::from_slice(&bundle_data).map_err(|e| {
-            CliError::new("parse_error", &format!("failed to parse proof bundle: {e}"))
+            CliError::new("parse_error", format!("failed to parse proof bundle: {e}"))
                 .exit_code(ExitCode::USER_ERROR)
         })?;
 
@@ -4282,7 +4282,7 @@ fn atp_proof(args: &AtpProofArgs, output: &mut Output) -> Result<(), CliError> {
         serializable_bundle.try_into().map_err(|e| {
             CliError::new(
                 "conversion_error",
-                &format!("failed to convert proof bundle: {e}"),
+                format!("failed to convert proof bundle: {e}"),
             )
             .exit_code(ExitCode::USER_ERROR)
         })?;
@@ -4460,7 +4460,7 @@ fn atp_share(args: &AtpShareArgs, output: &mut Output) -> Result<(), CliError> {
     // Generate share code with enhanced metadata
     let mut hasher = Sha256::new();
     hasher.update(args.source.to_string_lossy().as_bytes());
-    hasher.update(&args.expires_seconds.to_be_bytes());
+    hasher.update(args.expires_seconds.to_be_bytes());
     hasher.update(args.capabilities.join(",").as_bytes());
     let hash = hasher.finalize();
 
@@ -4718,8 +4718,7 @@ fn atp_inbox(args: &AtpInboxArgs, output: &mut Output) -> Result<(), CliError> {
         } => {
             let dest_path = destination
                 .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| ".".to_string());
+                .map_or_else(|| ".".to_string(), |p| p.display().to_string());
             let payload = AtpInboxAcceptOutput::new(transfer_id, &dest_path);
             output
                 .write(&payload)
@@ -5382,7 +5381,7 @@ impl Outputtable for AtpEarlyUsabilityOutput {
 }
 
 fn format_optional_byte_range(range: Option<ByteRange>) -> String {
-    range.map_or_else(|| "none".to_string(), |range| format_byte_range(range))
+    range.map_or_else(|| "none".to_string(), format_byte_range)
 }
 
 fn format_byte_ranges(ranges: &[ByteRange]) -> String {
@@ -6294,8 +6293,8 @@ Journal complete: {journal_complete}",
                 }
 
                 lines.push(format!("  Repair groups: {}", bundle.repair_groups.len()));
-                lines.push(format!(""));
-                lines.push(format!("Peer Identity:"));
+                lines.push(String::new());
+                lines.push("Peer Identity:".to_string());
                 lines.push(format!("  Source: {}", bundle.peer_identity.source_peer_id));
                 lines.push(format!(
                     "  Destination: {}",
@@ -6309,8 +6308,8 @@ Journal complete: {journal_complete}",
                     "  Key fingerprints: {}",
                     bundle.peer_identity.key_fingerprints.len()
                 ));
-                lines.push(format!(""));
-                lines.push(format!("Path:"));
+                lines.push(String::new());
+                lines.push("Path:".to_string());
                 lines.push(format!(
                     "  Primary protocol: {}",
                     bundle.path_summary.primary_protocol
@@ -6325,13 +6324,13 @@ Journal complete: {journal_complete}",
                     lines.push(format!("  Bandwidth: {} bps", bw));
                 }
 
-                lines.push(format!(""));
-                lines.push(format!("Journal:"));
+                lines.push(String::new());
+                lines.push("Journal:".to_string());
                 lines.push(format!("  Entries: {}", bundle.journal.entry_count));
                 lines.push(format!("  Size: {} bytes", bundle.journal.size_bytes));
                 lines.push(format!("  Complete: {}", bundle.journal.is_complete));
-                lines.push(format!(""));
-                lines.push(format!("Replay:"));
+                lines.push(String::new());
+                lines.push("Replay:".to_string());
                 lines.push(format!("  Pointers: {}", bundle.replay_pointers.len()));
                 lines.push(format!("  Extensions: {}", bundle.extensions.len()));
 

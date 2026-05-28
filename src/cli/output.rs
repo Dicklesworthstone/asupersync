@@ -178,7 +178,7 @@ pub trait Outputtable: Serialize {
 pub struct Output {
     format: OutputFormat,
     color: ColorChoice,
-    writer: Box<dyn Write>,
+    writer: Box<dyn Write + Send>,
 }
 
 impl Output {
@@ -194,7 +194,7 @@ impl Output {
 
     /// Create with a custom writer.
     #[must_use]
-    pub fn with_writer<W: Write + 'static>(format: OutputFormat, writer: W) -> Self {
+    pub fn with_writer<W: Write + Send + 'static>(format: OutputFormat, writer: W) -> Self {
         Self {
             format,
             color: ColorChoice::Never, // No colors for custom writers

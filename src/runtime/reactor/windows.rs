@@ -170,7 +170,7 @@ mod iocp_impl {
             let event = Self::interest_to_poll_event(token, interest);
             // SAFETY: registration implies the raw socket remains valid while tracked.
             let borrowed_socket = unsafe { BorrowedSocket::borrow_raw(info.raw_socket) };
-            if let Err(err) = self.poller.modify(&borrowed_socket, event) {
+            if let Err(err) = self.poller.modify(borrowed_socket, event) {
                 if Self::is_already_gone_error(&err) {
                     regs.remove(&token);
                     return Err(io::Error::new(
@@ -194,7 +194,7 @@ mod iocp_impl {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
             // SAFETY: registration implies the raw socket remains valid while tracked.
             let borrowed_socket = unsafe { BorrowedSocket::borrow_raw(info.raw_socket) };
-            match self.poller.delete(&borrowed_socket) {
+            match self.poller.delete(borrowed_socket) {
                 Ok(()) => {
                     regs.remove(&token);
                     Ok(())
