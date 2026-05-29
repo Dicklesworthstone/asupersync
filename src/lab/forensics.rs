@@ -9,12 +9,19 @@
 //! - Schedule dependency forensics with causality tracking
 //! - Benchmark result forensics and comparison analysis
 
-use crate::lab::{LabRuntime, LabConfig, OracleReport, ExplorationReport};
-use crate::types::{Time, Budget, TaskId, RegionId};
+use crate::types::{RegionId, TaskId, Time};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, BTreeMap, VecDeque};
-use std::time::{Duration, Instant, SystemTime};
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+fn current_time() -> Time {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Time::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
+}
 
 /// ATP Lab forensics error types
 #[derive(Debug, Error)]
@@ -93,7 +100,7 @@ pub struct EvidenceEntry {
 }
 
 /// Evidence category classification
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EvidenceCategory {
     Performance,
     Determinism,
@@ -299,7 +306,7 @@ pub struct ConnectionInfo {
 /// Resource usage snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceSnapshot {
-    pub timestamp: Instant,
+    pub timestamp: SystemTime,
     pub memory_usage: u64,
     pub open_files: u32,
     pub active_connections: u32,
@@ -325,7 +332,7 @@ impl Default for ForensicsConfig {
             enable_resource_tracking: true,
             enable_concurrency_analysis: true,
             max_evidence_entries: 10000,
-            regression_threshold: 20.0, // 20% regression threshold
+            regression_threshold: 20.0,         // 20% regression threshold
             memory_leak_threshold: 1024 * 1024, // 1MB leak threshold
         }
     }
@@ -344,6 +351,10 @@ impl ForensicsCollector {
         }
     }
 
+    fn evidence_id(&self, prefix: &str, offset: usize) -> String {
+        format!("{}-{}", prefix, self.evidence.len() + offset)
+    }
+
     /// Start forensics collection for a lab execution
     pub fn start_collection(&mut self, lab_id: &str, scenario_id: &str) {
         self.collection_start = Instant::now();
@@ -354,7 +365,7 @@ impl ForensicsCollector {
             scenario_id: scenario_id.to_string(),
             task_id: None,
             region_id: None,
-            virtual_time: Time::now(),
+            virtual_time: current_time(),
             real_time: SystemTime::now(),
             phase: ExecutionPhase::Initialization,
         };
@@ -382,11 +393,11 @@ impl ForensicsCollector {
         context: ExecutionContext,
         data: EvidenceData,
     ) {
-        let evidence_id = format!("evidence-{}-{}", self.evidence.len(), uuid::Uuid::new_v4());
+        let evidence_id = self.evidence_id("evidence", 0);
 
         let entry = EvidenceEntry {
             id: evidence_id,
-            timestamp: Time::now(),
+            timestamp: current_time(),
             category,
             severity,
             description,
@@ -399,7 +410,8 @@ impl ForensicsCollector {
 
         // Trim evidence if over limit
         if self.evidence.len() > self.config.max_evidence_entries {
-            self.evidence.drain(0..self.evidence.len() - self.config.max_evidence_entries);
+            self.evidence
+                .drain(0..self.evidence.len() - self.config.max_evidence_entries);
         }
     }
 
@@ -426,16 +438,21 @@ impl ForensicsCollector {
             baseline.measurements.push(measurement.clone());
 
             // Check for regression
-            let time_regression = (execution_time.as_nanos() as f64 - baseline.baseline_time.as_nanos() as f64)
-                / baseline.baseline_time.as_nanos() as f64 * 100.0;
+            let time_regression = (execution_time.as_nanos() as f64
+                - baseline.baseline_time.as_nanos() as f64)
+                / baseline.baseline_time.as_nanos() as f64
+                * 100.0;
 
             let memory_regression = (memory_usage as f64 - baseline.baseline_memory as f64)
-                / baseline.baseline_memory as f64 * 100.0;
+                / baseline.baseline_memory as f64
+                * 100.0;
 
-            if time_regression > self.config.regression_threshold || memory_regression > self.config.regression_threshold {
+            if time_regression > self.config.regression_threshold
+                || memory_regression > self.config.regression_threshold
+            {
                 let evidence = EvidenceEntry {
-                    id: format!("regression-{}", uuid::Uuid::new_v4()),
-                    timestamp: Time::now(),
+                    id: self.evidence_id("regression", 0),
+                    timestamp: current_time(),
                     category: EvidenceCategory::Performance,
                     severity: EvidenceSeverity::Warning,
                     description: format!("Performance regression detected in {}", test_name),
@@ -480,7 +497,8 @@ impl ForensicsCollector {
                 confidence_interval: (0.9, 1.1),
             };
 
-            self.performance_baselines.insert(test_name.to_string(), baseline);
+            self.performance_baselines
+                .insert(test_name.to_string(), baseline);
         }
 
         Ok(None)
@@ -495,8 +513,8 @@ impl ForensicsCollector {
         context: ExecutionContext,
     ) -> EvidenceEntry {
         let evidence = EvidenceEntry {
-            id: format!("determinism-{}", uuid::Uuid::new_v4()),
-            timestamp: Time::now(),
+            id: self.evidence_id("determinism", 0),
+            timestamp: current_time(),
             category: EvidenceCategory::Determinism,
             severity: EvidenceSeverity::Error,
             description: "Determinism violation detected".to_string(),
@@ -541,8 +559,8 @@ impl ForensicsCollector {
         let current_memory = self.resource_tracker.current_memory_usage();
         if current_memory > self.config.memory_leak_threshold {
             let evidence = EvidenceEntry {
-                id: format!("memory-leak-{}", uuid::Uuid::new_v4()),
-                timestamp: Time::now(),
+                id: self.evidence_id("memory-leak", evidence_entries.len()),
+                timestamp: current_time(),
                 category: EvidenceCategory::ResourceUsage,
                 severity: EvidenceSeverity::Error,
                 description: "Memory leak detected".to_string(),
@@ -550,7 +568,10 @@ impl ForensicsCollector {
                 data: EvidenceData::ResourceLeak {
                     resource_type: "memory".to_string(),
                     leaked_count: current_memory,
-                    allocation_trace: vec!["allocation_site_1".to_string(), "allocation_site_2".to_string()],
+                    allocation_trace: vec![
+                        "allocation_site_1".to_string(),
+                        "allocation_site_2".to_string(),
+                    ],
                 },
                 root_cause: Some(RootCause {
                     cause_type: RootCauseType::CodeBug,
@@ -573,10 +594,11 @@ impl ForensicsCollector {
 
         // Check for file handle leaks
         let open_files = self.resource_tracker.open_file_count();
-        if open_files > 100 { // Arbitrary threshold
+        if open_files > 100 {
+            // Arbitrary threshold
             let evidence = EvidenceEntry {
-                id: format!("file-leak-{}", uuid::Uuid::new_v4()),
-                timestamp: Time::now(),
+                id: self.evidence_id("file-leak", evidence_entries.len()),
+                timestamp: current_time(),
                 category: EvidenceCategory::ResourceUsage,
                 severity: EvidenceSeverity::Warning,
                 description: "File handle leak detected".to_string(),
@@ -618,8 +640,8 @@ impl ForensicsCollector {
         context: ExecutionContext,
     ) -> EvidenceEntry {
         let evidence = EvidenceEntry {
-            id: format!("concurrency-{}", uuid::Uuid::new_v4()),
-            timestamp: Time::now(),
+            id: self.evidence_id("concurrency", 0),
+            timestamp: current_time(),
             category: EvidenceCategory::Concurrency,
             severity: EvidenceSeverity::Critical,
             description: format!("Concurrency bug detected: {:?}", bug_type),
@@ -633,11 +655,21 @@ impl ForensicsCollector {
                 cause_type: RootCauseType::CodeBug,
                 description: match bug_type {
                     ConcurrencyBugType::RaceCondition => "Data race on shared memory".to_string(),
-                    ConcurrencyBugType::Deadlock => "Circular dependency in lock acquisition".to_string(),
-                    ConcurrencyBugType::LiveLock => "Tasks indefinitely yielding to each other".to_string(),
-                    ConcurrencyBugType::DataRace => "Unsynchronized access to shared data".to_string(),
-                    ConcurrencyBugType::AtomicityViolation => "Operation atomicity violated".to_string(),
-                    ConcurrencyBugType::OrderViolation => "Expected operation order violated".to_string(),
+                    ConcurrencyBugType::Deadlock => {
+                        "Circular dependency in lock acquisition".to_string()
+                    }
+                    ConcurrencyBugType::LiveLock => {
+                        "Tasks indefinitely yielding to each other".to_string()
+                    }
+                    ConcurrencyBugType::DataRace => {
+                        "Unsynchronized access to shared data".to_string()
+                    }
+                    ConcurrencyBugType::AtomicityViolation => {
+                        "Operation atomicity violated".to_string()
+                    }
+                    ConcurrencyBugType::OrderViolation => {
+                        "Expected operation order violated".to_string()
+                    }
                 },
                 contributing_factors: vec![
                     "Insufficient synchronization".to_string(),
@@ -660,18 +692,24 @@ impl ForensicsCollector {
     /// Generate forensics report
     pub fn generate_report(&self) -> ForensicsReport {
         let total_evidence = self.evidence.len();
-        let critical_evidence = self.evidence.iter()
+        let critical_evidence = self
+            .evidence
+            .iter()
             .filter(|e| e.severity == EvidenceSeverity::Critical)
             .count();
-        let error_evidence = self.evidence.iter()
+        let error_evidence = self
+            .evidence
+            .iter()
             .filter(|e| e.severity == EvidenceSeverity::Error)
             .count();
 
-        let category_breakdown: HashMap<EvidenceCategory, usize> = self.evidence.iter()
-            .fold(HashMap::new(), |mut acc, evidence| {
-                *acc.entry(evidence.category.clone()).or_insert(0) += 1;
-                acc
-            });
+        let category_breakdown: HashMap<EvidenceCategory, usize> =
+            self.evidence
+                .iter()
+                .fold(HashMap::new(), |mut acc, evidence| {
+                    *acc.entry(evidence.category.clone()).or_insert(0) += 1;
+                    acc
+                });
 
         ForensicsReport {
             collection_duration: self.collection_start.elapsed(),
@@ -689,20 +727,47 @@ impl ForensicsCollector {
     fn generate_recommendations(&self) -> Vec<String> {
         let mut recommendations = Vec::new();
 
-        if self.evidence.iter().any(|e| e.category == EvidenceCategory::Performance) {
-            recommendations.push("Consider performance profiling to identify bottlenecks".to_string());
+        if self
+            .evidence
+            .iter()
+            .any(|e| e.category == EvidenceCategory::Performance)
+        {
+            recommendations
+                .push("Consider performance profiling to identify bottlenecks".to_string());
         }
 
-        if self.evidence.iter().any(|e| e.category == EvidenceCategory::Determinism) {
+        if self
+            .evidence
+            .iter()
+            .any(|e| e.category == EvidenceCategory::Determinism)
+        {
             recommendations.push("Review code for non-deterministic behavior".to_string());
         }
 
-        if self.evidence.iter().any(|e| e.category == EvidenceCategory::ResourceUsage) {
-            recommendations.push("Implement proper resource cleanup and lifecycle management".to_string());
+        if self
+            .evidence
+            .iter()
+            .any(|e| e.category == EvidenceCategory::ResourceUsage)
+        {
+            recommendations
+                .push("Implement proper resource cleanup and lifecycle management".to_string());
         }
 
-        if self.evidence.iter().any(|e| e.category == EvidenceCategory::Concurrency) {
-            recommendations.push("Review synchronization primitives and concurrent access patterns".to_string());
+        if self
+            .evidence
+            .iter()
+            .any(|e| e.category == EvidenceCategory::Concurrency)
+        {
+            recommendations.push(
+                "Review synchronization primitives and concurrent access patterns".to_string(),
+            );
+        }
+
+        if !self.execution_stack.is_empty() {
+            recommendations.push(format!(
+                "Review {} captured execution frames for causal context",
+                self.execution_stack.len()
+            ));
         }
 
         recommendations
@@ -734,7 +799,7 @@ impl ResourceTracker {
 
     pub fn take_snapshot(&mut self) {
         let snapshot = ResourceSnapshot {
-            timestamp: Instant::now(),
+            timestamp: SystemTime::now(),
             memory_usage: self.current_memory_usage(),
             open_files: self.open_file_count(),
             active_connections: self.active_connection_count(),
@@ -778,7 +843,7 @@ mod tests {
             scenario_id: "test-scenario".to_string(),
             task_id: None,
             region_id: None,
-            virtual_time: Time::now(),
+            virtual_time: current_time(),
             real_time: SystemTime::now(),
             phase: ExecutionPhase::Execution,
         };
@@ -797,7 +862,10 @@ mod tests {
         );
 
         assert_eq!(collector.evidence.len(), 1);
-        assert_eq!(collector.evidence[0].category, EvidenceCategory::Performance);
+        assert_eq!(
+            collector.evidence[0].category,
+            EvidenceCategory::Performance
+        );
     }
 
     #[test]
@@ -812,29 +880,33 @@ mod tests {
             scenario_id: "test-scenario".to_string(),
             task_id: None,
             region_id: None,
-            virtual_time: Time::now(),
+            virtual_time: current_time(),
             real_time: SystemTime::now(),
             phase: ExecutionPhase::Execution,
         };
 
         // Establish baseline
-        collector.analyze_performance_regression(
-            "test_benchmark",
-            Duration::from_millis(100),
-            1024,
-            context.clone()
-        ).unwrap();
+        collector
+            .analyze_performance_regression(
+                "test_benchmark",
+                Duration::from_millis(100),
+                1024,
+                context.clone(),
+            )
+            .unwrap();
 
         // No regression should be detected yet
         assert_eq!(collector.evidence.len(), 0);
 
         // Trigger regression
-        let result = collector.analyze_performance_regression(
-            "test_benchmark",
-            Duration::from_millis(150), // 50% increase
-            1024,
-            context
-        ).unwrap();
+        let result = collector
+            .analyze_performance_regression(
+                "test_benchmark",
+                Duration::from_millis(150), // 50% increase
+                1024,
+                context,
+            )
+            .unwrap();
 
         assert!(result.is_some());
         let evidence = result.unwrap();
@@ -850,7 +922,7 @@ mod tests {
             scenario_id: "test-scenario".to_string(),
             task_id: None,
             region_id: None,
-            virtual_time: Time::now(),
+            virtual_time: current_time(),
             real_time: SystemTime::now(),
             phase: ExecutionPhase::Execution,
         };
@@ -859,7 +931,7 @@ mod tests {
             "expected_state",
             "actual_state",
             "divergence_point",
-            context
+            context,
         );
 
         assert_eq!(evidence.category, EvidenceCategory::Determinism);
@@ -876,7 +948,7 @@ mod tests {
             scenario_id: "test-scenario".to_string(),
             task_id: None,
             region_id: None,
-            virtual_time: Time::now(),
+            virtual_time: current_time(),
             real_time: SystemTime::now(),
             phase: ExecutionPhase::Execution,
         };
@@ -895,18 +967,21 @@ mod tests {
             },
         );
 
-        collector.analyze_determinism_violation(
-            "expected",
-            "actual",
-            "divergence",
-            context
-        );
+        collector.analyze_determinism_violation("expected", "actual", "divergence", context);
 
         let report = collector.generate_report();
         assert_eq!(report.total_evidence, 2);
         assert_eq!(report.critical_evidence, 1);
         assert_eq!(report.error_evidence, 1);
-        assert!(report.category_breakdown.contains_key(&EvidenceCategory::Performance));
-        assert!(report.category_breakdown.contains_key(&EvidenceCategory::Determinism));
+        assert!(
+            report
+                .category_breakdown
+                .contains_key(&EvidenceCategory::Performance)
+        );
+        assert!(
+            report
+                .category_breakdown
+                .contains_key(&EvidenceCategory::Determinism)
+        );
     }
 }

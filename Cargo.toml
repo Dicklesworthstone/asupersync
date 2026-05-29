@@ -136,7 +136,17 @@ cancel-correctness-oracle = []
 # Enable stack trace capture for lab oracle violations.
 lab-stack-traces = ["dep:backtrace", "dep:rustc-demangle"]
 # Enable benchmark adapter framework for performance testing
-benchmark-adapters = ["dep:async-trait", "dep:tokio", "dep:num_cpus", "dep:whoami", "dep:chrono"]
+benchmark-adapters = [
+    "dep:async-trait",
+    "dep:tokio",
+    "dep:tracing",
+    "tokio/macros",
+    "tokio/sync",
+    "tokio/time",
+    "dep:num_cpus",
+    "dep:whoami",
+    "dep:chrono",
+]
 # Gate the unpublished ATP daemon binary out of default release checks until
 # its daemon supervision/runtime contract is wired into the supported CLI.
 atpd-daemon = ["cli"]

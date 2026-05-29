@@ -3,14 +3,14 @@
 //! Provides trace minimization and replay optimization for deterministic lab execution.
 //! Reduces large traces to minimal reproducing cases for efficient debugging.
 
-use crate::types::{Time, TraceId, TaskId, RegionId};
+use crate::error::{Error, Result};
 use crate::trace::event::TraceEvent;
-use crate::error::Result;
-use anyhow::{Context, Error};
+use crate::types::{ObligationId, RegionId, TaskId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Configuration for replay minimization
@@ -85,7 +85,6 @@ pub trait ReplayValidator: Send + Sync {
 }
 
 /// Minimizer for ATP lab traces
-#[derive(Debug)]
 pub struct TraceMinimizer {
     config: MinimizationConfig,
     validator: Arc<dyn ReplayValidator>,
@@ -110,7 +109,7 @@ impl TraceMinimizer {
 
     /// Minimize a trace to its essential elements
     pub async fn minimize(&mut self, events: Vec<TraceEvent>) -> Result<MinimizationResult> {
-        let start_time = Time::now();
+        let start_time = Instant::now();
         let original_size = events.len();
 
         info!(
@@ -119,18 +118,12 @@ impl TraceMinimizer {
         );
 
         let minimized_events = match self.strategy {
-            MinimizationStrategy::DeltaDebugging => {
-                self.delta_debugging_minimize(events).await?
-            }
+            MinimizationStrategy::DeltaDebugging => self.delta_debugging_minimize(events).await?,
             MinimizationStrategy::DependencyPruning => {
                 self.dependency_pruning_minimize(events).await?
             }
-            MinimizationStrategy::CausalCone => {
-                self.causal_cone_minimize(events).await?
-            }
-            MinimizationStrategy::Hybrid => {
-                self.hybrid_minimize(events).await?
-            }
+            MinimizationStrategy::CausalCone => self.causal_cone_minimize(events).await?,
+            MinimizationStrategy::Hybrid => self.hybrid_minimize(events).await?,
         };
 
         let minimized_size = minimized_events.len();
@@ -140,10 +133,11 @@ impl TraceMinimizer {
             0.0
         };
 
-        let duration = Time::now().duration_since(start_time);
+        let duration = start_time.elapsed();
 
         // Compute essential and pruned event indices
-        let essential_events: Vec<usize> = minimized_events.iter()
+        let essential_events: Vec<usize> = minimized_events
+            .iter()
             .enumerate()
             .map(|(i, _)| i)
             .collect();
@@ -162,14 +156,19 @@ impl TraceMinimizer {
 
         info!(
             "Minimization complete: {} -> {} events ({:.1}% reduction)",
-            original_size, minimized_size, reduction_ratio * 100.0
+            original_size,
+            minimized_size,
+            reduction_ratio * 100.0
         );
 
         Ok(result)
     }
 
     /// Delta debugging-based minimization using binary search
-    async fn delta_debugging_minimize(&mut self, events: Vec<TraceEvent>) -> Result<Vec<TraceEvent>> {
+    async fn delta_debugging_minimize(
+        &mut self,
+        events: Vec<TraceEvent>,
+    ) -> Result<Vec<TraceEvent>> {
         let mut current = events;
         let mut changed = true;
         let mut iteration = 0;
@@ -178,13 +177,14 @@ impl TraceMinimizer {
             changed = false;
             iteration += 1;
 
-            debug!("Delta debugging iteration {}, {} events", iteration, current.len());
+            debug!(
+                "Delta debugging iteration {}, {} events",
+                iteration,
+                current.len()
+            );
 
             // Try removing chunks of events
-            let chunk_size = std::cmp::max(
-                self.config.min_chunk_size,
-                current.len() / 4
-            );
+            let chunk_size = std::cmp::max(self.config.min_chunk_size, current.len() / 4);
 
             for start in (0..current.len()).step_by(chunk_size) {
                 let end = std::cmp::min(start + chunk_size, current.len());
@@ -205,7 +205,10 @@ impl TraceMinimizer {
     }
 
     /// Dependency-aware pruning minimization
-    async fn dependency_pruning_minimize(&mut self, events: Vec<TraceEvent>) -> Result<Vec<TraceEvent>> {
+    async fn dependency_pruning_minimize(
+        &mut self,
+        events: Vec<TraceEvent>,
+    ) -> Result<Vec<TraceEvent>> {
         let dependencies = self.compute_dependencies(&events);
         let mut essential = HashSet::new();
 
@@ -217,9 +220,16 @@ impl TraceMinimizer {
         }
 
         // Extract essential events in original order
-        let minimized: Vec<TraceEvent> = events.into_iter()
+        let minimized: Vec<TraceEvent> = events
+            .into_iter()
             .enumerate()
-            .filter_map(|(i, event)| if essential.contains(&i) { Some(event) } else { None })
+            .filter_map(|(i, event)| {
+                if essential.contains(&i) {
+                    Some(event)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // Validate the result
@@ -256,15 +266,24 @@ impl TraceMinimizer {
         }
 
         // Extract reachable events
-        let minimized: Vec<TraceEvent> = events.into_iter()
+        let minimized: Vec<TraceEvent> = events
+            .into_iter()
             .enumerate()
-            .filter_map(|(i, event)| if reachable.contains(&i) { Some(event) } else { None })
+            .filter_map(|(i, event)| {
+                if reachable.contains(&i) {
+                    Some(event)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         // Validate the result
         if !self.validate_candidate(&minimized).await? {
             warn!("Causal cone minimization produced invalid trace, falling back");
-            return Err(Error::internal("Causal cone minimization failed validation"));
+            return Err(Error::internal(
+                "Causal cone minimization failed validation",
+            ));
         }
 
         Ok(minimized)
@@ -273,19 +292,24 @@ impl TraceMinimizer {
     /// Hybrid minimization combining multiple strategies
     async fn hybrid_minimize(&mut self, events: Vec<TraceEvent>) -> Result<Vec<TraceEvent>> {
         // Start with dependency pruning for coarse reduction
-        let mut current = self.dependency_pruning_minimize(events).await
-            .unwrap_or_else(|_| events.clone());
+        let mut current = self
+            .dependency_pruning_minimize(events.clone())
+            .await
+            .unwrap_or(events);
 
         // Apply causal cone if still too large
         if current.len() > 100 {
-            current = self.causal_cone_minimize(current).await
-                .unwrap_or(current);
+            let fallback = current.clone();
+            current = self.causal_cone_minimize(current).await.unwrap_or(fallback);
         }
 
         // Finish with delta debugging for fine-grained reduction
         if current.len() > 10 {
-            current = self.delta_debugging_minimize(current).await
-                .unwrap_or(current);
+            let fallback = current.clone();
+            current = self
+                .delta_debugging_minimize(current)
+                .await
+                .unwrap_or(fallback);
         }
 
         Ok(current)
@@ -299,13 +323,7 @@ impl TraceMinimizer {
             return Ok(cached);
         }
 
-        // Validate with timeout
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(self.config.replay_timeout_ms),
-            self.validator.validate_replay(events)
-        ).await
-        .context("Validation timeout")?
-        .context("Validation failed")?;
+        let result = self.validator.validate_replay(events)?;
 
         // Cache the result
         self.cache.insert(key, result);
@@ -315,7 +333,7 @@ impl TraceMinimizer {
 
     /// Compute event dependencies
     fn compute_dependencies(&self, events: &[TraceEvent]) -> HashMap<usize, Vec<usize>> {
-        let mut dependencies = HashMap::new();
+        let mut dependencies: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut task_events = HashMap::<TaskId, Vec<usize>>::new();
         let mut region_events = HashMap::<RegionId, Vec<usize>>::new();
         let mut obligation_events = HashMap::<ObligationId, Vec<usize>>::new();
@@ -392,7 +410,7 @@ impl TraceMinimizer {
 
     /// Build causal graph between events
     fn build_causal_graph(&self, events: &[TraceEvent]) -> HashMap<usize, Vec<usize>> {
-        let mut graph = HashMap::new();
+        let mut graph: HashMap<usize, Vec<usize>> = HashMap::new();
 
         // Simple causal relationship: happens-before ordering
         for i in 0..events.len() {
@@ -433,20 +451,46 @@ impl TraceMinimizer {
             UserTrace | Checkpoint => true,
 
             // Regular operational events are not targets by default
-            Spawn | Schedule | Yield | Wake | Poll | Complete |
-            RegionCreated | ObligationReserve | ObligationCommit |
-            TimeAdvance | TimerScheduled | TimerFired | TimerCancelled |
-            IoRequested | IoReady | IoResult | RngSeed | RngValue |
-            ChaosInjection | MonitorCreated | MonitorDropped | LinkCreated | LinkDropped |
-            WorkerCancelAcknowledged | WorkerDrainStarted => false,
+            Spawn
+            | Schedule
+            | Yield
+            | Wake
+            | Poll
+            | Complete
+            | RegionCreated
+            | ObligationReserve
+            | ObligationCommit
+            | TimeAdvance
+            | TimerScheduled
+            | TimerFired
+            | TimerCancelled
+            | IoRequested
+            | IoReady
+            | IoResult
+            | RngSeed
+            | RngValue
+            | ChaosInjection
+            | MonitorCreated
+            | MonitorDropped
+            | LinkCreated
+            | LinkDropped
+            | WorkerCancelAcknowledged
+            | WorkerDrainStarted => false,
         }
     }
 
     /// Find target events in trace
     fn find_target_events(&self, events: &[TraceEvent]) -> Vec<usize> {
-        events.iter()
+        events
+            .iter()
             .enumerate()
-            .filter_map(|(i, event)| if self.is_target_event(event) { Some(i) } else { None })
+            .filter_map(|(i, event)| {
+                if self.is_target_event(event) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -486,18 +530,25 @@ impl TraceMinimizer {
     }
 
     /// Add semantic dependencies based on domain knowledge
-    fn add_semantic_dependencies(&self, events: &[TraceEvent], dependencies: &mut HashMap<usize, Vec<usize>>) {
+    fn add_semantic_dependencies(
+        &self,
+        events: &[TraceEvent],
+        dependencies: &mut HashMap<usize, Vec<usize>>,
+    ) {
         use crate::trace::event::TraceEventKind::*;
 
         // Find parent-child region relationships
         for (child_idx, child_event) in events.iter().enumerate() {
-            if let Some(child_region) = self.extract_region_id(child_event) {
+            if self.extract_region_id(child_event).is_some() {
                 // Look for the parent region creation that this child depends on
                 for (parent_idx, parent_event) in events.iter().enumerate().take(child_idx) {
                     if parent_event.kind == RegionCreated {
                         if let Some(parent_region) = self.extract_region_id(parent_event) {
                             // If child event references parent as its parent, add dependency
-                            if let crate::trace::event::TraceData::Region { parent: Some(p), .. } = &child_event.data {
+                            if let crate::trace::event::TraceData::Region {
+                                parent: Some(p), ..
+                            } = &child_event.data
+                            {
                                 if *p == parent_region {
                                     dependencies.entry(child_idx).or_default().push(parent_idx);
                                 }
@@ -553,7 +604,7 @@ impl TraceMinimizer {
 
     /// Check if two events have causal relationship
     fn has_causal_relationship(&self, first: &TraceEvent, second: &TraceEvent) -> bool {
-        use crate::trace::event::{TraceEventKind::*, TraceData};
+        use crate::trace::event::{TraceData, TraceEventKind::*};
 
         // Logical time ordering indicates causal dependency
         if let (Some(first_time), Some(second_time)) = (&first.logical_time, &second.logical_time) {
@@ -565,38 +616,103 @@ impl TraceMinimizer {
         // Check for specific causal patterns based on event kinds and data
         match (&first.kind, &second.kind, &first.data, &second.data) {
             // Task lifecycle: spawn -> schedule -> poll -> complete
-            (Spawn, Schedule, TraceData::Task { task: task1, .. }, TraceData::Task { task: task2, .. })
-            | (Schedule, Poll, TraceData::Task { task: task1, .. }, TraceData::Task { task: task2, .. })
-            | (Poll, Complete, TraceData::Task { task: task1, .. }, TraceData::Task { task: task2, .. })
-                if task1 == task2 => true,
+            (
+                Spawn,
+                Schedule,
+                TraceData::Task { task: task1, .. },
+                TraceData::Task { task: task2, .. },
+            )
+            | (
+                Schedule,
+                Poll,
+                TraceData::Task { task: task1, .. },
+                TraceData::Task { task: task2, .. },
+            )
+            | (
+                Poll,
+                Complete,
+                TraceData::Task { task: task1, .. },
+                TraceData::Task { task: task2, .. },
+            ) if task1 == task2 => true,
 
             // Wake -> Schedule relationship
-            (Wake, Schedule, TraceData::Task { task: task1, .. }, TraceData::Task { task: task2, .. })
-                if task1 == task2 => true,
+            (
+                Wake,
+                Schedule,
+                TraceData::Task { task: task1, .. },
+                TraceData::Task { task: task2, .. },
+            ) if task1 == task2 => true,
 
             // Cancellation protocol: request -> ack
-            (CancelRequest, CancelAck, TraceData::Cancel { task: task1, .. }, TraceData::Cancel { task: task2, .. })
-                if task1 == task2 => true,
+            (
+                CancelRequest,
+                CancelAck,
+                TraceData::Cancel { task: task1, .. },
+                TraceData::Cancel { task: task2, .. },
+            ) if task1 == task2 => true,
 
             // Region lifecycle: create -> close
-            (RegionCreated, RegionCloseBegin, TraceData::Region { region: region1, .. }, TraceData::Region { region: region2, .. })
-            | (RegionCloseBegin, RegionCloseComplete, TraceData::Region { region: region1, .. }, TraceData::Region { region: region2, .. })
-                if region1 == region2 => true,
+            (
+                RegionCreated,
+                RegionCloseBegin,
+                TraceData::Region {
+                    region: region1, ..
+                },
+                TraceData::Region {
+                    region: region2, ..
+                },
+            )
+            | (
+                RegionCloseBegin,
+                RegionCloseComplete,
+                TraceData::Region {
+                    region: region1, ..
+                },
+                TraceData::Region {
+                    region: region2, ..
+                },
+            ) if region1 == region2 => true,
 
             // Parent-child region relationships
-            (RegionCreated, _, TraceData::Region { region: parent, .. }, TraceData::Region { parent: Some(child_parent), .. })
-                if parent == child_parent => true,
+            (
+                RegionCreated,
+                _,
+                TraceData::Region { region: parent, .. },
+                TraceData::Region {
+                    parent: Some(child_parent),
+                    ..
+                },
+            ) if parent == child_parent => true,
 
             // Obligation lifecycle: reserve -> commit/abort
-            (ObligationReserve, ObligationCommit, TraceData::Obligation { obligation: obl1, .. }, TraceData::Obligation { obligation: obl2, .. })
-            | (ObligationReserve, ObligationAbort, TraceData::Obligation { obligation: obl1, .. }, TraceData::Obligation { obligation: obl2, .. })
-                if obl1 == obl2 => true,
+            (
+                ObligationReserve,
+                ObligationCommit,
+                TraceData::Obligation {
+                    obligation: obl1, ..
+                },
+                TraceData::Obligation {
+                    obligation: obl2, ..
+                },
+            )
+            | (
+                ObligationReserve,
+                ObligationAbort,
+                TraceData::Obligation {
+                    obligation: obl1, ..
+                },
+                TraceData::Obligation {
+                    obligation: obl2, ..
+                },
+            ) if obl1 == obl2 => true,
 
             // Timer lifecycle: schedule -> fire/cancel
             (TimerScheduled, TimerFired, _, _) | (TimerScheduled, TimerCancelled, _, _) => true,
 
             // I/O lifecycle: request -> ready -> result/error
-            (IoRequested, IoReady, _, _) | (IoReady, IoResult, _, _) | (IoReady, IoError, _, _) => true,
+            (IoRequested, IoReady, _, _) | (IoReady, IoResult, _, _) | (IoReady, IoError, _, _) => {
+                true
+            }
 
             // Worker offload protocol
             (WorkerCancelRequested, WorkerCancelAcknowledged, _, _)
@@ -670,6 +786,41 @@ impl ReplayOptimizer {
         Ok(events)
     }
 
+    /// Extract task ID from event
+    fn extract_task_id(&self, event: &TraceEvent) -> Option<TaskId> {
+        use crate::trace::event::TraceData;
+
+        match &event.data {
+            TraceData::Task { task, .. } => Some(*task),
+            TraceData::Cancel { task, .. } => Some(*task),
+            TraceData::Obligation { task, .. } => Some(*task),
+            _ => None,
+        }
+    }
+
+    /// Extract region ID from event
+    fn extract_region_id(&self, event: &TraceEvent) -> Option<RegionId> {
+        use crate::trace::event::TraceData;
+
+        match &event.data {
+            TraceData::Task { region, .. } => Some(*region),
+            TraceData::Region { region, .. } => Some(*region),
+            TraceData::Cancel { region, .. } => Some(*region),
+            TraceData::Obligation { region, .. } => Some(*region),
+            _ => None,
+        }
+    }
+
+    /// Extract obligation ID from event
+    fn extract_obligation_id(&self, event: &TraceEvent) -> Option<ObligationId> {
+        use crate::trace::event::TraceData;
+
+        match &event.data {
+            TraceData::Obligation { obligation, .. } => Some(*obligation),
+            _ => None,
+        }
+    }
+
     /// Compute state key for deduplication
     fn compute_state_key(&self, event: &TraceEvent) -> Result<String> {
         // Create key based on event kind and relevant data
@@ -694,17 +845,23 @@ impl ReplayOptimizer {
         };
 
         // Include task/region/obligation IDs in the key for uniqueness
-        let task_id = self.extract_task_id(event)
+        let task_id = self
+            .extract_task_id(event)
             .map(|id| format!("_t{}", id.as_u64()))
             .unwrap_or_default();
-        let region_id = self.extract_region_id(event)
+        let region_id = self
+            .extract_region_id(event)
             .map(|id| format!("_r{}", id.as_u64()))
             .unwrap_or_default();
-        let obligation_id = self.extract_obligation_id(event)
+        let obligation_id = self
+            .extract_obligation_id(event)
             .map(|id| format!("_o{}", id.as_u64()))
             .unwrap_or_default();
 
-        Ok(format!("{}{}{}{}", kind_str, task_id, region_id, obligation_id))
+        Ok(format!(
+            "{}{}{}{}",
+            kind_str, task_id, region_id, obligation_id
+        ))
     }
 }
 
@@ -713,9 +870,7 @@ pub struct MinimizerFactory;
 
 impl MinimizerFactory {
     /// Create minimizer for specific bug reproduction
-    pub fn for_bug_reproduction(
-        bug_validator: Arc<dyn ReplayValidator>,
-    ) -> TraceMinimizer {
+    pub fn for_bug_reproduction(bug_validator: Arc<dyn ReplayValidator>) -> TraceMinimizer {
         let config = MinimizationConfig {
             aggressive_pruning: true,
             target_reduction: 0.05, // Very aggressive for bugs
@@ -726,9 +881,7 @@ impl MinimizerFactory {
     }
 
     /// Create minimizer for performance analysis
-    pub fn for_performance_analysis(
-        perf_validator: Arc<dyn ReplayValidator>,
-    ) -> TraceMinimizer {
+    pub fn for_performance_analysis(perf_validator: Arc<dyn ReplayValidator>) -> TraceMinimizer {
         let config = MinimizationConfig {
             preserve_timing: true, // Important for perf analysis
             target_reduction: 0.3, // Less aggressive
@@ -739,17 +892,19 @@ impl MinimizerFactory {
     }
 
     /// Create minimizer for race condition analysis
-    pub fn for_race_conditions(
-        race_validator: Arc<dyn ReplayValidator>,
-    ) -> TraceMinimizer {
+    pub fn for_race_conditions(race_validator: Arc<dyn ReplayValidator>) -> TraceMinimizer {
         let config = MinimizationConfig {
-            preserve_timing: true, // Critical for race conditions
+            preserve_timing: true,     // Critical for race conditions
             aggressive_pruning: false, // Be conservative
             target_reduction: 0.5,
             ..Default::default()
         };
 
-        TraceMinimizer::new(config, race_validator, MinimizationStrategy::DependencyPruning)
+        TraceMinimizer::new(
+            config,
+            race_validator,
+            MinimizationStrategy::DependencyPruning,
+        )
     }
 }
 
@@ -759,10 +914,12 @@ pub mod utils {
 
     /// Load trace from file
     pub async fn load_trace(path: &Path) -> Result<Vec<TraceEvent>> {
-        let content = tokio::fs::read_to_string(path).await
-            .context("Failed to read trace file")?;
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| Error::internal(format!("failed to read trace file: {e}")))?;
 
-        let events: Vec<TraceEvent> = content.lines()
+        let events: Vec<TraceEvent> = content
+            .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
 
@@ -773,12 +930,17 @@ pub mod utils {
     pub async fn save_trace(events: &[TraceEvent], path: &Path) -> Result<()> {
         let mut lines = Vec::new();
         for event in events {
-            lines.push(serde_json::to_string(event)?);
+            lines.push(
+                serde_json::to_string(event).map_err(|e| {
+                    Error::internal(format!("failed to serialize trace event: {e}"))
+                })?,
+            );
         }
 
         let content = lines.join("\n");
-        tokio::fs::write(path, content).await
-            .context("Failed to write trace file")?;
+        tokio::fs::write(path, content)
+            .await
+            .map_err(|e| Error::internal(format!("failed to write trace file: {e}")))?;
 
         Ok(())
     }
@@ -829,7 +991,7 @@ mod tests {
         let mut minimizer = TraceMinimizer::new(
             MinimizationConfig::default(),
             validator,
-            MinimizationStrategy::DeltaDebugging
+            MinimizationStrategy::DeltaDebugging,
         );
 
         let events = vec![]; // Deterministic event fixture starts empty.

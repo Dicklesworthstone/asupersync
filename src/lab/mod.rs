@@ -51,6 +51,8 @@ pub mod atp_lab {
     pub use crate::atp::lab::*;
 }
 pub mod atp_path;
+#[cfg(feature = "benchmark-adapters")]
+pub mod benchmark_cartel;
 pub mod chaos;
 pub mod config;
 pub mod conformal;
@@ -58,6 +60,8 @@ pub mod crashpack;
 pub mod dual_run;
 pub mod explorer;
 pub mod fixtures;
+#[cfg(feature = "benchmark-adapters")]
+pub mod forensics;
 pub mod fuzz;
 pub mod http;
 pub mod injection;
@@ -68,6 +72,8 @@ pub mod numa;
 pub mod opportunity;
 pub mod oracle;
 pub mod replay;
+#[cfg(feature = "benchmark-adapters")]
+pub mod replay_minimization;
 pub mod runtime;
 pub mod scenario;
 pub mod scenario_runner;

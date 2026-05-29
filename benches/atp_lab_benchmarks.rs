@@ -6,22 +6,75 @@
 use asupersync::error::Result;
 use asupersync::lab::benchmark_cartel::{
     BenchmarkCartel, BenchmarkExecutor, BenchmarkMetadata, BenchmarkResult, CartelConfig,
-    EnvironmentInfo, ExpectedCharacteristics, PerformanceCharacteristics, RegressionAnalysis,
-    StatisticalMeasurements,
+    EnvironmentInfo, ExpectedCharacteristics, PerformanceCharacteristics, StatisticalMeasurements,
 };
 use asupersync::lab::forensics::{
-    ConcurrencyAnalyzer, EvidenceCollector, ForensicsCollector, ForensicsConfig,
-    PerformanceTracker, ResourceTracker, RootCauseAnalyzer,
+    EvidenceCategory, EvidenceData, EvidenceSeverity, ExecutionContext, ExecutionPhase,
+    ForensicsCollector, ForensicsConfig,
 };
 use asupersync::lab::replay_minimization::{
-    MinimizationConfig, MinimizationStrategy, ReplayOptimizer, ReplayValidator, TraceMinimizer,
+    MinimizationConfig, MinimizationStrategy, ReplayValidator, TraceMinimizer,
 };
-use asupersync::trace::event::TraceEvent;
+use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Time, TraceId};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime;
+
+fn rust_version() -> String {
+    option_env!("RUSTC_VERSION")
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn current_time() -> Time {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Time::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
+}
+
+fn benchmark_context(description: &str) -> ExecutionContext {
+    ExecutionContext {
+        lab_id: "criterion".to_string(),
+        scenario_id: description.to_string(),
+        task_id: None,
+        region_id: None,
+        virtual_time: current_time(),
+        real_time: SystemTime::now(),
+        phase: ExecutionPhase::Execution,
+    }
+}
+
+fn collect_benchmark_evidence(collector: &mut ForensicsCollector, description: &str) {
+    collector.collect_evidence(
+        EvidenceCategory::Benchmark,
+        EvidenceSeverity::Info,
+        description.to_string(),
+        benchmark_context(description),
+        EvidenceData::PerformanceMetrics {
+            execution_time: Duration::ZERO,
+            memory_usage: 0,
+            cpu_cycles: None,
+            cache_misses: None,
+        },
+    );
+}
+
+fn mock_trace(size: usize) -> Vec<TraceEvent> {
+    (0..size)
+        .map(|i| {
+            TraceEvent::new(
+                i as u64,
+                Time::from_nanos(i as u64),
+                TraceEventKind::UserTrace,
+                TraceData::None,
+            )
+        })
+        .collect()
+}
 
 /// ATP Lab Forensics Benchmark Executor
 #[derive(Debug)]
@@ -39,23 +92,22 @@ impl ForensicsBenchmarkExecutor {
 #[async_trait::async_trait]
 impl BenchmarkExecutor for ForensicsBenchmarkExecutor {
     async fn execute(&self, cartel_config: &CartelConfig) -> Result<BenchmarkResult> {
-        let start_time = Time::now();
+        let start_time = current_time();
+        let elapsed_start = Instant::now();
         let mut measurements = Vec::new();
 
         // Warmup phase
         for _ in 0..cartel_config.warmup_iterations {
-            let collector = ForensicsCollector::new(self.config.clone());
-            let _ = collector.collect_evidence("warmup_test").await?;
+            let mut collector = ForensicsCollector::new(self.config.clone());
+            collect_benchmark_evidence(&mut collector, "warmup_test");
         }
 
         // Measurement phase
         for iteration in 0..cartel_config.measurement_iterations {
             let start = Instant::now();
 
-            let collector = ForensicsCollector::new(self.config.clone());
-            let _evidence = collector
-                .collect_evidence(&format!("bench_iteration_{}", iteration))
-                .await?;
+            let mut collector = ForensicsCollector::new(self.config.clone());
+            collect_benchmark_evidence(&mut collector, &format!("bench_iteration_{}", iteration));
 
             let duration = start.elapsed();
             measurements.push(duration.as_nanos() as f64);
@@ -87,8 +139,9 @@ impl BenchmarkExecutor for ForensicsBenchmarkExecutor {
         let min_ns = measurements[0];
         let max_ns = measurements[sample_count - 1];
 
-        let total_duration = Time::now().duration_since(start_time);
-        let throughput_ops_per_sec = sample_count as f64 / (total_duration.as_secs_f64());
+        let total_duration = elapsed_start.elapsed();
+        let throughput_ops_per_sec =
+            sample_count as f64 / total_duration.as_secs_f64().max(f64::EPSILON);
 
         Ok(BenchmarkResult {
             name: self.name.clone(),
@@ -119,7 +172,7 @@ impl BenchmarkExecutor for ForensicsBenchmarkExecutor {
                 context_switches_per_sec: 100.0,  // Estimated
                 gc_pressure_score: 0.2,           // Estimated
             },
-            trace_id: Some(TraceId::new()),
+            trace_id: Some(TraceId::from_raw(1)),
         })
     }
 
@@ -143,7 +196,7 @@ impl ForensicsBenchmarkExecutor {
             platform: std::env::consts::OS.to_string(),
             cpu_info: "Unknown CPU".to_string(), // Would use actual CPU detection
             memory_mb: 8192,                     // Would use actual memory detection
-            rust_version: env!("RUSTC_VERSION").to_string(),
+            rust_version: rust_version(),
             build_profile: if cfg!(debug_assertions) {
                 "debug"
             } else {
@@ -173,21 +226,15 @@ impl ReplayBenchmarkExecutor {
     }
 
     fn create_mock_trace(&self, size: usize) -> Vec<TraceEvent> {
-        // Create mock trace events for benchmarking
-        (0..size)
-            .map(|i| {
-                // This would create actual TraceEvent instances
-                // For now, using a placeholder
-                serde_json::from_str(&format!(r#"{{"id": {}, "timestamp": {}}}"#, i, i)).unwrap()
-            })
-            .collect()
+        mock_trace(size)
     }
 }
 
 #[async_trait::async_trait]
 impl BenchmarkExecutor for ReplayBenchmarkExecutor {
     async fn execute(&self, cartel_config: &CartelConfig) -> Result<BenchmarkResult> {
-        let start_time = Time::now();
+        let start_time = current_time();
+        let elapsed_start = Instant::now();
         let mut measurements = Vec::new();
 
         // Create mock validator for benchmarking
@@ -213,7 +260,7 @@ impl BenchmarkExecutor for ReplayBenchmarkExecutor {
         }
 
         // Measurement phase
-        for iteration in 0..cartel_config.measurement_iterations {
+        for _iteration in 0..cartel_config.measurement_iterations {
             let start = Instant::now();
 
             let mut minimizer =
@@ -251,8 +298,9 @@ impl BenchmarkExecutor for ReplayBenchmarkExecutor {
         let min_ns = measurements[0];
         let max_ns = measurements[sample_count - 1];
 
-        let total_duration = Time::now().duration_since(start_time);
-        let throughput_ops_per_sec = sample_count as f64 / total_duration.as_secs_f64();
+        let total_duration = elapsed_start.elapsed();
+        let throughput_ops_per_sec =
+            sample_count as f64 / total_duration.as_secs_f64().max(f64::EPSILON);
 
         Ok(BenchmarkResult {
             name: self.name.clone(),
@@ -276,7 +324,7 @@ impl BenchmarkExecutor for ReplayBenchmarkExecutor {
                     platform: std::env::consts::OS.to_string(),
                     cpu_info: "Unknown CPU".to_string(),
                     memory_mb: 8192,
-                    rust_version: env!("RUSTC_VERSION").to_string(),
+                    rust_version: rust_version(),
                     build_profile: if cfg!(debug_assertions) {
                         "debug"
                     } else {
@@ -295,7 +343,7 @@ impl BenchmarkExecutor for ReplayBenchmarkExecutor {
                 context_switches_per_sec: 150.0,
                 gc_pressure_score: 0.3,
             },
-            trace_id: Some(TraceId::new()),
+            trace_id: Some(TraceId::from_raw(2)),
         })
     }
 
@@ -329,7 +377,6 @@ pub fn forensics_benchmarks(c: &mut Criterion) {
                 enable_performance_tracking: true,
                 enable_resource_tracking: true,
                 enable_concurrency_analysis: true,
-                enable_root_cause_analysis: true,
                 ..Default::default()
             },
         ),
@@ -342,8 +389,9 @@ pub fn forensics_benchmarks(c: &mut Criterion) {
             |b, config| {
                 b.iter(|| {
                     rt.block_on(async {
-                        let collector = ForensicsCollector::new(config.clone());
-                        collector.collect_evidence("benchmark_test").await.unwrap()
+                        let mut collector = ForensicsCollector::new(config.clone());
+                        collect_benchmark_evidence(&mut collector, "benchmark_test");
+                        collector.generate_report()
                     })
                 })
             },
@@ -396,16 +444,7 @@ pub fn replay_minimization_benchmarks(c: &mut Criterion) {
                             let config = MinimizationConfig::default();
                             let mut minimizer = TraceMinimizer::new(config, validator, *strategy);
 
-                            // Create mock trace
-                            let trace: Vec<TraceEvent> = (0..*trace_size)
-                                .map(|i| {
-                                    serde_json::from_str(&format!(
-                                        r#"{{"id": {}, "timestamp": {}}}"#,
-                                        i, i
-                                    ))
-                                    .unwrap()
-                                })
-                                .collect();
+                            let trace = mock_trace(*trace_size);
 
                             minimizer.minimize(trace).await.unwrap()
                         })
@@ -469,8 +508,8 @@ pub fn comprehensive_atp_lab_benchmarks(c: &mut Criterion) {
             rt.block_on(async {
                 // 1. Create forensics evidence
                 let forensics_config = ForensicsConfig::default();
-                let collector = ForensicsCollector::new(forensics_config);
-                let evidence = collector.collect_evidence("pipeline_test").await.unwrap();
+                let mut collector = ForensicsCollector::new(forensics_config);
+                collect_benchmark_evidence(&mut collector, "pipeline_test");
 
                 // 2. Minimize any traces in evidence
                 struct MockValidator;
@@ -492,14 +531,7 @@ pub fn comprehensive_atp_lab_benchmarks(c: &mut Criterion) {
                 );
 
                 // Create mock trace from evidence
-                let mock_trace: Vec<TraceEvent> = (0..100)
-                    .map(|i| {
-                        serde_json::from_str(&format!(r#"{{"id": {}, "timestamp": {}}}"#, i, i))
-                            .unwrap()
-                    })
-                    .collect();
-
-                let _minimized = minimizer.minimize(mock_trace).await.unwrap();
+                let _minimized = minimizer.minimize(mock_trace(100)).await.unwrap();
 
                 // 3. Run benchmark cartel analysis
                 let cartel_config = CartelConfig {
@@ -517,7 +549,7 @@ pub fn comprehensive_atp_lab_benchmarks(c: &mut Criterion) {
                 cartel.register_executor(executor);
                 let _results = cartel.run_all_benchmarks().await.unwrap();
 
-                evidence
+                collector.generate_report()
             })
         })
     });
@@ -537,6 +569,7 @@ criterion_main!(benches);
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[tokio::test]

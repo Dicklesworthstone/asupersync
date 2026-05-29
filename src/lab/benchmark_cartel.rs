@@ -4,16 +4,23 @@
 //! analysis across multiple ATP lab instances. Manages distributed benchmark execution,
 //! result collection, and performance regression detection.
 
-use crate::types::{Time, TraceId, TaskId};
-use crate::error::Result;
-use anyhow::{Context, Error};
+use crate::error::{Error, ErrorKind, Result};
+use crate::types::{Time, TraceId};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tracing::{debug, info, warn, error};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{Mutex, RwLock, mpsc};
+use tracing::{info, warn};
+
+fn current_time() -> Time {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Time::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
+}
 
 /// Configuration for benchmark cartel
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,7 +228,6 @@ pub struct ExpectedCharacteristics {
 }
 
 /// Benchmark cartel coordinator
-#[derive(Debug)]
 pub struct BenchmarkCartel {
     config: CartelConfig,
     executors: Vec<Arc<dyn BenchmarkExecutor>>,
@@ -237,13 +243,19 @@ pub enum CartelEvent {
     /// Benchmark started
     BenchmarkStarted { name: String, timestamp: Time },
     /// Benchmark completed
-    BenchmarkCompleted { name: String, result: BenchmarkResult },
+    BenchmarkCompleted {
+        name: String,
+        result: BenchmarkResult,
+    },
     /// Benchmark failed
     BenchmarkFailed { name: String, error: String },
     /// Regression detected
     RegressionDetected { analysis: RegressionAnalysis },
     /// Performance improvement detected
-    ImprovementDetected { name: String, improvement_percent: f64 },
+    ImprovementDetected {
+        name: String,
+        improvement_percent: f64,
+    },
 }
 
 impl BenchmarkCartel {
@@ -271,7 +283,10 @@ impl BenchmarkCartel {
 
     /// Run all registered benchmarks
     pub async fn run_all_benchmarks(&self) -> Result<Vec<BenchmarkResult>> {
-        info!("Starting benchmark cartel execution with {} executors", self.executors.len());
+        info!(
+            "Starting benchmark cartel execution with {} executors",
+            self.executors.len()
+        );
 
         let mut handles = Vec::new();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.concurrency));
@@ -297,7 +312,7 @@ impl BenchmarkCartel {
                 // Send start event
                 let _ = event_sender.send(CartelEvent::BenchmarkStarted {
                     name: name.clone(),
-                    timestamp: Time::now(),
+                    timestamp: current_time(),
                 });
 
                 // Execute benchmark
@@ -355,7 +370,10 @@ impl BenchmarkCartel {
             self.check_regressions(&results).await?;
         }
 
-        info!("Benchmark cartel execution completed: {} results", results.len());
+        info!(
+            "Benchmark cartel execution completed: {} results",
+            results.len()
+        );
         Ok(results)
     }
 
@@ -371,8 +389,9 @@ impl BenchmarkCartel {
             let result = executor.execute(config).await;
             executor.cleanup().await?;
             result
-        }).await
-        .context("Benchmark timeout")?
+        })
+        .await
+        .map_err(|_| Error::new(ErrorKind::DeadlineExceeded).with_message("benchmark timed out"))?
     }
 
     /// Store benchmark results
@@ -450,7 +469,9 @@ impl BenchmarkCartel {
             RegressionSeverity::Minor => "Monitor for trend".to_string(),
             RegressionSeverity::Moderate => "Investigate potential causes".to_string(),
             RegressionSeverity::Severe => "Immediate investigation required".to_string(),
-            RegressionSeverity::Critical => "Critical performance issue - halt deployments".to_string(),
+            RegressionSeverity::Critical => {
+                "Critical performance issue - halt deployments".to_string()
+            }
         };
 
         Ok(RegressionAnalysis {
@@ -491,17 +512,16 @@ impl BenchmarkCartel {
 
     /// Get current git commit hash for baseline validation
     fn get_current_commit_hash() -> Result<String> {
-        std::process::Command::new("git")
+        let output = std::process::Command::new("git")
             .args(&["rev-parse", "HEAD"])
             .output()
-            .map_err(|e| anyhow::Error::new(e).context("Failed to get current commit hash"))
-            .and_then(|output| {
-                if output.status.success() {
-                    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-                } else {
-                    Err(anyhow::Error::msg("git rev-parse failed"))
-                }
-            })
+            .map_err(|e| Error::internal(format!("failed to get current commit hash: {e}")))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(Error::internal("git rev-parse failed"))
+        }
     }
 
     /// Check if baseline is compatible with current codebase
@@ -515,50 +535,74 @@ impl BenchmarkCartel {
 
         // If baseline commit is empty or unknown, consider it stale
         if baseline_commit.is_empty() || baseline_commit == "unknown" {
-            return (false, "Baseline has no commit hash - likely stale".to_string());
+            return (
+                false,
+                "Baseline has no commit hash - likely stale".to_string(),
+            );
         }
 
         // Different commits are potentially incompatible
         // In a production system, you might check if commits are on the same branch
         // or within a certain time window, but for safety we'll warn about any mismatch
-        (false, format!("Commit mismatch: baseline={}, current={}",
-                       &baseline_commit[..8.min(baseline_commit.len())],
-                       &current_commit[..8.min(current_commit.len())]))
+        (
+            false,
+            format!(
+                "Commit mismatch: baseline={}, current={}",
+                &baseline_commit[..8.min(baseline_commit.len())],
+                &current_commit[..8.min(current_commit.len())]
+            ),
+        )
     }
 
     /// Load baseline results from storage with validation
     pub async fn load_baselines(&self, baseline_dir: &Path) -> Result<()> {
         if !baseline_dir.exists() {
-            warn!("Baseline directory does not exist: {}", baseline_dir.display());
+            warn!(
+                "Baseline directory does not exist: {}",
+                baseline_dir.display()
+            );
             return Ok(());
         }
 
         // br-asupersync-q92qqo: Get current commit hash for baseline validation
-        let current_commit = Self::get_current_commit_hash()
-            .unwrap_or_else(|e| {
-                warn!("Failed to get current commit hash: {}", e);
-                "unknown".to_string()
-            });
+        let current_commit = Self::get_current_commit_hash().unwrap_or_else(|e| {
+            warn!("Failed to get current commit hash: {}", e);
+            "unknown".to_string()
+        });
 
         let mut baseline_store = self.baseline_store.write().await;
         let mut loaded_count = 0;
         let mut skipped_count = 0;
         let mut stale_baselines = Vec::new();
 
-        let mut entries = tokio::fs::read_dir(baseline_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
+        let mut entries = tokio::fs::read_dir(baseline_dir).await.map_err(|e| {
+            Error::internal(format!(
+                "failed to read baseline directory {}: {e}",
+                baseline_dir.display()
+            ))
+        })?;
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            Error::internal(format!(
+                "failed to iterate baseline directory {}: {e}",
+                baseline_dir.display()
+            ))
+        })? {
             let path = entry.path();
             if path.extension().map_or(false, |ext| ext == "json") {
                 if let Ok(content) = tokio::fs::read_to_string(&path).await {
                     if let Ok(result) = serde_json::from_str::<BenchmarkResult>(&content) {
                         // br-asupersync-q92qqo: Validate baseline compatibility
-                        let (compatible, reason) = Self::is_baseline_compatible(&result, &current_commit);
+                        let (compatible, reason) =
+                            Self::is_baseline_compatible(&result, &current_commit);
 
                         if compatible {
                             baseline_store.insert(result.name.clone(), result);
                             loaded_count += 1;
                         } else {
-                            warn!("Skipping incompatible baseline '{}': {}", result.name, reason);
+                            warn!(
+                                "Skipping incompatible baseline '{}': {}",
+                                result.name, reason
+                            );
                             stale_baselines.push((result.name.clone(), reason));
                             skipped_count += 1;
                         }
@@ -571,16 +615,22 @@ impl BenchmarkCartel {
             }
         }
 
-        info!("Loaded {} compatible baseline results, skipped {} incompatible baselines",
-              loaded_count, skipped_count);
+        info!(
+            "Loaded {} compatible baseline results, skipped {} incompatible baselines",
+            loaded_count, skipped_count
+        );
 
         if !stale_baselines.is_empty() {
-            warn!("Found {} stale baselines that may cause false regression alerts or miss real regressions:",
-                  stale_baselines.len());
+            warn!(
+                "Found {} stale baselines that may cause false regression alerts or miss real regressions:",
+                stale_baselines.len()
+            );
             for (name, reason) in stale_baselines {
                 warn!("  - {}: {}", name, reason);
             }
-            warn!("Consider regenerating baselines for current commit to ensure reliable CI/CD benchmarks");
+            warn!(
+                "Consider regenerating baselines for current commit to ensure reliable CI/CD benchmarks"
+            );
         }
 
         Ok(())
@@ -588,7 +638,12 @@ impl BenchmarkCartel {
 
     /// Save current results as new baselines
     pub async fn save_baselines(&self, baseline_dir: &Path) -> Result<()> {
-        tokio::fs::create_dir_all(baseline_dir).await?;
+        tokio::fs::create_dir_all(baseline_dir).await.map_err(|e| {
+            Error::internal(format!(
+                "failed to create baseline directory {}: {e}",
+                baseline_dir.display()
+            ))
+        })?;
 
         let results_store = self.results_store.read().await;
 
@@ -597,8 +652,17 @@ impl BenchmarkCartel {
                 let filename = format!("{}.json", name.replace('/', "_"));
                 let path = baseline_dir.join(filename);
 
-                let content = serde_json::to_string_pretty(latest)?;
-                tokio::fs::write(path, content).await?;
+                let content = serde_json::to_string_pretty(latest).map_err(|e| {
+                    Error::internal(format!(
+                        "failed to serialize benchmark baseline {name}: {e}"
+                    ))
+                })?;
+                tokio::fs::write(&path, content).await.map_err(|e| {
+                    Error::internal(format!(
+                        "failed to write benchmark baseline {}: {e}",
+                        path.display()
+                    ))
+                })?;
             }
         }
 
@@ -617,7 +681,8 @@ impl BenchmarkCartel {
         let active = self.active_benchmarks.lock().await;
         let now = Instant::now();
 
-        active.iter()
+        active
+            .iter()
             .map(|(name, start_time)| (name.clone(), now.duration_since(*start_time)))
             .collect()
     }
@@ -634,14 +699,15 @@ pub mod analysis {
     ) -> HashMap<String, f64> {
         let mut comparisons = HashMap::new();
 
-        let baseline_map: HashMap<String, &BenchmarkResult> = baseline.iter()
-            .map(|r| (r.name.clone(), r))
-            .collect();
+        let baseline_map: HashMap<String, &BenchmarkResult> =
+            baseline.iter().map(|r| (r.name.clone(), r)).collect();
 
         for current_result in current {
             if let Some(baseline_result) = baseline_map.get(&current_result.name) {
-                let delta = ((current_result.measurements.mean_ns - baseline_result.measurements.mean_ns)
-                    / baseline_result.measurements.mean_ns) * 100.0;
+                let delta = ((current_result.measurements.mean_ns
+                    - baseline_result.measurements.mean_ns)
+                    / baseline_result.measurements.mean_ns)
+                    * 100.0;
                 comparisons.insert(current_result.name.clone(), delta);
             }
         }
@@ -703,7 +769,7 @@ mod tests {
                     sample_count: 100,
                 },
                 metadata: BenchmarkMetadata {
-                    start_time: Time::now(),
+                    start_time: current_time(),
                     total_duration_ms: 1000,
                     target_iterations: 100,
                     completed_iterations: 100,
@@ -784,7 +850,7 @@ mod tests {
                 sample_count: 100,
             },
             metadata: BenchmarkMetadata {
-                start_time: Time::now(),
+                start_time: current_time(),
                 total_duration_ms: 1000,
                 target_iterations: 100,
                 completed_iterations: 100,
@@ -833,7 +899,7 @@ mod tests {
                 sample_count: 100,
             },
             metadata: BenchmarkMetadata {
-                start_time: Time::now(),
+                start_time: current_time(),
                 total_duration_ms: 1000,
                 target_iterations: 100,
                 completed_iterations: 100,
@@ -862,25 +928,29 @@ mod tests {
 
         // Test exact commit match - should be compatible
         let same_commit_baseline = create_baseline(current_commit);
-        let (compatible, reason) = BenchmarkCartel::is_baseline_compatible(&same_commit_baseline, current_commit);
+        let (compatible, reason) =
+            BenchmarkCartel::is_baseline_compatible(&same_commit_baseline, current_commit);
         assert!(compatible);
         assert_eq!(reason, "Exact commit match");
 
         // Test different commit - should be incompatible
         let different_commit_baseline = create_baseline("xyz789uvw012");
-        let (compatible, reason) = BenchmarkCartel::is_baseline_compatible(&different_commit_baseline, current_commit);
+        let (compatible, reason) =
+            BenchmarkCartel::is_baseline_compatible(&different_commit_baseline, current_commit);
         assert!(!compatible);
         assert!(reason.contains("Commit mismatch"));
 
         // Test empty commit hash - should be incompatible
         let empty_commit_baseline = create_baseline("");
-        let (compatible, reason) = BenchmarkCartel::is_baseline_compatible(&empty_commit_baseline, current_commit);
+        let (compatible, reason) =
+            BenchmarkCartel::is_baseline_compatible(&empty_commit_baseline, current_commit);
         assert!(!compatible);
         assert!(reason.contains("no commit hash"));
 
         // Test "unknown" commit hash - should be incompatible
         let unknown_commit_baseline = create_baseline("unknown");
-        let (compatible, reason) = BenchmarkCartel::is_baseline_compatible(&unknown_commit_baseline, current_commit);
+        let (compatible, reason) =
+            BenchmarkCartel::is_baseline_compatible(&unknown_commit_baseline, current_commit);
         assert!(!compatible);
         assert!(reason.contains("no commit hash"));
     }
