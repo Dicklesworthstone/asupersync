@@ -71,7 +71,11 @@ COMPILE_FRONTIER_RE = re.compile(
     r"^\s*(Compiling|Checking|Finished|Running)\s+.+$|^\s*error(?:\[|\:)|^\s*warning(?:\[|\:)",
     re.MULTILINE,
 )
-TIMEOUT_RE = re.compile(r"(?i)(timed out|timeout|terminated|signal TERM|wrapper timed out)")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+TIMEOUT_RE = re.compile(
+    r"(?im)(module microharness wrapper timed out|local wrapper timed out|"
+    r"timed out while|timeout expired|terminated by timeout|signal TERM)"
+)
 MICROHARNESS_EVENT_RE = re.compile(r"ASUPERSYNC_MICROHARNESS_EVENT\s+(?P<event>\{.+\})")
 
 
@@ -144,6 +148,10 @@ def selected_worker(text: str) -> str | None:
     return None
 
 
+def strip_ansi(value: str) -> str:
+    return ANSI_RE.sub("", value).strip()
+
+
 def remote_exit(text: str) -> int | None:
     matches = list(REMOTE_FINISHED_RE.finditer(text))
     if matches:
@@ -165,7 +173,7 @@ def remote_elapsed_ms(text: str) -> int | None:
 def remote_command(text: str) -> str | None:
     match = REMOTE_COMMAND_RE.search(text)
     if match:
-        return match.group("command").strip()
+        return strip_ansi(match.group("command"))
     return None
 
 
@@ -173,7 +181,7 @@ def last_compile_frontier(text: str) -> dict[str, Any] | None:
     last: dict[str, Any] | None = None
     for line_no, line in enumerate(text.splitlines(), start=1):
         if COMPILE_FRONTIER_RE.search(line):
-            last = {"line": line_no, "text": line.strip()}
+            last = {"line": line_no, "text": strip_ansi(line)}
     return last
 
 

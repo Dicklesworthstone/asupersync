@@ -114,6 +114,10 @@ fn passing_rch_log_produces_closeable_receipt() {
         receipt["execution"]["remote_elapsed_ms"].as_i64(),
         Some(12345)
     );
+    assert_eq!(
+        receipt["execution"]["wrapper_timed_out"].as_bool(),
+        Some(false)
+    );
     assert_eq!(receipt["execution"]["test_count"].as_u64(), Some(3));
     assert_eq!(
         receipt["execution"]["test_result"]["passed"].as_u64(),
