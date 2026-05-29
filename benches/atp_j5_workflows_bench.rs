@@ -17,9 +17,22 @@ use asupersync::cli::{
 use asupersync::test_utils::run_test_with_cx;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use std::path::PathBuf;
-use tempfile::TempDir;
+use tempfile::{Builder as TempDirBuilder, TempDir};
 use tokio::runtime::Runtime;
+
+const PUBLIC_BENCH_SCOPE: &str = "public";
+
+fn bench_temp_dir(prefix: &str) -> TempDir {
+    let root = std::env::current_dir()
+        .expect("ATP J5 workflow benchmarks require a current working directory")
+        .join("target")
+        .join("atp_j5_workflows_bench_inputs");
+    std::fs::create_dir_all(&root).expect("create ATP J5 workflow benchmark scratch root");
+    TempDirBuilder::new()
+        .prefix(prefix)
+        .tempdir_in(root)
+        .expect("create ATP J5 workflow benchmark scratch directory")
+}
 
 /// Benchmark CI artifact caching with different file sizes.
 fn bench_ci_artifact_cache(c: &mut Criterion) {
@@ -40,7 +53,7 @@ fn bench_ci_artifact_cache(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     run_test_with_cx(|cx| async move {
-                        let temp_dir = TempDir::new().unwrap();
+                        let temp_dir = bench_temp_dir("ci-artifact-cache-");
                         let artifact_path = temp_dir.path().join("benchmark-artifact");
 
                         let content = vec![0u8; size];
@@ -57,7 +70,7 @@ fn bench_ci_artifact_cache(c: &mut Criterion) {
                                 retention: "1h".to_string(),
                                 compression_level: 6,
                                 dedupe: true,
-                                scope: Some("bench:artifacts".to_string()),
+                                scope: Some(PUBLIC_BENCH_SCOPE.to_string()),
                             }),
                         };
 
@@ -94,7 +107,7 @@ fn bench_dataset_seeding(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         run_test_with_cx(|cx| async move {
-                            let temp_dir = TempDir::new().unwrap();
+                            let temp_dir = bench_temp_dir("dataset-seeding-");
                             let dataset_path = temp_dir.path().to_owned();
 
                             // Create dataset files
@@ -161,7 +174,7 @@ fn bench_fuzz_corpus_sync(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         run_test_with_cx(|cx| async move {
-                            let temp_dir = TempDir::new().unwrap();
+                            let temp_dir = bench_temp_dir("fuzz-corpus-sync-");
                             let corpus_path = temp_dir.path().to_owned();
 
                             // Create corpus test cases
@@ -220,7 +233,7 @@ fn bench_cache_deduplication(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         run_test_with_cx(|cx| async move {
-                            let temp_dir = TempDir::new().unwrap();
+                            let temp_dir = bench_temp_dir("cache-deduplication-");
                             let mut coordinator =
                                 AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
 
@@ -245,7 +258,7 @@ fn bench_cache_deduplication(c: &mut Criterion) {
                                         retention: "1h".to_string(),
                                         compression_level: 1, // Minimal compression for dedupe focus
                                         dedupe: true,
-                                        scope: Some("bench:dedupe".to_string()),
+                                        scope: Some(PUBLIC_BENCH_SCOPE.to_string()),
                                     }),
                                 };
 
@@ -279,7 +292,7 @@ fn bench_cache_lookup(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         run_test_with_cx(|cx| async move {
-                            let temp_dir = TempDir::new().unwrap();
+                            let temp_dir = bench_temp_dir("cache-lookup-");
                             let mut coordinator =
                                 AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
 
@@ -299,7 +312,7 @@ fn bench_cache_lookup(c: &mut Criterion) {
                                         retention: "1h".to_string(),
                                         compression_level: 1,
                                         dedupe: false,
-                                        scope: Some("bench:cache".to_string()),
+                                        scope: Some(PUBLIC_BENCH_SCOPE.to_string()),
                                     }),
                                 };
 
@@ -311,7 +324,7 @@ fn bench_cache_lookup(c: &mut Criterion) {
                                 action: AtpCiAction::Pull(AtpCiPullArgs {
                                     build_id: Some(format!("cache-prep-{}", cache_size / 2)),
                                     tags: vec!["cache-test".to_string()],
-                                    destination: PathBuf::from("/tmp/bench"),
+                                    destination: temp_dir.path().join("pull-destination"),
                                     if_newer: false,
                                     verify: false,
                                 }),
@@ -356,7 +369,7 @@ fn bench_compression_ratios(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         run_test_with_cx(|cx| async move {
-                            let temp_dir = TempDir::new().unwrap();
+                            let temp_dir = bench_temp_dir("compression-ratios-");
                             let artifact_path =
                                 temp_dir.path().join(format!("{}_artifact", content_type));
                             tokio::fs::write(&artifact_path, content).await.unwrap();
@@ -372,7 +385,7 @@ fn bench_compression_ratios(c: &mut Criterion) {
                                     retention: "1h".to_string(),
                                     compression_level: 9, // Maximum compression
                                     dedupe: false,
-                                    scope: Some("bench:compression".to_string()),
+                                    scope: Some(PUBLIC_BENCH_SCOPE.to_string()),
                                 }),
                             };
 
