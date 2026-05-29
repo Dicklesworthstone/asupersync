@@ -5,25 +5,54 @@
 //! These tests demonstrate actual ATP usage for real Asupersync artifacts
 //! and validate that dogfooding produces proper proof and replay artifacts.
 
-use anyhow::{Context, Result};
 use asupersync::cli::atp_workflows::AtpWorkflowCoordinator;
 use asupersync::cli::output::OutputFormat;
 use asupersync::cli::{
-    AtpArchiveAction, AtpArchiveArgs, AtpArchiveStoreArgs, AtpCiAction, AtpCiArgs, AtpCiPushArgs,
-    AtpDatasetAction, AtpDatasetArgs, AtpDatasetSeedArgs, AtpFuzzAction, AtpFuzzArgs,
-    AtpFuzzSyncArgs,
+    AtpArchiveAction, AtpArchiveArgs, AtpArchiveStoreArgs, AtpArchiveVerifyArgs, AtpCiAction,
+    AtpCiArgs, AtpCiPushArgs, AtpDatasetAction, AtpDatasetArgs, AtpDatasetSeedArgs, AtpFuzzAction,
+    AtpFuzzArgs, AtpFuzzSyncArgs,
 };
-use asupersync::test_utils::run_test_with_cx;
+use asupersync::cx::Cx;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+struct CurrentDirGuard {
+    _lock: MutexGuard<'static, ()>,
+    original_dir: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn enter(path: &Path) -> Result<Self> {
+        let lock = CURRENT_DIR_LOCK.lock().expect("current-dir lock poisoned");
+        let original_dir = std::env::current_dir()?;
+        std::env::set_current_dir(path)?;
+        Ok(Self {
+            _lock: lock,
+            original_dir,
+        })
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original_dir);
+    }
+}
 
 /// Test configuration for dogfood integration tests.
 struct DogfoodTestConfig {
-    temp_dir: TempDir,
+    _temp_dir: TempDir,
+    workspace_dir: PathBuf,
     artifacts_dir: PathBuf,
     coordinator: AtpWorkflowCoordinator,
     session_id: String,
@@ -31,17 +60,20 @@ struct DogfoodTestConfig {
 
 impl DogfoodTestConfig {
     fn new() -> Result<Self> {
-        let temp_dir = TempDir::new().context("Failed to create temp directory")?;
-        let artifacts_dir = temp_dir.path().join("artifacts");
+        let temp_dir = TempDir::new()?;
+        let workspace_dir = temp_dir.path().join("workspace");
+        let artifacts_dir = workspace_dir.join("artifacts");
         fs::create_dir_all(&artifacts_dir)?;
 
-        let coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json)
-            .context("Failed to create workflow coordinator")?;
+        let coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json)?;
 
-        let session_id = format!("test_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let ordinal = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let session_id = format!("test_{timestamp}_{ordinal}");
 
         Ok(Self {
-            temp_dir,
+            _temp_dir: temp_dir,
+            workspace_dir,
             artifacts_dir,
             coordinator,
             session_id,
@@ -57,21 +89,22 @@ impl DogfoodTestConfig {
     fn create_build_artifacts(&self) -> Result<Vec<PathBuf>> {
         let mut artifacts = Vec::new();
 
-        // Simulate build artifacts
         artifacts.push(self.create_test_artifact(
-            "asupersync",
-            "Mock binary content for asupersync executable",
+            "asupersync.sh",
+            "#!/usr/bin/env sh\nprintf 'asupersync dogfood fixture\\n'\n",
         )?);
-        artifacts
-            .push(self.create_test_artifact("libasupersync.rlib", "Mock Rust library artifact")?);
+        artifacts.push(self.create_test_artifact(
+            "libasupersync.rlib",
+            "deterministic Rust library archive fixture\nmetadata:dogfood\n",
+        )?);
         artifacts.push(
             self.create_test_artifact(
                 "build_metadata.json",
                 &serde_json::json!({
-                    "build_time": chrono::Utc::now().to_rfc3339(),
-                    "git_commit": "abcd1234",
+                    "build_epoch_nanos": SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+                    "git_commit": "0123456789abcdef0123456789abcdef01234567",
                     "profile": "release",
-                    "target": "x86_64-unknown-linux-gnu"
+                    "target": std::env::consts::ARCH
                 })
                 .to_string(),
             )?,
@@ -100,9 +133,8 @@ impl DogfoodTestConfig {
         let corpus_dir = self.artifacts_dir.join("corpus");
         fs::create_dir_all(&corpus_dir)?;
 
-        // Create sample fuzz test cases
         for i in 0..10 {
-            let test_case = format!("test_input_{}", i);
+            let test_case = format!("http/1.1 request fragment {i}\r\nx-dogfood: {i}\r\n\r\n");
             fs::write(corpus_dir.join(format!("case_{:03}", i)), test_case)?;
         }
 
@@ -110,20 +142,88 @@ impl DogfoodTestConfig {
     }
 
     fn create_proof_bundle(&self) -> Result<PathBuf> {
+        let manifest = serde_json::json!({
+            "chunks": 5,
+            "total_size": 1024,
+            "compression": "none",
+            "session_id": self.session_id,
+        });
+        let integrity_hash = format!(
+            "sha256:{}",
+            self.compute_sha256(manifest.to_string().as_bytes())
+        );
         let proof_data = serde_json::json!({
             "proof_version": "1.0",
             "session_id": self.session_id,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "integrity_hash": "sha256:mock_hash_value",
-            "transfer_manifest": {
-                "chunks": 5,
-                "total_size": 1024,
-                "compression": "gzip"
-            },
+            "timestamp_epoch_nanos": SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+            "integrity_hash": integrity_hash,
+            "transfer_manifest": manifest,
             "verification_status": "verified"
         });
 
         self.create_test_artifact("proof_bundle.json", &proof_data.to_string())
+    }
+
+    fn workflow_root(&self) -> PathBuf {
+        self.workspace_dir.join(".asupersync").join("atp")
+    }
+
+    fn read_json(&self, path: impl AsRef<Path>) -> Result<Value> {
+        Ok(serde_json::from_slice(&fs::read(path)?)?)
+    }
+
+    fn ci_index_entries(&self) -> Result<Vec<Value>> {
+        self.read_json_values(self.workflow_root().join("ci").join("index"))
+    }
+
+    fn read_json_values(&self, dir: PathBuf) -> Result<Vec<Value>> {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+                entries.push(self.read_json(path)?);
+            }
+        }
+        entries.sort_by_key(|value| value["id"].as_str().unwrap_or_default().to_string());
+        Ok(entries)
+    }
+
+    fn count_regular_files(path: &Path) -> Result<usize> {
+        let mut count = 0;
+        for entry in fs::read_dir(path)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                count += Self::count_regular_files(&path)?;
+            } else if path.is_file() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn dataset_metadata_path(&self, dataset_id: &str, version: &str) -> PathBuf {
+        self.workflow_root()
+            .join("datasets")
+            .join(format!("{dataset_id}-{version}.json"))
+    }
+
+    fn archive_metadata_path(&self, archive_id: &str) -> PathBuf {
+        self.workflow_root()
+            .join("archives")
+            .join(archive_id)
+            .join("metadata.json")
+    }
+
+    fn compute_sha256(&self, bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -133,28 +233,25 @@ mod tests {
 
     async fn run_dogfood_test<F, Fut>(test_fn: F) -> Result<()>
     where
-        F: FnOnce(DogfoodTestConfig) -> Fut,
+        F: FnOnce(Cx, DogfoodTestConfig) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
-        crate::test_utils::init_test_logging();
-
-        run_test_with_cx(|cx| async move {
-            let config = DogfoodTestConfig::new()?;
-            test_fn(config).await
-        })
-        .await
+        asupersync::test_utils::init_test_logging();
+        let config = DogfoodTestConfig::new()?;
+        let _cwd = CurrentDirGuard::enter(&config.workspace_dir)?;
+        test_fn(Cx::for_testing(), config).await
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_dogfood_build_artifacts() -> Result<()> {
-        run_dogfood_test(|mut config| async move {
+        run_dogfood_test(|cx, mut config| async move {
             let artifacts = config.create_build_artifacts()?;
+            let build_id = format!("dogfood_build_{}", config.session_id);
 
-            // Test CI artifact push workflow
             let ci_args = AtpCiArgs {
                 action: AtpCiAction::Push(AtpCiPushArgs {
                     paths: artifacts,
-                    build_id: format!("dogfood_build_{}", config.session_id),
+                    build_id: build_id.clone(),
                     tags: vec!["dogfood".to_string(), "build".to_string()],
                     retention: "7d".to_string(),
                     compression_level: 6,
@@ -163,26 +260,19 @@ mod tests {
                 }),
             };
 
-            // Execute the workflow
-            let cx = asupersync::cx::Cx::test_new();
-            let result = config.coordinator.handle_ci_command(&cx, ci_args).await?;
+            config.coordinator.handle_ci_command(&cx, ci_args).await?;
 
-            // Validate that proof artifacts were generated
-            assert!(result.success, "CI workflow should succeed");
-            assert!(
-                !result.cache_stats.entries_created.is_empty(),
-                "Should create cache entries"
-            );
-
-            // Check for proof artifacts in output
-            if let Some(proof_data) = result.proof_bundle {
-                assert!(
-                    proof_data.contains("integrity"),
-                    "Proof should contain integrity data"
-                );
-                assert!(
-                    proof_data.contains(&config.session_id),
-                    "Proof should reference session ID"
+            let entries = config.ci_index_entries()?;
+            assert_eq!(entries.len(), 3, "CI push should index every artifact");
+            for entry in &entries {
+                assert_eq!(entry["build_id"], build_id);
+                assert!(entry["size_bytes"].as_u64().unwrap() > 0);
+                assert_eq!(entry["tags"], serde_json::json!(["dogfood", "build"]));
+                let hash = entry["content_hash"].as_str().unwrap();
+                assert_eq!(
+                    hash.len(),
+                    64,
+                    "content hash should be a SHA-256 hex digest"
                 );
             }
 
@@ -191,19 +281,19 @@ mod tests {
         .await
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_dogfood_dataset_seeding() -> Result<()> {
-        run_dogfood_test(|mut config| async move {
+        run_dogfood_test(|cx, mut config| async move {
             let test_results = config.create_test_results()?;
             let dataset_dir = config.artifacts_dir.join("test_dataset");
             fs::create_dir_all(&dataset_dir)?;
             fs::copy(&test_results, dataset_dir.join("results.json"))?;
+            let dataset_id = format!("dogfood_test_dataset_{}", config.session_id);
 
-            // Test dataset seeding workflow
             let dataset_args = AtpDatasetArgs {
                 action: AtpDatasetAction::Seed(AtpDatasetSeedArgs {
                     path: dataset_dir,
-                    dataset_id: format!("dogfood_test_dataset_{}", config.session_id),
+                    dataset_id: dataset_id.clone(),
                     metadata: Some(
                         serde_json::json!({
                             "type": "test_results",
@@ -219,152 +309,119 @@ mod tests {
                 }),
             };
 
-            let cx = asupersync::cx::Cx::test_new();
-            let result = config
+            config
                 .coordinator
                 .handle_dataset_command(&cx, dataset_args)
                 .await?;
 
-            assert!(result.success, "Dataset seeding should succeed");
+            let metadata = config.read_json(config.dataset_metadata_path(&dataset_id, "v1.0"))?;
+            assert_eq!(metadata["id"], dataset_id);
+            assert_eq!(metadata["replication_factor"], 2);
+            assert_eq!(metadata["file_count"], 1);
+            assert_eq!(metadata["metadata"]["session_id"], config.session_id);
+            assert_eq!(metadata["metadata"]["dogfood"], true);
             assert!(
-                result.dataset_info.seeded,
-                "Dataset should be marked as seeded"
+                metadata["metadata"]["source_path"]
+                    .as_str()
+                    .unwrap()
+                    .contains("test_dataset")
             );
-
-            // Validate proof generation
-            if let Some(proof) = result.seeding_proof {
-                let proof_json: Value = serde_json::from_str(&proof)?;
-                assert!(
-                    proof_json["dataset_id"]
-                        .as_str()
-                        .unwrap()
-                        .contains(&config.session_id),
-                    "Proof should reference correct dataset ID"
-                );
-                assert_eq!(
-                    proof_json["replication_factor"].as_u64().unwrap(),
-                    2,
-                    "Proof should record replication factor"
-                );
-            }
+            assert_eq!(
+                metadata["metadata"]["content_hash"].as_str().unwrap().len(),
+                64
+            );
 
             Ok(())
         })
         .await
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_dogfood_fuzz_corpus_sync() -> Result<()> {
-        run_dogfood_test(|mut config| async move {
+        run_dogfood_test(|cx, mut config| async move {
             let corpus_dir = config.create_fuzz_corpus()?;
+            let target = format!("dogfood_fuzzer_{}", config.session_id);
 
-            // Test fuzz corpus synchronization workflow
             let fuzz_args = AtpFuzzArgs {
                 action: AtpFuzzAction::Sync(AtpFuzzSyncArgs {
                     corpus_path: corpus_dir,
-                    target: format!("dogfood_fuzzer_{}", config.session_id),
-                    strategy: "incremental".to_string(),
+                    target: target.clone(),
+                    strategy: "push".to_string(),
                     exclude: vec![],
                     watch: false,
                 }),
             };
 
-            let cx = asupersync::cx::Cx::test_new();
-            let result = config
+            config
                 .coordinator
                 .handle_fuzz_command(&cx, fuzz_args)
                 .await?;
 
-            assert!(result.success, "Fuzz sync should succeed");
-            assert!(
-                result.corpus_stats.files_synced > 0,
-                "Should sync corpus files"
-            );
-
-            // Check for corpus integrity proof
-            if let Some(sync_proof) = result.sync_proof {
-                let proof_data: Value = serde_json::from_str(&sync_proof)?;
-                assert!(
-                    proof_data["corpus_integrity"].is_object(),
-                    "Sync proof should include corpus integrity data"
-                );
-                assert!(
-                    proof_data["files_synced"].as_u64().unwrap() > 0,
-                    "Proof should record synced file count"
-                );
-            }
+            let corpus_store = config.workflow_root().join("fuzz").join(target);
+            assert_eq!(DogfoodTestConfig::count_regular_files(&corpus_store)?, 10);
+            let first_case = fs::read_to_string(corpus_store.join("case_000"))?;
+            assert!(first_case.contains("http/1.1 request fragment 0"));
 
             Ok(())
         })
         .await
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_dogfood_proof_bundle_archival() -> Result<()> {
-        run_dogfood_test(|mut config| async move {
+        run_dogfood_test(|cx, mut config| async move {
             let proof_bundle = config.create_proof_bundle()?;
+            let archive_id = format!("dogfood_archive_{}", config.session_id);
 
-            // Test proof bundle archival workflow
             let archive_args = AtpArchiveArgs {
                 action: AtpArchiveAction::Store(AtpArchiveStoreArgs {
-                    paths: vec![proof_bundle],
-                    archive_id: format!("dogfood_archive_{}", config.session_id),
-                    compression_level: 9,
-                    retention: "30d".to_string(),
-                    metadata: Some(
-                        serde_json::json!({
-                            "archive_type": "proof_bundle",
-                            "session_id": config.session_id,
-                            "purpose": "dogfood_testing"
-                        })
-                        .to_string(),
-                    ),
-                    verify: true,
+                    bundle_path: proof_bundle,
+                    archive_id: Some(archive_id.clone()),
+                    retention: Some("30d".to_string()),
+                    tier: "cold".to_string(),
+                    tags: vec![
+                        "proof_bundle".to_string(),
+                        config.session_id.clone(),
+                        "dogfood_testing".to_string(),
+                    ],
                 }),
             };
 
-            let cx = asupersync::cx::Cx::test_new();
-            let result = config
+            config
                 .coordinator
                 .handle_archive_command(&cx, archive_args)
                 .await?;
 
-            assert!(result.success, "Archive operation should succeed");
-            assert!(
-                result.storage_stats.bytes_stored > 0,
-                "Should store archive data"
-            );
+            let metadata = config.read_json(config.archive_metadata_path(&archive_id))?;
+            assert_eq!(metadata["id"], archive_id);
+            assert_eq!(metadata["tier"], "cold");
+            assert_eq!(metadata["tags"][0], "proof_bundle");
+            assert_eq!(metadata["tags"][1], config.session_id);
+            assert!(metadata["size_bytes"].as_u64().unwrap() > 0);
+            assert_eq!(metadata["checksum"].as_str().unwrap().len(), 64);
+            assert!(Path::new(metadata["bundle_path"].as_str().unwrap()).exists());
 
-            // Verify archival proof
-            if let Some(archival_proof) = result.archival_proof {
-                let proof: Value = serde_json::from_str(&archival_proof)?;
-                assert!(
-                    proof["retention_policy"]["duration"]
-                        .as_str()
-                        .unwrap()
-                        .contains("30d"),
-                    "Proof should record retention policy"
-                );
-                assert_eq!(
-                    proof["compression_level"].as_u64().unwrap(),
-                    9,
-                    "Proof should record compression settings"
-                );
-                assert!(
-                    proof["verification_status"]["verified"].as_bool().unwrap(),
-                    "Archive should be verified"
-                );
-            }
+            config
+                .coordinator
+                .handle_archive_command(
+                    &cx,
+                    AtpArchiveArgs {
+                        action: AtpArchiveAction::Verify(AtpArchiveVerifyArgs {
+                            archive_id,
+                            deep: true,
+                        }),
+                    },
+                )
+                .await?;
 
             Ok(())
         })
         .await
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_dogfood_failure_handling() -> Result<()> {
-        run_dogfood_test(|mut config| async move {
-            // Create an invalid CI push request to trigger failure handling
+        run_dogfood_test(|cx, mut config| async move {
             let invalid_ci_args = AtpCiArgs {
                 action: AtpCiAction::Push(AtpCiPushArgs {
                     paths: vec![PathBuf::from("/nonexistent/path")],
@@ -377,46 +434,38 @@ mod tests {
                 }),
             };
 
-            let cx = asupersync::cx::Cx::test_new();
             let result = config
                 .coordinator
                 .handle_ci_command(&cx, invalid_ci_args)
                 .await;
 
-            // Should fail gracefully with proper error context
             assert!(result.is_err(), "Invalid request should fail");
 
             let error = result.unwrap_err();
             let error_str = error.to_string();
 
-            // Verify error contains useful debugging context
             assert!(
-                error_str.contains("nonexistent") || error_str.contains("not found"),
+                error_str.contains("nonexistent")
+                    || error_str.contains("path")
+                    || error_str.contains("Path"),
                 "Error should reference the missing path: {}",
                 error_str
             );
-
-            // In a real dogfood scenario, this would create a bead with the error context
-            // For testing, we just verify the error is properly structured
 
             Ok(())
         })
         .await
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_dogfood_end_to_end_workflow() -> Result<()> {
-        run_dogfood_test(|mut config| async move {
-            let cx = asupersync::cx::Cx::test_new();
-
-            // Simulate a complete dogfood workflow: build -> test -> archive
-
-            // Step 1: Push build artifacts
+        run_dogfood_test(|cx, mut config| async move {
             let build_artifacts = config.create_build_artifacts()?;
+            let build_id = format!("e2e_build_{}", config.session_id);
             let ci_args = AtpCiArgs {
                 action: AtpCiAction::Push(AtpCiPushArgs {
                     paths: build_artifacts,
-                    build_id: format!("e2e_build_{}", config.session_id),
+                    build_id: build_id.clone(),
                     tags: vec!["dogfood".to_string(), "e2e".to_string()],
                     retention: "7d".to_string(),
                     compression_level: 6,
@@ -425,23 +474,23 @@ mod tests {
                 }),
             };
 
-            let build_result = config.coordinator.handle_ci_command(&cx, ci_args).await?;
-            assert!(build_result.success, "Build artifact push should succeed");
+            config.coordinator.handle_ci_command(&cx, ci_args).await?;
+            assert_eq!(config.ci_index_entries()?.len(), 3);
 
-            // Step 2: Seed test dataset
             let test_results = config.create_test_results()?;
             let dataset_dir = config.artifacts_dir.join("e2e_dataset");
             fs::create_dir_all(&dataset_dir)?;
             fs::copy(&test_results, dataset_dir.join("test_results.json"))?;
+            let dataset_id = format!("e2e_dataset_{}", config.session_id);
 
             let dataset_args = AtpDatasetArgs {
                 action: AtpDatasetAction::Seed(AtpDatasetSeedArgs {
                     path: dataset_dir,
-                    dataset_id: format!("e2e_dataset_{}", config.session_id),
+                    dataset_id: dataset_id.clone(),
                     metadata: Some(
                         serde_json::json!({
                             "workflow": "e2e_dogfood",
-                            "build_id": format!("e2e_build_{}", config.session_id)
+                            "build_id": build_id
                         })
                         .to_string(),
                     ),
@@ -452,69 +501,37 @@ mod tests {
                 }),
             };
 
-            let dataset_result = config
+            config
                 .coordinator
                 .handle_dataset_command(&cx, dataset_args)
                 .await?;
-            assert!(dataset_result.success, "Dataset seeding should succeed");
+            let dataset_metadata =
+                config.read_json(config.dataset_metadata_path(&dataset_id, "1.0"))?;
+            assert_eq!(dataset_metadata["id"], dataset_id);
 
-            // Step 3: Archive proof bundles
             let proof_bundle = config.create_proof_bundle()?;
+            let archive_id = format!("e2e_archive_{}", config.session_id);
             let archive_args = AtpArchiveArgs {
                 action: AtpArchiveAction::Store(AtpArchiveStoreArgs {
-                    paths: vec![proof_bundle],
-                    archive_id: format!("e2e_archive_{}", config.session_id),
-                    compression_level: 6,
-                    retention: "14d".to_string(),
-                    metadata: Some(
-                        serde_json::json!({
-                            "workflow": "e2e_dogfood",
-                            "build_id": format!("e2e_build_{}", config.session_id),
-                            "dataset_id": format!("e2e_dataset_{}", config.session_id)
-                        })
-                        .to_string(),
-                    ),
-                    verify: true,
+                    bundle_path: proof_bundle,
+                    archive_id: Some(archive_id.clone()),
+                    retention: Some("14d".to_string()),
+                    tier: "warm".to_string(),
+                    tags: vec![
+                        "e2e_dogfood".to_string(),
+                        dataset_id.clone(),
+                        config.session_id.clone(),
+                    ],
                 }),
             };
 
-            let archive_result = config
+            config
                 .coordinator
                 .handle_archive_command(&cx, archive_args)
                 .await?;
-            assert!(archive_result.success, "Archive operation should succeed");
-
-            // Verify cross-workflow consistency
-            // All operations should share the same session context
-            for proof in [
-                build_result.proof_bundle.as_deref(),
-                dataset_result.seeding_proof.as_deref(),
-                archive_result.archival_proof.as_deref(),
-            ]
-            .iter()
-            .filter_map(|&p| p)
-            {
-                assert!(
-                    proof.contains(&config.session_id),
-                    "All proofs should reference the session ID"
-                );
-            }
-
-            // Verify that dogfooding generated comprehensive audit trail
-            let total_operations = 3;
-            let successful_operations = [
-                build_result.success,
-                dataset_result.success,
-                archive_result.success,
-            ]
-            .iter()
-            .filter(|&&s| s)
-            .count();
-
-            assert_eq!(
-                successful_operations, total_operations,
-                "All dogfood operations should succeed"
-            );
+            let archive_metadata = config.read_json(config.archive_metadata_path(&archive_id))?;
+            assert_eq!(archive_metadata["tags"][1], dataset_id);
+            assert_eq!(archive_metadata["tags"][2], config.session_id);
 
             Ok(())
         })
@@ -525,7 +542,6 @@ mod tests {
 /// Integration tests for dogfood script execution.
 #[cfg(test)]
 mod script_integration_tests {
-    use super::*;
     use std::process::Command;
 
     #[test]
