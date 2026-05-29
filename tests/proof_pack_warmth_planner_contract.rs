@@ -386,6 +386,18 @@ fn output_is_dry_run_and_non_mutating() {
         receipt["contract"]["proof_must_still_execute"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        receipt["operator_receipt"]["dry_run_only"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        receipt["operator_receipt"]["planner_output_is_proof_evidence"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        receipt["operator_receipt"]["actual_proof_commands_still_required"].as_bool(),
+        Some(true)
+    );
 }
 
 #[test]
@@ -554,5 +566,108 @@ fn fixture_stale_telemetry_receipt_names_stale_worker_but_requires_replan() {
     assert_eq!(
         evidence["cache_warmth_is_correctness_evidence"].as_bool(),
         Some(false)
+    );
+}
+
+#[test]
+fn mismatched_cache_key_fails_closed_to_cold_worker() {
+    let receipt = planner_json(&fixture_json("mismatched_cache_key.json"));
+    let row = lane(&receipt, "module-microharness");
+    let evidence = &row["worker_warmth_evidence"];
+
+    assert_eq!(receipt["telemetry"]["state"].as_str(), Some("fresh"));
+    assert_eq!(row["classification"].as_str(), Some("not-warm"));
+    assert!(
+        row["reasons"]
+            .as_array()
+            .expect("reasons")
+            .contains(&json!("no-warm-worker"))
+    );
+    assert_eq!(
+        row["recommended_workers"][0]["worker_id"].as_str(),
+        Some("vmi-mismatched-cache")
+    );
+    assert_eq!(
+        row["recommended_workers"][0]["matches_cache_key"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        row["recommended_workers"][0]["matches_target_dir_family"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        evidence["observed_rch_worker_id"].as_str(),
+        Some("vmi-mismatched-cache")
+    );
+    assert_eq!(evidence["matching_target_dir_family"].as_str(), Some(""));
+    assert!(
+        evidence["warmth_basis"]
+            .as_array()
+            .expect("warmth basis")
+            .contains(&json!("compatible-cold-worker"))
+    );
+    assert_eq!(evidence["estimated_savings_band"].as_str(), Some("none"));
+    assert_eq!(evidence["confidence_class"].as_str(), Some("medium"));
+    assert_eq!(
+        evidence["cache_warmth_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn operator_receipt_names_required_real_proof_lanes_and_isolated_commands() {
+    let receipt = planner_json(&fixture_json("mismatched_cache_key.json"));
+    let operator = &receipt["operator_receipt"];
+
+    assert_eq!(
+        operator["schema_version"].as_str(),
+        Some("proof-pack-warmth-operator-receipt-v1")
+    );
+    assert_eq!(operator["dry_run_only"].as_bool(), Some(true));
+    assert_eq!(
+        operator["cache_warmth_is_authoritative"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        operator["planner_output_is_proof_evidence"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        operator["actual_proof_commands_still_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        operator["all_command_templates_preserve_agent_isolation"].as_bool(),
+        Some(true)
+    );
+
+    let lane_command = operator["lane_command_templates"][0]["actual_proof_command"]
+        .as_str()
+        .expect("lane command");
+    assert!(
+        lane_command
+            .starts_with("rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_MistyCat_")
+    );
+    assert_eq!(
+        operator["lane_command_templates"][0]["runs_now"].as_bool(),
+        Some(false)
+    );
+
+    let required = operator["broader_proof_lanes_still_required"]
+        .as_array()
+        .expect("required proof lanes");
+    assert_eq!(required.len(), 2);
+    assert_eq!(
+        required[0]["lane_id"].as_str(),
+        Some("proof-pack-warmth-planner-contract")
+    );
+    assert_eq!(
+        required[0]["command"].as_str(),
+        Some("cargo test --test proof_pack_warmth_planner_contract")
+    );
+    assert_eq!(required[1]["lane_id"].as_str(), Some("release-gate-clippy"));
+    assert_eq!(
+        required[1]["command"].as_str(),
+        Some("cargo clippy --all-targets -- -D warnings")
     );
 }

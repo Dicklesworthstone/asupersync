@@ -392,6 +392,50 @@ def contract_summary(contract: dict[str, Any], path: str) -> dict[str, Any]:
     }
 
 
+def required_broader_proof_lanes(source: dict[str, Any]) -> list[dict[str, str]]:
+    required: list[dict[str, str]] = []
+    for item in as_list(source.get("broader_proof_lanes_still_required")):
+        if not isinstance(item, dict):
+            continue
+        lane_id = string_value(item.get("lane_id"))
+        command = string_value(item.get("command"))
+        reason = string_value(item.get("reason"))
+        if lane_id and command:
+            required.append(
+                {
+                    "lane_id": lane_id,
+                    "command": command,
+                    "reason": reason,
+                }
+            )
+    return required
+
+
+def operator_receipt(lanes: list[dict[str, Any]], required_lanes: list[dict[str, str]]) -> dict[str, Any]:
+    lane_commands = [
+        {
+            "lane_id": lane["lane_id"],
+            "actual_proof_command": lane["command_templates"]["actual_proof_command"],
+            "target_dir": lane["command_templates"]["target_dir"],
+            "preserves_agent_isolation": bool(lane["command_templates"]["preserves_agent_isolation"]),
+            "runs_now": bool(lane["command_templates"]["runs_now"]),
+        }
+        for lane in lanes
+    ]
+    return {
+        "schema_version": "proof-pack-warmth-operator-receipt-v1",
+        "dry_run_only": True,
+        "planner_output_is_proof_evidence": False,
+        "cache_warmth_is_authoritative": False,
+        "actual_proof_commands_still_required": True,
+        "all_command_templates_preserve_agent_isolation": all(
+            command["preserves_agent_isolation"] for command in lane_commands
+        ),
+        "lane_command_templates": lane_commands,
+        "broader_proof_lanes_still_required": required_lanes,
+    }
+
+
 def build_lane_receipt(
     lane: dict[str, Any],
     operator: dict[str, Any],
@@ -450,6 +494,7 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         for lane in as_list(source.get("proof_lanes"))
         if isinstance(lane, dict)
     ]
+    required_lanes = required_broader_proof_lanes(source)
 
     summary = {
         "lane_count": len(lanes),
@@ -474,6 +519,7 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         },
         "summary": summary,
         "lanes": lanes,
+        "operator_receipt": operator_receipt(lanes, required_lanes),
         "dry_run_only": True,
         "non_mutating": True,
         "forbidden_actions": {
