@@ -3,16 +3,26 @@
 #![allow(missing_docs)]
 
 use serde_json::{Value, json};
+use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
 const SCRIPT_PATH: &str = "scripts/proof_pack_warmth_planner.py";
 const CONTRACT_PATH: &str = "artifacts/proof_pack_cache_key_contract_v1.json";
+const FIXTURE_DIR: &str = "tests/fixtures/proof_pack_warmth_planner";
 const GENERATED_AT: &str = "2026-05-29T01:45:00Z";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn fixture_json(name: &str) -> Value {
+    let path = repo_root().join(FIXTURE_DIR).join(name);
+    let raw = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read fixture {}: {error}", path.display()));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|error| panic!("parse fixture {}: {error}", path.display()))
 }
 
 fn key_input() -> Value {
@@ -194,6 +204,10 @@ fn warm_worker_is_recommended_with_isolated_rch_command_template() {
         Some(true)
     );
     assert_eq!(row["cache_warmth_is_authoritative"].as_bool(), Some(false));
+    assert_eq!(
+        row["worker_warmth_evidence"]["cache_warmth_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
 }
 
 #[test]
@@ -371,5 +385,174 @@ fn output_is_dry_run_and_non_mutating() {
     assert_eq!(
         receipt["contract"]["proof_must_still_execute"].as_bool(),
         Some(true)
+    );
+}
+
+#[test]
+fn fixture_receipts_explain_two_current_proof_families() {
+    let receipt = planner_json(&fixture_json("two_family_fresh.json"));
+
+    assert_eq!(receipt["summary"]["lane_count"].as_u64(), Some(2));
+    let module = lane(&receipt, "module-microharness");
+    let module_evidence = &module["worker_warmth_evidence"];
+    assert_eq!(module["classification"].as_str(), Some("warm"));
+    assert_eq!(
+        module_evidence["schema_version"].as_str(),
+        Some("proof-pack-worker-warmth-evidence-v1")
+    );
+    assert_eq!(
+        module_evidence["observed_rch_worker_id"].as_str(),
+        Some("vmi-module-warm")
+    );
+    assert_eq!(
+        module_evidence["sampled_at"].as_str(),
+        Some("2026-05-29T01:44:30Z")
+    );
+    assert_eq!(
+        module_evidence["proof_lane_family"].as_str(),
+        Some("module-microharness")
+    );
+    assert_eq!(
+        module_evidence["cache_key_fingerprint"].as_str(),
+        module["cache_key_fingerprint"].as_str()
+    );
+    assert_eq!(
+        module_evidence["matching_target_dir_family"].as_str(),
+        Some("rch_target_module_microharness_contract")
+    );
+    assert!(
+        module_evidence["warmth_basis"]
+            .as_array()
+            .expect("warmth basis")
+            .contains(&json!("target-dir-family"))
+    );
+    assert_eq!(
+        module_evidence["queue_pressure"]["class"].as_str(),
+        Some("low")
+    );
+    assert_eq!(
+        module_evidence["estimated_compile_savings_seconds"].as_u64(),
+        Some(780)
+    );
+    assert_eq!(
+        module_evidence["estimated_savings_band"].as_str(),
+        Some("high")
+    );
+    assert_eq!(module_evidence["confidence_class"].as_str(), Some("medium"));
+    assert_eq!(
+        module_evidence["fallback_recommendation"].as_str(),
+        Some("run-proof-on-recommended-warm-worker")
+    );
+    assert_eq!(
+        module_evidence["cache_warmth_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
+
+    let selector = lane(&receipt, "touched-surface-selector");
+    let selector_evidence = &selector["worker_warmth_evidence"];
+    assert_eq!(selector["classification"].as_str(), Some("not-warm"));
+    assert_eq!(
+        selector_evidence["observed_rch_worker_id"].as_str(),
+        Some("vmi-selector-cold")
+    );
+    assert_eq!(
+        selector_evidence["proof_lane_family"].as_str(),
+        Some("touched-surface-selector")
+    );
+    assert_eq!(
+        selector_evidence["matching_target_dir_family"].as_str(),
+        Some("")
+    );
+    assert!(
+        selector_evidence["warmth_basis"]
+            .as_array()
+            .expect("selector warmth basis")
+            .contains(&json!("compatible-cold-worker"))
+    );
+    assert_eq!(
+        selector_evidence["queue_pressure"]["class"].as_str(),
+        Some("low")
+    );
+    assert_eq!(
+        selector_evidence["estimated_compile_savings_seconds"].as_u64(),
+        Some(60)
+    );
+    assert_eq!(
+        selector_evidence["estimated_savings_band"].as_str(),
+        Some("none")
+    );
+    assert_eq!(
+        selector_evidence["confidence_class"].as_str(),
+        Some("medium")
+    );
+    assert_eq!(
+        selector_evidence["fallback_recommendation"].as_str(),
+        Some("run-proof-on-compatible-cold-worker")
+    );
+}
+
+#[test]
+fn fixture_missing_telemetry_receipt_fails_closed_without_worker_claims() {
+    let receipt = planner_json(&fixture_json("missing_telemetry.json"));
+    let row = lane(&receipt, "module-microharness");
+    let evidence = &row["worker_warmth_evidence"];
+
+    assert_eq!(receipt["telemetry"]["state"].as_str(), Some("no-data"));
+    assert_eq!(row["classification"].as_str(), Some("no-data"));
+    assert_eq!(evidence["observed_rch_worker_id"].as_str(), Some(""));
+    assert_eq!(evidence["sampled_at"].as_str(), Some(""));
+    assert_eq!(
+        evidence["telemetry_freshness"]["state"].as_str(),
+        Some("no-data")
+    );
+    assert_eq!(
+        evidence["queue_pressure"]["class"].as_str(),
+        Some("unknown")
+    );
+    assert_eq!(evidence["estimated_savings_band"].as_str(), Some("unknown"));
+    assert_eq!(evidence["confidence_class"].as_str(), Some("low"));
+    assert_eq!(
+        evidence["fallback_recommendation"].as_str(),
+        Some("collect-rch-worker-telemetry-before-selecting-worker")
+    );
+    assert_eq!(
+        evidence["cache_warmth_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn fixture_stale_telemetry_receipt_names_stale_worker_but_requires_replan() {
+    let receipt = planner_json(&fixture_json("stale_telemetry.json"));
+    let row = lane(&receipt, "module-microharness");
+    let evidence = &row["worker_warmth_evidence"];
+
+    assert_eq!(receipt["telemetry"]["state"].as_str(), Some("stale"));
+    assert_eq!(row["classification"].as_str(), Some("degraded"));
+    assert_eq!(
+        evidence["observed_rch_worker_id"].as_str(),
+        Some("vmi-stale-module-warm")
+    );
+    assert_eq!(
+        evidence["telemetry_freshness"]["state"].as_str(),
+        Some("stale")
+    );
+    assert_eq!(
+        evidence["telemetry_freshness"]["age_seconds"].as_u64(),
+        Some(6300)
+    );
+    assert_eq!(
+        evidence["matching_target_dir_family"].as_str(),
+        Some("rch_target_module_microharness_contract")
+    );
+    assert_eq!(evidence["estimated_savings_band"].as_str(), Some("unknown"));
+    assert_eq!(evidence["confidence_class"].as_str(), Some("low"));
+    assert_eq!(
+        evidence["fallback_recommendation"].as_str(),
+        Some("refresh-rch-telemetry-and-replan")
+    );
+    assert_eq!(
+        evidence["cache_warmth_is_correctness_evidence"].as_bool(),
+        Some(false)
     );
 }

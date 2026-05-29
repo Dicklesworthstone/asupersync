@@ -115,9 +115,16 @@ def worker_warm_for(worker: dict[str, Any], lane_cache_key: str, target_dir_fami
 
 
 def worker_row(worker: dict[str, Any], lane_cache_key: str, target_dir_family: str) -> dict[str, Any]:
+    cache_keys = set(stable_string_list(worker.get("cache_keys")))
+    target_families = set(stable_string_list(worker.get("target_dir_families")))
+    matches_cache_key = bool(lane_cache_key) and lane_cache_key in cache_keys
+    matches_target_dir_family = target_dir_family in target_families
     return {
         "worker_id": worker_id(worker),
-        "warm": worker_warm_for(worker, lane_cache_key, target_dir_family),
+        "warm": matches_cache_key or matches_target_dir_family,
+        "matches_cache_key": matches_cache_key,
+        "matches_target_dir_family": matches_target_dir_family,
+        "matching_target_dir_family": target_dir_family if matches_target_dir_family else "",
         "saturated": worker_is_saturated(worker),
         "queue_depth": worker.get("queue_depth") if isinstance(worker.get("queue_depth"), int) else None,
         "available_slots": worker.get("available_slots")
@@ -155,10 +162,9 @@ def command_templates(
 def classify_lane(
     lane: dict[str, Any],
     lane_key: dict[str, Any],
-    workers: list[dict[str, Any]],
+    worker_rows: list[dict[str, Any]],
     telemetry_state: dict[str, Any],
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
-    lane_id = string_value(lane.get("lane_id"))
     if bool(lane.get("unsupported", False)):
         return "unsupported", ["unsupported-lane"], []
     if not string_value(lane.get("command")):
@@ -170,19 +176,9 @@ def classify_lane(
     if telemetry_state["state"] == "stale":
         return "degraded", ["stale-worker-telemetry"], []
 
-    target_dir_family = string_value(lane.get("target_dir_family")) or lane_slug(lane_id)
-    eligible = [
-        worker
-        for worker in workers
-        if worker_id(worker) and worker_supports_lane(worker, lane)
-    ]
-    if not eligible:
+    if not worker_rows:
         return "no-data", ["no-compatible-workers"], []
 
-    worker_rows = [
-        worker_row(worker, lane_key["cache_key"], target_dir_family)
-        for worker in eligible
-    ]
     warm_available = [
         row for row in worker_rows if row["warm"] and not row["saturated"]
     ]
@@ -199,6 +195,177 @@ def classify_lane(
     if any(row["warm"] for row in worker_rows):
         return "degraded", ["warm-workers-saturated"], []
     return "degraded", ["worker-saturated"], []
+
+
+def compatible_worker_rows(
+    lane: dict[str, Any],
+    lane_key: dict[str, Any],
+    workers: list[dict[str, Any]],
+    target_dir_family: str,
+) -> list[dict[str, Any]]:
+    if not lane_key["cache_key_valid"]:
+        return []
+    return [
+        worker_row(worker, lane_key["cache_key"], target_dir_family)
+        for worker in workers
+        if worker_id(worker) and worker_supports_lane(worker, lane)
+    ]
+
+
+def numeric_value(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float) and value >= 0:
+        return float(value)
+    return None
+
+
+def compile_savings_seconds(lane: dict[str, Any]) -> int | None:
+    cold = numeric_value(lane.get("estimated_cold_compile_seconds"))
+    warm = numeric_value(lane.get("estimated_warm_compile_seconds"))
+    if cold is None or warm is None:
+        return None
+    return max(0, int(cold - warm))
+
+
+def queue_pressure(row: dict[str, Any] | None) -> dict[str, Any]:
+    if row is None:
+        return {
+            "class": "unknown",
+            "queue_depth": None,
+            "available_slots": None,
+            "saturated": False,
+        }
+    queue_depth = row.get("queue_depth")
+    available_slots = row.get("available_slots")
+    saturated = bool(row.get("saturated", False))
+    if saturated:
+        pressure = "saturated"
+    elif not isinstance(queue_depth, int) and not isinstance(available_slots, int):
+        pressure = "unknown"
+    elif isinstance(queue_depth, int) and queue_depth >= 4:
+        pressure = "high"
+    elif isinstance(available_slots, int) and available_slots >= 2 and (queue_depth is None or queue_depth <= 1):
+        pressure = "low"
+    else:
+        pressure = "medium"
+    return {
+        "class": pressure,
+        "queue_depth": queue_depth if isinstance(queue_depth, int) else None,
+        "available_slots": available_slots if isinstance(available_slots, int) else None,
+        "saturated": saturated,
+    }
+
+
+def observed_worker(
+    recommended_workers: list[dict[str, Any]],
+    worker_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if recommended_workers:
+        return recommended_workers[0]
+    warm_rows = sorted([row for row in worker_rows if row["warm"]], key=lambda row: row["worker_id"])
+    if warm_rows:
+        return warm_rows[0]
+    if worker_rows:
+        return sorted(worker_rows, key=lambda row: row["worker_id"])[0]
+    return None
+
+
+def warmth_basis(row: dict[str, Any] | None, classification: str) -> list[str]:
+    if row is None:
+        return []
+    basis: list[str] = []
+    if row.get("matches_cache_key"):
+        basis.append("cache-key")
+    if row.get("matches_target_dir_family"):
+        basis.append("target-dir-family")
+    if not basis and classification == "not-warm":
+        basis.append("compatible-cold-worker")
+    if not basis and classification == "degraded" and row.get("warm"):
+        basis.append("warm-but-unusable")
+    return basis
+
+
+def savings_band(classification: str, lane: dict[str, Any], pressure: dict[str, Any]) -> tuple[str, int | None]:
+    estimated_seconds = compile_savings_seconds(lane)
+    if classification != "warm":
+        if classification == "not-warm":
+            return "none", estimated_seconds
+        return "unknown", estimated_seconds
+    if estimated_seconds is None:
+        return "medium" if pressure["class"] in {"low", "medium"} else "low", None
+    if estimated_seconds >= 300:
+        return "high", estimated_seconds
+    if estimated_seconds >= 60:
+        return "medium", estimated_seconds
+    if estimated_seconds > 0:
+        return "low", estimated_seconds
+    return "none", estimated_seconds
+
+
+def confidence_class(classification: str, telem_state: dict[str, Any], row: dict[str, Any] | None) -> str:
+    if classification == "unsupported":
+        return "none"
+    if telem_state["state"] != "fresh":
+        return "low"
+    if classification == "warm" and row is not None and row.get("matches_cache_key"):
+        return "high"
+    if classification in {"warm", "not-warm"} and row is not None:
+        return "medium"
+    return "low"
+
+
+def fallback_recommendation(classification: str, reasons: list[str]) -> str:
+    if classification == "warm":
+        return "run-proof-on-recommended-warm-worker"
+    if classification == "not-warm":
+        return "run-proof-on-compatible-cold-worker"
+    if classification == "unsupported":
+        return "do-not-schedule-unsupported-lane"
+    if "stale-worker-telemetry" in reasons:
+        return "refresh-rch-telemetry-and-replan"
+    if "no-worker-telemetry" in reasons or "no-compatible-workers" in reasons:
+        return "collect-rch-worker-telemetry-before-selecting-worker"
+    if "invalid-cache-key" in reasons:
+        return "fix-cache-key-input-before-reuse"
+    if "warm-workers-saturated" in reasons or "worker-saturated" in reasons:
+        return "wait-for-capacity-or-run-cold-with-caveat"
+    return "rerun-planner-after-input-update"
+
+
+def worker_evidence_receipt(
+    lane: dict[str, Any],
+    lane_key: dict[str, Any],
+    target_dir_family: str,
+    classification: str,
+    reasons: list[str],
+    recommended_workers: list[dict[str, Any]],
+    worker_rows: list[dict[str, Any]],
+    telem_state: dict[str, Any],
+) -> dict[str, Any]:
+    row = observed_worker(recommended_workers, worker_rows)
+    pressure = queue_pressure(row)
+    band, estimated_seconds = savings_band(classification, lane, pressure)
+    proof_lane_family = string_value(lane_key["normalized_key_material"].get("proof_lane_family"))
+    return {
+        "schema_version": "proof-pack-worker-warmth-evidence-v1",
+        "observed_rch_worker_id": string_value(row.get("worker_id")) if row else "",
+        "sampled_at": string_value(telem_state.get("sampled_at")),
+        "proof_lane_family": proof_lane_family,
+        "cache_key_fingerprint": lane_key["key_material_digest_sha256"][:16],
+        "matching_target_dir_family": string_value(row.get("matching_target_dir_family")) if row else "",
+        "warmth_basis": warmth_basis(row, classification),
+        "queue_pressure": pressure,
+        "telemetry_freshness": {
+            "state": string_value(telem_state.get("state")),
+            "age_seconds": telem_state.get("age_seconds"),
+        },
+        "estimated_compile_savings_seconds": estimated_seconds,
+        "estimated_savings_band": band,
+        "confidence_class": confidence_class(classification, telem_state, row),
+        "fallback_recommendation": fallback_recommendation(classification, reasons),
+        "cache_warmth_is_correctness_evidence": False,
+    }
 
 
 def telemetry_state(telemetry: dict[str, Any], generated_at: str) -> dict[str, Any]:
@@ -234,8 +401,19 @@ def build_lane_receipt(
     lane_id = string_value(lane.get("lane_id"))
     target_dir_family = string_value(lane.get("target_dir_family")) or lane_slug(lane_id)
     lane_key = cache_key_for(object_value(lane.get("cache_key_input")))
-    classification, reasons, recommended_workers = classify_lane(lane, lane_key, workers, telem_state)
+    worker_rows = compatible_worker_rows(lane, lane_key, workers, target_dir_family)
+    classification, reasons, recommended_workers = classify_lane(lane, lane_key, worker_rows, telem_state)
     templates = command_templates(operator, lane, target_dir_family, lane_key["cache_key"])
+    evidence = worker_evidence_receipt(
+        lane,
+        lane_key,
+        target_dir_family,
+        classification,
+        reasons,
+        recommended_workers,
+        worker_rows,
+        telem_state,
+    )
 
     return {
         "lane_id": lane_id,
@@ -246,6 +424,7 @@ def build_lane_receipt(
         "cache_key_fingerprint": lane_key["key_material_digest_sha256"][:16],
         "target_dir_family": target_dir_family,
         "recommended_workers": recommended_workers,
+        "worker_warmth_evidence": evidence,
         "command_templates": templates,
         "real_proof_requires_isolated_target_dir": True,
         "cache_warmth_is_authoritative": False,
