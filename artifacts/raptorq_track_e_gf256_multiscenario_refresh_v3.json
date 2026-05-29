@@ -42,9 +42,9 @@
     "comparison_strategy": "same target dir comparator corpus; longer-window baseline, auto, and rollback captures over the eight-scenario dual-policy family",
     "value_contract": "longer-window percentile proxy and interval-endpoint comparison across the same multi-scenario corpus",
     "commands": [
-      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-long-baseline; ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2'",
-      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-long-auto; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2'",
-      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-long-rollback; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2'"
+      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-long-baseline; ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2'",
+      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-long-auto; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2'",
+      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-long-rollback; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2'"
     ]
   },
   "aggregate_deltas_pct": {

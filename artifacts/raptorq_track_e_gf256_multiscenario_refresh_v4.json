@@ -41,9 +41,9 @@
     "comparison_strategy": "same target dir comparator corpus; current-head raw-sample capture from Criterion sample.json across baseline, auto, and rollback on the eight-scenario dual-policy family",
     "value_contract": "current-head raw-sample median/p95/p99 deltas across the same multi-scenario corpus",
     "commands": [
-      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
-      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
-      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2"
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 CARGO_TARGET_DIR=/tmp/rch-e5-long-v4-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2"
     ]
   },
   "aggregate_deltas_pct": {
