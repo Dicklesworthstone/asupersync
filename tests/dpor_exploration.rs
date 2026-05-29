@@ -18,6 +18,8 @@ use asupersync::trace::event::TraceEvent;
 use asupersync::trace::independence::independent;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 
+const TRACE_FINGERPRINT_GATE_SEEDS: [u64; 5] = [11, 29, 42, 73, 101];
+
 // ---------------------------------------------------------------------------
 // Independence relation integration tests
 // ---------------------------------------------------------------------------
@@ -115,6 +117,68 @@ fn canonicalization_same_trace_same_fingerprint() {
     assert_eq!(fp1, fp2, "same seed should produce same fingerprint");
 
     test_complete!("canonicalization_same_trace_same_fingerprint");
+}
+
+#[test]
+fn trace_fingerprint_fixed_seed_gate_is_stable() {
+    init_test_logging();
+    test_phase!("trace_fingerprint_fixed_seed_gate_is_stable");
+
+    for seed in TRACE_FINGERPRINT_GATE_SEEDS {
+        let first = fixed_seed_trace_fingerprint(seed);
+        let second = fixed_seed_trace_fingerprint(seed);
+
+        assert_ne!(
+            first.fingerprint, 0,
+            "seed {seed} produced an empty trace fingerprint"
+        );
+        assert_eq!(
+            first, second,
+            "trace fingerprint gate drifted for fixed seed {seed}"
+        );
+    }
+
+    test_complete!("trace_fingerprint_fixed_seed_gate_is_stable");
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedSeedTraceReceipt {
+    fingerprint: u64,
+    certificate_hash: u64,
+    steps: u64,
+}
+
+fn fixed_seed_trace_fingerprint(seed: u64) -> FixedSeedTraceReceipt {
+    let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(seed, 1).worker_count(1));
+    let report = explorer.explore(|runtime| {
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let (t1, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("t1");
+        let (t2, _) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("t2");
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            scheduler.schedule(t1, 0);
+            scheduler.schedule(t2, 0);
+        }
+        runtime.run_until_quiescent();
+    });
+
+    assert_eq!(report.total_runs, 1, "gate should run exactly one seed");
+    assert!(
+        !report.has_violations(),
+        "seed {seed} violated lab invariants"
+    );
+    let run = report.runs.first().expect("fixed-seed run receipt");
+    FixedSeedTraceReceipt {
+        fingerprint: run.fingerprint,
+        certificate_hash: run.certificate_hash,
+        steps: run.steps,
+    }
 }
 
 #[test]

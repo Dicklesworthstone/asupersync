@@ -2257,6 +2257,16 @@ jobs:
           fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_combinator_laws" cargo test --lib combinator::laws --all-features -- --nocapture
 
+      - name: Trace fingerprint fixed-seed determinism gate
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for trace fingerprint determinism gate" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_trace_fingerprint_seed_gate" cargo test --test dpor_exploration trace_fingerprint_fixed_seed_gate_is_stable -- --nocapture
+
       - name: DPOR exploration tests
         run: |
           set -euo pipefail
