@@ -829,14 +829,28 @@ mod tests {
     use super::*;
     use crate::types::{Budget, TraceId};
 
+    fn test_object_id(object_id: &str) -> ObjectId {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in object_id.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        ObjectId::new_for_test(hash)
+    }
+
+    const fn test_trace_id(value: u128) -> TraceId {
+        TraceId::from_raw(value)
+    }
+
     fn create_test_chunk(
         object_id: &str,
         offset: u64,
         priority: TransferPriority,
     ) -> ScheduledChunk {
+        let object_id = test_object_id(object_id);
         ScheduledChunk {
-            chunk_id: ChunkId::new(ObjectId::from(object_id), offset, 1024),
-            object_id: ObjectId::from(object_id),
+            chunk_id: ChunkId::new(object_id, offset, 1024),
+            object_id,
             priority,
             size_bytes: 1024,
             cpu_cost: 0.1,
@@ -850,7 +864,7 @@ mod tests {
             },
             decode_usefulness: 0.5,
             resume_value: 0,
-            trace_id: TraceId::new(),
+            trace_id: test_trace_id(1),
         }
     }
 
@@ -916,17 +930,17 @@ mod tests {
         brain.schedule_chunk(create_test_chunk("obj1", 2048, TransferPriority::Repair))?;
 
         // Should select control chunk first
-        let next = brain.next_chunk(&budget, TraceId::new())?.unwrap();
+        let next = brain.next_chunk(&budget, test_trace_id(2))?.unwrap();
         assert_eq!(next.priority, TransferPriority::Control);
         assert_eq!(next.chunk_id.offset, 0);
 
         // Should select standard chunk next
-        let next = brain.next_chunk(&budget, TraceId::new())?.unwrap();
+        let next = brain.next_chunk(&budget, test_trace_id(3))?.unwrap();
         assert_eq!(next.priority, TransferPriority::Standard);
         assert_eq!(next.chunk_id.offset, 1024);
 
         // Should select repair chunk last
-        let next = brain.next_chunk(&budget, TraceId::new())?.unwrap();
+        let next = brain.next_chunk(&budget, test_trace_id(4))?.unwrap();
         assert_eq!(next.priority, TransferPriority::Repair);
         assert_eq!(next.chunk_id.offset, 2048);
 
@@ -943,7 +957,7 @@ mod tests {
         let chunk_id = chunk.chunk_id.clone();
 
         brain.schedule_chunk(chunk)?;
-        let selected = brain.next_chunk(&budget, TraceId::new())?.unwrap();
+        let selected = brain.next_chunk(&budget, test_trace_id(5))?.unwrap();
 
         assert_eq!(brain.scheduling_state().in_flight_count, 1);
 
@@ -974,7 +988,7 @@ mod tests {
         let chunk_id = chunk.chunk_id.clone();
 
         brain.schedule_chunk(chunk)?;
-        let _selected = brain.next_chunk(&budget, TraceId::new())?.unwrap();
+        let _selected = brain.next_chunk(&budget, test_trace_id(6))?.unwrap();
 
         std::thread::sleep(Duration::from_millis(10)); // Small delay for metrics
 
@@ -1016,7 +1030,7 @@ mod tests {
             .unwrap();
 
         // Should throttle due to high pressure
-        let next = brain.next_chunk(&budget, TraceId::new()).unwrap();
+        let next = brain.next_chunk(&budget, test_trace_id(7)).unwrap();
         assert!(next.is_none());
     }
 
@@ -1030,7 +1044,7 @@ mod tests {
         let budget = Budget::unlimited();
 
         brain.schedule_chunk(create_test_chunk("obj1", 0, TransferPriority::Control))?;
-        let _chunk = brain.next_chunk(&budget, TraceId::new())?.unwrap();
+        let _chunk = brain.next_chunk(&budget, test_trace_id(8))?.unwrap();
 
         let history = brain.decision_history();
         assert_eq!(history.len(), 1);

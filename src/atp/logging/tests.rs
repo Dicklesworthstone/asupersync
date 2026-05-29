@@ -689,7 +689,7 @@ fn test_macro_ergonomics_and_safety() {
         event_type,
         Level::Debug,
         &owned_data,
-        &context
+        context.clone()
     );
 
     // Test with empty context variations

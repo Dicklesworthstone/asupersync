@@ -323,7 +323,8 @@ mod tests {
 
     #[test]
     fn cache_maintenance_toctou_fix() {
-        let mut manager = CachePolicyManager::new(EvictionPolicy::LeastRecentlyUsed);
+        let policy = CachePolicyManager::new(EvictionPolicy::LeastRecentlyUsed);
+        let mut maintenance = CacheMaintenanceScheduler::new(Duration::ZERO);
 
         let mut entries = BTreeMap::new();
 
@@ -369,7 +370,7 @@ mod tests {
         assert_eq!(entries.len(), 2);
 
         // Run maintenance - should remove expired entry but keep valid one
-        let metrics = manager.run_maintenance(&mut entries, &manager.clone());
+        let metrics = maintenance.run_maintenance(&mut entries, &policy);
 
         // Should have removed exactly 1 expired entry
         assert_eq!(metrics.expired_entries, 1);

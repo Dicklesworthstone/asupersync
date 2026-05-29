@@ -368,18 +368,18 @@ mod tests {
         assert_eq!(checker.max_log_entries(), 3);
 
         // Verify the entries are in order
-        assert_eq!(checker.access_log()[0].key.content_id, "content1");
-        assert_eq!(checker.access_log()[1].key.content_id, "content2");
-        assert_eq!(checker.access_log()[2].key.content_id, "content3");
+        assert_eq!(checker.access_log()[0].key.content_hash, "content1");
+        assert_eq!(checker.access_log()[1].key.content_hash, "content2");
+        assert_eq!(checker.access_log()[2].key.content_hash, "content3");
 
         // Add 4th entry - should evict oldest (FIFO)
         checker.check_access(&key4, "verify").unwrap();
         assert_eq!(checker.access_log().len(), 3); // Still capped at 3
 
         // First entry should be evicted, remaining entries shifted
-        assert_eq!(checker.access_log()[0].key.content_id, "content2");
-        assert_eq!(checker.access_log()[1].key.content_id, "content3");
-        assert_eq!(checker.access_log()[2].key.content_id, "content4");
+        assert_eq!(checker.access_log()[0].key.content_hash, "content2");
+        assert_eq!(checker.access_log()[1].key.content_hash, "content3");
+        assert_eq!(checker.access_log()[2].key.content_hash, "content4");
     }
 
     #[test]

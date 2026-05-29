@@ -347,7 +347,7 @@ mod tests {
         assert!(log.assert_outcome("cache_entry_count", &2_usize, &cache.metrics().entry_count));
         assert!(log.assert_outcome(
             "cache_total_bytes",
-            &(manifest_data.len() + blob_data.len()) as u64,
+            &((manifest_data.len() + blob_data.len()) as u64),
             &cache.metrics().total_bytes
         ));
 

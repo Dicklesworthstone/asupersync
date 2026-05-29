@@ -660,7 +660,8 @@ mod tests {
 
             // Use both structured tracing and stderr JSON for comprehensive logging
             if let Some(ref cx) = logger.cx {
-                cx.trace(|| format!("CacheStorageTest {} started: {}", test, suite));
+                let message = format!("CacheStorageTest {test} started: {suite}");
+                cx.trace(&message);
             }
 
             eprintln!(
@@ -680,7 +681,8 @@ mod tests {
             self.current_phase = phase.to_string();
 
             if let Some(ref cx) = self.cx {
-                cx.trace(|| format!("CacheStorageTest phase: {}", phase));
+                let message = format!("CacheStorageTest phase: {phase}");
+                cx.trace(&message);
             }
 
             eprintln!(
@@ -712,7 +714,8 @@ mod tests {
             };
 
             if let Some(ref cx) = self.cx {
-                cx.trace(|| format!("CacheStorage snapshot {}: {:?}", label, snapshot));
+                let message = format!("CacheStorage snapshot {label}: {snapshot:?}");
+                cx.trace(&message);
             }
 
             eprintln!(
@@ -737,17 +740,15 @@ mod tests {
 
         fn assert_storage_outcome<T>(&self, field: &str, expected: &T, actual: &T) -> bool
         where
-            T: PartialEq + serde::Serialize,
+            T: PartialEq + serde::Serialize + std::fmt::Debug,
         {
             let matches = expected == actual;
 
             if let Some(ref cx) = self.cx {
-                cx.trace(|| {
-                    format!(
-                        "CacheStorage assertion {}: expected={:?}, actual={:?}, match={}",
-                        field, expected, actual, matches
-                    )
-                });
+                let message = format!(
+                    "CacheStorage assertion {field}: expected={expected:?}, actual={actual:?}, match={matches}"
+                );
+                cx.trace(&message);
             }
 
             eprintln!(
@@ -776,12 +777,11 @@ mod tests {
                 .as_millis() as u64;
 
             if let Some(ref cx) = self.cx {
-                cx.trace(|| {
-                    format!(
-                        "CacheStorageTest {} completed: {} in {}ms",
-                        self.test_name, result, duration_ms
-                    )
-                });
+                let message = format!(
+                    "CacheStorageTest {} completed: {} in {}ms",
+                    self.test_name, result, duration_ms
+                );
+                cx.trace(&message);
             }
 
             eprintln!(
