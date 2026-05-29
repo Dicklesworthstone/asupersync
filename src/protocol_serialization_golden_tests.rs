@@ -56,6 +56,7 @@ mod tests {
                     golden_path.display()
                 )
             });
+            let expected = self.canonicalize(&expected);
 
             if actual != expected {
                 let actual_path = golden_path.with_extension("actual");
@@ -98,6 +99,8 @@ mod tests {
                 .map(|l| l.trim_end())
                 .collect::<Vec<_>>()
                 .join("\n")
+                .trim_end_matches('\n')
+                .to_string()
         }
     }
 
@@ -617,6 +620,17 @@ mod tests {
         tester.assert_golden(&tester.canonicalize(&output));
     }
 
+    #[test]
+    fn golden_websocket_extended_payload_wire_bytes() {
+        let tester = ProtocolGoldenTester::new("websocket_extended_payload_wire_bytes");
+        let payload = [b'a'; 126];
+        let mut frame = vec![0x81, 0x7e];
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&payload);
+
+        tester.assert_binary_golden(&frame);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // RaptorQ RFC 6330 Prefix Tables Golden Tests
     // ═══════════════════════════════════════════════════════════════════════════
@@ -627,15 +641,15 @@ mod tests {
 
         // These would normally come from crate::raptorq::rfc6330
         // Using simplified constants for testing
-        let v0_sample = &[
+        let v0_sample: &[u32] = &[
             251291136, 3952231631, 3370958628, 4070167936, 123631495, 3351110283, 3218676425,
             2011642291,
         ];
-        let v1_sample = &[
+        let v1_sample: &[u32] = &[
             807385413, 2043073223, 3336749796, 1302105833, 2278607931, 541015020, 1684564270,
             372709334,
         ];
-        let v2_sample = &[
+        let v2_sample: &[u32] = &[
             1629829892, 282540176, 2794583710, 496504798, 2990494426, 3070701851, 2575963183,
             4094823972,
         ];
@@ -729,7 +743,7 @@ mod tests {
     }
 
     /// Encode value as QUIC varint (simplified)
-    fn encode_varint(mut value: u64) -> Vec<u8> {
+    fn encode_varint(value: u64) -> Vec<u8> {
         if value < 0x40 {
             vec![value as u8]
         } else if value < 0x4000 {

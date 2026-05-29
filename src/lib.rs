@@ -282,7 +282,13 @@ pub mod error_message_golden_tests;
 pub mod fs_config_metamorphic_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod fs_protocol_conformance_tests;
-#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "legacy-internal-test-harnesses",
+        feature = "serialization-golden-harnesses"
+    )
+))]
 pub mod golden_artifacts_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod grpc_protocol_conformance_tests;
@@ -298,7 +304,13 @@ pub mod io_bytes_time_conformance_tests;
 pub mod lab_determinism_conformance_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod lab_trace_observability_security_metamorphic_tests;
-#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "legacy-internal-test-harnesses",
+        feature = "serialization-golden-harnesses"
+    )
+))]
 pub mod messaging_primitives_conformance_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod messaging_scheduler_deep_metamorphic_tests;
@@ -314,7 +326,13 @@ pub mod obligation_combinator_metamorphic_tests;
 pub mod obligation_leak_conformance_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod plan_trace_metamorphic_tests;
-#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
+#[cfg(all(
+    test,
+    any(
+        feature = "legacy-internal-test-harnesses",
+        feature = "serialization-golden-harnesses"
+    )
+))]
 pub mod protocol_serialization_golden_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod public_api_golden_tests;

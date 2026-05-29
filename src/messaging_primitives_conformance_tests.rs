@@ -507,6 +507,18 @@ pub struct MockRedisClient {
     next_id: Arc<AtomicU64>,
 }
 
+fn redis_stream_id_parts(id: &str) -> (u64, u64) {
+    let (major, minor) = id.split_once('-').unwrap_or((id, "0"));
+    (
+        major.parse::<u64>().unwrap_or(0),
+        minor.parse::<u64>().unwrap_or(0),
+    )
+}
+
+fn redis_stream_id_gt(left: &str, right: &str) -> bool {
+    redis_stream_id_parts(left) > redis_stream_id_parts(right)
+}
+
 #[derive(Debug, Clone)]
 pub struct RedisConsumerGroup {
     pub name: String,
@@ -587,19 +599,22 @@ impl MockRedisClient {
         let stream_entries = streams.get(stream).ok_or("Stream not found")?;
 
         let mut result = Vec::new();
-        for entry in stream_entries.iter().take(count) {
-            if entry.id > group_info.last_delivered_id {
-                result.push(entry.clone());
-                group_info.last_delivered_id = entry.id.clone();
+        let last_delivered_id = group_info.last_delivered_id.clone();
+        for entry in stream_entries
+            .iter()
+            .filter(|entry| redis_stream_id_gt(&entry.id, &last_delivered_id))
+            .take(count)
+        {
+            result.push(entry.clone());
+            group_info.last_delivered_id = entry.id.clone();
 
-                // Add to consumer's pending list
-                group_info
-                    .consumers
-                    .get_mut(consumer)
-                    .unwrap()
-                    .pending_messages
-                    .insert(entry.id.clone(), entry.clone());
-            }
+            // Add to consumer's pending list.
+            group_info
+                .consumers
+                .get_mut(consumer)
+                .unwrap()
+                .pending_messages
+                .insert(entry.id.clone(), entry.clone());
         }
 
         Ok(result)
@@ -1073,12 +1088,21 @@ fn test_kafka_offset_commit_semantics() -> TestResult {
         };
     }
 
-    // Cannot commit beyond newly processed offset
-    match consumer.commit_offset(&partition, 6) {
+    // Kafka commits the next offset to consume; after processing record offset
+    // 5, committing offset 6 is the exact processed frontier.
+    if let Err(e) = consumer.commit_offset(&partition, 6) {
+        return TestResult::Fail {
+            reason: format!("Failed to commit processed frontier offset: {}", e),
+        };
+    }
+
+    // Cannot commit beyond newly processed frontier.
+    match consumer.commit_offset(&partition, 7) {
         Err(_) => {} // Expected
         Ok(_) => {
             return TestResult::Fail {
-                reason: "Should not be able to commit offset beyond processed (6 > 5)".to_string(),
+                reason: "Should not be able to commit offset beyond processed frontier (7 > 6)"
+                    .to_string(),
             };
         }
     }

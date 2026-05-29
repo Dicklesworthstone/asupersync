@@ -83,6 +83,7 @@ mod tests {
                     golden_path.display()
                 )
             });
+            let expected = self.canonicalize(&expected);
 
             if actual != expected {
                 // Write actual for easy diffing
@@ -109,6 +110,8 @@ mod tests {
                 .map(|l| l.trim_end()) // Trailing whitespace
                 .collect::<Vec<_>>()
                 .join("\n")
+                .trim_end_matches('\n')
+                .to_string()
         }
     }
 
@@ -465,7 +468,6 @@ mod tests {
     /// [br-golden-6] Observability metrics JSON serialization golden test
     #[test]
     fn golden_observability_metrics_json() {
-        use crate::observability::metrics::MetricValue;
         use serde_json::{Map, Value, json};
 
         let tester = GoldenTester::new("observability_metrics_json");
@@ -527,8 +529,6 @@ mod tests {
     /// [br-golden-7] Trace event canonical bytes golden test
     #[test]
     fn golden_trace_event_canonical_bytes() {
-        use crate::trace::event::TraceEvent;
-        use crate::types::TraceId;
         use serde_json::json;
 
         let tester = GoldenTester::new("trace_event_canonical_bytes");
