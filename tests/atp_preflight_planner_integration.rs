@@ -418,7 +418,7 @@ async fn test_mirror_with_deletes_scenario() {
         .unwrap();
 
     assert_eq!(plan.transfer_type, TransferType::Mirror);
-    assert!(!plan.object_graph.total_bytes == 0);
+    assert!(plan.object_graph.total_bytes > 0);
 }
 
 #[tokio::test]
