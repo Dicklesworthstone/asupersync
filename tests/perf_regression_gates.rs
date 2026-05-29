@@ -33,6 +33,8 @@ struct BaselineBenchmark {
     #[serde(default)]
     std_dev_ns: f64,
     #[serde(default)]
+    cv_pct: Option<f64>,
+    #[serde(default)]
     p95_ns: Option<f64>,
     #[serde(default)]
     p99_ns: Option<f64>,
@@ -41,7 +43,13 @@ struct BaselineBenchmark {
 /// Root structure of baseline JSON files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BaselineReport {
+    #[serde(default)]
+    schema_version: Option<String>,
     generated_at: String,
+    #[serde(default)]
+    cv_pct_flake_threshold: Option<f64>,
+    #[serde(default)]
+    flaky_benches: Vec<String>,
     benchmarks: Vec<BaselineBenchmark>,
 }
 
@@ -208,6 +216,7 @@ fn make_benchmark(name: &str, mean_ns: f64, median_ns: f64) -> BaselineBenchmark
         mean_ns,
         median_ns,
         std_dev_ns: mean_ns * 0.1,
+        cv_pct: Some(10.0),
         p95_ns: Some(mean_ns * 1.3),
         p99_ns: Some(mean_ns * 1.8),
     }
@@ -215,24 +224,48 @@ fn make_benchmark(name: &str, mean_ns: f64, median_ns: f64) -> BaselineBenchmark
 
 fn make_report(benchmarks: Vec<BaselineBenchmark>) -> BaselineReport {
     BaselineReport {
+        schema_version: Some("asupersync.baseline.v2".to_string()),
         generated_at: "2026-01-01T00:00:00Z".to_string(),
+        cv_pct_flake_threshold: Some(5.0),
+        flaky_benches: vec![],
         benchmarks,
     }
 }
 
-fn write_minimal_criterion_output(root: &Path) {
-    let bench_dir = root.join("criterion").join("bench").join("new");
+fn write_criterion_benchmark(
+    root: &Path,
+    bench_path: &str,
+    mean_ns: f64,
+    median_ns: f64,
+    std_dev_ns: f64,
+    iters: &[u64],
+    times: &[u64],
+) {
+    let bench_dir = root.join("criterion").join(bench_path).join("new");
     fs::create_dir_all(&bench_dir).expect("create criterion fixture directories");
+    let estimates = serde_json::json!({
+        "mean": {"point_estimate": mean_ns},
+        "median": {"point_estimate": median_ns},
+        "std_dev": {"point_estimate": std_dev_ns},
+    });
+    let sample = serde_json::json!({
+        "iters": iters,
+        "times": times,
+    });
     fs::write(
         bench_dir.join("estimates.json"),
-        r#"{"mean":{"point_estimate":1},"median":{"point_estimate":1},"std_dev":{"point_estimate":0}}"#,
+        serde_json::to_vec(&estimates).expect("serialize estimates"),
     )
     .expect("write estimates.json");
     fs::write(
         bench_dir.join("sample.json"),
-        r#"{"iters":[1],"times":[1]}"#,
+        serde_json::to_vec(&sample).expect("serialize sample"),
     )
     .expect("write sample.json");
+}
+
+fn write_minimal_criterion_output(root: &Path) {
+    write_criterion_benchmark(root, "bench", 1.0, 1.0, 0.0, &[1], &[1]);
 }
 
 fn repo_root() -> PathBuf {
@@ -446,7 +479,16 @@ fn capture_baseline_default_run_uses_rch_override() {
     );
 
     let argv = fs::read_to_string(&fake_log).expect("read fake rch log");
-    for token in ["exec", "--", "cargo", "bench", "--bench", "phase0_baseline"] {
+    for token in [
+        "exec",
+        "--",
+        "env",
+        "CARGO_TARGET_DIR=",
+        "cargo",
+        "bench",
+        "--bench",
+        "phase0_baseline",
+    ] {
         assert!(
             argv.contains(token),
             "default run path must invoke rch-wrapped bench token `{token}`: {argv}"
@@ -472,8 +514,9 @@ fn capture_baseline_default_run_uses_rch_override() {
             .as_str()
             .expect("command field should be present");
         assert!(
-            command.contains("exec -- cargo bench --bench phase0_baseline"),
-            "run events must record the rch-wrapped bench command: {command}"
+            command.contains("exec -- env CARGO_TARGET_DIR=")
+                && command.contains(" cargo bench --bench phase0_baseline"),
+            "run events must record the isolated rch-wrapped bench command: {command}"
         );
     }
 
@@ -494,8 +537,9 @@ fn capture_baseline_default_run_uses_rch_override() {
         .as_str()
         .expect("smoke report command field should be present");
     assert!(
-        smoke_command.contains("exec -- cargo bench --bench phase0_baseline"),
-        "smoke report must record the rch-wrapped bench command: {smoke_command}"
+        smoke_command.contains("exec -- env CARGO_TARGET_DIR=")
+            && smoke_command.contains(" cargo bench --bench phase0_baseline"),
+        "smoke report must record the isolated rch-wrapped bench command: {smoke_command}"
     );
 }
 
@@ -580,6 +624,228 @@ fn parse_baseline_without_percentiles() {
     assert_eq!(report.benchmarks.len(), 1);
     assert!(report.benchmarks[0].p95_ns.is_none());
     assert!(report.benchmarks[0].p99_ns.is_none());
+}
+
+#[test]
+fn capture_baseline_emits_cv_pct_and_flaky_bench_quarantine() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_criterion_benchmark(
+        temp.path(),
+        "stable/bench",
+        1_000.0,
+        950.0,
+        40.0,
+        &[1, 1, 1],
+        &[900, 1_000, 1_100],
+    );
+    write_criterion_benchmark(
+        temp.path(),
+        "noisy/bench",
+        1_000.0,
+        960.0,
+        75.0,
+        &[1, 1, 1],
+        &[900, 1_000, 1_200],
+    );
+
+    let script = repo_root().join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--cv-pct-flake-threshold")
+        .arg("5.0")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .current_dir(temp.path())
+        .output()
+        .expect("run capture_baseline.sh");
+
+    eprintln!(
+        "capture_baseline cv_pct status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        output.status.success(),
+        "capture_baseline should succeed against synthetic Criterion output"
+    );
+
+    let report: BaselineReport =
+        serde_json::from_slice(&output.stdout).expect("stdout must stay pure baseline JSON");
+    assert_eq!(
+        report.schema_version.as_deref(),
+        Some("asupersync.baseline.v2"),
+        "baseline schema version should be explicit"
+    );
+    assert_eq!(
+        report.cv_pct_flake_threshold,
+        Some(5.0),
+        "flake threshold should be recorded in the baseline"
+    );
+    assert_eq!(
+        report.flaky_benches,
+        vec!["noisy/bench".to_string()],
+        "only benches above the cv_pct threshold should be quarantined"
+    );
+
+    let by_name: std::collections::HashMap<&str, &BaselineBenchmark> = report
+        .benchmarks
+        .iter()
+        .map(|bench| (bench.name.as_str(), bench))
+        .collect();
+    let stable = by_name.get("stable/bench").expect("stable bench present");
+    let noisy = by_name.get("noisy/bench").expect("noisy bench present");
+    assert!(
+        (stable.cv_pct.expect("stable cv_pct") - 4.0).abs() < 0.000_001,
+        "stable bench cv_pct should be std_dev/mean*100"
+    );
+    assert!(
+        (noisy.cv_pct.expect("noisy cv_pct") - 7.5).abs() < 0.000_001,
+        "noisy bench cv_pct should be std_dev/mean*100"
+    );
+    assert!(
+        !temp.path().join(".bench-history").exists(),
+        "plain capture must not mutate .bench-history without --bench-history"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(".bench-history updated"),
+        "history logging should be absent when history writes are disabled"
+    );
+}
+
+#[test]
+fn capture_baseline_bench_history_is_opt_in_and_appends_runs_log() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_criterion_benchmark(
+        temp.path(),
+        "history/bench_a",
+        2_000.0,
+        1_900.0,
+        50.0,
+        &[1, 1, 1],
+        &[1_800, 2_000, 2_200],
+    );
+
+    let repo = repo_root();
+    let script = repo.join("scripts/capture_baseline.sh");
+    let history_dir = temp.path().join("bench-history");
+
+    for run_idx in 0..2 {
+        let output = Command::new("bash")
+            .arg(&script)
+            .arg("--bench-history")
+            .arg("--bench-history-dir")
+            .arg(&history_dir)
+            .arg("--profile")
+            .arg("release-perf")
+            .env("CRITERION_DIR", temp.path().join("criterion"))
+            .current_dir(&repo)
+            .output()
+            .expect("run capture_baseline.sh");
+
+        eprintln!(
+            "capture_baseline bench-history run {run_idx} status={:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(
+            output.status.success(),
+            "bench-history run {run_idx} should succeed"
+        );
+        let report: BaselineReport =
+            serde_json::from_slice(&output.stdout).expect("stdout must remain baseline JSON");
+        assert_eq!(report.benchmarks.len(), 1, "one synthetic bench captured");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(".bench-history updated"),
+            "bench-history update receipt should be logged to stderr"
+        );
+    }
+
+    let latest_path = history_dir.join("history__bench_a.latest.json");
+    let latest: serde_json::Value = serde_json::from_slice(
+        &fs::read(&latest_path)
+            .unwrap_or_else(|err| panic!("read latest history {}: {err}", latest_path.display())),
+    )
+    .expect("latest history JSON should parse");
+    assert_eq!(latest["name"], "history/bench_a");
+    assert_eq!(latest["profile"], "release-perf");
+    assert_eq!(latest["mean_ns"], 2_000.0);
+    assert_eq!(latest["median_ns"], 1_900.0);
+    assert_eq!(latest["std_dev_ns"], 50.0);
+    assert_eq!(latest["cv_pct"], 2.5);
+    assert!(
+        latest["git_sha"].as_str().is_some_and(|sha| sha.len() >= 7),
+        "history records should carry git SHA attribution: {latest}"
+    );
+
+    let runs_path = history_dir.join("runs.jsonl");
+    let runs = fs::read_to_string(&runs_path)
+        .unwrap_or_else(|err| panic!("read runs log {}: {err}", runs_path.display()));
+    let records: Vec<serde_json::Value> = runs
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("runs.jsonl line should parse"))
+        .collect();
+    assert_eq!(
+        records.len(),
+        2,
+        "runs.jsonl should append one record per capture invocation: {runs}"
+    );
+    for record in records {
+        assert_eq!(record["name"], "history/bench_a");
+        assert_eq!(record["profile"], "release-perf");
+        assert_eq!(record["cv_pct"], 2.5);
+    }
+}
+
+#[test]
+fn capture_baseline_help_documents_perf_history_options() {
+    let script = repo_root().join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--help")
+        .output()
+        .expect("run capture_baseline.sh --help");
+
+    assert!(output.status.success(), "--help should succeed");
+    let stdout = String::from_utf8(output.stdout).expect("help stdout should be utf8");
+    for expected in [
+        "--profile <name>",
+        "--bench-history",
+        "--no-bench-history",
+        "--bench-history-dir <dir>",
+        "--cv-pct-flake-threshold <pct>",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "help output should document {expected}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn capture_baseline_rejects_missing_perf_option_values_cleanly() {
+    let script = repo_root().join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--profile")
+        .output()
+        .expect("run capture_baseline.sh --profile");
+
+    assert!(
+        !output.status.success(),
+        "missing --profile value should fail"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("--profile requires a non-empty value"),
+        "missing value error should be explicit, not a shell nounset failure: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unbound variable"),
+        "missing value path must not expose bash nounset noise: {stderr}"
+    );
 }
 
 // =========================================================================

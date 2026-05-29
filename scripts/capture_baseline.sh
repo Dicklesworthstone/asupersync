@@ -30,10 +30,11 @@ SMOKE_SEED=""
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_capture_baseline_phase0}"
 RUN_OUTPUT_LOG="${RUN_OUTPUT_LOG:-${TMPDIR:-/tmp}/asupersync_capture_baseline_run_$$.log}"
+BASELINE_TMP_PATH="${BASELINE_TMP_PATH:-${TMPDIR:-/tmp}/asupersync_baseline_$$.json}"
 # gauntlet PERF-001/002/003: append-only ratchet substrate + measured profile.
 BENCH_HISTORY_DIR="${BENCH_HISTORY_DIR:-.bench-history}"
 BENCH_PROFILE="${BENCH_PROFILE:-unknown}"
-WRITE_BENCH_HISTORY=1
+WRITE_BENCH_HISTORY="${WRITE_BENCH_HISTORY:-0}"
 CV_PCT_FLAKE_THRESHOLD="${CV_PCT_FLAKE_THRESHOLD:-5.0}"
 
 usage() {
@@ -51,6 +52,11 @@ Options:
   --run                          Run benchmark command before capture
   --smoke                        Run benchmark + capture + smoke report
   --seed <value>                 Set ASUPERSYNC_SEED for --run/--smoke
+  --profile <name>               Profile label recorded in bench-history records
+  --bench-history                Write latest JSON files plus runs.jsonl to bench-history dir
+  --no-bench-history             Disable bench-history writes, overriding env defaults
+  --bench-history-dir <dir>      Bench-history output dir (default: .bench-history)
+  --cv-pct-flake-threshold <pct> Mark benchmarks with cv_pct above this threshold (default: 5.0)
   -h, --help                     Show help
 
 Examples:
@@ -58,7 +64,18 @@ Examples:
   ./scripts/capture_baseline.sh --save baselines/
   ./scripts/capture_baseline.sh --run --save baselines/
   ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
+  ./scripts/capture_baseline.sh --bench-history --profile release-perf
 USAGE
+}
+
+require_arg() {
+    local opt="$1"
+    local value="${2:-}"
+    if [[ -z "$value" ]]; then
+        echo "ERROR: $opt requires a non-empty value" >&2
+        usage >&2
+        exit 1
+    fi
 }
 
 require_rch_for_default_benchmark_run() {
@@ -78,20 +95,30 @@ reject_rch_local_fallback_log() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --save) SAVE_DIR="$2"; shift 2 ;;
-        --compare) COMPARE_PATH="$2"; shift 2 ;;
-        --max-regression-pct) MAX_REGRESSION_PCT="$2"; shift 2 ;;
-        --metric) METRIC="$2"; shift 2 ;;
-        --cmd) CMD_STRING="$2"; shift 2 ;;
-        --cmd=*) CMD_STRING="${1#--cmd=}"; shift ;;
-        --cmd-b64) CMD_B64="$2"; shift 2 ;;
-        --cmd-b64=*) CMD_B64="${1#--cmd-b64=}"; shift ;;
+        --save) require_arg "$1" "${2:-}"; SAVE_DIR="$2"; shift 2 ;;
+        --save=*) SAVE_DIR="${1#--save=}"; require_arg "--save" "$SAVE_DIR"; shift ;;
+        --compare) require_arg "$1" "${2:-}"; COMPARE_PATH="$2"; shift 2 ;;
+        --compare=*) COMPARE_PATH="${1#--compare=}"; require_arg "--compare" "$COMPARE_PATH"; shift ;;
+        --max-regression-pct) require_arg "$1" "${2:-}"; MAX_REGRESSION_PCT="$2"; shift 2 ;;
+        --max-regression-pct=*) MAX_REGRESSION_PCT="${1#--max-regression-pct=}"; require_arg "--max-regression-pct" "$MAX_REGRESSION_PCT"; shift ;;
+        --metric) require_arg "$1" "${2:-}"; METRIC="$2"; shift 2 ;;
+        --metric=*) METRIC="${1#--metric=}"; require_arg "--metric" "$METRIC"; shift ;;
+        --cmd) require_arg "$1" "${2:-}"; CMD_STRING="$2"; shift 2 ;;
+        --cmd=*) CMD_STRING="${1#--cmd=}"; require_arg "--cmd" "$CMD_STRING"; shift ;;
+        --cmd-b64) require_arg "$1" "${2:-}"; CMD_B64="$2"; shift 2 ;;
+        --cmd-b64=*) CMD_B64="${1#--cmd-b64=}"; require_arg "--cmd-b64" "$CMD_B64"; shift ;;
         --run) RUN_CMD=1; shift ;;
         --smoke) SMOKE=1; RUN_CMD=1; shift ;;
-        --profile) BENCH_PROFILE="$2"; shift 2 ;;
+        --profile) require_arg "$1" "${2:-}"; BENCH_PROFILE="$2"; shift 2 ;;
+        --profile=*) BENCH_PROFILE="${1#--profile=}"; require_arg "--profile" "$BENCH_PROFILE"; shift ;;
+        --bench-history) WRITE_BENCH_HISTORY=1; shift ;;
         --no-bench-history) WRITE_BENCH_HISTORY=0; shift ;;
-        --bench-history-dir) BENCH_HISTORY_DIR="$2"; shift 2 ;;
-        --seed) SMOKE_SEED="$2"; shift 2 ;;
+        --bench-history-dir) require_arg "$1" "${2:-}"; BENCH_HISTORY_DIR="$2"; shift 2 ;;
+        --bench-history-dir=*) BENCH_HISTORY_DIR="${1#--bench-history-dir=}"; require_arg "--bench-history-dir" "$BENCH_HISTORY_DIR"; shift ;;
+        --cv-pct-flake-threshold) require_arg "$1" "${2:-}"; CV_PCT_FLAKE_THRESHOLD="$2"; shift 2 ;;
+        --cv-pct-flake-threshold=*) CV_PCT_FLAKE_THRESHOLD="${1#--cv-pct-flake-threshold=}"; require_arg "--cv-pct-flake-threshold" "$CV_PCT_FLAKE_THRESHOLD"; shift ;;
+        --seed) require_arg "$1" "${2:-}"; SMOKE_SEED="$2"; shift 2 ;;
+        --seed=*) SMOKE_SEED="${1#--seed=}"; require_arg "--seed" "$SMOKE_SEED"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
     esac
@@ -117,6 +144,27 @@ if ! command -v python3 &>/dev/null; then
     echo "ERROR: python3 is required but not installed" >&2
     exit 1
 fi
+case "$WRITE_BENCH_HISTORY" in
+    0|1) ;;
+    *)
+        echo "ERROR: WRITE_BENCH_HISTORY must be 0 or 1" >&2
+        exit 1
+        ;;
+esac
+python3 - "$CV_PCT_FLAKE_THRESHOLD" <<'PY'
+import math
+import sys
+
+try:
+    threshold = float(sys.argv[1])
+except ValueError:
+    print("ERROR: --cv-pct-flake-threshold must be a finite non-negative number", file=sys.stderr)
+    raise SystemExit(1)
+
+if not math.isfinite(threshold) or threshold < 0:
+    print("ERROR: --cv-pct-flake-threshold must be a finite non-negative number", file=sys.stderr)
+    raise SystemExit(1)
+PY
 
 json_escape() {
     jq -Rn --arg s "$1" '$s'
@@ -243,18 +291,19 @@ done | jq -s --argjson flake_threshold "$CV_PCT_FLAKE_THRESHOLD" '{
     cv_pct_flake_threshold: $flake_threshold,
     flaky_benches: [.[] | select((.cv_pct // 0) > $flake_threshold) | .name],
     benchmarks: .
-}' > /tmp/asupersync_baseline.json
+}' > "$BASELINE_TMP_PATH"
 
 if [[ -n "$COMPARE_PATH" ]]; then
-    python3 - "$COMPARE_PATH" "$METRIC" "$MAX_REGRESSION_PCT" <<'PY'
+    python3 - "$BASELINE_TMP_PATH" "$COMPARE_PATH" "$METRIC" "$MAX_REGRESSION_PCT" <<'PY'
 import json
 import sys
 
-baseline_path = sys.argv[1]
-metric = sys.argv[2]
-max_regression_pct = float(sys.argv[3])
+current_path = sys.argv[1]
+baseline_path = sys.argv[2]
+metric = sys.argv[3]
+max_regression_pct = float(sys.argv[4])
 
-with open("/tmp/asupersync_baseline.json", "r") as fh:
+with open(current_path, "r") as fh:
     current = json.load(fh)
 with open(baseline_path, "r") as fh:
     baseline = json.load(fh)
@@ -306,7 +355,7 @@ if [[ -n "$SAVE_DIR" ]]; then
     mkdir -p "$SAVE_DIR"
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     DEST="$SAVE_DIR/baseline_${TIMESTAMP}.json"
-    cp /tmp/asupersync_baseline.json "$DEST"
+    cp "$BASELINE_TMP_PATH" "$DEST"
     echo "Baseline saved to: $DEST"
 
     # Also save as 'latest'
@@ -359,7 +408,7 @@ PY
         echo "Smoke report saved to: $SMOKE_REPORT"
     fi
 else
-    cat /tmp/asupersync_baseline.json
+    cat "$BASELINE_TMP_PATH"
 fi
 
 # gauntlet PERF-001: populate the append-only .bench-history ratchet substrate.
@@ -367,13 +416,14 @@ fi
 # runs.jsonl append. Each record carries git_sha + profile + cv_pct for the
 # pass-over-pass ratchet (apply-ratchet.sh, PERF-004) to consume.
 if [[ "$WRITE_BENCH_HISTORY" -eq 1 ]]; then
-    BENCH_HISTORY_DIR="$BENCH_HISTORY_DIR" BENCH_PROFILE="$BENCH_PROFILE" python3 - <<'PY'
-import json, os, re, subprocess, time
+    BASELINE_TMP_PATH="$BASELINE_TMP_PATH" BENCH_HISTORY_DIR="$BENCH_HISTORY_DIR" BENCH_PROFILE="$BENCH_PROFILE" python3 - <<'PY'
+import json, os, re, subprocess, sys, time
 
+baseline_path = os.environ.get("BASELINE_TMP_PATH")
 hist = os.environ.get("BENCH_HISTORY_DIR", ".bench-history")
 profile = os.environ.get("BENCH_PROFILE", "unknown")
 try:
-    with open("/tmp/asupersync_baseline.json") as fh:
+    with open(baseline_path) as fh:
         data = json.load(fh)
 except FileNotFoundError:
     raise SystemExit(0)
@@ -404,6 +454,6 @@ with open(runs_path, "a") as runs:
             json.dump(rec, f, indent=2, sort_keys=True)
         runs.write(json.dumps(rec, sort_keys=True) + "\n")
         n += 1
-print(f".bench-history updated: {hist} ({n} benches, profile={profile}, sha={sha})")
+print(f".bench-history updated: {hist} ({n} benches, profile={profile}, sha={sha})", file=sys.stderr)
 PY
 fi
