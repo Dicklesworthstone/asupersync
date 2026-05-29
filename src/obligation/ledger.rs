@@ -445,27 +445,34 @@ impl ObligationLedger {
     /// [`LedgerError::RegionFinalized`] instead of mutating ledger
     /// state. Idempotent.
     ///
-    /// **Status (2026-04-28): the fence is implemented and unit-tested
-    /// here, but is NOT wired into the production region-close path.**
-    /// `grep -rn 'mark_region_finalized' src/` returns hits only inside
-    /// this file's own `#[cfg(test)]` mod. The intended wire site is
-    /// `RuntimeState::drive_region_lifecycle` — the same block that
-    /// emits the `RegionCloseComplete` trace event after `complete_close`
-    /// returns true (`src/runtime/state.rs` around the
-    /// `record_finalizer_close(region_id)` call). Wiring there must
-    /// respect the C(Obligations) lock-ordering tail position:
-    /// acquire the obligation ledger AFTER releasing the regions
-    /// guard, since the canonical order is
-    /// `E(Config) → D(Instrumentation) → B(Regions) → A(Tasks) → C(Obligations)`.
+    /// **Status (verified 2026-05-29): the fence MACHINERY is complete and
+    /// unit-tested here — [`Self::commit`] (`finalized_regions` check before
+    /// mutate), [`Self::abort`], [`Self::abort_by_id`], and
+    /// [`Self::acquire_with_context`] (via `acquire_internal`) all fail-closed
+    /// on a finalized region, and the `try_*` variants surface it as an error.
+    /// What is missing is the production CALL SITE: `mark_region_finalized`
+    /// is invoked only from this file's `#[cfg(test)]` mod, so in production
+    /// `finalized_regions` stays empty and every fence check above is inert.**
     ///
-    /// Until that wiring lands, the fence checks in
-    /// [`Self::try_commit`] / [`Self::try_abort`] / [`Self::commit`] /
-    /// [`Self::abort`] / [`Self::abort_by_id`] / `acquire_with_context`
-    /// (br-asupersync-u1gcfp, br-asupersync-12cqs2) are
-    /// inert in production: the `finalized_regions` set stays empty,
-    /// so a Drop-late commit/abort that races with region close still
-    /// mutates an already-closed region's audit trail. The structural
-    /// defense exists in this file; only the call site is missing.
+    /// IMPORTANT — do NOT confuse this type with the runtime's
+    /// `crate::runtime::obligation_table::ObligationTable` (Σ shard C). That
+    /// SEPARATE type is ALREADY fenced in production: `RuntimeState`'s region
+    /// driver `advance_region_state` calls
+    /// `self.obligations.mark_region_finalized(region_id)` right after
+    /// `complete_close()` returns true (`src/runtime/state.rs`, near the
+    /// `RegionCloseComplete` trace event). The runtime core is covered.
+    ///
+    /// THIS `ObligationLedger` is used by the messaging / FABRIC + session
+    /// lane (e.g. `FabricConsumer` in `src/messaging/consumer.rs`, plus
+    /// `src/messaging/{fabric,service}.rs` and `src/messaging/session/obligation.rs`).
+    /// `FabricConsumer` owns a ledger and resolves obligations via
+    /// `commit`/`abort`/`acquire_with_context`, but has no region-finalize hook
+    /// today, so `mark_region_finalized` is never reached for it. The wire site
+    /// is therefore the MESSAGING region/consumer finalize path, NOT
+    /// `RuntimeState`. Until that lands, a Drop-late commit/abort racing a
+    /// messaging region close still mutates an already-closed region's audit
+    /// trail. Tracked as br-asupersync-qyf37e / -u1gcfp / -12cqs2 and gauntlet
+    /// finding CONF-001.
     ///
     /// Tokens captured across the region boundary (e.g. in a Drop impl
     /// outside the scope) that arrive after this point are rejected
