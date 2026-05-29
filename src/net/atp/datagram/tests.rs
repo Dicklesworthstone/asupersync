@@ -9,8 +9,15 @@
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::net::atp::datagram::*;
+use crate::net::atp::handshake::transport_params::{TransportParamId, TransportParameters};
 use crate::types::outcome::Outcome;
 use std::time::{Duration, Instant};
+
+fn peer_datagram_params(max_size: u64) -> TransportParameters {
+    let mut params = TransportParameters::new();
+    params.set_integer(TransportParamId::MaxDatagramFrameSize, max_size);
+    params
+}
 
 /// Test DATAGRAM frame encoding/decoding with various payload sizes
 #[test]
@@ -68,11 +75,11 @@ fn test_transport_parameter_negotiation() {
     let mut local_transport = DatagramTransport::new(true, 1024).unwrap();
     assert!(!local_transport.is_enabled()); // No peer negotiated yet
 
-    // Simulate peer negotiation
-    let params = crate::net::atp::handshake::transport_params::TransportParameters::new();
+    // Simulate peer negotiation with RFC 9221 max_datagram_frame_size.
+    let params = peer_datagram_params(1024);
     local_transport.process_peer_params(&params).unwrap();
 
-    // Should now be enabled (simplified implementation assumes peer support)
+    // Should now be enabled because both local and peer advertised support.
     assert!(local_transport.is_enabled());
     assert_eq!(local_transport.max_frame_size(), Some(1024));
 }
@@ -478,7 +485,9 @@ mod transport_tests {
 
     #[test]
     fn test_transport_size_validation_edge_cases() {
-        let transport = DatagramTransport::new(true, 100).unwrap();
+        let mut transport = DatagramTransport::new(true, 100).unwrap();
+        let params = peer_datagram_params(100);
+        transport.process_peer_params(&params).unwrap();
 
         // Size exactly at limit should pass
         assert!(transport.validate_size(100).is_ok());
@@ -499,7 +508,7 @@ mod transport_tests {
         let mut transport = DatagramTransport::new(true, 1024).unwrap();
 
         // Simulate peer negotiation
-        let params = crate::net::atp::handshake::transport_params::TransportParameters::new();
+        let params = peer_datagram_params(1024);
         transport.process_peer_params(&params).unwrap();
         assert!(transport.is_enabled());
 
