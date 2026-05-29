@@ -632,12 +632,12 @@ pub fn inject_test_signal(kind: SignalKind) -> io::Result<()> {
     }
 }
 
-/// Creates a stream for SIGINT (Ctrl+C on Unix).
+/// Creates a stream for SIGINT (Ctrl+C on Unix and Windows).
 ///
 /// # Errors
 ///
 /// Returns an error if signal handling is not available.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn sigint() -> io::Result<Signal> {
     signal(SignalKind::interrupt())
 }
@@ -647,7 +647,7 @@ pub fn sigint() -> io::Result<Signal> {
 /// # Errors
 ///
 /// Returns an error if signal handling is not available.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn sigterm() -> io::Result<Signal> {
     signal(SignalKind::terminate())
 }
@@ -682,12 +682,12 @@ pub fn sigusr2() -> io::Result<Signal> {
     signal(SignalKind::user_defined2())
 }
 
-/// Creates a stream for SIGQUIT.
+/// Creates a stream for SIGQUIT on Unix or SIGBREAK on Windows.
 ///
 /// # Errors
 ///
 /// Returns an error if signal handling is not available.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn sigquit() -> io::Result<Signal> {
     signal(SignalKind::quit())
 }
@@ -778,6 +778,12 @@ mod tests {
             crate::assert_with_log!(ok, "signal creation ok", true, ok);
         }
 
+        #[cfg(windows)]
+        {
+            let ok = result.is_ok();
+            crate::assert_with_log!(ok, "windows signal creation ok", true, ok);
+        }
+
         #[cfg(not(any(unix, windows)))]
         {
             let is_err = result.is_err();
@@ -812,6 +818,19 @@ mod tests {
         let sigalrm_ok = sigalrm().is_ok();
         crate::assert_with_log!(sigalrm_ok, "sigalrm ok", true, sigalrm_ok);
         crate::test_complete!("unix_signal_helpers");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_signal_helpers() {
+        init_test("windows_signal_helpers");
+        let sigint_ok = sigint().is_ok();
+        crate::assert_with_log!(sigint_ok, "sigint ok", true, sigint_ok);
+        let sigterm_ok = sigterm().is_ok();
+        crate::assert_with_log!(sigterm_ok, "sigterm ok", true, sigterm_ok);
+        let sigquit_ok = sigquit().is_ok();
+        crate::assert_with_log!(sigquit_ok, "sigbreak ok", true, sigquit_ok);
+        crate::test_complete!("windows_signal_helpers");
     }
 
     #[cfg(unix)]

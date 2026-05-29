@@ -157,10 +157,10 @@
       "id": "SG-G1",
       "domain": "signal",
       "severity": "medium",
-      "divergence_risk": "missing windows signal parity surface",
+      "divergence_risk": "windows signal subset parity drift",
       "owner_modules": ["src/signal/mod.rs", "src/signal/ctrl_c.rs", "src/signal/signal.rs"],
       "evidence_requirements": [
-        "windows-specific contract tests and behavior docs per signal class"
+        "windows-specific contract tests and behavior docs for SIGINT, SIGTERM, SIGBREAK, and unsupported POSIX-only signals"
       ],
       "downstream_bead": "asupersync-2oh2u.3.5"
     },
@@ -168,10 +168,10 @@
       "id": "SG-G2",
       "domain": "signal",
       "severity": "medium",
-      "divergence_risk": "non-unix signal stream unsupported behavior ambiguity",
+      "divergence_risk": "unsupported behavior ambiguity outside Unix and the Windows signal subset",
       "owner_modules": ["src/signal/signal.rs", "src/signal/ctrl_c.rs"],
       "evidence_requirements": [
-        "deterministic fallback tests and migration guidance for non-unix builds"
+        "deterministic fallback tests and migration guidance for non-Unix/non-Windows builds and POSIX-only signal kinds on Windows"
       ],
       "downstream_bead": "asupersync-2oh2u.3.5"
     },
@@ -223,14 +223,14 @@
     {
       "surface": "signal_stream_api",
       "unix": "full async stream support",
-      "windows": "signal stream currently unsupported",
+      "windows": "async stream support for SIGINT, SIGTERM, and SIGBREAK; POSIX-only signals return unsupported",
       "wasm": "unsupported",
       "known_divergence_risk": "cross-platform services need conditional handling"
     },
     {
       "surface": "ctrl_c",
       "unix": "backed by unix signal stream",
-      "windows": "api shape exposed with backend constraints",
+      "windows": "backed by the Windows SIGINT stream",
       "wasm": "unsupported",
       "known_divergence_risk": "ctrl_c availability assumptions can fail off unix"
     }
@@ -384,7 +384,7 @@
     {"id": "FI-03", "domain": "filesystem", "injection_point": "Vfs::open", "expected_behavior": "io::Error with PermissionDenied; no handle leak", "owner_module": "src/fs/vfs.rs", "mapped_gap": "FS-G3"},
     {"id": "FI-04", "domain": "process", "injection_point": "Command::spawn with nonexistent binary", "expected_behavior": "ProcessError::NotFound with program name", "owner_module": "src/process.rs", "mapped_gap": "PR-G3"},
     {"id": "FI-05", "domain": "process", "injection_point": "Command::spawn with non-executable path", "expected_behavior": "ProcessError::PermissionDenied with program name", "owner_module": "src/process.rs", "mapped_gap": "PR-G3"},
-    {"id": "FI-06", "domain": "signal", "injection_point": "signal(kind) on non-Unix", "expected_behavior": "io::Error with unsupported message", "owner_module": "src/signal/signal.rs", "mapped_gap": "SG-G1"},
+    {"id": "FI-06", "domain": "signal", "injection_point": "signal(kind) for unsupported platform or POSIX-only Windows signal", "expected_behavior": "io::Error with unsupported message", "owner_module": "src/signal/signal.rs", "mapped_gap": "SG-G1"},
     {"id": "FI-07", "domain": "signal", "injection_point": "rapid inject() calls on signal slot", "expected_behavior": "monotonic counter; no lost signals", "owner_module": "src/signal/signal.rs", "mapped_gap": "SG-G3"},
     {"id": "FI-08", "domain": "signal", "injection_point": "concurrent shutdown() calls", "expected_behavior": "exactly one transition; all subscribers notified; idempotent", "owner_module": "src/signal/shutdown.rs", "mapped_gap": "SG-G4"}
   ],
@@ -411,9 +411,10 @@
     {
       "id": "SGC-02",
       "bead_id": "asupersync-2oh2u.3.5",
-      "focus": "cross-platform fallback and unsupported semantics",
+      "focus": "cross-platform Windows subset and unsupported fallback semantics",
       "pass_criteria": [
-        "non-unix behavior for signal() remains explicit via unsupported path",
+        "Windows signal(SignalKind::terminate()) succeeds through the async stream dispatcher",
+        "POSIX-only Windows signals and non-Unix/non-Windows behavior remain explicit via unsupported path",
         "ctrl_c availability gate remains explicit and deterministic"
       ],
       "failure_semantics": "emit SG-G1/SG-G2 diagnostics with owner module and unsupported-path mismatch",
@@ -421,7 +422,9 @@
       "artifacts": ["src/signal/signal.rs", "src/signal/ctrl_c.rs"],
       "contract_tests": [
         "signal_creation_platform_contract",
-        "ctrl_c_not_available"
+        "ctrl_c_not_available",
+        "windows_raw_signal_mapping_subset",
+        "windows_signal_helpers"
       ],
       "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync ctrl_c_not_available -- --nocapture"
     },
@@ -545,7 +548,7 @@
       {"domain": "process", "change": "wait_with_output() is synchronous; use wait_with_output_async()", "severity": "high", "migration": "Replace child.wait_with_output().await with child.wait_with_output_async().await"},
       {"domain": "process", "change": "kill() is synchronous; no .await needed", "severity": "medium", "migration": "Remove .await from child.kill()"},
       {"domain": "process", "change": "ProcessError enum instead of io::Error", "severity": "medium", "migration": "Match on ProcessError variants or use .into()"},
-      {"domain": "signal", "change": "Unix-only signal streams; non-Unix returns SignalError", "severity": "medium", "migration": "Add #[cfg(unix)] guards or is_available() checks"}
+      {"domain": "signal", "change": "Windows now supports SIGINT, SIGTERM, and SIGBREAK streams; POSIX-only signals still return SignalError off Unix", "severity": "medium", "migration": "Use signal(SignalKind::interrupt/terminate/quit) or sigint/sigterm/sigquit on Unix and Windows; cfg-guard SIGHUP/SIGUSR/SIGCHLD/SIGWINCH/SIGPIPE/SIGALRM helpers to Unix"}
     ],
     "api_compatible_surfaces": [
       "fs::File::open", "fs::File::create", "fs::read", "fs::read_to_string", "fs::write",

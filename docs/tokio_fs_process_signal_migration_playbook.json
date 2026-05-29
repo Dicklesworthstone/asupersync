@@ -113,11 +113,11 @@
       "id": "MR-SG-01",
       "domain": "signal",
       "title": "Signal listener creation",
-      "tokio_api": "tokio::signal::unix::signal(SignalKind::terminate())",
+      "tokio_api": "tokio::signal::unix::signal(SignalKind::terminate()) or tokio::signal::windows::{ctrl_c, ctrl_break}",
       "asupersync_api": "asupersync::signal::signal(SignalKind::Terminate)",
       "change_type": "api_change",
       "breaking": true,
-      "note": "Enum variants instead of constructor functions"
+      "note": "Enum variants instead of constructor functions; Windows supports SIGINT, SIGTERM, and SIGBREAK via SignalKind::quit()"
     },
     {
       "id": "MR-SG-02",
@@ -180,7 +180,7 @@
   "platform_support": {
     "linux": {"fs": "full", "process": "full", "signal": "full", "io_uring": "optional"},
     "macos": {"fs": "full", "process": "full", "signal": "full", "io_uring": "unsupported"},
-    "windows": {"fs": "full", "process": "partial", "signal": "ctrl_c_only", "io_uring": "unsupported"}
+    "windows": {"fs": "full", "process": "partial", "signal": "SIGINT_SIGTERM_SIGBREAK_streams", "io_uring": "unsupported"}
   },
   "rollback_strategies": [
     {

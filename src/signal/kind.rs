@@ -1,11 +1,16 @@
-//! Signal kind enumeration for Unix signals.
+//! Signal kind enumeration for supported process signals.
 //!
-//! Provides a cross-platform representation of Unix signals.
+//! Provides a cross-platform representation of signal intents. Unix targets
+//! map every variant to the matching POSIX signal number. Windows targets map
+//! the supported subset (`SIGINT`, `SIGTERM`, and `SIGBREAK` via
+//! [`SignalKind::quit`]) and report the remaining POSIX-only variants as
+//! unsupported.
 
-/// Unix signal kinds.
+/// Supported process signal kinds.
 ///
-/// This enum represents the various Unix signals that can be handled
-/// asynchronously. On Windows, only a subset of signals are supported.
+/// This enum represents signal intents that can be handled asynchronously on
+/// Unix. On Windows, only the Ctrl-C/Ctrl-Break-compatible subset is
+/// supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SignalKind {
@@ -15,7 +20,7 @@ pub enum SignalKind {
     Terminate,
     /// SIGHUP - Hangup detected on controlling terminal.
     Hangup,
-    /// SIGQUIT - Quit from keyboard.
+    /// SIGQUIT on Unix; SIGBREAK / Ctrl+Break on Windows.
     Quit,
     /// SIGUSR1 - User-defined signal 1.
     User1,

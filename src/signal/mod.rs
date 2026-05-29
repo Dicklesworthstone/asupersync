@@ -1,12 +1,12 @@
 //! Async signal handling and graceful shutdown.
 //!
-//! This module provides primitives for handling Unix signals and implementing
+//! This module provides primitives for handling process signals and implementing
 //! graceful shutdown patterns in async applications.
 //!
 //! # Components
 //!
-//! - [`SignalKind`]: Enumeration of Unix signal types
-//! - [`Signal`]: Async stream for receiving Unix signals
+//! - [`SignalKind`]: Enumeration of supported signal types
+//! - [`Signal`]: Async stream for receiving supported signals
 //! - [`ctrl_c`]: Cross-platform Ctrl+C handling
 //! - [`ShutdownController`]: Coordinated graceful shutdown
 //! - [`ShutdownReceiver`]: Handle for receiving shutdown notifications
@@ -18,8 +18,9 @@
 //! global signal dispatcher.
 //!
 //! Windows builds support a subset of process signals (`SIGINT`, `SIGTERM`,
-//! and `SIGBREAK` via `SignalKind::quit()`). Other non-Unix builds expose the
-//! same API surface but return unsupported errors for signal stream creation.
+//! and `SIGBREAK` via `SignalKind::quit()`) through the same async stream API.
+//! Other non-Unix builds expose the same API surface but return unsupported
+//! errors for signal stream creation.
 //!
 //! The [`ShutdownController`] and graceful shutdown helpers are fully
 //! functional using our sync primitives.
@@ -68,8 +69,10 @@ pub use kind::SignalKind;
 pub use shutdown::{ShutdownController, ShutdownReceiver};
 pub use signal::{Signal, SignalError, signal};
 
-// Unix-specific signal helpers
+// Cross-platform helpers for the signal subset supported on Unix and Windows.
+#[cfg(any(unix, windows))]
+pub use signal::{sigint, sigquit, sigterm};
+
+// Unix-specific signal helpers.
 #[cfg(unix)]
-pub use signal::{
-    sigalrm, sigchld, sighup, sigint, sigpipe, sigquit, sigterm, sigusr1, sigusr2, sigwinch,
-};
+pub use signal::{sigalrm, sigchld, sighup, sigpipe, sigusr1, sigusr2, sigwinch};
