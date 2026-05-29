@@ -174,61 +174,138 @@ W7n9v0wIyo4e/O0DO2fczXZD
         client_key: PrivateKey,
     }
 
+    const MTLS_CA_CERT_PEM: &[u8] = br#"-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUNmLaJqmpTgkGxR6LEoTx80ZsAGswDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwSYXN1cGVyc3luYyB0ZXN0IGNhMB4XDTI2MDUyOTAxMjMz
+N1oXDTM2MDUyNjAxMjMzN1owHTEbMBkGA1UEAwwSYXN1cGVyc3luYyB0ZXN0IGNh
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtAX0S7sppjw4BZ4DlbQ9
+GsU7aUCiZSG2Zp1pTtgbM9nQy82ULr5kS+CnZI/TXhc/lWDYcrniduGiGvzRcLYI
+VW4Ha1LNuu8LrAUHiorL1Pbq3OpRNxATe0qt+GP0YiLGyKdb8boYL2wkXxDjJDxh
+IOTSZD7w0uwOlMJ5OjxcVvaDCwpQOD7++gNYXFxZ+WBjcud2Oamaf5KEaY2mhOqB
+HOGRWBRcYDY/qDqEk9kL2R+VZoozE5gZFPxZNAHK/R3luF7cgQLj4A/RO4XSVr5h
+m4+XIYAqvnmjNl0KH8FBXPQvBkz9pbQ/w9jFWiz+rRoR6mfsJmnCikZDJKs5WZsX
+vQIDAQABo2MwYTAdBgNVHQ4EFgQUYPNklSSK2fNAh/FLiJVTyxwmMPMwHwYDVR0j
+BBgwFoAUYPNklSSK2fNAh/FLiJVTyxwmMPMwDwYDVR0TAQH/BAUwAwEB/zAOBgNV
+HQ8BAf8EBAMCAQYwDQYJKoZIhvcNAQELBQADggEBAJsyp44YP64rxhh51r3/wOc4
+4V9jL9m6JjHWe1RlkbeUh/ZfEwTx63rFC2SvwXAGyDJyjZ1g/GgTdoQwJg6aTzEb
+SKsI+O7O3H/R5jk0Vi0bj2nZLpBru6HWiieckV5z0MuRS5rqyvLUFNOx6egYIo9I
+kRrbrN1pg2FOupAuYZ1Dv1V/mfODkOBw0F7SQ1c1k3Rqi0mMxVmD6nvIGfXfKgFf
+MJ6L4DdiQnAjvSOTPx1zLQjsUOShk5lQCeySSbHJP990AJluQPUpX+0HxQFakEW+
++g/QuWMScJXA9oaJ+dvDifEjlN9XxN7TpskEaFfrzQShbqjnGFNamQspMXPCmhA=
+-----END CERTIFICATE-----"#;
+
+    const MTLS_SERVER_CERT_PEM: &[u8] = br#"-----BEGIN CERTIFICATE-----
+MIIDTDCCAjSgAwIBAgIUFAAU1gIA1vscc6XrGt6Wo523lzUwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwSYXN1cGVyc3luYyB0ZXN0IGNhMB4XDTI2MDUyOTAxMjMz
+OFoXDTM2MDUyNjAxMjMzOFowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkq
+hkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7dxYfOkdhecBOd96ETuRR/11btBsqzgD
+hMmkwGOUz5DEgQtwrM0j82dS5kPy2K4EVRcOZkisJKm9EeTSGYEjNFWk5NqZbLo9
+vB0buNlVLaiNdFjNKVXaekD2lykTKvuouOWyHtvCxd8zeNoi/7OcJ22LKxJoF88S
+Ci2DyVkU+4sCYElkqmGNa3aZ6O/pgGQ4qkC3lHPteU1Uuo4+6w7YuJ1JLeme8JcQ
+2DHPsrh6Z81Li15UPf6fzLFRfaMnPnP/AzNQ2RgZ1TmIIPEg/e55oYRO8FYZaeBB
+T8cCJf1VZ6JfRBtw3NjTuZRuhbydIVS6CIvX1AxyjlNfna1xk4TbiQIDAQABo4GM
+MIGJMAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQDAgWgMBMGA1UdJQQMMAoGCCsG
+AQUFBwMBMBQGA1UdEQQNMAuCCWxvY2FsaG9zdDAdBgNVHQ4EFgQUNXPJnylplS7j
+9sdymmWV4ezuQI8wHwYDVR0jBBgwFoAUYPNklSSK2fNAh/FLiJVTyxwmMPMwDQYJ
+KoZIhvcNAQELBQADggEBADsD9TS21k8crkfA0yhcOus+IYvKHUzkwc0tkDryVY0Z
+o8wBjzjnpXRNRkZz4b97f5MRfaFNckv6GD8++sDCByEaDtMmyo09PQbGNCQEZ2Rb
+52Yh91ysthP9bcbeD4hpkZJAjIyK0CPCuWogFKYnlDv7+gqXhZFTwYa4qsB981S4
+PqZMasYfgFYD6cK07dSbn+K1ndOrAu0I+ukEAy84b5/Oo/0pHqelp5dXWz3sx+2w
+MspqgKD0oZ/ducTzXygcXDwGvboes8qlWM41S7YZkowngJcfmk2d+yTyepZtE1+J
+XgfWNNot+IyLR8iGf343mzDSZBKRhnCq86yKuJijKmM=
+-----END CERTIFICATE-----"#;
+
+    const MTLS_SERVER_KEY_PEM: &[u8] = br#"-----BEGIN PRIVATE KEY-----
+MIIEuwIBADANBgkqhkiG9w0BAQEFAASCBKUwggShAgEAAoIBAQDt3Fh86R2F5wE5
+33oRO5FH/XVu0GyrOAOEyaTAY5TPkMSBC3CszSPzZ1LmQ/LYrgRVFw5mSKwkqb0R
+5NIZgSM0VaTk2plsuj28HRu42VUtqI10WM0pVdp6QPaXKRMq+6i45bIe28LF3zN4
+2iL/s5wnbYsrEmgXzxIKLYPJWRT7iwJgSWSqYY1rdpno7+mAZDiqQLeUc+15TVS6
+jj7rDti4nUkt6Z7wlxDYMc+yuHpnzUuLXlQ9/p/MsVF9oyc+c/8DM1DZGBnVOYgg
+8SD97nmhhE7wVhlp4EFPxwIl/VVnol9EG3Dc2NO5lG6FvJ0hVLoIi9fUDHKOU1+d
+rXGThNuJAgMBAAECgf9J3aOdJseETbiTwFKoB1eWg590SkV05nAxTG1dUY9k5hAg
+Au16vDnt3Khh2bgQkfnGcuKF4QuUVyHf7K9SPEgyeGY8q6X5ndyODnwNa3CIPU+w
+UeNkcsTmMkZhqt/I+V3sDWjDLHvP9wCFBzjXL2/OzrXpKk4pFqUDhB7o6EEb2/Yb
+I6qYCH3iKzJ1toBgtGNGNILg6kbzYOCX0I1yASGaPhrycGvgk33jtlUWtQ4uwBiL
+D/aUkUMmd2GfUQyg5FA0FvGawbbQAPy5680LJ6EtELhyPOYOs5ta63tqZxB8aC4M
+f5+GWDmVuXhN0z8orLZQFLIosUv7XSitP3QfojcCgYEA+X0C6zzuoegQpglyhMKy
+/jMMdTKT8MWV0ioR9+2YU6j1qXn0BeoBolRuc8fLAEIfYFCouvcUmcXAtrmo7uyh
+9wWUPCNo4YAZFXzeG52jkHWxle3fysSVb6z7givgdiDivbuu6m5uCtVzVaG/o+eC
+/KRcWdppaVnfRlybg4nhn9cCgYEA9BGkl0SOA+7Bd3v0qa6Ju1a0JSG1n8AYquhr
+tT9KzStumkMcqbey1atbmb234Yu9H2qAci0N852Mrc0AG4Pr+s2h066ZQ2FOLKrP
+T42EUMKKmmGXAgWSviHnZSK8VSt4QRJQma1QODZnw3cp5Fip50sXUB8HAJfCidPi
+0Xhzc58CgYEApsritq3nw6pH5xkNzJ/11mf+fiOwMBmIThb+KEhZvCSLCCCV+ZY2
+PXZA2XrKxoNuQo/qHgStaxh//CknPYRJy8GZFpN9vLRNEMaIHuJGxX9JmDiNkxvV
+4/E7vAzlZVQbAkmFaQkm3GtTTf5zBnryYUDo1NFmA56n3HxxI4F8q8UCgYBzuzn0
+kIlWzAvpAFoPa7fboU1ing1lZs1LnVIVa6GokAOuGkypHXYrY0nYKOHcjUpsby/g
+9AQ9lGN0tlRqt69aCc/GdHAwRx+uhoAvFMe9E8JtWgEk8EeY6LK0fjgXmrk3Adw+
+QrRbM1EYmpS+tlw6VJ0FXPEREuUoPdS7xwXXuQKBgAldofCPhEMC8sGfuLDNQWWE
+eSG2Km+7Hed6SK+Ycw8E82Q3aikeN/tg0V7Wp+5qqbb6Gv0EwDWYMNEE4YxayShr
+0Gcdact/vDsgkdtEZ29QZucxqPmM2z/yZy0McPyNMA4wFGDoSCiGLlqcksSczbLI
+Xg9lOuhkQdFEb9ak2cOw
+-----END PRIVATE KEY-----"#;
+
+    const MTLS_CLIENT_CERT_PEM: &[u8] = br#"-----BEGIN CERTIFICATE-----
+MIIDZjCCAk6gAwIBAgIUFAAU1gIA1vscc6XrGt6Wo523lzYwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwSYXN1cGVyc3luYyB0ZXN0IGNhMB4XDTI2MDUyOTAxMjMz
+OFoXDTM2MDUyNjAxMjMzOFowITEfMB0GA1UEAwwWYXN1cGVyc3luYy10ZXN0LWNs
+aWVudDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJW1eS8J0UUQYfDh
+hWOF+gLdbKrKQdzYMHG5ewQ78veKlJzm/h5j9fF7iPYDCFl6FFeQZu1QZmRtLOxm
+s1NuQ88jFSZEwwJ8IoCEMNcBhFOWdxDgD90b/4FLMB8ZhPgUngvnfZqZmGXpMcoV
+XioayulQttF5xmuNmZtG8DQz5b/fTP9I5yJcSyQExDP5mjH+JYgCusnS9FtitjQO
+5D+Rg+BOehu2qapl429Dc9jFCi0B0xBYVl1wOWUag2l03wPpT8g/KClsZ+bejr0Q
+fN9/kHEeINwSgnJOLL1eQayG/9Brf2nuDFPYHEtml9XC/urpqytLEAg41WQHMdFE
+g2Ha8asCAwEAAaOBmTCBljAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDAT
+BgNVHSUEDDAKBggrBgEFBQcDAjAhBgNVHREEGjAYghZhc3VwZXJzeW5jLXRlc3Qt
+Y2xpZW50MB0GA1UdDgQWBBS4Fu9oG4NY8H1GZt0wLD9Eq5gZnDAfBgNVHSMEGDAW
+gBRg82SVJIrZ80CH8UuIlVPLHCYw8zANBgkqhkiG9w0BAQsFAAOCAQEAHvgywJJ9
+FmJvt2A8K7z6vFdTWXfeTB1QVtwDGcAA5UXqTldpAyt3dFGSxIV0620yB+bVZmjH
+ujx/LsiRvwNzQ3powBhrK3sHf/PtfM9NEuO/waV6uThOtM6BQMrZkjy9Yrncj4XW
+RNBr01yA8AjCysiORvn+UZby53xEb8UPT6gCVSjQux7QgknHf34tPSCx4uPvberF
+tO9nXYX+87bGPot4ThdfAR+n0Wnw1bNVK3ZMLjfCLFaZOkDtUfKIYkAO+OW4eAIA
+BeYYIhdd+u2HHAH5rhKDQrJdqhS+CwXmBeKlwh25D7ukFeHVe/9Gi+Rqy9/PG2ay
+MDvm1jeAR3W97g==
+-----END CERTIFICATE-----"#;
+
+    const MTLS_CLIENT_KEY_PEM: &[u8] = br#"-----BEGIN PRIVATE KEY-----
+MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQCVtXkvCdFFEGHw
+4YVjhfoC3WyqykHc2DBxuXsEO/L3ipSc5v4eY/Xxe4j2AwhZehRXkGbtUGZkbSzs
+ZrNTbkPPIxUmRMMCfCKAhDDXAYRTlncQ4A/dG/+BSzAfGYT4FJ4L532amZhl6THK
+FV4qGsrpULbRecZrjZmbRvA0M+W/30z/SOciXEskBMQz+Zox/iWIArrJ0vRbYrY0
+DuQ/kYPgTnobtqmqZeNvQ3PYxQotAdMQWFZdcDllGoNpdN8D6U/IPygpbGfm3o69
+EHzff5BxHiDcEoJyTiy9XkGshv/Qa39p7gxT2BxLZpfVwv7q6asrSxAIONVkBzHR
+RINh2vGrAgMBAAECggEAMltvDlv6iQUoNKrfP+lWffU2MsLC4cLUlMRjtTpnEU4L
+jDWE3/sWxOodWUcO3W4bfpLDlGrZbkls9X3cLyGlbHzsBcnWYLUZs+oDNac8eBNi
+LIp5u5HJ4ZdFcgiW+g2RVgbBcKneodUNWuDSIk6N12o/fHm+PPpN43W6oYydaOrz
+WkKh9nepzMmoNoliySVfGdG2//tYY+hITfQkb/UbA87da+rWQ2V1zze5ngRTI02a
+dosPsVDelOPst4mZTdhqUh+DapO7jC/EO+OkYCTcr15wRgw7cqZCX0DPSRrbdAR6
+sMxAxZkNhxRnMTy5aBqk6djtnhy18BB4WchKymPlJQKBgQDQST8HE/8yti22Zs2s
+PonVVVO04iM1cXFg4kIHPyyLQSotZfrXsEglF/XcTm4tCFMcq1jOm/zdxLkLIr3g
+dXDz+LTWXTsfe/HTYzkO6p16mOrOIV/Oy+Tc1FxCFNyaLdOA2qjExfeb1+AuzJxA
+LcbgRsPnKmTGUh/2WwbWhO/YVwKBgQC4AQRrnlO1iM4+25f40IDqit+9vYcbpUAk
+PyCa4G3ywJmR0JjYkIp77Miabd77ev4K8LrTZ0Itt8BnYUOU5zsI8NeXVCMLRt5x
+cGIwTO3f14x5OeNTLW6OG8znZeQkL7nMClmuuYamyKjqL8tNuulU89LvHX94WVu7
+ze8SmepszQKBgQC98E2dssqiACgnkhA05sLi3HD9HstkzRLLewkjeqSwSLihtcHO
+N19TFEqMoKkwP8sq9caCgxVRVzg3w3LL4c0jbsXaRiLIT0rzriQ2ShVZ22EkoKKx
+/pWyG6YWTNfvcaLSepQ0/SMT5wT1KHnEvPoDRAUaJTrI79Nd4RyXO5tM+QKBgQCI
+OIiTO6VxMZSuyFdb5tBp0uINUDCj8NTpgKqcviXnn1qRrsJZIbjEQenJGioIN2e3
+pbxKIZnGytBwOHuV0xHLbrHM4IcJJDAt/ytR4sIAA02FuatnuqysHDy32qDpgUOl
+oMwAJG1hMBCNP1DdfNCdCd1RFJ9383+MK8sgFD6OyQKBgQDLs1YwXQYG8cJhTA6i
+9IOr8qlW0V08t6+N6wsgmn52pSUDEuE85HrbK/UWSONwzY74DQZMuHDIUQ0+imml
+nZUpTJydc+jUkkhkDDFSQ3f1TCgGzJC7Q4ibIPhVMJ1WfMtL/nA9st4fdul1vq2s
+RLNNF5SAMOuWaoMVh8hVa/V8Fg==
+-----END PRIVATE KEY-----"#;
+
     fn generated_mtls_material() -> GeneratedMtlsMaterial {
-        let mut ca_params =
-            rcgen::CertificateParams::new(Vec::new()).expect("empty CA SAN set is valid");
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, "asupersync test ca");
-        ca_params.key_usages.extend([
-            rcgen::KeyUsagePurpose::DigitalSignature,
-            rcgen::KeyUsagePurpose::KeyCertSign,
-            rcgen::KeyUsagePurpose::CrlSign,
-        ]);
-        ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
-        ca_params.not_after = rcgen::date_time_ymd(2035, 1, 1);
+        let ca_cert = Certificate::from_pem(MTLS_CA_CERT_PEM)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
 
-        let ca_key = rcgen::KeyPair::generate().unwrap();
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-        let ca_cert = Certificate::from_der(ca_cert.der().as_ref().to_vec());
-        let issuer = rcgen::Issuer::new(ca_params, ca_key);
-
-        fn leaf_material(
-            issuer: &rcgen::Issuer<'static, rcgen::KeyPair>,
-            common_name: &str,
-            extended_key_usage: rcgen::ExtendedKeyUsagePurpose,
-        ) -> (CertificateChain, PrivateKey) {
-            let mut params = rcgen::CertificateParams::new(vec![common_name.into()]).unwrap();
-            params.is_ca = rcgen::IsCa::ExplicitNoCa;
-            params
-                .distinguished_name
-                .push(rcgen::DnType::CommonName, common_name);
-            params
-                .key_usages
-                .push(rcgen::KeyUsagePurpose::DigitalSignature);
-            params.extended_key_usages.push(extended_key_usage);
-            params.not_before = rcgen::date_time_ymd(2025, 1, 1);
-            params.not_after = rcgen::date_time_ymd(2035, 1, 1);
-
-            let key = rcgen::KeyPair::generate().unwrap();
-            let cert = params.signed_by(&key, issuer).unwrap();
-            let chain =
-                CertificateChain::from_cert(Certificate::from_der(cert.der().as_ref().to_vec()));
-            let key = PrivateKey::from_pkcs8_der(key.serialize_der());
-            (chain, key)
-        }
-
-        let (server_chain, server_key) = leaf_material(
-            &issuer,
-            "localhost",
-            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
-        );
-        let (client_chain, client_key) = leaf_material(
-            &issuer,
-            "asupersync-test-client",
-            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
-        );
+        let server_chain = CertificateChain::from_pem(MTLS_SERVER_CERT_PEM).unwrap();
+        let server_key = PrivateKey::from_pem(MTLS_SERVER_KEY_PEM).unwrap();
+        let client_chain = CertificateChain::from_pem(MTLS_CLIENT_CERT_PEM).unwrap();
+        let client_key = PrivateKey::from_pem(MTLS_CLIENT_KEY_PEM).unwrap();
 
         GeneratedMtlsMaterial {
             ca_cert,

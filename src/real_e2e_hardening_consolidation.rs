@@ -13,7 +13,6 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod analysis {
     use super::*;
-    use rcgen;
 
     /// Analysis of e2e test issues found across the test suite
     #[derive(Debug)]
@@ -335,34 +334,19 @@ mod hardened_examples {
         crate::tls::PrivateKey,
     )> = std::sync::OnceLock::new();
 
+    const TEST_TLS_CERT_PEM: &[u8] = include_bytes!("../tests/fixtures/tls/server.crt");
+    const TEST_TLS_KEY_PEM: &[u8] = include_bytes!("../tests/fixtures/tls/server.key");
+
     pub fn generate_test_tls_material() -> &'static (crate::tls::Certificate, crate::tls::PrivateKey)
     {
         TEST_TLS_MATERIAL.get_or_init(|| {
-            // Generate a single key pair for both certificate and private key
-            let key_pair = rcgen::KeyPair::generate().expect("key generation");
-
-            // Set up certificate parameters
-            let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])
-                .expect("valid localhost SAN");
-            params.is_ca = rcgen::IsCa::ExplicitNoCa;
-            params
-                .distinguished_name
-                .push(rcgen::DnType::CommonName, "asupersync-test-server");
-            params
-                .key_usages
-                .push(rcgen::KeyUsagePurpose::DigitalSignature);
-            params
-                .extended_key_usages
-                .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
-            params.not_before = rcgen::date_time_ymd(2025, 1, 1);
-            params.not_after = rcgen::date_time_ymd(2035, 1, 1);
-
-            // Generate certificate using the key pair
-            let cert = params
-                .self_signed(&key_pair)
-                .expect("certificate generation");
-            let certificate = crate::tls::Certificate::from_der(cert.der().as_ref().to_vec());
-            let private_key = crate::tls::PrivateKey::from_pkcs8_der(key_pair.serialize_der());
+            let certificate = crate::tls::Certificate::from_pem(TEST_TLS_CERT_PEM)
+                .expect("parse static test TLS certificate")
+                .into_iter()
+                .next()
+                .expect("static test TLS certificate bundle contains a leaf");
+            let private_key = crate::tls::PrivateKey::from_pem(TEST_TLS_KEY_PEM)
+                .expect("parse static test TLS private key");
 
             (certificate, private_key)
         })

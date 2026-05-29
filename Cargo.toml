@@ -345,7 +345,6 @@ chacha20poly1305 = "0.10.1"
 
 [dev-dependencies]
 proptest = "1.10"
-criterion = { version = "0.8", features = ["html_reports"] }
 conformance = { package = "asupersync-conformance", version = "0.3.1", path = "conformance", default-features = false }
 tempfile = "3.25"
 tracing = "0.1"
@@ -357,8 +356,6 @@ opentelemetry-proto = { version = "0.31", default-features = false, features = [
 lz4_flex = "0.13"
 toml = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-# Certificate generation for TLS/QUIC tests
-rcgen = "0.14"
 rayon = "1.12"
 serde_yaml = "0.9"
 flate2 = "1.1"
@@ -370,14 +367,24 @@ fastrand = "2.3"
 httparse = "1.8"
 # tokio-util for differential conformance testing of LengthDelimitedCodec
 tokio-util = { version = "0.7", features = ["codec"] }
-# sqlx MySQL reference implementation for binary-protocol differential tests
-sqlx = { version = "0.8.6", default-features = false, features = ["mysql", "runtime-tokio-rustls"] }
+# sqlx MySQL reference implementation for binary-protocol differential tests.
+# The harness disables MySQL TLS at runtime, so keep this dev edge TLS-free;
+# otherwise default Windows test builds must compile ring before they reach
+# asupersync code.
+sqlx = { version = "0.8.6", default-features = false, features = ["mysql", "runtime-tokio", "tls-none"] }
 # redis-rs for differential conformance testing of RESP3 push dispatch
 redis = "0.26"
 # External RFC 6330 decoder for byte-level RaptorQ interoperability checks
 raptorq = "1.7.0"
 # Tokio for differential semaphore fairness conformance testing
 tokio = { version = "1.0", features = ["rt", "sync", "time"] }
+
+[target.'cfg(not(windows))'.dev-dependencies]
+# Criterion 0.8 depends on `alloca` on Windows, which requires a C compiler
+# even for `cargo check --tests`. Keep benchmark support unchanged on the
+# Unix lanes where these benches are maintained, while keeping Windows test
+# checks focused on asupersync code instead of benchmark harness plumbing.
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[test]]
 name = "kafka_real_broker"
