@@ -11,11 +11,12 @@
 
 use asupersync::cli::output::OutputFormat;
 use asupersync::cli::{
-    AtpCiAction, AtpCiArgs, AtpCiPushArgs, AtpDatasetAction, AtpDatasetArgs, AtpDatasetSeedArgs,
-    AtpFuzzAction, AtpFuzzArgs, AtpFuzzSyncArgs, AtpWorkflowCoordinator,
+    AtpCiAction, AtpCiArgs, AtpCiPullArgs, AtpCiPushArgs, AtpDatasetAction, AtpDatasetArgs,
+    AtpDatasetSeedArgs, AtpFuzzAction, AtpFuzzArgs, AtpFuzzSyncArgs, AtpWorkflowCoordinator,
 };
 use asupersync::test_utils::run_test_with_cx;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
@@ -61,8 +62,7 @@ fn bench_ci_artifact_cache(c: &mut Criterion) {
                         };
 
                         black_box(coordinator.handle_ci_command(&cx, ci_args).await.unwrap());
-                    })
-                    .await;
+                    });
                 });
             });
         });
@@ -128,8 +128,7 @@ fn bench_dataset_seeding(c: &mut Criterion) {
                                     .await
                                     .unwrap(),
                             );
-                        })
-                        .await;
+                        });
                     });
                 });
             },
@@ -191,8 +190,7 @@ fn bench_fuzz_corpus_sync(c: &mut Criterion) {
                                     .await
                                     .unwrap(),
                             );
-                        })
-                        .await;
+                        });
                     });
                 });
             },
@@ -232,12 +230,12 @@ fn bench_cache_deduplication(c: &mut Criterion) {
 
                                 // Create content based on deduplication pattern
                                 let content = if use_duplicates && i % 2 == 0 {
-                                    b"duplicate content for deduplication test"
+                                    b"duplicate content for deduplication test".to_vec()
                                 } else {
-                                    &format!("unique content for file {}", i).into_bytes()
+                                    format!("unique content for file {}", i).into_bytes()
                                 };
 
-                                tokio::fs::write(&artifact_path, content).await.unwrap();
+                                tokio::fs::write(&artifact_path, &content).await.unwrap();
 
                                 let ci_args = AtpCiArgs {
                                     action: AtpCiAction::Push(AtpCiPushArgs {
@@ -255,8 +253,7 @@ fn bench_cache_deduplication(c: &mut Criterion) {
                                     coordinator.handle_ci_command(&cx, ci_args).await.unwrap(),
                                 );
                             }
-                        })
-                        .await;
+                        });
                     });
                 });
             },
@@ -311,7 +308,7 @@ fn bench_cache_lookup(c: &mut Criterion) {
 
                             // Benchmark cache lookup
                             let lookup_args = AtpCiArgs {
-                                action: AtpCiAction::Pull(crate::cli::AtpCiPullArgs {
+                                action: AtpCiAction::Pull(AtpCiPullArgs {
                                     build_id: Some(format!("cache-prep-{}", cache_size / 2)),
                                     tags: vec!["cache-test".to_string()],
                                     destination: PathBuf::from("/tmp/bench"),
@@ -326,8 +323,7 @@ fn bench_cache_lookup(c: &mut Criterion) {
                                     .await
                                     .unwrap(),
                             );
-                        })
-                        .await;
+                        });
                     });
                 });
             },
@@ -381,8 +377,7 @@ fn bench_compression_ratios(c: &mut Criterion) {
                             };
 
                             black_box(coordinator.handle_ci_command(&cx, ci_args).await.unwrap());
-                        })
-                        .await;
+                        });
                     });
                 });
             },
