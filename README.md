@@ -1047,6 +1047,11 @@ The separate `conformance/` workspace member still exists for standalone
 vendor/spec harnesses, but it should not be read as proof that every
 disk-resident file under `tests/conformance/` is active in CI.
 
+Volatile project facts such as LOC totals, workspace-member counts, conformance
+registry counts, and roadmap status are audited in
+[`provider_audit_log.md`](./provider_audit_log.md). Treat live command output
+and checked contract artifacts as the source of truth for those values.
+
 Related test and CI entrypoints include:
 
 - `scripts/run_all_e2e.sh` (orchestrated suite execution and summary checks)

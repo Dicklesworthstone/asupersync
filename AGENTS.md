@@ -598,7 +598,12 @@ asupersync/
 - **`ShardedState`** with `ContendedMutex` for independent locking across task/region/obligation tables
 - **Two-phase effects** (reserve/commit) prevent data loss on cancellation
 - **FrankenSuite integration** — evidence ledger, decision contracts, and kernel types for runtime verification
-- **Roadmap reality** — README roadmap currently treats Phases 0-5 as complete, with Phase 6 ongoing hardening / policy gates / adapter expansion; some audit and cleanup beads still refer to earlier phase labels for historical context
+- **Roadmap reality** — README roadmap currently treats Phase 0, Phase 1, and
+  Phase 3 as complete; Phase 2 and Phase 5 remain partial; Phase 4 has complete
+  core primitives with production remote adapters still support-class scoped;
+  Phase 6 is continuous hardening / policy gates / adapter surface expansion.
+  Some audit and cleanup beads still refer to earlier phase labels for
+  historical context.
 
 ---
 
