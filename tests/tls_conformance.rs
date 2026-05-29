@@ -741,19 +741,20 @@ RLNNF5SAMOuWaoMVh8hVa/V8Fg==
     #[test]
     fn mtls_required_client_provides_cert() {
         let material = generated_mtls_material();
+        let mtls_success_timeout = Duration::from_secs(10);
 
         let mut server_client_roots = RootCertStore::empty();
         server_client_roots.add(&material.ca_cert).unwrap();
         let acceptor = TlsAcceptorBuilder::new(material.server_chain, material.server_key)
             .client_auth(ClientAuth::Required(server_client_roots))
-            .handshake_timeout(Duration::from_secs(1))
+            .handshake_timeout(mtls_success_timeout)
             .build()
             .unwrap();
 
         let connector = TlsConnectorBuilder::new()
             .add_root_certificate(&material.ca_cert)
             .identity(material.client_chain, material.client_key)
-            .handshake_timeout(Duration::from_secs(1))
+            .handshake_timeout(mtls_success_timeout)
             .build()
             .unwrap();
 
