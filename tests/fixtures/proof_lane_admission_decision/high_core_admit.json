@@ -69,6 +69,46 @@
     "peer_owned_paths": [],
     "unreserved_source_paths": []
   },
+  "proof_cache_warmth": {
+    "schema_version": "proof-pack-warmth-planner-receipt-v1",
+    "telemetry": {
+      "state": "fresh",
+      "sampled_at": "2026-05-29T02:17:40Z",
+      "age_seconds": 20,
+      "worker_count": 1
+    },
+    "lanes": [
+      {
+        "lane_id": "proof-lane-admission-decision-contract",
+        "classification": "not-warm",
+        "reasons": ["no-warm-worker"],
+        "recommended_workers": [
+          {
+            "worker_id": "rchw-cold-a",
+            "warm": false,
+            "saturated": false
+          }
+        ],
+        "worker_warmth_evidence": {
+          "warmth_basis": ["compatible-cold-worker"],
+          "cache_warmth_is_correctness_evidence": false
+        },
+        "command_templates": {
+          "actual_proof_command": "rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_MistyCat_admission_decision_contract\" cargo test -p asupersync --test proof_lane_admission_decision_contract -- --nocapture",
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_MistyCat_admission_decision_contract",
+          "preserves_agent_isolation": true,
+          "runs_now": false
+        }
+      }
+    ],
+    "operator_receipt": {
+      "dry_run_only": true,
+      "planner_output_is_proof_evidence": false,
+      "cache_warmth_is_authoritative": false,
+      "actual_proof_commands_still_required": true,
+      "all_command_templates_preserve_agent_isolation": true
+    }
+  },
   "proof_lane": {
     "lane_id": "proof-lane-admission-decision-contract",
     "workspace_package": "asupersync",

@@ -143,6 +143,49 @@ def reservation_holders(data: dict[str, Any]) -> list[dict[str, str]]:
     return [holders[key] for key in sorted(holders)]
 
 
+def dirty_tree_gate(dirty: dict[str, Any], holders: list[dict[str, str]]) -> dict[str, Any]:
+    blockers: list[dict[str, str]] = []
+    for path in dirty["peer_owned_paths"]:
+        blockers.append(
+            {
+                "kind": "peer_owned_dirty_path",
+                "path": path,
+                "required_action": "wait_for_dirty_tree_handoff",
+            }
+        )
+    for path in dirty["unreserved_source_paths"]:
+        blockers.append(
+            {
+                "kind": "unreserved_dirty_path",
+                "path": path,
+                "required_action": "reserve_or_clean_path_before_proof",
+            }
+        )
+    for holder in holders:
+        blockers.append(
+            {
+                "kind": "active_peer_reservation",
+                "agent": holder["agent"],
+                "path_pattern": holder["path_pattern"],
+                "required_action": "wait_for_reservation_handoff",
+            }
+        )
+
+    if dirty["peer_owned_paths"] or dirty["unreserved_source_paths"]:
+        precondition = "wait-for-dirty-tree-handoff"
+    elif holders:
+        precondition = "wait-for-reservation-handoff"
+    else:
+        precondition = "clear"
+
+    return {
+        "classification": dirty["classification"],
+        "blocks_admission": bool(blockers),
+        "admission_precondition": precondition,
+        "blockers": blockers,
+    }
+
+
 def dirty_tree_summary(data: dict[str, Any]) -> dict[str, Any]:
     dirty = section(data, "dirty_tree")
     return {
@@ -229,6 +272,74 @@ def disk_summary(data: dict[str, Any]) -> dict[str, Any]:
         "estimated_io_bytes": io_bytes,
         "sufficient_for_lane": target_free >= max(io_bytes, 2 * GIB)
         and pressure_class in {"healthy", "watch"},
+    }
+
+
+def proof_cache_warmth_summary(data: dict[str, Any]) -> dict[str, Any]:
+    payload = as_dict(data.get("proof_cache_warmth"))
+    lane_id = string_value(section(data, "proof_lane").get("lane_id"))
+    if not payload:
+        return {
+            "schema_version": "proof-cache-warmth-summary-v1",
+            "source_schema_version": "",
+            "lane_id": lane_id,
+            "classification": "no-data",
+            "telemetry_state": "no-data",
+            "telemetry_age_seconds": None,
+            "recommended_worker_id": "",
+            "warmth_basis": [],
+            "reason_codes": ["missing-proof-cache-warmth-receipt"],
+            "suggested_proof_command": "",
+            "target_dir": "",
+            "preserves_agent_isolation": False,
+            "cache_warmth_is_authoritative": False,
+            "proof_commands_still_required": True,
+            "cache_warmth_is_correctness_evidence": False,
+        }
+
+    lanes = [row for row in as_list(payload.get("lanes")) if isinstance(row, dict)]
+    matched_lane = next(
+        (row for row in lanes if string_value(row.get("lane_id")) == lane_id),
+        lanes[0] if lanes else {},
+    )
+    telemetry = as_dict(payload.get("telemetry"))
+    operator = as_dict(payload.get("operator_receipt"))
+    templates = as_dict(matched_lane.get("command_templates"))
+    evidence = as_dict(matched_lane.get("worker_warmth_evidence"))
+    recommended = [
+        row for row in as_list(matched_lane.get("recommended_workers")) if isinstance(row, dict)
+    ]
+    first_worker = recommended[0] if recommended else {}
+    classification = (
+        string_value(matched_lane.get("classification"))
+        or string_value(payload.get("classification"))
+        or "unknown"
+    )
+    reasons = stable_strings(matched_lane.get("reasons") or payload.get("reason_codes"))
+    if not reasons:
+        reasons = ["proof-cache-warmth-receipt-present"]
+
+    age = telemetry.get("age_seconds")
+    if not isinstance(age, int) or age < 0:
+        age = None
+
+    return {
+        "schema_version": "proof-cache-warmth-summary-v1",
+        "source_schema_version": string_value(payload.get("schema_version")),
+        "lane_id": string_value(matched_lane.get("lane_id")) or lane_id,
+        "classification": classification,
+        "telemetry_state": string_value(telemetry.get("state")) or "unknown",
+        "telemetry_age_seconds": age,
+        "recommended_worker_id": string_value(first_worker.get("worker_id")),
+        "warmth_basis": stable_strings(evidence.get("warmth_basis")),
+        "reason_codes": reasons,
+        "suggested_proof_command": string_value(templates.get("actual_proof_command")),
+        "target_dir": string_value(templates.get("target_dir")),
+        "preserves_agent_isolation": bool_value(templates.get("preserves_agent_isolation"))
+        or bool_value(operator.get("all_command_templates_preserve_agent_isolation")),
+        "cache_warmth_is_authoritative": bool_value(operator.get("cache_warmth_is_authoritative")),
+        "proof_commands_still_required": True,
+        "cache_warmth_is_correctness_evidence": False,
     }
 
 
@@ -386,6 +497,66 @@ def decision_row(
     }
 
 
+def operator_action(decision: dict[str, Any]) -> str:
+    name = string_value(decision.get("admission_decision"))
+    if bool_value(decision.get("proof_may_run_now")):
+        return "run_suggested_command"
+    if name == "split_lane":
+        return "split_lane_before_admission"
+    if name == "queue":
+        return "queue_and_retry_after_capacity_changes"
+    if name == "reject":
+        return "fix_admission_precondition_before_retry"
+    if name == "wait_for_telemetry":
+        return "refresh_telemetry_before_retry"
+    if name in {"wait_for_dirty_tree_handoff", "wait_for_reservation_handoff"}:
+        return name
+    return "inspect_receipt_before_retry"
+
+
+def integrated_operator_receipt(
+    *,
+    data: dict[str, Any],
+    decision: dict[str, Any],
+    dirty_gate: dict[str, Any],
+    holders: list[dict[str, str]],
+    resource: dict[str, Any],
+    disk: dict[str, Any],
+    proof_cache: dict[str, Any],
+    non_coverage: list[str],
+) -> dict[str, Any]:
+    cache_overridden = (
+        proof_cache["classification"] in {"warm", "not-warm"}
+        and not bool_value(decision.get("proof_may_run_now"))
+    )
+    return {
+        "schema_version": "proof-lane-integrated-operator-receipt-v1",
+        "receipt_id": (
+            f"{string_value(data.get('profile_id'))}:"
+            f"{string_value(section(data, 'proof_lane').get('lane_id'))}:integrated"
+        ),
+        "dry_run_only": True,
+        "non_mutating": True,
+        "planner_output_is_proof_evidence": False,
+        "cache_warmth_is_authoritative": False,
+        "actual_proof_commands_still_required": True,
+        "admission_decision": decision["admission_decision"],
+        "proof_may_run_now": decision["proof_may_run_now"],
+        "operator_action": operator_action(decision),
+        "reason_codes": decision["reason_codes"],
+        "suggested_next_command": decision["suggested_next_command"],
+        "proof_cache_warmth": {
+            **proof_cache,
+            "overridden_by_admission_blockers": cache_overridden,
+        },
+        "dirty_tree_gate": dirty_gate,
+        "reservation_holders": holders,
+        "resource_pressure_summary": resource,
+        "disk_summary": disk,
+        "non_coverage": non_coverage,
+    }
+
+
 def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     data = load_json(args.input)
     if not isinstance(data, dict):
@@ -398,10 +569,19 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     workers = worker_rows(data)
     dirty = dirty_tree_summary(data)
     holders = reservation_holders(data)
+    gate = dirty_tree_gate(dirty, holders)
     resource = resource_pressure_summary(data)
     disk = disk_summary(data)
+    proof_cache = proof_cache_warmth_summary(data)
     proof_lane = section(data, "proof_lane")
     target = section(data, "cargo_target_isolation")
+    non_coverage = [
+        "does not start proof lanes",
+        "does not mutate Agent Mail reservations",
+        "does not mutate Beads",
+        "does not prove Cargo/test success",
+        "does not make cache warmth correctness evidence",
+    ]
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -422,7 +602,9 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         },
         "decision": decision,
         "dirty_tree": dirty,
+        "dirty_tree_gate": gate,
         "reservation_holders": holders,
+        "proof_cache_warmth": proof_cache,
         "resource_pressure_summary": resource,
         "disk_summary": disk,
         "worker_summary": {
@@ -445,13 +627,17 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             "reservation_holders": holders,
             "dirty_paths": dirty["dirty_paths"],
         },
-        "non_coverage": [
-            "does not start proof lanes",
-            "does not mutate Agent Mail reservations",
-            "does not mutate Beads",
-            "does not prove Cargo/test success",
-            "does not make cache warmth correctness evidence",
-        ],
+        "integrated_operator_receipt": integrated_operator_receipt(
+            data=data,
+            decision=decision,
+            dirty_gate=gate,
+            holders=holders,
+            resource=resource,
+            disk=disk,
+            proof_cache=proof_cache,
+            non_coverage=non_coverage,
+        ),
+        "non_coverage": non_coverage,
     }
 
 
