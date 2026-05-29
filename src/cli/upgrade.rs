@@ -722,16 +722,13 @@ mod tests {
     #[test]
     fn selective_backup_excludes_only_matching_suffix_logs() {
         let temp_dir = TempDir::new().unwrap();
-        let manager = UpgradeManager::new(temp_dir.path().join("cfg")).unwrap();
         let src = temp_dir.path().join("daemon-src");
         let dst = temp_dir.path().join("daemon-dst");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("worker.log"), "skip").unwrap();
         std::fs::write(src.join("dialog.txt"), "keep").unwrap();
 
-        manager
-            .copy_directory_selective(&src, &dst, &["*.log"])
-            .expect("selective copy");
+        UpgradeManager::copy_directory_selective(&src, &dst, &["*.log"]).expect("selective copy");
 
         assert!(!dst.join("worker.log").exists());
         assert_eq!(
