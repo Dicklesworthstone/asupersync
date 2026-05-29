@@ -40,7 +40,7 @@
   },
   "generated_at": "2026-05-08T05:10:00Z",
   "guarantee": "remote fuzz smoke result is separated from local artifact retrieval",
-  "log_path": "tests/fixtures/rch_retrieval_receipt/passed_after_retrieval_enospc.log",
+  "log_path": "/data/projects/asupersync/tests/fixtures/rch_retrieval_receipt/passed_after_retrieval_enospc.log",
   "markers": {
     "artifact_bytes": null,
     "artifact_file_count": null,

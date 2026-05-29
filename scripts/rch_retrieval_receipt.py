@@ -33,6 +33,12 @@ ARTIFACTS_RETRIEVED_RE = re.compile(
 )
 RETRIEVAL_STAGE_RE = re.compile(r"(?m)^\s*.*Retrieving artifacts from .*$")
 TIMEOUT_RE = re.compile(r"(?i)(timed out|timeout|terminated|signal TERM|exit code -1)")
+REMOTE_REFUSAL_RE = re.compile(
+    r"(?i)(RCH_REQUIRE_REMOTE|remote execution required|remote required).*(refus|no healthy remote|no remote worker|local fallback disabled)"
+)
+LINE_TIMESTAMP_RE = re.compile(
+    r"^\s*(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\b"
+)
 DISK_FULL_RE = re.compile(
     r"(?i)(ENOSPC|No space left on device|os error 28|error 28)"
 )
@@ -52,6 +58,11 @@ def parse_timestamp(value: str) -> dt.datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
+
+
+def line_timestamp(line: str) -> str:
+    match = LINE_TIMESTAMP_RE.search(line)
+    return match.group("timestamp") if match else ""
 
 
 def current_date(generated_at: str) -> str:
@@ -122,6 +133,17 @@ def selected_worker_from_log(text: str) -> str | None:
     if failure:
         return failure.group("worker")
     return None
+
+
+def remote_refusal_from_log(text: str) -> dict[str, Any] | None:
+    refusal = first_matching_line(text, REMOTE_REFUSAL_RE)
+    if refusal is None:
+        return None
+    return {
+        "kind": "remote-required-refusal",
+        "line": refusal["line"],
+        "text": refusal["text"],
+    }
 
 
 def remote_elapsed_ms(text: str) -> int | None:
@@ -295,6 +317,7 @@ def audit_target_dir(
 
 def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     local_fallback = LOCAL_FALLBACK_RE.search(text) is not None
+    remote_refusal = remote_refusal_from_log(text)
     remote_exit = last_remote_exit(text)
     remote_success = remote_exit == 0
     remote_failed = (remote_exit is not None and remote_exit != 0) or REMOTE_FAILED_RE.search(text) is not None
@@ -316,6 +339,9 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     if local_fallback:
         classification = "local_fallback"
         decision = "invalid"
+    elif remote_refusal is not None:
+        classification = "remote_refusal"
+        decision = "blocked-external"
     elif remote_failed:
         classification = "remote_failure"
         decision = "failed"
@@ -362,6 +388,7 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
         "classification": classification,
         "decision": decision,
         "retrieval_blocker": retrieval_blocker,
+        "remote_refusal": remote_refusal,
         "markers": {
             "local_fallback": local_fallback,
             "remote_exit_code": remote_exit,
@@ -528,6 +555,19 @@ def remediation_for(classification: str) -> dict[str, Any]:
             "operator_note": "Reject local cargo/test output for this repo's proof lanes.",
             "next_steps": ["rerun through rch remote execution after worker health is restored"],
         }
+    if classification == "remote_refusal":
+        return {
+            "summary": "remote-required proof lane refused local fallback before running",
+            "operator_note": (
+                "This is a blocked proof lane, not a local validation result. Keep the "
+                "refusal line in the closeout and retry after remote capacity is healthy."
+            ),
+            "next_steps": [
+                "preserve the exact remote-required refusal line",
+                "check rch worker health before retrying",
+                "rerun the same command with the same CARGO_TARGET_DIR discipline",
+            ],
+        }
     if classification == "wrapper_interrupted":
         return {
             "summary": "local wrapper stopped before a remote proof verdict was captured",
@@ -657,6 +697,15 @@ def first_blocker_from_log(
             "text": fallback["text"] if fallback else "rch local fallback observed",
             "file": "rch-local-fallback",
         }
+    remote_refusal = analysis.get("remote_refusal")
+    if remote_refusal is not None:
+        return {
+            "kind": remote_refusal["kind"],
+            "source": "rch-wrapper",
+            "line": remote_refusal["line"],
+            "text": remote_refusal["text"],
+            "file": "rch-remote-required",
+        }
     if retrieval_blocker is not None:
         return {
             "kind": retrieval_blocker["kind"],
@@ -733,9 +782,157 @@ def operator_decision_for(classification: str) -> str:
         return "surface-remote-failure"
     if classification == "local_fallback":
         return "reject-local-fallback-rerun-remote"
+    if classification == "remote_refusal":
+        return "wait-for-remote-capacity"
     if classification == "wrapper_interrupted":
         return "rerun-incomplete-proof"
     return "escalate-incomplete-proof"
+
+
+def last_progress_line(text: str) -> dict[str, Any]:
+    progress: dict[str, Any] = {
+        "line": 0,
+        "text": "",
+        "timestamp": "",
+        "stream": "combined",
+    }
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if TIMEOUT_RE.search(stripped):
+            continue
+        progress = {
+            "line": line_no,
+            "text": stripped,
+            "timestamp": line_timestamp(stripped),
+            "stream": "combined",
+        }
+    return progress
+
+
+def elapsed_since_progress_ms(
+    last_progress: dict[str, Any], stopped_at: str
+) -> int | None:
+    progress_at = parse_timestamp(str(last_progress.get("timestamp") or ""))
+    stopped = parse_timestamp(stopped_at)
+    if progress_at is None or stopped is None:
+        return None
+    elapsed = stopped - progress_at
+    return max(int(elapsed.total_seconds() * 1000), 0)
+
+
+def wrapper_stop_reason(args: argparse.Namespace, analysis: dict[str, Any]) -> str:
+    if args.wrapper_stop_reason:
+        return args.wrapper_stop_reason
+    classification = analysis["classification"]
+    if classification == "remote_success":
+        return "remote-exit-zero"
+    if classification == "remote_failure":
+        return "remote-nonzero-exit"
+    if classification == "local_fallback":
+        return "local-fallback"
+    if classification == "remote_refusal":
+        return "remote-required-refusal"
+    if args.wrapper_exit_code == 124:
+        return "timeout"
+    if args.wrapper_exit_code == 143:
+        return "terminated"
+    if args.wrapper_exit_code is not None:
+        return "wrapper-exit-code"
+    if analysis["markers"]["timeout_observed"]:
+        return "timeout-or-terminated"
+    return "unknown"
+
+
+def retry_class_for(classification: str) -> str:
+    if classification == "remote_success":
+        return "no-retry"
+    if classification == "remote_failure":
+        return "fix-remote-diagnostic"
+    if classification == "remote_refusal":
+        return "wait-for-remote-capacity"
+    if classification == "local_fallback":
+        return "require-remote-worker-and-rerun"
+    if classification in {"passed_after_retrieval_enospc", "passed_after_retrieval_timeout"}:
+        return "record-remote-result-and-retry-artifact-retrieval"
+    if classification == "remote_success_retrieval_unknown":
+        return "record-remote-result-and-audit-artifact-retrieval"
+    if classification == "wrapper_interrupted":
+        return "rerun-focused-lane-after-wrapper-triage"
+    return "human-escalation"
+
+
+def execution_location(analysis: dict[str, Any], text: str) -> str:
+    markers = analysis["markers"]
+    if markers["local_fallback"]:
+        return "local-fallback"
+    if analysis["classification"] == "remote_refusal":
+        return "remote-required-refused"
+    if (
+        markers["remote_success"]
+        or markers["remote_failure"]
+        or selected_worker_from_log(text) is not None
+        or remote_command_from_log(text) is not None
+    ):
+        return "remote"
+    return "unknown"
+
+
+def silent_stall_receipt(
+    args: argparse.Namespace,
+    text: str,
+    analysis: dict[str, Any],
+    target_dir: str | None,
+    generated_at: str,
+) -> dict[str, Any]:
+    last_progress = last_progress_line(text)
+    stopped_at = args.wrapper_stopped_at or generated_at
+    elapsed_ms = elapsed_since_progress_ms(last_progress, stopped_at)
+    classification = analysis["classification"]
+    markers = analysis["markers"]
+    silent_stall = (
+        classification == "wrapper_interrupted"
+        and not markers["remote_success"]
+        and not markers["remote_failure"]
+    )
+
+    return {
+        "schema_version": "rch-silent-stall-receipt-v1",
+        "command": args.command,
+        "proof_lane": args.proof_lane or "unspecified",
+        "target_dir": target_dir,
+        "selected_worker": selected_worker_from_log(text),
+        "execution_location": execution_location(analysis, text),
+        "classification": classification,
+        "decision": analysis["decision"],
+        "remote_exit_status": markers["remote_exit_code"],
+        "wrapper_exit_code": args.wrapper_exit_code,
+        "wrapper_stop_reason": wrapper_stop_reason(args, analysis),
+        "wrapper_stopped_at": stopped_at,
+        "last_progress_line": last_progress,
+        "elapsed_since_last_progress_ms": elapsed_ms,
+        "silent_stall": silent_stall,
+        "retry_class": retry_class_for(classification),
+        "operator_note": (
+            "operator-stopped wrapper after no remote verdict; do not infer pass or fail"
+            if silent_stall
+            else "receipt records the terminal proof classification without treating it as a silent stall"
+        ),
+        "closeout_fields": [
+            "command",
+            "target_dir",
+            "selected_worker",
+            "execution_location",
+            "classification",
+            "remote_exit_status",
+            "wrapper_exit_code",
+            "wrapper_stop_reason",
+            "last_progress_line",
+            "elapsed_since_last_progress_ms",
+            "retry_class",
+        ],
+    }
 
 
 def cleanup_authorization_result(
@@ -935,6 +1132,10 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         receipt["proof_lifecycle_contract"] = proof_lifecycle_contract(
             args, text, analysis, target_dir
         )
+    if args.silent_stall_receipt:
+        receipt["silent_stall_receipt"] = silent_stall_receipt(
+            args, text, analysis, target_dir, generated_at
+        )
     return receipt
 
 
@@ -985,6 +1186,11 @@ def main() -> int:
         help="Emit remote/retrieval/local-pressure/cleanup-authorization lifecycle fields",
     )
     parser.add_argument(
+        "--silent-stall-receipt",
+        action="store_true",
+        help="Emit command/worker/progress frontier fields for silent rch proof stalls",
+    )
+    parser.add_argument(
         "--stale-target-candidate",
         action="append",
         default=[],
@@ -992,6 +1198,16 @@ def main() -> int:
     )
     parser.add_argument("--generated-at", default="", help="UTC timestamp for deterministic receipts")
     parser.add_argument("--wrapper-exit-code", type=int, help="Local wrapper exit code, if known")
+    parser.add_argument(
+        "--wrapper-stopped-at",
+        default="",
+        help="UTC timestamp when the local wrapper was stopped; defaults to generated-at",
+    )
+    parser.add_argument(
+        "--wrapper-stop-reason",
+        default="",
+        help="Operator-supplied stop reason for silent-stall receipts",
+    )
     parser.add_argument("--output", choices=["json"], default="json")
     args = parser.parse_args()
 

@@ -842,6 +842,125 @@ fn artifact_free_proof_receipt_rejects_remote_required_local_fallback() {
 }
 
 #[test]
+fn silent_stall_receipt_covers_pass_failure_refusal_fallback_and_stop() {
+    let success = receipt_json_with_args("remote_success.log", None, &["--silent-stall-receipt"]);
+    let success_stall = &success["silent_stall_receipt"];
+    assert_eq!(
+        success_stall["schema_version"].as_str(),
+        Some("rch-silent-stall-receipt-v1")
+    );
+    assert_eq!(success_stall["execution_location"].as_str(), Some("remote"));
+    assert_eq!(
+        success_stall["classification"].as_str(),
+        Some("remote_success")
+    );
+    assert_eq!(success_stall["retry_class"].as_str(), Some("no-retry"));
+    assert_eq!(success_stall["silent_stall"].as_bool(), Some(false));
+
+    let failure =
+        receipt_json_with_args("remote_failure.log", Some(101), &["--silent-stall-receipt"]);
+    let failure_stall = &failure["silent_stall_receipt"];
+    assert_eq!(failure_stall["execution_location"].as_str(), Some("remote"));
+    assert_eq!(
+        failure_stall["classification"].as_str(),
+        Some("remote_failure")
+    );
+    assert_eq!(
+        failure_stall["wrapper_stop_reason"].as_str(),
+        Some("remote-nonzero-exit")
+    );
+    assert_eq!(
+        failure_stall["retry_class"].as_str(),
+        Some("fix-remote-diagnostic")
+    );
+
+    let remote_required_command = concat!(
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env ",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs ",
+        "cargo test --test proof_runner_contract -- --nocapture"
+    );
+    let refusal = receipt_json_with_command(
+        "remote_required_refusal.log",
+        Some(75),
+        remote_required_command,
+        &["--silent-stall-receipt"],
+    );
+    let refusal_stall = &refusal["silent_stall_receipt"];
+    assert_eq!(refusal["classification"].as_str(), Some("remote_refusal"));
+    assert_eq!(refusal["decision"].as_str(), Some("blocked-external"));
+    assert_eq!(
+        refusal_stall["execution_location"].as_str(),
+        Some("remote-required-refused")
+    );
+    assert_eq!(
+        refusal_stall["wrapper_stop_reason"].as_str(),
+        Some("remote-required-refusal")
+    );
+    assert_eq!(
+        refusal_stall["retry_class"].as_str(),
+        Some("wait-for-remote-capacity")
+    );
+
+    let fallback = receipt_json_with_command(
+        "local_fallback.log",
+        None,
+        remote_required_command,
+        &["--silent-stall-receipt"],
+    );
+    let fallback_stall = &fallback["silent_stall_receipt"];
+    assert_eq!(
+        fallback_stall["execution_location"].as_str(),
+        Some("local-fallback")
+    );
+    assert_eq!(
+        fallback_stall["retry_class"].as_str(),
+        Some("require-remote-worker-and-rerun")
+    );
+
+    let stopped = receipt_json_with_args(
+        "wrapper_interrupted.log",
+        Some(143),
+        &[
+            "--silent-stall-receipt",
+            "--wrapper-stopped-at",
+            "2026-05-10T07:57:25.221759Z",
+        ],
+    );
+    let stopped_stall = &stopped["silent_stall_receipt"];
+    assert_eq!(
+        stopped_stall["classification"].as_str(),
+        Some("wrapper_interrupted")
+    );
+    assert_eq!(stopped_stall["silent_stall"].as_bool(), Some(true));
+    assert_eq!(
+        stopped_stall["selected_worker"].as_str(),
+        Some("vmi1152480")
+    );
+    assert_eq!(
+        stopped_stall["last_progress_line"]["line"].as_u64(),
+        Some(3)
+    );
+    assert!(
+        stopped_stall["last_progress_line"]["text"]
+            .as_str()
+            .expect("last progress text")
+            .contains("Executing command remotely")
+    );
+    assert_eq!(
+        stopped_stall["elapsed_since_last_progress_ms"].as_u64(),
+        Some(720_000)
+    );
+    assert_eq!(
+        stopped_stall["wrapper_stop_reason"].as_str(),
+        Some("terminated")
+    );
+    assert_eq!(
+        stopped_stall["retry_class"].as_str(),
+        Some("rerun-focused-lane-after-wrapper-triage")
+    );
+}
+
+#[test]
 fn proof_lifecycle_contract_splits_remote_enospc_and_cleanup_authorization() {
     let receipt = receipt_json_with_args(
         "passed_after_retrieval_enospc.log",
