@@ -7,17 +7,17 @@ Parent: `asupersync-36m6p`
 
 ```bash
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --features criterion-benches --bench raptorq_benchmark -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_auto_capture.log 2>&1
 
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=sequential ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --features criterion-benches --bench raptorq_benchmark -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_sequential_capture.log 2>&1
 
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=fused ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --features criterion-benches --bench raptorq_benchmark -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_fused_capture.log 2>&1
 ```

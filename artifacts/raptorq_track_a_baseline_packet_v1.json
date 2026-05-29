@@ -170,11 +170,11 @@
     ],
     "full": [
       "rch exec -- cargo test",
-      "rch exec -- cargo bench --bench raptorq_benchmark"
+      "rch exec -- cargo bench --features criterion-benches --bench raptorq_benchmark"
     ],
     "forensics": [
       "rch exec -- cargo test -- --nocapture",
-      "rch exec -- cargo bench -- --save-baseline raptorq_track_a --noplot"
+      "rch exec -- cargo bench --features criterion-benches -- --save-baseline raptorq_track_a --noplot"
     ]
   },
   "next_actions": [

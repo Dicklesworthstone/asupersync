@@ -86,7 +86,7 @@
         "Emit replay pointer and command bundle for every benchmark and decode verdict."
       ],
       "starter_repro_commands": [
-        "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 20 --warm-up-time 0.2 --measurement-time 0.2",
+        "rch exec -- cargo bench --features criterion-benches --bench raptorq_benchmark -- gf256_primitives --sample-size 20 --warm-up-time 0.2 --measurement-time 0.2",
         "rch exec -- cargo test --test raptorq_perf_invariants g3_decision -- --nocapture"
       ]
     },
@@ -140,7 +140,7 @@
       ],
       "starter_repro_commands": [
         "rch exec -- cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
-        "rch exec -- cargo bench --bench raptorq_benchmark -- repair_campaign --sample-size 20 --warm-up-time 0.2 --measurement-time 0.2"
+        "rch exec -- cargo bench --features criterion-benches --bench raptorq_benchmark -- repair_campaign --sample-size 20 --warm-up-time 0.2 --measurement-time 0.2"
       ]
     },
     {
