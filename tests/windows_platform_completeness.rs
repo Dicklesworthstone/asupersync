@@ -91,7 +91,9 @@ fn track_i_process_surface_contains_windows_output_path() {
 
 #[test]
 fn track_i_signal_surface_contains_windows_subset_mapping() {
+    let signal_mod = load_source("src/signal/mod.rs");
     let signal_src = load_source("src/signal/signal.rs");
+    let kind_src = load_source("src/signal/kind.rs");
 
     for token in [
         "#[cfg(windows)]\nfn all_signal_kinds() -> [SignalKind; 3]",
@@ -109,6 +111,34 @@ fn track_i_signal_surface_contains_windows_subset_mapping() {
             "signal module missing windows-specific token: {token}"
         );
     }
+
+    for token in [
+        "#[cfg(any(unix, windows))]\npub use signal::{sigint, sigquit, sigterm};",
+        "#[cfg(unix)]\npub use signal::{sigalrm, sigchld, sighup, sigpipe, sigusr1, sigusr2, sigwinch};",
+    ] {
+        assert!(
+            signal_mod.contains(token),
+            "signal module must expose only the Windows-supported helper subset cross-platform: {token}"
+        );
+    }
+
+    for token in [
+        "#[cfg(any(unix, windows))]\npub fn sigint()",
+        "#[cfg(any(unix, windows))]\npub fn sigterm()",
+        "#[cfg(any(unix, windows))]\npub fn sigquit()",
+        "Creates a stream for SIGQUIT on Unix or SIGBREAK on Windows.",
+    ] {
+        assert!(
+            signal_src.contains(token),
+            "signal helpers must be Windows-visible for the supported subset: {token}"
+        );
+    }
+
+    assert!(
+        kind_src.contains("Windows targets map\n//! the supported subset")
+            && kind_src.contains("/// SIGQUIT on Unix; SIGBREAK / Ctrl+Break on Windows."),
+        "SignalKind docs must describe the Windows SIGINT/SIGTERM/SIGBREAK subset"
+    );
 }
 
 #[test]
