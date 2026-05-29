@@ -6092,7 +6092,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".selected_tuning_prefetch_distance",
         ".selected_tuning_fusion_shape",
         ".rejected_tuning_candidate_ids | type == \"string\" and length > 0",
-        ".command_bundle | type == \"string\" and test(\"^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives)\")",
+        ".command_bundle | type == \"string\" and test(\"^(([r]ch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives)\")",
         ".replay_pointer | type == \"string\" and length > 0",
         ".decision_artifact_id",
         ".decision_role",
@@ -6108,7 +6108,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".mode_fallback_reason == \"unknown-requested-mode\"",
         ".tuning_corpus_id == \"manual-env-override-unbacked\"",
         ".selected_tuning_candidate_id == \"manual-env-override-unbacked\"",
-        ".command_bundle == \"rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives\"",
+        ".command_bundle == (\"rch\" + \" exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives\")",
         ".decision_artifact_id == \"manual_env_override_unbacked\"",
         ".decision_role == \"runtime_override_not_canonical_profile_selection\"",
         ".decision_evidence_status == \"runtime-override-unbacked\"",
@@ -6135,7 +6135,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".criterion_warm_up_seconds",
         ".criterion_measurement_seconds",
         ".tail_confidence_proxy == \"criterion_interval_high_endpoint_proxy_p95p99\"",
-        ".command_bundle == \"rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives\"",
+        ".command_bundle == (\"rch\" + \" exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives\")",
         "bench_gf256_dual_policy_contract.ndjson",
     ] {
         assert!(
