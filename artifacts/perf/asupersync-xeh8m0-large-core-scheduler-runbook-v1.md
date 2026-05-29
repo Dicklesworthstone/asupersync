@@ -24,7 +24,7 @@ The selected benchmark group covers:
 Run the benchmark through `rch`:
 
 ```bash
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision
 ```
 
 The JSON artifact contract must parse:

@@ -96,7 +96,7 @@
   },
   "profiler": {
     "perf_attempt": {
-      "command": "rch exec -- perf stat -x, -o target/perf-results/perf_20260214_143734/artifacts/perf_stat_raptorq_encode_k32.csv -- cargo bench --bench raptorq_benchmark raptorq_e2e/encode/k=32_sym=1024 -- --noplot --sample-size 20 --measurement-time 1 --warm-up-time 1",
+      "command": "rch exec -- perf stat -x, -o target/perf-results/perf_20260214_143734/artifacts/perf_stat_raptorq_encode_k32.csv -- cargo bench --features criterion-benches --bench raptorq_benchmark raptorq_e2e/encode/k=32_sym=1024 -- --noplot --sample-size 20 --measurement-time 1 --warm-up-time 1",
       "status": "blocked",
       "reason": "perf_event_paranoid=4 denies non-privileged perf counters"
     },

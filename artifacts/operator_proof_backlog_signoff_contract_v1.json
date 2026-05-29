@@ -90,7 +90,7 @@
         "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_rch.log",
         "tests/artifacts/perf/asupersync-xeh8m0.3/hotspot_table.md"
       ],
-      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision",
       "remote_exit_status": 101,
       "first_blocker": {
         "file": "os-thread-local-0.1.3/src/lib.rs",

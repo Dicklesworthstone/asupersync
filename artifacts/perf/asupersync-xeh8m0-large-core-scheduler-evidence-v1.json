@@ -76,7 +76,7 @@
   },
   "proof_commands": [
     "jq empty artifacts/perf/asupersync-xeh8m0-large-core-scheduler-evidence-v1.json",
-    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision"
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision"
   ],
   "closeout_requirements": [
     "Run the rch-routed cargo bench command on a host with at least 64 logical CPUs and 256 GiB RAM, or record a no_win verdict that the available worker class cannot prove the claim.",

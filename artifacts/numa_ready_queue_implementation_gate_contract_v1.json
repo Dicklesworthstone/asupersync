@@ -104,7 +104,7 @@
     "json_probe": "jq empty artifacts/numa_ready_queue_implementation_gate_contract_v1.json",
     "format_check": "rustfmt --edition 2024 --check tests/numa_ready_queue_implementation_gate_contract.rs",
     "remote_required_contract_test": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_boldtower_numa_ready_queue_gate CARGO_INCREMENTAL=0 cargo test -p asupersync --test numa_ready_queue_implementation_gate_contract -- --nocapture",
-    "benchmark_smoke": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_boldtower_numa_gate_bench CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+    "benchmark_smoke": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_boldtower_numa_gate_bench CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
     "local_fallback_policy": "A local rch fallback marker is a fail-closed gate rejection and cannot count as benchmark or contract evidence."
   },
   "forbidden_command_fragments": [
@@ -114,7 +114,7 @@
     "git worktree add",
     "git checkout -b",
     "git switch -c",
-    "cargo bench -p asupersync --bench scheduler_benchmark",
+    "cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark",
     "cargo test -p asupersync --test numa_ready_queue_implementation_gate_contract"
   ],
   "scenarios": [
@@ -138,7 +138,7 @@
         "kernel": "6.8.0",
         "rustc": "rustc 1.91.0-nightly",
         "cargo": "cargo 1.91.0-nightly",
-        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_gate_before cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_gate_before cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
         "criterion_sample_count": 10,
         "lanes": [
           {
@@ -218,7 +218,7 @@
         "kernel": "6.8.0",
         "rustc": "rustc 1.91.0-nightly",
         "cargo": "cargo 1.91.0-nightly",
-        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_gate_after cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_gate_after cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
         "criterion_sample_count": 10,
         "lanes": [
           {
@@ -333,7 +333,7 @@
         "kernel": "6.8.0",
         "rustc": "rustc 1.91.0-nightly",
         "cargo": "cargo 1.91.0-nightly",
-        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_after_only cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+        "command_line": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_numa_after_only cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
         "criterion_sample_count": 10,
         "lanes": [],
         "fairness_counters": {
