@@ -34,6 +34,113 @@ mod common {
     }
 }
 
+fn long_running_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("ping -n 100 127.0.0.1 >NUL");
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sleep");
+        command.arg("100");
+        command
+    }
+}
+
+fn echo_line_command(line: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(format!("echo {line}"));
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("printf");
+        command.arg("%s\n").arg(line);
+        command
+    }
+}
+
+fn assert_stdout_line(bytes: &[u8], expected: &str) {
+    let line = String::from_utf8(bytes.to_vec()).expect("child output must be valid UTF-8");
+    assert_eq!(line.trim_end_matches(['\r', '\n']), expected);
+}
+
+#[cfg(unix)]
+fn assert_process_not_running_after_drop(pid: u32, context: &str) {
+    #[allow(clippy::cast_possible_wrap)]
+    let pid = pid as libc::pid_t;
+
+    loop {
+        let mut status: libc::c_int = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == -1 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            assert_eq!(
+                err.raw_os_error(),
+                Some(libc::ECHILD),
+                "{context}: unexpected waitpid error after kill_on_drop"
+            );
+            return;
+        }
+
+        assert_ne!(
+            waited, pid,
+            "{context}: kill_on_drop terminated the child but left it waitable"
+        );
+        assert_eq!(
+            waited, 0,
+            "{context}: unexpected waitpid result after kill_on_drop"
+        );
+
+        let probe = unsafe { libc::kill(pid, 0) };
+        assert_ne!(
+            probe, 0,
+            "{context}: child process is still alive after kill_on_drop"
+        );
+        return;
+    }
+}
+
+#[cfg(windows)]
+fn assert_process_not_running_after_drop(pid: u32, context: &str) {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+    };
+
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE_ACCESS,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return;
+    }
+
+    let wait_result = unsafe { WaitForSingleObject(handle, 0) };
+    unsafe {
+        CloseHandle(handle);
+    }
+
+    assert_eq!(
+        wait_result, WAIT_OBJECT_0,
+        "{context}: child process is still running after kill_on_drop"
+    );
+}
+
 // ── FC: FS Cancel-Safety ─────────────────────────────────────────────
 
 #[test]
@@ -99,8 +206,7 @@ fn fc_05_file_metadata_cancel_safe() {
 fn pc_01_kill_on_drop_prevents_zombie() {
     let pid;
     {
-        let child = Command::new("sleep")
-            .arg("100")
+        let child = long_running_command()
             .kill_on_drop(true)
             .spawn()
             .expect("spawn");
@@ -108,17 +214,12 @@ fn pc_01_kill_on_drop_prevents_zombie() {
         // child dropped here — kill_on_drop sends SIGKILL
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
-    #[allow(clippy::cast_possible_wrap)]
-    let pid_i32 = pid as i32;
-    unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), libc::WNOHANG) };
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let ret = unsafe { libc::kill(pid_i32, 0) };
-    assert_ne!(ret, 0, "Process should be gone after kill_on_drop");
+    assert_process_not_running_after_drop(pid, "pc_01");
 }
 
 #[test]
 fn pc_02_cancelled_wait_leaves_process_running() {
-    let mut child = Command::new("sleep").arg("100").spawn().expect("spawn");
+    let mut child = long_running_command().spawn().expect("spawn");
     // try_wait simulates a cancelled wait — process still running
     let result = child.try_wait().expect("try_wait");
     assert!(result.is_none());
@@ -130,8 +231,7 @@ fn pc_02_cancelled_wait_leaves_process_running() {
 #[test]
 fn pc_03_wait_async_cancel_safe() {
     let output = futures_lite::future::block_on(async {
-        let child = Command::new("echo")
-            .arg("cancel_safe")
+        let child = echo_line_command("cancel_safe")
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn");
@@ -140,7 +240,7 @@ fn pc_03_wait_async_cancel_safe() {
     })
     .expect("output");
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"cancel_safe\n");
+    assert_stdout_line(&output.stdout, "cancel_safe");
 }
 
 #[test]
@@ -148,8 +248,7 @@ fn pc_04_multiple_children_kill_on_drop() {
     // Spawn multiple children, all with kill_on_drop
     let mut pids = Vec::new();
     for _ in 0..3 {
-        let child = Command::new("sleep")
-            .arg("100")
+        let child = long_running_command()
             .kill_on_drop(true)
             .spawn()
             .expect("spawn");
@@ -157,16 +256,8 @@ fn pc_04_multiple_children_kill_on_drop() {
         // child dropped each iteration
     }
     std::thread::sleep(std::time::Duration::from_millis(150));
-    for pid in &pids {
-        #[allow(clippy::cast_possible_wrap)]
-        let pid_i32 = *pid as i32;
-        unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), libc::WNOHANG) };
-    }
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    for pid in &pids {
-        #[allow(clippy::cast_possible_wrap)]
-        let ret = unsafe { libc::kill(*pid as i32, 0) };
-        assert_ne!(ret, 0, "Child {pid} should be dead after kill_on_drop");
+    for (index, pid) in pids.iter().enumerate() {
+        assert_process_not_running_after_drop(*pid, &format!("pc_04 child {index}"));
     }
 }
 
@@ -237,14 +328,13 @@ fn ic_01_file_and_process_concurrent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("concurrent.txt");
 
-    let output = Command::new("echo")
-        .arg("process_output")
+    let output = echo_line_command("process_output")
         .stdout(Stdio::piped())
         .output()
         .expect("process output");
 
     std::fs::write(&path, &output.stdout).expect("file write");
-    assert_eq!(std::fs::read(&path).expect("read"), b"process_output\n");
+    assert_stdout_line(&std::fs::read(&path).expect("read"), "process_output");
 }
 
 #[test]
@@ -253,7 +343,7 @@ fn ic_02_process_kill_during_file_write() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("kill_during_write.txt");
 
-    let mut child = Command::new("sleep").arg("100").spawn().expect("spawn");
+    let mut child = long_running_command().spawn().expect("spawn");
 
     std::fs::write(&path, b"written_before_kill").expect("write");
     child.kill().expect("kill");
@@ -268,7 +358,7 @@ fn ic_03_shutdown_kills_processes() {
     let controller = asupersync::signal::ShutdownController::new();
     let receiver = controller.subscribe();
 
-    let mut child = Command::new("sleep").arg("100").spawn().expect("spawn");
+    let mut child = long_running_command().spawn().expect("spawn");
 
     // Simulate shutdown signal
     controller.shutdown();
@@ -286,8 +376,7 @@ fn ic_04_shutdown_with_kill_on_drop() {
     let controller = asupersync::signal::ShutdownController::new();
 
     {
-        let _child = Command::new("sleep")
-            .arg("100")
+        let _child = long_running_command()
             .kill_on_drop(true)
             .spawn()
             .expect("spawn");
@@ -305,8 +394,7 @@ fn ic_05_file_cleanup_after_process_exit() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("process_output.txt");
 
-    let output = Command::new("echo")
-        .arg("cleanup_test")
+    let output = echo_line_command("cleanup_test")
         .stdout(Stdio::piped())
         .output()
         .expect("output");

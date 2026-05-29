@@ -98,6 +98,169 @@ mod common {
     }
 }
 
+fn long_running_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("ping -n 100 127.0.0.1 >NUL");
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sleep");
+        command.arg("100");
+        command
+    }
+}
+
+fn echo_line_command(line: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(format!("echo {line}"));
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("printf");
+        command.arg("%s\n").arg(line);
+        command
+    }
+}
+
+fn uppercase_pipe_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "'hello' | ForEach-Object { $_.ToUpperInvariant() }",
+        ]);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf '%s\n' hello | tr 'a-z' 'A-Z'");
+        command
+    }
+}
+
+fn env_echo_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("echo %E2E_VAR1%-%E2E_VAR2%");
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("printf '%s\n' \"$E2E_VAR1-$E2E_VAR2\"");
+        command
+    }
+}
+
+fn failing_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("exit /B 1");
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("exit 1");
+        command
+    }
+}
+
+fn assert_stdout_line(bytes: &[u8], expected: &str) {
+    let line = String::from_utf8(bytes.to_vec()).expect("child output must be valid UTF-8");
+    assert_eq!(line.trim_end_matches(['\r', '\n']), expected);
+}
+
+#[cfg(unix)]
+fn assert_process_not_running_after_drop(pid: u32, context: &str) {
+    #[allow(clippy::cast_possible_wrap)]
+    let pid = pid as libc::pid_t;
+
+    loop {
+        let mut status: libc::c_int = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == -1 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            assert_eq!(
+                err.raw_os_error(),
+                Some(libc::ECHILD),
+                "{context}: unexpected waitpid error after kill_on_drop"
+            );
+            return;
+        }
+
+        assert_ne!(
+            waited, pid,
+            "{context}: kill_on_drop terminated the child but left it waitable"
+        );
+        assert_eq!(
+            waited, 0,
+            "{context}: unexpected waitpid result after kill_on_drop"
+        );
+
+        let probe = unsafe { libc::kill(pid, 0) };
+        assert_ne!(
+            probe, 0,
+            "{context}: child process is still alive after kill_on_drop"
+        );
+        return;
+    }
+}
+
+#[cfg(windows)]
+fn assert_process_not_running_after_drop(pid: u32, context: &str) {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+    };
+
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE_ACCESS,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return;
+    }
+
+    let wait_result = unsafe { WaitForSingleObject(handle, 0) };
+    unsafe {
+        CloseHandle(handle);
+    }
+
+    assert_eq!(
+        wait_result, WAIT_OBJECT_0,
+        "{context}: child process is still running after kill_on_drop"
+    );
+}
+
 // ── EF: File Lifecycle ──────────────────────────────────────────────
 
 #[test]
@@ -227,8 +390,7 @@ fn ep_01_spawn_pipe_capture_exit() {
 
     log.log("setup", "process", "prepare", "ok", "echo test");
 
-    let output = Command::new("echo")
-        .arg("e2e_output")
+    let output = echo_line_command("e2e_output")
         .stdout(Stdio::piped())
         .output()
         .expect("output");
@@ -242,7 +404,7 @@ fn ep_01_spawn_pipe_capture_exit() {
     );
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"e2e_output\n");
+    assert_stdout_line(&output.stdout, "e2e_output");
     log.log(
         "verify",
         "process",
@@ -260,10 +422,7 @@ fn ep_02_pipe_chain_a_to_b() {
 
     log.log("setup", "process", "prepare", "ok", "pipe chain");
 
-    // echo "hello" | tr 'a-z' 'A-Z'
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("echo hello | tr 'a-z' 'A-Z'")
+    let output = uppercase_pipe_command()
         .stdout(Stdio::piped())
         .output()
         .expect("output");
@@ -271,7 +430,7 @@ fn ep_02_pipe_chain_a_to_b() {
     log.log("execute", "process", "pipe_chain", "ok", "echo | tr");
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"HELLO\n");
+    assert_stdout_line(&output.stdout, "HELLO");
     log.log(
         "verify",
         "process",
@@ -289,7 +448,7 @@ fn ep_03_spawn_sigterm_wait() {
 
     log.log("setup", "process", "prepare", "ok", "sigterm test");
 
-    let mut child = Command::new("sleep").arg("100").spawn().expect("spawn");
+    let mut child = long_running_command().spawn().expect("spawn");
 
     log.log(
         "execute",
@@ -299,19 +458,38 @@ fn ep_03_spawn_sigterm_wait() {
         format!("pid={}", child.id().unwrap_or(0)),
     );
 
-    child.signal(libc::SIGTERM).expect("signal");
-    log.log("execute", "process", "sigterm", "ok", "sent");
+    #[cfg(unix)]
+    {
+        child.signal(libc::SIGTERM).expect("signal");
+        log.log("execute", "process", "sigterm", "ok", "sent");
 
-    let status = child.wait().expect("wait");
-    assert!(!status.success());
-    assert_eq!(status.signal(), Some(libc::SIGTERM));
-    log.log(
-        "verify",
-        "process",
-        "signal_verify",
-        "ok",
-        "terminated by SIGTERM",
-    );
+        let status = child.wait().expect("wait");
+        assert!(!status.success());
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        log.log(
+            "verify",
+            "process",
+            "signal_verify",
+            "ok",
+            "terminated by SIGTERM",
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        child.kill().expect("kill");
+        log.log("execute", "process", "terminate", "ok", "sent");
+
+        let status = child.wait().expect("wait");
+        assert!(!status.success());
+        log.log(
+            "verify",
+            "process",
+            "signal_verify",
+            "ok",
+            "terminated by kill",
+        );
+    }
 
     log.assert_all_ok();
 }
@@ -323,8 +501,7 @@ fn ep_04_kill_on_drop_nested_scope() {
 
     let pid;
     {
-        let child = Command::new("sleep")
-            .arg("100")
+        let child = long_running_command()
             .kill_on_drop(true)
             .spawn()
             .expect("spawn");
@@ -335,13 +512,7 @@ fn ep_04_kill_on_drop_nested_scope() {
     log.log("execute", "process", "scope_exit", "ok", "child dropped");
 
     std::thread::sleep(std::time::Duration::from_millis(100));
-    #[allow(clippy::cast_possible_wrap)]
-    let pid_i32 = pid as i32;
-    unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), libc::WNOHANG) };
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let ret = unsafe { libc::kill(pid_i32, 0) };
-    assert_ne!(ret, 0);
+    assert_process_not_running_after_drop(pid, "EP-04");
     log.log("verify", "process", "zombie_check", "ok", "no zombie");
 
     log.assert_all_ok();
@@ -352,9 +523,7 @@ fn ep_05_process_env_isolation() {
     let mut log = ScenarioLog::new("EP-05");
     log.log("setup", "process", "prepare", "ok", "env isolation");
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("echo $E2E_VAR1-$E2E_VAR2")
+    let output = env_echo_command()
         .env("E2E_VAR1", "alpha")
         .env("E2E_VAR2", "beta")
         .stdout(Stdio::piped())
@@ -364,7 +533,7 @@ fn ep_05_process_env_isolation() {
     log.log("execute", "process", "spawn_with_env", "ok", "2 vars set");
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"alpha-beta\n");
+    assert_stdout_line(&output.stdout, "alpha-beta");
     log.log("verify", "process", "env_verify", "ok", "vars propagated");
 
     log.assert_all_ok();
@@ -460,8 +629,7 @@ fn ex_01_process_writes_file_parent_reads() {
     log.log("setup", "cross", "prepare", "ok", "process -> file");
 
     // Process writes to stdout
-    let output = Command::new("echo")
-        .arg("process_data")
+    let output = echo_line_command("process_data")
         .stdout(Stdio::piped())
         .output()
         .expect("output");
@@ -474,7 +642,7 @@ fn ex_01_process_writes_file_parent_reads() {
 
     // Verify
     let content = std::fs::read(&path).expect("read");
-    assert_eq!(content, b"process_data\n");
+    assert_stdout_line(&content, "process_data");
     log.log("verify", "cross", "data_flow", "ok", "end-to-end correct");
 
     log.assert_all_ok();
@@ -495,8 +663,7 @@ fn ex_02_shutdown_kills_process_file_cleanup() {
     // Spawn process with kill_on_drop
     let pid;
     {
-        let child = Command::new("sleep")
-            .arg("100")
+        let child = long_running_command()
             .kill_on_drop(true)
             .spawn()
             .expect("spawn");
@@ -516,12 +683,7 @@ fn ex_02_shutdown_kills_process_file_cleanup() {
 
     // Verify no zombie
     std::thread::sleep(std::time::Duration::from_millis(100));
-    #[allow(clippy::cast_possible_wrap)]
-    let pid_i32 = pid as i32;
-    unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), libc::WNOHANG) };
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let ret = unsafe { libc::kill(pid_i32, 0) };
-    assert_ne!(ret, 0);
+    assert_process_not_running_after_drop(pid, "EX-02");
     log.log("verify", "cross", "quiescence", "ok", "no zombie, no file");
 
     log.assert_all_ok();
@@ -540,8 +702,7 @@ fn ex_03_file_process_signal_concurrent_lifecycle() {
     log.log("execute", "file", "write", "ok", "file created");
 
     // Process operations
-    let output = Command::new("echo")
-        .arg("concurrent_process")
+    let output = echo_line_command("concurrent_process")
         .stdout(Stdio::piped())
         .output()
         .expect("output");
@@ -582,11 +743,7 @@ fn ex_04_crash_recovery_retry() {
     log.log("setup", "cross", "prepare", "ok", "crash recovery");
 
     // First attempt: process "crashes" (exits with error)
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("exit 1")
-        .output()
-        .expect("output");
+    let output = failing_command().output().expect("output");
     assert!(!output.status.success());
     log.log("execute", "process", "attempt_1", "ok", "expected failure");
 
@@ -597,8 +754,7 @@ fn ex_04_crash_recovery_retry() {
     log.log("execute", "cross", "cleanup", "ok", "partial state cleared");
 
     // Retry: successful attempt
-    let output = Command::new("echo")
-        .arg("recovered")
+    let output = echo_line_command("recovered")
         .stdout(Stdio::piped())
         .output()
         .expect("output");
@@ -607,7 +763,7 @@ fn ex_04_crash_recovery_retry() {
     log.log("execute", "cross", "retry", "ok", "recovery succeeded");
 
     // Verify
-    assert_eq!(std::fs::read(&path).expect("read"), b"recovered\n");
+    assert_stdout_line(&std::fs::read(&path).expect("read"), "recovered");
     log.log(
         "verify",
         "cross",

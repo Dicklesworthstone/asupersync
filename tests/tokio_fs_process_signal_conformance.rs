@@ -35,6 +35,183 @@ mod common {
     }
 }
 
+fn successful_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("exit /B 0");
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new("true")
+    }
+}
+
+fn long_running_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("ping -n 100 127.0.0.1 >NUL");
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sleep");
+        command.arg("100");
+        command
+    }
+}
+
+fn echo_line_command(line: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(format!("echo {line}"));
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("printf");
+        command.arg("%s\n").arg(line);
+        command
+    }
+}
+
+fn large_stdout_stderr_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "$out='A' * 131072; $err='B' * 131072; [Console]::Out.Write($out); [Console]::Error.Write($err)",
+        ]);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr '\\0' 'A'; dd if=/dev/zero bs=1024 count=128 | tr '\\0' 'B' >&2");
+        command
+    }
+}
+
+fn missing_command() -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg("nonexistent_command_xyz_12345");
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("nonexistent_command_xyz_12345");
+        command
+    }
+}
+
+fn full_path_echo_command(line: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let comspec = std::env::var_os("ComSpec")
+            .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows\System32\cmd.exe"));
+        let mut command = Command::new(comspec);
+        command.arg("/C").arg(format!("echo {line}"));
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("/bin/echo");
+        command.arg(line);
+        command
+    }
+}
+
+fn assert_stdout_line(bytes: &[u8], expected: &str) {
+    let line = String::from_utf8(bytes.to_vec()).expect("child output must be valid UTF-8");
+    assert_eq!(line.trim_end_matches(['\r', '\n']), expected);
+}
+
+#[cfg(unix)]
+fn assert_process_not_running_after_drop(pid: u32, context: &str) {
+    #[allow(clippy::cast_possible_wrap)]
+    let pid = pid as libc::pid_t;
+
+    loop {
+        let mut status: libc::c_int = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if waited == -1 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            assert_eq!(
+                err.raw_os_error(),
+                Some(libc::ECHILD),
+                "{context}: unexpected waitpid error after kill_on_drop"
+            );
+            return;
+        }
+
+        assert_ne!(
+            waited, pid,
+            "{context}: kill_on_drop terminated the child but left it waitable"
+        );
+        assert_eq!(
+            waited, 0,
+            "{context}: unexpected waitpid result after kill_on_drop"
+        );
+
+        let probe = unsafe { libc::kill(pid, 0) };
+        assert_ne!(
+            probe, 0,
+            "{context}: child process is still alive after kill_on_drop"
+        );
+        return;
+    }
+}
+
+#[cfg(windows)]
+fn assert_process_not_running_after_drop(pid: u32, context: &str) {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+    };
+
+    const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE_ACCESS,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return;
+    }
+
+    let wait_result = unsafe { WaitForSingleObject(handle, 0) };
+    unsafe {
+        CloseHandle(handle);
+    }
+
+    assert_eq!(
+        wait_result, WAIT_OBJECT_0,
+        "{context}: child process is still running after kill_on_drop"
+    );
+}
+
 // ── FF: Filesystem Fault Injection ──────────────────────────────────
 
 #[test]
@@ -194,7 +371,7 @@ fn pf_01_spawn_nonexistent_binary() {
 
 #[test]
 fn pf_02_double_wait_returns_error() {
-    let mut child = Command::new("true").spawn().expect("spawn");
+    let mut child = successful_command().spawn().expect("spawn");
     let status = child.wait().expect("first wait");
     assert!(status.success());
 
@@ -210,17 +387,28 @@ fn pf_02_double_wait_returns_error() {
 
 #[test]
 fn pf_03_signal_on_consumed_handle() {
-    let mut child = Command::new("true").spawn().expect("spawn");
+    let mut child = successful_command().spawn().expect("spawn");
     child.wait().expect("wait");
 
-    // Signal after wait should fail
-    let result = child.signal(libc::SIGTERM);
-    assert!(result.is_err(), "Signal on consumed handle should fail");
+    #[cfg(unix)]
+    {
+        // Signal after wait should fail
+        let result = child.signal(libc::SIGTERM);
+        assert!(result.is_err(), "Signal on consumed handle should fail");
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows has no Unix signal API; the equivalent consumed-handle
+        // termination operation must still fail.
+        let result = child.start_kill();
+        assert!(result.is_err(), "Terminate on consumed handle should fail");
+    }
 }
 
 #[test]
 fn pf_04_kill_on_consumed_handle() {
-    let mut child = Command::new("true").spawn().expect("spawn");
+    let mut child = successful_command().spawn().expect("spawn");
     child.wait().expect("wait");
 
     // Kill after wait should fail
@@ -232,9 +420,7 @@ fn pf_04_kill_on_consumed_handle() {
 fn pf_05_large_stdout_stderr_no_deadlock() {
     // Spawn a process that writes >64KB to both stdout and stderr simultaneously
     // wait_with_output must drain both without deadlocking
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg("dd if=/dev/zero bs=1024 count=128 2>/dev/null | tr '\\0' 'A'; dd if=/dev/zero bs=1024 count=128 | tr '\\0' 'B' >&2")
+    let child = large_stdout_stderr_command()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -258,7 +444,7 @@ fn pf_05_large_stdout_stderr_no_deadlock() {
 #[test]
 fn pf_06_stdin_dropped_after_child_exits() {
     // After child exits and handle is waited, stdin take returns None
-    let mut child = Command::new("true")
+    let mut child = successful_command()
         .stdin(Stdio::piped())
         .spawn()
         .expect("spawn");
@@ -275,7 +461,7 @@ fn pf_06_stdin_dropped_after_child_exits() {
 
 #[test]
 fn pf_07_try_wait_returns_none_for_running() {
-    let mut child = Command::new("sleep").arg("100").spawn().expect("spawn");
+    let mut child = long_running_command().spawn().expect("spawn");
 
     let result = child.try_wait().expect("try_wait");
     assert!(
@@ -289,39 +475,43 @@ fn pf_07_try_wait_returns_none_for_running() {
 
 #[test]
 fn pf_08_exit_code_127_command_not_found_at_exec() {
-    // sh -c with nonexistent command gives exit code 127
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("nonexistent_command_xyz_12345")
-        .output()
-        .expect("output");
+    let output = missing_command().output().expect("output");
     assert!(!output.status.success());
-    assert_eq!(
-        output.status.code(),
-        Some(127),
-        "Exit code should be 127 for command not found"
-    );
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            output.status.code(),
+            Some(127),
+            "Exit code should be 127 for command not found"
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "Windows command-not-found should exit non-zero"
+        );
+    }
 }
 
 #[test]
 fn pf_09_env_clear_with_full_path_works() {
-    let output = Command::new("/bin/echo")
-        .arg("works")
+    let output = full_path_echo_command("works")
         .env_clear()
         .stdout(Stdio::piped())
         .output()
         .expect("output");
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"works\n");
+    assert_stdout_line(&output.stdout, "works");
 }
 
 #[test]
 fn pf_10_kill_on_drop_rapid_scope_exit() {
     let pid;
     {
-        let child = Command::new("sleep")
-            .arg("100")
+        let child = long_running_command()
             .kill_on_drop(true)
             .spawn()
             .expect("spawn");
@@ -330,20 +520,13 @@ fn pf_10_kill_on_drop_rapid_scope_exit() {
     }
 
     std::thread::sleep(std::time::Duration::from_millis(100));
-    #[allow(clippy::cast_possible_wrap)]
-    let pid_i32 = pid as i32;
-    // Reap zombie if any
-    unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), libc::WNOHANG) };
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let ret = unsafe { libc::kill(pid_i32, 0) };
-    assert_ne!(ret, 0, "Process {pid} should be gone after kill_on_drop");
+    assert_process_not_running_after_drop(pid, "PF-10");
 }
 
 #[test]
 fn pf_11_fast_exit_before_first_try_wait() {
     // Spawn a process that exits immediately
-    let mut child = Command::new("true").spawn().expect("spawn");
+    let mut child = successful_command().spawn().expect("spawn");
     // Small delay to ensure it exits
     std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -494,7 +677,7 @@ fn cf_01_file_write_and_process_kill_interleaved() {
     std::fs::write(&path, b"important data").expect("write");
 
     // Spawn and kill a process
-    let mut child = Command::new("sleep").arg("100").spawn().expect("spawn");
+    let mut child = long_running_command().spawn().expect("spawn");
     child.kill().expect("kill");
     child.wait().expect("reap");
 
@@ -508,8 +691,7 @@ fn cf_02_shutdown_during_process_wait() {
     let controller = ShutdownController::new();
     let receiver = controller.subscribe();
 
-    let child = Command::new("echo")
-        .arg("signal_test")
+    let child = echo_line_command("signal_test")
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn");
@@ -521,7 +703,7 @@ fn cf_02_shutdown_during_process_wait() {
     // Process output is still captured correctly
     let output = child.wait_with_output().expect("wait_with_output");
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"signal_test\n");
+    assert_stdout_line(&output.stdout, "signal_test");
 }
 
 #[test]
@@ -547,8 +729,7 @@ fn cf_04_kill_on_drop_during_shutdown() {
 
     let pid;
     {
-        let child = Command::new("sleep")
-            .arg("100")
+        let child = long_running_command()
             .kill_on_drop(true)
             .spawn()
             .expect("spawn");
@@ -559,16 +740,7 @@ fn cf_04_kill_on_drop_during_shutdown() {
     }
 
     std::thread::sleep(std::time::Duration::from_millis(100));
-    #[allow(clippy::cast_possible_wrap)]
-    let pid_i32 = pid as i32;
-    unsafe { libc::waitpid(pid_i32, std::ptr::null_mut(), libc::WNOHANG) };
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let ret = unsafe { libc::kill(pid_i32, 0) };
-    assert_ne!(
-        ret, 0,
-        "Process should be gone after kill_on_drop during shutdown"
-    );
+    assert_process_not_running_after_drop(pid, "CF-04");
 }
 
 // ── CT: Contract Artifact Validation ────────────────────────────────
