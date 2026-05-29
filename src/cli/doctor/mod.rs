@@ -20113,7 +20113,9 @@ impl RuntimeState {
                 artifact_id: "artifact-benchmark".to_string(),
                 artifact_type: "benchmark".to_string(),
                 source_path: "target/criterion/summary.txt".to_string(),
-                replay_pointer: "rch exec -- cargo bench --bench doctor_ingestion".to_string(),
+                replay_pointer:
+                    "rch exec -- cargo bench --features criterion-benches --bench doctor_ingestion"
+                        .to_string(),
                 content: "throughput_gib_s=12.4\nlatency_p95_ms=4.1\n".to_string(),
             },
             RuntimeArtifact {

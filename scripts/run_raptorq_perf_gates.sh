@@ -83,7 +83,7 @@ EOF
 
     # Run the benchmark suite
     if rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo bench --bench raptorq_benchmark \
-        --features simd-intrinsics \
+        --features simd-intrinsics,criterion-benches \
         -- --output-format json > "$CURRENT_RESULTS" 2>&1; then
         reject_rch_local_fallback_file "$CURRENT_RESULTS"
 
@@ -113,6 +113,7 @@ EOF
 
     # Run critical workloads only
     if rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo bench --bench raptorq_benchmark \
+        --features criterion-benches \
         -- --warm-up-time 1 --measurement-time 5 \
         'gf256_primitives' 'raptorq_e2e/encode' \
         --output-format json > "$CURRENT_RESULTS" 2>&1; then

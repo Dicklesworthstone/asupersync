@@ -266,7 +266,7 @@ struct SmokeSystem {
 fn smoke_report_format_parses() {
     let sample = r#"{
         "generated_at": "2026-02-03T19:00:00Z",
-        "command": "cargo bench --bench phase0_baseline",
+        "command": "cargo bench --features criterion-benches --bench phase0_baseline",
         "seed": "3735928559",
         "criterion_dir": "target/criterion",
         "baseline_path": "baselines/baseline_20260203_190000.json",

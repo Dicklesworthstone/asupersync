@@ -518,7 +518,9 @@ fn capture_baseline_default_run_uses_rch_override() {
             .expect("command field should be present");
         assert!(
             command.contains("exec -- env RUSTFLAGS=-C force-frame-pointers=yes CARGO_TARGET_DIR=")
-                && command.contains(" cargo bench --profile release-perf --bench phase0_baseline"),
+                && command.contains(" cargo bench --profile release-perf")
+                && command.contains(" --features criterion-benches")
+                && command.contains(" --bench phase0_baseline"),
             "run events must record the isolated rch-wrapped bench command: {command}"
         );
     }
@@ -542,8 +544,9 @@ fn capture_baseline_default_run_uses_rch_override() {
     assert!(
         smoke_command
             .contains("exec -- env RUSTFLAGS=-C force-frame-pointers=yes CARGO_TARGET_DIR=")
-            && smoke_command
-                .contains(" cargo bench --profile release-perf --bench phase0_baseline"),
+            && smoke_command.contains(" cargo bench --profile release-perf")
+            && smoke_command.contains(" --features criterion-benches")
+            && smoke_command.contains(" --bench phase0_baseline"),
         "smoke report must record the isolated rch-wrapped bench command: {smoke_command}"
     );
     assert_eq!(

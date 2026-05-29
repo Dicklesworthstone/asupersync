@@ -33,7 +33,7 @@ Options:
   -h, --help                     Show help
 
 Examples:
-  rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_alloc_census" cargo bench --bench scheduler_benchmark --no-run
+  rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_alloc_census" cargo bench --features criterion-benches --bench scheduler_benchmark --no-run
   ./scripts/alloc_census.sh --tool valgrind --cmd "path/to/prebuilt-benchmark"
   ./scripts/alloc_census.sh --flamegraph
 USAGE

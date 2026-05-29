@@ -9,23 +9,24 @@ Asupersync uses [Criterion.rs](https://crates.io/crates/criterion) for statistic
 ```bash
 export BENCH_CARGO_PROFILE=release-perf
 export BENCH_RUSTFLAGS="-C force-frame-pointers=yes"
+export BENCH_FEATURES=criterion-benches
 
 # Run all benchmarks (saves to target/criterion/)
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE"
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES"
 
 # Run specific benchmark suite
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench phase0_baseline
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench scheduler_benchmark
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench protocol_benchmark
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench timer_wheel
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench tracing_overhead
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench reactor_benchmark
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" --bench phase0_baseline
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" --bench scheduler_benchmark
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" --bench protocol_benchmark
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" --bench timer_wheel
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" --bench tracing_overhead
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" --bench reactor_benchmark
 
 # Save a named baseline for comparison
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" -- --save-baseline initial --noplot
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" -- --save-baseline initial --noplot
 
 # Compare against a baseline
-rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" -- --baseline initial --noplot
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" -- --baseline initial --noplot
 ```
 
 ## Extreme Optimization Loop (bd-4bfy4)
@@ -59,7 +60,7 @@ available):
 ```json
 {
   "generated_at": "2026-02-03T19:00:00Z",
-  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench phase0_baseline",
+  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --features criterion-benches --bench phase0_baseline",
   "seed": "3735928559",
   "criterion_dir": "target/criterion",
   "baseline_path": "baselines/baseline_20260203_190000.json",
@@ -148,13 +149,13 @@ Requires `cargo-flamegraph` and `perf` on Linux.
 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo install flamegraph
 
 # Scheduler hot path (release build with frame pointers)
-rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo flamegraph --bench scheduler_benchmark -- --bench
+rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo flamegraph --features criterion-benches --bench scheduler_benchmark -- --bench
 
 # Cancellation/combinator path
-rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo flamegraph --bench protocol_benchmark -- --bench
+rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo flamegraph --features criterion-benches --bench protocol_benchmark -- --bench
 
 # Trace/DPOR path
-rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo flamegraph --bench tracing_overhead -- --bench
+rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo flamegraph --features criterion-benches --bench tracing_overhead -- --bench
 ```
 
 Notes:
@@ -173,7 +174,7 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo
 hyperfine \
   --warmup 2 \
   --export-json baselines/hyperfine/scheduler_benchmark.json \
-  'rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench scheduler_benchmark'
+  'rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --features criterion-benches --bench scheduler_benchmark'
 ```
 
 Notes:
@@ -189,7 +190,7 @@ Preferred path uses the built-in census script:
 ./scripts/alloc_census.sh
 
 # Scheduler benchmark with explicit tool
-./scripts/alloc_census.sh --tool heaptrack --cmd "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench scheduler_benchmark"
+./scripts/alloc_census.sh --tool heaptrack --cmd "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --features criterion-benches --bench scheduler_benchmark"
 ```
 
 Alternative manual tools:
@@ -214,7 +215,7 @@ Notes:
 
 ```bash
 # High-level syscall counts + time spent
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs strace -f -c -o /tmp/asupersync_syscalls.txt cargo bench --bench scheduler_benchmark
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs strace -f -c -o /tmp/asupersync_syscalls.txt cargo bench --features criterion-benches --bench scheduler_benchmark
 
 # Inspect the summary
 cat /tmp/asupersync_syscalls.txt
@@ -273,7 +274,7 @@ save dir, comparison settings).
 ```json
 {
   "generated_at": "2026-02-03T19:00:00Z",
-  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench phase0_baseline",
+  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --features criterion-benches --bench phase0_baseline",
   "seed": "3735928559",
   "criterion_dir": "target/criterion",
   "baseline_path": "baselines/baseline_20260203_190000.json",
@@ -407,7 +408,7 @@ Use this template when proposing a performance optimization:
 
 | Metric | Current | Target | Measurement |
 |--------|---------|--------|-------------|
-| p50 latency | X ns | Y ns | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench <name>` |
+| p50 latency | X ns | Y ns | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --features criterion-benches --bench <name>` |
 | p99 latency | X ns | Y ns | |
 | Allocations/op | X | Y | heaptrack or alloc_census |
 | Throughput | X/s | Y/s | |
@@ -577,7 +578,7 @@ modifying code or outputs.
 ./scripts/alloc_census.sh
 
 # Explicit tool + benchmark
-./scripts/alloc_census.sh --tool valgrind --cmd "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench scheduler_benchmark"
+./scripts/alloc_census.sh --tool valgrind --cmd "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --features criterion-benches --bench scheduler_benchmark"
 
 # Optional flamegraph capture (requires cargo-flamegraph)
 ./scripts/alloc_census.sh --flamegraph
@@ -590,7 +591,7 @@ artifacts and summaries. Example schema:
 {
   "generated_at": "2026-02-03T03:21:00Z",
   "tool": "heaptrack",
-  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench phase0_baseline",
+  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --features criterion-benches --bench phase0_baseline",
   "artifacts": {
     "raw": "baselines/alloc_census/heaptrack_20260203_032100.1234.gz",
     "summary": "baselines/alloc_census/heaptrack_20260203_032100.txt",
@@ -685,7 +686,7 @@ Recommended CI workflow:
 
 ```yaml
 - rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo test --test golden_outputs  # behavioral equivalence
-- rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile release-perf  # run benchmarks
+- rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile release-perf --features criterion-benches  # run benchmarks
 - ./scripts/capture_baseline.sh --profile release-perf --save baselines/  # archive baseline
 ```
 

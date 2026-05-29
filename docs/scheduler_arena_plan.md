@@ -70,7 +70,7 @@ To measure allocation reduction, run with DHAT or similar allocator profiler:
 
 ```bash
 # With DHAT (requires nightly)
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_arena_docs RUSTFLAGS="-Z sanitizer=memory" cargo bench scheduler
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_arena_docs RUSTFLAGS="-Z sanitizer=memory" cargo bench --features criterion-benches scheduler
 
 # With custom allocator tracking
 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_arena_docs cargo test --lib scheduler -- --nocapture

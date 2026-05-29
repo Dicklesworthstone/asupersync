@@ -32,6 +32,7 @@ RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_capture_baseline_ph
 RUN_OUTPUT_LOG="${RUN_OUTPUT_LOG:-${TMPDIR:-/tmp}/asupersync_capture_baseline_run_$$.log}"
 BASELINE_TMP_PATH="${BASELINE_TMP_PATH:-${TMPDIR:-/tmp}/asupersync_baseline_$$.json}"
 BENCH_CARGO_PROFILE="${BENCH_CARGO_PROFILE:-release-perf}"
+BENCH_FEATURES="${BENCH_FEATURES:-criterion-benches}"
 BENCH_RUSTFLAGS="${BENCH_RUSTFLAGS:--C force-frame-pointers=yes}"
 # gauntlet PERF-001/002/003: append-only ratchet substrate + measured profile.
 BENCH_HISTORY_DIR="${BENCH_HISTORY_DIR:-.bench-history}"
@@ -56,6 +57,7 @@ Options:
   --seed <value>                 Set ASUPERSYNC_SEED for --run/--smoke
   --profile <name>               Profile label recorded in bench-history records
   --cargo-profile <name>         Cargo profile for default benchmark runs (default: release-perf)
+  --bench-features <features>    Cargo features for default benchmark runs (default: criterion-benches)
   --bench-rustflags <flags>      RUSTFLAGS for default benchmark runs (default: -C force-frame-pointers=yes)
   --bench-history                Write latest JSON files plus runs.jsonl to bench-history dir
   --no-bench-history             Disable bench-history writes, overriding env defaults
@@ -117,6 +119,8 @@ while [[ $# -gt 0 ]]; do
         --profile=*) BENCH_PROFILE="${1#--profile=}"; require_arg "--profile" "$BENCH_PROFILE"; shift ;;
         --cargo-profile) require_arg "$1" "${2:-}"; BENCH_CARGO_PROFILE="$2"; shift 2 ;;
         --cargo-profile=*) BENCH_CARGO_PROFILE="${1#--cargo-profile=}"; require_arg "--cargo-profile" "$BENCH_CARGO_PROFILE"; shift ;;
+        --bench-features) require_arg "$1" "${2:-}"; BENCH_FEATURES="$2"; shift 2 ;;
+        --bench-features=*) BENCH_FEATURES="${1#--bench-features=}"; require_arg "--bench-features" "$BENCH_FEATURES"; shift ;;
         --bench-rustflags) require_arg "$1" "${2:-}"; BENCH_RUSTFLAGS="$2"; shift 2 ;;
         --bench-rustflags=*) BENCH_RUSTFLAGS="${1#--bench-rustflags=}"; require_arg "--bench-rustflags" "$BENCH_RUSTFLAGS"; shift ;;
         --bench-history) WRITE_BENCH_HISTORY=1; shift ;;
@@ -149,7 +153,7 @@ if [[ -z "$CMD_STRING" ]]; then
         "$RCH_BIN" exec -- env
         "RUSTFLAGS=${BENCH_RUSTFLAGS}"
         "CARGO_TARGET_DIR=${RCH_TARGET_DIR}"
-        cargo bench --profile "$BENCH_CARGO_PROFILE" --bench phase0_baseline
+        cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" --bench phase0_baseline
     )
 fi
 

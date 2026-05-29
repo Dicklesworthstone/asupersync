@@ -103,7 +103,7 @@ grep -r "Ordering::SeqCst" src/ --include="*.rs" | wc -l
 grep -A 5 -B 5 "fence.*SeqCst" src/runtime/scheduler/worker.rs
 
 # Run benchmarks to measure improvements
-cargo bench --bench memory_ordering_bench
+cargo bench --features criterion-benches --bench memory_ordering_bench
 
 # Verify all tests still pass
 cargo test --lib

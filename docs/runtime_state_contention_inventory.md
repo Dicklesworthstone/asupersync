@@ -580,7 +580,7 @@ class and preferably the same rch worker.
 Focused smoke validation for this audit ran through rch on 2026-05-18:
 
 ```bash
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_amberrabbit_numa_ready_queue_20260518 CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_amberrabbit_numa_ready_queue_20260518 CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1
 ```
 
 Result: remote worker `ts2`, exit 0, `[35.346 us 35.564 us 35.776 us]`

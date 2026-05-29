@@ -149,7 +149,7 @@ This manifest defines the complete set of proof lanes required for ATP release q
 ## Performance & Reliability Proof Lanes
 
 ### R1: Performance Benchmarks
-- **Command**: `rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_r1" cargo bench --bench atp_j5_workflows_bench`
+- **Command**: `rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_r1" cargo bench --features criterion-benches --bench atp_j5_workflows_bench`
 - **Guarantee**: ATP meets performance targets for throughput, latency, and resource utilization
 - **Artifacts**: Performance benchmark results, regression detection, resource utilization metrics
 - **Validation**: Benchmark execution, performance threshold verification, regression analysis

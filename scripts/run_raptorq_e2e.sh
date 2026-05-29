@@ -21,6 +21,10 @@ set -euo pipefail
 #   TEST_THREADS   - cargo test thread count (default: 1)
 #   NO_PREFLIGHT   - set to 1 to skip cargo --no-run preflight
 #   RCH_TARGET_ROOT - root directory for remote Cargo target dirs
+#   RAPTORQ_SIMD_BENCH_FEATURES - Cargo features for SIMD Criterion benches
+#                                 (default: simd-intrinsics,criterion-benches)
+#   RAPTORQ_BENCH_FEATURES      - Cargo features for non-SIMD Criterion benches
+#                                 (default: criterion-benches)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -32,6 +36,8 @@ SCENARIO_FILTER=""
 LIST_ONLY=0
 RUN_VALIDATION_BUNDLE=0
 VALIDATION_TIMEOUT="${VALIDATION_TIMEOUT:-1200}"
+RAPTORQ_SIMD_BENCH_FEATURES="${RAPTORQ_SIMD_BENCH_FEATURES:-simd-intrinsics,criterion-benches}"
+RAPTORQ_BENCH_FEATURES="${RAPTORQ_BENCH_FEATURES:-criterion-benches}"
 
 declare -a SCENARIO_IDS=(
     "RQ-E2E-HAPPY-NO-LOSS"
@@ -329,7 +335,7 @@ validate_dual_policy_probe_contract() {
     local rc=0
     local status="pass"
 
-    repro_cmd="${REPRO_PREFIX}cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05"
+    repro_cmd="${REPRO_PREFIX}cargo bench --bench raptorq_benchmark --features ${RAPTORQ_SIMD_BENCH_FEATURES} -- gf256_dual_policy --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05"
 
     echo ">>> [bundle] ${stage_id}: ${stage_desc}"
     start_s="$(date +%s)"
@@ -380,7 +386,7 @@ validate_dual_policy_probe_contract() {
             (.selected_tuning_prefetch_distance | type == "number" and . >= 0 and floor == .) and
             (.selected_tuning_fusion_shape | type == "string" and length > 0) and
             (.rejected_tuning_candidate_ids | type == "string" and length > 0) and
-            (.command_bundle | type == "string" and test("^(([r]ch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives)")) and
+            (.command_bundle | type == "string" and test("^(([r]ch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives)")) and
             (.decision_artifact_id | type == "string" and length > 0) and
             (.decision_role | type == "string" and length > 0) and
             (.decision_evidence_status | type == "string" and length > 0) and
@@ -418,7 +424,7 @@ validate_dual_policy_probe_contract() {
             (.tail_confidence_proxy == "criterion_interval_high_endpoint_proxy_p95p99") and
             (.replay_pointer | type == "string" and length > 0) and
             (.artifact_path | type == "string" and length > 0) and
-            (.repro_command | type == "string" and test("^(([r]ch exec -- )?cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy)")) and
+            (.repro_command | type == "string" and test("^(([r]ch exec -- )?cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy)")) and
             (if .selected_tuning_candidate_id == "manual-env-override-unbacked"
                 then
                     .tuning_corpus_id == "manual-env-override-unbacked" and
@@ -427,7 +433,7 @@ validate_dual_policy_probe_contract() {
                     .selected_tuning_prefetch_distance == 0 and
                     .selected_tuning_fusion_shape == "unknown" and
                     .rejected_tuning_candidate_ids == "none" and
-                    .command_bundle == ("rch" + " exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives") and
+                    .command_bundle == ("rch" + " exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives") and
                     .decision_artifact_id == "manual_env_override_unbacked" and
                     .decision_role == "runtime_override_not_canonical_profile_selection" and
                     .decision_evidence_status == "runtime-override-unbacked" and
@@ -452,7 +458,7 @@ validate_dual_policy_probe_contract() {
                     .selected_tuning_unroll >= 1 and
                     .selected_tuning_fusion_shape != "unknown" and
                     .rejected_tuning_candidate_ids != "none" and
-                    .command_bundle == ("rch" + " exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives") and
+                    .command_bundle == ("rch" + " exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives") and
                     .decision_artifact_id != "manual_env_override_unbacked" and
                     .decision_role != "runtime_override_not_canonical_profile_selection" and
                     .decision_evidence_status != "runtime-override-unbacked" and
@@ -721,7 +727,7 @@ if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
                     "bench-smoke-gf256-primitives" \
                     "perf smoke (gf256_primitives)" \
                     "${RUN_DIR}/bench_gf256_primitives.log" \
-                    cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
+                    cargo bench --bench raptorq_benchmark --features "$RAPTORQ_SIMD_BENCH_FEATURES" -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
             fi
             ;;
         full)
@@ -735,14 +741,14 @@ if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
                     "bench-smoke-gf256-primitives" \
                     "perf smoke (gf256_primitives)" \
                     "${RUN_DIR}/bench_gf256_primitives.log" \
-                    cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
+                    cargo bench --bench raptorq_benchmark --features "$RAPTORQ_SIMD_BENCH_FEATURES" -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
             fi
             if [[ -z "$failed_stage_id" ]]; then
                 run_validation_stage \
                     "bench-smoke-gf256-dual-policy" \
                     "perf smoke (gf256_dual_policy)" \
                     "${RUN_DIR}/bench_gf256_dual_policy.log" \
-                    cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-dual-policy"
+                    cargo bench --bench raptorq_benchmark --features "$RAPTORQ_SIMD_BENCH_FEATURES" -- gf256_dual_policy --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-dual-policy"
             fi
             if [[ -z "$failed_stage_id" ]]; then
                 validate_dual_policy_probe_contract \
@@ -761,14 +767,14 @@ if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
                     "bench-smoke-gf256-primitives" \
                     "perf smoke (gf256_primitives)" \
                     "${RUN_DIR}/bench_gf256_primitives.log" \
-                    cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
+                    cargo bench --bench raptorq_benchmark --features "$RAPTORQ_SIMD_BENCH_FEATURES" -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
             fi
             if [[ -z "$failed_stage_id" ]]; then
                 run_validation_stage \
                     "bench-smoke-gf256-dual-policy" \
                     "perf smoke (gf256_dual_policy)" \
                     "${RUN_DIR}/bench_gf256_dual_policy.log" \
-                    cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-dual-policy"
+                    cargo bench --bench raptorq_benchmark --features "$RAPTORQ_SIMD_BENCH_FEATURES" -- gf256_dual_policy --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-dual-policy"
             fi
             if [[ -z "$failed_stage_id" ]]; then
                 validate_dual_policy_probe_contract \
@@ -780,7 +786,7 @@ if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
                     "bench-forensics-repair-campaign" \
                     "forensics perf smoke (repair_campaign)" \
                     "${RUN_DIR}/bench_repair_campaign.log" \
-                    cargo bench --bench raptorq_benchmark -- repair_campaign --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-forensics-repair-campaign"
+                    cargo bench --bench raptorq_benchmark --features "$RAPTORQ_BENCH_FEATURES" -- repair_campaign --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-forensics-repair-campaign"
             fi
             ;;
     esac

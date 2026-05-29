@@ -55,7 +55,7 @@
 cargo build --profile release-perf --features="profiling"
 
 # 2. Create unit benchmark
-cargo bench hpack_encode_typical_headers
+cargo bench --features criterion-benches hpack_encode_typical_headers
 
 # 3. Profile with samply/perf
 samply record target/release-perf/hpack_bench

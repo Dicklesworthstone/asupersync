@@ -27,7 +27,7 @@
       },
       "native": {
         "artifact": "artifacts/perf/native_scheduler_burst_64.json",
-        "command": "rch exec -- cargo bench --bench scheduler_benchmark -- scheduler_burst_64",
+        "command": "rch exec -- cargo bench --features criterion-benches --bench scheduler_benchmark -- scheduler_burst_64",
         "git_sha": "abc1234",
         "mode": "native",
         "p95_us": 420.0,

@@ -36,14 +36,14 @@ export WAKER_PROFILING=1
 cargo test --features waker-profiling hotpath_waker
 
 # Run comprehensive benchmarks  
-cargo bench --bench waker_allocation_profile
+cargo bench --features criterion-benches --bench waker_allocation_profile
 
 # Profile with samply
 samply record --save-only -o waker-cpu.json -- \
-  cargo bench --bench waker_allocation_profile -- creation_burst
+  cargo bench --features criterion-benches --bench waker_allocation_profile -- creation_burst
 
 # Allocation profiling with heaptrack
-heaptrack cargo bench --bench waker_allocation_profile
+heaptrack cargo bench --features criterion-benches --bench waker_allocation_profile
 ```
 
 ## Hypothesis Ledger

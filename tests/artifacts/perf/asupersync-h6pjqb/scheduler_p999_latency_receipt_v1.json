@@ -6,7 +6,7 @@
   "git_sha": "c79fcf16d6162a323c6efc3ab42d7bf31f6be576",
   "benchmark_surface": "benches/scheduler_benchmark.rs",
   "criterion_filter": "scheduler/three_lane_decision",
-  "benchmark_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_coralgorge_h6pjqb_three_lane_repro RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision",
+  "benchmark_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_coralgorge_h6pjqb_three_lane_repro RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision",
   "proof_lane_executed_through_rch": true,
   "verdict": "complete_measurement",
   "operator_verdict": "full_lane_completed_without_previous_os_thread_local_panic",
@@ -121,7 +121,7 @@
     }
   ],
   "focused_reproduction": {
-    "benchmark_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_coralgorge_h6pjqb_three_lane_repro CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
+    "benchmark_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_coralgorge_h6pjqb_three_lane_repro CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision/global_ready_burst/64 --sample-size 10 --measurement-time 1",
     "completed_build_id": 29832516688938152,
     "worker_id": "vmi1152480",
     "remote_exit": 0,

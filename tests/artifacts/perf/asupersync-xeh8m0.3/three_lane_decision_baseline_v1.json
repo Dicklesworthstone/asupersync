@@ -6,7 +6,7 @@
   "git_sha": "08fd9846d6ae9383f24494801158e77a38c294bd",
   "benchmark_surface": "benches/scheduler_benchmark.rs",
   "criterion_filter": "scheduler/three_lane_decision",
-  "benchmark_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision",
+  "benchmark_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --features criterion-benches --bench scheduler_benchmark -- scheduler/three_lane_decision",
   "proof_lane_executed_through_rch": true,
   "verdict": "no_win",
   "operator_verdict": "partial_measurement_runtime_blocker",

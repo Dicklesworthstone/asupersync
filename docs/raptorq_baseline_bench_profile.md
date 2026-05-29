@@ -143,7 +143,7 @@ Artifact path conventions by profile:
 Track-E dual-lane policy probes are emitted from `benches/raptorq_benchmark.rs` under benchmark group `gf256_dual_policy`:
 
 ```bash
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy
 ```
 
 Probe log schema:
@@ -193,7 +193,7 @@ Override truthfulness rule:
   `decision_evidence_status = runtime-override-unbacked`,
   `replay_pointer = replay:rq-e-gf256-profile-pack-env-override-v1`
   and an override-specific `command_bundle` placeholder:
-  `rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives`
+  `rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives`
   that tells operators to replay from the emitted override fields
 - the same override branch must keep the rationale/delta fields honest:
   `selected_candidate_summary = runtime override changed the effective dual-policy contract; canonical selected candidate suppressed`,
@@ -211,9 +211,9 @@ Coverage intent:
 Command-surface split:
 
 - Comparator/rollback bundle: manifest-level `command_bundle` in the profile-pack
-  snapshot remains anchored to `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives`.
+  snapshot remains anchored to `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives`.
 - Probe-specific bundle: the dual-policy log `repro_command` remains anchored to
-  `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy`.
+  `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy`.
 
 Current default policy note (profile-pack schema v5):
 
@@ -245,17 +245,17 @@ Capture command bundle (rch-only):
 
 ```bash
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_auto_capture.log 2>&1
 
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=sequential ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_sequential_capture.log 2>&1
 
 rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=fused ASUPERSYNC_GF256_PROFILE_PACK=auto \
-  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy \
+  CARGO_TARGET_DIR=/tmp/rch-e5-qd cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy \
   --sample-size 10 --warm-up-time 0.05 --measurement-time 0.08 \
   > artifacts/e5_profile_pack_fused_capture.log 2>&1
 ```
@@ -289,9 +289,9 @@ contract; the canonical current x86 default contract remains
 Follow-up same-session SIMD ablations were run via `rch` on `RQ-E-GF256-DUAL-006` (`lane_a=16384`, `lane_b=16384`) to reduce cross-worker noise:
 
 ```bash
-rch exec -- bash -lc 'set -euo pipefail; COMMON="cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL-006 --sample-size 40 --warm-up-time 0.15 --measurement-time 0.18"; export CARGO_TARGET_DIR=/tmp/rch-e5-samesession; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto $COMMON; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=12288 $COMMON'
+rch exec -- bash -lc 'set -euo pipefail; COMMON="cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL-006 --sample-size 40 --warm-up-time 0.15 --measurement-time 0.18"; export CARGO_TARGET_DIR=/tmp/rch-e5-samesession; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto $COMMON; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=12288 $COMMON'
 
-rch exec -- bash -lc 'set -euo pipefail; COMMON="cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL-006 --sample-size 40 --warm-up-time 0.15 --measurement-time 0.18"; export CARGO_TARGET_DIR=/tmp/rch-e5-samesession2; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto $COMMON; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 $COMMON'
+rch exec -- bash -lc 'set -euo pipefail; COMMON="cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL-006 --sample-size 40 --warm-up-time 0.15 --measurement-time 0.18"; export CARGO_TARGET_DIR=/tmp/rch-e5-samesession2; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto $COMMON; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 $COMMON'
 ```
 
 Recorded in `artifacts/raptorq_track_e_gf256_bench_v1.json` under `simd_policy_ablation_2026_03_02`:
@@ -330,14 +330,14 @@ Command bundle for the 2026-03-04 corpus:
 ```bash
 rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; \
   ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto \
-  cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL \
+  cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL \
   --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'
 
 rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; \
   ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto \
   ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 \
   ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 \
-  cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL \
+  cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL \
   --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'
 
 rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; \
@@ -345,7 +345,7 @@ rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-202
   ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=30720 \
   ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=30720 \
   ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 \
-  cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL \
+  cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL \
   --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'
 ```
 

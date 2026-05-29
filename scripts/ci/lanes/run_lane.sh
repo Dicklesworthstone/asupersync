@@ -253,7 +253,7 @@ case "$LANE_ID" in
 
     "atp_benchmark")
         echo "Running ATP benchmarks..." | tee -a "$LANE_LOG"
-        run_required "timeout '$TIMEOUT' cargo bench --bench atp_benchmarks 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo bench --features criterion-benches --bench atp_benchmarks 2>&1 | tee -a '$LANE_LOG'"
 
         # Comparison benchmarks are optional
         if [[ -f "scripts/ci/run_comparison_benchmarks.sh" ]]; then

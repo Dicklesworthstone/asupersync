@@ -29,10 +29,10 @@ use asupersync::raptorq::rfc6330::repair_indices_for_esi;
 use asupersync::raptorq::systematic::SystematicEncoder;
 
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
-const TRACK_E_REPRO_CMD: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives";
+const TRACK_E_REPRO_CMD: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives";
 const TRACK_E_POLICY_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-v6";
 const TRACK_E_POLICY_PROBE_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-probe-v6";
-const TRACK_E_POLICY_PROBE_REPRO_CMD: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy";
+const TRACK_E_POLICY_PROBE_REPRO_CMD: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy";
 const TRACK_E_CRITERION_SAMPLE_SIZE: usize = 10;
 const TRACK_E_CRITERION_WARM_UP_SECONDS: f64 = 0.05;
 const TRACK_E_CRITERION_MEASUREMENT_SECONDS: f64 = 0.05;
@@ -848,7 +848,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
                     "workload_family": "kernel_hotspot"
                 },
                 "reproducibility": {
-                    "command": "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives/addmul_slice",
+                    "command": "rch exec -- cargo bench --bench raptorq_benchmark --features criterion-benches -- gf256_primitives/addmul_slice",
                     "seed": scenario.seed,
                     "deterministic": true
                 }
@@ -1395,8 +1395,7 @@ fn bench_encode_decode(c: &mut Criterion) {
 // ============================================================================
 
 const F4_CAMPAIGN_SCHEMA_VERSION: &str = "raptorq-f4-repair-campaign-v1";
-const F4_CAMPAIGN_REPRO_CMD: &str =
-    "rch exec -- cargo bench --bench raptorq_benchmark -- repair_campaign";
+const F4_CAMPAIGN_REPRO_CMD: &str = "rch exec -- cargo bench --bench raptorq_benchmark --features criterion-benches -- repair_campaign";
 
 /// Campaign scenario parameterising one repair-heavy decode configuration.
 #[derive(Clone)]

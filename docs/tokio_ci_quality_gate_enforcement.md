@@ -215,7 +215,7 @@ Alarm routing is deterministic: identical perf manifests must produce identical 
 
 Performance-budget checks MUST run via `rch exec --`:
 
-- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench scheduler_benchmark`
-- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench reactor_benchmark`
-- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench protocol_benchmark`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --features criterion-benches --bench scheduler_benchmark`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --features criterion-benches --bench reactor_benchmark`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --features criterion-benches --bench protocol_benchmark`
 - `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test perf_regression_gates -- --nocapture`

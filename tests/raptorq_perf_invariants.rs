@@ -1651,7 +1651,9 @@ fn e3_track_e_gf256_p95p99_artifact_schema_and_coverage() {
             "Track-E p95/p99 command must be rch-offloaded: {command}"
         );
         assert!(
-            command.contains("cargo bench --bench raptorq_benchmark"),
+            command.contains("cargo bench --bench raptorq_benchmark")
+                || command
+                    .contains("cargo bench --features criterion-benches --bench raptorq_benchmark"),
             "Track-E p95/p99 command must run raptorq_benchmark: {command}"
         );
         assert!(
@@ -2401,11 +2403,13 @@ fn e5_bench_artifact_top_level_runs_exercise_simd_surface() {
             "Track-E benchmark {run_id} command must stay rch-offloaded: {command}"
         );
         assert!(
-            command.contains("cargo bench --bench raptorq_benchmark"),
+            command.contains("cargo bench --bench raptorq_benchmark")
+                || command
+                    .contains("cargo bench --features criterion-benches --bench raptorq_benchmark"),
             "Track-E benchmark {run_id} command must stay on the canonical benchmark: {command}"
         );
         assert!(
-            command.contains("--features simd-intrinsics"),
+            command.contains("--features simd-intrinsics,criterion-benches"),
             "Track-E benchmark {run_id} command must exercise the SIMD surface: {command}"
         );
         assert!(
@@ -2553,7 +2557,7 @@ fn e5_live_gf256_catalog_matches_current_x86_default_contract() {
     );
     assert_eq!(
         x86.command_bundle,
-        "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives",
+        "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives",
         "live x86 profile-pack metadata must keep the manifest command-bundle contract"
     );
     assert_eq!(
@@ -3444,14 +3448,14 @@ fn g3_e5_decision_record_command_surface_split_is_explicit() {
     assert_eq!(
         split["manifest_command_bundle"].as_str(),
         Some(
-            "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives"
+            "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives"
         ),
         "E5 manifest command bundle must stay anchored to gf256_primitives"
     );
     assert_eq!(
         split["probe_repro_command"].as_str(),
         Some(
-            "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy"
+            "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy"
         ),
         "E5 probe repro command must stay anchored to gf256_dual_policy"
     );
@@ -6088,7 +6092,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".selected_tuning_prefetch_distance",
         ".selected_tuning_fusion_shape",
         ".rejected_tuning_candidate_ids | type == \"string\" and length > 0",
-        ".command_bundle | type == \"string\" and test(\"^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives)\")",
+        ".command_bundle | type == \"string\" and test(\"^((rch exec -- )?(env .+ )?cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives)\")",
         ".replay_pointer | type == \"string\" and length > 0",
         ".decision_artifact_id",
         ".decision_role",
@@ -6104,7 +6108,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".mode_fallback_reason == \"unknown-requested-mode\"",
         ".tuning_corpus_id == \"manual-env-override-unbacked\"",
         ".selected_tuning_candidate_id == \"manual-env-override-unbacked\"",
-        ".command_bundle == \"rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives\"",
+        ".command_bundle == \"rch exec -- env <captured ASUPERSYNC_GF256_* override fields> cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives\"",
         ".decision_artifact_id == \"manual_env_override_unbacked\"",
         ".decision_role == \"runtime_override_not_canonical_profile_selection\"",
         ".decision_evidence_status == \"runtime-override-unbacked\"",
@@ -6131,7 +6135,7 @@ fn track_e_dual_policy_probe_contract_surface_tokens() {
         ".criterion_warm_up_seconds",
         ".criterion_measurement_seconds",
         ".tail_confidence_proxy == \"criterion_interval_high_endpoint_proxy_p95p99\"",
-        ".command_bundle == \"rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives\"",
+        ".command_bundle == \"rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives\"",
         "bench_gf256_dual_policy_contract.ndjson",
     ] {
         assert!(

@@ -356,7 +356,7 @@ run_medium_priority_gates() {
 
     # R1: Performance Benchmarks
     run_proof_lane "R1" "MEDIUM" "Performance Benchmarks" \
-        'rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_r1" cargo bench --bench atp_j5_workflows_bench' \
+        'rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_r1" cargo bench --features criterion-benches --bench atp_j5_workflows_bench' \
         1800
 
     # R2: Stress Testing
@@ -585,7 +585,7 @@ elif [[ "$DEPENDENCY_ONLY" == true ]]; then
         'scripts/dependency_audit.sh --atp-core-only'
 elif [[ "$PERFORMANCE_ONLY" == true ]]; then
     run_proof_lane "R1" "MEDIUM" "Performance Benchmarks" \
-        'rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_r1" cargo bench --bench atp_j5_workflows_bench' \
+        'rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_r1" cargo bench --features criterion-benches --bench atp_j5_workflows_bench' \
         1800
     run_proof_lane "R2" "MEDIUM" "Stress Testing" \
         'scripts/atp_stress_test.sh --resource-limits' \

@@ -150,7 +150,7 @@ jobs:
             echo "rch is required for conformance performance benchmarks" >&2
             exit 1
           fi
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_conformance_performance_bounds" cargo bench 2>&1 | tee ../perf_output.log || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_conformance_performance_bounds" cargo bench --features criterion-benches 2>&1 | tee ../perf_output.log || true
 
       - name: Check for performance regressions
         run: |

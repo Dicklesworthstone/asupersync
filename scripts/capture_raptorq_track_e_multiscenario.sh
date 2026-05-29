@@ -10,6 +10,7 @@ WARM_UP_TIME="${WARM_UP_TIME:-0.2}"
 MEASUREMENT_TIME="${MEASUREMENT_TIME:-0.2}"
 TARGET_ROOT="${TARGET_ROOT:-/tmp/rch-e5-long-v5}"
 RCH_BIN="${RCH_BIN:-rch}"
+BENCH_FEATURES="${BENCH_FEATURES:-simd-intrinsics,criterion-benches}"
 
 cd "$PROJECT_ROOT"
 
@@ -23,7 +24,7 @@ run_case() {
 
     "$RCH_BIN" exec -- env "$@" \
         CARGO_TARGET_DIR="$target_dir" \
-        cargo bench --bench raptorq_benchmark --features simd-intrinsics -- \
+        cargo bench --bench raptorq_benchmark --features "$BENCH_FEATURES" -- \
         "$BENCH_FILTER" \
         --sample-size "$SAMPLE_SIZE" \
         --warm-up-time "$WARM_UP_TIME" \
@@ -82,9 +83,9 @@ result = {
     "measurement_time_seconds": 0.2,
     "target_root": "/tmp/rch-e5-long-v5",
     "commands": {
-        "baseline": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-long-v5-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
-        "auto": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-long-v5-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
-        "rollback": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 CARGO_TARGET_DIR=/tmp/rch-e5-long-v5-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
+        "baseline": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-long-v5-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
+        "auto": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-long-v5-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
+        "rollback": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 CARGO_TARGET_DIR=/tmp/rch-e5-long-v5-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 40 --warm-up-time 0.2 --measurement-time 0.2",
     },
     "cases": {
         "baseline": load_case("baseline"),

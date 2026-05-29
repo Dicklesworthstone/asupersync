@@ -37,9 +37,9 @@
     "unit_normalization": "Time medians converted to microseconds; ns values divided by 1000.",
     "percentile_method": "Nearest-rank percentile over sorted scenario-level medians per mode/op; n=5 per op and n=20 for overall aggregate.",
     "commands": [
-      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-baseline cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
-      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-auto cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
-      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-rollback cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
     ]
   },
   "per_mode_overall_percentiles": [

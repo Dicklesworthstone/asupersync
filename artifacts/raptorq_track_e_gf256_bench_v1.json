@@ -21,7 +21,7 @@
         "ASUPERSYNC_GF256_DUAL_POLICY": "never",
         "CARGO_TARGET_DIR": "/tmp/rch-e5-baseline"
       },
-      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-baseline cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
       "log_path": "/tmp/e5_gf256_primitives_baseline.log",
       "remote_exit": {
         "status": 0,
@@ -37,7 +37,7 @@
         "ASUPERSYNC_GF256_DUAL_POLICY": "auto",
         "CARGO_TARGET_DIR": "/tmp/rch-e5-auto"
       },
-      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-auto cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
       "log_path": "/tmp/e5_gf256_primitives_auto.log",
       "remote_exit": {
         "status": 0,
@@ -53,7 +53,7 @@
         "ASUPERSYNC_GF256_DUAL_POLICY": "never",
         "CARGO_TARGET_DIR": "/tmp/rch-e5-rollback"
       },
-      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
       "log_path": "/tmp/e5_gf256_primitives_rollback.log",
       "remote_exit": {
         "status": 0,
@@ -156,12 +156,12 @@
     "command_bundles": [
       {
         "id": "current_vs_candidate_large_balanced_addmul_window",
-        "command": "rch exec -- bash -lc 'set -euo pipefail; COMMON=\"cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL-006 --sample-size 40 --warm-up-time 0.15 --measurement-time 0.18\"; export CARGO_TARGET_DIR=/tmp/rch-e5-samesession; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto $COMMON; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=12288 $COMMON'",
+        "command": "rch exec -- bash -lc 'set -euo pipefail; COMMON=\"cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL-006 --sample-size 40 --warm-up-time 0.15 --measurement-time 0.18\"; export CARGO_TARGET_DIR=/tmp/rch-e5-samesession; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto $COMMON; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=12288 $COMMON'",
         "log_path": "/tmp/e5_dual_006_samesession.log"
       },
       {
         "id": "current_vs_candidate_mul_window_32768",
-        "command": "rch exec -- bash -lc 'set -euo pipefail; COMMON=\"cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL-006 --sample-size 40 --warm-up-time 0.15 --measurement-time 0.18\"; export CARGO_TARGET_DIR=/tmp/rch-e5-samesession2; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto $COMMON; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 $COMMON'",
+        "command": "rch exec -- bash -lc 'set -euo pipefail; COMMON=\"cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL-006 --sample-size 40 --warm-up-time 0.15 --measurement-time 0.18\"; export CARGO_TARGET_DIR=/tmp/rch-e5-samesession2; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto $COMMON; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=32768 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=32768 $COMMON'",
         "log_path": "/tmp/e5_dual_006_mul_candidate.log"
       }
     ],
@@ -290,17 +290,17 @@
     "command_bundles": [
       {
         "id": "baseline_auto_defaults",
-        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
+        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
         "log_path": "/tmp/e5_dual_baseline_20260304.log"
       },
       {
         "id": "candidate_addmul_window_only",
-        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
+        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
         "log_path": "/tmp/e5_dual_candidate1_20260304.log"
       },
       {
         "id": "candidate_mul_and_addmul_windows",
-        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=30720 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=30720 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
+        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=30720 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=30720 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
         "log_path": "/tmp/e5_dual_candidate2_20260304.log"
       }
     ],

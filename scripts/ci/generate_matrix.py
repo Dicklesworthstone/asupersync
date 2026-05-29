@@ -245,7 +245,7 @@ PROOF_LANES = {
         "timeout": "45m",
         "platforms": ["linux"],
         "commands": [
-            "cargo bench --bench atp_benchmarks",
+            "cargo bench --features criterion-benches --bench atp_benchmarks",
             "scripts/ci/run_comparison_benchmarks.sh"
         ],
         "artifacts": [

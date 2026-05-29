@@ -16,6 +16,8 @@
 #   PERF_TIMEOUT       - per-bench timeout seconds (default: 0 = no timeout)
 #   PERF_BENCH_ARGS    - extra args passed to cargo bench (default: "-- --noplot")
 #   BENCH_CARGO_PROFILE - Cargo profile for benchmark runs (default: release-perf)
+#   BENCH_FEATURES     - Cargo features for Criterion benchmark targets
+#                        (default: criterion-benches)
 #   BENCH_RUSTFLAGS    - RUSTFLAGS for benchmark runs (default: -C force-frame-pointers=yes)
 #   ASUPERSYNC_SEED    - deterministic seed (if benchmark uses it)
 #   RCH_BIN            - remote compilation helper executable (default: rch,
@@ -36,6 +38,7 @@ WORKLOAD_ID="${WORKLOAD_ID:-AA01-WL-CPU-001}"
 RUNTIME_PROFILE="${RUNTIME_PROFILE:-bench-release}"
 WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/run_perf_e2e.sh::phase0_baseline,scheduler_benchmark}"
 BENCH_CARGO_PROFILE="${BENCH_CARGO_PROFILE:-release-perf}"
+BENCH_FEATURES="${BENCH_FEATURES:-criterion-benches}"
 BENCH_RUSTFLAGS="${BENCH_RUSTFLAGS:--C force-frame-pointers=yes}"
 
 DEFAULT_BENCHES=(
@@ -76,6 +79,7 @@ Options:
   --timeout <sec>                Per-bench timeout in seconds (default: 0)
   --bench-args "<args>"          Extra args passed to cargo bench
   --cargo-profile <name>         Cargo profile for benchmark runs (default: release-perf)
+  --bench-features <features>    Cargo features for benchmark targets (default: criterion-benches)
   --bench-rustflags <flags>      RUSTFLAGS for benchmark runs (default: -C force-frame-pointers=yes)
   --seed <value>                 Set ASUPERSYNC_SEED for benches
   -h, --help                     Show help
@@ -116,6 +120,8 @@ while [[ $# -gt 0 ]]; do
             BENCH_ARGS_STR="$2"; shift 2 ;;
         --cargo-profile)
             BENCH_CARGO_PROFILE="$2"; shift 2 ;;
+        --bench-features)
+            BENCH_FEATURES="$2"; shift 2 ;;
         --bench-rustflags)
             BENCH_RUSTFLAGS="$2"; shift 2 ;;
         --seed)
@@ -246,14 +252,14 @@ append_result() {
 
 for bench in "${BENCHES[@]}"; do
     log_file="${LOG_DIR}/${bench}_${TIMESTAMP}.log"
-    bench_repro_command="${RUN_REPRO_COMMAND} --bench ${bench}"
+    bench_repro_command="${RUN_REPRO_COMMAND} --bench ${bench} --bench-features ${BENCH_FEATURES}"
     safe_bench="${bench//[^A-Za-z0-9_]/_}"
     bench_target_dir="${RCH_TARGET_ROOT}/${safe_bench}"
     cmd=(
         "$RCH_BIN" exec -- env
         "RUSTFLAGS=${BENCH_RUSTFLAGS}"
         "CARGO_TARGET_DIR=${bench_target_dir}"
-        cargo bench --profile "$BENCH_CARGO_PROFILE" --bench "$bench"
+        cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES" --bench "$bench"
     )
     if [[ ${#BENCH_ARGS[@]} -gt 0 ]]; then
         cmd+=("${BENCH_ARGS[@]}")
