@@ -1,0 +1,117 @@
+{
+  "schema_version": "proof-lane-admission-input-v1",
+  "profile_id": "64c-256g-clean-admit-smoke",
+  "generated_at_utc": "2026-05-29T01:24:00Z",
+  "host_profile": {
+    "cpu_cores": 64,
+    "memory_bytes": 274877906944,
+    "numa_nodes": 2,
+    "profile_class": "large_core_swarm"
+  },
+  "resource_pressure": {
+    "telemetry_sampled_at_utc": "2026-05-29T01:23:30Z",
+    "telemetry_age_seconds": 30,
+    "cpu_busy_bps": 4200,
+    "memory_used_bytes": 103079215104,
+    "memory_available_bytes": 171798691840,
+    "io_some_avg10_bps": 250,
+    "memory_some_avg10_bps": 120
+  },
+  "disk_headroom": {
+    "root_free_bytes": 429496729600,
+    "tmp_free_bytes": 214748364800,
+    "target_parent_free_bytes": 536870912000,
+    "pressure_class": "healthy"
+  },
+  "rch_workers": {
+    "remote_required": true,
+    "telemetry_sampled_at_utc": "2026-05-29T01:23:35Z",
+    "telemetry_age_seconds": 25,
+    "workers": [
+      {
+        "worker_id": "rchw-smoke-a",
+        "queue_state": "open",
+        "available_cores": 32,
+        "available_memory_bytes": 137438953472,
+        "active_project_excluded": false,
+        "cache_warmth": {
+          "proof_lane_family": "schema-contract",
+          "target_dir_family": "rch_target_proof_lane_admission_input_schema",
+          "warmth_class": "warm",
+          "confidence_bps": 8600
+        }
+      },
+      {
+        "worker_id": "rchw-smoke-b",
+        "queue_state": "busy",
+        "available_cores": 16,
+        "available_memory_bytes": 68719476736,
+        "active_project_excluded": false,
+        "cache_warmth": {
+          "proof_lane_family": "schema-contract",
+          "target_dir_family": "rch_target_proof_lane_admission_input_schema",
+          "warmth_class": "cold",
+          "confidence_bps": 6100
+        }
+      }
+    ]
+  },
+  "active_project_exclusion": {
+    "local_project_active": true,
+    "same_project_workers_excluded": [
+      "rchw-local"
+    ],
+    "remote_worker_required": true
+  },
+  "cargo_target_isolation": {
+    "target_dir_template": "${TMPDIR:-/tmp}/rch_target_{agent}_{bead}_{lane}",
+    "agent_scoped": true,
+    "bead_scoped": true,
+    "lane_scoped": true,
+    "forbid_shared_target_dir": true
+  },
+  "agent_mail_reservations": {
+    "telemetry_age_seconds": 20,
+    "tracker_reserved": false,
+    "active_peer_source_reservations": [],
+    "active_self_reservations": [
+      {
+        "agent": "DustyTrout",
+        "path_pattern": "artifacts/proof_lane_admission_input_schema_v1.json",
+        "exclusive": true
+      },
+      {
+        "agent": "DustyTrout",
+        "path_pattern": "tests/proof_lane_admission_input_schema_contract.rs",
+        "exclusive": true
+      }
+    ]
+  },
+  "dirty_tree": {
+    "classification": "clean-or-self-only",
+    "dirty_paths": [],
+    "peer_owned_paths": [],
+    "unreserved_source_paths": []
+  },
+  "proof_lane": {
+    "lane_id": "proof-lane-admission-input-schema-contract",
+    "workspace_package": "asupersync",
+    "lane_family": "schema-contract",
+    "estimated_cost": {
+      "cpu_core_seconds": 600,
+      "memory_bytes_peak": 8589934592,
+      "io_bytes": 1073741824,
+      "proof_weight": "medium"
+    },
+    "command_template": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_admission_input_schema cargo test -p asupersync --test proof_lane_admission_input_schema_contract -- --nocapture"
+  },
+  "expected_preflight": {
+    "input_status": "complete",
+    "admission_precondition": "schema-ready",
+    "reason_codes": [
+      "host-large-core",
+      "worker-admissible",
+      "target-dir-isolated"
+    ]
+  }
+}
