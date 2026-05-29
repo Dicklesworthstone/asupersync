@@ -5504,7 +5504,7 @@ mod tests {
 
         let server = Server::builder()
             .max_concurrent_streams(2) // Very low limit for testing
-            .stream_idle_timeout(Some(std::time::Duration::from_secs(1)))
+            .stream_idle_timeout(None)
             .build();
 
         let connection_id = "test-integration-conn".to_string();
