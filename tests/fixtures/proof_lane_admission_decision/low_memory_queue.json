@@ -1,0 +1,82 @@
+{
+  "schema_version": "proof-lane-admission-input-v1",
+  "profile_id": "low-memory-queue",
+  "generated_at_utc": "2026-05-29T02:18:00Z",
+  "host_profile": {
+    "cpu_cores": 16,
+    "memory_bytes": 34359738368,
+    "numa_nodes": 1,
+    "profile_class": "oversubscribed_ci"
+  },
+  "resource_pressure": {
+    "telemetry_sampled_at_utc": "2026-05-29T02:17:30Z",
+    "telemetry_age_seconds": 30,
+    "cpu_busy_bps": 5500,
+    "memory_used_bytes": 30064771072,
+    "memory_available_bytes": 4294967296,
+    "io_some_avg10_bps": 300,
+    "memory_some_avg10_bps": 7200
+  },
+  "disk_headroom": {
+    "root_free_bytes": 214748364800,
+    "tmp_free_bytes": 107374182400,
+    "target_parent_free_bytes": 214748364800,
+    "pressure_class": "healthy"
+  },
+  "rch_workers": {
+    "remote_required": true,
+    "telemetry_sampled_at_utc": "2026-05-29T02:17:35Z",
+    "telemetry_age_seconds": 25,
+    "workers": [
+      {
+        "worker_id": "rchw-cold-a",
+        "queue_state": "open",
+        "available_cores": 16,
+        "available_memory_bytes": 68719476736,
+        "active_project_excluded": false,
+        "cache_warmth": {
+          "proof_lane_family": "admission-decision-contract",
+          "target_dir_family": "rch_target_proof_lane_admission_decision",
+          "warmth_class": "cold",
+          "confidence_bps": 6000
+        }
+      }
+    ]
+  },
+  "active_project_exclusion": {
+    "local_project_active": true,
+    "same_project_workers_excluded": [],
+    "remote_worker_required": true
+  },
+  "cargo_target_isolation": {
+    "target_dir_template": "${TMPDIR:-/tmp}/rch_target_{agent}_{bead}_{lane}",
+    "agent_scoped": true,
+    "bead_scoped": true,
+    "lane_scoped": true,
+    "forbid_shared_target_dir": true
+  },
+  "agent_mail_reservations": {
+    "telemetry_age_seconds": 20,
+    "tracker_reserved": false,
+    "active_peer_source_reservations": [],
+    "active_self_reservations": []
+  },
+  "dirty_tree": {
+    "classification": "clean",
+    "dirty_paths": [],
+    "peer_owned_paths": [],
+    "unreserved_source_paths": []
+  },
+  "proof_lane": {
+    "lane_id": "proof-lane-admission-decision-contract",
+    "workspace_package": "asupersync",
+    "lane_family": "admission-decision-contract",
+    "estimated_cost": {
+      "cpu_core_seconds": 1200,
+      "memory_bytes_peak": 8589934592,
+      "io_bytes": 1073741824,
+      "proof_weight": "medium"
+    },
+    "command_template": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_MistyCat_asupersync_l5m170_5_2_admission_decision cargo test -p asupersync --test proof_lane_admission_decision_contract -- --nocapture"
+  }
+}
