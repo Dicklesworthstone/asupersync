@@ -1669,9 +1669,9 @@ mod tests {
     #[test]
     fn ood365_individual_reserved_bits_are_rejected() {
         init_test("ood365_individual_reserved_bits_are_rejected");
-        let codec = WebFrameCodec::new();
         // Every reserved bit, alone, MUST be rejected.
         for shift in 1u8..=6 {
+            let codec = WebFrameCodec::new();
             let flag = 1u8 << shift;
             let mut buf = build_frame(flag, 0);
             assert_protocol_error(codec.decode(&mut buf), &format!("flag 0x{flag:02x}"));
@@ -1692,14 +1692,19 @@ mod tests {
     #[test]
     fn ood365_reserved_bit_combined_with_trailer_or_compression_rejected() {
         init_test("ood365_reserved_bit_combined_with_trailer_or_compression_rejected");
-        let codec = WebFrameCodec::new();
         // 0x82 = TRAILER (0x80) | reserved bit 1 (0x02). Even though bit
         // 7 alone would be legal, the reserved overlap MUST reject.
         let mut buf = build_frame(0x82, 0);
-        assert_protocol_error(codec.decode(&mut buf), "0x82 (trailer + reserved)");
+        assert_protocol_error(
+            WebFrameCodec::new().decode(&mut buf),
+            "0x82 (trailer + reserved)",
+        );
         // 0x03 = compression (0x01) | reserved bit 1 (0x02).
         let mut buf = build_frame(0x03, 0);
-        assert_protocol_error(codec.decode(&mut buf), "0x03 (compression + reserved)");
+        assert_protocol_error(
+            WebFrameCodec::new().decode(&mut buf),
+            "0x03 (compression + reserved)",
+        );
         crate::test_complete!("ood365_reserved_bit_combined_with_trailer_or_compression_rejected");
     }
 
