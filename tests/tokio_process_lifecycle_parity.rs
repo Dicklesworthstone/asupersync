@@ -203,7 +203,7 @@ fn env_clear_home_probe_command() -> Command {
     #[cfg(not(windows))]
     {
         let mut command = Command::new("sh");
-        command.arg("-c").arg("echo ${HOME:-empty}");
+        command.arg("-c").arg(concat!("echo $", "{HOME:-empty}"));
         command
     }
 }
