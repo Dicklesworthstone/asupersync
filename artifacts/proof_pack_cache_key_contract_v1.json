@@ -1,0 +1,102 @@
+{
+  "schema_version": "proof-pack-cache-key-contract-v1",
+  "title": "Proof-pack cache key and safety contract",
+  "purpose": "Define the deterministic key material for advisory rch proof-pack cache warming without making cache warmth part of proof correctness.",
+  "canonical_components": [
+    {
+      "id": "cargo_lock_sha256",
+      "source": "Cargo.lock content hash",
+      "required": true,
+      "invalidates_when": "Any dependency resolution byte changes."
+    },
+    {
+      "id": "rust_toolchain",
+      "source": "rust-toolchain.toml channel, profile, components, and targets",
+      "required": true,
+      "invalidates_when": "The compiler channel, installed target set, or relevant toolchain profile changes."
+    },
+    {
+      "id": "target_triple",
+      "source": "The compilation target triple for the proof lane",
+      "required": true,
+      "invalidates_when": "The proof moves between host or cross-compilation targets."
+    },
+    {
+      "id": "workspace_package",
+      "source": "Cargo package selected by the proof lane",
+      "required": true,
+      "invalidates_when": "A different workspace member or package graph is selected."
+    },
+    {
+      "id": "features",
+      "source": "Sorted, deduplicated Cargo feature set",
+      "required": true,
+      "invalidates_when": "Any feature is added, removed, or renamed."
+    },
+    {
+      "id": "proof_lane_family",
+      "source": "Logical proof lane family such as module-microharness, receipt-contract, or dependency-graph",
+      "required": true,
+      "invalidates_when": "The proof lane switches to a different build/test family."
+    },
+    {
+      "id": "env_flags",
+      "source": "Keyed environment flags: CARGO_BUILD_JOBS, CARGO_INCREMENTAL, CARGO_PROFILE_TEST_DEBUG, RUSTDOCFLAGS, RUSTFLAGS",
+      "required": true,
+      "invalidates_when": "Any keyed environment flag changes."
+    },
+    {
+      "id": "git_branch",
+      "source": "Current git branch",
+      "required": true,
+      "invalidates_when": "The branch is not main; non-main refs are refused."
+    },
+    {
+      "id": "git_head_sha",
+      "source": "Current main commit sha",
+      "required": true,
+      "invalidates_when": "The main commit changes or is unknown."
+    }
+  ],
+  "normalization_rules": {
+    "features": "Sort and deduplicate before hashing.",
+    "rust_toolchain.components": "Sort and deduplicate before hashing.",
+    "rust_toolchain.targets": "Sort and deduplicate before hashing.",
+    "env_flags": "Include only keyed build-affecting flags and sort by key.",
+    "json": "Hash canonical JSON with sorted object keys and compact separators."
+  },
+  "refusal_rules": [
+    {
+      "code": "non-main-ref",
+      "meaning": "The input branch is not main, so the cache key must not be emitted for reuse."
+    },
+    {
+      "code": "unknown-head-sha",
+      "meaning": "The input head sha is missing, non-hex, or otherwise not a concrete commit boundary."
+    },
+    {
+      "code": "missing-required-input",
+      "meaning": "A required cache-key component is absent, so the helper must refuse a reusable key."
+    }
+  ],
+  "safety_contract": {
+    "warmed_caches_are_advisory_only": true,
+    "proof_must_still_execute": true,
+    "branch_required": "main",
+    "cross_ref_reuse_forbidden": true,
+    "unknown_ref_reuse_forbidden": true,
+    "stale_cache_behavior": "discard cache hint, recompute key, and run proof in an isolated CARGO_TARGET_DIR",
+    "cache_hit_is_not_evidence": "A warm cache may reduce build latency, but it never proves a lane green. Only the actual proof command output can be cited."
+  },
+  "guarantees": [
+    "Equivalent input material produces the same advisory cache key regardless of feature, component, target, or env map ordering.",
+    "Dependency, feature, toolchain, target, package, proof-family, env-flag, or main-head changes invalidate the key.",
+    "Non-main and unknown refs are refused instead of being normalized into reusable cache keys."
+  ],
+  "explicit_non_guarantees": [
+    "Does not read or write remote caches.",
+    "Does not select a worker.",
+    "Does not run Cargo or rch.",
+    "Does not make cache warmth authoritative validation evidence."
+  ]
+}
