@@ -277,9 +277,9 @@ impl H3Session {
             stream_count: self.streams.len(),
             datagram_queue_len: self.datagram_send_queue.len(),
             max_streams: self.config.max_streams as usize,
-            uptime_ms: duration_millis_floor_one(self.uptime()),
-            idle_time_ms: duration_millis_floor_one(self.idle_time()),
-            timeout_ms: duration_millis_floor_one(self.timeout),
+            uptime_ms: elapsed_millis_floor_one(self.uptime()),
+            idle_time_ms: elapsed_millis_floor_one(self.idle_time()),
+            timeout_ms: duration_millis(self.timeout),
         }
     }
 
@@ -289,12 +289,12 @@ impl H3Session {
     }
 }
 
-fn duration_millis_floor_one(duration: Duration) -> u64 {
-    if duration.is_zero() {
-        return 0;
-    }
-
+fn elapsed_millis_floor_one(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis().max(1)).unwrap_or(u64::MAX)
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Session statistics.
