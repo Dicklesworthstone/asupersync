@@ -3141,53 +3141,97 @@ mod tests {
         // Create a child process that creates its own session. Spawn `setsid`
         // directly so `child.id()` refers to the session-isolated process we
         // later probe and kill, rather than an intermediate shell in our group.
-        let mut child = Command::new("setsid")
+        let mut isolated_child = Command::new("setsid")
             .arg("sleep")
             .arg("30")
             .spawn()
             .expect("spawn failed");
 
-        let child_pid = child.id().expect("no pid");
+        let isolated_pid = isolated_child.id().expect("no pid");
 
         // Get our own process group
         let our_pgid = unsafe { libc::getpgid(0) };
 
         // Get child's process group (should be different after setsid)
-        let child_pgid = unsafe { libc::getpgid(child_pid.cast_signed()) };
+        let isolated_pgid = unsafe { libc::getpgid(isolated_pid.cast_signed()) };
 
+        let isolated_group_valid = isolated_pgid > 0 && isolated_pgid != our_pgid;
+        if !isolated_group_valid {
+            let _ = isolated_child.kill();
+            let _ = isolated_child.wait();
+        }
         crate::assert_with_log!(
-            child_pgid != our_pgid,
+            isolated_group_valid,
             "Child in different process group",
             true,
-            child_pgid != our_pgid
+            isolated_group_valid
         );
 
-        // Send signal to our process group - child should not receive it
-        let signal_result = unsafe {
-            libc::kill(-our_pgid, libc::SIGUSR1) // Negative PID = process group
-        };
+        // Exercise process-group signalling against a dedicated target group
+        // instead of the test runner's own process group.
+        let mut signal_target = Command::new("setsid")
+            .arg("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn signal target failed");
+        let target_pid = signal_target.id().expect("target pid");
+        let target_pgid = unsafe { libc::getpgid(target_pid.cast_signed()) };
+        let target_group_valid = target_pgid > 0 && target_pgid != isolated_pgid;
+        if !target_group_valid {
+            let _ = signal_target.kill();
+            let _ = signal_target.wait();
+            let _ = isolated_child.kill();
+            let _ = isolated_child.wait();
+        }
+        crate::assert_with_log!(
+            target_group_valid,
+            "Signal target in separate process group",
+            true,
+            target_group_valid
+        );
+
+        let signal_result = unsafe { libc::kill(-target_pgid, libc::SIGUSR1) };
         crate::assert_with_log!(
             signal_result == 0,
-            "Signal sent to our process group",
+            "Signal sent to dedicated process group",
             0,
             signal_result
         );
 
-        // Give signal time to be delivered (if it were going to be)
-        std::thread::sleep(Duration::from_millis(50));
+        let mut target_signal = None;
+        for _ in 0..50 {
+            if let Some(status) = signal_target.try_wait().expect("target try_wait failed") {
+                target_signal = status.signal();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if target_signal.is_none() {
+            let _ = signal_target.kill();
+            let _ = signal_target.wait();
+        }
 
-        // Child should still be alive (signal was isolated)
-        let child_alive = unsafe { libc::kill(child_pid.cast_signed(), 0) == 0 };
+        // The isolated child should still be alive because the group signal was
+        // sent to a different session.
+        let child_alive = unsafe { libc::kill(isolated_pid.cast_signed(), 0) == 0 };
+
+        // Clean up the isolated child before asserting so failures don't leave
+        // the long-lived sleep process behind.
+        let _ = isolated_child.kill();
+        let _ = isolated_child.wait();
+
+        crate::assert_with_log!(
+            target_signal == Some(libc::SIGUSR1),
+            "Signal target received group signal",
+            Some(libc::SIGUSR1),
+            target_signal
+        );
         crate::assert_with_log!(
             child_alive,
-            "Child survived signal to parent group",
+            "Child survived signal to other process group",
             true,
             child_alive
         );
-
-        // Clean up the child
-        child.kill().expect("kill failed");
-        let _status = child.wait().expect("wait failed");
 
         crate::test_complete!("test_setsid_isolation");
     }
