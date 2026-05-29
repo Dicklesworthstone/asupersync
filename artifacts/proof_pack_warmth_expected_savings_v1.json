@@ -1,0 +1,70 @@
+{
+  "schema_version": "proof-pack-warmth-expected-savings-v1",
+  "generated_at": "2026-05-29T01:45:00Z",
+  "source_fixture": "tests/fixtures/proof_pack_warmth_planner/two_family_fresh.json",
+  "source_planner": "scripts/proof_pack_warmth_planner.py",
+  "purpose": "Checked parent-level evidence for asupersync-l5m170.4: expected queue and compile-time savings for two current proof families without treating cache warmth as proof success.",
+  "safety_contract": {
+    "dry_run_only": true,
+    "cache_warmth_is_correctness_evidence": false,
+    "proof_must_still_execute": true,
+    "uses_agent_isolated_cargo_target_dirs": true
+  },
+  "summary": {
+    "proof_family_count": 2,
+    "warm_family_count": 1,
+    "cold_compatible_family_count": 1,
+    "degraded_family_count": 0
+  },
+  "proof_families": [
+    {
+      "proof_lane_family": "module-microharness",
+      "lane_id": "module-microharness",
+      "classification": "warm",
+      "cache_key_fingerprint": "d9f58a6efc57cf38",
+      "observed_rch_worker_id": "vmi-module-warm",
+      "matching_target_dir_family": "rch_target_module_microharness_contract",
+      "queue_pressure": {
+        "class": "low",
+        "queue_depth": 0,
+        "available_slots": 3,
+        "saturated": false
+      },
+      "expected_compile_savings_seconds": 780,
+      "expected_compile_savings_band": "high",
+      "expected_queue_savings": {
+        "class": "immediate-warm-worker",
+        "reason": "The sampled worker exposes the target-dir family and has available slots, so the planner can recommend a warm worker without queueing behind saturated capacity."
+      },
+      "fallback_recommendation": "run-proof-on-recommended-warm-worker"
+    },
+    {
+      "proof_lane_family": "touched-surface-selector",
+      "lane_id": "touched-surface-selector",
+      "classification": "not-warm",
+      "cache_key_fingerprint": "4cd58f3f08ebaa47",
+      "observed_rch_worker_id": "vmi-selector-cold",
+      "matching_target_dir_family": "",
+      "queue_pressure": {
+        "class": "low",
+        "queue_depth": 1,
+        "available_slots": 2,
+        "saturated": false
+      },
+      "expected_compile_savings_seconds": 60,
+      "expected_compile_savings_band": "none",
+      "expected_queue_savings": {
+        "class": "compatible-cold-worker",
+        "reason": "The sampled worker has capacity but no matching cache key or target-dir family, so the planner must not claim warm-cache savings even though the lane can run."
+      },
+      "fallback_recommendation": "run-proof-on-compatible-cold-worker"
+    }
+  ],
+  "required_real_proof_lanes": [
+    {
+      "lane_id": "proof-pack-warmth-planner-contract",
+      "command": "cargo test --test proof_pack_warmth_planner_contract",
+      "reason": "This artifact is a planning receipt; the contract test must still execute before citing planner behavior."
+    }
+  ]
+}

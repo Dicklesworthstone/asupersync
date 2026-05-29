@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 
 const SCRIPT_PATH: &str = "scripts/proof_pack_warmth_planner.py";
 const CONTRACT_PATH: &str = "artifacts/proof_pack_cache_key_contract_v1.json";
+const EXPECTED_SAVINGS_PATH: &str = "artifacts/proof_pack_warmth_expected_savings_v1.json";
 const FIXTURE_DIR: &str = "tests/fixtures/proof_pack_warmth_planner";
 const GENERATED_AT: &str = "2026-05-29T01:45:00Z";
 
@@ -23,6 +24,14 @@ fn fixture_json(name: &str) -> Value {
         .unwrap_or_else(|error| panic!("read fixture {}: {error}", path.display()));
     serde_json::from_str(&raw)
         .unwrap_or_else(|error| panic!("parse fixture {}: {error}", path.display()))
+}
+
+fn artifact_json(path: &str) -> Value {
+    let path = repo_root().join(path);
+    let raw = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read artifact {}: {error}", path.display()));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|error| panic!("parse artifact {}: {error}", path.display()))
 }
 
 fn key_input() -> Value {
@@ -669,5 +678,96 @@ fn operator_receipt_names_required_real_proof_lanes_and_isolated_commands() {
     assert_eq!(
         required[1]["command"].as_str(),
         Some("cargo clippy --all-targets -- -D warnings")
+    );
+}
+
+#[test]
+fn expected_savings_artifact_matches_two_family_planner_receipt() {
+    let artifact = artifact_json(EXPECTED_SAVINGS_PATH);
+    let receipt = planner_json(&fixture_json("two_family_fresh.json"));
+
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some("proof-pack-warmth-expected-savings-v1")
+    );
+    assert_eq!(
+        artifact["source_fixture"].as_str(),
+        Some("tests/fixtures/proof_pack_warmth_planner/two_family_fresh.json")
+    );
+    assert_eq!(
+        artifact["safety_contract"]["dry_run_only"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        artifact["safety_contract"]["cache_warmth_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        artifact["safety_contract"]["proof_must_still_execute"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(artifact["summary"]["proof_family_count"].as_u64(), Some(2));
+
+    for family in artifact["proof_families"]
+        .as_array()
+        .expect("proof families")
+    {
+        let lane_id = family["lane_id"].as_str().expect("lane id");
+        let row = lane(&receipt, lane_id);
+        let evidence = &row["worker_warmth_evidence"];
+
+        assert_eq!(
+            family["proof_lane_family"].as_str(),
+            evidence["proof_lane_family"].as_str()
+        );
+        assert_eq!(
+            family["classification"].as_str(),
+            row["classification"].as_str()
+        );
+        assert_eq!(
+            family["cache_key_fingerprint"].as_str(),
+            row["cache_key_fingerprint"].as_str()
+        );
+        assert_eq!(
+            family["observed_rch_worker_id"].as_str(),
+            evidence["observed_rch_worker_id"].as_str()
+        );
+        assert_eq!(
+            family["matching_target_dir_family"].as_str(),
+            evidence["matching_target_dir_family"].as_str()
+        );
+        assert_eq!(
+            family["queue_pressure"]["class"].as_str(),
+            evidence["queue_pressure"]["class"].as_str()
+        );
+        assert_eq!(
+            family["queue_pressure"]["queue_depth"].as_u64(),
+            evidence["queue_pressure"]["queue_depth"].as_u64()
+        );
+        assert_eq!(
+            family["queue_pressure"]["available_slots"].as_u64(),
+            evidence["queue_pressure"]["available_slots"].as_u64()
+        );
+        assert_eq!(
+            family["expected_compile_savings_seconds"].as_u64(),
+            evidence["estimated_compile_savings_seconds"].as_u64()
+        );
+        assert_eq!(
+            family["expected_compile_savings_band"].as_str(),
+            evidence["estimated_savings_band"].as_str()
+        );
+        assert_eq!(
+            family["fallback_recommendation"].as_str(),
+            evidence["fallback_recommendation"].as_str()
+        );
+    }
+
+    let required = artifact["required_real_proof_lanes"]
+        .as_array()
+        .expect("required proof lanes");
+    assert_eq!(required.len(), 1);
+    assert_eq!(
+        required[0]["command"].as_str(),
+        Some("cargo test --test proof_pack_warmth_planner_contract")
     );
 }
