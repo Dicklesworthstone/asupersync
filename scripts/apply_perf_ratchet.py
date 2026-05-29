@@ -66,6 +66,15 @@ def load_history_baseline(history_dir: str) -> dict:
     return baseline
 
 
+def load_combined_baseline(path: str) -> dict:
+    """Read a combined `asupersync.baseline.v2` file (capture_baseline.sh --save
+    output) as the baseline. Used in CI's base-vs-PR flow where there is no
+    committed `.bench-history` yet."""
+    with open(path, "r") as fh:
+        data = json.load(fh)
+    return {b["name"]: b for b in data.get("benchmarks", []) if "name" in b}
+
+
 def is_number(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
@@ -121,7 +130,11 @@ def eprocess_alarm(runs_path: str, metric: str, per_bench_thr_pct: float,
 def main() -> int:
     ap = argparse.ArgumentParser(description="Pass-over-pass perf ratchet (PERF-004)")
     ap.add_argument("--candidate", required=True, help="candidate baseline JSON (capture_baseline.sh output)")
-    ap.add_argument("--history-dir", default=".bench-history")
+    ap.add_argument("--history-dir", default=".bench-history",
+                    help="committed keep-gate baseline dir (default mode)")
+    ap.add_argument("--baseline", default=None,
+                    help="combined baseline JSON to use instead of --history-dir "
+                         "(CI base-vs-PR flow; capture_baseline.sh --save output)")
     ap.add_argument("--metric", default="median_ns",
                     choices=["mean_ns", "median_ns", "p95_ns", "p99_ns"])
     ap.add_argument("--per-bench-max-regression-pct", type=float, default=10.0)
@@ -137,7 +150,12 @@ def main() -> int:
     args = ap.parse_args()
 
     candidate = load_candidate(args.candidate)
-    baseline = load_history_baseline(args.history_dir)
+    if args.baseline:
+        baseline = load_combined_baseline(args.baseline)
+        baseline_source = args.baseline
+    else:
+        baseline = load_history_baseline(args.history_dir)
+        baseline_source = args.history_dir
 
     metric = args.metric
     per_bench_thr = args.per_bench_max_regression_pct / 100.0
@@ -190,6 +208,7 @@ def main() -> int:
     report = {
         "schema_version": "asupersync.perf_ratchet.v1",
         "verdict": verdict,
+        "baseline_source": baseline_source,
         "metric": metric,
         "thresholds": {
             "per_bench_max_regression_pct": args.per_bench_max_regression_pct,

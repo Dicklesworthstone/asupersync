@@ -221,6 +221,21 @@ jobs:
           print("No threshold regressions detected")
           PY
 
+      # gauntlet PERF-004: complementary pass-over-pass ratchet — median_ns
+      # per-bench (10%) + geomean (5%) gates plus cv_pct>5 flake quarantine,
+      # on top of the mean/p95/p99 check above. Fails only on Block (exit 2).
+      - name: Pass-over-pass perf ratchet
+        run: |
+          set +e
+          python3 ./scripts/apply_perf_ratchet.py \
+            --baseline /tmp/bench_baseline/baseline_latest.json \
+            --candidate /tmp/bench_current/baseline_latest.json \
+            --metric median_ns --json | tee /tmp/bench_ratchet.json
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" = "2" ]; then echo "::error::perf ratchet verdict=Block (geomean or per-bench regression)"; exit 1; fi
+          if [ "$rc" = "3" ]; then echo "::warning::perf ratchet verdict=Quarantine (all scored benches flaky)"; fi
+          exit 0
+
       - name: Upload comparison results
         uses: actions/upload-artifact@v4
         with:
@@ -229,6 +244,7 @@ jobs:
             /tmp/bench_baseline/
             /tmp/bench_current/
             /tmp/bench_compare.json
+            /tmp/bench_ratchet.json
             /tmp/rch_target_bench_baseline/criterion/
             /tmp/rch_target_bench_pr/criterion/
           retention-days: 30
