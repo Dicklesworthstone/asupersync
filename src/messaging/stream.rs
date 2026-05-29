@@ -487,7 +487,7 @@ impl WalStorageBackend {
     /// Compute integrity hash for WAL entry payload to detect corruption.
     fn compute_payload_hash(payload: &[u8]) -> u64 {
         let mut hasher = DefaultHasher::new();
-        Self::WAL_INTEGRITY_SEED.hash(&mut hasher);
+        WalStorageConfig::WAL_INTEGRITY_SEED.hash(&mut hasher);
         payload.hash(&mut hasher);
         hasher.finish()
     }
@@ -495,14 +495,14 @@ impl WalStorageBackend {
     /// Validate payload size and integrity before deserialization.
     fn validate_payload(payload: &[u8], expected_hash: Option<u64>) -> Result<(), StreamError> {
         // Check size bounds to prevent memory exhaustion
-        if payload.len() > Self::MAX_WAL_ENTRY_BYTES {
+        if payload.len() > WalStorageConfig::MAX_WAL_ENTRY_BYTES {
             return Err(StreamError::WalFormat {
                 path: "<validation>".to_string(),
                 line: 0,
                 detail: format!(
                     "WAL entry payload too large: {} bytes (max: {})",
                     payload.len(),
-                    Self::MAX_WAL_ENTRY_BYTES
+                    WalStorageConfig::MAX_WAL_ENTRY_BYTES
                 ),
             });
         }

@@ -1573,6 +1573,23 @@ impl ConsumerRedeliveryAction {
     }
 }
 
+/// Receipt returned when a FABRIC consumer reaches its region finalization fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumerFinalizationReceipt {
+    /// Region whose messaging ledger was fenced.
+    pub region: RegionId,
+    /// Whether this call was the first one to finalize the region.
+    pub finalized_now: bool,
+    /// Pending ack obligations aborted during drain.
+    pub aborted_obligations: usize,
+    /// Messages released from the pending-ack window set.
+    pub released_messages: u64,
+    /// Pull requests discarded because the consumer is no longer schedulable.
+    pub cleared_waiting_pull_requests: usize,
+    /// Defensive count for tokens that existed without matching pending state.
+    pub orphaned_tokens_aborted: usize,
+}
+
 /// Auditable record of one consumer scheduling / retry decision.
 #[derive(Debug, Clone)]
 pub struct ConsumerDecisionRecord {
@@ -1726,6 +1743,12 @@ impl FabricConsumer {
         self.waiting_pull_requests.len()
     }
 
+    /// Return whether the owner region has reached the messaging finalization fence.
+    #[must_use]
+    pub fn is_region_finalized(&self) -> bool {
+        self.ledger.is_region_finalized(self.owner.region)
+    }
+
     /// Return the current cursor lease.
     #[must_use]
     pub fn current_lease(&self) -> &CursorAuthorityLease {
@@ -1761,6 +1784,7 @@ impl FabricConsumer {
 
     /// Queue a pull request for later dispatch.
     pub fn queue_pull_request(&mut self, request: PullRequest) -> Result<(), FabricConsumerError> {
+        self.ensure_region_open()?;
         if self.policy.mode != ConsumerDispatchMode::Pull {
             return Err(FabricConsumerError::PullModeRequired);
         }
@@ -1790,6 +1814,7 @@ impl FabricConsumer {
         capsule: &RecoverableCapsule,
         ticket: Option<&ReadDelegationTicket>,
     ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
+        self.ensure_region_open()?;
         if self.policy.mode != ConsumerDispatchMode::Push {
             return Err(FabricConsumerError::PushModeRequired);
         }
@@ -1812,6 +1837,7 @@ impl FabricConsumer {
         capsule: &RecoverableCapsule,
         ticket: Option<&ReadDelegationTicket>,
     ) -> Result<PullDispatchOutcome, FabricConsumerError> {
+        self.ensure_region_open()?;
         if self.policy.mode != ConsumerDispatchMode::Pull {
             return Err(FabricConsumerError::PullModeRequired);
         }
@@ -1948,6 +1974,7 @@ impl FabricConsumer {
         capsule: &RecoverableCapsule,
         ticket: Option<&ReadDelegationTicket>,
     ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
+        self.ensure_region_open()?;
         let Some(pending) = self.state.pending_acks.get(&attempt.obligation_id).cloned() else {
             return Err(FabricConsumerError::PendingAckNotFound {
                 obligation_id: attempt.obligation_id,
@@ -2015,6 +2042,7 @@ impl FabricConsumer {
         attempt: &AttemptCertificate,
         reason: impl Into<String>,
     ) -> Result<DeadLetterTransfer, FabricConsumerError> {
+        self.ensure_region_open()?;
         let reason = reason.into();
         if reason.trim().is_empty() {
             return Err(FabricConsumerError::EmptyDeadLetterReason);
@@ -2047,6 +2075,45 @@ impl FabricConsumer {
             delivery_attempt: pending.delivery_attempt,
             reason,
         })
+    }
+
+    /// Drain live ack obligations and fence the owner region against late ledger mutation.
+    pub fn finalize_region(&mut self) -> ConsumerFinalizationReceipt {
+        let region = self.owner.region;
+        let finalized_now = !self.ledger.is_region_finalized(region);
+        let pending_acks = std::mem::take(&mut self.state.pending_acks);
+        let pending_ack_tokens = std::mem::take(&mut self.pending_ack_tokens);
+        let released_messages = pending_acks
+            .values()
+            .map(|pending| window_len(pending.window))
+            .sum();
+        let orphaned_tokens_aborted = pending_ack_tokens
+            .keys()
+            .filter(|obligation_id| !pending_acks.contains_key(obligation_id))
+            .count();
+
+        let aborted_obligations = if finalized_now {
+            let aborted_at = self.next_event_time();
+            self.ledger
+                .abort_pending_for_region(region, aborted_at, ObligationAbortReason::Cancel)
+                .aborted
+        } else {
+            0
+        };
+
+        self.state.pending_count = 0;
+        let cleared_waiting_pull_requests = self.waiting_pull_requests.len();
+        self.waiting_pull_requests.clear();
+        self.ledger.mark_region_finalized(region);
+
+        ConsumerFinalizationReceipt {
+            region,
+            finalized_now,
+            aborted_obligations,
+            released_messages,
+            cleared_waiting_pull_requests,
+            orphaned_tokens_aborted,
+        }
     }
 
     fn pop_next_live_pull_request(&mut self) -> Option<QueuedPullRequest> {
@@ -2223,6 +2290,16 @@ impl FabricConsumer {
         now
     }
 
+    fn ensure_region_open(&self) -> Result<(), FabricConsumerError> {
+        if self.is_region_finalized() {
+            Err(FabricConsumerError::RegionFinalized {
+                region: self.owner.region,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     fn decision_context<T: Hash>(
         &mut self,
         seed: &T,
@@ -2316,6 +2393,7 @@ impl FabricConsumer {
         ticket: Option<&ReadDelegationTicket>,
         supersedes_obligation_id: Option<ObligationId>,
     ) -> Result<ScheduledConsumerDelivery, FabricConsumerError> {
+        self.ensure_region_open()?;
         if self.policy.paused {
             return Err(FabricConsumerError::ConsumerPaused);
         }
@@ -3047,6 +3125,12 @@ pub enum FabricConsumerError {
     /// Dead-letter transfers must capture a non-empty reason.
     #[error("dead-letter reason must not be empty")]
     EmptyDeadLetterReason,
+    /// Consumer owner region has finalized; no new obligations may be minted.
+    #[error("consumer owner region `{region:?}` has finalized")]
+    RegionFinalized {
+        /// Region that owns this consumer.
+        region: RegionId,
+    },
     /// The adaptive redelivery policy deferred the retry instead of executing it now.
     #[error(
         "consumer deferred redelivery for obligation `{obligation_id}` at attempt `{delivery_attempt}`"
@@ -3518,17 +3602,26 @@ impl crate::gen_server::GenServer for ConsumerActor {
         let cx = cx.clone();
         Box::pin(async move {
             self.lifecycle = ConsumerActorLifecycle::Stopping;
+            let receipt = self.consumer.finalize_region();
             let name = self
                 .consumer
                 .config()
                 .durable_name
                 .clone()
                 .unwrap_or_else(|| "anonymous".to_owned());
+            let region = format!("{:?}", receipt.region);
+            let aborted = receipt.aborted_obligations.to_string();
+            let released = receipt.released_messages.to_string();
+            let waiting = receipt.cleared_waiting_pull_requests.to_string();
             cx.trace_with_fields(
                 "fabric.consumer_actor.stop",
                 &[
                     ("event", "consumer_actor_stop"),
                     ("consumer", name.as_str()),
+                    ("region", region.as_str()),
+                    ("aborted_obligations", aborted.as_str()),
+                    ("released_messages", released.as_str()),
+                    ("cleared_waiting_pull_requests", waiting.as_str()),
                 ],
             );
         })
@@ -5209,6 +5302,128 @@ mod tests {
     }
 
     #[test]
+    fn fabric_consumer_finalize_region_aborts_pending_and_fences_late_ack() {
+        let cell = test_cell();
+        let owner = FabricConsumerOwner {
+            holder: TaskId::new_for_test(41, 0),
+            region: RegionId::new_for_test(7, 0),
+        };
+        let mut consumer = FabricConsumer::new_owned(&cell, FabricConsumerConfig::default(), owner)
+            .expect("consumer");
+        let window = SequenceWindow::new(11, 12).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let delivery = consumer
+            .dispatch_push(window, &capsule, None)
+            .expect("dispatch");
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(1, ConsumerDemandClass::Tail).expect("pull"))
+            .expect("queue before finalize");
+
+        let receipt = consumer.finalize_region();
+        assert_eq!(receipt.region, owner.region);
+        assert!(receipt.finalized_now);
+        assert_eq!(receipt.aborted_obligations, 1);
+        assert_eq!(receipt.released_messages, 2);
+        assert_eq!(receipt.cleared_waiting_pull_requests, 1);
+        assert_eq!(receipt.orphaned_tokens_aborted, 0);
+        assert!(consumer.is_region_finalized());
+        assert_eq!(consumer.state().pending_count, 0);
+        assert_eq!(consumer.waiting_pull_request_count(), 0);
+
+        let record = consumer
+            .ledger
+            .get(delivery.attempt.obligation_id)
+            .expect("finalized record");
+        assert_eq!(record.state, crate::record::ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Cancel));
+        let stats_after_finalize = consumer.obligation_stats();
+        assert_eq!(stats_after_finalize.pending, 0);
+        assert_eq!(stats_after_finalize.total_aborted, 1);
+        assert_eq!(stats_after_finalize.total_committed, 0);
+
+        assert_eq!(
+            consumer.acknowledge_delivery(&delivery.attempt),
+            Ok(AckResolution::StaleNoOp {
+                obligation_id: delivery.attempt.obligation_id,
+                current_generation: consumer.current_lease().lease_generation,
+                current_holder: CursorLeaseHolder::Steward(NodeId::new("node-a")),
+            })
+        );
+        let stats_after_late_ack = consumer.obligation_stats();
+        assert_eq!(stats_after_late_ack.pending, stats_after_finalize.pending);
+        assert_eq!(
+            stats_after_late_ack.total_aborted,
+            stats_after_finalize.total_aborted
+        );
+        assert_eq!(
+            stats_after_late_ack.total_committed,
+            stats_after_finalize.total_committed
+        );
+
+        let err = consumer
+            .queue_pull_request(PullRequest::new(1, ConsumerDemandClass::Tail).expect("pull"))
+            .expect_err("finalized consumer must reject new pull work");
+        assert_eq!(
+            err,
+            FabricConsumerError::RegionFinalized {
+                region: owner.region
+            }
+        );
+
+        let second = consumer.finalize_region();
+        assert!(!second.finalized_now);
+        assert_eq!(second.aborted_obligations, 0);
+        assert_eq!(second.released_messages, 0);
+        assert_eq!(second.cleared_waiting_pull_requests, 0);
+    }
+
+    #[test]
+    fn fabric_consumer_finalize_region_drains_tokenless_pending_ack() {
+        let cell = test_cell();
+        let owner = FabricConsumerOwner {
+            holder: TaskId::new_for_test(41, 0),
+            region: RegionId::new_for_test(7, 0),
+        };
+        let mut consumer = FabricConsumer::new_owned(&cell, FabricConsumerConfig::default(), owner)
+            .expect("consumer");
+        let window = SequenceWindow::new(31, 33).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let delivery = consumer
+            .dispatch_push(window, &capsule, None)
+            .expect("dispatch");
+        let dropped_token = consumer
+            .pending_ack_tokens
+            .remove(&delivery.attempt.obligation_id)
+            .expect("test setup removes token");
+        drop(dropped_token);
+
+        let receipt = consumer.finalize_region();
+        assert_eq!(receipt.aborted_obligations, 1);
+        assert_eq!(receipt.released_messages, 3);
+        assert_eq!(receipt.orphaned_tokens_aborted, 0);
+        assert!(consumer.ledger.is_region_clean(owner.region));
+        assert!(consumer.is_region_finalized());
+
+        let record = consumer
+            .ledger
+            .get(delivery.attempt.obligation_id)
+            .expect("drained tokenless record");
+        assert_eq!(record.state, crate::record::ObligationState::Aborted);
+        assert_eq!(record.abort_reason, Some(ObligationAbortReason::Cancel));
+        assert_eq!(
+            consumer.acknowledge_delivery(&delivery.attempt),
+            Ok(AckResolution::StaleNoOp {
+                obligation_id: delivery.attempt.obligation_id,
+                current_generation: consumer.current_lease().lease_generation,
+                current_holder: CursorLeaseHolder::Steward(NodeId::new("node-a")),
+            })
+        );
+    }
+
+    #[test]
     fn pull_request_expiry_measured_from_original_enqueue_not_re_enqueue() {
         let cell = test_cell();
         let mut consumer = FabricConsumer::new(
@@ -5369,6 +5584,47 @@ mod tests {
             &mut actor, &cx,
         ));
         assert_eq!(actor.lifecycle(), ConsumerActorLifecycle::Stopping);
+        assert!(actor.consumer().is_region_finalized());
+    }
+
+    #[test]
+    fn consumer_actor_on_stop_finalizes_pending_consumer_obligations() {
+        let cell = test_cell();
+        let owner = FabricConsumerOwner {
+            holder: TaskId::new_for_test(41, 0),
+            region: RegionId::new_for_test(7, 0),
+        };
+        let consumer = FabricConsumer::new_owned(&cell, FabricConsumerConfig::default(), owner)
+            .expect("consumer");
+        let mut actor = ConsumerActor::new(consumer);
+        let cx = crate::cx::Cx::for_testing();
+        let window = SequenceWindow::new(21, 22).expect("window");
+        let capsule = RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+        let delivery = actor
+            .consumer_mut()
+            .dispatch_push(window, &capsule, None)
+            .expect("dispatch before stop");
+        assert_eq!(actor.consumer().obligation_stats().pending, 1);
+
+        futures_lite::future::block_on(<ConsumerActor as crate::gen_server::GenServer>::on_stop(
+            &mut actor, &cx,
+        ));
+
+        assert_eq!(actor.lifecycle(), ConsumerActorLifecycle::Stopping);
+        assert!(actor.consumer().is_region_finalized());
+        assert_eq!(actor.consumer().state().pending_count, 0);
+        assert_eq!(actor.consumer().obligation_stats().pending, 0);
+        assert_eq!(actor.consumer().obligation_stats().total_aborted, 1);
+        let current_generation = actor.consumer().current_lease().lease_generation;
+        assert_eq!(
+            actor.consumer_mut().acknowledge_delivery(&delivery.attempt),
+            Ok(AckResolution::StaleNoOp {
+                obligation_id: delivery.attempt.obligation_id,
+                current_generation,
+                current_holder: CursorLeaseHolder::Steward(NodeId::new("node-a")),
+            })
+        );
     }
 
     #[test]

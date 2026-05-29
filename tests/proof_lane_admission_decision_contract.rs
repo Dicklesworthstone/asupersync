@@ -318,13 +318,13 @@ fn warm_worker_is_preferred_but_not_correctness_evidence() {
     );
     assert_has_reason(&receipt, "warm-worker-preferred");
     assert!(suggested_command(&receipt).contains("RCH_PREFERRED_WORKER=rchw-warm-a"));
-    let non_coverage = receipt["non_coverage"]
+    let has_cache_warmth_non_coverage = receipt["non_coverage"]
         .as_array()
         .expect("non coverage")
         .iter()
         .map(|value| value.as_str().expect("non coverage string"))
-        .collect::<Vec<_>>();
-    assert!(non_coverage.contains(&"does not make cache warmth correctness evidence"));
+        .any(|entry| entry == "does not make cache warmth correctness evidence");
+    assert!(has_cache_warmth_non_coverage);
 }
 
 #[test]

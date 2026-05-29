@@ -445,14 +445,15 @@ impl ObligationLedger {
     /// [`LedgerError::RegionFinalized`] instead of mutating ledger
     /// state. Idempotent.
     ///
-    /// **Status (verified 2026-05-29): the fence MACHINERY is complete and
+    /// **Status (verified 2026-05-29): the fence machinery is complete and
     /// unit-tested here — [`Self::commit`] (`finalized_regions` check before
     /// mutate), [`Self::abort`], [`Self::abort_by_id`], and
     /// [`Self::acquire_with_context`] (via `acquire_internal`) all fail-closed
     /// on a finalized region, and the `try_*` variants surface it as an error.
-    /// What is missing is the production CALL SITE: `mark_region_finalized`
-    /// is invoked only from this file's `#[cfg(test)]` mod, so in production
-    /// `finalized_regions` stays empty and every fence check above is inert.**
+    /// The FABRIC consumer production call site now drains pending ack
+    /// obligations and invokes this method from
+    /// `FabricConsumer::finalize_region`, which `ConsumerActor::on_stop` calls
+    /// after its mailbox drain.**
     ///
     /// IMPORTANT — do NOT confuse this type with the runtime's
     /// `crate::runtime::obligation_table::ObligationTable` (Σ shard C). That
@@ -466,13 +467,12 @@ impl ObligationLedger {
     /// lane (e.g. `FabricConsumer` in `src/messaging/consumer.rs`, plus
     /// `src/messaging/{fabric,service}.rs` and `src/messaging/session/obligation.rs`).
     /// `FabricConsumer` owns a ledger and resolves obligations via
-    /// `commit`/`abort`/`acquire_with_context`, but has no region-finalize hook
-    /// today, so `mark_region_finalized` is never reached for it. The wire site
-    /// is therefore the MESSAGING region/consumer finalize path, NOT
-    /// `RuntimeState`. Until that lands, a Drop-late commit/abort racing a
-    /// messaging region close still mutates an already-closed region's audit
-    /// trail. Tracked as br-asupersync-qyf37e / -u1gcfp / -12cqs2 and gauntlet
-    /// finding CONF-001.
+    /// `commit`/`abort`/`acquire_with_context`; its finalize hook is the
+    /// MESSAGING region/consumer finalize path, NOT `RuntimeState`. That hook
+    /// is intentionally responsible for aborting live ack obligations before
+    /// marking the owner region finalized, so Drop-late commit/abort paths cannot
+    /// mutate an already-closed region's audit trail. Tracked as
+    /// br-asupersync-qyf37e / -u1gcfp / -12cqs2 and gauntlet finding CONF-001.
     ///
     /// Tokens captured across the region boundary (e.g. in a Drop impl
     /// outside the scope) that arrive after this point are rejected

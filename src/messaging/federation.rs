@@ -478,8 +478,8 @@ pub struct ReplicationTransfer {
     pub sequence: u64,
     /// Ordering guarantee promised by the replication role.
     pub ordering_guarantee: OrderingGuarantee,
-    /// Deterministic content hash of the exported snapshot.
-    pub snapshot_hash: u64,
+    /// Lowercase SHA-256 content hash of the exported snapshot.
+    pub snapshot_hash: String,
     /// Deterministic binary snapshot payload.
     pub snapshot_bytes: Vec<u8>,
 }
@@ -888,7 +888,7 @@ impl FederationBridge {
         let transfer = ReplicationTransfer {
             sequence: snapshot.sequence,
             ordering_guarantee: config.ordering_guarantee,
-            snapshot_hash: snapshot.content_hash(),
+            snapshot_hash: snapshot.content_hash().to_hex(),
             snapshot_bytes: snapshot.to_bytes(),
         };
 
@@ -964,10 +964,11 @@ impl FederationBridge {
             });
         }
         let actual_hash = snapshot.content_hash();
-        if actual_hash != transfer.snapshot_hash {
+        let actual_hash_hex = actual_hash.to_hex();
+        if actual_hash_hex != transfer.snapshot_hash {
             return Err(FederationError::ReplicationTransferHashMismatch {
-                expected: transfer.snapshot_hash,
-                actual: actual_hash,
+                expected: transfer.snapshot_hash.clone(),
+                actual: actual_hash_hex,
             });
         }
         bridge.apply_snapshot(&snapshot).map_err(|error| {
@@ -2180,9 +2181,9 @@ pub enum FederationError {
     #[error("replication transfer hash mismatch: expected {expected}, got {actual}")]
     ReplicationTransferHashMismatch {
         /// Hash advertised by the transfer envelope.
-        expected: u64,
+        expected: String,
         /// Hash recomputed from the decoded snapshot payload.
-        actual: u64,
+        actual: String,
     },
     /// Catch-up planning fails closed if the remote peer reports a newer sequence.
     #[error(

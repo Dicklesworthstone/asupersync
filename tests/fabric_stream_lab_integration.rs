@@ -8,8 +8,8 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::messaging::capability::FabricCapability as RuntimeFabricCapability;
 use asupersync::messaging::consumer::{
     AckResolution, ConsumerDemandClass, ConsumerDispatchMode, CursorLeaseHolder, FabricConsumer,
-    FabricConsumerConfig, FabricConsumerError, PullDispatchOutcome, PullRequest,
-    RecoverableCapsule, SequenceWindow,
+    FabricConsumerConfig, FabricConsumerError, FabricConsumerOwner, PullDispatchOutcome,
+    PullRequest, RecoverableCapsule, SequenceWindow,
 };
 use asupersync::messaging::fabric::{
     CellEpoch, CellTemperature, DataCapsule, NodeRole, PlacementPolicy, RepairPolicy,
@@ -68,6 +68,18 @@ struct PullNoDataSummary {
     demand_class: ConsumerDemandClass,
     available_tail: u64,
     waiting_after_error: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FinalizeFenceSummary {
+    pending_after_dispatch: u64,
+    pending_after_finalize: u64,
+    total_aborted: u64,
+    total_committed: u64,
+    released_messages: u64,
+    aborted_obligations: usize,
+    late_ack_was_stale: bool,
+    finalized_dispatch_rejected: bool,
 }
 
 fn test_fabric_cx(slot: u32) -> Cx {
@@ -563,6 +575,117 @@ fn run_pull_no_data_scenario(seed: u64) -> (PullNoDataSummary, Vec<StreamConsume
     (summary, log_entries, runtime.steps())
 }
 
+fn run_finalize_fence_scenario(
+    seed: u64,
+) -> (FinalizeFenceSummary, Vec<StreamConsumerLogEntry>, u64) {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5_000));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seq = Arc::new(AtomicU64::new(0));
+    let summary = Arc::new(Mutex::new(None::<FinalizeFenceSummary>));
+
+    {
+        let log = Arc::clone(&log);
+        let seq = Arc::clone(&seq);
+        let summary = Arc::clone(&summary);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let owner = FabricConsumerOwner {
+                    holder: TaskId::new_for_test(41, 0),
+                    region: RegionId::new_for_test(7, 0),
+                };
+                let mut consumer =
+                    FabricConsumer::new_owned(&test_cell(), FabricConsumerConfig::default(), owner)
+                        .expect("consumer");
+                let window = SequenceWindow::new(5, 6).expect("window");
+                let capsule =
+                    RecoverableCapsule::default().with_window(NodeId::new("node-a"), window);
+
+                yield_now().await;
+                let delivery = consumer
+                    .dispatch_push(window, &capsule, None)
+                    .expect("dispatch");
+                let pending_after_dispatch = consumer.state().pending_count;
+                push_log(
+                    &log,
+                    &seq,
+                    "finalize",
+                    "dispatch",
+                    format!("pending={pending_after_dispatch}"),
+                );
+
+                yield_now().await;
+                let receipt = consumer.finalize_region();
+                let stats_after_finalize = consumer.obligation_stats();
+                push_log(
+                    &log,
+                    &seq,
+                    "finalize",
+                    "finalize_region",
+                    format!(
+                        "aborted={} released={} finalized={}",
+                        receipt.aborted_obligations, receipt.released_messages, receipt.finalized_now
+                    ),
+                );
+
+                yield_now().await;
+                let late_ack_was_stale = matches!(
+                    consumer
+                        .acknowledge_delivery(&delivery.attempt)
+                        .expect("late ack must be classified"),
+                    AckResolution::StaleNoOp { .. }
+                );
+                let finalized_dispatch_rejected = matches!(
+                    consumer.dispatch_push(window, &capsule, None),
+                    Err(FabricConsumerError::RegionFinalized { region }) if region == owner.region
+                );
+                push_log(
+                    &log,
+                    &seq,
+                    "finalize",
+                    "late_paths",
+                    format!(
+                        "late_ack_stale={late_ack_was_stale} dispatch_rejected={finalized_dispatch_rejected}"
+                    ),
+                );
+
+                *summary.lock().expect("summary lock") = Some(FinalizeFenceSummary {
+                    pending_after_dispatch,
+                    pending_after_finalize: consumer.state().pending_count,
+                    total_aborted: stats_after_finalize.total_aborted,
+                    total_committed: stats_after_finalize.total_committed,
+                    released_messages: receipt.released_messages,
+                    aborted_obligations: receipt.aborted_obligations,
+                    late_ack_was_stale,
+                    finalized_dispatch_rejected,
+                });
+            })
+            .expect("create finalize-fence task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+    }
+
+    runtime.run_until_quiescent();
+    let violations = runtime.check_invariants();
+    assert!(
+        runtime.is_quiescent(),
+        "finalize-fence scenario should quiesce"
+    );
+    assert!(
+        violations.is_empty(),
+        "finalize-fence scenario should not violate lab invariants: {violations:?}"
+    );
+
+    let summary = summary
+        .lock()
+        .expect("summary lock")
+        .clone()
+        .expect("finalize-fence summary");
+    let mut log_entries = log.lock().expect("log lock").clone();
+    log_entries.sort_unstable_by_key(|entry| entry.seq);
+    (summary, log_entries, runtime.steps())
+}
+
 #[test]
 fn fabric_stream_handle_is_deterministic_across_seeded_lab_runs() {
     let (first_summary, first_log, first_steps) = run_stream_handle_scenario(0x5172_0001);
@@ -655,4 +778,29 @@ fn fabric_consumer_pull_no_wait_fails_closed_when_no_data_is_available() {
     assert_eq!(summary.available_tail, 0);
     assert_eq!(summary.waiting_after_error, 0);
     assert_eq!(log.len(), 2);
+}
+
+#[test]
+fn fabric_consumer_finalize_fence_is_deterministic_across_seeded_lab_runs() {
+    let (first_summary, first_log, first_steps) = run_finalize_fence_scenario(0x5172_0040);
+    let (second_summary, second_log, second_steps) = run_finalize_fence_scenario(0x5172_0040);
+
+    assert_eq!(first_summary, second_summary);
+    assert_eq!(first_log, second_log);
+    assert_eq!(first_steps, second_steps);
+}
+
+#[test]
+fn fabric_consumer_finalize_fence_aborts_pending_and_rejects_late_work() {
+    let (summary, log, _) = run_finalize_fence_scenario(0x5172_0041);
+
+    assert_eq!(summary.pending_after_dispatch, 2);
+    assert_eq!(summary.pending_after_finalize, 0);
+    assert_eq!(summary.total_aborted, 1);
+    assert_eq!(summary.total_committed, 0);
+    assert_eq!(summary.released_messages, 2);
+    assert_eq!(summary.aborted_obligations, 1);
+    assert!(summary.late_ack_was_stale);
+    assert!(summary.finalized_dispatch_rejected);
+    assert_eq!(log.len(), 3);
 }

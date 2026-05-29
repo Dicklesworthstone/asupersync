@@ -1,0 +1,423 @@
+{
+  "contract_version": "roundtrip-oracle-v1",
+  "bead_id": "asupersync-wr5m5s",
+  "description": "Source-backed oracle catalog for encode/decode, serde, replay, snapshot, TLA projection, and protocol roundtrip surfaces.",
+  "source_of_truth": {
+    "artifact": "artifacts/roundtrip_oracle_v1.json",
+    "contract_test": "tests/roundtrip_oracle_contract.rs",
+    "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_roundtrip_oracle CARGO_BUILD_JOBS=2 cargo test -p asupersync --test roundtrip_oracle_contract -- --nocapture"
+  },
+  "oracle_rules": {
+    "entry_id_prefix": "roundtrip.",
+    "category_prefix": "RoundtripCategory::",
+    "source_paths_are_repo_relative": true,
+    "source_markers_must_exist": true,
+    "proof_command_must_use_rch": true,
+    "risk_focus_must_be_nonempty": true,
+    "equality_oracle_must_be_nonempty": true
+  },
+  "roundtrip_categories": [
+    {
+      "tag": "RoundtripCategory::TypedIdSerde",
+      "description": "Core typed identifiers survive JSON serialization and deserialization without losing generation or type identity."
+    },
+    {
+      "tag": "RoundtripCategory::WasmAbiSerde",
+      "description": "Browser/WASM ABI envelopes survive JSON serialization with handles and structured failure fields intact."
+    },
+    {
+      "tag": "RoundtripCategory::RegionSnapshotBinary",
+      "description": "Distributed region snapshots encode to deterministic bytes and decode back to equivalent region/task/budget state."
+    },
+    {
+      "tag": "RoundtripCategory::TraceEventSerde",
+      "description": "Runtime trace events serialize through JSON and deserialize to the identical typed event."
+    },
+    {
+      "tag": "RoundtripCategory::OracleReportSerde",
+      "description": "Lab oracle reports and evidence ledgers preserve invariant summaries through JSON serialization."
+    },
+    {
+      "tag": "RoundtripCategory::CrashpackReplaySerde",
+      "description": "Incident replay and minimization crashpack repro artifacts retain replay identity through JSON import/export."
+    },
+    {
+      "tag": "RoundtripCategory::ScenarioSerde",
+      "description": "Frankenlab scenario fixtures preserve schema, seed, participants, and fault shape through JSON or YAML."
+    },
+    {
+      "tag": "RoundtripCategory::CodecFrame",
+      "description": "Framed codec surfaces encode payload bytes and decode the same frame or consume the same wire payload."
+    },
+    {
+      "tag": "RoundtripCategory::ProtocolEnvelope",
+      "description": "Protocol-level frames and field sections encode into wire envelopes and decode to equivalent protocol state."
+    },
+    {
+      "tag": "RoundtripCategory::MessagingConfig",
+      "description": "Messaging configuration enums and codec selections round-trip through public builder or wire identity surfaces."
+    },
+    {
+      "tag": "RoundtripCategory::RaptorQEncodeDecode",
+      "description": "RaptorQ systematic and repair-symbol encode/decode paths recover the original source payload."
+    },
+    {
+      "tag": "RoundtripCategory::TlaProjection",
+      "description": "Trace-to-TLA projection stays pinned to deterministic golden behavior for model-checking handoff."
+    },
+    {
+      "tag": "RoundtripCategory::RedisResp3Wire",
+      "description": "RESP3 wire fixtures decode to typed Redis values and re-encode byte-for-byte."
+    }
+  ],
+  "roundtrip_entries": [
+    {
+      "entry_id": "roundtrip.types.ids_serde_json",
+      "category": "RoundtripCategory::TypedIdSerde",
+      "encoder": "serde_json::to_string(&id)",
+      "decoder": "serde_json::from_str::<RegionId|TaskId|ObligationId>(&json)",
+      "equality_oracle": "assert_eq!(id, deserialized)",
+      "source_paths": [
+        "src/types/id.rs"
+      ],
+      "markers": [
+        "fn region_id_serde_roundtrip()",
+        "fn task_id_serde_roundtrip()",
+        "fn obligation_id_serde_roundtrip()"
+      ],
+      "proof_surface": "inline unit tests in src/types/id.rs",
+      "risk_focus": [
+        "identifier generation loss",
+        "serde type drift",
+        "obligation handle aliasing"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.types.wasm_abi_outcome_envelope_json",
+      "category": "RoundtripCategory::WasmAbiSerde",
+      "encoder": "serde_json::to_string(&ok)",
+      "decoder": "serde_json::from_str::<WasmAbiOutcomeEnvelope>(&ok_json)",
+      "equality_oracle": "assert_eq!(ok, ok_back) and assert_eq!(err, err_back)",
+      "source_paths": [
+        "src/types/wasm_abi.rs"
+      ],
+      "markers": [
+        "fn outcome_envelope_serialization_round_trip()",
+        "let ok_json = serde_json::to_string(&ok).expect(\"serialize ok\");",
+        "serde_json::from_str(&ok_json).expect(\"deserialize ok\")"
+      ],
+      "proof_surface": "inline unit tests in src/types/wasm_abi.rs",
+      "risk_focus": [
+        "browser ABI drift",
+        "failure envelope loss",
+        "handle generation loss"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.distributed.region_snapshot_binary",
+      "category": "RoundtripCategory::RegionSnapshotBinary",
+      "encoder": "RegionSnapshot::to_bytes()",
+      "decoder": "RegionSnapshot::from_bytes(&bytes)",
+      "equality_oracle": "field-by-field assertions over region, task, child, budget, parent, and metadata state",
+      "source_paths": [
+        "tests/distributed_trace_remote_invariants.rs"
+      ],
+      "markers": [
+        "fn snapshot_empty_roundtrip()",
+        "fn snapshot_full_roundtrip()",
+        "let loaded = RegionSnapshot::from_bytes(&bytes).unwrap();"
+      ],
+      "proof_surface": "integration-test",
+      "risk_focus": [
+        "snapshot schema drift",
+        "truncated binary acceptance",
+        "budget or metadata loss"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.trace.event_json",
+      "category": "RoundtripCategory::TraceEventSerde",
+      "encoder": "serde_json::to_string(&event)",
+      "decoder": "serde_json::from_str::<TraceEvent>(&json)",
+      "equality_oracle": "assert_eq!(event, deserialized)",
+      "source_paths": [
+        "tests/trace_event_golden.rs"
+      ],
+      "markers": [
+        "fn trace_event_roundtrip_serialization()",
+        "let json = serde_json::to_string(&event)",
+        "let deserialized: TraceEvent = serde_json::from_str(&json)"
+      ],
+      "proof_surface": "integration-test",
+      "risk_focus": [
+        "trace replay drift",
+        "logical time loss",
+        "variant coverage loss"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.lab.oracle_report_json",
+      "category": "RoundtripCategory::OracleReportSerde",
+      "encoder": "serde_json::to_string(&report)",
+      "decoder": "serde_json::from_str::<OracleReport>(&json_str)",
+      "equality_oracle": "assertions over totals, pass/fail counts, check time, entries, violations, and stats",
+      "source_paths": [
+        "tests/oracle_report.rs"
+      ],
+      "markers": [
+        "fn unified_report_json_roundtrip()",
+        "let json_str = serde_json::to_string(&report).expect(\"serialize\");",
+        "let deserialized: OracleReport = serde_json::from_str(&json_str).expect(\"deserialize\");"
+      ],
+      "proof_surface": "integration-test",
+      "risk_focus": [
+        "oracle summary loss",
+        "invariant stats drift",
+        "lab evidence serialization drift"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.lab.evidence_ledger_json",
+      "category": "RoundtripCategory::OracleReportSerde",
+      "encoder": "serde_json::to_string(&ledger)",
+      "decoder": "serde_json::from_str::<EvidenceLedger>(&json_str)",
+      "equality_oracle": "assertions over entry count, summary totals, check time, invariant names, pass flags, and Bayes factors",
+      "source_paths": [
+        "tests/oracle_report.rs"
+      ],
+      "markers": [
+        "fn evidence_ledger_json_roundtrip()",
+        "let ledger = EvidenceLedger::from_report(&report);",
+        "let deserialized: EvidenceLedger = serde_json::from_str(&json_str).expect(\"deserialize\");"
+      ],
+      "proof_surface": "integration-test",
+      "risk_focus": [
+        "evidence ledger loss",
+        "Bayes factor precision drift",
+        "invariant identity drift"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.crashpack.incident_replay_repro_json",
+      "category": "RoundtripCategory::CrashpackReplaySerde",
+      "encoder": "IncidentMinimizedReplayRepro::to_json()",
+      "decoder": "IncidentMinimizedReplayRepro::from_json(&json)",
+      "equality_oracle": "assert_eq!(repro.repro_id, parsed.repro_id) and assert_eq!(repro, parsed)",
+      "source_paths": [
+        "tests/incident_replay_minimization.rs"
+      ],
+      "markers": [
+        "fn repro_json_round_trip_is_stable()",
+        "let json = repro.to_json().expect(\"repro serializes\");",
+        "let parsed = IncidentMinimizedReplayRepro::from_json(&json).expect(\"repro parses\");"
+      ],
+      "proof_surface": "integration-test",
+      "risk_focus": [
+        "crashpack replay drift",
+        "minimized repro identity loss",
+        "incident forensics import failure"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.frankenlab.scenario_json",
+      "category": "RoundtripCategory::ScenarioSerde",
+      "encoder": "Scenario::to_json()",
+      "decoder": "Scenario::from_json(&json)",
+      "equality_oracle": "property assertions over id, schema, seed, worker count, faults, and participants",
+      "source_paths": [
+        "tests/frankenlab_integration.rs"
+      ],
+      "markers": [
+        "fn scenario_json_roundtrip(scenario in arb_scenario())",
+        "let json = scenario.to_json().expect(\"serialize to JSON\");",
+        "let parsed = Scenario::from_json(&json).expect(\"parse from JSON\");"
+      ],
+      "proof_surface": "proptest integration-test",
+      "risk_focus": [
+        "scenario corpus drift",
+        "seed loss",
+        "fault model truncation"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.codec.grpc_message_frame",
+      "category": "RoundtripCategory::CodecFrame",
+      "encoder": "GrpcCodec::encode(original.clone(), &mut buf)",
+      "decoder": "GrpcCodec::decode(&mut buf)",
+      "equality_oracle": "assert_eq!(decoded.data, original.data) and assert!(buf.is_empty())",
+      "source_paths": [
+        "tests/grpc_verification.rs"
+      ],
+      "markers": [
+        "fn grpc_verify_007_codec_roundtrip()",
+        "codec.encode(original.clone(), &mut buf).unwrap();",
+        "let decoded = codec.decode(&mut buf).unwrap().unwrap();"
+      ],
+      "proof_surface": "integration-test",
+      "risk_focus": [
+        "gRPC payload truncation",
+        "compressed flag drift",
+        "frame-consumption bug"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.codec.length_delimited_frame",
+      "category": "RoundtripCategory::CodecFrame",
+      "encoder": "LengthDelimitedCodec::encode(payload, &mut dst)",
+      "decoder": "LengthDelimitedCodec::decode(&mut buf)",
+      "equality_oracle": "golden hexdump snapshots and decode result assertions",
+      "source_paths": [
+        "tests/codec_wire_frame_goldens.rs"
+      ],
+      "markers": [
+        "fn length_delimited_encode_empty_payload()",
+        "fn length_delimited_decode_empty_buffer()",
+        ".encode(BytesMut::from(&b\"hello\"[..]), &mut dst)"
+      ],
+      "proof_surface": "golden integration-test",
+      "risk_focus": [
+        "length prefix drift",
+        "partial frame handling drift",
+        "wire golden mismatch"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.protocol.http3_qpack_request_fields",
+      "category": "RoundtripCategory::ProtocolEnvelope",
+      "encoder": "qpack_encode_request_field_section(&req)",
+      "decoder": "qpack_decode_request_field_section(&encoded, H3QpackMode::StaticOnly, None)",
+      "equality_oracle": "assertions over method, scheme, and path pseudo headers",
+      "source_paths": [
+        "tests/tokio_quic_h3_e2e_scenario_manifest.rs"
+      ],
+      "markers": [
+        "fn eh_06_qpack_round_trip()",
+        "asupersync::http::h3_native::qpack_encode_request_field_section(&req).expect(\"encode\");",
+        "asupersync::http::h3_native::qpack_decode_request_field_section("
+      ],
+      "proof_surface": "integration-test",
+      "risk_focus": [
+        "QPACK static-table drift",
+        "pseudo-header loss",
+        "HTTP/3 field-section decode failure"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.messaging.kafka_compression_config",
+      "category": "RoundtripCategory::MessagingConfig",
+      "encoder": "ProducerConfig::new(...).compression(compression)",
+      "decoder": "ProducerConfig::compression field observation",
+      "equality_oracle": "assert_eq!(config.compression, compression)",
+      "source_paths": [
+        "tests/messaging_kafka_compression_roundtrip.rs"
+      ],
+      "markers": [
+        "fn huvyi0_every_compression_variant_round_trips_through_config()",
+        "ProducerConfig::new(vec![\"localhost:9092\".to_string()]).compression(compression)",
+        "assert_eq!("
+      ],
+      "proof_surface": "feature-gated integration-test",
+      "risk_focus": [
+        "Kafka compression selection drift",
+        "builder API regression",
+        "codec label identity loss"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.raptorq.rfc6330_encode_decode",
+      "category": "RoundtripCategory::RaptorQEncodeDecode",
+      "encoder": "SystematicEncoder plus repair_symbol(esi)",
+      "decoder": "InactivationDecoder::decode(&all_symbols)",
+      "equality_oracle": "assertions that decoded source symbols match deterministic source_data",
+      "source_paths": [
+        "src/codec/raptorq.rs"
+      ],
+      "markers": [
+        "fn rfc6330_section6_encode_decode_roundtrip_differential_conformance()",
+        "let decode_result = decoder",
+        "Source symbol {i} round-trip failed: decoded data must exactly match original"
+      ],
+      "proof_surface": "inline unit test in src/codec/raptorq.rs",
+      "risk_focus": [
+        "RFC 6330 incompatibility",
+        "repair-symbol decode drift",
+        "systematic source corruption"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.raptorq.systematic_repair_backed",
+      "category": "RoundtripCategory::RaptorQEncodeDecode",
+      "encoder": "SystematicEncoder::new(...).emit_all(...)",
+      "decoder": "decode_source_symbols(&decoder, &received)",
+      "equality_oracle": "assert_eq!(decoded, source)",
+      "source_paths": [
+        "tests/raptorq_encoding_roundtrip_metamorphic.rs"
+      ],
+      "markers": [
+        "fn mr_repair_backed_roundtrip_preserves_original_source()",
+        "let decoded = decode_source_symbols(&decoder, &received);",
+        "repair-backed roundtrip must recover the original source symbols"
+      ],
+      "proof_surface": "metamorphic integration-test",
+      "risk_focus": [
+        "repair-backed recovery drift",
+        "source-symbol order loss",
+        "metamorphic decode regression"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.tla.trace_export_projection",
+      "category": "RoundtripCategory::TlaProjection",
+      "encoder": "TlaExporter::from_trace(&events).export_behavior(\"GoldenTraceBehavior\")",
+      "decoder": "golden snapshot parser / insta assertion over module.source",
+      "equality_oracle": "assert_snapshot!(\"trace_tla_region_obligation_behavior\", module.source)",
+      "source_paths": [
+        "tests/golden_outputs.rs",
+        "src/trace/tla_export.rs"
+      ],
+      "markers": [
+        "fn snapshot_trace_tla_region_obligation_behavior()",
+        "TlaExporter::from_trace(&events)",
+        "export_behavior(\"GoldenTraceBehavior\")"
+      ],
+      "proof_surface": "golden integration-test",
+      "risk_focus": [
+        "TLA projection drift",
+        "model-checking handoff mismatch",
+        "trace behavior golden mismatch"
+      ]
+    },
+    {
+      "entry_id": "roundtrip.redis.resp3_map_order_wire",
+      "category": "RoundtripCategory::RedisResp3Wire",
+      "encoder": "RespValue::encode()",
+      "decoder": "RespValue::try_decode(wire)",
+      "equality_oracle": "assert_eq!(decoded.encode(), wire) with duplicate-key pair-order assertions",
+      "source_paths": [
+        "tests/redis_resp3_map_order_differential.rs"
+      ],
+      "markers": [
+        "fn resp3_map_duplicate_keys_preserve_pair_order_like_redis_rs()",
+        "let (decoded, consumed) = RespValue::try_decode(wire)",
+        "assert_eq!(decoded.encode(), wire);"
+      ],
+      "proof_surface": "differential integration-test",
+      "risk_focus": [
+        "RESP3 duplicate-key coalescing",
+        "map pair-order loss",
+        "wire byte drift"
+      ]
+    }
+  ],
+  "required_entry_ids": [
+    "roundtrip.types.ids_serde_json",
+    "roundtrip.distributed.region_snapshot_binary",
+    "roundtrip.trace.event_json",
+    "roundtrip.crashpack.incident_replay_repro_json",
+    "roundtrip.codec.grpc_message_frame",
+    "roundtrip.protocol.http3_qpack_request_fields",
+    "roundtrip.messaging.kafka_compression_config",
+    "roundtrip.raptorq.rfc6330_encode_decode",
+    "roundtrip.tla.trace_export_projection"
+  ]
+}

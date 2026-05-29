@@ -78,7 +78,7 @@ fn disconnect_retry_preserves_idempotency() {
     assert_eq!(retry_transcript.outcome_class, OutcomeClass::Success);
     assert_eq!(retry_transcript.chunks_completed, 100);
     assert_eq!(retry_transcript.retry_attempt, 1);
-    assert!(retry_transcript.progress_percent() == 100.0);
+    assert_eq!(retry_transcript.progress_percent(), 100.0);
 }
 
 #[test]
