@@ -22,6 +22,7 @@ use asupersync::atp::object::{ObjectGraph, ObjectId};
 use asupersync::atp::safety::{
     DestinationPolicy, ReceiveConsentSource, ReceiveMetadataPolicy, ReceivePlan,
     ReceivePreflightInput, RollbackResumePolicy, StorageEvidence, build_receive_plan,
+    consent_token,
 };
 use asupersync::atp::sdk::StreamEarlyUsabilityReport;
 use asupersync::atp::stream_object::ByteRange;
@@ -3731,28 +3732,42 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
 
     let (graph, manifest_root) = object_graph_from_transfer_reference(&args.transfer_id)?;
 
-    // Build receive plan with safety preflight
-    let input = ReceivePreflightInput {
+    let destination_relative_path =
+        destination_relative_path_from_transfer_reference(&args.transfer_id);
+    let existing_destination_paths = scan_existing_paths(&destination_root)?;
+    let storage_evidence = get_storage_evidence(&destination_root)?;
+    let make_input = |consent_source| ReceivePreflightInput {
         sender_identity: "peer-alpha".to_string(),
         grant_id: None,
         capability_scope: Some("transfer-scope".to_string()),
         manifest_root: &manifest_root,
         graph: &graph,
-        destination_policy,
+        destination_policy: destination_policy.clone(),
         destination_root: destination_root.clone(),
-        destination_relative_path: PathBuf::from(&args.transfer_id),
-        existing_destination_paths: scan_existing_paths(&destination_root)?,
-        storage_evidence: get_storage_evidence(&destination_root)?,
+        destination_relative_path: destination_relative_path.clone(),
+        existing_destination_paths: existing_destination_paths.clone(),
+        storage_evidence,
         metadata_policy: ReceiveMetadataPolicy::PortableOnly,
-        consent_source: get_consent_source(args)?,
+        consent_source,
         rollback_resume: RollbackResumePolicy::RollbackQuarantineKeepJournal,
         trace_id: Some(format!("atp-get-{}", args.transfer_id)),
         replay_pointer: None,
     };
 
-    let plan = build_receive_plan(input).map_err(|err| {
-        CliError::new("receive_plan_error", "Failed to build receive plan").detail(err.to_string())
-    })?;
+    let preview_consent_source = if args.accept {
+        ReceiveConsentSource::DaemonAllowRule {
+            rule_id: "cli-accept-preview".to_string(),
+        }
+    } else {
+        ReceiveConsentSource::None
+    };
+    let preview_plan = build_cli_receive_plan(make_input(preview_consent_source))?;
+    let plan = if args.accept {
+        let consent_source = get_consent_source(args, Some(&preview_plan))?;
+        build_cli_receive_plan(make_input(consent_source))?
+    } else {
+        preview_plan
+    };
 
     if args.dry_run || args.verbose {
         if output.format() == OutputFormat::Json {
@@ -3828,6 +3843,20 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
         .map_err(output_write_error("ATP get execution message"))?;
 
     Ok(())
+}
+
+fn build_cli_receive_plan(input: ReceivePreflightInput<'_>) -> Result<ReceivePlan, CliError> {
+    build_receive_plan(input).map_err(|err| {
+        CliError::new("receive_plan_error", "Failed to build receive plan").detail(err.to_string())
+    })
+}
+
+fn destination_relative_path_from_transfer_reference(transfer_reference: &str) -> PathBuf {
+    let source = Path::new(transfer_reference);
+    source
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(transfer_reference))
 }
 
 fn parse_destination_policy(args: &AtpGetArgs) -> Result<DestinationPolicy, CliError> {
@@ -3998,10 +4027,20 @@ fn get_storage_evidence(root: &Path) -> Result<StorageEvidence, CliError> {
     })
 }
 
-fn get_consent_source(args: &AtpGetArgs) -> Result<ReceiveConsentSource, CliError> {
+fn get_consent_source(
+    args: &AtpGetArgs,
+    accepted_preview: Option<&ReceivePlan>,
+) -> Result<ReceiveConsentSource, CliError> {
     if args.accept {
+        let preview = accepted_preview.ok_or_else(|| {
+            CliError::new(
+                "receive_plan_error",
+                "Accepted ATP receive plan missing consent preview",
+            )
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
         Ok(ReceiveConsentSource::CliConfirmation {
-            token: "auto-accept".to_string(),
+            token: consent_token(preview),
         })
     } else {
         Ok(ReceiveConsentSource::None)
@@ -12272,6 +12311,13 @@ mod tests {
         }
     }
 
+    fn temp_transfer_reference(contents: &[u8]) -> (NamedTempFile, String) {
+        let file = NamedTempFile::new().expect("transfer source temp file");
+        fs::write(file.path(), contents).expect("write transfer source");
+        let reference = file.path().to_string_lossy().into_owned();
+        (file, reference)
+    }
+
     fn sample_task_console_snapshot() -> TaskConsoleWireSnapshot {
         let summary = TaskSummaryWire {
             total_tasks: 2,
@@ -15216,10 +15262,12 @@ lab:
     #[test]
     fn atp_get_dry_run_produces_receive_plan() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut output = Output::with_writer(OutputFormat::Human, Vec::<u8>::new());
+        let (_transfer, transfer_id) = temp_transfer_reference(b"dry-run transfer");
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
 
         let args = AtpGetArgs {
-            transfer_id: "test-transfer-123".to_string(),
+            transfer_id,
             destination: Some(temp.path().to_path_buf()),
             dry_run: true,
             policy: "allow-listed".to_string(),
@@ -15229,12 +15277,15 @@ lab:
             max_bytes: Some(1000),
             accept: false,
             verbose: true,
+            progress: false,
+            explain: false,
         };
 
         let result = atp_get(&args, &mut output);
         assert!(result.is_ok(), "atp get dry-run should succeed");
 
-        let output_str = String::from_utf8(output.into_writer().unwrap()).unwrap();
+        output.flush().expect("flush output");
+        let output_str = capture.contents();
         assert!(
             output_str.contains("Receive Plan:"),
             "should contain receive plan"
@@ -15249,10 +15300,11 @@ lab:
     #[test]
     fn atp_get_deny_policy_rejects_transfer() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let (_transfer, transfer_id) = temp_transfer_reference(b"deny transfer");
         let mut output = Output::with_writer(OutputFormat::Human, Vec::<u8>::new());
 
         let args = AtpGetArgs {
-            transfer_id: "test-transfer-456".to_string(),
+            transfer_id,
             destination: Some(temp.path().to_path_buf()),
             dry_run: false,
             policy: "deny".to_string(),
@@ -15262,6 +15314,8 @@ lab:
             max_bytes: None,
             accept: false,
             verbose: false,
+            progress: false,
+            explain: false,
         };
 
         let result = atp_get(&args, &mut output);
@@ -15274,10 +15328,12 @@ lab:
     #[test]
     fn atp_get_json_output_contains_plan_fields() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut output = Output::with_writer(OutputFormat::Json, Vec::<u8>::new());
+        let (_transfer, transfer_id) = temp_transfer_reference(b"json transfer");
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Json, capture.clone());
 
         let args = AtpGetArgs {
-            transfer_id: "test-transfer-json".to_string(),
+            transfer_id,
             destination: Some(temp.path().to_path_buf()),
             dry_run: true,
             policy: "allow-listed".to_string(),
@@ -15287,15 +15343,17 @@ lab:
             max_bytes: None,
             accept: false,
             verbose: false,
+            progress: false,
+            explain: false,
         };
 
         let result = atp_get(&args, &mut output);
         assert!(result.is_ok(), "json output should succeed");
 
-        let output_bytes = output.into_writer().unwrap();
-        let output_str = String::from_utf8(output_bytes).unwrap();
+        output.flush().expect("flush output");
+        let output_str = capture.contents();
         let json: serde_json::Value =
-            serde_json::from_str(&output_str).expect("output should be valid JSON");
+            serde_json::from_str(output_str.trim()).expect("output should be valid JSON");
 
         assert!(
             json.get("decision").is_some(),
@@ -15326,10 +15384,12 @@ lab:
     #[test]
     fn atp_get_quarantine_policy_shows_appropriate_message() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut output = Output::with_writer(OutputFormat::Human, Vec::<u8>::new());
+        let (_transfer, transfer_id) = temp_transfer_reference(b"quarantine transfer");
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
 
         let args = AtpGetArgs {
-            transfer_id: "test-transfer-quarantine".to_string(),
+            transfer_id,
             destination: Some(temp.path().to_path_buf()),
             dry_run: false,
             policy: "quarantine-only".to_string(),
@@ -15339,12 +15399,15 @@ lab:
             max_bytes: None,
             accept: true,
             verbose: false,
+            progress: false,
+            explain: false,
         };
 
         let result = atp_get(&args, &mut output);
         assert!(result.is_ok(), "quarantine policy should succeed");
 
-        let output_str = String::from_utf8(output.into_writer().unwrap()).unwrap();
+        output.flush().expect("flush output");
+        let output_str = capture.contents();
         assert!(
             output_str.contains("quarantined"),
             "should mention quarantine"
@@ -15367,6 +15430,8 @@ lab:
             max_bytes: None,
             accept: false,
             verbose: false,
+            progress: false,
+            explain: false,
         };
         let policy = parse_destination_policy(&deny_args).expect("deny policy should parse");
         assert!(matches!(policy, DestinationPolicy::Deny));
@@ -15383,6 +15448,8 @@ lab:
             max_bytes: Some(1000),
             accept: false,
             verbose: false,
+            progress: false,
+            explain: false,
         };
         let policy =
             parse_destination_policy(&allow_args).expect("allow-listed policy should parse");
@@ -15414,6 +15481,8 @@ lab:
             max_bytes: None,
             accept: false,
             verbose: false,
+            progress: false,
+            explain: false,
         };
         let result = parse_destination_policy(&invalid_args);
         assert!(result.is_err(), "invalid policy should error");
