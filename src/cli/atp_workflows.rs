@@ -1924,7 +1924,7 @@ mod tests {
 
     #[test]
     fn test_workflow_coordinator_creation() {
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             let coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json);
             assert!(coordinator.is_ok());
         });
@@ -1932,7 +1932,7 @@ mod tests {
 
     #[test]
     fn test_content_hash_computation() {
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             let coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
             let content = b"test content";
             let hash1 = coordinator.compute_content_hash(content);
@@ -1944,7 +1944,7 @@ mod tests {
 
     #[test]
     fn test_retention_duration_parsing() {
-        run_test_with_cx(|cx| async move {
+        run_test_with_cx(|_cx| async move {
             let coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
 
             let duration_7d = coordinator.parse_retention_duration("7d");

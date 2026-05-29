@@ -6995,6 +6995,7 @@ mod tests {
     use crate::test_utils::run_test_with_cx;
     use proptest::prelude::*;
     use std::collections::BTreeSet;
+    #[cfg(debug_assertions)]
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Duration;
 

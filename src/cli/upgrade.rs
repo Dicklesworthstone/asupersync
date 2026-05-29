@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn test_backup_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let mut manager = UpgradeManager::new(temp_dir.path().to_path_buf()).unwrap();
+        let manager = UpgradeManager::new(temp_dir.path().to_path_buf()).unwrap();
 
         // Create some test files
         write_install_config(temp_dir.path(), Version::new(0, 2, 0));

@@ -1291,7 +1291,6 @@ mod tests {
                         has_elvish_arg_completer
                     ));
                 }
-                _ => {}
             }
 
             comprehensive_report.push_str("\n");
