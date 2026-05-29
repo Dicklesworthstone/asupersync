@@ -43,7 +43,7 @@ mod tests {
         /// Broadcast channel for sending messages to all connected clients
         broadcast_tx: broadcast::Sender<BroadcastMessage>,
         /// Map of client connections with their individual receive channels
-        clients: Arc<Mutex<HashMap<ClientId, ClientConnection>>>,
+        clients: Arc<Mutex<HashMap<ClientId, Arc<ClientConnection>>>>,
         /// Server statistics for monitoring and testing
         stats: ServerStats,
         /// Configuration for backpressure and resource limits
@@ -329,7 +329,7 @@ mod tests {
             };
 
             let mut clients = self.clients.lock().await;
-            clients.insert(client_id, connection);
+            clients.insert(client_id, Arc::new(connection));
             self.stats
                 .connected_clients
                 .store(clients.len(), Ordering::Relaxed);
@@ -344,10 +344,16 @@ mod tests {
             let mut failed_sends = 0;
             let mut backpressured_clients = Vec::new();
 
-            let clients = self.clients.lock().await;
+            let clients: Vec<(ClientId, Arc<ClientConnection>)> = {
+                let clients = self.clients.lock().await;
+                clients
+                    .iter()
+                    .map(|(client_id, connection)| (*client_id, Arc::clone(connection)))
+                    .collect()
+            };
 
-            for (client_id, connection) in clients.iter() {
-                match self.send_to_client(connection, message.clone()).await {
+            for (client_id, connection) in clients {
+                match self.send_to_client(&connection, message.clone()).await {
                     SendResult::Success => {
                         successful_sends += 1;
                         connection
@@ -356,7 +362,7 @@ mod tests {
                             .fetch_add(1, Ordering::Relaxed);
                     }
                     SendResult::Backpressure => {
-                        backpressured_clients.push(*client_id);
+                        backpressured_clients.push(client_id);
                         connection
                             .backpressure_state
                             .dropped_messages
