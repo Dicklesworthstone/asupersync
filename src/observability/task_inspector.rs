@@ -511,7 +511,7 @@ impl TaskInspector {
             task.cx_inner.as_ref().and_then(|inner| {
                 inner
                     .read()
-                    .checkpoint_state
+                    .materialised_checkpoint_state()
                     .last_checkpoint
                     .map(|last_checkpoint| {
                         Duration::from_nanos(now.duration_since(last_checkpoint))
