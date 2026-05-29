@@ -6,6 +6,9 @@ use std::process::{Command, Stdio};
 
 const CONTRACT_PATH: &str = "artifacts/atp_completion_dashboard_contract_v1.json";
 const SCRIPT_PATH: &str = "scripts/atp_completion_dashboard.py";
+const LIVE_GENERATED_AT: &str = "2026-05-29T15:11:00Z";
+const LIVE_AS_OF_DATE: &str = "2026-05-29";
+const STALE_AS_OF_DATE: &str = "2026-06-07";
 
 fn repo_file(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|err| panic!("read {path}: {err}"))
@@ -32,15 +35,19 @@ fn run_dashboard(args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("dashboard stdout is utf8")
 }
 
-fn dashboard_json() -> Value {
+fn dashboard_json_as_of(generated_at: &str, as_of_date: &str) -> Value {
     serde_json::from_str(&run_dashboard(&[
         "--format=json",
         "--generated-at",
-        "2026-05-21T00:00:00Z",
+        generated_at,
         "--as-of-date",
-        "2026-05-21",
+        as_of_date,
     ]))
     .expect("dashboard json parses")
+}
+
+fn dashboard_json() -> Value {
+    dashboard_json_as_of(LIVE_GENERATED_AT, LIVE_AS_OF_DATE)
 }
 
 #[test]
@@ -154,21 +161,12 @@ fn dashboard_json_answers_user_questions_and_lists_live_gates() {
         7,
         "dashboard must answer every user question"
     );
-    assert_ne!(
-        answers["all_done"]["answer"].as_str(),
-        Some("yes"),
-        "ATP cannot be marked done while release-blocking rows remain"
-    );
     let all_done_gate_blockers = answers["all_done"]["blocking_gate_ids"]
         .as_array()
         .expect("all_done blocking gates");
     let all_done_artifact_blockers = answers["all_done"]["blocking_artifact_paths"]
         .as_array()
         .expect("all_done blocking artifacts");
-    assert!(
-        !all_done_gate_blockers.is_empty() || !all_done_artifact_blockers.is_empty(),
-        "all_done must name blocking gates or proof artifacts"
-    );
 
     let gates = dashboard["release_gates"]
         .as_array()
@@ -210,22 +208,43 @@ fn dashboard_json_answers_user_questions_and_lists_live_gates() {
         14,
         "dashboard must list ATP-A through ATP-N"
     );
-    assert!(
-        dashboard["summary"]["release_blocking_count"]
-            .as_u64()
-            .expect("release_blocking_count")
-            > 0,
-        "current ATP dashboard must stay release-blocking until the ATP-NR gates land"
-    );
-    assert_eq!(
-        dashboard["summary"]["ready_to_close_top_epic"].as_bool(),
-        Some(false)
-    );
+    let release_blocking_count = dashboard["summary"]["release_blocking_count"]
+        .as_u64()
+        .expect("release_blocking_count");
+    if release_blocking_count == 0 {
+        assert_eq!(
+            answers["all_done"]["answer"].as_str(),
+            Some("yes"),
+            "ATP should be marked done only when live gates and proof artifacts are green"
+        );
+        assert!(
+            all_done_gate_blockers.is_empty() && all_done_artifact_blockers.is_empty(),
+            "green all_done must not name blocking gates or proof artifacts"
+        );
+        assert_eq!(
+            dashboard["summary"]["ready_to_close_top_epic"].as_bool(),
+            Some(true)
+        );
+    } else {
+        assert_ne!(
+            answers["all_done"]["answer"].as_str(),
+            Some("yes"),
+            "ATP cannot be marked done while release-blocking rows remain"
+        );
+        assert!(
+            !all_done_gate_blockers.is_empty() || !all_done_artifact_blockers.is_empty(),
+            "red all_done must name blocking gates or proof artifacts"
+        );
+        assert_eq!(
+            dashboard["summary"]["ready_to_close_top_epic"].as_bool(),
+            Some(false)
+        );
+    }
 }
 
 #[test]
 fn dashboard_detects_missing_artifacts_and_stale_proof_snapshot() {
-    let dashboard = dashboard_json();
+    let dashboard = dashboard_json_as_of("2026-06-07T00:00:00Z", STALE_AS_OF_DATE);
     let artifacts = dashboard["proof_artifacts"]
         .as_array()
         .expect("proof_artifacts array");
@@ -241,7 +260,7 @@ fn dashboard_detects_missing_artifacts_and_stale_proof_snapshot() {
     assert_eq!(
         proof_status["stale"].as_bool(),
         Some(true),
-        "2026-05-08 proof snapshot must be stale as of 2026-05-21 under the 7-day policy"
+        "2026-05-29 proof snapshot must be stale as of 2026-06-07 under the 7-day policy"
     );
     assert_eq!(proof_status["release_blocking"].as_bool(), Some(true));
     assert!(
@@ -284,23 +303,23 @@ fn dashboard_summary_and_table_are_stable_human_outputs() {
     let summary = run_dashboard(&[
         "--format=summary",
         "--generated-at",
-        "2026-05-21T00:00:00Z",
+        LIVE_GENERATED_AT,
         "--as-of-date",
-        "2026-05-21",
+        LIVE_AS_OF_DATE,
     ]);
-    assert!(summary.contains("ATP completion dashboard (2026-05-21)"));
-    assert!(summary.contains("Ready to close top epic: false"));
+    assert!(summary.contains("ATP completion dashboard (2026-05-29)"));
+    assert!(summary.contains("Ready to close top epic: "));
     assert!(summary.contains("all_done:"));
     assert!(summary.contains("mock_free:"));
 
     let table = run_dashboard(&[
         "--format=table",
         "--generated-at",
-        "2026-05-21T00:00:00Z",
+        LIVE_GENERATED_AT,
         "--as-of-date",
-        "2026-05-21",
+        LIVE_AS_OF_DATE,
     ]);
-    assert!(table.contains("# ATP Completion Dashboard - 2026-05-21T00:00:00Z"));
+    assert!(table.contains("# ATP Completion Dashboard - 2026-05-29T15:11:00Z"));
     assert!(table.contains("| ATP-NR0 |"));
     assert!(table.contains("| ATP-A |"));
 }

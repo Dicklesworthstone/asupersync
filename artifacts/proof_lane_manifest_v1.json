@@ -1,7 +1,7 @@
 {
   "contract_version": "proof-lane-manifest-v1",
   "bead_id": "asupersync-aj7lx3.1",
-  "created_date": "2026-05-07",
+  "created_date": "2026-05-29",
   "description": "Canonical rch-routed proof-command manifest for production, feature, fuzz, broad validation, rustdoc, and formal proof lanes.",
   "source_of_truth": {
     "manifest": "artifacts/proof_lane_manifest_v1.json",

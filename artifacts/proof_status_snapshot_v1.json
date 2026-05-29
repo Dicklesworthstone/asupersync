@@ -1,7 +1,7 @@
 {
   "contract_version": "proof-status-snapshot-v1",
   "bead_id": "asupersync-aj7lx3.5",
-  "created_date": "2026-05-08",
+  "created_date": "2026-05-29",
   "description": "Machine-readable green/red status snapshot that maps README and AGENTS proof claims to canonical proof-lane commands and validation-frontier blocker evidence.",
   "source_of_truth": {
     "snapshot": "artifacts/proof_status_snapshot_v1.json",

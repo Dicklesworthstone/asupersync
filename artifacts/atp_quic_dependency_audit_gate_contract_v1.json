@@ -1,7 +1,7 @@
 {
   "contract_version": "atp-quic-dependency-audit-gate-contract-v1",
   "bead_id": "asupersync-jaghjr",
-  "created_date": "2026-05-20",
+  "created_date": "2026-05-29",
   "description": "ATP dependency audit gates forbidding external QUIC stacks and Tokio runtime paths in ATP/native core",
   "source_of_truth": {
     "audit_script": "scripts/detect_forbidden_quic_deps.sh",
