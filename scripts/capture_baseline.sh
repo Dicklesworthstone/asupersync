@@ -30,6 +30,11 @@ SMOKE_SEED=""
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_capture_baseline_phase0}"
 RUN_OUTPUT_LOG="${RUN_OUTPUT_LOG:-${TMPDIR:-/tmp}/asupersync_capture_baseline_run_$$.log}"
+# gauntlet PERF-001/002/003: append-only ratchet substrate + measured profile.
+BENCH_HISTORY_DIR="${BENCH_HISTORY_DIR:-.bench-history}"
+BENCH_PROFILE="${BENCH_PROFILE:-unknown}"
+WRITE_BENCH_HISTORY=1
+CV_PCT_FLAKE_THRESHOLD="${CV_PCT_FLAKE_THRESHOLD:-5.0}"
 
 usage() {
     cat <<'USAGE'
@@ -83,6 +88,9 @@ while [[ $# -gt 0 ]]; do
         --cmd-b64=*) CMD_B64="${1#--cmd-b64=}"; shift ;;
         --run) RUN_CMD=1; shift ;;
         --smoke) SMOKE=1; RUN_CMD=1; shift ;;
+        --profile) BENCH_PROFILE="$2"; shift 2 ;;
+        --no-bench-history) WRITE_BENCH_HISTORY=0; shift ;;
+        --bench-history-dir) BENCH_HISTORY_DIR="$2"; shift 2 ;;
         --seed) SMOKE_SEED="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
@@ -227,9 +235,13 @@ PY
         --argjson p95 "$p95_ns" \
         --argjson p99 "$p99_ns" \
         --argjson std_dev "$std_dev" \
-        '{name: $name, mean_ns: $mean, median_ns: $median, p95_ns: $p95, p99_ns: $p99, std_dev_ns: $std_dev}'
-done | jq -s '{
+        '{name: $name, mean_ns: $mean, median_ns: $median, p95_ns: $p95, p99_ns: $p99, std_dev_ns: $std_dev,
+          cv_pct: (if (($mean // 0) > 0) then (($std_dev / $mean) * 100) else null end)}'
+done | jq -s --argjson flake_threshold "$CV_PCT_FLAKE_THRESHOLD" '{
+    schema_version: "asupersync.baseline.v2",
     generated_at: (now | todate),
+    cv_pct_flake_threshold: $flake_threshold,
+    flaky_benches: [.[] | select((.cv_pct // 0) > $flake_threshold) | .name],
     benchmarks: .
 }' > /tmp/asupersync_baseline.json
 
@@ -348,4 +360,50 @@ PY
     fi
 else
     cat /tmp/asupersync_baseline.json
+fi
+
+# gauntlet PERF-001: populate the append-only .bench-history ratchet substrate.
+# One <bench>.latest.json per benchmark (the committed keep-gate baseline) plus a
+# runs.jsonl append. Each record carries git_sha + profile + cv_pct for the
+# pass-over-pass ratchet (apply-ratchet.sh, PERF-004) to consume.
+if [[ "$WRITE_BENCH_HISTORY" -eq 1 ]]; then
+    BENCH_HISTORY_DIR="$BENCH_HISTORY_DIR" BENCH_PROFILE="$BENCH_PROFILE" python3 - <<'PY'
+import json, os, re, subprocess, time
+
+hist = os.environ.get("BENCH_HISTORY_DIR", ".bench-history")
+profile = os.environ.get("BENCH_PROFILE", "unknown")
+try:
+    with open("/tmp/asupersync_baseline.json") as fh:
+        data = json.load(fh)
+except FileNotFoundError:
+    raise SystemExit(0)
+
+os.makedirs(hist, exist_ok=True)
+
+def git_sha():
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        return None
+
+sha = git_sha()
+ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+runs_path = os.path.join(hist, "runs.jsonl")
+n = 0
+with open(runs_path, "a") as runs:
+    for b in data.get("benchmarks", []):
+        name = b.get("name", "")
+        safe = re.sub(r"[^A-Za-z0-9._-]", "__", name)
+        rec = {
+            "name": name, "git_sha": sha, "profile": profile, "generated_at": ts,
+            "mean_ns": b.get("mean_ns"), "median_ns": b.get("median_ns"),
+            "p95_ns": b.get("p95_ns"), "p99_ns": b.get("p99_ns"),
+            "std_dev_ns": b.get("std_dev_ns"), "cv_pct": b.get("cv_pct"),
+        }
+        with open(os.path.join(hist, f"{safe}.latest.json"), "w") as f:
+            json.dump(rec, f, indent=2, sort_keys=True)
+        runs.write(json.dumps(rec, sort_keys=True) + "\n")
+        n += 1
+print(f".bench-history updated: {hist} ({n} benches, profile={profile}, sha={sha})")
+PY
 fi
