@@ -526,7 +526,7 @@ mod tests {
         #[test]
         fn source_wrapper_with_tcp_listener() {
             super::init_test("source_wrapper_with_tcp_listener");
-            let mut listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");
             let socket = listener.as_raw_socket();
             let wrapper = SourceWrapper::new(listener);
 
@@ -564,9 +564,24 @@ mod tests {
         }
 
         #[test]
+        fn source_wrapper_with_custom_id() {
+            super::init_test("source_wrapper_with_custom_id");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");
+            let wrapper = SourceWrapper::with_id(listener, 12345);
+
+            crate::assert_with_log!(
+                wrapper.source_id() == 12345,
+                "custom id",
+                12345u64,
+                wrapper.source_id()
+            );
+            crate::test_complete!("source_wrapper_with_custom_id");
+        }
+
+        #[test]
         fn tcp_listener_implements_source() {
             super::init_test("tcp_listener_implements_source");
-            let mut listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");
 
             fn accepts_source<T: Source>(_: &T) {}
             accepts_source(&listener);

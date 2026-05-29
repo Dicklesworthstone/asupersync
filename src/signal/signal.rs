@@ -743,9 +743,12 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    #[cfg(unix)]
     use std::future::Future;
+    #[cfg(unix)]
     use std::task::{Context, Poll, Waker};
 
+    #[cfg(unix)]
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
@@ -1044,7 +1047,7 @@ mod tests {
         crate::assert_with_log!(
             raw_value.is_none(),
             "SIGPIPE not supported on Windows",
-            None,
+            None::<i32>,
             raw_value
         );
 
@@ -1082,7 +1085,7 @@ mod tests {
         crate::assert_with_log!(
             raw_value.is_none(),
             "SIGPIPE not supported on other platforms",
-            None,
+            None::<i32>,
             raw_value
         );
 

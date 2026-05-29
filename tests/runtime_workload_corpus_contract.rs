@@ -10,6 +10,7 @@ use asupersync::lab::replay::{
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -876,11 +877,14 @@ fn workload_runner_rejects_rch_local_fallback() {
         "#!/usr/bin/env bash\nprintf '[RCH] local (all worker circuits open)\\n'\nexit 0\n",
     )
     .expect("write fake rch");
-    let mut perms = std::fs::metadata(&fake_rch)
-        .expect("fake rch metadata")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&fake_rch, perms).expect("chmod fake rch");
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&fake_rch)
+            .expect("fake rch metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_rch, perms).expect("chmod fake rch");
+    }
 
     let out = run_workload_script_with_env(
         &[

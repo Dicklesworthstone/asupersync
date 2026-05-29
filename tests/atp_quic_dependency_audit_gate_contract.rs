@@ -167,19 +167,31 @@ fn cargo_toml_documents_quic_native_policy() {
 
 #[test]
 fn audit_script_exists_and_is_executable() {
-    use std::os::unix::fs::PermissionsExt;
-
     let script_path = "scripts/detect_forbidden_quic_deps.sh";
     let metadata = std::fs::metadata(script_path).expect("ATP dependency audit script must exist");
 
     assert!(metadata.is_file(), "Audit script must be a regular file");
 
-    // Check that the script is executable (has execute permission)
-    let permissions = metadata.permissions();
-    assert!(
-        permissions.mode() & 0o111 != 0,
-        "Audit script must be executable"
-    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permissions = metadata.permissions();
+        assert!(
+            permissions.mode() & 0o111 != 0,
+            "Audit script must be executable"
+        );
+    }
+
+    #[cfg(windows)]
+    {
+        let script = std::fs::read_to_string(script_path)
+            .expect("ATP dependency audit script must be readable");
+        assert!(
+            script.starts_with("#!"),
+            "Windows cannot represent POSIX execute bits; script must keep an explicit interpreter line"
+        );
+    }
 }
 
 #[test]

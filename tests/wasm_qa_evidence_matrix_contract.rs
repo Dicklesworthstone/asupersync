@@ -949,12 +949,12 @@ fn runner_execute_mode_honors_rch_bin_override() {
     )
     .expect("write fake rch");
 
-    let mut perms = std::fs::metadata(&fake_rch)
-        .expect("fake rch metadata")
-        .permissions();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&fake_rch)
+            .expect("fake rch metadata")
+            .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_rch, perms).expect("chmod fake rch");
     }

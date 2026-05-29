@@ -102,14 +102,14 @@ struct BrowserReactorInner {
     wake_pending: AtomicBool,
 }
 
-#[cfg(any(test, target_arch = "wasm32"))]
+#[cfg(any(target_arch = "wasm32", all(test, unix)))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserHostBindingKind {
     MessagePort,
     BroadcastChannel,
 }
 
-#[cfg(any(test, target_arch = "wasm32"))]
+#[cfg(any(target_arch = "wasm32", all(test, unix)))]
 impl BrowserHostBindingKind {
     const fn label(self) -> &'static str {
         match self {
@@ -371,7 +371,7 @@ impl BrowserReactorInner {
         true
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn notify_ready_with_barriers(
         &self,
         token: Token,
@@ -532,12 +532,12 @@ impl BrowserReactor {
         }
     }
 
-    #[cfg(any(test, target_arch = "wasm32"))]
+    #[cfg(any(target_arch = "wasm32", all(test, unix)))]
     fn message_source_interest_mask() -> Interest {
         Interest::READABLE | Interest::ERROR
     }
 
-    #[cfg(any(test, target_arch = "wasm32"))]
+    #[cfg(any(target_arch = "wasm32", all(test, unix)))]
     fn validate_message_source_interest(
         kind: BrowserHostBindingKind,
         interest: Interest,
@@ -567,7 +567,7 @@ impl BrowserReactor {
         Ok(self.inner.notify_ready(token, ready))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn notify_ready_with_barriers(
         &self,
         token: Token,
@@ -579,7 +579,7 @@ impl BrowserReactor {
             .notify_ready_with_barriers(token, ready, after_interest, continue_after_interest)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn wake_pending(&self) -> bool {
         self.inner.wake_pending.load(Ordering::Acquire)
     }

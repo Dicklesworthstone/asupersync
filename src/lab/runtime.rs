@@ -2895,6 +2895,7 @@ mod tests {
     use crate::record::TaskRecord;
     use crate::record::{ObligationAbortReason, ObligationKind};
     use crate::runtime::deadline_monitor::{AdaptiveDeadlineConfig, WarningReason};
+    #[cfg(unix)]
     use crate::runtime::reactor::{Event, Interest};
     use crate::types::{Budget, CxInner, Outcome, TaskId};
     use crate::util::ArenaIndex;

@@ -39,12 +39,11 @@ fn dashboard_script_exists_and_executable() {
     let script_path = std::path::Path::new("scripts/operator_proof_lane_dashboard.py");
     assert!(script_path.exists(), "Dashboard script must exist");
 
-    let metadata = std::fs::metadata(script_path).unwrap();
-    let permissions = metadata.permissions();
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(script_path).unwrap();
+        let permissions = metadata.permissions();
         let mode = permissions.mode();
         assert!(mode & 0o111 != 0, "Dashboard script must be executable");
     }

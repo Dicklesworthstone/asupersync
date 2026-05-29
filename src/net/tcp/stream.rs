@@ -1088,6 +1088,7 @@ mod tests {
     use std::future::poll_fn;
     use std::io;
     use std::net::{SocketAddr, TcpListener};
+    #[cfg(unix)]
     use std::os::unix::io::AsRawFd;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1963,9 +1964,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_broken_pipe_error_instead_of_signal() {
-        use std::os::windows::io::AsRawSocket;
-        use std::ptr;
-
         let listener = net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("local addr");
 

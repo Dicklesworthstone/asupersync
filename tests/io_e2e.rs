@@ -9,15 +9,21 @@ mod common;
 use asupersync::io::{
     AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf, SplitStream, copy, copy_bidirectional,
 };
+#[cfg(unix)]
 use asupersync::lab::{LabConfig, LabRuntime};
+#[cfg(unix)]
 use asupersync::runtime::IoOp;
+#[cfg(unix)]
 use asupersync::runtime::reactor::{Event, Interest};
+#[cfg(unix)]
 use asupersync::trace::ReplayTrace;
+#[cfg(unix)]
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
 use common::*;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
+#[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
 use std::{os::unix::io::AsRawFd, os::unix::net::UnixStream};

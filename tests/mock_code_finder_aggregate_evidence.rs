@@ -90,13 +90,13 @@ fn write_child_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     writeln!(file, "set -euo pipefail").unwrap();
     write!(file, "{body}").unwrap();
     drop(file);
-    let mut permissions = fs::metadata(&path).expect("script metadata").permissions();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&path).expect("script metadata").permissions();
         permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("set script executable");
     }
-    fs::set_permissions(&path, permissions).expect("set script executable");
     path
 }
 

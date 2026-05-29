@@ -4239,12 +4239,14 @@ mod tests {
     use crate::cx::Cx;
     use crate::lab::{LabConfig, LabRuntime};
     use crate::record::TaskRecord;
+    #[cfg(unix)]
     use crate::runtime::reactor::{Event, Interest, LabReactor, Reactor};
     use crate::test_utils::init_test_logging;
     use crate::time::sleep;
     use crate::trace::{TraceEvent, TraceEventKind};
     use crate::types::{Budget, CancelReason, CxInner, Time};
     use parking_lot::RwLock;
+    #[cfg(unix)]
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
     use std::time::Duration;

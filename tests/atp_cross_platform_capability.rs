@@ -7,7 +7,9 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
+#[cfg(unix)]
+use std::io::{Seek, SeekFrom};
 use std::net::{Ipv6Addr, SocketAddrV6, UdpSocket};
 use std::path::Path;
 use tempfile::TempDir;

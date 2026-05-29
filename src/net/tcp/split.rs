@@ -948,16 +948,24 @@ mod tests {
     use crate::cx::Cx;
     use crate::io::AsyncReadVectored;
     use crate::net::tcp::stream::TcpStream;
+    #[cfg(unix)]
     use crate::runtime::io_driver::IoDriverHandle;
+    #[cfg(unix)]
     use crate::runtime::reactor::{Events, Reactor, Source, Token};
     use crate::test_utils::init_test_logging;
+    #[cfg(unix)]
     use crate::types::{Budget, RegionId, TaskId};
+    #[cfg(unix)]
     use parking_lot::Mutex;
+    #[cfg(unix)]
     use std::collections::HashMap;
     use std::io::{IoSliceMut, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
+    #[cfg(unix)]
+    use std::sync::Barrier;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
     use std::task::{Context, Waker};
     use std::thread;
     use std::time::Duration;

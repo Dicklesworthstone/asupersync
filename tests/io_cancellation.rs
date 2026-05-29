@@ -39,7 +39,9 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::net::{TcpListener, TcpStream};
 use asupersync::runtime::IoOp;
 #[cfg(feature = "test-internals")]
-use asupersync::runtime::reactor::{Interest, LabReactor, Token};
+use asupersync::runtime::reactor::LabReactor;
+#[cfg(all(feature = "test-internals", unix))]
+use asupersync::runtime::reactor::{Interest, Token};
 #[cfg(feature = "test-internals")]
 use asupersync::runtime::{IoDriverHandle, Reactor};
 use asupersync::types::{Budget, CancelReason, Outcome};

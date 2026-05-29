@@ -278,18 +278,9 @@ mod iocp_impl {
 
         #[test]
         fn unsupported_interest_flags_are_rejected() {
-            assert_eq!(
-                IocpReactor::validate_supported_interest(Interest::READABLE),
-                Ok(())
-            );
-            assert_eq!(
-                IocpReactor::validate_supported_interest(Interest::WRITABLE),
-                Ok(())
-            );
-            assert_eq!(
-                IocpReactor::validate_supported_interest(Interest::both()),
-                Ok(())
-            );
+            assert!(IocpReactor::validate_supported_interest(Interest::READABLE).is_ok());
+            assert!(IocpReactor::validate_supported_interest(Interest::WRITABLE).is_ok());
+            assert!(IocpReactor::validate_supported_interest(Interest::both()).is_ok());
 
             let err = IocpReactor::validate_supported_interest(Interest::READABLE.with_dispatch())
                 .expect_err("dispatch should be rejected");
@@ -313,7 +304,7 @@ mod iocp_impl {
             use std::net::TcpListener;
 
             let reactor = IocpReactor::new().expect("failed to create iocp reactor");
-            let mut listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
 
             reactor
                 .register(&listener, Token::new(1), Interest::READABLE)
@@ -336,7 +327,7 @@ mod iocp_impl {
             use std::net::TcpListener;
 
             let reactor = IocpReactor::new().expect("failed to create iocp reactor");
-            let mut listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
             let key = Token::new(44);
             reactor
                 .register(&listener, key, Interest::READABLE)
