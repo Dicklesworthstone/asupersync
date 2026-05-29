@@ -17,6 +17,7 @@ from typing import Any
 
 SCHEMA_VERSION = "touched-surface-proof-selector-v1"
 INPUT_SCHEMA_VERSION = "touched-surface-proof-selector-input-v1"
+TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db", ".beads/beads.db-wal"}
 
 
 def utc_now() -> str:
@@ -128,6 +129,165 @@ def normalize_blocked(raw_blocked: list[Any]) -> dict[str, dict[str, Any]]:
             "blocked_by_paths": sorted(set(string_list(item.get("blocked_by_paths")))),
         }
     return blocked
+
+
+def dirty_receipt_from_data(data: dict[str, Any], dirty_receipt_path: str) -> dict[str, Any] | None:
+    if dirty_receipt_path:
+        return json.loads(Path(dirty_receipt_path).read_text(encoding="utf-8"))
+    receipt = data.get("dirty_tree_receipt")
+    return receipt if isinstance(receipt, dict) else None
+
+
+def is_tracker_path(path: str) -> bool:
+    normalized = normalize_path(path)
+    return normalized in TRACKER_PATHS or normalized.startswith(".beads/")
+
+
+def is_source_like_dirty_path(path: str) -> bool:
+    normalized = normalize_path(path)
+    if is_tracker_path(normalized):
+        return False
+    return normalized.startswith(
+        (
+            "src/",
+            "tests/",
+            "benches/",
+            "examples/",
+            "conformance/",
+            "asupersync-",
+            "franken",
+            "drop_unwrap_finder/",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain",
+        )
+    )
+
+
+def dirty_row_path(row: dict[str, Any]) -> str:
+    return normalize_path(str(row.get("path", "")))
+
+
+def dirty_row_owner(row: dict[str, Any]) -> str:
+    owner = row.get("owner")
+    if isinstance(owner, str) and owner:
+        return owner
+    evidence = row.get("evidence")
+    if isinstance(evidence, dict):
+        holder = evidence.get("reservation_holder") or evidence.get("message_from")
+        if isinstance(holder, str):
+            return holder
+    return ""
+
+
+def dirty_row_status(row: dict[str, Any]) -> str:
+    return str(row.get("status", ""))
+
+
+def dirty_row_staging_decision(row: dict[str, Any]) -> str:
+    staging = row.get("staging_guidance")
+    if isinstance(staging, dict):
+        return str(staging.get("decision", ""))
+    return ""
+
+
+def dirty_row_relation(path: str, touched_files: list[str]) -> str:
+    if any(matches_pattern(path, touched) or matches_pattern(touched, path) for touched in touched_files):
+        return "overlaps-touched"
+    return "outside-touched"
+
+
+def normalize_dirty_rows(receipt: dict[str, Any], touched_files: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    raw_rows = receipt.get("rows")
+    if not isinstance(raw_rows, list):
+        return rows
+    for item in raw_rows:
+        if not isinstance(item, dict):
+            continue
+        path = dirty_row_path(item)
+        if not path:
+            continue
+        classification = str(item.get("classification", "unattributed")) or "unattributed"
+        rows.append(
+            {
+                "path": path,
+                "status": dirty_row_status(item),
+                "classification": classification,
+                "owner": dirty_row_owner(item),
+                "staging_decision": dirty_row_staging_decision(item),
+                "scope": "tracker-only" if is_tracker_path(path) else "source-or-proof-surface",
+                "relation_to_touched": dirty_row_relation(path, touched_files),
+                "source_like": is_source_like_dirty_path(path),
+            }
+        )
+    return sorted(rows, key=lambda row: row["path"])
+
+
+def build_dirty_tree_preflight(
+    receipt: dict[str, Any] | None,
+    touched_files: list[str],
+) -> dict[str, Any] | None:
+    if receipt is None:
+        return None
+
+    rows = normalize_dirty_rows(receipt, touched_files)
+    tracker_rows = [row for row in rows if row["scope"] == "tracker-only"]
+    source_rows = [row for row in rows if row["scope"] != "tracker-only"]
+    peer_rows = [
+        row
+        for row in source_rows
+        if row["classification"] in {"peer-owned", "owner-conflict"}
+    ]
+    unattributed_rows = [row for row in source_rows if row["classification"] == "unattributed"]
+    self_rows = [row for row in source_rows if row["classification"] == "self-owned"]
+    self_outside_rows = [
+        row for row in self_rows if row["relation_to_touched"] == "outside-touched"
+    ]
+
+    action_items: list[str] = []
+    for row in peer_rows:
+        action_items.append(
+            "wait for peer-owned dirty path "
+            f"{row['path']} held by {row['owner'] or 'unknown-owner'} before running cargo/rch proof"
+        )
+    for row in unattributed_rows:
+        action_items.append(
+            f"ask for handoff or reserve dirty path {row['path']} before running cargo/rch proof"
+        )
+
+    if peer_rows:
+        decision = "wait"
+        reason = "peer-owned dirty source/proof paths would be synced into the remote proof tree"
+    elif unattributed_rows:
+        decision = "ask-for-handoff"
+        reason = "unattributed dirty source/proof paths need ownership before proof execution"
+    elif self_outside_rows or tracker_rows:
+        decision = "run-with-caveat"
+        caveats = []
+        if self_outside_rows:
+            caveats.append("self-owned dirty paths outside touched surface are included in the proof tree")
+        if tracker_rows:
+            caveats.append("tracker-only dirt does not affect compiled code but must stay out of source commits")
+        reason = "; ".join(caveats)
+    else:
+        decision = "run"
+        reason = "dirty tree is clean or limited to self-owned touched paths"
+
+    return {
+        "decision": decision,
+        "reason": reason,
+        "dirty_path_count": len(rows),
+        "tracker_only_count": len(tracker_rows),
+        "source_or_proof_dirty_count": len(source_rows),
+        "peer_owned_count": len(peer_rows),
+        "unattributed_count": len(unattributed_rows),
+        "self_owned_count": len(self_rows),
+        "rows": rows,
+        "blockers": peer_rows + unattributed_rows,
+        "caveats": tracker_rows + self_outside_rows,
+        "action_items": action_items,
+    }
 
 
 def add_selection(
@@ -250,7 +410,20 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     supplemental_selected, blocked_supplemental = split_blocked(supplemental, blocked)
     unmatched = [path for path in touched_files if path not in all_matched_paths]
     no_touched_files = len(touched_files) == 0
-    passes = not no_touched_files and len(unmatched) == 0 and len(blocked_selected) == 0
+    dirty_preflight = build_dirty_tree_preflight(
+        dirty_receipt_from_data(data, args.dirty_receipt),
+        touched_files,
+    )
+    dirty_blocks = dirty_preflight is not None and dirty_preflight["decision"] in {
+        "wait",
+        "ask-for-handoff",
+    }
+    passes = (
+        not no_touched_files
+        and len(unmatched) == 0
+        and len(blocked_selected) == 0
+        and not dirty_blocks
+    )
 
     action_items: list[str] = []
     for row in blocked_selected + blocked_supplemental:
@@ -261,8 +434,10 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         action_items.append(f"add a selection rule or lane source path for {path}")
     if no_touched_files:
         action_items.append("provide at least one touched file before selecting proof lanes")
+    if dirty_preflight is not None:
+        action_items.extend(dirty_preflight["action_items"])
 
-    return {
+    receipt = {
         "schema_version": SCHEMA_VERSION,
         "input_schema_version": data.get("schema_version", ""),
         "generated_at": generated_at,
@@ -303,11 +478,23 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             "runs_destructive_command": False,
         },
     }
+    if dirty_preflight is not None:
+        receipt["summary"]["dirty_tree_decision"] = dirty_preflight["decision"]
+        receipt["dirty_tree_preflight"] = dirty_preflight
+        receipt["operator_notes"].append(
+            "Dirty-tree preflight is advisory for proof execution; wait/ask decisions mean cargo/rch proof evidence would be contaminated."
+        )
+    return receipt
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Select proof lanes for touched paths")
     parser.add_argument("--input", required=True, help="JSON touched-surface selector input")
+    parser.add_argument(
+        "--dirty-receipt",
+        default="",
+        help="Optional dirty_tree_ownership_receipt.py JSON output to gate proof execution",
+    )
     parser.add_argument("--generated-at", default="", help="UTC timestamp for deterministic output")
     parser.add_argument("--output", choices=["json"], default="json")
     args = parser.parse_args()

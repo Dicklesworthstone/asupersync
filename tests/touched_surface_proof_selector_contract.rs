@@ -349,3 +349,99 @@ fn helper_declares_it_does_not_run_or_mutate_anything() {
         );
     }
 }
+
+#[test]
+fn dirty_tree_clean_preflight_allows_proof_execution() {
+    let receipt = selector_json("dirty_clean.json");
+
+    assert_eq!(receipt["summary"]["passes"].as_bool(), Some(true));
+    assert_eq!(
+        receipt["summary"]["dirty_tree_decision"].as_str(),
+        Some("run")
+    );
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["dirty_path_count"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(lane_ids(&receipt, "selected_lanes"), vec!["lib-tests"]);
+}
+
+#[test]
+fn dirty_tree_tracker_only_preflight_runs_with_caveat() {
+    let receipt = selector_json("dirty_tracker_only.json");
+
+    assert_eq!(receipt["summary"]["passes"].as_bool(), Some(true));
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["decision"].as_str(),
+        Some("run-with-caveat")
+    );
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["tracker_only_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["caveats"][0]["path"].as_str(),
+        Some(".beads/issues.jsonl")
+    );
+}
+
+#[test]
+fn dirty_tree_peer_unrelated_source_blocks_rch_proof() {
+    let receipt = selector_json("dirty_peer_unrelated.json");
+
+    assert_eq!(receipt["summary"]["passes"].as_bool(), Some(false));
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["decision"].as_str(),
+        Some("wait")
+    );
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["blockers"][0]["path"].as_str(),
+        Some("src/grpc/server.rs")
+    );
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["blockers"][0]["owner"].as_str(),
+        Some("BeigeDog")
+    );
+    assert!(
+        receipt["action_items"][0]
+            .as_str()
+            .expect("action item")
+            .contains("src/grpc/server.rs")
+    );
+}
+
+#[test]
+fn dirty_tree_peer_overlapping_source_names_overlap_relation() {
+    let receipt = selector_json("dirty_peer_overlap.json");
+
+    assert_eq!(receipt["summary"]["passes"].as_bool(), Some(false));
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["decision"].as_str(),
+        Some("wait")
+    );
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["blockers"][0]["relation_to_touched"].as_str(),
+        Some("overlaps-touched")
+    );
+}
+
+#[test]
+fn dirty_tree_unreserved_source_requires_handoff_before_proof() {
+    let receipt = selector_json("dirty_unreserved_source.json");
+
+    assert_eq!(receipt["summary"]["passes"].as_bool(), Some(false));
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["decision"].as_str(),
+        Some("ask-for-handoff")
+    );
+    assert_eq!(
+        receipt["dirty_tree_preflight"]["blockers"][0]["classification"].as_str(),
+        Some("unattributed")
+    );
+    assert!(
+        receipt["action_items"][0]
+            .as_str()
+            .expect("action item")
+            .contains("ask for handoff")
+    );
+}
