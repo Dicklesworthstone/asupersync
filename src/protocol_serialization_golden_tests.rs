@@ -498,11 +498,7 @@ mod tests {
             }
 
             output.push_str(&format!("Test case {}:\n", payload_idx + 1));
-            output.push_str(&format!(
-                "Original: {} ({})\n",
-                String::from_utf8_lossy(payload),
-                hex::encode(payload)
-            ));
+            output.push_str(&format!("Original bytes: {}\n", hex::encode(payload)));
             output.push_str(&format!(
                 "Masking key: {:02x}{:02x}{:02x}{:02x}\n",
                 masking_key[0], masking_key[1], masking_key[2], masking_key[3]

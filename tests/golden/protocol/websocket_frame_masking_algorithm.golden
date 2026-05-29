@@ -1,0 +1,31 @@
+# WebSocket Frame Masking Algorithm (RFC 6455 §5.3)
+
+# Algorithm: transformed-octet-i = original-octet-i XOR masking-key-octet-[i MOD 4]
+
+Test case 1:
+Original bytes: 48656c6c6f
+Masking key: 37fa213d
+Masked: 7f9f4d5158
+Unmasked: 48656c6c6f
+Round-trip: true
+
+Test case 2:
+Original bytes: 576562536f636b6574
+Masking key: 12345678
+Masked: 4551342b7d573d1d66
+Unmasked: 576562536f636b6574
+Round-trip: true
+
+Test case 3:
+Original bytes: 54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67
+Masking key: ff00aa55
+Masked: ab68cf758e75c3369420c8279077c475996fd2759575c7258c20c5239a728a2197658a399e7ad3759b6fcd
+Unmasked: 54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67
+Round-trip: true
+
+Test case 4:
+Original bytes: 000102030405060708090a0b0c0d0e0f
+Masking key: 00000000
+Masked: 000102030405060708090a0b0c0d0e0f
+Unmasked: 000102030405060708090a0b0c0d0e0f
+Round-trip: true
