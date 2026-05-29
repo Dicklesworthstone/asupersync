@@ -18,6 +18,8 @@ env:
   RUST_TOOLCHAIN: nightly-2026-02-05
   # Reduce benchmark noise
   CARGO_INCREMENTAL: 0
+  BENCH_CARGO_PROFILE: release-perf
+  BENCH_RUSTFLAGS: -C force-frame-pointers=yes
 
 # Cancel in-progress runs for the same PR
 concurrency:
@@ -62,7 +64,7 @@ jobs:
       # Run current benchmarks
       - name: Run benchmarks (current)
         run: |
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_bench_current cargo bench --all-features -- --noplot --save-baseline current
+          "$RCH_BIN" exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=/tmp/rch_target_bench_current cargo bench --profile "$BENCH_CARGO_PROFILE" --all-features -- --noplot --save-baseline current
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
@@ -115,7 +117,7 @@ jobs:
 
       - name: Run baseline benchmarks
         run: |
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_bench_baseline cargo bench --all-features -- --noplot
+          "$RCH_BIN" exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=/tmp/rch_target_bench_baseline cargo bench --profile "$BENCH_CARGO_PROFILE" --all-features -- --noplot
 
       # Switch back and compare
       - name: Checkout PR branch
@@ -125,12 +127,12 @@ jobs:
 
       - name: Capture baseline (using PR script)
         run: |
-          CRITERION_DIR=/tmp/rch_target_bench_baseline/criterion ./scripts/capture_baseline.sh --save /tmp/bench_baseline
+          CRITERION_DIR=/tmp/rch_target_bench_baseline/criterion ./scripts/capture_baseline.sh --profile "$BENCH_CARGO_PROFILE" --cargo-profile "$BENCH_CARGO_PROFILE" --bench-rustflags "$BENCH_RUSTFLAGS" --save /tmp/bench_baseline
 
       - name: Run PR benchmarks
         run: |
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_bench_pr cargo bench --all-features -- --noplot
-          CRITERION_DIR=/tmp/rch_target_bench_pr/criterion ./scripts/capture_baseline.sh --save /tmp/bench_current
+          "$RCH_BIN" exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=/tmp/rch_target_bench_pr cargo bench --profile "$BENCH_CARGO_PROFILE" --all-features -- --noplot
+          CRITERION_DIR=/tmp/rch_target_bench_pr/criterion ./scripts/capture_baseline.sh --profile "$BENCH_CARGO_PROFILE" --cargo-profile "$BENCH_CARGO_PROFILE" --bench-rustflags "$BENCH_RUSTFLAGS" --save /tmp/bench_current
 
       - name: Compare benchmarks against baseline
         run: |
@@ -263,7 +265,7 @@ jobs:
 
       - name: Run scheduler benchmarks
         run: |
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_scheduler_benchmark cargo bench --all-features --bench scheduler_benchmark -- --noplot 2>&1 | tee scheduler-bench.txt
+          "$RCH_BIN" exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=/tmp/rch_target_scheduler_benchmark cargo bench --profile "$BENCH_CARGO_PROFILE" --all-features --bench scheduler_benchmark -- --noplot 2>&1 | tee scheduler-bench.txt
 
       - name: Check performance thresholds
         run: |
@@ -321,4 +323,4 @@ jobs:
 
       - name: Run protocol benchmarks
         run: |
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR=/tmp/rch_target_protocol_benchmark cargo bench --all-features --bench protocol_benchmark -- --noplot 2>&1 | tee protocol-bench.txt
+          "$RCH_BIN" exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=/tmp/rch_target_protocol_benchmark cargo bench --profile "$BENCH_CARGO_PROFILE" --all-features --bench protocol_benchmark -- --noplot 2>&1 | tee protocol-bench.txt

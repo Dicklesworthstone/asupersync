@@ -31,9 +31,11 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_capture_baseline_phase0}"
 RUN_OUTPUT_LOG="${RUN_OUTPUT_LOG:-${TMPDIR:-/tmp}/asupersync_capture_baseline_run_$$.log}"
 BASELINE_TMP_PATH="${BASELINE_TMP_PATH:-${TMPDIR:-/tmp}/asupersync_baseline_$$.json}"
+BENCH_CARGO_PROFILE="${BENCH_CARGO_PROFILE:-release-perf}"
+BENCH_RUSTFLAGS="${BENCH_RUSTFLAGS:--C force-frame-pointers=yes}"
 # gauntlet PERF-001/002/003: append-only ratchet substrate + measured profile.
 BENCH_HISTORY_DIR="${BENCH_HISTORY_DIR:-.bench-history}"
-BENCH_PROFILE="${BENCH_PROFILE:-unknown}"
+BENCH_PROFILE="${BENCH_PROFILE:-}"
 WRITE_BENCH_HISTORY="${WRITE_BENCH_HISTORY:-0}"
 CV_PCT_FLAKE_THRESHOLD="${CV_PCT_FLAKE_THRESHOLD:-5.0}"
 
@@ -53,6 +55,8 @@ Options:
   --smoke                        Run benchmark + capture + smoke report
   --seed <value>                 Set ASUPERSYNC_SEED for --run/--smoke
   --profile <name>               Profile label recorded in bench-history records
+  --cargo-profile <name>         Cargo profile for default benchmark runs (default: release-perf)
+  --bench-rustflags <flags>      RUSTFLAGS for default benchmark runs (default: -C force-frame-pointers=yes)
   --bench-history                Write latest JSON files plus runs.jsonl to bench-history dir
   --no-bench-history             Disable bench-history writes, overriding env defaults
   --bench-history-dir <dir>      Bench-history output dir (default: .bench-history)
@@ -111,6 +115,10 @@ while [[ $# -gt 0 ]]; do
         --smoke) SMOKE=1; RUN_CMD=1; shift ;;
         --profile) require_arg "$1" "${2:-}"; BENCH_PROFILE="$2"; shift 2 ;;
         --profile=*) BENCH_PROFILE="${1#--profile=}"; require_arg "--profile" "$BENCH_PROFILE"; shift ;;
+        --cargo-profile) require_arg "$1" "${2:-}"; BENCH_CARGO_PROFILE="$2"; shift 2 ;;
+        --cargo-profile=*) BENCH_CARGO_PROFILE="${1#--cargo-profile=}"; require_arg "--cargo-profile" "$BENCH_CARGO_PROFILE"; shift ;;
+        --bench-rustflags) require_arg "$1" "${2:-}"; BENCH_RUSTFLAGS="$2"; shift 2 ;;
+        --bench-rustflags=*) BENCH_RUSTFLAGS="${1#--bench-rustflags=}"; require_arg "--bench-rustflags" "$BENCH_RUSTFLAGS"; shift ;;
         --bench-history) WRITE_BENCH_HISTORY=1; shift ;;
         --no-bench-history) WRITE_BENCH_HISTORY=0; shift ;;
         --bench-history-dir) require_arg "$1" "${2:-}"; BENCH_HISTORY_DIR="$2"; shift 2 ;;
@@ -124,6 +132,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -z "$BENCH_PROFILE" ]]; then
+    BENCH_PROFILE="$BENCH_CARGO_PROFILE"
+fi
+
 if [[ -n "$CMD_B64" ]]; then
     if ! command -v base64 &>/dev/null; then
         echo "ERROR: base64 is required when using --cmd-b64" >&2
@@ -133,7 +145,12 @@ if [[ -n "$CMD_B64" ]]; then
 fi
 
 if [[ -z "$CMD_STRING" ]]; then
-    CMD=("$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${RCH_TARGET_DIR}" cargo bench --bench phase0_baseline)
+    CMD=(
+        "$RCH_BIN" exec -- env
+        "RUSTFLAGS=${BENCH_RUSTFLAGS}"
+        "CARGO_TARGET_DIR=${RCH_TARGET_DIR}"
+        cargo bench --profile "$BENCH_CARGO_PROFILE" --bench phase0_baseline
+    )
 fi
 
 if ! command -v jq &>/dev/null; then
@@ -391,6 +408,8 @@ report = {
         "compare_path": "${COMPARE_PATH}" or None,
         "metric": "${METRIC}",
         "max_regression_pct": float("${MAX_REGRESSION_PCT}"),
+        "cargo_profile": "${BENCH_CARGO_PROFILE}",
+        "bench_rustflags": "${BENCH_RUSTFLAGS}",
     },
     "env": {
         "CI": os.environ.get("CI"),

@@ -7,22 +7,25 @@ Asupersync uses [Criterion.rs](https://crates.io/crates/criterion) for statistic
 ## Quick Start
 
 ```bash
+export BENCH_CARGO_PROFILE=release-perf
+export BENCH_RUSTFLAGS="-C force-frame-pointers=yes"
+
 # Run all benchmarks (saves to target/criterion/)
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE"
 
 # Run specific benchmark suite
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench phase0_baseline
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench scheduler_benchmark
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench protocol_benchmark
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench timer_wheel
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench tracing_overhead
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench reactor_benchmark
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench phase0_baseline
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench scheduler_benchmark
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench protocol_benchmark
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench timer_wheel
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench tracing_overhead
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --bench reactor_benchmark
 
 # Save a named baseline for comparison
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench -- --save-baseline initial --noplot
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" -- --save-baseline initial --noplot
 
 # Compare against a baseline
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench -- --baseline initial --noplot
+rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" -- --baseline initial --noplot
 ```
 
 ## Extreme Optimization Loop (bd-4bfy4)
@@ -235,6 +238,11 @@ run a smoke capture end-to-end with structured metadata.
 ```
 
 `--run` / `--smoke` require `rch` via `RCH_BIN` for the default benchmark path.
+The default run path uses Cargo profile `release-perf` and
+`RUSTFLAGS=-C force-frame-pointers=yes`; override with
+`BENCH_CARGO_PROFILE`, `BENCH_RUSTFLAGS`, `--cargo-profile`, or
+`--bench-rustflags` only when you are intentionally producing a differently
+scoped baseline.
 Read-only capture / compare flows that only parse existing Criterion output do
 not need `rch`.
 
@@ -530,7 +538,10 @@ Perf evidence:
 ./scripts/capture_baseline.sh --save baselines/
 ```
 
-Reads `target/criterion/*/new/estimates.json` and produces a single JSON with `{name, mean_ns, median_ns, std_dev_ns}` per benchmark. Baselines are saved as `baselines/baseline_<timestamp>.json` and `baselines/baseline_latest.json`.
+Reads `target/criterion/*/new/estimates.json` and produces a single JSON with
+`schema_version`, `cv_pct_flake_threshold`, `flaky_benches`, and per-benchmark
+`{name, mean_ns, median_ns, std_dev_ns, cv_pct}` fields. Baselines are saved as
+`baselines/baseline_<timestamp>.json` and `baselines/baseline_latest.json`.
 
 The baseline JSON also includes `p95_ns` and `p99_ns`, computed from `sample.json`
 as per-iteration latencies.
@@ -674,8 +685,8 @@ Recommended CI workflow:
 
 ```yaml
 - rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo test --test golden_outputs  # behavioral equivalence
-- rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench                        # run benchmarks
-- ./scripts/capture_baseline.sh --save baselines/  # archive baseline
+- rch exec -- env RUSTFLAGS="-C force-frame-pointers=yes" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile release-perf  # run benchmarks
+- ./scripts/capture_baseline.sh --profile release-perf --save baselines/  # archive baseline
 ```
 
 The conformance bench runner (`conformance/src/bench/`) also supports regression checking with configurable thresholds (default: 10% mean, 15% p95, 25% p99, 10% allocation count).

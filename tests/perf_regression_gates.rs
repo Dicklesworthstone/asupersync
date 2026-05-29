@@ -483,9 +483,12 @@ fn capture_baseline_default_run_uses_rch_override() {
         "exec",
         "--",
         "env",
+        "RUSTFLAGS=-C force-frame-pointers=yes",
         "CARGO_TARGET_DIR=",
         "cargo",
         "bench",
+        "--profile",
+        "release-perf",
         "--bench",
         "phase0_baseline",
     ] {
@@ -514,8 +517,8 @@ fn capture_baseline_default_run_uses_rch_override() {
             .as_str()
             .expect("command field should be present");
         assert!(
-            command.contains("exec -- env CARGO_TARGET_DIR=")
-                && command.contains(" cargo bench --bench phase0_baseline"),
+            command.contains("exec -- env RUSTFLAGS=-C force-frame-pointers=yes CARGO_TARGET_DIR=")
+                && command.contains(" cargo bench --profile release-perf --bench phase0_baseline"),
             "run events must record the isolated rch-wrapped bench command: {command}"
         );
     }
@@ -537,9 +540,19 @@ fn capture_baseline_default_run_uses_rch_override() {
         .as_str()
         .expect("smoke report command field should be present");
     assert!(
-        smoke_command.contains("exec -- env CARGO_TARGET_DIR=")
-            && smoke_command.contains(" cargo bench --bench phase0_baseline"),
+        smoke_command
+            .contains("exec -- env RUSTFLAGS=-C force-frame-pointers=yes CARGO_TARGET_DIR=")
+            && smoke_command
+                .contains(" cargo bench --profile release-perf --bench phase0_baseline"),
         "smoke report must record the isolated rch-wrapped bench command: {smoke_command}"
+    );
+    assert_eq!(
+        smoke_report_json["config"]["cargo_profile"], "release-perf",
+        "smoke report should record the Cargo benchmark profile"
+    );
+    assert_eq!(
+        smoke_report_json["config"]["bench_rustflags"], "-C force-frame-pointers=yes",
+        "smoke report should record benchmark RUSTFLAGS"
     );
 }
 
@@ -594,6 +607,43 @@ fn run_perf_e2e_requires_rch_for_benchmark_execution() {
     assert!(
         stderr.contains("refusing local cargo bench fallback"),
         "stderr should explain the fail-closed benchmark policy: {stderr}"
+    );
+}
+
+#[test]
+fn run_perf_e2e_and_ci_route_benches_through_release_perf_profile() {
+    let repo = repo_root();
+    let run_perf =
+        fs::read_to_string(repo.join("scripts/run_perf_e2e.sh")).expect("read run_perf_e2e.sh");
+    let workflow = fs::read_to_string(repo.join(".github/workflows/benchmarks.yml"))
+        .expect("read benchmarks workflow");
+
+    for (label, text) in [
+        ("run_perf_e2e.sh", run_perf.as_str()),
+        ("benchmarks.yml", workflow.as_str()),
+    ] {
+        assert!(
+            text.contains("BENCH_CARGO_PROFILE") && text.contains("release-perf"),
+            "{label} should expose release-perf as the benchmark Cargo profile"
+        );
+        assert!(
+            text.contains("BENCH_RUSTFLAGS") && text.contains("-C force-frame-pointers=yes"),
+            "{label} should force frame pointers for benchmark profiles"
+        );
+        assert!(
+            text.contains("cargo bench --profile"),
+            "{label} should invoke cargo bench with an explicit profile"
+        );
+    }
+
+    assert!(
+        !workflow.contains("cargo bench --all-features -- --noplot")
+            && !workflow.contains("cargo bench --all-features --bench"),
+        "workflow cargo bench calls must not silently use Cargo's default bench profile"
+    );
+    assert!(
+        run_perf.contains("BASELINE_TMP_PATH=\"$BASELINE_CURRENT\" ./scripts/capture_baseline.sh"),
+        "run_perf_e2e should preserve captured baseline JSON after capture_baseline stopped using a fixed /tmp path"
     );
 }
 
@@ -812,6 +862,8 @@ fn capture_baseline_help_documents_perf_history_options() {
     let stdout = String::from_utf8(output.stdout).expect("help stdout should be utf8");
     for expected in [
         "--profile <name>",
+        "--cargo-profile <name>",
+        "--bench-rustflags <flags>",
         "--bench-history",
         "--no-bench-history",
         "--bench-history-dir <dir>",

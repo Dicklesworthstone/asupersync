@@ -15,6 +15,8 @@
 #   PERF_BASELINE_DIR  - default baseline dir (default: baselines/)
 #   PERF_TIMEOUT       - per-bench timeout seconds (default: 0 = no timeout)
 #   PERF_BENCH_ARGS    - extra args passed to cargo bench (default: "-- --noplot")
+#   BENCH_CARGO_PROFILE - Cargo profile for benchmark runs (default: release-perf)
+#   BENCH_RUSTFLAGS    - RUSTFLAGS for benchmark runs (default: -C force-frame-pointers=yes)
 #   ASUPERSYNC_SEED    - deterministic seed (if benchmark uses it)
 #   RCH_BIN            - remote compilation helper executable (default: rch,
 #                        required for benchmark execution)
@@ -33,6 +35,8 @@ RCH_BIN="${RCH_BIN:-rch}"
 WORKLOAD_ID="${WORKLOAD_ID:-AA01-WL-CPU-001}"
 RUNTIME_PROFILE="${RUNTIME_PROFILE:-bench-release}"
 WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/run_perf_e2e.sh::phase0_baseline,scheduler_benchmark}"
+BENCH_CARGO_PROFILE="${BENCH_CARGO_PROFILE:-release-perf}"
+BENCH_RUSTFLAGS="${BENCH_RUSTFLAGS:--C force-frame-pointers=yes}"
 
 DEFAULT_BENCHES=(
     phase0_baseline
@@ -71,6 +75,8 @@ Options:
   --max-regression-pct <pct>     Regression threshold percent (default: 10)
   --timeout <sec>                Per-bench timeout in seconds (default: 0)
   --bench-args "<args>"          Extra args passed to cargo bench
+  --cargo-profile <name>         Cargo profile for benchmark runs (default: release-perf)
+  --bench-rustflags <flags>      RUSTFLAGS for benchmark runs (default: -C force-frame-pointers=yes)
   --seed <value>                 Set ASUPERSYNC_SEED for benches
   -h, --help                     Show help
 USAGE
@@ -108,6 +114,10 @@ while [[ $# -gt 0 ]]; do
             TIMEOUT_SEC="$2"; shift 2 ;;
         --bench-args)
             BENCH_ARGS_STR="$2"; shift 2 ;;
+        --cargo-profile)
+            BENCH_CARGO_PROFILE="$2"; shift 2 ;;
+        --bench-rustflags)
+            BENCH_RUSTFLAGS="$2"; shift 2 ;;
         --seed)
             export ASUPERSYNC_SEED="$2"; shift 2 ;;
         -h|--help)
@@ -143,7 +153,7 @@ COMPARE_STDOUT="${ARTIFACT_DIR}/compare.txt"
 BASELINE_CURRENT="${ARTIFACT_DIR}/baseline_current.json"
 GATE_EVENTS_FILE="${ARTIFACT_DIR}/gate_events.ndjson"
 GATE_SCHEMA_VERSION="raptorq-g2-perf-gate-v1"
-RUN_REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' RCH_BIN=${RCH_BIN} RCH_TARGET_ROOT='${RCH_TARGET_ROOT}' PERF_TIMEOUT=${TIMEOUT_SEC} PERF_BENCH_ARGS='${BENCH_ARGS_STR}' ./scripts/run_perf_e2e.sh"
+RUN_REPRO_COMMAND="WORKLOAD_ID=${WORKLOAD_ID} RUNTIME_PROFILE=${RUNTIME_PROFILE} WORKLOAD_CONFIG_REF='${WORKLOAD_CONFIG_REF}' RCH_BIN=${RCH_BIN} RCH_TARGET_ROOT='${RCH_TARGET_ROOT}' PERF_TIMEOUT=${TIMEOUT_SEC} PERF_BENCH_ARGS='${BENCH_ARGS_STR}' BENCH_CARGO_PROFILE=${BENCH_CARGO_PROFILE} BENCH_RUSTFLAGS='${BENCH_RUSTFLAGS}' ./scripts/run_perf_e2e.sh"
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 : > "$GATE_EVENTS_FILE"
@@ -208,6 +218,8 @@ echo "  Timeout:           ${TIMEOUT_SEC}s per bench"
 echo "  Seed:              ${ASUPERSYNC_SEED:-<unset>}"
 echo "  Workload:          ${WORKLOAD_ID}"
 echo "  Profile:           ${RUNTIME_PROFILE}"
+echo "  Cargo profile:     ${BENCH_CARGO_PROFILE}"
+echo "  Bench RUSTFLAGS:   ${BENCH_RUSTFLAGS}"
 echo "  RCH target root:   ${RCH_TARGET_ROOT}"
 echo "  RCH mode:          enabled"
 echo ""
@@ -237,7 +249,12 @@ for bench in "${BENCHES[@]}"; do
     bench_repro_command="${RUN_REPRO_COMMAND} --bench ${bench}"
     safe_bench="${bench//[^A-Za-z0-9_]/_}"
     bench_target_dir="${RCH_TARGET_ROOT}/${safe_bench}"
-    cmd=("$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${bench_target_dir}" cargo bench --bench "$bench")
+    cmd=(
+        "$RCH_BIN" exec -- env
+        "RUSTFLAGS=${BENCH_RUSTFLAGS}"
+        "CARGO_TARGET_DIR=${bench_target_dir}"
+        cargo bench --profile "$BENCH_CARGO_PROFILE" --bench "$bench"
+    )
     if [[ ${#BENCH_ARGS[@]} -gt 0 ]]; then
         cmd+=("${BENCH_ARGS[@]}")
         bench_repro_command="${bench_repro_command} --bench-args '${BENCH_ARGS_STR}'"
@@ -294,18 +311,18 @@ done
 COMPARE_EXIT=0
 if [[ -n "$COMPARE_PATH" ]]; then
     set +e
-    ./scripts/capture_baseline.sh \
+    BASELINE_TMP_PATH="$BASELINE_CURRENT" ./scripts/capture_baseline.sh \
+        --profile "$BENCH_CARGO_PROFILE" \
         --compare "$COMPARE_PATH" \
         --metric "$METRIC" \
         --max-regression-pct "$MAX_REGRESSION_PCT" \
+        --cargo-profile "$BENCH_CARGO_PROFILE" \
+        --bench-rustflags "$BENCH_RUSTFLAGS" \
         > /tmp/asupersync_compare_stdout.txt 2> "$COMPARE_LOG"
     COMPARE_EXIT=$?
     set -e
     if [[ -f /tmp/asupersync_compare_stdout.txt ]]; then
         cp /tmp/asupersync_compare_stdout.txt "$COMPARE_STDOUT"
-    fi
-    if [[ -f /tmp/asupersync_baseline.json ]]; then
-        cp /tmp/asupersync_baseline.json "$BASELINE_CURRENT"
     fi
     if [[ "$COMPARE_EXIT" -eq 0 ]]; then
         emit_gate_event \
@@ -325,12 +342,13 @@ if [[ -n "$COMPARE_PATH" ]]; then
             "${RUN_REPRO_COMMAND} --compare ${COMPARE_PATH} --metric ${METRIC} --max-regression-pct ${MAX_REGRESSION_PCT}"
     fi
 else
-    ./scripts/capture_baseline.sh > /tmp/asupersync_compare_stdout.txt
+    BASELINE_TMP_PATH="$BASELINE_CURRENT" ./scripts/capture_baseline.sh \
+        --profile "$BENCH_CARGO_PROFILE" \
+        --cargo-profile "$BENCH_CARGO_PROFILE" \
+        --bench-rustflags "$BENCH_RUSTFLAGS" \
+        > /tmp/asupersync_compare_stdout.txt
     if [[ -f /tmp/asupersync_compare_stdout.txt ]]; then
         cp /tmp/asupersync_compare_stdout.txt "$COMPARE_STDOUT"
-    fi
-    if [[ -f /tmp/asupersync_baseline.json ]]; then
-        cp /tmp/asupersync_baseline.json "$BASELINE_CURRENT"
     fi
     emit_gate_event \
         "baseline_capture" \
@@ -343,7 +361,12 @@ fi
 
 SAVED_BASELINE=""
 if [[ -n "$SAVE_DIR" ]]; then
-    ./scripts/capture_baseline.sh --save "$SAVE_DIR" > /tmp/asupersync_save_stdout.txt
+    ./scripts/capture_baseline.sh \
+        --profile "$BENCH_CARGO_PROFILE" \
+        --cargo-profile "$BENCH_CARGO_PROFILE" \
+        --bench-rustflags "$BENCH_RUSTFLAGS" \
+        --save "$SAVE_DIR" \
+        > /tmp/asupersync_save_stdout.txt
     if [[ -d "$SAVE_DIR" ]]; then
         SAVED_BASELINE=$(find "$SAVE_DIR" -maxdepth 1 -type f -name 'baseline_*.json' -printf '%T@ %p\n' 2>/dev/null \
             | sort -rn \
