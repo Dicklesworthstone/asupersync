@@ -4239,8 +4239,9 @@ mod tests {
     use crate::cx::Cx;
     use crate::lab::{LabConfig, LabRuntime};
     use crate::record::TaskRecord;
+    use crate::runtime::reactor::LabReactor;
     #[cfg(unix)]
-    use crate::runtime::reactor::{Event, Interest, LabReactor, Reactor};
+    use crate::runtime::reactor::{Event, Interest, Reactor};
     use crate::test_utils::init_test_logging;
     use crate::time::sleep;
     use crate::trace::{TraceEvent, TraceEventKind};
