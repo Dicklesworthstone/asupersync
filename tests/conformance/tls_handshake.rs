@@ -48,7 +48,7 @@
 //!
 //! # Out of scope (filed as gap)
 //!
-//! Real end-to-end handshake tests (TCP loopback + rcgen self-signed cert
+//! Real end-to-end handshake tests (TCP loopback + repository TLS fixture
 //! + happy path / hostname mismatch / cipher negotiation outcome) require
 //! an in-process async transport pair and a `Cx` / `block_on` scaffold.
 //! That infrastructure exists in `tests/net_quic.rs` for QUIC and can be

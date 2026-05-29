@@ -34,7 +34,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll, Waker};
 
-const VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES: usize = 1024;
+// Keep deterministic virtual TCP finite so backpressure remains testable, but
+// large enough for real TLS/mTLS handshakes and full-size TLS records.
+const VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES: usize = 64 * 1024;
 const VIRTUAL_TCP_ACCEPT_QUEUE_CAPACITY: usize = 16;
 
 #[derive(Debug, Default)]

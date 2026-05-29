@@ -35,18 +35,39 @@ mod common;
 
 use asupersync::cx::Cx;
 use asupersync::net::quic::{QuicConfig, QuicEndpoint, StreamTracker};
+use base64::Engine as _;
 use common::init_test_logging;
 use futures_lite::future::block_on;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-/// Generate self-signed certificate for testing.
+/// Load the repository's real localhost TLS fixture as DER material.
 fn generate_test_cert() -> (Vec<Vec<u8>>, Vec<u8>) {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
-        .expect("failed to generate cert");
-    let cert_der = cert.cert.der().to_vec();
-    let key_der = cert.key_pair.serialize_der();
-    (vec![cert_der], key_der)
+    const CERT_PEM: &str = include_str!("fixtures/tls/server.crt");
+    const KEY_PEM: &str = include_str!("fixtures/tls/server.key");
+
+    (
+        vec![decode_pem_der(CERT_PEM, "CERTIFICATE")],
+        decode_pem_der(KEY_PEM, "PRIVATE KEY"),
+    )
+}
+
+fn decode_pem_der(pem: &str, label: &str) -> Vec<u8> {
+    let begin_marker = format!("-----BEGIN {label}-----");
+    let end_marker = format!("-----END {label}-----");
+    let begin = pem
+        .find(&begin_marker)
+        .map(|idx| idx + begin_marker.len())
+        .unwrap_or_else(|| panic!("missing {begin_marker}"));
+    let end = pem[begin..]
+        .find(&end_marker)
+        .map(|idx| begin + idx)
+        .unwrap_or_else(|| panic!("missing {end_marker}"));
+    let encoded = pem[begin..end].lines().map(str::trim).collect::<String>();
+
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap_or_else(|error| panic!("invalid {label} PEM fixture: {error}"))
 }
 
 /// Create a server config with self-signed certificate.
