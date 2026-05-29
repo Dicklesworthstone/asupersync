@@ -992,7 +992,7 @@ fn state_reducer_idempotency_key_noop() {
         run_id: "run-001".to_string(),
         scenario_id: "scenario-001".to_string(),
         approved_checkpoints: vec!["checkpoint_apply_authorization".to_string()],
-        simulate_apply_failure: false,
+        inject_apply_failure: false,
         previous_idempotency_key: Some("idem-key-001".to_string()),
     };
 
@@ -1014,13 +1014,13 @@ fn state_reducer_apply_failure_triggers_rollback() {
             "checkpoint_rollback_ready".to_string(),
             "checkpoint_apply_authorization".to_string(),
         ],
-        simulate_apply_failure: true,
+        inject_apply_failure: true,
         previous_idempotency_key: None,
     };
 
     assert!(
-        request.simulate_apply_failure,
-        "Simulated failure must trigger rollback path"
+        request.inject_apply_failure,
+        "Injected failure must trigger rollback path"
     );
 }
 

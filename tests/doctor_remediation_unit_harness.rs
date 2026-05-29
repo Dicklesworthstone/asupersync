@@ -1321,7 +1321,7 @@ fn guided_session_blocks_apply_without_all_approvals() {
             run_id: "run-guided-remediation-tests".to_string(),
             scenario_id: "guided-remediation-missing-approvals".to_string(),
             approved_checkpoints: vec!["checkpoint_diff_review".to_string()],
-            simulate_apply_failure: false,
+            inject_apply_failure: false,
             previous_idempotency_key: None,
         },
     )
@@ -1360,7 +1360,7 @@ fn guided_session_apply_success_creates_rollback_point() {
             run_id: "run-guided-remediation-tests".to_string(),
             scenario_id: "guided-remediation-success".to_string(),
             approved_checkpoints: all_checkpoint_ids(&recipe),
-            simulate_apply_failure: false,
+            inject_apply_failure: false,
             previous_idempotency_key: None,
         },
     )
@@ -1399,7 +1399,7 @@ fn guided_session_idempotency_returns_noop() {
             run_id: "run-guided-remediation-tests".to_string(),
             scenario_id: "guided-remediation-idempotent-first".to_string(),
             approved_checkpoints: all_checkpoint_ids(&recipe),
-            simulate_apply_failure: false,
+            inject_apply_failure: false,
             previous_idempotency_key: None,
         },
     )
@@ -1412,7 +1412,7 @@ fn guided_session_idempotency_returns_noop() {
             run_id: "run-guided-remediation-tests".to_string(),
             scenario_id: "guided-remediation-idempotent-second".to_string(),
             approved_checkpoints: all_checkpoint_ids(&recipe),
-            simulate_apply_failure: false,
+            inject_apply_failure: false,
             previous_idempotency_key: Some(first.patch_plan.idempotency_key),
         },
     )
@@ -1494,7 +1494,7 @@ fn guided_session_failure_injection_requests_rollback_with_diagnostics() {
             run_id: "run-guided-remediation-tests".to_string(),
             scenario_id: "guided-remediation-failure-injection".to_string(),
             approved_checkpoints: approvals,
-            simulate_apply_failure: true,
+            inject_apply_failure: true,
             previous_idempotency_key: None,
         },
     )
@@ -1578,7 +1578,7 @@ fn guided_session_failure_summary_event_reports_recovery_path() {
             run_id: "run-guided-remediation-tests".to_string(),
             scenario_id: "guided-remediation-failure-summary".to_string(),
             approved_checkpoints: approvals,
-            simulate_apply_failure: true,
+            inject_apply_failure: true,
             previous_idempotency_key: None,
         },
     )
