@@ -411,8 +411,10 @@ impl MockLabRuntime {
             }
         }
 
-        // Hash oracle results
-        for (key, value) in &self.scenario_state.oracle_checks {
+        // Hash oracle results in key order so replay certificates do not depend on HashMap iteration.
+        let mut oracle_checks: Vec<_> = self.scenario_state.oracle_checks.iter().collect();
+        oracle_checks.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (key, value) in oracle_checks {
             key.hash(&mut hasher);
             value.hash(&mut hasher);
         }
@@ -502,7 +504,6 @@ impl MockLabRuntime {
 
     fn generate_sample_task_states(&self) -> HashMap<u64, TaskState> {
         let mut tasks = HashMap::new();
-        let mut rng = MockRng::new(self.seed);
 
         for i in 0..5 {
             tasks.insert(
@@ -510,11 +511,7 @@ impl MockLabRuntime {
                 TaskState {
                     task_id: i,
                     region_id: i / 2,
-                    status: if rng.next_bool(0.7) {
-                        TaskStatus::Completed
-                    } else {
-                        TaskStatus::Running
-                    },
+                    status: TaskStatus::Completed,
                     logical_time: i * 1000,
                     cancellation_token: None,
                 },
@@ -534,7 +531,7 @@ impl MockLabRuntime {
                 parent_region: None,
                 child_tasks: vec![0, 1],
                 child_regions: vec![1, 2],
-                status: RegionStatus::Active,
+                status: RegionStatus::Closed,
             },
         );
 
@@ -544,6 +541,17 @@ impl MockLabRuntime {
                 region_id: 1,
                 parent_region: Some(0),
                 child_tasks: vec![2, 3],
+                child_regions: vec![],
+                status: RegionStatus::Closed,
+            },
+        );
+
+        regions.insert(
+            2,
+            RegionState {
+                region_id: 2,
+                parent_region: Some(0),
+                child_tasks: vec![4],
                 child_regions: vec![],
                 status: RegionStatus::Closed,
             },

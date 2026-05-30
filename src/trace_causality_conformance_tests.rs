@@ -229,18 +229,24 @@ impl MockTraceAnalyzer {
     // =============================================================================================
 
     pub fn add_event(&mut self, mut event: TraceEvent) -> Result<(), String> {
-        // Assign logical time based on causality constraints
+        let dependencies = self.find_causality_dependencies(&event);
+        let dependency_clock = dependencies
+            .iter()
+            .filter_map(|dep_id| self.events.iter().find(|e| e.id == *dep_id))
+            .map(|dep_event| dep_event.logical_time.clock)
+            .max()
+            .unwrap_or(0);
+
+        // Assign logical time after all happens-before dependencies.
         let current_clock = self
             .logical_clock_domains
             .get(&event.task_id)
             .cloned()
             .unwrap_or(0);
+        let next_clock = current_clock.max(dependency_clock) + 1;
 
-        event.logical_time = LogicalTime {
-            clock: current_clock + 1,
-        };
-        self.logical_clock_domains
-            .insert(event.task_id, current_clock + 1);
+        event.logical_time = LogicalTime { clock: next_clock };
+        self.logical_clock_domains.insert(event.task_id, next_clock);
 
         // Update resource state tracking
         for access in &event.resource_accesses {
@@ -250,8 +256,9 @@ impl MockTraceAnalyzer {
                 .push(event.id);
         }
 
-        // Build causality dependencies
-        self.build_causality_dependencies(&event)?;
+        if !dependencies.is_empty() {
+            self.causality_graph.insert(event.id, dependencies);
+        }
 
         self.events.push(event);
         Ok(())
@@ -280,13 +287,13 @@ impl MockTraceAnalyzer {
             if let Some(dependencies) = self.causality_graph.get(&event.id) {
                 for dep_id in dependencies {
                     if let Some(dep_event) = self.events.iter().find(|e| e.id == *dep_id) {
-                        if event.logical_time.clock <= dep_event.logical_time.clock {
+                        if dep_event.logical_time.clock >= event.logical_time.clock {
                             violations.push(CausalityViolation {
                                 kind: CausalityViolationKind::InvalidHappensBefore,
-                                earlier_event: event.id,
-                                later_event: dep_event.id,
-                                earlier_time: event.logical_time.clone(),
-                                later_time: dep_event.logical_time.clone(),
+                                earlier_event: dep_event.id,
+                                later_event: event.id,
+                                earlier_time: dep_event.logical_time.clone(),
+                                later_time: event.logical_time.clone(),
                             });
                         }
                     }
@@ -333,7 +340,7 @@ impl MockTraceAnalyzer {
         violations
     }
 
-    fn build_causality_dependencies(&mut self, event: &TraceEvent) -> Result<(), String> {
+    fn find_causality_dependencies(&self, event: &TraceEvent) -> Vec<u64> {
         let mut dependencies = Vec::new();
 
         match &event.event_type {
@@ -359,18 +366,10 @@ impl MockTraceAnalyzer {
                     }
                 }
             }
-            TraceEventType::TaskSpawn { child_task: _ } => {
-                // Child task events depend on spawn event
-                dependencies.push(event.id);
-            }
             _ => {}
         }
 
-        if !dependencies.is_empty() {
-            self.causality_graph.insert(event.id, dependencies);
-        }
-
-        Ok(())
+        dependencies
     }
 
     // =============================================================================================

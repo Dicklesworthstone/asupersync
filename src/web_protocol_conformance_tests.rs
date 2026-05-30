@@ -152,19 +152,28 @@ impl MockMultipartParser {
                     pos += 1;
                 }
 
-                // Find next boundary or end
-                let next_boundary_pos = self
-                    .find_boundary(data, &boundary_bytes, pos)
-                    .or_else(|| self.find_boundary(data, &end_boundary, pos));
+                // Find the earliest following boundary, treating a final boundary as terminal.
+                let next_boundary_pos = self.find_boundary(data, &boundary_bytes, pos);
+                let next_end_boundary_pos = self.find_boundary(data, &end_boundary, pos);
+                let next_boundary = match (next_boundary_pos, next_end_boundary_pos) {
+                    (Some(boundary_pos), Some(end_pos)) if end_pos <= boundary_pos => {
+                        Some((end_pos, true))
+                    }
+                    (Some(boundary_pos), Some(_)) | (Some(boundary_pos), None) => {
+                        Some((boundary_pos, false))
+                    }
+                    (None, Some(end_pos)) => Some((end_pos, true)),
+                    (None, None) => None,
+                };
 
-                match next_boundary_pos {
-                    Some(end_pos) => {
+                match next_boundary {
+                    Some((end_pos, is_final_boundary)) => {
                         let part_data = &data[pos..end_pos];
                         if let Ok(field) = self.parse_part(part_data) {
                             fields.push(field);
                         }
 
-                        if self.find_boundary(data, &end_boundary, pos).is_some() {
+                        if is_final_boundary {
                             break; // End boundary found
                         }
 
@@ -258,7 +267,13 @@ impl MockMultipartParser {
         } else {
             header_end + 2
         };
-        let body = data[body_start..].to_vec();
+        let mut body_end = data.len();
+        if body_end >= 2 && &data[body_end - 2..body_end] == b"\r\n" {
+            body_end -= 2;
+        } else if body_end >= 1 && data[body_end - 1] == b'\n' {
+            body_end -= 1;
+        }
+        let body = data[body_start..body_end].to_vec();
 
         // Parse headers
         let mut headers = HashMap::new();
@@ -731,11 +746,15 @@ impl MockSessionManager {
 #[derive(Debug, Clone)]
 pub struct CsrfTokenManager {
     secret_key: Vec<u8>,
+    issued_tokens: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
 
 impl CsrfTokenManager {
     pub fn new(secret_key: Vec<u8>) -> Self {
-        Self { secret_key }
+        Self {
+            secret_key,
+            issued_tokens: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     /// Generate a cryptographically secure CSRF token
@@ -752,19 +771,29 @@ impl CsrfTokenManager {
             .as_nanos()
             .hash(&mut hasher);
 
-        format!("{:016x}", hasher.finish())
+        let token = format!("{:016x}", hasher.finish());
+        self.issued_tokens
+            .lock()
+            .unwrap()
+            .insert(token.clone(), session_id.to_string());
+        token
     }
 
     /// Validate a CSRF token against a session
     pub fn validate_token(&self, token: &str, session_id: &str) -> bool {
-        // In a real implementation, this would involve HMAC validation
-        // For this compact model, perform deterministic validation.
         if token.is_empty() || session_id.is_empty() {
             return false;
         }
 
-        // Simple validation: token should be hex and proper length
-        token.len() == 16 && token.chars().all(|c| c.is_ascii_hexdigit())
+        if token.len() != 16 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+
+        self.issued_tokens
+            .lock()
+            .unwrap()
+            .get(token)
+            .is_some_and(|issued_session| issued_session == session_id)
     }
 
     /// Test round-trip token generation and validation
