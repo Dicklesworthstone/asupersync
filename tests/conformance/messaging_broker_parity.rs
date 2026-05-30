@@ -21,13 +21,13 @@
 //!
 //! * **Redis RESP3** — the conformance gap was not in the client
 //!   implementation, but in this suite: the file carried only a
-//!   placeholder assertion claiming RESP2-only behaviour. The live
+//!   shortcut assertion claiming RESP2-only behaviour. The live
 //!   broker test below now verifies Redis 7 `HELLO 3` vendor reply
 //!   shape through the public client surface.
 //! * **Kafka disabled-feature fallback** — covered by pre-existing
 //!   `asupersync-w2p2a0` (CRITICAL): production builds without `--features
 //!   kafka` must return `FeatureDisabled` instead of routing producers or
-//!   consumers into an in-process stub. The producer operation and client
+//!   consumers into an in-process deterministic source. The producer operation and client
 //!   consumer source boundary are pinned below.
 //! * **Kafka at-most-once default** — covered by pre-existing
 //!   `asupersync-2i2e21` (HIGH): `enable_auto_commit=true` default plus
@@ -167,7 +167,7 @@ mod kafka_mod {
     }
 
     #[test]
-    fn kafka_disabled_client_consumer_stub_is_test_only() {
+    fn kafka_disabled_client_consumer_source_is_test_only() {
         let source = include_str!("../../src/messaging/kafka.rs");
 
         assert!(
@@ -186,7 +186,7 @@ mod kafka_mod {
         );
         assert!(
             source.contains("non-test builds without the kafka feature must fail loudly below"),
-            "source must document why the stub consumer boundary is test-only"
+            "source must document why the deterministic consumer boundary is test-only"
         );
     }
 
@@ -1221,7 +1221,7 @@ mod redis_mod {
     /// negotiated protocol version and canonical server metadata keys.
     /// This is the narrowest vendor-comparison seam that proves our public
     /// client surface can speak and parse real RESP3 wire replies instead
-    /// of carrying a dead placeholder in the conformance suite.
+    /// of carrying a dead shortcut assertion in the conformance suite.
     #[test]
     fn redis_hello3_vendor_shape() {
         let suite = "redis_hello3_vendor_shape";

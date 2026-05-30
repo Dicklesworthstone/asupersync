@@ -6,7 +6,7 @@
 //! RaptorQ encode-decode cycles produce correct outputs. It uses golden
 //! files to freeze known-correct behavior and detect regressions.
 
-use crate::golden_file_manager::{create_metadata, GoldenError, GoldenFileManager, GoldenMetadata};
+use crate::golden_file_manager::{GoldenError, GoldenFileManager, GoldenMetadata, create_metadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -112,11 +112,33 @@ impl RoundTripHarness {
         }
     }
 
+    /// Creates a new round-trip test harness with explicit golden update mode.
+    #[allow(dead_code)]
+    pub fn with_update_mode<P: AsRef<Path>>(golden_dir: P, update_mode: bool) -> Self {
+        Self {
+            golden_manager: GoldenFileManager::with_update_mode(golden_dir, update_mode),
+            configs: Self::default_test_configs(),
+        }
+    }
+
     /// Creates a harness with custom test configurations
     #[allow(dead_code)]
     pub fn with_configs<P: AsRef<Path>>(golden_dir: P, configs: Vec<RoundTripConfig>) -> Self {
         Self {
             golden_manager: GoldenFileManager::new(golden_dir),
+            configs,
+        }
+    }
+
+    /// Creates a harness with custom test configurations and explicit golden update mode.
+    #[allow(dead_code)]
+    pub fn with_configs_and_update_mode<P: AsRef<Path>>(
+        golden_dir: P,
+        configs: Vec<RoundTripConfig>,
+        update_mode: bool,
+    ) -> Self {
+        Self {
+            golden_manager: GoldenFileManager::with_update_mode(golden_dir, update_mode),
             configs,
         }
     }
@@ -265,8 +287,8 @@ impl RoundTripHarness {
         use asupersync::config::EncodingConfig;
         use asupersync::decoding::{DecodingConfig, DecodingPipeline};
         use asupersync::encoding::EncodingPipeline;
-        use asupersync::security::tag::AuthenticationTag;
         use asupersync::security::AuthenticatedSymbol;
+        use asupersync::security::tag::AuthenticationTag;
         use asupersync::types::resource::{PoolConfig, SymbolPool};
         use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
 

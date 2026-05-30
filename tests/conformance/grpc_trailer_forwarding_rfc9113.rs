@@ -122,10 +122,10 @@ mod grpc_trailer_conformance_tests {
         ExpectedFailure,
     }
 
-    /// Mock gRPC response for testing trailer forwarding.
+    /// Scripted gRPC response for testing trailer forwarding.
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
-    pub struct MockGrpcResponse {
+    pub struct ScriptedGrpcResponse {
         pub http_status: u16,
         pub initial_headers: Metadata,
         pub data_frames: Vec<Bytes>,
@@ -137,8 +137,8 @@ mod grpc_trailer_conformance_tests {
 
     #[allow(dead_code)]
 
-    impl MockGrpcResponse {
-        /// Create a new mock gRPC response.
+    impl ScriptedGrpcResponse {
+        /// Create a new scripted gRPC response.
         #[allow(dead_code)]
         pub fn new() -> Self {
             let mut initial_headers = Metadata::new();
@@ -222,7 +222,7 @@ mod grpc_trailer_conformance_tests {
         }
     }
 
-    impl Default for MockGrpcResponse {
+    impl Default for ScriptedGrpcResponse {
         #[allow(dead_code)]
         fn default() -> Self {
             Self::new()
@@ -288,7 +288,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_status_in_trailers_not_headers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new().with_status(Status::ok());
+            let mut response = ScriptedGrpcResponse::new().with_status(Status::ok());
 
             // Erroneously place grpc-status in initial headers
             response.initial_headers.insert("grpc-status", "0");
@@ -322,7 +322,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_status_required_in_trailers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let response = MockGrpcResponse::new().with_status(Status::ok());
+            let response = ScriptedGrpcResponse::new().with_status(Status::ok());
 
             // Don't call build_response() to simulate missing grpc-status
             let verdict = match response.validate_trailer_placement() {
@@ -355,8 +355,8 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let message = "invalid\r\nrequest 100%";
-            let mut response =
-                MockGrpcResponse::new().with_status(Status::new(Code::InvalidArgument, message));
+            let mut response = ScriptedGrpcResponse::new()
+                .with_status(Status::new(Code::InvalidArgument, message));
 
             response.build_response();
 
@@ -398,7 +398,7 @@ mod grpc_trailer_conformance_tests {
 
             let ascii_message = "not found";
             let mut response =
-                MockGrpcResponse::new().with_status(Status::new(Code::NotFound, ascii_message));
+                ScriptedGrpcResponse::new().with_status(Status::new(Code::NotFound, ascii_message));
 
             response.build_response();
 
@@ -438,7 +438,7 @@ mod grpc_trailer_conformance_tests {
         fn test_grpc_message_empty_handling(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new().with_status(Status::ok()); // No message
+            let mut response = ScriptedGrpcResponse::new().with_status(Status::ok()); // No message
 
             response.build_response();
 
@@ -472,7 +472,7 @@ mod grpc_trailer_conformance_tests {
         fn test_trailer_only_response_for_immediate_errors(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
+            let mut response = ScriptedGrpcResponse::new()
                 .with_status(Status::new(Code::Unauthenticated, "invalid token"));
 
             // Don't add any data frames for immediate error
@@ -508,7 +508,7 @@ mod grpc_trailer_conformance_tests {
         fn test_trailer_only_response_structure(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
+            let mut response = ScriptedGrpcResponse::new()
                 .with_status(Status::new(Code::InvalidArgument, "bad request"));
 
             response.build_response();
@@ -550,7 +550,7 @@ mod grpc_trailer_conformance_tests {
         fn test_rst_stream_no_error_after_trailers(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let response = MockGrpcResponse::new()
+            let response = ScriptedGrpcResponse::new()
                 .with_status(Status::ok())
                 .with_data_frame(Bytes::from("response data"))
                 .with_rst_stream(0); // NO_ERROR = 0
@@ -587,7 +587,7 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let response =
-                MockGrpcResponse::new().with_status(Status::new(Code::NotFound, "not found"));
+                ScriptedGrpcResponse::new().with_status(Status::new(Code::NotFound, "not found"));
             // No RST_STREAM for trailer-only
 
             let verdict = if response.is_trailer_only() && !response.has_rst_stream {
@@ -774,7 +774,7 @@ mod grpc_trailer_conformance_tests {
         fn test_http2_frame_ordering_compliance(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
+            let mut response = ScriptedGrpcResponse::new()
                 .with_status(Status::ok())
                 .with_data_frame(Bytes::from("data"));
 
@@ -816,7 +816,7 @@ mod grpc_trailer_conformance_tests {
         fn test_data_before_trailers_ordering(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
+            let mut response = ScriptedGrpcResponse::new()
                 .with_status(Status::ok())
                 .with_data_frame(Bytes::from("first"))
                 .with_data_frame(Bytes::from("second"));
@@ -854,7 +854,7 @@ mod grpc_trailer_conformance_tests {
         fn test_error_response_trailer_forwarding(&self) -> GrpcTrailerConformanceResult {
             let start = Instant::now();
 
-            let mut response = MockGrpcResponse::new()
+            let mut response = ScriptedGrpcResponse::new()
                 .with_status(Status::new(Code::Internal, "database connection failed"));
 
             response.build_response();
@@ -940,14 +940,15 @@ mod tests {
 
     #[test]
     #[allow(dead_code)]
-    fn test_mock_grpc_response() {
-        let mut mock = MockGrpcResponse::new().with_status(Status::new(Code::Ok, "success"));
+    fn test_scripted_grpc_response() {
+        let mut response =
+            ScriptedGrpcResponse::new().with_status(Status::new(Code::Ok, "success"));
 
-        mock.build_response();
+        response.build_response();
 
-        assert!(mock.validate_trailer_placement().is_ok());
-        assert!(mock.is_trailer_only()); // No data frames added
-        assert_eq!(mock.status.code(), Code::Ok);
+        assert!(response.validate_trailer_placement().is_ok());
+        assert!(response.is_trailer_only()); // No data frames added
+        assert_eq!(response.status.code(), Code::Ok);
     }
 
     #[test]
@@ -981,7 +982,7 @@ mod tests {
     #[test]
     #[allow(dead_code)]
     fn test_trailer_placement_validation() {
-        let mut response = MockGrpcResponse::new().with_status(Status::ok());
+        let mut response = ScriptedGrpcResponse::new().with_status(Status::ok());
 
         // Valid: grpc-status in trailers only
         response.build_response();

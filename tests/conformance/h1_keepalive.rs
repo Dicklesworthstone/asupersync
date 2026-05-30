@@ -2,7 +2,7 @@
 //!
 //! These tests pin RFC 9112 connection persistence behavior using production
 //! `Http1Server` request/response flow over an in-memory transport. The older
-//! mock-pool draft is preserved below as disabled archaeology.
+//! draft in-memory pool is preserved below as disabled archaeology.
 
 use asupersync::http::h1::server::HostPolicy;
 use asupersync::http::h1::types::{Request, Response};

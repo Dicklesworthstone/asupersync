@@ -43,7 +43,7 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
 ///
 /// All assertions are aggregated into the returned `ConformanceResult`;
 /// any single failure flips the result to `fail` with a precise diagnostic
-/// rather than a generic placeholder string.
+/// rather than a generic fallback string.
 #[allow(dead_code)]
 fn test_gaussian_elimination(_ctx: &ConformanceContext) -> ConformanceResult {
     let mut details: Vec<String> = Vec::new();

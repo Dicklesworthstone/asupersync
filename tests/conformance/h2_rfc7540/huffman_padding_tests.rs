@@ -6,6 +6,8 @@
 //! to address DISC-003 - ensuring malformed Huffman padding is properly rejected.
 
 use super::*;
+use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::http::h2::hpack::Decoder;
 
 /// Run all Huffman padding strictness validation tests.
 #[allow(dead_code)]
@@ -28,19 +30,21 @@ fn test_huffman_padding_validation() -> H2ConformanceResult {
         // Valid Huffman encodings with correct padding
         let valid_huffman_samples = vec![
             (
-                vec![0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff],
+                vec![
+                    0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff,
+                ],
                 "www.example.com",
-                "valid encoding with proper padding"
+                "valid encoding with proper padding",
             ),
             (
                 vec![0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf],
                 "no-cache",
-                "valid short encoding with padding"
+                "valid short encoding with padding",
             ),
             (
                 vec![0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f],
                 "private",
-                "valid encoding ending with padding bits"
+                "valid encoding ending with padding bits",
             ),
         ];
 
@@ -89,23 +93,25 @@ fn test_malformed_huffman_rejection() -> H2ConformanceResult {
         let malformed_huffman_samples = vec![
             (
                 vec![0xff, 0xff, 0xff, 0xff], // All 1s - invalid padding
-                "all ones padding (invalid)"
+                "all ones padding (invalid)",
             ),
             (
                 vec![0x80], // Single bit set in padding area
-                "single bit in padding"
+                "single bit in padding",
             ),
             (
                 vec![0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf, 0x80], // Valid sequence + invalid padding
-                "valid sequence with invalid padding suffix"
+                "valid sequence with invalid padding suffix",
             ),
             (
                 vec![0x00, 0x00], // All zeros with incorrect length
-                "all zeros with wrong length"
+                "all zeros with wrong length",
             ),
             (
-                vec![0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0x00], // Valid prefix + wrong padding
-                "valid prefix with wrong padding"
+                vec![
+                    0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0x00,
+                ], // Valid prefix + wrong padding
+                "valid prefix with wrong padding",
             ),
         ];
 
@@ -121,9 +127,10 @@ fn test_malformed_huffman_rejection() -> H2ConformanceResult {
 
             // Verify the error indicates padding/format issue
             if let Err(error_msg) = decoded_result {
-                if !error_msg.to_lowercase().contains("padding") &&
-                   !error_msg.to_lowercase().contains("invalid") &&
-                   !error_msg.to_lowercase().contains("malformed") {
+                if !error_msg.to_lowercase().contains("padding")
+                    && !error_msg.to_lowercase().contains("invalid")
+                    && !error_msg.to_lowercase().contains("malformed")
+                {
                     return Err(format!(
                         "Error message for {} should mention padding/invalid format, got: {}",
                         description, error_msg
@@ -149,33 +156,26 @@ fn test_malformed_huffman_rejection() -> H2ConformanceResult {
 #[allow(dead_code)]
 fn test_padding_length_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        // Test various padding lengths to ensure proper validation
-
-        // Huffman encoding requires that padding uses the most significant bits
-        // of the EOS symbol (256, which is all 1s in the Huffman table)
-
         let padding_test_cases = vec![
             (
-                // Single character 'A' (0x41) with different padding lengths
-                vec![0x1f], // 5 bits of data + 3 bits padding (all 1s)
+                vec![0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf],
                 true,
-                "single char with 3-bit padding"
+                "RFC Appendix C no-cache encoding with EOS-prefix padding",
             ),
             (
-                vec![0x10], // 5 bits of data + 3 bits of zeros (invalid padding)
+                vec![0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xb8],
                 false,
-                "single char with invalid zero padding"
+                "no-cache encoding with final padding bits cleared",
             ),
             (
-                // Test 7-bit padding case
-                vec![0xfe, 0x0f], // Some data + 7 bits of padding
+                vec![0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f],
                 true,
-                "7-bit padding with all 1s"
+                "RFC Appendix C private encoding with EOS-prefix padding",
             ),
             (
-                vec![0xfe, 0x00], // Some data + 7 bits of zeros (invalid)
+                vec![0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x70],
                 false,
-                "7-bit zero padding (invalid)"
+                "private encoding with final padding bits cleared",
             ),
         ];
 
@@ -186,7 +186,8 @@ fn test_padding_length_validation() -> H2ConformanceResult {
                 if decode_result.is_err() {
                     return Err(format!(
                         "Valid padding case was rejected: {} - {:?}",
-                        description, decode_result.err()
+                        description,
+                        decode_result.err()
                     ));
                 }
             } else {
@@ -216,45 +217,57 @@ fn test_padding_length_validation() -> H2ConformanceResult {
 #[allow(dead_code)]
 fn test_eos_symbol_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        // Test that padding uses the most significant bits of the EOS symbol (256)
-        // EOS is encoded as all 1s in the Huffman table
-
-        // Valid EOS padding patterns
-        let valid_eos_patterns = vec![
-            (0b11111111, 8, "8-bit EOS padding"),
-            (0b1111111_0, 7, "7-bit EOS padding"),
-            (0b111111_00, 6, "6-bit EOS padding"),
-            (0b11111_000, 5, "5-bit EOS padding"),
-            (0b1111_0000, 4, "4-bit EOS padding"),
-            (0b111_00000, 3, "3-bit EOS padding"),
-            (0b11_000000, 2, "2-bit EOS padding"),
-            (0b1_0000000, 1, "1-bit EOS padding"),
+        let valid_eos_terminated = vec![
+            (
+                vec![
+                    0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff,
+                ],
+                "www.example.com",
+            ),
+            (vec![0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf], "no-cache"),
+            (
+                vec![0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f],
+                "private",
+            ),
         ];
 
-        for (padding_byte, padding_bits, description) in valid_eos_patterns {
-            // Create a simple encoded sequence ending with this padding
-            let mut encoded = vec![0x41]; // Some valid prefix
-            encoded.push(padding_byte);
-
-            // The decoder should accept padding that matches EOS prefix
-            let result = huffman_decode(&encoded);
-            // Note: This test may need adjustment based on actual implementation
+        for (encoded, expected_text) in valid_eos_terminated {
+            let decoded = huffman_decode(&encoded)
+                .map_err(|err| format!("valid EOS-terminated encoding rejected: {}", err))?;
+            let decoded_str = String::from_utf8(decoded)
+                .map_err(|err| format!("decoded bytes are not valid UTF-8: {}", err))?;
+            if decoded_str != expected_text {
+                return Err(format!(
+                    "valid EOS-terminated encoding decoded to '{}', expected '{}'",
+                    decoded_str, expected_text
+                ));
+            }
         }
 
-        // Invalid EOS padding patterns (don't match EOS symbol prefix)
         let invalid_patterns = vec![
-            (0b01111111, "starts with 0 instead of 1"),
-            (0b10101010, "alternating pattern"),
-            (0b11110000, "too few 1s for EOS prefix"),
+            (
+                vec![
+                    0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0x00,
+                ],
+                "www.example.com with zero padding",
+            ),
+            (
+                vec![0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xb0],
+                "no-cache with zero padding",
+            ),
+            (
+                vec![0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x00],
+                "private with zero padding",
+            ),
         ];
 
-        for (invalid_byte, description) in invalid_patterns {
-            let mut encoded = vec![0x41]; // Some valid prefix
-            encoded.push(invalid_byte);
-
-            let result = huffman_decode(&encoded);
-            // Should reject invalid padding patterns
-            // Note: Implementation detail - may need adjustment
+        for (encoded, description) in invalid_patterns {
+            if huffman_decode(&encoded).is_ok() {
+                return Err(format!(
+                    "invalid EOS padding pattern was accepted: {}",
+                    description
+                ));
+            }
         }
 
         Ok(())
@@ -278,16 +291,18 @@ fn test_incomplete_symbol_rejection() -> H2ConformanceResult {
 
         let incomplete_symbol_cases = vec![
             (
-                vec![0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4], // Missing final bits
-                "truncated encoding missing padding"
+                vec![
+                    0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4,
+                ], // Missing final bits
+                "truncated encoding missing padding",
             ),
             (
                 vec![0x80, 0x00], // Incomplete symbol start
-                "incomplete symbol at start"
+                "incomplete symbol at start",
             ),
             (
                 vec![0xff, 0x80], // Symbol that doesn't complete properly
-                "symbol without proper termination"
+                "symbol without proper termination",
             ),
         ];
 
@@ -295,18 +310,16 @@ fn test_incomplete_symbol_rejection() -> H2ConformanceResult {
             let decode_result = huffman_decode(&incomplete_bytes);
 
             if decode_result.is_ok() {
-                return Err(format!(
-                    "Incomplete symbol was accepted: {}",
-                    description
-                ));
+                return Err(format!("Incomplete symbol was accepted: {}", description));
             }
 
             // Error should indicate incomplete/truncated symbol
             if let Err(error_msg) = decode_result {
                 let error_lower = error_msg.to_lowercase();
-                if !error_lower.contains("incomplete") &&
-                   !error_lower.contains("truncated") &&
-                   !error_lower.contains("invalid") {
+                if !error_lower.contains("incomplete")
+                    && !error_lower.contains("truncated")
+                    && !error_lower.contains("invalid")
+                {
                     return Err(format!(
                         "Error for incomplete symbol ({}) should mention incomplete/truncated, got: {}",
                         description, error_msg
@@ -328,71 +341,78 @@ fn test_incomplete_symbol_rejection() -> H2ConformanceResult {
     )
 }
 
-// Mock Huffman decoder for testing
-// In real implementation, this would integrate with actual HPACK Huffman decoder
-
 #[derive(Debug)]
-enum HuffmanError {
-    InvalidPadding,
-    IncompleteSymbol,
-    InvalidFormat,
+enum HpackHuffmanError {
+    Compression(String),
+    MissingDecodedHeader,
 }
 
-impl std::fmt::Display for HuffmanError {
+impl std::fmt::Display for HpackHuffmanError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            HuffmanError::InvalidPadding => write!(f, "Invalid Huffman padding"),
-            HuffmanError::IncompleteSymbol => write!(f, "Incomplete Huffman symbol"),
-            HuffmanError::InvalidFormat => write!(f, "Invalid Huffman format"),
-        }
-    }
-}
-
-fn huffman_decode(encoded: &[u8]) -> Result<Vec<u8>, HuffmanError> {
-    // Mock Huffman decoder implementation
-    // In real implementation, this would be the actual HPACK Huffman decoder
-
-    if encoded.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Check for obviously invalid patterns
-    let last_byte = encoded[encoded.len() - 1];
-
-    // Check for invalid padding patterns
-    if encoded.len() >= 4 && encoded.iter().all(|&b| b == 0xff) {
-        return Err(HuffmanError::InvalidPadding);
-    }
-
-    if encoded.len() == 1 && last_byte == 0x80 {
-        return Err(HuffmanError::InvalidPadding);
-    }
-
-    // Check for incomplete symbols (very basic heuristic)
-    if encoded.len() > 1 && last_byte == 0x00 {
-        return Err(HuffmanError::InvalidPadding);
-    }
-
-    // For testing purposes, return some decoded content for valid-looking input
-    // Real implementation would perform actual Huffman decoding
-    match encoded {
-        // Simulate known valid patterns
-        [0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff] => {
-            Ok(b"www.example.com".to_vec())
-        }
-        [0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf] => {
-            Ok(b"no-cache".to_vec())
-        }
-        [0x25, 0xa8, 0x49, 0xe9, 0x5b, 0xa9, 0x7d, 0x7f] => {
-            Ok(b"private".to_vec())
-        }
-        _ => {
-            // Default mock behavior - reject obviously invalid patterns
-            if last_byte == 0x00 || (encoded.len() == 1 && last_byte == 0x80) {
-                Err(HuffmanError::InvalidPadding)
-            } else {
-                Ok(b"decoded".to_vec())
+            HpackHuffmanError::Compression(message) => write!(f, "{}", message),
+            HpackHuffmanError::MissingDecodedHeader => {
+                write!(f, "Invalid HPACK block: missing decoded header")
             }
         }
     }
+}
+
+fn huffman_decode(encoded: &[u8]) -> Result<Vec<u8>, HpackHuffmanError> {
+    let mut header_block = BytesMut::new();
+
+    // Literal Header Field without indexing, new name (RFC 7541 §6.2.2).
+    header_block.put_u8(0x00);
+    encode_plain_hpack_string(&mut header_block, b"x-huffman-test");
+    encode_huffman_hpack_string(&mut header_block, encoded);
+
+    let mut decoder = Decoder::new();
+    let mut encoded_block = header_block.freeze();
+    let decoded_headers = decoder
+        .decode(&mut encoded_block)
+        .map_err(|err| HpackHuffmanError::Compression(err.to_string()))?;
+    let header = decoded_headers
+        .into_iter()
+        .next()
+        .ok_or(HpackHuffmanError::MissingDecodedHeader)?;
+    Ok(header.value.into_bytes())
+}
+
+fn encode_plain_hpack_string(dst: &mut BytesMut, value: &[u8]) {
+    encode_hpack_integer(dst, value.len(), 7, 0x00);
+    dst.extend_from_slice(value);
+}
+
+fn encode_huffman_hpack_string(dst: &mut BytesMut, value: &[u8]) {
+    encode_hpack_integer(dst, value.len(), 7, 0x80);
+    dst.extend_from_slice(value);
+}
+
+fn encode_hpack_integer(dst: &mut BytesMut, value: usize, prefix_bits: u8, prefix: u8) {
+    let max_first = (1_usize << prefix_bits).saturating_sub(1);
+
+    if value < max_first {
+        dst.put_u8(prefix | value as u8);
+        return;
+    }
+
+    dst.put_u8(prefix | max_first as u8);
+    let mut remaining = value - max_first;
+    while remaining >= 128 {
+        dst.put_u8((remaining & 0x7f) as u8 | 0x80);
+        remaining >>= 7;
+    }
+    dst.put_u8(remaining as u8);
+}
+
+#[test]
+fn real_hpack_huffman_padding_results_pass() {
+    let results = run_huffman_padding_tests();
+    assert!(
+        results
+            .iter()
+            .all(|result| result.verdict == TestVerdict::Pass),
+        "HPACK Huffman padding conformance failures: {:?}",
+        results
+    );
 }

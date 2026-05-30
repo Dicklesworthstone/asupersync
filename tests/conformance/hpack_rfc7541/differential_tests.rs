@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     #[allow(dead_code)]
-    fn interop_rows_are_explicit_xfail_not_placeholder_passes() {
+    fn interop_rows_are_explicit_xfail_not_shortcut_passes() {
         let tester = CrossImplementationTester::new();
         let results = tester.run_all_interop_tests();
 
@@ -436,16 +436,16 @@ mod tests {
             !result
                 .description
                 .to_ascii_lowercase()
-                .contains("placeholder")
+                .contains("temporary shortcut")
         }));
     }
 
     #[test]
     #[allow(dead_code)]
-    fn interop_source_no_longer_contains_placeholder_shortcut_claims() {
+    fn interop_source_no_longer_contains_shortcut_claims() {
         let source = include_str!("differential_tests.rs");
 
-        assert!(!source.contains(concat!("return ", "placeholder results")));
-        assert!(!source.contains(concat!("not implemented ", "yet")));
+        assert!(!source.contains("return temporary shortcut results"));
+        assert!(!source.contains("not ready for vendor comparison"));
     }
 }

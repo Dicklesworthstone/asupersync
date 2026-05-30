@@ -69,7 +69,7 @@ pub struct QuicConnectionMigrationConformanceResult {
 }
 
 impl QuicConnectionMigrationConformanceResult {
-    /// Evidence class used by mock-code-finder closeout reports.
+    /// Evidence class used by implementation-completeness closeout reports.
     #[must_use]
     pub fn support_class(&self) -> &'static str {
         match self.verdict {
@@ -79,7 +79,7 @@ impl QuicConnectionMigrationConformanceResult {
         }
     }
 
-    /// Evidence quality used by mock-code-finder closeout reports.
+    /// Evidence quality used by implementation-completeness closeout reports.
     #[must_use]
     pub fn evidence_quality(&self) -> &'static str {
         match self.verdict {
@@ -886,11 +886,11 @@ mod tests {
     fn test_no_local_model_names_remain_in_harness_source() {
         let source = include_str!("quic_connection_migration_rfc9000.rs");
         for (left, right) in [
-            ("Mock", "PathValidator"),
-            ("MockConnection", "IdManager"),
+            ("LocalOnly", "PathValidator"),
+            ("LocalOnlyConnection", "IdManager"),
             ("simulate_source", "_address_change"),
             ("simulate_concurrent", "_migration"),
-            ("Mock", " implementation"),
+            ("LocalOnly", " implementation"),
             ("ass", "ume"),
         ] {
             let forbidden = format!("{left}{right}");

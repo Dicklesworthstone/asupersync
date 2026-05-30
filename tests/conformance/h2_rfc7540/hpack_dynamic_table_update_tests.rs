@@ -6,6 +6,9 @@
 //! integrated with HTTP/2 SETTINGS frame validation (addresses DISC-001).
 
 use super::*;
+use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::hpack::Decoder;
 
 /// Run all HPACK dynamic table size update validation tests.
 #[allow(dead_code)]
@@ -34,7 +37,8 @@ fn test_dynamic_table_size_update_validation() -> H2ConformanceResult {
 
             for update_size in valid_updates {
                 if update_size <= settings_size {
-                    let update_result = validate_dynamic_table_size_update(update_size, settings_size);
+                    let update_result =
+                        validate_dynamic_table_size_update(update_size, settings_size);
                     if !update_result {
                         return Err(format!(
                             "Valid table size update {} (SETTINGS limit: {}) was rejected",
@@ -45,13 +49,16 @@ fn test_dynamic_table_size_update_validation() -> H2ConformanceResult {
             }
 
             // Invalid size updates (> SETTINGS value)
-            let invalid_updates = vec![
-                settings_size + 1,
-                settings_size * 2,
+            let invalid_updates = [
+                settings_size.saturating_add(1),
+                settings_size.saturating_add(settings_size.max(1)),
                 u32::MAX,
             ];
 
-            for update_size in invalid_updates {
+            for update_size in invalid_updates
+                .into_iter()
+                .filter(|&size| size > settings_size)
+            {
                 let update_result = validate_dynamic_table_size_update(update_size, settings_size);
                 if update_result {
                     return Err(format!(
@@ -94,7 +101,8 @@ fn test_oversized_table_update_rejection() -> H2ConformanceResult {
 
         for (oversized_update, description) in oversized_updates {
             // This should be rejected and result in connection error
-            let validation_result = validate_dynamic_table_size_update(oversized_update, settings_limit);
+            let validation_result =
+                validate_dynamic_table_size_update(oversized_update, settings_limit);
 
             if validation_result {
                 return Err(format!(
@@ -104,8 +112,9 @@ fn test_oversized_table_update_rejection() -> H2ConformanceResult {
             }
 
             // Should also trigger a connection error (COMPRESSION_ERROR)
-            let expected_error = H2ErrorCode::CompressionError;
-            let actual_error = get_last_connection_error();
+            let expected_error = ErrorCode::CompressionError;
+            let actual_error =
+                dynamic_table_size_update_error_code(oversized_update, settings_limit);
 
             if actual_error != Some(expected_error) {
                 return Err(format!(
@@ -136,18 +145,16 @@ fn test_settings_integration_atomicity() -> H2ConformanceResult {
 
         // Initial state: SETTINGS_HEADER_TABLE_SIZE = 4096
         let initial_settings_size = 4096u32;
-        apply_settings(SettingsFrame {
+        let mut settings_state = SettingsState::new(SettingsFrame {
             header_table_size: Some(initial_settings_size),
-            enable_push: None,
-            max_concurrent_streams: None,
-            initial_window_size: None,
-            max_frame_size: None,
-            max_header_list_size: None,
         });
 
         // Send HPACK update that's valid under current settings
         let valid_update_size = initial_settings_size;
-        let update_result = validate_dynamic_table_size_update(valid_update_size, initial_settings_size);
+        let update_result = validate_dynamic_table_size_update(
+            valid_update_size,
+            settings_state.active_header_table_size(),
+        );
         if !update_result {
             return Err("Valid HPACK update under current SETTINGS was rejected".to_string());
         }
@@ -156,33 +163,37 @@ fn test_settings_integration_atomicity() -> H2ConformanceResult {
         let new_settings_size = 2048u32;
         let new_settings = SettingsFrame {
             header_table_size: Some(new_settings_size),
-            enable_push: None,
-            max_concurrent_streams: None,
-            initial_window_size: None,
-            max_frame_size: None,
-            max_header_list_size: None,
         };
 
         // Send SETTINGS frame (but not yet ACKed)
-        send_settings_frame(new_settings.clone());
+        settings_state.send_settings_frame(new_settings.clone());
 
         // Before SETTINGS ACK, old limit should still apply
-        let pre_ack_result = validate_dynamic_table_size_update(initial_settings_size, initial_settings_size);
+        let pre_ack_result = validate_dynamic_table_size_update(
+            initial_settings_size,
+            settings_state.active_header_table_size(),
+        );
         if !pre_ack_result {
             return Err("HPACK update should be valid before SETTINGS ACK".to_string());
         }
 
         // ACK the SETTINGS frame - changes should now be atomic
-        ack_settings_frame();
+        settings_state.ack_settings_frame();
 
         // After SETTINGS ACK, new limit should apply
-        let post_ack_result = validate_dynamic_table_size_update(initial_settings_size, new_settings_size);
+        let post_ack_result = validate_dynamic_table_size_update(
+            initial_settings_size,
+            settings_state.active_header_table_size(),
+        );
         if post_ack_result {
-            return Err("HPACK update should be invalid after SETTINGS ACK with smaller limit".to_string());
+            return Err(
+                "HPACK update should be invalid after SETTINGS ACK with smaller limit".to_string(),
+            );
         }
 
         // Updates within new limit should work
-        let new_valid_update = validate_dynamic_table_size_update(new_settings_size, new_settings_size);
+        let new_valid_update =
+            validate_dynamic_table_size_update(new_settings_size, new_settings_size);
         if !new_valid_update {
             return Err("HPACK update within new SETTINGS limit should be valid".to_string());
         }
@@ -284,7 +295,7 @@ fn test_size_update_sequencing() -> H2ConformanceResult {
         // Test invalid sequencing: header fields before size updates
         let invalid_sequences = vec![
             vec![
-                HpackInstruction::IndexedHeaderField(2), // :method GET
+                HpackInstruction::IndexedHeaderField(2),        // :method GET
                 HpackInstruction::DynamicTableSizeUpdate(4096), // Invalid: after header field
             ],
             vec![
@@ -317,23 +328,38 @@ fn test_size_update_sequencing() -> H2ConformanceResult {
     )
 }
 
-// Mock types and functions for testing
-// In real implementation, these would integrate with actual HTTP/2 and HPACK code
-
 #[derive(Debug, Clone)]
 struct SettingsFrame {
     header_table_size: Option<u32>,
-    enable_push: Option<u32>,
-    max_concurrent_streams: Option<u32>,
-    initial_window_size: Option<u32>,
-    max_frame_size: Option<u32>,
-    max_header_list_size: Option<u32>,
 }
 
-#[derive(Debug, PartialEq)]
-enum H2ErrorCode {
-    CompressionError,
-    ProtocolError,
+#[derive(Debug, Clone)]
+struct SettingsState {
+    active_header_table_size: u32,
+    pending_header_table_size: Option<u32>,
+}
+
+impl SettingsState {
+    fn new(frame: SettingsFrame) -> Self {
+        Self {
+            active_header_table_size: frame.header_table_size.unwrap_or(4096),
+            pending_header_table_size: None,
+        }
+    }
+
+    fn send_settings_frame(&mut self, frame: SettingsFrame) {
+        self.pending_header_table_size = frame.header_table_size;
+    }
+
+    fn ack_settings_frame(&mut self) {
+        if let Some(size) = self.pending_header_table_size.take() {
+            self.active_header_table_size = size;
+        }
+    }
+
+    fn active_header_table_size(&self) -> u32 {
+        self.active_header_table_size
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -355,44 +381,103 @@ enum IndexingMode {
 }
 
 fn validate_dynamic_table_size_update(update_size: u32, settings_limit: u32) -> bool {
-    // Basic validation logic - in real implementation, this would integrate
-    // with the actual HPACK decoder
-    update_size <= settings_limit
+    apply_dynamic_table_size_update(update_size, settings_limit)
+        .is_ok_and(|applied_size| applied_size == update_size as usize)
 }
 
-fn apply_settings(settings: SettingsFrame) {
-    // Mock settings application
-}
-
-fn send_settings_frame(settings: SettingsFrame) {
-    // Mock settings frame send
-}
-
-fn ack_settings_frame() {
-    // Mock settings ACK
-}
-
-fn get_last_connection_error() -> Option<H2ErrorCode> {
-    // Mock error tracking - would return actual connection error
-    Some(H2ErrorCode::CompressionError)
+fn dynamic_table_size_update_error_code(
+    update_size: u32,
+    settings_limit: u32,
+) -> Option<ErrorCode> {
+    apply_dynamic_table_size_update(update_size, settings_limit).err()
 }
 
 fn validate_hpack_sequence(sequence: &[HpackInstruction]) -> bool {
-    // Validate that dynamic table size updates come first
-    let mut seen_non_update = false;
-
+    let mut header_block = BytesMut::new();
     for instruction in sequence {
-        match instruction {
-            HpackInstruction::DynamicTableSizeUpdate(_) => {
-                if seen_non_update {
-                    return false; // Size update after non-size instruction
-                }
-            }
-            _ => {
-                seen_non_update = true;
-            }
-        }
+        encode_hpack_instruction(&mut header_block, instruction);
     }
 
-    true
+    let mut decoder = Decoder::new();
+    let mut encoded = header_block.freeze();
+    decoder.decode(&mut encoded).is_ok()
+}
+
+fn apply_dynamic_table_size_update(
+    update_size: u32,
+    settings_limit: u32,
+) -> Result<usize, ErrorCode> {
+    let mut decoder = Decoder::new();
+    decoder.set_allowed_table_size(settings_limit as usize);
+
+    let mut header_block = BytesMut::new();
+    encode_hpack_integer(&mut header_block, update_size as usize, 5, 0x20);
+    let mut encoded = header_block.freeze();
+
+    decoder
+        .decode(&mut encoded)
+        .map(|_| decoder.dynamic_table_max_size())
+        .map_err(|err| err.code)
+}
+
+fn encode_hpack_instruction(dst: &mut BytesMut, instruction: &HpackInstruction) {
+    match instruction {
+        HpackInstruction::DynamicTableSizeUpdate(size) => {
+            encode_hpack_integer(dst, *size as usize, 5, 0x20);
+        }
+        HpackInstruction::IndexedHeaderField(index) => {
+            encode_hpack_integer(dst, *index as usize, 7, 0x80);
+        }
+        HpackInstruction::LiteralHeaderField {
+            name,
+            value,
+            indexing,
+        } => match indexing {
+            IndexingMode::WithIncremental => encode_literal_with_new_name(dst, 0x40, name, value),
+            IndexingMode::WithoutIncremental => {
+                encode_literal_with_new_name(dst, 0x00, name, value)
+            }
+            IndexingMode::NeverIndexed => encode_literal_with_new_name(dst, 0x10, name, value),
+        },
+    }
+}
+
+fn encode_literal_with_new_name(dst: &mut BytesMut, prefix: u8, name: &[u8], value: &[u8]) {
+    dst.put_u8(prefix);
+    encode_plain_hpack_string(dst, name);
+    encode_plain_hpack_string(dst, value);
+}
+
+fn encode_plain_hpack_string(dst: &mut BytesMut, value: &[u8]) {
+    encode_hpack_integer(dst, value.len(), 7, 0x00);
+    dst.extend_from_slice(value);
+}
+
+fn encode_hpack_integer(dst: &mut BytesMut, value: usize, prefix_bits: u8, prefix: u8) {
+    let max_first = (1_usize << prefix_bits).saturating_sub(1);
+
+    if value < max_first {
+        dst.put_u8(prefix | value as u8);
+        return;
+    }
+
+    dst.put_u8(prefix | max_first as u8);
+    let mut remaining = value - max_first;
+    while remaining >= 128 {
+        dst.put_u8((remaining & 0x7f) as u8 | 0x80);
+        remaining >>= 7;
+    }
+    dst.put_u8(remaining as u8);
+}
+
+#[test]
+fn real_hpack_dynamic_table_update_results_pass() {
+    let results = run_hpack_dynamic_table_update_tests();
+    assert!(
+        results
+            .iter()
+            .all(|result| result.verdict == TestVerdict::Pass),
+        "HPACK dynamic table update conformance failures: {:?}",
+        results
+    );
 }

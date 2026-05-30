@@ -84,9 +84,9 @@ mod race_loser_drain_metamorphic_tests {
         pub execution_time_ms: u64,
     }
 
-    /// A mock future that can be cancelled and tracked for testing.
+    /// A tracked future with scripted readiness and cancellation state.
     #[allow(dead_code)]
-    struct MockFuture {
+    struct TrackedFuture {
         id: u64,
         delay_ticks: u64,
         current_tick: Arc<AtomicU64>,
@@ -99,7 +99,7 @@ mod race_loser_drain_metamorphic_tests {
 
     #[allow(dead_code)]
 
-    impl MockFuture {
+    impl TrackedFuture {
         #[allow(dead_code)]
         fn new(id: u64, delay_ticks: u64, result: i32, current_tick: Arc<AtomicU64>) -> Self {
             Self {
@@ -127,7 +127,7 @@ mod race_loser_drain_metamorphic_tests {
         }
     }
 
-    impl Future for MockFuture {
+    impl Future for TrackedFuture {
         type Output = Outcome<i32, &'static str>;
 
         #[allow(dead_code)]
@@ -155,7 +155,7 @@ mod race_loser_drain_metamorphic_tests {
         }
     }
 
-    impl Cancel for MockFuture {
+    impl Cancel for TrackedFuture {
         #[allow(dead_code)]
         fn cancel(&mut self, reason: CancelReason) {
             self.cancelled.store(true, Ordering::Release);
@@ -177,7 +177,7 @@ mod race_loser_drain_metamorphic_tests {
         }
     }
 
-    impl Drop for MockFuture {
+    impl Drop for TrackedFuture {
         #[allow(dead_code)]
         fn drop(&mut self) {
             self.finalizer_called.store(true, Ordering::Release);
@@ -237,11 +237,11 @@ mod race_loser_drain_metamorphic_tests {
             )
         }
 
-        /// Simulates race execution with mock futures.
+        /// Drives race execution with tracked futures.
         #[allow(dead_code)]
         fn simulate_race_execution(
             &self,
-            futures: Vec<MockFuture>,
+            futures: Vec<TrackedFuture>,
             current_tick: Arc<AtomicU64>,
         ) -> (usize, Vec<Outcome<i32, &'static str>>) {
             // Simplified race simulation - find earliest completion
@@ -285,8 +285,8 @@ mod race_loser_drain_metamorphic_tests {
                 let current_tick = Arc::new(AtomicU64::new(0));
 
                 // First race: race(a, b)
-                let future_a1 = MockFuture::new(1, delay_a, result_a, current_tick.clone());
-                let future_b1 = MockFuture::new(2, delay_b, result_b, current_tick.clone());
+                let future_a1 = TrackedFuture::new(1, delay_a, result_a, current_tick.clone());
+                let future_b1 = TrackedFuture::new(2, delay_b, result_b, current_tick.clone());
                 let futures_ab = vec![future_a1, future_b1];
 
                 let (winner_ab, outcomes_ab) = self.simulate_race_execution(futures_ab, current_tick.clone());
@@ -295,8 +295,8 @@ mod race_loser_drain_metamorphic_tests {
                 current_tick.store(0, Ordering::Release);
 
                 // Second race: race(b, a)
-                let future_b2 = MockFuture::new(2, delay_b, result_b, current_tick.clone());
-                let future_a2 = MockFuture::new(1, delay_a, result_a, current_tick.clone());
+                let future_b2 = TrackedFuture::new(2, delay_b, result_b, current_tick.clone());
+                let future_a2 = TrackedFuture::new(1, delay_a, result_a, current_tick.clone());
                 let futures_ba = vec![future_b2, future_a2];
 
                 let (winner_ba, outcomes_ba) = self.simulate_race_execution(futures_ba, current_tick.clone());
@@ -385,12 +385,17 @@ mod race_loser_drain_metamorphic_tests {
                 let mut futures = Vec::new();
 
                 // Create winner (fastest)
-                let winner_future = MockFuture::new(0, winner_delay, 42, current_tick.clone());
+                let winner_future = TrackedFuture::new(0, winner_delay, 42, current_tick.clone());
                 futures.push(winner_future);
 
                 // Create losers (slower)
                 for i in 1..=loser_count {
-                    let loser_future = MockFuture::new(i as u64, loser_delay + i as u64, i as i32, current_tick.clone());
+                    let loser_future = TrackedFuture::new(
+                        i as u64,
+                        loser_delay + i as u64,
+                        i as i32,
+                        current_tick.clone(),
+                    );
                     futures.push(loser_future);
                 }
 
@@ -480,8 +485,8 @@ mod race_loser_drain_metamorphic_tests {
                 let current_tick = Arc::new(AtomicU64::new(0));
 
                 // Create futures that would exhaust budget during drain
-                let winner_future = MockFuture::new(0, 1, 42, current_tick.clone());
-                let loser_future = MockFuture::new(1, budget_limit + 5, 1, current_tick.clone());
+                let winner_future = TrackedFuture::new(0, 1, 42, current_tick.clone());
+                let loser_future = TrackedFuture::new(1, budget_limit + 5, 1, current_tick.clone());
 
                 let futures = vec![winner_future, loser_future];
 
@@ -542,14 +547,15 @@ mod race_loser_drain_metamorphic_tests {
                 let mut futures = Vec::new();
 
                 // Create winner (fastest)
-                let winner_future = MockFuture::new(0, 5, 42, current_tick.clone());
+                let winner_future = TrackedFuture::new(0, 5, 42, current_tick.clone());
                 let winner_finalizer_tracker = winner_future.finalizer_called.clone();
                 futures.push(winner_future);
 
                 // Create losers and track their finalizers
                 let mut loser_finalizer_trackers = Vec::new();
                 for i in 1..=loser_count {
-                    let loser_future = MockFuture::new(i as u64, 20 + i as u64, i as i32, current_tick.clone());
+                    let loser_future =
+                        TrackedFuture::new(i as u64, 20 + i as u64, i as i32, current_tick.clone());
                     loser_finalizer_trackers.push(loser_future.finalizer_called.clone());
                     futures.push(loser_future);
                 }
@@ -630,14 +636,15 @@ mod race_loser_drain_metamorphic_tests {
                 // Create race participants
                 let mut futures = Vec::new();
                 let winner_delay = 5;
-                let winner_future = MockFuture::new(0, winner_delay, 42, current_tick.clone());
+                let winner_future = TrackedFuture::new(0, winner_delay, 42, current_tick.clone());
                 futures.push(winner_future);
 
                 let mut max_loser_delay = 0u64;
                 for i in 1..=loser_count {
                     let loser_delay = 10 + i as u64 * 3;
                     max_loser_delay = max_loser_delay.max(loser_delay);
-                    let loser_future = MockFuture::new(i as u64, loser_delay, i as i32, current_tick.clone());
+                    let loser_future =
+                        TrackedFuture::new(i as u64, loser_delay, i as i32, current_tick.clone());
                     futures.push(loser_future);
                 }
 
@@ -722,9 +729,9 @@ mod race_loser_drain_metamorphic_tests {
                     current_tick.store(0, Ordering::Release);
 
                     let futures = vec![
-                        MockFuture::new(1, 10, 100, current_tick.clone()),
-                        MockFuture::new(2, 10, 200, current_tick.clone()), // Tie with different results
-                        MockFuture::new(3, 15, 300, current_tick.clone()),
+                        TrackedFuture::new(1, 10, 100, current_tick.clone()),
+                        TrackedFuture::new(2, 10, 200, current_tick.clone()), // Tie with different results
+                        TrackedFuture::new(3, 15, 300, current_tick.clone()),
                     ];
 
                     let (winner_index, outcomes) = self.simulate_race_execution(futures, current_tick.clone());
@@ -786,11 +793,12 @@ mod race_loser_drain_metamorphic_tests {
 
                 // Create race with multiple losers
                 let mut futures = Vec::new();
-                let winner_future = MockFuture::new(0, 5, 42, current_tick.clone());
+                let winner_future = TrackedFuture::new(0, 5, 42, current_tick.clone());
                 futures.push(winner_future);
 
                 for i in 1..=loser_count {
-                    let loser_future = MockFuture::new(i as u64, 10 + i as u64, i as i32, current_tick.clone());
+                    let loser_future =
+                        TrackedFuture::new(i as u64, 10 + i as u64, i as i32, current_tick.clone());
                     futures.push(loser_future);
                 }
 
@@ -855,13 +863,14 @@ mod race_loser_drain_metamorphic_tests {
 
                 // Create race participants
                 let mut futures = Vec::new();
-                let winner_future = MockFuture::new(0, 5, 42, current_tick.clone());
+                let winner_future = TrackedFuture::new(0, 5, 42, current_tick.clone());
                 let winner_cancel_tracker = winner_future.cancelled.clone();
                 futures.push(winner_future);
 
                 let mut loser_cancel_trackers = Vec::new();
                 for i in 1..=loser_count {
-                    let loser_future = MockFuture::new(i as u64, 20, i as i32, current_tick.clone());
+                    let loser_future =
+                        TrackedFuture::new(i as u64, 20, i as i32, current_tick.clone());
                     loser_cancel_trackers.push(loser_future.cancelled.clone());
                     futures.push(loser_future);
                 }
@@ -930,12 +939,13 @@ mod race_loser_drain_metamorphic_tests {
 
                 // Create race with resource tracking
                 let mut futures = Vec::new();
-                let winner_future = MockFuture::new(0, 5, 42, current_tick.clone());
+                let winner_future = TrackedFuture::new(0, 5, 42, current_tick.clone());
                 futures.push(winner_future);
 
                 let mut loser_resource_trackers = Vec::new();
                 for i in 1..=loser_count {
-                    let loser_future = MockFuture::new(i as u64, 20 + i as u64, i as i32, current_tick.clone());
+                    let loser_future =
+                        TrackedFuture::new(i as u64, 20 + i as u64, i as i32, current_tick.clone());
 
                     // Track resources (simplified - using finalizer call as proxy)
                     loser_resource_trackers.push((
@@ -1010,14 +1020,14 @@ mod race_loser_drain_metamorphic_tests {
 
                 // Race 1: fast winner
                 let race1_futures = vec![
-                    MockFuture::new(1, 5, 100, current_tick.clone()),
-                    MockFuture::new(2, 10, 200, current_tick.clone()),
+                    TrackedFuture::new(1, 5, 100, current_tick.clone()),
+                    TrackedFuture::new(2, 10, 200, current_tick.clone()),
                 ];
 
                 // Race 2: different timing
                 let race2_futures = vec![
-                    MockFuture::new(3, 8, 300, current_tick.clone()),
-                    MockFuture::new(4, 12, 400, current_tick.clone()),
+                    TrackedFuture::new(3, 8, 300, current_tick.clone()),
+                    TrackedFuture::new(4, 12, 400, current_tick.clone()),
                 ];
 
                 // Execute races independently (in real implementation would be concurrent)
@@ -1079,8 +1089,8 @@ mod race_loser_drain_metamorphic_tests {
 
                 // Inner race: race(a, b)
                 let inner_futures = vec![
-                    MockFuture::new(1, 10, 100, current_tick.clone()),
-                    MockFuture::new(2, 15, 200, current_tick.clone()),
+                    TrackedFuture::new(1, 10, 100, current_tick.clone()),
+                    TrackedFuture::new(2, 15, 200, current_tick.clone()),
                 ];
 
                 let (inner_winner, inner_outcomes) = self.simulate_race_execution(inner_futures, current_tick.clone());
@@ -1097,8 +1107,8 @@ mod race_loser_drain_metamorphic_tests {
                 // Outer race: race(inner_result, c)
                 // Simulate this by creating new futures representing the composed race
                 let outer_futures = vec![
-                    MockFuture::new(10, 5, inner_result, current_tick.clone()), // Inner race result
-                    MockFuture::new(11, 12, 300, current_tick.clone()),          // Direct future c
+                    TrackedFuture::new(10, 5, inner_result, current_tick.clone()), // Inner race result
+                    TrackedFuture::new(11, 12, 300, current_tick.clone()),          // Direct future c
                 ];
 
                 let (outer_winner, outer_outcomes) = self.simulate_race_execution(outer_futures, current_tick.clone());
@@ -1164,8 +1174,8 @@ mod race_loser_drain_metamorphic_tests {
                 let current_tick = Arc::new(AtomicU64::new(0));
 
                 // Create futures with clearly different completion times
-                let fast_future = MockFuture::new(1, 5, 100, current_tick.clone());
-                let slow_future = MockFuture::new(2, 20, 200, current_tick.clone());
+                let fast_future = TrackedFuture::new(1, 5, 100, current_tick.clone());
+                let slow_future = TrackedFuture::new(2, 20, 200, current_tick.clone());
 
                 // Test both polling orders: [fast, slow] and [slow, fast]
 
@@ -1177,8 +1187,8 @@ mod race_loser_drain_metamorphic_tests {
                 current_tick.store(0, Ordering::Release);
 
                 // Order 2: slow first
-                let fast_future2 = MockFuture::new(1, 5, 100, current_tick.clone());
-                let slow_future2 = MockFuture::new(2, 20, 200, current_tick.clone());
+                let fast_future2 = TrackedFuture::new(1, 5, 100, current_tick.clone());
+                let slow_future2 = TrackedFuture::new(2, 20, 200, current_tick.clone());
                 let futures_slow_first = vec![slow_future2, fast_future2];
                 let (winner2, outcomes2) = self.simulate_race_execution(futures_slow_first, current_tick.clone());
 

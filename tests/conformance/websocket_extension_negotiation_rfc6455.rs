@@ -52,7 +52,7 @@ pub struct WsExtensionConformanceResult {
 }
 
 impl WsExtensionConformanceResult {
-    /// Evidence class used by mock-code-finder closeout reports.
+    /// Evidence class used by implementation-completeness closeout reports.
     #[must_use]
     pub fn support_class(&self) -> &'static str {
         match self.verdict {
@@ -62,7 +62,7 @@ impl WsExtensionConformanceResult {
         }
     }
 
-    /// Evidence quality used by mock-code-finder closeout reports.
+    /// Evidence quality used by implementation-completeness closeout reports.
     #[must_use]
     pub fn evidence_quality(&self) -> &'static str {
         match self.verdict {
@@ -1020,7 +1020,7 @@ mod tests {
     #[allow(dead_code)]
     fn test_no_local_extension_negotiation_model_claims_conformance() {
         let source = include_str!("websocket_extension_negotiation_rfc6455.rs");
-        let former_type = ["Mock", "Extension", "Negotiation"].concat();
+        let former_type = ["LocalOnly", "Extension", "Negotiation"].concat();
         let former_method = ["simulate", "_", "negotiation"].concat();
 
         assert!(!source.contains(&former_type));

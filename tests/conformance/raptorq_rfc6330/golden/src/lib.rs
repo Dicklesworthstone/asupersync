@@ -74,8 +74,8 @@ pub mod round_trip_harness;
 
 // Re-export main types for convenience
 pub use golden_file_manager::{
-    create_metadata, GoldenError, GoldenFileEntry, GoldenFileManager, GoldenMetadata,
-    ValidationSummary,
+    GoldenError, GoldenFileEntry, GoldenFileManager, GoldenMetadata, ValidationSummary,
+    create_metadata,
 };
 
 pub use round_trip_harness::{
@@ -100,6 +100,40 @@ pub fn run_complete_test_suite<P: AsRef<std::path::Path>>(
     golden_dir: P,
     fixture_dir: P,
 ) -> Result<TestSuiteResults, TestSuiteError> {
+    run_complete_test_suite_inner(golden_dir, fixture_dir, None, false)
+}
+
+/// Run the complete golden-file suite with an explicit round-trip profile.
+///
+/// This keeps fast unit proof lanes small while preserving the default
+/// `run_complete_test_suite` entrypoint for the full RFC 6330 fixture corpus.
+#[allow(dead_code)]
+pub fn run_complete_test_suite_with_configs<P: AsRef<std::path::Path>>(
+    golden_dir: P,
+    fixture_dir: P,
+    configs: Vec<RoundTripConfig>,
+) -> Result<TestSuiteResults, TestSuiteError> {
+    run_complete_test_suite_inner(golden_dir, fixture_dir, Some(configs), false)
+}
+
+/// Run the complete golden-file suite with explicit round-trip profile and
+/// golden update mode.
+#[allow(dead_code)]
+pub fn run_complete_test_suite_with_configs_and_update_mode<P: AsRef<std::path::Path>>(
+    golden_dir: P,
+    fixture_dir: P,
+    configs: Vec<RoundTripConfig>,
+    update_mode: bool,
+) -> Result<TestSuiteResults, TestSuiteError> {
+    run_complete_test_suite_inner(golden_dir, fixture_dir, Some(configs), update_mode)
+}
+
+fn run_complete_test_suite_inner<P: AsRef<std::path::Path>>(
+    golden_dir: P,
+    fixture_dir: P,
+    round_trip_configs: Option<Vec<RoundTripConfig>>,
+    round_trip_update_mode: bool,
+) -> Result<TestSuiteResults, TestSuiteError> {
     let golden_path = golden_dir.as_ref();
     let fixture_path = fixture_dir.as_ref();
 
@@ -114,7 +148,14 @@ pub fn run_complete_test_suite<P: AsRef<std::path::Path>>(
         .map_err(TestSuiteError::FixtureGeneration)?;
 
     // Step 2: Run round-trip tests
-    let harness = RoundTripHarness::new(golden_path);
+    let harness = match round_trip_configs {
+        Some(configs) => RoundTripHarness::with_configs_and_update_mode(
+            golden_path,
+            configs,
+            round_trip_update_mode,
+        ),
+        None => RoundTripHarness::with_update_mode(golden_path, round_trip_update_mode),
+    };
     let roundtrip_results = harness.run_all_tests().map_err(TestSuiteError::RoundTrip)?;
 
     // Step 3: Validate golden files
@@ -290,10 +331,87 @@ pub fn run_smoke_tests<P: AsRef<std::path::Path>>(
     })
 }
 
+/// Run a bounded live-code smoke profile without materializing the larger
+/// default fixture corpus.
+#[allow(dead_code)]
+pub fn run_smoke_tests_with_configs<P: AsRef<std::path::Path>>(
+    golden_dir: P,
+    configs: Vec<RoundTripConfig>,
+) -> Result<RoundTripSummary, RoundTripError> {
+    run_smoke_tests_with_configs_and_update_mode(golden_dir, configs, false)
+}
+
+/// Run a bounded live-code smoke profile with explicit golden update mode.
+#[allow(dead_code)]
+pub fn run_smoke_tests_with_configs_and_update_mode<P: AsRef<std::path::Path>>(
+    golden_dir: P,
+    configs: Vec<RoundTripConfig>,
+    update_mode: bool,
+) -> Result<RoundTripSummary, RoundTripError> {
+    let mut total_tests = 0;
+    let mut passed_tests = 0;
+    let mut failed_tests = 0;
+    let mut failures = Vec::new();
+
+    let harness = RoundTripHarness::with_configs_and_update_mode(
+        golden_dir.as_ref(),
+        configs.clone(),
+        update_mode,
+    );
+
+    for (index, config) in configs.iter().enumerate() {
+        let test_name = format!("smoke_test_{}", index);
+        total_tests += 1;
+        match harness.run_single_test(&test_name, config) {
+            Ok(result) if result.success => passed_tests += 1,
+            Ok(result) => {
+                failed_tests += 1;
+                failures.push(format!(
+                    "{}: {}",
+                    test_name,
+                    result.error_message.as_deref().unwrap_or("unknown error")
+                ));
+            }
+            Err(err) => {
+                failed_tests += 1;
+                failures.push(format!("{}: {}", test_name, err));
+            }
+        }
+    }
+
+    Ok(RoundTripSummary {
+        total_tests,
+        passed_tests,
+        failed_tests,
+        failures,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn bounded_live_configs() -> Vec<RoundTripConfig> {
+        vec![
+            RoundTripConfig {
+                source_symbols: 4,
+                symbol_size: 16,
+                repair_symbols: 2,
+                seed: 7,
+                test_erasures: false,
+                erasure_probability: 0.0,
+            },
+            RoundTripConfig {
+                source_symbols: 8,
+                symbol_size: 32,
+                repair_symbols: 4,
+                seed: 11,
+                test_erasures: true,
+                erasure_probability: 0.1,
+            },
+        ]
+    }
 
     #[test]
     #[allow(dead_code)]
@@ -304,21 +422,21 @@ mod tests {
 
         // This test primarily validates the API works
         // The actual functionality is tested in individual modules
-        let result = run_complete_test_suite(&golden_path, &fixture_path);
+        let result = run_complete_test_suite_with_configs_and_update_mode(
+            &golden_path,
+            &fixture_path,
+            bounded_live_configs(),
+            true,
+        );
 
-        // Should succeed with mock implementation
-        // (Real implementation would require actual RaptorQ integration)
-        match result {
-            Ok(results) => {
-                // Check that all components ran
-                assert!(results.fixture_generation.generated_fixtures > 0);
-                assert!(results.round_trip_tests.total_tests > 0);
-            }
-            Err(e) => {
-                // Expected until real RaptorQ integration
-                println!("Test suite failed as expected: {}", e);
-            }
-        }
+        let results = result.expect("complete RaptorQ golden suite must run against live codec");
+        assert!(results.fixture_generation.generated_fixtures > 0);
+        assert!(results.round_trip_tests.total_tests > 0);
+        assert_eq!(
+            results.round_trip_tests.failed_tests, 0,
+            "live RaptorQ golden roundtrips must not fail: {:?}",
+            results.round_trip_tests.failures
+        );
     }
 
     #[test]
@@ -327,16 +445,19 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Should not panic and should return some results
-        let result = run_smoke_tests(temp_dir.path());
+        let result = run_smoke_tests_with_configs_and_update_mode(
+            temp_dir.path(),
+            bounded_live_configs(),
+            true,
+        );
 
-        match result {
-            Ok(summary) => {
-                assert!(summary.total_tests > 0);
-            }
-            Err(_) => {
-                // Expected until real RaptorQ integration
-            }
-        }
+        let summary = result.expect("RaptorQ smoke tests must run against live codec");
+        assert!(summary.total_tests > 0);
+        assert_eq!(
+            summary.failed_tests, 0,
+            "live RaptorQ smoke roundtrips must not fail: {:?}",
+            summary.failures
+        );
     }
 
     #[test]
