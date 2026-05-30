@@ -1067,6 +1067,7 @@ fn read_network_snapshot() -> Option<NetworkSnapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::object::ContentId;
 
     #[test]
     fn test_transfer_actor_creation() {
@@ -1079,15 +1080,15 @@ mod tests {
 
     #[test]
     fn test_session_state_transition() {
-        let object_id = ObjectId::from("test-object");
+        let object_id = ObjectId::content(ContentId::from_bytes(b"test-object"));
         let session_id = SessionId::new(object_id.clone(), 1);
         let mut session = TransferSession::new(
             session_id,
             object_id,
-            RegionId::new(),
-            TaskId::new(),
+            RegionId::new_for_test(1, 0),
+            TaskId::new_for_test(2, 0),
             TransferBrainConfig::default(),
-            TraceId::new(),
+            TraceId::from_raw(3),
         );
 
         assert_eq!(session.state, SessionState::Initializing);
