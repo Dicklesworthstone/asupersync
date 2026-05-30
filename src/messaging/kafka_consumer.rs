@@ -1,11 +1,10 @@
 //! Kafka consumer with Cx integration for cancel-correct message consumption.
 //!
 //! This module defines the API surface for a Kafka consumer that integrates
-//! with the Asupersync `Cx` context. When the `kafka` feature is disabled, the
-//! consumer uses the same harness-only deterministic in-process broker as the
-//! fallback producer path so tests and contract validation can exercise
-//! subscribe/poll/seek/commit semantics without implying a real Kafka
-//! deployment.
+//! with the Asupersync `Cx` context. When the `kafka` feature is disabled,
+//! broker operations fail loudly with [`KafkaError::FeatureDisabled`] outside
+//! unit tests. Unit tests keep a cfg-gated deterministic broker so the offset
+//! state machine remains covered without shipping broker surrogate behavior.
 //!
 //! # Cancel-Correct Behavior
 //!
@@ -23,24 +22,24 @@ use crate::messaging::kafka::apply_security_config;
 use crate::messaging::kafka::{
     KafkaError, KafkaSaslConfig, KafkaSecurityConfig, KafkaTlsConfig, is_loopback_bootstrap_server,
 };
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(test, not(feature = "kafka")))]
 use crate::messaging::kafka::{
     deterministic_broker_end_offset, deterministic_broker_fetch, deterministic_broker_notify,
 };
 use crate::sync::Notify;
-#[cfg(any(feature = "kafka", not(feature = "kafka"), test))]
+#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
 use crate::time::Sleep;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-#[cfg(any(not(feature = "kafka"), test))]
+#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
 use std::future::Future;
-#[cfg(any(feature = "kafka", not(feature = "kafka"), test))]
+#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
 use std::pin::Pin;
 #[cfg(any(test, feature = "kafka"))]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "kafka", not(feature = "kafka"), test))]
+#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
 use std::task::Poll;
 use std::time::Duration;
 
@@ -121,9 +120,12 @@ pub struct ConsumerConfig {
     pub isolation_level: IsolationLevel,
     /// Transport security for Kafka broker connections.
     pub security: KafkaSecurityConfig,
-    /// Force real Kafka connection even in test mode.
-    /// When true, always use rdkafka broker connection.
-    /// When false (default), use deterministic broker in test mode.
+    /// Force real Kafka connection even in unit-test mode.
+    ///
+    /// When `true`, feature-enabled unit tests use the `rdkafka` broker
+    /// connection path. When `false`, unit tests may exercise the local offset
+    /// state machine without a broker. Non-test builds always require the
+    /// `kafka` feature for broker operations.
     pub force_real_kafka: bool,
     /// Maximum number of retries for retriable operations (offset commits, etc.).
     pub retries: u32,
@@ -403,14 +405,30 @@ pub struct ConsumerRecord {
     pub headers: Vec<(String, Vec<u8>)>,
 }
 
+#[cfg(any(feature = "kafka", all(test, not(feature = "kafka"))))]
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn broker_operations_feature_disabled_for_build() -> bool {
+    #[cfg(all(not(test), not(feature = "kafka")))]
+    {
+        true
+    }
+    #[cfg(any(test, feature = "kafka"))]
+    {
+        false
+    }
 }
 
 #[cfg(feature = "kafka")]
 const MAX_BROKER_POLL_SLICE: Duration = Duration::from_millis(50);
 
-/// Kafka consumer with a harness-only deterministic brokerless fallback.
+/// Kafka consumer with Cx-aware real-broker operations.
+///
+/// The no-feature build keeps the type and configuration surface available, but
+/// broker operations return [`KafkaError::FeatureDisabled`] unless the code is
+/// compiled as crate unit tests.
 pub struct KafkaConsumer {
     config: ConsumerConfig,
     state: Mutex<ConsumerState>,
@@ -444,7 +462,7 @@ struct ConsumerState {
     assigned_partitions: BTreeSet<(String, i32)>,
     committed_offsets: BTreeMap<(String, i32), i64>,
     positions: BTreeMap<(String, i32), i64>,
-    #[cfg(not(feature = "kafka"))]
+    #[cfg(all(test, not(feature = "kafka")))]
     poll_cursor: usize,
     rebalance_generation: u64,
     last_revoked_partitions: BTreeSet<(String, i32)>,
@@ -809,13 +827,17 @@ impl KafkaConsumer {
             .await?;
         }
 
+        if broker_operations_feature_disabled_for_build() {
+            return Err(KafkaError::FeatureDisabled);
+        }
+
         let mut state = self.state.lock();
         // Re-check closed under lock to prevent TOCTOU race with close().
         if self.closed.load(Ordering::Acquire) {
             return Err(KafkaError::Config("consumer is closed".to_string()));
         }
         state.subscribed_topics = normalized;
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(all(test, not(feature = "kafka")))]
         {
             state.assigned_partitions = state
                 .subscribed_topics
@@ -857,6 +879,10 @@ impl KafkaConsumer {
     ) -> Result<RebalanceResult, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
+
+        if broker_operations_feature_disabled_for_build() {
+            return Err(KafkaError::FeatureDisabled);
+        }
 
         #[cfg(test)]
         let rebalance_after_open_hook = self.rebalance_after_open_hook.lock().clone();
@@ -968,6 +994,11 @@ impl KafkaConsumer {
     ) -> Result<Option<ConsumerRecord>, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
+
+        if broker_operations_feature_disabled_for_build() {
+            return Err(KafkaError::FeatureDisabled);
+        }
+
         self.ensure_has_subscription()?;
 
         #[cfg(feature = "kafka")]
@@ -1151,7 +1182,7 @@ impl KafkaConsumer {
             }
         }
 
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(all(test, not(feature = "kafka")))]
         {
             if let Some(record) = self.try_poll_local_record()? {
                 return Ok(Some(record));
@@ -1217,6 +1248,11 @@ impl KafkaConsumer {
                 .await;
             }
         }
+
+        #[cfg(all(not(test), not(feature = "kafka")))]
+        {
+            Err(KafkaError::FeatureDisabled)
+        }
     }
 
     /// Commit offsets explicitly.
@@ -1228,6 +1264,10 @@ impl KafkaConsumer {
     ) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
+
+        if broker_operations_feature_disabled_for_build() {
+            return Err(KafkaError::FeatureDisabled);
+        }
 
         if offsets.is_empty() {
             return Err(KafkaError::Config("offsets cannot be empty".to_string()));
@@ -1323,6 +1363,10 @@ impl KafkaConsumer {
     pub async fn seek(&self, cx: &Cx, tpo: &TopicPartitionOffset) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
+
+        if broker_operations_feature_disabled_for_build() {
+            return Err(KafkaError::FeatureDisabled);
+        }
 
         validate_partition_number(tpo.partition)?;
         if tpo.offset < 0 {
@@ -1500,7 +1544,7 @@ impl KafkaConsumer {
         Ok(())
     }
 
-    #[cfg(not(feature = "kafka"))]
+    #[cfg(all(test, not(feature = "kafka")))]
     fn try_poll_local_record(&self) -> Result<Option<ConsumerRecord>, KafkaError> {
         let mut state = self.state.lock();
         if self.closed.load(Ordering::Acquire) {
@@ -1546,7 +1590,7 @@ impl KafkaConsumer {
         Ok(None)
     }
 
-    #[cfg(not(feature = "kafka"))]
+    #[cfg(all(test, not(feature = "kafka")))]
     fn current_position_for_partition(
         config: &ConsumerConfig,
         state: &mut ConsumerState,

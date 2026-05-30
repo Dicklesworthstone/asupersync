@@ -7,11 +7,11 @@
 //! # Design
 //!
 //! The implementation wraps the rdkafka crate (when available) with a Cx
-//! integration layer. When the `kafka` feature is disabled, the producer and
-//! transaction APIs remain available only as a harness lane: sends land in a
-//! deterministic in-process broker and transactions stage/commit/abort locally
-//! so tests and contract probes can exercise honest semantics without implying
-//! a real broker-backed deployment.
+//! integration layer. When the `kafka` feature is disabled, broker operations
+//! fail closed with [`KafkaError::FeatureDisabled`] outside crate unit tests.
+//! Unit tests keep a cfg-gated deterministic in-process broker so the producer
+//! and transaction state machines remain covered without shipping broker
+//! surrogate behavior to downstream builds.
 //!
 //! # Exactly-Once Semantics
 //!
@@ -30,11 +30,11 @@ use crate::sync::Notify;
 use parking_lot::Mutex;
 #[cfg(feature = "kafka")]
 use rdkafka::producer::Producer;
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -588,7 +588,7 @@ where
     }
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeterministicBrokerRecord {
     pub topic: String,
@@ -599,13 +599,13 @@ pub(crate) struct DeterministicBrokerRecord {
     pub headers: Vec<(String, Vec<u8>)>,
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 #[derive(Debug, Default)]
 struct DeterministicBrokerState {
     partitions: BTreeMap<(String, i32), Vec<DeterministicBrokerRecord>>,
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 /// Harness-only deterministic in-process broker shared by the fallback
 /// producer and consumer paths when the real Kafka feature is disabled.
 #[derive(Debug, Default)]
@@ -614,13 +614,13 @@ struct DeterministicBroker {
     notify: Notify,
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 static DETERMINISTIC_BROKER: OnceLock<DeterministicBroker> = OnceLock::new();
 
 #[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
 static DETERMINISTIC_BROKER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), test))]
 fn deterministic_broker() -> &'static DeterministicBroker {
     // PRODUCTION SAFETY: Block the deterministic harness in production builds.
     // It should only run in this crate's tests and debug-only diagnostics.
@@ -640,12 +640,12 @@ fn deterministic_broker() -> &'static DeterministicBroker {
     }
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), test))]
 pub(crate) fn deterministic_broker_notify() -> &'static Notify {
     &deterministic_broker().notify
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), test))]
 /// Return the current end offset for a deterministic harness topic partition.
 pub fn deterministic_broker_end_offset(topic: &str, partition: i32) -> i64 {
     let state = deterministic_broker().state.lock();
@@ -657,7 +657,7 @@ pub fn deterministic_broker_end_offset(topic: &str, partition: i32) -> i64 {
         })
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), test))]
 pub(crate) fn deterministic_broker_fetch(
     topic: &str,
     partition: i32,
@@ -678,7 +678,7 @@ pub(crate) fn deterministic_broker_fetch(
         })
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), test))]
 #[allow(dead_code)]
 pub(crate) fn deterministic_broker_publish(record: DeterministicBrokerRecord) -> RecordMetadata {
     // PRODUCTION SAFETY: Additional guard for critical payment/transaction topics
@@ -708,7 +708,7 @@ pub(crate) fn deterministic_broker_publish(record: DeterministicBrokerRecord) ->
         .expect("single-record publish must return metadata")
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), test))]
 fn deterministic_broker_publish_batch(
     records: Vec<DeterministicBrokerRecord>,
 ) -> Vec<RecordMetadata> {
@@ -806,7 +806,7 @@ fn kafka_client_consumer_group_id(
     Ok(format!("asupersync-consumer-{client_id}-{topic}"))
 }
 
-#[cfg(not(feature = "kafka"))]
+#[cfg(all(not(feature = "kafka"), test))]
 /// Check if a topic contains critical production data that should never use the deterministic harness.
 fn is_critical_production_topic(topic: &str) -> bool {
     // Payment and transaction topics are critical - message loss = financial loss
@@ -1465,7 +1465,7 @@ struct TransactionalProducerState {
     phase: TransactionPhase,
     #[cfg(feature = "kafka")]
     initialized: bool,
-    #[cfg(not(feature = "kafka"))]
+    #[cfg(all(not(feature = "kafka"), test))]
     staged_records: Vec<DeterministicBrokerRecord>,
 }
 
@@ -1899,7 +1899,7 @@ impl TransactionalProducer {
         match state.phase {
             TransactionPhase::Idle => {
                 state.phase = TransactionPhase::Active;
-                #[cfg(not(feature = "kafka"))]
+                #[cfg(all(not(feature = "kafka"), test))]
                 state.staged_records.clear();
                 drop(state);
                 Ok(())
@@ -1943,7 +1943,7 @@ impl TransactionalProducer {
     fn mark_transaction_idle(&self) {
         let mut state = self.state.lock();
         state.phase = TransactionPhase::Idle;
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(all(not(feature = "kafka"), test))]
         state.staged_records.clear();
     }
 
@@ -1951,7 +1951,7 @@ impl TransactionalProducer {
     fn mark_transaction_needs_abort(&self) {
         let mut state = self.state.lock();
         state.phase = TransactionPhase::NeedsAbortRecovery;
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(all(not(feature = "kafka"), test))]
         state.staged_records.clear();
     }
 
@@ -1962,7 +1962,7 @@ impl TransactionalProducer {
             TransactionPhase::Active | TransactionPhase::Finalizing
         ) {
             state.phase = TransactionPhase::NeedsAbortRecovery;
-            #[cfg(not(feature = "kafka"))]
+            #[cfg(all(not(feature = "kafka"), test))]
             state.staged_records.clear();
         }
     }
