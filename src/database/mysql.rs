@@ -14,9 +14,9 @@
 //! use asupersync::database::MySqlConnection;
 //!
 //! async fn example(cx: &Cx) -> Result<(), MySqlError> {
-//!     let conn = MySqlConnection::connect(cx, "mysql://user:pass@localhost/db").await?;
+//!     let mut conn = MySqlConnection::connect(cx, "mysql://user:pass@localhost/db").await?;
 //!
-//!     let rows = conn.query_unchecked(cx, "SELECT id, name FROM users WHERE active = 1").await?;
+//!     let rows = conn.query_static_sql(cx, "SELECT id, name FROM users WHERE active = 1").await?;
 //!     for row in rows {
 //!         let id: i32 = row.get_i32("id")?;
 //!         let name: &str = row.get_str("name")?;
@@ -754,7 +754,7 @@ impl MySqlConnection {
     /// iteration. Memory usage is O(1) per row instead of O(result_set_size).
     ///
     /// # Security
-    /// Same as [`Self::query_unchecked`] - no parameterization performed.
+    /// Same wire path as [`Self::query_static_sql`] - no parameterization performed.
     pub async fn query_stream<'a>(
         &'a mut self,
         cx: &Cx,
@@ -1101,6 +1101,7 @@ impl<'a> PacketReader<'a> {
 // ============================================================================
 
 /// Compute SHA1 hash.
+#[cfg(test)]
 fn sha1(data: &[u8]) -> [u8; 20] {
     use sha1::Digest;
     let mut hasher = sha1::Sha1::new();
@@ -1197,6 +1198,7 @@ impl<T: AsMut<[u8]>> Drop for ZeroizingBytes<T> {
 /// [`ZeroizingBytes`] so they are volatile-zeroed when this function
 /// returns; only the XOR'd scramble (which is what we send on the
 /// wire and is meaningless without the matching nonce) is returned.
+#[cfg(test)]
 fn mysql_native_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError> {
     validate_auth_nonce("mysql_native_password", nonce)?;
 
@@ -2514,7 +2516,7 @@ impl MySqlConnection {
 
         for pattern in INJECTION_PATTERNS {
             if sql_lower.contains(pattern) {
-                return Err(MySqlError::InvalidQuery(format!(
+                return Err(MySqlError::InvalidParameter(format!(
                     "Potential SQL injection detected: query contains '{}'. Use prepared statements for dynamic content.",
                     pattern
                 )));
@@ -2523,7 +2525,7 @@ impl MySqlConnection {
 
         // Additional check: if SQL contains dynamic-looking patterns
         if sql.chars().any(|c| matches!(c, '{' | '}' | '%')) {
-            return Err(MySqlError::InvalidQuery(
+            return Err(MySqlError::InvalidParameter(
                 "Dynamic SQL pattern detected (contains format markers). Use prepared statements."
                     .to_string(),
             ));
@@ -2576,14 +2578,14 @@ impl MySqlConnection {
         self.query_unchecked_inner_impl(cx, sql).await
     }
 
-    /// Execute a query (DEPRECATED — use [`Self::query_unchecked`] for
+    /// Execute a query (DEPRECATED — use [`Self::query_static_sql`] for
     /// trusted-literal SQL or the prepared-statement APIs for parameterized
     /// queries).
     ///
-    /// See [`Self::query_unchecked`] for the same implementation under the
+    /// See [`Self::query_static_sql`] for the same implementation under the
     /// explicit-opt-in name (br-asupersync-0fxbp6).
     #[deprecated(
-        note = "use query_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized queries (br-asupersync-0fxbp6)"
+        note = "use query_static_sql for trusted-literal SQL or the prepared-statement APIs for parameterized queries (br-asupersync-0fxbp6)"
     )]
     pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
         self.query_unchecked_internal(cx, sql).await
@@ -3406,17 +3408,17 @@ impl MySqlConnection {
         )
     }
 
-    /// Execute a command (DEPRECATED — use [`Self::execute_unchecked`] for
+    /// Execute a command (DEPRECATED — use [`Self::execute_static_sql`] for
     /// trusted-literal SQL or the prepared-statement APIs for parameterized
     /// commands).
     ///
-    /// See [`Self::execute_unchecked`] for the same implementation under the
+    /// See [`Self::execute_static_sql`] for the same implementation under the
     /// explicit-opt-in name (br-asupersync-0fxbp6).
     #[deprecated(
-        note = "use execute_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized commands (br-asupersync-0fxbp6)"
+        note = "use execute_static_sql for trusted-literal SQL or the prepared-statement APIs for parameterized commands (br-asupersync-0fxbp6)"
     )]
     pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
-        self.execute_unchecked(cx, sql).await
+        self.execute_unchecked_internal(cx, sql).await
     }
 
     /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) command
@@ -3679,28 +3681,31 @@ impl MySqlConnection {
         {
             Outcome::Ok(_) => {}
             Outcome::Err(err) => {
-                self.inner.needs_rollback = true;
-                self.inner.needs_discard = true;
+                self.mark_unusable_after_cleanup_failure();
                 cx.trace(&format!(
                     "begin_with_isolation cleanup rollback failed; marking connection for orphan cleanup: {:?}",
                     err
                 ));
             }
             Outcome::Cancelled(reason) => {
-                self.inner.needs_rollback = true;
-                self.inner.needs_discard = true;
+                self.mark_unusable_after_cleanup_failure();
                 cx.trace(&format!(
                     "begin_with_isolation cleanup rollback was cancelled; marking connection for orphan cleanup: {reason}"
                 ));
             }
             Outcome::Panicked(_) => {
-                self.inner.needs_rollback = true;
-                self.inner.needs_discard = true;
+                self.mark_unusable_after_cleanup_failure();
                 cx.trace(
                     "begin_with_isolation cleanup rollback panicked; marking connection for orphan cleanup",
                 );
             }
         }
+    }
+
+    fn mark_unusable_after_cleanup_failure(&mut self) {
+        self.inner.needs_rollback = true;
+        self.inner.closed = true;
+        let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
     }
 
     /// Ping the server.
@@ -5081,12 +5086,12 @@ impl MySqlTransaction<'_> {
     }
 
     /// Execute a simple query within this transaction (DEPRECATED — see
-    /// [`Self::query_unchecked`]).
+    /// [`Self::query_static_sql`]).
     #[deprecated(
-        note = "use query_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized queries (br-asupersync-0fxbp6)"
+        note = "use query_static_sql for trusted-literal SQL or the prepared-statement APIs for parameterized queries (br-asupersync-0fxbp6)"
     )]
     pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
-        self.query_unchecked(cx, sql).await
+        self.query_unchecked_internal(cx, sql).await
     }
 
     /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) query within
@@ -5106,12 +5111,12 @@ impl MySqlTransaction<'_> {
     }
 
     /// Execute a simple command within this transaction (DEPRECATED — see
-    /// [`Self::execute_unchecked`]).
+    /// [`Self::execute_static_sql`]).
     #[deprecated(
-        note = "use execute_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized commands (br-asupersync-0fxbp6)"
+        note = "use execute_static_sql for trusted-literal SQL or the prepared-statement APIs for parameterized commands (br-asupersync-0fxbp6)"
     )]
     pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
-        self.execute_unchecked(cx, sql).await
+        self.execute_unchecked_internal(cx, sql).await
     }
 
     /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) command
@@ -5140,6 +5145,40 @@ impl MySqlTransaction<'_> {
         sql: &str,
     ) -> Outcome<Vec<MySqlRow>, MySqlError> {
         self.query_unchecked_internal(cx, sql).await
+    }
+
+    /// Prepare a statement within this transaction.
+    pub async fn prepare(&mut self, cx: &Cx, sql: &str) -> Outcome<MySqlStatement, MySqlError> {
+        if self.finished {
+            return Outcome::Err(MySqlError::TransactionFinished);
+        }
+        self.conn.prepare(cx, sql).await
+    }
+
+    /// Execute a prepared statement within this transaction.
+    pub async fn execute_prepared(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<u64, MySqlError> {
+        if self.finished {
+            return Outcome::Err(MySqlError::TransactionFinished);
+        }
+        self.conn.execute_prepared(cx, stmt, params).await
+    }
+
+    /// Query a prepared statement within this transaction.
+    pub async fn query_prepared(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        if self.finished {
+            return Outcome::Err(MySqlError::TransactionFinished);
+        }
+        self.conn.query_prepared(cx, stmt, params).await
     }
 }
 
@@ -6902,7 +6941,7 @@ mod tests {
         let (mut conn, server) = make_command_connection_with_single_response(vec![0xFF]);
         let cx = Cx::for_testing();
 
-        let outcome = run(conn.query(&cx, "SELECT 1"));
+        let outcome = run(conn.query_static_sql(&cx, "SELECT 1"));
         match outcome {
             Outcome::Err(MySqlError::Protocol(_)) => {}
             other => panic!(
@@ -6923,7 +6962,7 @@ mod tests {
         let (mut conn, server) = make_command_connection_with_single_response(vec![0xFF]);
         let cx = Cx::for_testing();
 
-        let outcome = run(conn.execute(&cx, "DELETE FROM widgets"));
+        let outcome = run(conn.execute_static_sql(&cx, "DELETE FROM widgets"));
         match outcome {
             Outcome::Err(MySqlError::Protocol(_)) => {}
             other => panic!(
@@ -6992,7 +7031,7 @@ mod tests {
         ));
         let cx = Cx::for_testing();
 
-        let outcome = run(conn.execute(&cx, "START TRANSACTION"));
+        let outcome = run(conn.execute_static_sql(&cx, "START TRANSACTION"));
         match outcome {
             Outcome::Ok(0) => {}
             other => panic!("expected START TRANSACTION OK packet, got {other:?}"),
@@ -7014,7 +7053,7 @@ mod tests {
         conn.inner.status_flags = SERVER_STATUS_IN_TRANS;
         let cx = Cx::for_testing();
 
-        let outcome = run(conn.execute(&cx, "COMMIT"));
+        let outcome = run(conn.execute_static_sql(&cx, "COMMIT"));
         match outcome {
             Outcome::Ok(0) => {}
             other => panic!("expected COMMIT OK packet, got {other:?}"),
@@ -7138,7 +7177,7 @@ mod tests {
         };
         let cx = Cx::for_testing();
 
-        let outcome = run(conn.query(&cx, "SELECT value FROM test"));
+        let outcome = run(conn.query_static_sql(&cx, "SELECT value FROM test"));
         match outcome {
             Outcome::Ok(rows) => assert!(rows.is_empty(), "expected empty result set"),
             other => panic!("expected empty result set success, got {other:?}"),
@@ -7216,7 +7255,7 @@ mod tests {
         };
         let cx = Cx::for_testing();
 
-        let outcome = run(conn.query(&cx, "SELECT value FROM test"));
+        let outcome = run(conn.query_static_sql(&cx, "SELECT value FROM test"));
         match outcome {
             Outcome::Ok(rows) => assert!(rows.is_empty(), "expected empty result set"),
             other => panic!("expected empty result set success, got {other:?}"),
@@ -7370,7 +7409,7 @@ mod tests {
         let cx = Cx::for_testing();
 
         {
-            let mut query = std::pin::pin!(conn.query(&cx, "SELECT 1"));
+            let mut query = std::pin::pin!(conn.query_static_sql(&cx, "SELECT 1"));
             let mut saw_query = false;
             for _ in 0..128 {
                 if query_seen_rx.try_recv().is_ok() {
@@ -8988,10 +9027,10 @@ mod tests {
     fn audit_mysql_query_result_streaming_memory_usage() {
         // DEFECT FIXED: Added MySqlRowStream<'_> for bounded memory streaming
 
-        let mut conn = make_test_connection();
+        let conn = make_test_connection();
 
         // Evidence 1: Legacy methods still exist but now have streaming alternatives
-        // - query_unchecked() -> Vec<MySqlRow> (legacy, collects all rows) [KEPT for compatibility]
+        // - query_static_sql() -> Vec<MySqlRow> (collecting static-query path)
         // - query_stream() -> MySqlRowStream<'_> (NEW, streams one row at a time) [ADDED]
 
         // Evidence 2: Streaming implementation uses bounded memory
@@ -9005,7 +9044,7 @@ mod tests {
         assert_eq!(DEFAULT_MAX_RESULT_ROWS, 1_000_000);
 
         // FIXED: Streaming-first philosophy now implemented
-        // Old: query_unchecked() memory usage = O(result_set_size) [legacy]
+        // Collecting query_static_sql() memory usage = O(result_set_size)
         // New: query_stream() memory usage = O(1) per row [current recommendation]
 
         // IMPLEMENTED STREAMING FEATURES:
@@ -9033,9 +9072,12 @@ mod tests {
         // Verify query_stream method exists and has the correct signature
         let mut conn = make_test_connection();
 
-        // Type check: query_stream should return MySqlRowStream<'_> not Vec<MySqlRow>
-        // This compilation test verifies the streaming API exists
-        let _: fn(&'_ mut MySqlConnection, &Cx, &str) -> _ = MySqlConnection::query_stream;
+        // Type check: query_stream should return a borrow-tied streaming future,
+        // not Vec<MySqlRow>. The future is intentionally not polled.
+        {
+            let cx = Cx::for_testing();
+            let _stream_future = conn.query_stream(&cx, "SELECT 1");
+        }
 
         eprintln!(
             "{{\"defect\":\"MYSQL_QUERY_RESULT_STREAMING\",\"status\":\"FIXED\",\"method\":\"query_stream\",\"memory\":\"O(1)_per_row\",\"api\":\"MySqlRowStream\"}}"
@@ -9049,7 +9091,7 @@ mod tests {
         // ✅ 5. Streaming API available for use (compilation verified)
 
         // MEMORY MODEL COMPARISON:
-        // Old: query_unchecked() -> Vec<MySqlRow> -> O(result_set_size) memory
+        // Collecting query_static_sql() -> Vec<MySqlRow> -> O(result_set_size) memory
         // New: query_stream() -> MySqlRowStream<'_> -> O(1) memory per row
 
         // Memory improvement validation

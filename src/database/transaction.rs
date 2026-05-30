@@ -836,7 +836,7 @@ mod mysql {
                 )));
             }
             let sql = format!("SAVEPOINT {name}");
-            match tx.execute_unchecked(cx, &sql).await {
+            match tx.execute_static_sql(cx, &sql).await {
                 Outcome::Ok(_) => Outcome::Ok(MySqlSavepoint {
                     tx,
                     name: name.to_owned(),
@@ -854,7 +854,7 @@ mod mysql {
                 return Outcome::Err(MySqlError::TransactionFinished);
             }
             let sql = format!("RELEASE SAVEPOINT {}", self.name);
-            match self.tx.execute_unchecked(cx, &sql).await {
+            match self.tx.execute_static_sql(cx, &sql).await {
                 Outcome::Ok(_) => {
                     self.released = true;
                     Outcome::Ok(())
@@ -871,10 +871,10 @@ mod mysql {
                 return Outcome::Err(MySqlError::TransactionFinished);
             }
             let rollback_sql = format!("ROLLBACK TO SAVEPOINT {}", self.name);
-            match self.tx.execute_unchecked(cx, &rollback_sql).await {
+            match self.tx.execute_static_sql(cx, &rollback_sql).await {
                 Outcome::Ok(_) => {
                     let release_sql = format!("RELEASE SAVEPOINT {}", self.name);
-                    match self.tx.execute_unchecked(cx, &release_sql).await {
+                    match self.tx.execute_static_sql(cx, &release_sql).await {
                         Outcome::Ok(_) => {
                             self.released = true;
                             Outcome::Ok(())

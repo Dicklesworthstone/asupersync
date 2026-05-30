@@ -203,18 +203,18 @@ fn real_mysql_transaction_rollback_behavior() {
         );
 
         log.phase("begin_transaction");
-        let _ = unwrap_mysql(conn.execute_unchecked(&cx, "BEGIN").await, &log, "BEGIN");
+        let _ = unwrap_mysql(conn.execute_static_sql(&cx, "BEGIN").await, &log, "BEGIN");
 
         // Insert some test data that we'll rollback
         log.phase("insert_test_data");
         let _ = unwrap_mysql(
-            conn.execute_unchecked(&cx, "CREATE TEMPORARY TABLE test_rollback (id int)")
+            conn.execute_static_sql(&cx, "CREATE TEMPORARY TABLE test_rollback (id int)")
                 .await,
             &log,
             "create_temp_table",
         );
         let _ = unwrap_mysql(
-            conn.execute_unchecked(&cx, "INSERT INTO test_rollback VALUES (42)")
+            conn.execute_static_sql(&cx, "INSERT INTO test_rollback VALUES (42)")
                 .await,
             &log,
             "insert_data",
@@ -223,7 +223,7 @@ fn real_mysql_transaction_rollback_behavior() {
         // REAL DATABASE VERIFICATION: Data should be visible within transaction
         log.phase("verify_data_in_transaction");
         let rows = unwrap_mysql(
-            conn.query_unchecked(&cx, "SELECT id FROM test_rollback")
+            conn.query_static_sql(&cx, "SELECT id FROM test_rollback")
                 .await,
             &log,
             "select_in_txn",
@@ -236,14 +236,14 @@ fn real_mysql_transaction_rollback_behavior() {
         // Rollback the transaction
         log.phase("rollback_transaction");
         let _ = unwrap_mysql(
-            conn.execute_unchecked(&cx, "ROLLBACK").await,
+            conn.execute_static_sql(&cx, "ROLLBACK").await,
             &log,
             "ROLLBACK",
         );
 
         // REAL DATABASE VERIFICATION: Connection should be usable after rollback
         log.phase("verify_connection_usable_after_rollback");
-        let test_query = conn.query_unchecked(&cx, "SELECT 1 as test").await;
+        let test_query = conn.query_static_sql(&cx, "SELECT 1 as test").await;
         match test_query {
             Outcome::Ok(rows) => {
                 log.line("post_rollback_query", &[("rows", &rows.len().to_string())]);
@@ -293,7 +293,7 @@ fn real_mysql_query_execution_error_handling() {
         // Test 1: Syntax error should preserve session but return error
         log.phase("test_syntax_error");
         let syntax_error = conn
-            .query_unchecked(&cx, "SELECT invalid syntax here")
+            .query_static_sql(&cx, "SELECT invalid syntax here")
             .await;
         match syntax_error {
             Outcome::Err(e) => {
@@ -316,7 +316,7 @@ fn real_mysql_query_execution_error_handling() {
 
         // Test 2: Session should be recoverable after syntax error
         log.phase("test_session_recovery_after_error");
-        let recovery_query = conn.query_unchecked(&cx, "SELECT 42").await;
+        let recovery_query = conn.query_static_sql(&cx, "SELECT 42").await;
         match recovery_query {
             Outcome::Ok(rows) => {
                 log.line(
@@ -341,7 +341,7 @@ fn real_mysql_query_execution_error_handling() {
 
         // Test 3: Division by zero error (MySQL behavior)
         log.phase("test_division_by_zero");
-        let div_zero = conn.query_unchecked(&cx, "SELECT 1/0").await;
+        let div_zero = conn.query_static_sql(&cx, "SELECT 1/0").await;
         match div_zero {
             Outcome::Ok(rows) => {
                 // MySQL returns NULL for 1/0 instead of error by default
@@ -364,7 +364,7 @@ fn real_mysql_query_execution_error_handling() {
 
         // Test 4: Session still usable
         log.phase("test_final_recovery");
-        let final_query = conn.query_unchecked(&cx, "SELECT 'recovered'").await;
+        let final_query = conn.query_static_sql(&cx, "SELECT 1 AS recovered").await;
         match final_query {
             Outcome::Ok(rows) => {
                 log.line("final_recovery", &[("success", "true")]);

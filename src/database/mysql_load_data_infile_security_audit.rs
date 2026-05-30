@@ -11,7 +11,6 @@
 
 use super::{
     Handshake, MySqlConnectOptions, MySqlConnection, MySqlConnectionInner, MySqlError, capability,
-    run,
 };
 use crate::cx::Cx;
 use crate::types::Outcome;
@@ -19,6 +18,10 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+
+fn run<F: std::future::Future>(future: F) -> F::Output {
+    futures_lite::future::block_on(future)
+}
 
 /// Packet buffer helper for building MySQL protocol packets
 struct PacketBuffer {
@@ -148,7 +151,7 @@ fn audit_handshake_does_not_advertise_local_infile_capability() {
     });
 
     // Connect and trigger handshake
-    let stream = super::run(async {
+    let stream = run(async {
         crate::net::TcpStream::connect_socket_addr(addr)
             .await
             .expect("connect to test server")
@@ -224,7 +227,7 @@ fn audit_server_local_infile_request_rejection() {
     });
 
     // Create connection without going through full handshake
-    let stream = super::run(async {
+    let stream = run(async {
         crate::net::TcpStream::connect_socket_addr(addr)
             .await
             .expect("connect client")
@@ -235,7 +238,7 @@ fn audit_server_local_infile_request_rejection() {
     let cx = Cx::for_testing();
 
     // Execute query that triggers malicious server response
-    let outcome = super::run(conn.query_unchecked(&cx, "SELECT 1"));
+    let outcome = run(conn.query_static_sql(&cx, "SELECT 1"));
 
     // AUDIT VERIFICATION: Client rejects LOCAL INFILE request
     match outcome {
@@ -274,7 +277,7 @@ fn audit_server_local_infile_request_rejection() {
 #[test]
 fn audit_local_infile_rejection_comprehensive_paths() {
     // AUDIT: Test rejection works for various malicious file paths
-    let malicious_paths = [
+    let malicious_paths: &[&[u8]] = &[
         b"/etc/passwd",                        // Unix system file
         b"/etc/shadow",                        // Unix password file
         b"C:\\windows\\system32\\config\\SAM", // Windows SAM file
@@ -286,7 +289,7 @@ fn audit_local_infile_rejection_comprehensive_paths() {
         b"/tmp/does-not-exist.txt",            // Non-existent file
     ];
 
-    for (i, path) in malicious_paths.iter().enumerate() {
+    for (i, &path) in malicious_paths.iter().enumerate() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener addr");
 
@@ -322,7 +325,7 @@ fn audit_local_infile_rejection_comprehensive_paths() {
             stream.flush().expect("flush LOCAL INFILE request");
         });
 
-        let stream = super::run(async {
+        let stream = run(async {
             crate::net::TcpStream::connect_socket_addr(addr)
                 .await
                 .expect("connect client")
@@ -331,7 +334,7 @@ fn audit_local_infile_rejection_comprehensive_paths() {
         let mut conn = make_test_connection(stream, 0);
 
         let cx = Cx::for_testing();
-        let outcome = super::run(conn.query_unchecked(&cx, "SELECT 1"));
+        let outcome = run(conn.query_static_sql(&cx, "SELECT 1"));
 
         // AUDIT: Every path must be rejected
         assert!(

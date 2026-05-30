@@ -231,9 +231,13 @@ fn mysql_real_ping_query_and_prepared_roundtrip() {
         unwrap_mysql(conn.ping(&cx).await, "ping", &log);
 
         log.phase("select_one");
+        let select_one_stmt = unwrap_mysql(
+            conn.prepare(&cx, "SELECT 1 AS v, ? AS name").await,
+            "prepare_select_one",
+            &log,
+        );
         let rows = unwrap_mysql(
-            conn.query_unchecked(&cx, "SELECT 1 AS v, 'ok' AS name")
-                .await,
+            conn.query_prepared(&cx, &select_one_stmt, &[&"ok"]).await,
             "query",
             &log,
         );
@@ -243,7 +247,7 @@ fn mysql_real_ping_query_and_prepared_roundtrip() {
 
         log.phase("temp_table");
         unwrap_mysql(
-            conn.execute_unchecked(
+            conn.execute_static_sql(
                 &cx,
                 "CREATE TEMPORARY TABLE IF NOT EXISTS asupersync_real_stmt (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL)",
             )
@@ -319,7 +323,7 @@ fn mysql_real_transaction_isolation_and_rollback() {
 
         log.phase("temp_table");
         unwrap_mysql(
-            conn.execute_unchecked(
+            conn.execute_static_sql(
                 &cx,
                 "CREATE TEMPORARY TABLE IF NOT EXISTS asupersync_real_tx (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL)",
             )
@@ -343,12 +347,18 @@ fn mysql_real_transaction_isolation_and_rollback() {
         assert!(!tx.is_read_only(), "transaction should be read-write");
 
         log.phase("insert_inside_tx");
-        unwrap_mysql(
-            tx.execute_unchecked(
+        let insert_stmt = unwrap_mysql(
+            tx.prepare(
                 &cx,
-                "INSERT INTO asupersync_real_tx (id, name) VALUES (7, 'rolled-back')",
+                "INSERT INTO asupersync_real_tx (id, name) VALUES (?, ?)",
             )
             .await,
+            "prepare_tx_insert",
+            &log,
+        );
+        unwrap_mysql(
+            tx.execute_prepared(&cx, &insert_stmt, &[&7_i32, &"rolled-back"])
+                .await,
             "tx_insert",
             &log,
         );
@@ -358,7 +368,7 @@ fn mysql_real_transaction_isolation_and_rollback() {
 
         log.phase("verify_rollback");
         let rows = unwrap_mysql(
-            conn.query_unchecked(
+            conn.query_static_sql(
                 &cx,
                 "SELECT COUNT(*) AS cnt FROM asupersync_real_tx WHERE id = 7",
             )
@@ -407,19 +417,19 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
         let create_sql = format!(
             "CREATE TABLE {table_name} (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL) ENGINE=InnoDB"
         );
-        let insert_sql = format!("INSERT INTO {table_name} (id, name) VALUES (7, 'should-fail')");
+        let insert_sql = format!("INSERT INTO {table_name} (id, name) VALUES (?, ?)");
         let verify_sql = format!("SELECT COUNT(*) AS cnt FROM {table_name} WHERE id = 7");
 
         log.phase("drop_before");
         unwrap_mysql(
-            conn.execute_unchecked(&cx, &drop_sql).await,
+            conn.execute_static_sql(&cx, &drop_sql).await,
             "drop_before",
             &log,
         );
 
         log.phase("create_table");
         unwrap_mysql(
-            conn.execute_unchecked(&cx, &create_sql).await,
+            conn.execute_static_sql(&cx, &create_sql).await,
             "create_table",
             &log,
         );
@@ -434,7 +444,15 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
         assert!(tx.is_read_only(), "transaction should be read-only");
 
         log.phase("insert_rejected");
-        match tx.execute_unchecked(&cx, &insert_sql).await {
+        let insert_stmt = unwrap_mysql(
+            tx.prepare(&cx, &insert_sql).await,
+            "prepare_insert_rejected",
+            &log,
+        );
+        match tx
+            .execute_prepared(&cx, &insert_stmt, &[&7_i32, &"should-fail"])
+            .await
+        {
             Outcome::Err(MySqlError::Server {
                 code,
                 sql_state,
@@ -457,7 +475,7 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
 
         log.phase("verify_no_row");
         let rows = unwrap_mysql(
-            conn.query_unchecked(&cx, &verify_sql).await,
+            conn.query_static_sql(&cx, &verify_sql).await,
             "verify_no_row",
             &log,
         );
@@ -466,7 +484,7 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
 
         log.phase("drop_after");
         unwrap_mysql(
-            conn.execute_unchecked(&cx, &drop_sql).await,
+            conn.execute_static_sql(&cx, &drop_sql).await,
             "drop_after",
             &log,
         );
@@ -532,7 +550,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
         // panics or is killed mid-flight.
         log.phase("create_temp_table");
         unwrap_mysql(
-            conn.execute_unchecked(
+            conn.execute_static_sql(
                 &cx,
                 "CREATE TEMPORARY TABLE asupersync_llwouh_drop_rollback \
                  (id INT PRIMARY KEY, payload VARCHAR(64) NOT NULL) ENGINE=InnoDB",
@@ -544,7 +562,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
 
         log.phase("baseline_in_transaction_off");
         let baseline = unwrap_mysql(
-            conn.query_unchecked(&cx, "SELECT @@in_transaction AS in_txn")
+            conn.query_static_sql(&cx, "SELECT @@in_transaction AS in_txn")
                 .await,
             "baseline_in_transaction",
             &log,
@@ -573,13 +591,19 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
         let drop_returned_at_ms;
         {
             let mut tx = unwrap_mysql(conn.begin(&cx).await, "begin", &log);
-            unwrap_mysql(
-                tx.execute_unchecked(
+            let insert_stmt = unwrap_mysql(
+                tx.prepare(
                     &cx,
                     "INSERT INTO asupersync_llwouh_drop_rollback \
-                     (id, payload) VALUES (1, 'abandoned-via-drop')",
+                     (id, payload) VALUES (?, ?)",
                 )
                 .await,
+                "prepare_insert_inside_tx",
+                &log,
+            );
+            unwrap_mysql(
+                tx.execute_prepared(&cx, &insert_stmt, &[&1_i32, &"abandoned-via-drop"])
+                    .await,
                 "insert_inside_tx",
                 &log,
             );
@@ -598,7 +622,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
         // this query), count would be 1.
         log.phase("first_op_after_drop_drains_rollback");
         let drained = unwrap_mysql(
-            conn.query_unchecked(
+            conn.query_static_sql(
                 &cx,
                 "SELECT COUNT(*) AS cnt FROM asupersync_llwouh_drop_rollback",
             )
@@ -627,7 +651,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
         // not anything our wire codec can synthesize.
         log.phase("server_side_in_transaction_off");
         let post_drain = unwrap_mysql(
-            conn.query_unchecked(&cx, "SELECT @@in_transaction AS in_txn")
+            conn.query_static_sql(&cx, "SELECT @@in_transaction AS in_txn")
                 .await,
             "post_drain_in_transaction",
             &log,
@@ -649,13 +673,19 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
 
         // Connection must remain genuinely usable: write, then read.
         log.phase("write_after_drop");
-        let affected = unwrap_mysql(
-            conn.execute_unchecked(
+        let post_drop_insert_stmt = unwrap_mysql(
+            conn.prepare(
                 &cx,
                 "INSERT INTO asupersync_llwouh_drop_rollback \
-                 (id, payload) VALUES (2, 'after-drop')",
+                 (id, payload) VALUES (?, ?)",
             )
             .await,
+            "prepare_post_drop_insert",
+            &log,
+        );
+        let affected = unwrap_mysql(
+            conn.execute_prepared(&cx, &post_drop_insert_stmt, &[&2_i32, &"after-drop"])
+                .await,
             "post_drop_insert",
             &log,
         );
@@ -671,7 +701,7 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
 
         log.phase("read_after_drop");
         let final_rows = unwrap_mysql(
-            conn.query_unchecked(
+            conn.query_static_sql(
                 &cx,
                 "SELECT id, payload FROM asupersync_llwouh_drop_rollback ORDER BY id",
             )

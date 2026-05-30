@@ -138,27 +138,33 @@ async fn mysql_cancel_sends_kill_query_audit() {
     let cx = Cx::for_testing();
     let url = format!("mysql://test:test@{}:{}/test", addr.ip(), addr.port());
 
-    let conn = MySqlConnection::connect(&cx, &url)
+    let mut conn = MySqlConnection::connect(&cx, &url)
         .await
         .expect("connect to mock MySQL server");
 
-    // Wait for server to be ready for query
-    query_started_rx
-        .recv_timeout(Duration::from_secs(3))
-        .expect("server should be ready for query");
-
     println!("✓ Connection established, starting long-running query");
 
-    // Start a query but don't await it - we'll drop the connection mid-query
-    let query_future = conn.query_unchecked(&cx, "SELECT SLEEP(30)");
+    // Start and poll the query until it is in flight. The mock server reads
+    // the COM_QUERY packet but deliberately withholds a response so the future
+    // remains pending and can be cancelled by dropping it.
+    {
+        let mut query_future = std::pin::pin!(conn.query_static_sql(&cx, "SELECT SLEEP(30)"));
+        let query_poll =
+            tokio::time::timeout(Duration::from_millis(100), query_future.as_mut()).await;
+        assert!(
+            query_poll.is_err(),
+            "long-running query should still be pending before cancellation"
+        );
 
-    // Give the query time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait for server to observe the query packet.
+        query_started_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("server should observe query");
 
-    // Drop the connection mid-query - this should trigger KILL QUERY
-    proceed_tx.send(()).expect("signal to proceed with kill");
+        // Drop the in-flight query future before dropping the connection.
+        proceed_tx.send(()).expect("signal to proceed with kill");
+    }
     drop(conn);
-    drop(query_future);
 
     // Verify that KILL QUERY was sent
     let kill_query_received = kill_query_seen_rx.recv_timeout(Duration::from_secs(5));
