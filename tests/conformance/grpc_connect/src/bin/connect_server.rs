@@ -6,12 +6,12 @@
 //! protocol for conformance testing. It can be used as a reference server
 //! or target for external conformance test suites.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use asupersync::grpc::{Server, ServerBuilder};
 use clap::{Arg, Command};
 use grpc_conformance_suite::service::create_conformance_test_service;
 use std::net::SocketAddr;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -115,6 +115,8 @@ async fn main() -> Result<()> {
     info!("Reflection: {}", enable_reflection);
     info!("Health check: {}", enable_health);
 
+    validate_server_options(connect_protocol, enable_tls)?;
+
     // Create the conformance test service
     let test_service = create_conformance_test_service();
 
@@ -135,43 +137,6 @@ async fn main() -> Result<()> {
         info!("Adding health check service");
         let health_service = asupersync::grpc::HealthService::new();
         server_builder = server_builder.add_service(health_service);
-    }
-
-    // Add Connect protocol support.
-    //
-    // PENDING(br-asupersync-egeaq2): asupersync ships gRPC-web (see
-    // `asupersync::grpc::web` — `WebFrameCodec`, `is_grpc_web_request`,
-    // base64 trailer encoding) but not the Buf-defined Connect protocol.
-    // Enabling `--connect-protocol` is currently a no-op at the server
-    // layer; the conformance harness still runs Connect-format validation
-    // entirely client-side (see `connect_compat::ConnectConformanceTests`).
-    if connect_protocol {
-        info!("--connect-protocol requested");
-        warn!(
-            "Connect protocol support is not implemented in asupersync; \
-             falling back to gRPC over HTTP/2. The conformance suite's \
-             Connect format checks still run, but no server-side Connect \
-             middleware is wired (br-asupersync-egeaq2)."
-        );
-    }
-
-    // Add TLS if requested.
-    //
-    // PENDING(br-asupersync-egeaq2): wiring TLS requires enabling the
-    // `tls` feature on the conformance crate's `asupersync` dependency
-    // and threading a `rustls::ServerConfig` through `ServerBuilder`.
-    // That widens this crate's dependency graph (rustls + ring) for a
-    // test harness that today only exercises plaintext flows; deferred
-    // until the suite is rewired to drive real network sockets instead
-    // of in-process loopback. Until then, `--enable-tls` is a no-op.
-    if enable_tls {
-        info!("--enable-tls requested");
-        warn!(
-            "TLS is not wired in this conformance harness — serving \
-             plaintext. To enable, add the `tls` feature to the \
-             asupersync dep in Cargo.toml and pass a `ServerConfig` to \
-             `ServerBuilder::tls(...)` (br-asupersync-egeaq2)."
-        );
     }
 
     let server = server_builder.build();
@@ -217,6 +182,22 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn validate_server_options(connect_protocol: bool, enable_tls: bool) -> Result<()> {
+    if connect_protocol {
+        bail!(
+            "--connect-protocol requires a server-side Connect transport adapter; \
+             this conformance binary currently serves gRPC over HTTP/2 only"
+        );
+    }
+    if enable_tls {
+        bail!(
+            "--enable-tls requires a rustls ServerConfig and a TLS-enabled \
+             asupersync dependency; this conformance binary currently serves plaintext only"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +224,23 @@ mod tests {
         let addr: Result<SocketAddr, _> = "127.0.0.1:8080".parse();
         assert!(addr.is_ok());
         assert_eq!(addr.unwrap().port(), 8080);
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn rejects_unwired_connect_transport_flag() {
+        let err = validate_server_options(true, false).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("--connect-protocol"), "{text}");
+        assert!(text.contains("gRPC over HTTP/2 only"), "{text}");
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn rejects_unwired_tls_flag() {
+        let err = validate_server_options(false, true).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("--enable-tls"), "{text}");
+        assert!(text.contains("plaintext only"), "{text}");
     }
 }

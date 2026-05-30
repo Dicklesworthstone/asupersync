@@ -656,9 +656,11 @@ mod tests {
         assert_eq!(request.method, Method::POST);
         assert_eq!(request.uri.path(), "/test.Service/TestMethod");
         assert!(request.headers.contains_key("user-agent"));
-        assert!(request
-            .headers
-            .contains_key(constants::CONNECT_PROTOCOL_HEADER));
+        assert!(
+            request
+                .headers
+                .contains_key(constants::CONNECT_PROTOCOL_HEADER)
+        );
     }
 
     #[test]

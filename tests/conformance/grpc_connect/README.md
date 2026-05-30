@@ -30,10 +30,10 @@ This directory contains a comprehensive conformance test suite for gRPC with Con
 
 ### Standalone Server
 
-Start the test server:
+Validate the standalone server registry and bind configuration:
 
 ```bash
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin grpc-connect-server -- --port 8080 --enable-compression --connect-protocol
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin grpc-connect-server -- --port 8080 --enable-compression
 ```
 
 ### Conformance Runner
@@ -47,8 +47,8 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conform
 ### Custom Configuration
 
 ```bash
-# Test against external server
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin conformance-runner -- --server https://api.example.com --enable-tls
+# Test Connect-format validators in the deterministic in-process runner
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin conformance-runner -- --connect-protocol
 
 # Run specific test categories
 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin conformance-runner -- --filter "unary"
@@ -121,14 +121,16 @@ View detailed error information in the generated JSON report.
 - ✅ Connect protocol header / error-format / streaming-flag validators
   (format-level — see *Quarantined surfaces* below)
 - 🚧 Connect protocol *server-side* support — asupersync ships gRPC-web
-  but not the Buf-defined Connect protocol; `--connect-protocol` falls
-  back to gRPC over HTTP/2 with a warning. (br-asupersync-egeaq2)
+  but does not yet expose the Buf-defined Connect transport adapter; the
+  standalone server rejects `--connect-protocol` instead of silently
+  downgrading to gRPC over HTTP/2. (br-asupersync-egeaq2)
 - 🚧 TLS — the `tls` feature is not enabled on this crate's asupersync
-  dep; `--enable-tls` is currently a no-op. (br-asupersync-egeaq2)
+  dep; the standalone server rejects `--enable-tls` until the harness
+  can supply a rustls `ServerConfig`. (br-asupersync-egeaq2)
 - 🚧 `ServiceHandler` trait wiring for `ConformanceTestService` — the
   service methods are invoked directly by the in-process runner; full
-  trait wiring needs per-method codec/descriptor wiring not yet exposed
-  by the surrounding crate. (br-asupersync-egeaq2)
+  trait wiring needs per-method codec/descriptor wiring exposed by the
+  surrounding crate. (br-asupersync-egeaq2)
 
 ## Quarantined surfaces
 

@@ -359,9 +359,11 @@ mod tests {
         let unary_cases = filter_test_cases_by_category(test_cases.clone(), TestCategory::UnaryRpc);
 
         assert!(!unary_cases.is_empty());
-        assert!(unary_cases
-            .iter()
-            .all(|tc| tc.category == TestCategory::UnaryRpc));
+        assert!(
+            unary_cases
+                .iter()
+                .all(|tc| tc.category == TestCategory::UnaryRpc)
+        );
     }
 
     #[test]

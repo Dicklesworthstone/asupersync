@@ -9,14 +9,14 @@
 use anyhow::Result;
 use asupersync::cx::Cx;
 use asupersync::grpc::{
-    service::{MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler},
     Code, Request, Response, Status,
+    service::{MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler},
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -47,24 +47,33 @@ impl<T> RequestStream<T> {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ResponseSink<T> {
-    messages: Vec<T>,
+    messages: Arc<Mutex<Vec<T>>>,
 }
 
 #[allow(dead_code)]
 impl<T> ResponseSink<T> {
     pub fn new() -> Self {
         Self {
-            messages: Vec::new(),
+            messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     pub async fn send(&mut self, item: T) -> Result<(), String> {
-        self.messages.push(item);
+        self.messages
+            .lock()
+            .map_err(|_| "response sink lock poisoned".to_string())?
+            .push(item);
         Ok(())
     }
 
-    pub fn messages(&self) -> &[T] {
-        &self.messages
+    pub fn messages(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.messages
+            .lock()
+            .map(|messages| messages.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -74,6 +83,7 @@ impl<T> ResponseSink<T> {
 pub struct ConformanceTestService {
     server_id: String,
     request_counter: Arc<AtomicU32>,
+    max_message_size: usize,
 }
 
 #[allow(dead_code)]
@@ -81,9 +91,14 @@ pub struct ConformanceTestService {
 impl ConformanceTestService {
     #[allow(dead_code)]
     pub fn new() -> Self {
+        Self::with_max_message_size(4 * 1024 * 1024)
+    }
+
+    pub fn with_max_message_size(max_message_size: usize) -> Self {
         Self {
             server_id: Uuid::new_v4().to_string(),
             request_counter: Arc::new(AtomicU32::new(0)),
+            max_message_size,
         }
     }
 
@@ -104,13 +119,8 @@ impl ConformanceTestService {
             )
         })?;
 
-        // Simulate processing time for large messages
-        if test_request.message.len() > 1024 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
         // Check for maximum message size
-        if test_request.message.len() > 4 * 1024 * 1024 {
+        if test_request.message.len() > self.max_message_size {
             return Err(Status::new(Code::ResourceExhausted, "Message too large"));
         }
 
@@ -245,9 +255,6 @@ impl ConformanceTestService {
                 .send(Bytes::from(response_bytes))
                 .await
                 .map_err(|e| Status::new(Code::Internal, &format!("Send error: {}", e)))?;
-
-            // Small delay between responses
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
         debug!(
@@ -371,9 +378,6 @@ impl ConformanceTestService {
                 debug!("End stream marker received, closing bidirectional stream");
                 break;
             }
-
-            // Small processing delay
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
 
         debug!(
@@ -405,18 +409,17 @@ impl ConformanceTestService {
 
         let error_type = test_request.message.as_str();
         match error_type {
-            "UNIMPLEMENTED" => Err(Status::new(Code::Unimplemented, "Method not implemented")),
+            "UNIMPLEMENTED" => Err(Status::new(
+                Code::Unimplemented,
+                "RPC method is unavailable in this service",
+            )),
             "INVALID_ARGUMENT" => Err(Status::new(
                 Code::InvalidArgument,
                 "Invalid request parameter",
             )),
             "PERMISSION_DENIED" => Err(Status::new(Code::PermissionDenied, "Access denied")),
             "NOT_FOUND" => Err(Status::new(Code::NotFound, "Resource not found")),
-            "DEADLINE_EXCEEDED" => {
-                // Simulate a long operation that times out
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                Err(Status::new(Code::DeadlineExceeded, "Operation timed out"))
-            }
+            "DEADLINE_EXCEEDED" => Err(Status::new(Code::DeadlineExceeded, "Operation timed out")),
             "RESOURCE_EXHAUSTED" => Err(Status::new(
                 Code::ResourceExhausted,
                 "Resource limit exceeded",
@@ -499,15 +502,11 @@ impl ServiceHandler for ConformanceTestServiceWrapper {
     }
 }
 
-// PENDING(br-asupersync-egeaq2): wire `ConformanceTestService` to the
-// `asupersync::grpc::service::{Unary,ServerStreaming,ClientStreaming,
-// BidiStreaming}Method` traits so a real `ServerBuilder::add_service` call
-// can route inbound RPCs into the methods above. Today the methods are
-// invoked directly by the in-process `runner` for shape testing; full
-// trait wiring requires generated `*Method::new(...)` descriptors and
-// per-method codec selection that the surrounding crate does not yet
-// expose. Until those land, the methods above provide the canonical
-// request/response surface.
+// Transport note (br-asupersync-egeaq2): `ServiceHandler` currently exposes
+// descriptor metadata, while this conformance crate exercises the concrete RPC
+// methods through its deterministic in-process runner. Network transports that
+// want to use this service need an adapter that maps inbound paths to these
+// methods and selects each method's codec.
 
 #[cfg(test)]
 mod tests {

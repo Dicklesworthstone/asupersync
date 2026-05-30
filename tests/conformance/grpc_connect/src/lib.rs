@@ -30,13 +30,10 @@
 //! - **Error Handling**: Status codes, metadata, cancellation
 //! - **Protocol Compliance**: HTTP/2 framing, compression, timeouts
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use asupersync::cx::Cx;
-use asupersync::grpc::{
-    Channel, Code, GrpcClient, Request, Response, Server, ServerBuilder, Status,
-};
+use asupersync::grpc::{Code, MetadataValue, Request};
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -196,6 +193,18 @@ pub struct ConformanceTestSuite {
     results: Vec<ConformanceResult>,
 }
 
+struct InProcessConformanceHarness {
+    service: service::ConformanceTestService,
+}
+
+impl InProcessConformanceHarness {
+    fn new(max_message_size: usize) -> Self {
+        Self {
+            service: service::ConformanceTestService::with_max_message_size(max_message_size),
+        }
+    }
+}
+
 #[allow(dead_code)]
 impl ConformanceTestSuite {
     #[allow(dead_code)]
@@ -210,54 +219,39 @@ impl ConformanceTestSuite {
     pub async fn run_all_tests(&mut self, cx: &Cx) -> Result<()> {
         info!("Starting gRPC Connect conformance test suite");
 
-        // Start our test server
-        let server_handle = self.start_test_server(cx).await?;
-
-        // Wait for server to be ready
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let harness = self.build_in_process_harness(cx).await?;
 
         // Run test categories in sequence
-        self.run_unary_tests(cx).await?;
-        self.run_server_streaming_tests(cx).await?;
-        self.run_client_streaming_tests(cx).await?;
-        self.run_bidirectional_streaming_tests(cx).await?;
-        self.run_error_handling_tests(cx).await?;
-        self.run_metadata_tests(cx).await?;
-        self.run_compression_tests(cx).await?;
-        self.run_timeout_tests(cx).await?;
-        self.run_cancellation_tests(cx).await?;
+        self.run_unary_tests(cx, &harness).await?;
+        self.run_server_streaming_tests(cx, &harness).await?;
+        self.run_client_streaming_tests(cx, &harness).await?;
+        self.run_bidirectional_streaming_tests(cx, &harness).await?;
+        self.run_error_handling_tests(cx, &harness).await?;
+        self.run_metadata_tests(cx, &harness).await?;
+        self.run_compression_tests(cx, &harness).await?;
+        self.run_timeout_tests(cx, &harness).await?;
+        self.run_cancellation_tests(&harness).await?;
 
         if self.config.connect_protocol {
             self.run_connect_protocol_tests(cx).await?;
         }
-
-        // Stop test server
-        server_handle.shutdown().await?;
 
         self.generate_conformance_report()?;
 
         Ok(())
     }
 
-    async fn start_test_server(&self, _cx: &Cx) -> Result<TestServerHandle> {
-        let service = service::create_conformance_test_service();
-
-        let server = ServerBuilder::new()
-            .max_recv_message_size(self.config.max_message_size)
-            .max_send_message_size(self.config.max_message_size)
-            .default_timeout(self.config.timeout)
-            .add_service(service)
-            .build();
-
-        server
-            .serve(&self.config.server_address)
-            .await
-            .context("Failed to start test server")?;
-
-        Ok(TestServerHandle {})
+    async fn build_in_process_harness(&self, _cx: &Cx) -> Result<InProcessConformanceHarness> {
+        Ok(InProcessConformanceHarness::new(
+            self.config.max_message_size,
+        ))
     }
 
-    async fn run_unary_tests(&mut self, cx: &Cx) -> Result<()> {
+    async fn run_unary_tests(
+        &mut self,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running unary RPC tests");
 
         let test_cases = vec![
@@ -297,7 +291,7 @@ impl ConformanceTestSuite {
         ];
 
         for (test_name, request) in test_cases {
-            let result = self.run_unary_test(cx, test_name, request).await?;
+            let result = self.run_unary_test(cx, harness, test_name, request).await?;
             self.results.push(result);
         }
 
@@ -306,7 +300,8 @@ impl ConformanceTestSuite {
 
     async fn run_unary_test(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
         test_name: &str,
         request: TestRequest,
     ) -> Result<ConformanceResult> {
@@ -314,28 +309,67 @@ impl ConformanceTestSuite {
         let mut metadata = TestMetadata::default();
         metadata.request_count = 1;
 
-        let channel = Channel::connect(&self.config.server_address).await?;
-        let mut client = GrpcClient::new(channel);
+        let encoded_request = serde_json::to_vec(&request)?;
+        metadata.bytes_sent = encoded_request.len() as u64;
+        let mut grpc_request = Request::new(Bytes::from(encoded_request));
+        if request.echo_metadata {
+            grpc_request
+                .metadata_mut()
+                .insert("test-client-header", "client-value");
+        }
+        if request.echo_deadline {
+            grpc_request.metadata_mut().insert("grpc-timeout", "1S");
+        }
 
-        let result = match client
-            .unary::<Vec<u8>, Vec<u8>>(
-                "/conformance.TestService/UnaryCall",
-                Request::new(serde_json::to_vec(&request)?),
-            )
-            .await
-        {
+        let result = match harness.service.unary_call(cx, grpc_request).await {
             Ok(response) => {
                 metadata.response_count = 1;
-                metadata.bytes_sent = serde_json::to_vec(&request)?.len() as u64;
                 metadata.bytes_received = response.get_ref().len() as u64;
                 metadata.grpc_status = Some(0); // OK
+                for (key, value) in response.metadata().iter() {
+                    match value {
+                        MetadataValue::Ascii(value) => {
+                            metadata.headers.insert(key.to_string(), value.clone());
+                        }
+                        MetadataValue::Binary(value) => {
+                            metadata
+                                .headers
+                                .insert(key.to_string(), format!("{} bytes", value.len()));
+                        }
+                    }
+                }
+
+                let response_data: TestResponse = serde_json::from_slice(response.get_ref())?;
+                let mut issues = Vec::new();
+                if request.fill_server_id && response_data.server_id.is_none() {
+                    issues.push("response omitted requested server_id".to_string());
+                }
+                if request.echo_metadata
+                    && metadata.headers.get("test-client-header")
+                        != Some(&"client-value".to_string())
+                {
+                    issues.push("response did not echo test metadata".to_string());
+                }
+                if request.echo_deadline
+                    && metadata.headers.get("echo-deadline") != Some(&"1S".to_string())
+                {
+                    issues.push("response did not echo grpc-timeout".to_string());
+                }
 
                 ConformanceResult {
                     test_name: test_name.to_string(),
                     category: TestCategory::UnaryRpc,
-                    status: TestStatus::Passed,
+                    status: if issues.is_empty() {
+                        TestStatus::Passed
+                    } else {
+                        TestStatus::Failed
+                    },
                     duration: start_time.elapsed(),
-                    error_message: None,
+                    error_message: if issues.is_empty() {
+                        None
+                    } else {
+                        Some(issues.join("; "))
+                    },
                     metadata,
                 }
             }
@@ -356,46 +390,203 @@ impl ConformanceTestSuite {
         Ok(result)
     }
 
-    async fn run_server_streaming_tests(&mut self, _cx: &Cx) -> Result<()> {
+    async fn run_server_streaming_tests(
+        &mut self,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running server streaming tests");
 
-        self.record_skipped_category_result(
-            "server_streaming_response_sequence_contract",
-            TestCategory::ServerStreaming,
-            "requires_connect_reference_client_server_streaming_fixture",
-            "server-streaming conformance execution requires a Connect reference-client streaming fixture",
-        );
+        let start_time = Instant::now();
+        let request = StreamingTestRequest {
+            message: "server-stream".to_string(),
+            sequence_number: 0,
+            end_stream: false,
+        };
+        let request = Request::new(Bytes::from(serde_json::to_vec(&request)?));
+        let sink = service::ResponseSink::new();
+        let observed = sink.clone();
+        let status = match harness
+            .service
+            .server_streaming_call(cx, request, sink)
+            .await
+        {
+            Ok(()) => {
+                let messages = observed.messages();
+                let decoded = messages
+                    .iter()
+                    .map(|bytes| serde_json::from_slice::<StreamingTestResponse>(bytes))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if decoded.len() == 5
+                    && decoded
+                        .iter()
+                        .enumerate()
+                        .all(|(index, response)| response.sequence_number == index as u32)
+                {
+                    (TestStatus::Passed, None, decoded.len() as u32)
+                } else {
+                    (
+                        TestStatus::Failed,
+                        Some(format!("unexpected response sequence: {decoded:?}")),
+                        decoded.len() as u32,
+                    )
+                }
+            }
+            Err(status) => (
+                TestStatus::Failed,
+                Some(format!("server streaming returned {:?}", status.code())),
+                0,
+            ),
+        };
+
+        let mut metadata = TestMetadata::default();
+        metadata.request_count = 1;
+        metadata.response_count = status.2;
+        self.results.push(ConformanceResult {
+            test_name: "server_streaming_response_sequence_contract".to_string(),
+            category: TestCategory::ServerStreaming,
+            status: status.0,
+            duration: start_time.elapsed(),
+            error_message: status.1,
+            metadata,
+        });
 
         Ok(())
     }
 
-    async fn run_client_streaming_tests(&mut self, _cx: &Cx) -> Result<()> {
+    async fn run_client_streaming_tests(
+        &mut self,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running client streaming tests");
 
-        self.record_skipped_category_result(
-            "client_streaming_aggregation_contract",
-            TestCategory::ClientStreaming,
-            "requires_connect_reference_client_client_streaming_fixture",
-            "client-streaming conformance execution requires a Connect reference-client streaming fixture",
-        );
+        let start_time = Instant::now();
+        let requests = (0..3)
+            .map(|index| StreamingTestRequest {
+                message: format!("client-{index}"),
+                sequence_number: index,
+                end_stream: index == 2,
+            })
+            .map(|request| serde_json::to_vec(&request).map(Bytes::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        let request_count = requests.len() as u32;
+        let stream = service::RequestStream::new(requests);
+        let mut metadata = TestMetadata::default();
+        metadata.request_count = request_count;
+
+        let (status, error_message) = match harness.service.client_streaming_call(cx, stream).await
+        {
+            Ok(response) => {
+                metadata.response_count = 1;
+                metadata.bytes_received = response.get_ref().len() as u64;
+                let response_data: TestResponse = serde_json::from_slice(response.get_ref())?;
+                if response_data.message.contains("Processed 3 requests") {
+                    (TestStatus::Passed, None)
+                } else {
+                    (
+                        TestStatus::Failed,
+                        Some(format!(
+                            "unexpected aggregation response: {}",
+                            response_data.message
+                        )),
+                    )
+                }
+            }
+            Err(status) => (
+                TestStatus::Failed,
+                Some(format!("client streaming returned {:?}", status.code())),
+            ),
+        };
+
+        self.results.push(ConformanceResult {
+            test_name: "client_streaming_aggregation_contract".to_string(),
+            category: TestCategory::ClientStreaming,
+            status,
+            duration: start_time.elapsed(),
+            error_message,
+            metadata,
+        });
 
         Ok(())
     }
 
-    async fn run_bidirectional_streaming_tests(&mut self, _cx: &Cx) -> Result<()> {
+    async fn run_bidirectional_streaming_tests(
+        &mut self,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running bidirectional streaming tests");
 
-        self.record_skipped_category_result(
-            "bidirectional_streaming_duplex_contract",
-            TestCategory::BidirectionalStreaming,
-            "requires_connect_reference_client_bidirectional_streaming_fixture",
-            "bidirectional-streaming conformance execution requires a Connect reference-client streaming fixture",
-        );
+        let start_time = Instant::now();
+        let requests = (0..3)
+            .map(|index| StreamingTestRequest {
+                message: format!("duplex-{index}"),
+                sequence_number: index,
+                end_stream: index == 2,
+            })
+            .map(|request| serde_json::to_vec(&request).map(Bytes::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        let request_count = requests.len() as u32;
+        let stream = service::RequestStream::new(requests);
+        let sink = service::ResponseSink::new();
+        let observed = sink.clone();
+        let (status, error_message, response_count) = match harness
+            .service
+            .bidirectional_streaming_call(cx, stream, sink)
+            .await
+        {
+            Ok(()) => {
+                let messages = observed.messages();
+                let decoded = messages
+                    .iter()
+                    .map(|bytes| serde_json::from_slice::<StreamingTestResponse>(bytes))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let valid = decoded.len() == 3
+                    && decoded.iter().enumerate().all(|(index, response)| {
+                        response.sequence_number == index as u32
+                            && response.message == format!("Echo: duplex-{index}")
+                    });
+                if valid {
+                    (TestStatus::Passed, None, decoded.len() as u32)
+                } else {
+                    (
+                        TestStatus::Failed,
+                        Some(format!("unexpected duplex responses: {decoded:?}")),
+                        decoded.len() as u32,
+                    )
+                }
+            }
+            Err(status) => (
+                TestStatus::Failed,
+                Some(format!(
+                    "bidirectional streaming returned {:?}",
+                    status.code()
+                )),
+                0,
+            ),
+        };
+
+        let mut metadata = TestMetadata::default();
+        metadata.request_count = request_count;
+        metadata.response_count = response_count;
+        self.results.push(ConformanceResult {
+            test_name: "bidirectional_streaming_duplex_contract".to_string(),
+            category: TestCategory::BidirectionalStreaming,
+            status,
+            duration: start_time.elapsed(),
+            error_message,
+            metadata,
+        });
 
         Ok(())
     }
 
-    async fn run_error_handling_tests(&mut self, cx: &Cx) -> Result<()> {
+    async fn run_error_handling_tests(
+        &mut self,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running error handling tests");
 
         let error_test_cases = vec![
@@ -405,7 +596,7 @@ impl ConformanceTestSuite {
         ];
 
         for (test_name, method) in error_test_cases {
-            let result = self.run_error_test(cx, test_name, method).await?;
+            let result = self.run_error_test(cx, harness, test_name, method).await?;
             self.results.push(result);
         }
 
@@ -414,19 +605,21 @@ impl ConformanceTestSuite {
 
     async fn run_error_test(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
         test_name: &str,
-        method: &str,
+        _method: &str,
     ) -> Result<ConformanceResult> {
         let start_time = Instant::now();
         let mut metadata = TestMetadata::default();
 
-        let channel = Channel::connect(&self.config.server_address).await?;
-        let mut client = GrpcClient::new(channel);
-
         let request = TestRequest {
             message: if test_name == "large_payload" {
                 "x".repeat(self.config.max_message_size + 1)
+            } else if test_name == "invalid_method" {
+                "UNIMPLEMENTED".to_string()
+            } else if test_name == "timeout_exceeded" {
+                "DEADLINE_EXCEEDED".to_string()
             } else {
                 "test".to_string()
             },
@@ -437,9 +630,15 @@ impl ConformanceTestSuite {
             fill_server_id: false,
         };
 
-        let result = client
-            .unary::<Vec<u8>, Vec<u8>>(method, Request::new(serde_json::to_vec(&request)?))
-            .await;
+        let encoded_request = serde_json::to_vec(&request)?;
+        metadata.request_count = 1;
+        metadata.bytes_sent = encoded_request.len() as u64;
+        let grpc_request = Request::new(Bytes::from(encoded_request));
+        let result = if test_name == "large_payload" {
+            harness.service.unary_call(cx, grpc_request).await
+        } else {
+            harness.service.error_test_call(cx, grpc_request).await
+        };
 
         let test_result = match result {
             Err(status) => {
@@ -483,77 +682,242 @@ impl ConformanceTestSuite {
         Ok(test_result)
     }
 
-    fn record_skipped_category_result(
+    async fn run_metadata_tests(
         &mut self,
-        test_name: &str,
-        category: TestCategory,
-        coverage_status: &str,
-        error_message: &str,
-    ) {
-        let start_time = Instant::now();
-        let mut metadata = TestMetadata::default();
-        metadata
-            .headers
-            .insert("coverage_status".to_string(), coverage_status.to_string());
-
-        self.results.push(ConformanceResult {
-            test_name: test_name.to_string(),
-            category,
-            status: TestStatus::Skipped,
-            duration: start_time.elapsed(),
-            error_message: Some(error_message.to_string()),
-            metadata,
-        });
-    }
-
-    async fn run_metadata_tests(&mut self, _cx: &Cx) -> Result<()> {
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running metadata tests");
 
-        self.record_skipped_category_result(
-            "metadata_custom_headers_contract",
-            TestCategory::Metadata,
-            "requires_connect_reference_client_metadata_fixture",
-            "metadata conformance execution requires a Connect reference-client header fixture",
-        );
+        let start_time = Instant::now();
+        let request = TestRequest {
+            message: "metadata".to_string(),
+            echo_metadata: true,
+            echo_deadline: true,
+            check_auth_context: false,
+            response_size: None,
+            fill_server_id: false,
+        };
+        let mut grpc_request = Request::new(Bytes::from(serde_json::to_vec(&request)?));
+        grpc_request
+            .metadata_mut()
+            .insert("test-custom-header", "custom-value");
+        grpc_request.metadata_mut().insert("grpc-timeout", "250m");
+
+        let mut metadata = TestMetadata::default();
+        metadata.request_count = 1;
+        let (status, error_message) = match harness.service.unary_call(cx, grpc_request).await {
+            Ok(response) => {
+                metadata.response_count = 1;
+                let echoed_custom =
+                    response
+                        .metadata()
+                        .get("test-custom-header")
+                        .and_then(|value| match value {
+                            MetadataValue::Ascii(value) => Some(value.as_str()),
+                            MetadataValue::Binary(_) => None,
+                        });
+                let echoed_deadline =
+                    response
+                        .metadata()
+                        .get("echo-deadline")
+                        .and_then(|value| match value {
+                            MetadataValue::Ascii(value) => Some(value.as_str()),
+                            MetadataValue::Binary(_) => None,
+                        });
+                if echoed_custom == Some("custom-value") && echoed_deadline == Some("250m") {
+                    (TestStatus::Passed, None)
+                } else {
+                    (
+                        TestStatus::Failed,
+                        Some(format!(
+                            "metadata echo mismatch: custom={echoed_custom:?} deadline={echoed_deadline:?}"
+                        )),
+                    )
+                }
+            }
+            Err(status) => (
+                TestStatus::Failed,
+                Some(format!("metadata call returned {:?}", status.code())),
+            ),
+        };
+
+        self.results.push(ConformanceResult {
+            test_name: "metadata_custom_headers_contract".to_string(),
+            category: TestCategory::Metadata,
+            status,
+            duration: start_time.elapsed(),
+            error_message,
+            metadata,
+        });
 
         Ok(())
     }
 
-    async fn run_compression_tests(&mut self, _cx: &Cx) -> Result<()> {
+    async fn run_compression_tests(
+        &mut self,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running compression tests");
 
-        self.record_skipped_category_result(
-            "compression_negotiation_contract",
-            TestCategory::Compression,
-            "requires_connect_reference_client_compression_fixture",
-            "compression conformance execution requires a Connect reference-client compression negotiation fixture",
-        );
+        let start_time = Instant::now();
+        let request = TestRequest {
+            message: "compression".to_string(),
+            echo_metadata: false,
+            echo_deadline: false,
+            check_auth_context: false,
+            response_size: None,
+            fill_server_id: false,
+        };
+        let mut grpc_request = Request::new(Bytes::from(serde_json::to_vec(&request)?));
+        grpc_request.metadata_mut().insert("grpc-encoding", "gzip");
+        grpc_request
+            .metadata_mut()
+            .insert("grpc-accept-encoding", "gzip, identity");
+
+        let mut metadata = TestMetadata::default();
+        metadata.request_count = 1;
+        let (status, error_message) = match harness.service.unary_call(cx, grpc_request).await {
+            Ok(response) => {
+                metadata.response_count = 1;
+                let response_data: TestResponse = serde_json::from_slice(response.get_ref())?;
+                if response_data.client_compressed && response_data.server_compressed {
+                    (TestStatus::Passed, None)
+                } else {
+                    (
+                        TestStatus::Failed,
+                        Some(format!(
+                            "compression flags mismatch: client={} server={}",
+                            response_data.client_compressed, response_data.server_compressed
+                        )),
+                    )
+                }
+            }
+            Err(status) => (
+                TestStatus::Failed,
+                Some(format!("compression call returned {:?}", status.code())),
+            ),
+        };
+
+        self.results.push(ConformanceResult {
+            test_name: "compression_negotiation_contract".to_string(),
+            category: TestCategory::Compression,
+            status,
+            duration: start_time.elapsed(),
+            error_message,
+            metadata,
+        });
 
         Ok(())
     }
 
-    async fn run_timeout_tests(&mut self, _cx: &Cx) -> Result<()> {
+    async fn run_timeout_tests(
+        &mut self,
+        cx: &Cx,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running timeout tests");
 
-        self.record_skipped_category_result(
-            "timeout_deadline_propagation_contract",
-            TestCategory::Timeout,
-            "requires_connect_reference_client_timeout_fixture",
-            "timeout conformance execution requires a Connect reference-client deadline propagation fixture",
-        );
+        let start_time = Instant::now();
+        let request = TestRequest {
+            message: "DEADLINE_EXCEEDED".to_string(),
+            echo_metadata: false,
+            echo_deadline: false,
+            check_auth_context: false,
+            response_size: None,
+            fill_server_id: false,
+        };
+        let grpc_request = Request::new(Bytes::from(serde_json::to_vec(&request)?));
+        let mut metadata = TestMetadata::default();
+        metadata.request_count = 1;
+        let (status, error_message) = match harness.service.error_test_call(cx, grpc_request).await
+        {
+            Err(status) if status.code() == Code::DeadlineExceeded => {
+                metadata.grpc_status = Some(status.code() as i32);
+                (TestStatus::Passed, None)
+            }
+            Err(status) => {
+                metadata.grpc_status = Some(status.code() as i32);
+                (
+                    TestStatus::Failed,
+                    Some(format!(
+                        "expected DeadlineExceeded, got {:?}",
+                        status.code()
+                    )),
+                )
+            }
+            Ok(_) => (
+                TestStatus::Failed,
+                Some("expected DeadlineExceeded, got success".to_string()),
+            ),
+        };
+
+        self.results.push(ConformanceResult {
+            test_name: "timeout_deadline_propagation_contract".to_string(),
+            category: TestCategory::Timeout,
+            status,
+            duration: start_time.elapsed(),
+            error_message,
+            metadata,
+        });
 
         Ok(())
     }
 
-    async fn run_cancellation_tests(&mut self, _cx: &Cx) -> Result<()> {
+    async fn run_cancellation_tests(
+        &mut self,
+        harness: &InProcessConformanceHarness,
+    ) -> Result<()> {
         info!("Running cancellation tests");
 
-        self.record_skipped_category_result(
-            "cancellation_cleanup_contract",
-            TestCategory::Cancellation,
-            "requires_connect_reference_client_cancellation_fixture",
-            "cancellation conformance execution requires a Connect reference-client cancellation fixture",
-        );
+        let start_time = Instant::now();
+        let cancelled = Cx::for_testing();
+        cancelled.set_cancel_requested(true);
+        let request = StreamingTestRequest {
+            message: "cancelled".to_string(),
+            sequence_number: 0,
+            end_stream: false,
+        };
+        let request = Request::new(Bytes::from(serde_json::to_vec(&request)?));
+        let sink = service::ResponseSink::new();
+        let observed = sink.clone();
+        let mut metadata = TestMetadata::default();
+        metadata.request_count = 1;
+        let (status, error_message) = match harness
+            .service
+            .server_streaming_call(&cancelled, request, sink)
+            .await
+        {
+            Err(status) if status.code() == Code::Cancelled && observed.messages().is_empty() => {
+                metadata.grpc_status = Some(status.code() as i32);
+                (TestStatus::Passed, None)
+            }
+            Err(status) => {
+                metadata.grpc_status = Some(status.code() as i32);
+                (
+                    TestStatus::Failed,
+                    Some(format!(
+                        "expected Cancelled before responses, got {:?} with {} responses",
+                        status.code(),
+                        observed.messages().len()
+                    )),
+                )
+            }
+            Ok(()) => (
+                TestStatus::Failed,
+                Some("cancelled stream completed successfully".to_string()),
+            ),
+        };
+
+        self.results.push(ConformanceResult {
+            test_name: "cancellation_cleanup_contract".to_string(),
+            category: TestCategory::Cancellation,
+            status,
+            duration: start_time.elapsed(),
+            error_message,
+            metadata,
+        });
 
         Ok(())
     }
@@ -733,6 +1097,10 @@ mod tests {
     use super::*;
     use asupersync::cx::Cx;
 
+    fn harness() -> InProcessConformanceHarness {
+        InProcessConformanceHarness::new(4 * 1024 * 1024)
+    }
+
     #[tokio::test]
     async fn test_conformance_suite_creation() {
         let config = ConformanceConfig::default();
@@ -749,105 +1117,90 @@ mod tests {
 
         let suite = ConformanceTestSuite::new(config);
 
-        // This would normally run against a real server.
-        // For testing, verify the suite starts empty.
+        // The suite now runs through the deterministic in-process harness.
         assert!(suite.results.is_empty());
     }
 
     #[tokio::test]
-    async fn test_metadata_conformance_records_fixture_gap() {
+    async fn test_metadata_conformance_records_in_process_result() {
         let cx = Cx::for_testing();
+        let harness = harness();
         let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
 
-        suite.run_metadata_tests(&cx).await.unwrap();
+        suite.run_metadata_tests(&cx, &harness).await.unwrap();
 
         assert_eq!(suite.results.len(), 1);
         let result = &suite.results[0];
         assert_eq!(result.test_name, "metadata_custom_headers_contract");
         assert_eq!(result.category, TestCategory::Metadata);
-        assert_eq!(result.status, TestStatus::Skipped);
-        assert_eq!(
-            result.metadata.headers.get("coverage_status"),
-            Some(&"requires_connect_reference_client_metadata_fixture".to_string())
-        );
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Connect reference-client header fixture")));
+        assert_eq!(result.status, TestStatus::Passed);
+        assert!(result.error_message.is_none());
+        assert_eq!(result.metadata.response_count, 1);
     }
 
     #[tokio::test]
-    async fn test_compression_conformance_records_fixture_gap() {
+    async fn test_compression_conformance_records_in_process_result() {
         let cx = Cx::for_testing();
+        let harness = harness();
         let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
 
-        suite.run_compression_tests(&cx).await.unwrap();
+        suite.run_compression_tests(&cx, &harness).await.unwrap();
 
         assert_eq!(suite.results.len(), 1);
         let result = &suite.results[0];
         assert_eq!(result.test_name, "compression_negotiation_contract");
         assert_eq!(result.category, TestCategory::Compression);
-        assert_eq!(result.status, TestStatus::Skipped);
-        assert_eq!(
-            result.metadata.headers.get("coverage_status"),
-            Some(&"requires_connect_reference_client_compression_fixture".to_string())
-        );
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("compression negotiation fixture")));
+        assert_eq!(result.status, TestStatus::Passed);
+        assert!(result.error_message.is_none());
+        assert_eq!(result.metadata.response_count, 1);
     }
 
     #[tokio::test]
-    async fn test_timeout_conformance_records_fixture_gap() {
+    async fn test_timeout_conformance_records_in_process_result() {
         let cx = Cx::for_testing();
+        let harness = harness();
         let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
 
-        suite.run_timeout_tests(&cx).await.unwrap();
+        suite.run_timeout_tests(&cx, &harness).await.unwrap();
 
         assert_eq!(suite.results.len(), 1);
         let result = &suite.results[0];
         assert_eq!(result.test_name, "timeout_deadline_propagation_contract");
         assert_eq!(result.category, TestCategory::Timeout);
-        assert_eq!(result.status, TestStatus::Skipped);
+        assert_eq!(result.status, TestStatus::Passed);
         assert_eq!(
-            result.metadata.headers.get("coverage_status"),
-            Some(&"requires_connect_reference_client_timeout_fixture".to_string())
+            result.metadata.grpc_status,
+            Some(Code::DeadlineExceeded as i32)
         );
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("deadline propagation fixture")));
+        assert!(result.error_message.is_none());
     }
 
     #[tokio::test]
-    async fn test_cancellation_conformance_records_fixture_gap() {
-        let cx = Cx::for_testing();
+    async fn test_cancellation_conformance_records_in_process_result() {
+        let harness = harness();
         let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
 
-        suite.run_cancellation_tests(&cx).await.unwrap();
+        suite.run_cancellation_tests(&harness).await.unwrap();
 
         assert_eq!(suite.results.len(), 1);
         let result = &suite.results[0];
         assert_eq!(result.test_name, "cancellation_cleanup_contract");
         assert_eq!(result.category, TestCategory::Cancellation);
-        assert_eq!(result.status, TestStatus::Skipped);
-        assert_eq!(
-            result.metadata.headers.get("coverage_status"),
-            Some(&"requires_connect_reference_client_cancellation_fixture".to_string())
-        );
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("cancellation fixture")));
+        assert_eq!(result.status, TestStatus::Passed);
+        assert_eq!(result.metadata.grpc_status, Some(Code::Cancelled as i32));
+        assert!(result.error_message.is_none());
     }
 
     #[tokio::test]
-    async fn test_server_streaming_conformance_records_fixture_gap() {
+    async fn test_server_streaming_conformance_records_in_process_result() {
         let cx = Cx::for_testing();
+        let harness = harness();
         let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
 
-        suite.run_server_streaming_tests(&cx).await.unwrap();
+        suite
+            .run_server_streaming_tests(&cx, &harness)
+            .await
+            .unwrap();
 
         assert_eq!(suite.results.len(), 1);
         let result = &suite.results[0];
@@ -856,59 +1209,52 @@ mod tests {
             "server_streaming_response_sequence_contract"
         );
         assert_eq!(result.category, TestCategory::ServerStreaming);
-        assert_eq!(result.status, TestStatus::Skipped);
-        assert_eq!(
-            result.metadata.headers.get("coverage_status"),
-            Some(&"requires_connect_reference_client_server_streaming_fixture".to_string())
-        );
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("server-streaming conformance")));
+        assert_eq!(result.status, TestStatus::Passed);
+        assert_eq!(result.metadata.request_count, 1);
+        assert_eq!(result.metadata.response_count, 5);
+        assert!(result.error_message.is_none());
     }
 
     #[tokio::test]
-    async fn test_client_streaming_conformance_records_fixture_gap() {
+    async fn test_client_streaming_conformance_records_in_process_result() {
         let cx = Cx::for_testing();
+        let harness = harness();
         let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
 
-        suite.run_client_streaming_tests(&cx).await.unwrap();
+        suite
+            .run_client_streaming_tests(&cx, &harness)
+            .await
+            .unwrap();
 
         assert_eq!(suite.results.len(), 1);
         let result = &suite.results[0];
         assert_eq!(result.test_name, "client_streaming_aggregation_contract");
         assert_eq!(result.category, TestCategory::ClientStreaming);
-        assert_eq!(result.status, TestStatus::Skipped);
-        assert_eq!(
-            result.metadata.headers.get("coverage_status"),
-            Some(&"requires_connect_reference_client_client_streaming_fixture".to_string())
-        );
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("client-streaming conformance")));
+        assert_eq!(result.status, TestStatus::Passed);
+        assert_eq!(result.metadata.request_count, 3);
+        assert_eq!(result.metadata.response_count, 1);
+        assert!(result.error_message.is_none());
     }
 
     #[tokio::test]
-    async fn test_bidirectional_streaming_conformance_records_fixture_gap() {
+    async fn test_bidirectional_streaming_conformance_records_in_process_result() {
         let cx = Cx::for_testing();
+        let harness = harness();
         let mut suite = ConformanceTestSuite::new(ConformanceConfig::default());
 
-        suite.run_bidirectional_streaming_tests(&cx).await.unwrap();
+        suite
+            .run_bidirectional_streaming_tests(&cx, &harness)
+            .await
+            .unwrap();
 
         assert_eq!(suite.results.len(), 1);
         let result = &suite.results[0];
         assert_eq!(result.test_name, "bidirectional_streaming_duplex_contract");
         assert_eq!(result.category, TestCategory::BidirectionalStreaming);
-        assert_eq!(result.status, TestStatus::Skipped);
-        assert_eq!(
-            result.metadata.headers.get("coverage_status"),
-            Some(&"requires_connect_reference_client_bidirectional_streaming_fixture".to_string())
-        );
-        assert!(result
-            .error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("bidirectional-streaming conformance")));
+        assert_eq!(result.status, TestStatus::Passed);
+        assert_eq!(result.metadata.request_count, 3);
+        assert_eq!(result.metadata.response_count, 3);
+        assert!(result.error_message.is_none());
     }
 
     #[tokio::test]

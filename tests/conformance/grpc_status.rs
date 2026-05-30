@@ -398,7 +398,7 @@ fn test_trailer_only_response_conformance() {
         (Code::PermissionDenied, "insufficient permissions"),
         (Code::NotFound, "user not found"),
         (Code::Unauthenticated, "invalid token"),
-        (Code::Unimplemented, "method not implemented"),
+        (Code::Unimplemented, "method unavailable in this service"),
         // Success with no data
         (Code::Ok, ""),
         // Resource exhaustion (immediate rejection)

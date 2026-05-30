@@ -18,6 +18,30 @@
   "default_owner": "runtime-core",
   "classification_rules": [
     {
+      "pattern": "tests/conformance/grpc_connect/src/connect_compat.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
+      "pattern": "tests/conformance/grpc_connect/src/lib.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
+      "pattern": "tests/conformance/grpc_connect/src/service.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
+      "pattern": "tests/conformance/grpc_connect/src/test_cases.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
+      "pattern": "tests/conformance/grpc_status.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
+      "pattern": "tests/conformance/grpc_status_mapping.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
       "pattern": "tests/conformance/**",
       "category": "conformance_placeholder"
     },
@@ -303,11 +327,17 @@
         "src/grpc/status.rs",
         "src/grpc/streaming.rs",
         "src/grpc/web.rs",
-        "src/grpc/snapshots/asupersync__grpc__status__tests__grpc_status_http_mapping_all_codes.snap"
+        "src/grpc/snapshots/asupersync__grpc__status__tests__grpc_status_http_mapping_all_codes.snap",
+        "tests/conformance/grpc_connect/src/connect_compat.rs",
+        "tests/conformance/grpc_connect/src/lib.rs",
+        "tests/conformance/grpc_connect/src/service.rs",
+        "tests/conformance/grpc_connect/src/test_cases.rs",
+        "tests/conformance/grpc_status.rs",
+        "tests/conformance/grpc_status_mapping.rs"
       ],
       "category": "canonical_grpc_status_code",
       "owner": "grpc-core",
-      "reason": "The remaining lexical hits in these gRPC files are the protocol-defined UNIMPLEMENTED status code, constructor, or golden status fixture rather than incomplete runtime behavior.",
+      "reason": "The remaining lexical hits in these gRPC files are the protocol-defined UNIMPLEMENTED status code, constructor, conformance table value, or golden status fixture rather than incomplete runtime behavior.",
       "revisit_condition": "Keep canonical gRPC status vocabulary covered while future non-status implementation gaps in these files continue to require direct source repair."
     },
     {
@@ -328,12 +358,6 @@
         "tests/conformance/cancel_dag_determinism.rs",
         "tests/conformance/channel_cancel_correctness/mpsc/send_cancel_tests.rs",
         "tests/conformance/channel_cancel_correctness/src/state_validation.rs",
-        "tests/conformance/grpc_connect/src/connect_compat.rs",
-        "tests/conformance/grpc_connect/src/lib.rs",
-        "tests/conformance/grpc_connect/src/service.rs",
-        "tests/conformance/grpc_connect/src/test_cases.rs",
-        "tests/conformance/grpc_status.rs",
-        "tests/conformance/grpc_status_mapping.rs",
         "tests/conformance/grpc_trailer_forwarding_rfc9113.rs",
         "tests/conformance/h1_body_framing.rs",
         "tests/conformance/h1_keepalive.rs",
