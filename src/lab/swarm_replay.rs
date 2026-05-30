@@ -33,6 +33,10 @@ pub const SWARM_PRESSURE_SCHEMA_VERSION: &str = "asupersync.swarm-pressure-lab.v
 pub const SWARM_PRESSURE_TRACE_SUMMARY_SCHEMA_VERSION: &str =
     "asupersync.swarm-pressure-trace-summary.v1";
 
+/// Stable schema version for swarm contention heatmap ledgers.
+pub const SWARM_CONTENTION_HEATMAP_LEDGER_SCHEMA_VERSION: &str =
+    "asupersync.swarm-contention-heatmap-ledger.v1";
+
 /// Stable schema version for deterministic agent-run summaries.
 pub const SWARM_AGENT_RUN_SCHEMA_VERSION: &str = "asupersync.swarm-agent-run-lab.v1";
 
@@ -1133,6 +1137,227 @@ pub struct SwarmPressureTraceSummary {
     /// Obligation leak suspects.
     pub obligation_leak_suspects: Vec<SwarmPressureTraceObligationLeakSuspect>,
     /// Stable follow-up routing hints for agents.
+    pub routing_hints: Vec<String>,
+}
+
+/// Verdict emitted by the swarm contention heatmap ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmContentionHeatmapVerdict {
+    /// Required trace, lock, and scheduler fields were present with nominal hotspots.
+    Pass,
+    /// Required fields were present, but at least one hotspot needs operator attention.
+    Degraded,
+    /// Required trace, lock, or scheduler evidence was missing.
+    Incomplete,
+    /// Required fields were present, but the baseline is too old to compare safely.
+    StaleEvidence,
+}
+
+/// Contention severity class used by heatmap rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmContentionSeverity {
+    /// No meaningful contention signal.
+    Nominal,
+    /// Low contention worth observing.
+    Watch,
+    /// Elevated contention that should be routed to an owner.
+    Warning,
+    /// Critical contention or stale/missing proof inputs.
+    Critical,
+}
+
+/// Hotspot source kind in the heatmap ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmContentionHotspotKind {
+    /// ContendedMutex wait/hold metric row.
+    Lock,
+    /// Scheduler lane metric row.
+    SchedulerLane,
+    /// Region hotspot derived from a swarm pressure trace summary.
+    Region,
+    /// Queue hotspot derived from a swarm pressure trace summary.
+    Queue,
+}
+
+/// Serializable lock metric row consumed by the heatmap planner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmContentionLockMetric {
+    /// Human-readable lock name.
+    pub name: String,
+    /// Successful lock acquisitions.
+    pub acquisitions: u64,
+    /// Contended acquisitions.
+    pub contentions: u64,
+    /// Cumulative wait duration.
+    pub wait_ns: u64,
+    /// Cumulative hold duration.
+    pub hold_ns: u64,
+    /// Maximum observed wait duration.
+    pub max_wait_ns: u64,
+    /// Maximum observed hold duration.
+    pub max_hold_ns: u64,
+    /// Median or average wait duration when known.
+    pub p50_wait_ns: u64,
+    /// p95 wait duration.
+    pub p95_wait_ns: u64,
+    /// p99 wait duration, or the nearest stricter percentile available.
+    pub p99_wait_ns: u64,
+    /// p95 hold duration.
+    pub p95_hold_ns: u64,
+    /// p99 hold duration, or the nearest stricter percentile available.
+    pub p99_hold_ns: u64,
+    /// Instrumentation mode from the lock metric source.
+    pub instrumentation_mode: String,
+}
+
+impl SwarmContentionLockMetric {
+    /// Convert a live [`crate::sync::LockMetricsSnapshot`] into a ledger row.
+    #[must_use]
+    pub fn from_lock_metrics_snapshot(snapshot: &crate::sync::LockMetricsSnapshot) -> Self {
+        let p50_wait_ns = if snapshot.acquisitions == 0 {
+            0
+        } else {
+            snapshot.wait_ns / snapshot.acquisitions
+        };
+
+        Self {
+            name: snapshot.name.to_string(),
+            acquisitions: snapshot.acquisitions,
+            contentions: snapshot.contentions,
+            wait_ns: snapshot.wait_ns,
+            hold_ns: snapshot.hold_ns,
+            max_wait_ns: snapshot.max_wait_ns,
+            max_hold_ns: snapshot.max_hold_ns,
+            p50_wait_ns,
+            p95_wait_ns: snapshot.p95_wait_ns,
+            p99_wait_ns: snapshot.p999_wait_ns,
+            p95_hold_ns: snapshot.p95_hold_ns,
+            p99_hold_ns: snapshot.p999_hold_ns,
+            instrumentation_mode: snapshot.instrumentation_mode.to_string(),
+        }
+    }
+}
+
+/// Scheduler lane metric row consumed by the heatmap planner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmContentionSchedulerLaneMetric {
+    /// Stable lane identifier.
+    pub lane_id: String,
+    /// Number of tasks dispatched by this lane.
+    pub dispatched_tasks: u64,
+    /// p50 lane wait duration.
+    pub p50_wait_ns: u64,
+    /// p95 lane wait duration.
+    pub p95_wait_ns: u64,
+    /// p99 lane wait duration.
+    pub p99_wait_ns: u64,
+    /// p50 queue depth.
+    pub queue_depth_p50: u64,
+    /// p95 queue depth.
+    pub queue_depth_p95: u64,
+    /// p99 queue depth.
+    pub queue_depth_p99: u64,
+    /// Number of steal attempts attributed to this lane.
+    pub steal_attempts: u64,
+    /// Number of fairness/starvation yields attributed to this lane.
+    pub fairness_yields: u64,
+}
+
+/// Ranked heatmap row across locks, lanes, regions, and queues.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmContentionHotSpot {
+    /// Stable row key.
+    pub key: String,
+    /// Source kind for this row.
+    pub kind: SwarmContentionHotspotKind,
+    /// Severity class.
+    pub severity: SwarmContentionSeverity,
+    /// Deterministic impact score used for sorting.
+    pub impact_score: u64,
+    /// p50 wait duration when available.
+    pub p50_wait_ns: Option<u64>,
+    /// p95 wait duration when available.
+    pub p95_wait_ns: Option<u64>,
+    /// p99 wait duration when available.
+    pub p99_wait_ns: Option<u64>,
+    /// p95 queue depth when available.
+    pub queue_depth_p95: Option<u64>,
+    /// p99 queue depth when available.
+    pub queue_depth_p99: Option<u64>,
+    /// Contention count when available.
+    pub contentions: Option<u64>,
+    /// Region id or trace scope when available.
+    pub region_or_scope: Option<String>,
+    /// Stable evidence string for logs and Agent Mail.
+    pub evidence: String,
+    /// Suggested owner surface.
+    pub owner_surface: String,
+    /// Suggested owner bead or follow-up thread.
+    pub owner_bead_hint: String,
+}
+
+/// Input for building an operator-readable contention heatmap ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmContentionHeatmapInput {
+    /// Stable ledger id.
+    pub ledger_id: String,
+    /// Optional baseline id used for stale-evidence detection.
+    pub baseline_id: Option<String>,
+    /// Age of the baseline in seconds.
+    pub baseline_age_secs: u64,
+    /// Maximum acceptable baseline age in seconds.
+    pub max_baseline_age_secs: u64,
+    /// Trace summary consumed by this ledger.
+    pub trace_summary: Option<SwarmPressureTraceSummary>,
+    /// Lock metrics consumed by this ledger.
+    pub lock_metrics: Vec<SwarmContentionLockMetric>,
+    /// Scheduler lane metrics consumed by this ledger.
+    pub scheduler_lanes: Vec<SwarmContentionSchedulerLaneMetric>,
+    /// Stable trace ids or artifact ids consumed by this ledger.
+    pub source_trace_ids: Vec<String>,
+    /// Proof command that validates this ledger surface.
+    pub proof_command: Option<String>,
+}
+
+/// Operator-readable contention heatmap report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmContentionHeatmapLedger {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Ledger id copied from the input.
+    pub ledger_id: String,
+    /// Source scenario id copied from the trace summary when present.
+    pub scenario_id: Option<String>,
+    /// Baseline id copied from the input.
+    pub baseline_id: Option<String>,
+    /// Whether the baseline is older than the accepted bound.
+    pub stale_baseline: bool,
+    /// Heatmap verdict.
+    pub verdict: SwarmContentionHeatmapVerdict,
+    /// Highest severity observed in ranked hotspots.
+    pub max_severity: SwarmContentionSeverity,
+    /// Whether every required evidence family was present.
+    pub required_fields_present: bool,
+    /// Missing required fields.
+    pub missing_required_fields: Vec<String>,
+    /// Stable trace ids or artifact ids consumed by this ledger.
+    pub source_trace_ids: Vec<String>,
+    /// Proof command copied from the input.
+    pub proof_command: Option<String>,
+    /// Ranked lock hotspots.
+    pub lock_hotspots: Vec<SwarmContentionHotSpot>,
+    /// Ranked scheduler lane hotspots.
+    pub scheduler_lane_hotspots: Vec<SwarmContentionHotSpot>,
+    /// Ranked region hotspots.
+    pub region_hotspots: Vec<SwarmContentionHotSpot>,
+    /// Ranked queue hotspots.
+    pub queue_hotspots: Vec<SwarmContentionHotSpot>,
+    /// Top cross-family hotspots.
+    pub top_hotspots: Vec<SwarmContentionHotSpot>,
+    /// Stable routing hints for agents.
     pub routing_hints: Vec<String>,
 }
 
@@ -3893,6 +4118,419 @@ pub fn render_swarm_pressure_trace_text(summary: &SwarmPressureTraceSummary) -> 
     }
 
     lines.join("\n")
+}
+
+/// Build a deterministic, fail-closed contention heatmap ledger.
+#[must_use]
+pub fn build_swarm_contention_heatmap(
+    input: &SwarmContentionHeatmapInput,
+) -> SwarmContentionHeatmapLedger {
+    let mut missing_required_fields = Vec::new();
+    if input.ledger_id.trim().is_empty() {
+        missing_required_fields.push("ledger_id".to_string());
+    }
+    if input.trace_summary.is_none() {
+        missing_required_fields.push("trace_summary".to_string());
+    }
+    if input.lock_metrics.is_empty() {
+        missing_required_fields.push("lock_metrics".to_string());
+    }
+    if input.scheduler_lanes.is_empty() {
+        missing_required_fields.push("scheduler_lanes".to_string());
+    }
+
+    let scenario_id = input
+        .trace_summary
+        .as_ref()
+        .map(|summary| summary.scenario_id.clone());
+    if let Some(summary) = &input.trace_summary {
+        if !summary.required_fields_present {
+            missing_required_fields.extend(
+                summary
+                    .missing_required_fields
+                    .iter()
+                    .map(|field| format!("trace_summary.{field}")),
+            );
+        }
+        if summary.verdict == SwarmPressureTraceVerdict::Incomplete {
+            missing_required_fields.push("trace_summary.verdict".to_string());
+        }
+    }
+    missing_required_fields = sorted_unique_owned(missing_required_fields);
+
+    let stale_baseline = input.baseline_age_secs > input.max_baseline_age_secs;
+    let lock_hotspots = ranked_lock_hotspots(&input.lock_metrics);
+    let scheduler_lane_hotspots = ranked_scheduler_lane_hotspots(&input.scheduler_lanes);
+    let (region_hotspots, queue_hotspots) = input
+        .trace_summary
+        .as_ref()
+        .map_or_else(|| (Vec::new(), Vec::new()), trace_contention_hotspots);
+
+    let mut top_hotspots = Vec::new();
+    top_hotspots.extend(lock_hotspots.clone());
+    top_hotspots.extend(scheduler_lane_hotspots.clone());
+    top_hotspots.extend(region_hotspots.clone());
+    top_hotspots.extend(queue_hotspots.clone());
+    sort_heatmap_hotspots(&mut top_hotspots);
+    top_hotspots.truncate(8);
+
+    let max_severity = top_hotspots
+        .iter()
+        .map(|hotspot| hotspot.severity)
+        .max()
+        .unwrap_or(SwarmContentionSeverity::Nominal);
+    let required_fields_present = missing_required_fields.is_empty();
+    let verdict = if !required_fields_present {
+        SwarmContentionHeatmapVerdict::Incomplete
+    } else if stale_baseline {
+        SwarmContentionHeatmapVerdict::StaleEvidence
+    } else if max_severity >= SwarmContentionSeverity::Warning {
+        SwarmContentionHeatmapVerdict::Degraded
+    } else {
+        SwarmContentionHeatmapVerdict::Pass
+    };
+
+    let mut routing_hints = Vec::new();
+    if !required_fields_present {
+        routing_hints.push(format!(
+            "missing contention evidence: {}",
+            missing_required_fields.join(",")
+        ));
+    }
+    if stale_baseline {
+        routing_hints.push(format!(
+            "refresh baseline {}: age={}s max={}s",
+            input.baseline_id.as_deref().unwrap_or("unknown"),
+            input.baseline_age_secs,
+            input.max_baseline_age_secs
+        ));
+    }
+    if let Some(summary) = &input.trace_summary {
+        routing_hints.extend(summary.routing_hints.clone());
+    }
+    routing_hints.extend(
+        top_hotspots
+            .iter()
+            .filter(|hotspot| hotspot.severity >= SwarmContentionSeverity::Warning)
+            .map(|hotspot| {
+                format!(
+                    "{} {:?} hotspot routes to {} ({})",
+                    hotspot.key, hotspot.kind, hotspot.owner_surface, hotspot.owner_bead_hint
+                )
+            }),
+    );
+    routing_hints = sorted_unique_owned(routing_hints);
+
+    SwarmContentionHeatmapLedger {
+        schema_version: SWARM_CONTENTION_HEATMAP_LEDGER_SCHEMA_VERSION.to_string(),
+        ledger_id: input.ledger_id.clone(),
+        scenario_id,
+        baseline_id: input.baseline_id.clone(),
+        stale_baseline,
+        verdict,
+        max_severity,
+        required_fields_present,
+        missing_required_fields,
+        source_trace_ids: sorted_unique_owned(input.source_trace_ids.clone()),
+        proof_command: input.proof_command.clone(),
+        lock_hotspots,
+        scheduler_lane_hotspots,
+        region_hotspots,
+        queue_hotspots,
+        top_hotspots,
+        routing_hints,
+    }
+}
+
+/// Render a compact deterministic text summary for Agent Mail handoff.
+#[must_use]
+pub fn render_swarm_contention_heatmap_text(ledger: &SwarmContentionHeatmapLedger) -> String {
+    let mut lines = vec![
+        "Swarm Contention Heatmap Ledger".to_string(),
+        format!("schema_version: {}", ledger.schema_version),
+        format!(
+            "ledger_id: {} scenario={} baseline={} stale_baseline={}",
+            ledger.ledger_id,
+            ledger.scenario_id.as_deref().unwrap_or("none"),
+            ledger.baseline_id.as_deref().unwrap_or("none"),
+            ledger.stale_baseline
+        ),
+        format!(
+            "verdict: {:?} max_severity={:?} required_fields_present={} missing={}",
+            ledger.verdict,
+            ledger.max_severity,
+            ledger.required_fields_present,
+            if ledger.missing_required_fields.is_empty() {
+                "none".to_string()
+            } else {
+                ledger.missing_required_fields.join(",")
+            }
+        ),
+    ];
+
+    lines.push("top_hotspots:".to_string());
+    if ledger.top_hotspots.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for hotspot in &ledger.top_hotspots {
+            lines.push(format!(
+                "- key={} kind={:?} severity={:?} score={} p50={} p95={} p99={} q95={} q99={} route={} bead={}",
+                hotspot.key,
+                hotspot.kind,
+                hotspot.severity,
+                hotspot.impact_score,
+                optional_u64_text(hotspot.p50_wait_ns),
+                optional_u64_text(hotspot.p95_wait_ns),
+                optional_u64_text(hotspot.p99_wait_ns),
+                optional_u64_text(hotspot.queue_depth_p95),
+                optional_u64_text(hotspot.queue_depth_p99),
+                hotspot.owner_surface,
+                hotspot.owner_bead_hint
+            ));
+        }
+    }
+
+    lines.push("routing_hints:".to_string());
+    if ledger.routing_hints.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for hint in &ledger.routing_hints {
+            lines.push(format!("- {hint}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn ranked_lock_hotspots(metrics: &[SwarmContentionLockMetric]) -> Vec<SwarmContentionHotSpot> {
+    let mut hotspots = metrics
+        .iter()
+        .filter(|metric| {
+            metric.acquisitions > 0
+                || metric.contentions > 0
+                || metric.p95_wait_ns > 0
+                || metric.p99_wait_ns > 0
+        })
+        .map(|metric| {
+            let severity = wait_severity(metric.p95_wait_ns, metric.p99_wait_ns);
+            let impact_score = metric
+                .p99_wait_ns
+                .saturating_add(metric.p95_wait_ns)
+                .saturating_add(metric.max_wait_ns)
+                .saturating_add(metric.contentions.saturating_mul(10_000))
+                .saturating_add(metric.p99_hold_ns / 2);
+            SwarmContentionHotSpot {
+                key: metric.name.clone(),
+                kind: SwarmContentionHotspotKind::Lock,
+                severity,
+                impact_score,
+                p50_wait_ns: Some(metric.p50_wait_ns),
+                p95_wait_ns: Some(metric.p95_wait_ns),
+                p99_wait_ns: Some(metric.p99_wait_ns),
+                queue_depth_p95: None,
+                queue_depth_p99: None,
+                contentions: Some(metric.contentions),
+                region_or_scope: None,
+                evidence: format!(
+                    "acquisitions={} contentions={} wait_p95={}ns wait_p99={}ns hold_p95={}ns hold_p99={}ns mode={}",
+                    metric.acquisitions,
+                    metric.contentions,
+                    metric.p95_wait_ns,
+                    metric.p99_wait_ns,
+                    metric.p95_hold_ns,
+                    metric.p99_hold_ns,
+                    metric.instrumentation_mode
+                ),
+                owner_surface: "src/sync/contended_mutex.rs".to_string(),
+                owner_bead_hint: "asupersync-vssefs.9.4".to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    sort_heatmap_hotspots(&mut hotspots);
+    hotspots
+}
+
+fn ranked_scheduler_lane_hotspots(
+    metrics: &[SwarmContentionSchedulerLaneMetric],
+) -> Vec<SwarmContentionHotSpot> {
+    let mut hotspots = metrics
+        .iter()
+        .filter(|metric| {
+            metric.dispatched_tasks > 0
+                || metric.p95_wait_ns > 0
+                || metric.p99_wait_ns > 0
+                || metric.queue_depth_p95 > 0
+                || metric.queue_depth_p99 > 0
+        })
+        .map(|metric| {
+            let wait = wait_severity(metric.p95_wait_ns, metric.p99_wait_ns);
+            let queue = queue_severity(metric.queue_depth_p95, metric.queue_depth_p99);
+            let severity = wait.max(queue);
+            let impact_score = metric
+                .p99_wait_ns
+                .saturating_add(metric.p95_wait_ns)
+                .saturating_add(metric.queue_depth_p99.saturating_mul(20_000))
+                .saturating_add(metric.queue_depth_p95.saturating_mul(5_000))
+                .saturating_add(metric.fairness_yields.saturating_mul(50_000))
+                .saturating_add(metric.steal_attempts.saturating_mul(1_000));
+            SwarmContentionHotSpot {
+                key: metric.lane_id.clone(),
+                kind: SwarmContentionHotspotKind::SchedulerLane,
+                severity,
+                impact_score,
+                p50_wait_ns: Some(metric.p50_wait_ns),
+                p95_wait_ns: Some(metric.p95_wait_ns),
+                p99_wait_ns: Some(metric.p99_wait_ns),
+                queue_depth_p95: Some(metric.queue_depth_p95),
+                queue_depth_p99: Some(metric.queue_depth_p99),
+                contentions: Some(metric.steal_attempts.saturating_add(metric.fairness_yields)),
+                region_or_scope: Some(metric.lane_id.clone()),
+                evidence: format!(
+                    "dispatched={} wait_p95={}ns wait_p99={}ns queue_p95={} queue_p99={} steals={} fairness_yields={}",
+                    metric.dispatched_tasks,
+                    metric.p95_wait_ns,
+                    metric.p99_wait_ns,
+                    metric.queue_depth_p95,
+                    metric.queue_depth_p99,
+                    metric.steal_attempts,
+                    metric.fairness_yields
+                ),
+                owner_surface: "src/runtime/scheduler/three_lane.rs".to_string(),
+                owner_bead_hint: "asupersync-vssefs.9.4".to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    sort_heatmap_hotspots(&mut hotspots);
+    hotspots
+}
+
+fn trace_contention_hotspots(
+    summary: &SwarmPressureTraceSummary,
+) -> (Vec<SwarmContentionHotSpot>, Vec<SwarmContentionHotSpot>) {
+    let mut regions = summary
+        .top_hot_regions
+        .iter()
+        .map(|region| {
+            let severity = queue_severity(region.queue_peak as u64, region.queue_peak as u64).max(
+                if region.cancelled_task_count > 0 {
+                    SwarmContentionSeverity::Warning
+                } else {
+                    SwarmContentionSeverity::Nominal
+                },
+            );
+            let impact_score = (region.event_count as u64)
+                .saturating_mul(1_000)
+                .saturating_add((region.queue_peak as u64).saturating_mul(20_000))
+                .saturating_add((region.cancelled_task_count as u64).saturating_mul(50_000))
+                .saturating_add((region.admission_decision_count as u64).saturating_mul(5_000));
+            SwarmContentionHotSpot {
+                key: format!("region:{}", region.region_index),
+                kind: SwarmContentionHotspotKind::Region,
+                severity,
+                impact_score,
+                p50_wait_ns: None,
+                p95_wait_ns: None,
+                p99_wait_ns: None,
+                queue_depth_p95: Some(region.queue_peak as u64),
+                queue_depth_p99: Some(region.queue_peak as u64),
+                contentions: Some(region.admission_decision_count as u64),
+                region_or_scope: region.region_id.map_or_else(
+                    || Some(format!("region:{}", region.region_index)),
+                    |id| Some(format!("region_id:{id}")),
+                ),
+                evidence: format!(
+                    "events={} tasks={} cancelled={} queue_peak={} admissions={}",
+                    region.event_count,
+                    region.task_count,
+                    region.cancelled_task_count,
+                    region.queue_peak,
+                    region.admission_decision_count
+                ),
+                owner_surface: region.route_hint.clone(),
+                owner_bead_hint: "asupersync-vssefs.9.4".to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut queues = summary
+        .largest_queues
+        .iter()
+        .map(|queue| {
+            let severity = queue_severity(queue.queue_depth as u64, queue.queue_depth as u64);
+            SwarmContentionHotSpot {
+                key: queue.scope.clone(),
+                kind: SwarmContentionHotspotKind::Queue,
+                severity,
+                impact_score: (queue.queue_depth as u64).saturating_mul(20_000),
+                p50_wait_ns: None,
+                p95_wait_ns: None,
+                p99_wait_ns: None,
+                queue_depth_p95: Some(queue.queue_depth as u64),
+                queue_depth_p99: Some(queue.queue_depth as u64),
+                contentions: Some(queue.queue_depth as u64),
+                region_or_scope: Some(queue.scope.clone()),
+                evidence: format!(
+                    "queue_depth={} event_kind={}",
+                    queue.queue_depth, queue.event_kind
+                ),
+                owner_surface: queue.route_hint.clone(),
+                owner_bead_hint: "asupersync-vssefs.9.4".to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    sort_heatmap_hotspots(&mut regions);
+    sort_heatmap_hotspots(&mut queues);
+    (regions, queues)
+}
+
+const fn wait_severity(p95_wait_ns: u64, p99_wait_ns: u64) -> SwarmContentionSeverity {
+    if p99_wait_ns >= 1_000_000 || p95_wait_ns >= 500_000 {
+        SwarmContentionSeverity::Critical
+    } else if p99_wait_ns >= 250_000 || p95_wait_ns >= 100_000 {
+        SwarmContentionSeverity::Warning
+    } else if p99_wait_ns >= 50_000 || p95_wait_ns >= 25_000 {
+        SwarmContentionSeverity::Watch
+    } else {
+        SwarmContentionSeverity::Nominal
+    }
+}
+
+const fn queue_severity(queue_depth_p95: u64, queue_depth_p99: u64) -> SwarmContentionSeverity {
+    if queue_depth_p99 >= 256 || queue_depth_p95 >= 128 {
+        SwarmContentionSeverity::Critical
+    } else if queue_depth_p99 >= 64 || queue_depth_p95 >= 32 {
+        SwarmContentionSeverity::Warning
+    } else if queue_depth_p99 >= 8 || queue_depth_p95 >= 4 {
+        SwarmContentionSeverity::Watch
+    } else {
+        SwarmContentionSeverity::Nominal
+    }
+}
+
+fn sort_heatmap_hotspots(hotspots: &mut [SwarmContentionHotSpot]) {
+    hotspots.sort_by(|left, right| {
+        right
+            .severity
+            .cmp(&left.severity)
+            .then_with(|| right.impact_score.cmp(&left.impact_score))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+}
+
+fn sorted_unique_owned(mut values: Vec<String>) -> Vec<String> {
+    for value in &mut values {
+        *value = value.trim().to_string();
+    }
+    values.retain(|value| !value.is_empty());
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn optional_u64_text(value: Option<u64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
 }
 
 const REPLAY_TRACE_REQUIRED_FIELDS: &[&str] = &[

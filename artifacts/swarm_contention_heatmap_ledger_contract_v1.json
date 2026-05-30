@@ -1,0 +1,121 @@
+{
+  "contract_version": "swarm-contention-heatmap-ledger-contract-v1",
+  "schema_version": "asupersync.swarm-contention-heatmap-ledger.v1",
+  "bead_id": "asupersync-vssefs.9.4",
+  "purpose": "Define the source-backed contract for deterministic swarm contention heatmap ledgers that join lock metrics, scheduler lane metrics, and swarm pressure trace summaries.",
+  "source_of_truth": {
+    "contract": "artifacts/swarm_contention_heatmap_ledger_contract_v1.json",
+    "contract_test": "tests/swarm_contention_heatmap_contract.rs",
+    "runtime_policy_source": "src/lab/swarm_replay.rs",
+    "runtime_policy": "asupersync::lab::build_swarm_contention_heatmap",
+    "runtime_input_type": "asupersync::lab::SwarmContentionHeatmapInput",
+    "runtime_ledger_type": "asupersync::lab::SwarmContentionHeatmapLedger",
+    "text_renderer": "asupersync::lab::render_swarm_contention_heatmap_text"
+  },
+  "required_input_families": [
+    "ledger_id",
+    "trace_summary",
+    "lock_metrics",
+    "scheduler_lanes"
+  ],
+  "required_ledger_fields": [
+    "schema_version",
+    "ledger_id",
+    "scenario_id",
+    "baseline_id",
+    "stale_baseline",
+    "verdict",
+    "max_severity",
+    "required_fields_present",
+    "missing_required_fields",
+    "source_trace_ids",
+    "proof_command",
+    "lock_hotspots",
+    "scheduler_lane_hotspots",
+    "region_hotspots",
+    "queue_hotspots",
+    "top_hotspots",
+    "routing_hints"
+  ],
+  "required_hotspot_fields": [
+    "key",
+    "kind",
+    "severity",
+    "impact_score",
+    "p50_wait_ns",
+    "p95_wait_ns",
+    "p99_wait_ns",
+    "queue_depth_p95",
+    "queue_depth_p99",
+    "contentions",
+    "region_or_scope",
+    "evidence",
+    "owner_surface",
+    "owner_bead_hint"
+  ],
+  "required_verdicts": [
+    "pass",
+    "degraded",
+    "incomplete",
+    "stale_evidence"
+  ],
+  "required_hotspot_kinds": [
+    "lock",
+    "scheduler_lane",
+    "region",
+    "queue"
+  ],
+  "required_severities": [
+    "nominal",
+    "watch",
+    "warning",
+    "critical"
+  ],
+  "scenarios": [
+    {
+      "name": "healthy",
+      "requirement": "Required trace, lock, and scheduler fields are present and nominal, yielding pass with stable JSON and text."
+    },
+    {
+      "name": "scheduler_hot",
+      "requirement": "High scheduler lane wait or queue percentiles produce a degraded ledger and route to the scheduler owner surface."
+    },
+    {
+      "name": "lock_hot",
+      "requirement": "High ContendedMutex wait percentiles rank the lock hotspot first with critical severity."
+    },
+    {
+      "name": "queue_hot",
+      "requirement": "Queue hotspots from the swarm pressure trace summary are carried into the heatmap and ranked as degraded evidence."
+    },
+    {
+      "name": "missing_fields",
+      "requirement": "Missing trace, lock, or scheduler evidence yields incomplete, never pass."
+    },
+    {
+      "name": "stale_baseline",
+      "requirement": "Baselines older than max_baseline_age_secs yield stale_evidence separately from incomplete."
+    }
+  ],
+  "semantic_rules": {
+    "source_trace_join": "At least one fixture consumes summarize_swarm_replay_trace output from src/lab/swarm_replay.rs.",
+    "fail_closed_missing_evidence": "Missing trace_summary, lock_metrics, scheduler_lanes, or trace required fields must set verdict to incomplete.",
+    "fail_closed_stale_baseline": "A baseline older than the accepted bound must set verdict to stale_evidence unless required fields are already incomplete.",
+    "ranked_hotspots": "top_hotspots is sorted by severity, impact score, kind, and key with a stable maximum of eight rows.",
+    "operator_routing": "Every hotspot includes owner_surface and owner_bead_hint so the ledger can route follow-up work.",
+    "no_runtime_dependency": "The ledger is a deterministic report builder and does not introduce another executor, runtime, or hidden ambient telemetry source."
+  },
+  "proof_lane": {
+    "id": "swarm-contention-heatmap-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_contention_heatmap cargo test -p asupersync --test swarm_contention_heatmap_contract swarm_contention_heatmap --features test-internals -- --nocapture",
+    "scope": "Focused contract tests for the swarm contention heatmap ledger and source-backed artifact."
+  },
+  "forbidden_semantics": [
+    "report success when trace, lock, or scheduler evidence is missing",
+    "claim fresh baseline support from stale evidence",
+    "drop trace summary routing hints",
+    "create branches or worktrees",
+    "delete files as part of contention analysis",
+    "introduce hidden ambient runtime tuning"
+  ]
+}
