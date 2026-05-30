@@ -872,9 +872,9 @@ mod tests {
             }
         }
 
-        fn create_temp_dir(&mut self) -> &std::path::Path {
+        fn create_temp_dir(&mut self) -> std::path::PathBuf {
             let temp_dir = tempdir().expect("create temp dir");
-            let path = temp_dir.path();
+            let path = temp_dir.path().to_path_buf();
             self.temp_dirs.push(temp_dir);
             path
         }

@@ -827,15 +827,11 @@ pub struct SchedulingState {
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     use super::*;
+    use crate::atp::object::ContentId;
     use crate::types::{Budget, TraceId};
 
     fn test_object_id(object_id: &str) -> ObjectId {
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in object_id.bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        ObjectId::new_for_test(hash)
+        ObjectId::content(ContentId::from_bytes(object_id.as_bytes()))
     }
 
     const fn test_trace_id(value: u128) -> TraceId {
@@ -849,7 +845,7 @@ mod tests {
     ) -> ScheduledChunk {
         let object_id = test_object_id(object_id);
         ScheduledChunk {
-            chunk_id: ChunkId::new(object_id, offset, 1024),
+            chunk_id: ChunkId::new(object_id.clone(), offset, 1024),
             object_id,
             priority,
             size_bytes: 1024,
@@ -957,7 +953,7 @@ mod tests {
         let chunk_id = chunk.chunk_id.clone();
 
         brain.schedule_chunk(chunk)?;
-        let selected = brain.next_chunk(&budget, test_trace_id(5))?.unwrap();
+        let _selected = brain.next_chunk(&budget, test_trace_id(5))?.unwrap();
 
         assert_eq!(brain.scheduling_state().in_flight_count, 1);
 

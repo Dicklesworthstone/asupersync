@@ -569,7 +569,7 @@ fn test_cross_subsystem_event_correlation() {
             schema_version: ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
             timestamp: format!("2026-05-25T12:{:02}:00Z", i),
             level: Level::Info,
-            subsystem: *subsystem,
+            subsystem: subsystem.clone(),
             event_type: event_type.to_string(),
             data: json!({
                 "correlation_id": trace_id,
