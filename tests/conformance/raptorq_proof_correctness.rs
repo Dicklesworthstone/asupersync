@@ -478,12 +478,17 @@ fn vector_6_symbol_size_mismatch() {
     let seed = 0x6000;
     let object_id = ObjectId::new_for_test(0x7001);
 
+    let (_source, mut received) = make_complete_symbol_set(k, symbol_size, seed, 0x66);
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
-    let mut received = decoder.constraint_symbols();
 
-    // Add source symbol with wrong size
+    // Keep the symbol count sufficient so validation reaches the payload-width
+    // check this vector is meant to pin.
     let wrong_data = vec![0u8; symbol_size + 8]; // Intentionally wrong size
-    received.push(ReceivedSymbol::source(0, wrong_data));
+    let source_zero = received
+        .iter_mut()
+        .find(|sym| sym.is_source && sym.esi == 0)
+        .expect("complete symbol set should include source ESI 0");
+    source_zero.data = wrong_data;
 
     let (_err, proof) = decoder
         .decode_with_proof(&received, object_id, 0)
