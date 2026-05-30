@@ -2183,7 +2183,7 @@ mod tests {
 
             // Verify quiescence initiation
             prop_assert_ne!(
-                supervisor.quiescence_state, MockQuiescenceState::NotQuiescent,
+                &supervisor.quiescence_state, &MockQuiescenceState::NotQuiescent,
                 "Quiescence should have been initiated"
             );
 

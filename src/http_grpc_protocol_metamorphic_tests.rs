@@ -816,11 +816,11 @@ mod tests {
                 .expect("Failed to decode HTTP/1.1 request");
 
             // Semantic preservation: core components must match
-            prop_assert_eq!(decoded_request.method, original_request.method,
+            prop_assert_eq!(&decoded_request.method, &original_request.method,
                 "Method mismatch after round-trip");
-            prop_assert_eq!(decoded_request.uri, original_request.uri,
+            prop_assert_eq!(&decoded_request.uri, &original_request.uri,
                 "URI mismatch after round-trip");
-            prop_assert_eq!(decoded_request.version, original_request.version,
+            prop_assert_eq!(&decoded_request.version, &original_request.version,
                 "Version mismatch after round-trip");
 
             // Header preservation (order may change, but values must be preserved).
@@ -829,13 +829,13 @@ mod tests {
             for (orig_name, orig_value) in &original_request.headers {
                 let decoded_value = decoded_request.get_header(orig_name)
                     .unwrap_or_else(|| panic!("Header '{}' missing after round-trip", orig_name));
-                prop_assert_eq!(decoded_value.clone(), orig_value.clone(),
+                prop_assert_eq!(decoded_value, orig_value,
                     "Header '{}' value changed", orig_name);
             }
 
             // Body preservation
             if !body_bytes.is_empty() {
-                prop_assert_eq!(decoded_request.body, body_bytes,
+                prop_assert_eq!(&decoded_request.body, &body_bytes,
                     "Body content changed after round-trip");
             }
         }

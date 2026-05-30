@@ -816,7 +816,7 @@ mod fs_config_tests {
             let canonical1 = mock_vfs.canonicalize(&path1).unwrap();
             let canonical2 = mock_vfs.canonicalize(&path2).unwrap();
 
-            prop_assert_eq!(canonical1, canonical2,
+            prop_assert_eq!(&canonical1, &canonical2,
                 "Equivalent paths don't canonicalize to same result");
 
             // Test with parent directory references
@@ -825,7 +825,7 @@ mod fs_config_tests {
             path3.push("..");
 
             let canonical3 = mock_vfs.canonicalize(&path3).unwrap();
-            prop_assert_eq!(canonical1.clone(), canonical3,
+            prop_assert_eq!(&canonical1, &canonical3,
                 "Path with parent ref doesn't normalize correctly");
         });
 
