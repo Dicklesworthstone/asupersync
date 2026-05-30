@@ -27,7 +27,8 @@
 //! # Cancel-Safety
 //!
 //! - Process spawning itself is synchronous (the syscall).
-//! - `wait()` can be cancelled; the process continues running.
+//! - `wait()` is synchronous; `wait_async(cx)` observes parent cancellation and
+//!   drains the child before returning.
 //! - Use `kill_on_drop(true)` for automatic cleanup on cancellation.
 //! - I/O operations are cancel-safe (partial reads/writes are fine).
 
@@ -851,8 +852,9 @@ impl Child {
 
     /// Waits for the child process to exit.
     ///
-    /// This is cancel-safe: if cancelled, the process continues running.
-    /// Use `kill_on_drop(true)` for automatic cleanup on cancellation.
+    /// This synchronous call blocks the current thread until process exit.
+    /// Use [`wait_async`](Self::wait_async) for `Cx`-aware cancellation and
+    /// runtime-integrated waiting.
     ///
     /// # Errors
     ///
@@ -911,8 +913,8 @@ impl Child {
     ///
     /// The escalation runs without honoring further cancellation
     /// checkpoints — the parent's cancel has already fired, this is the
-    /// drain phase. The function returns `Cancelled` after the child has
-    /// been fully reaped.
+    /// drain phase. The function returns an `Interrupted` I/O error after the
+    /// child has been fully reaped.
     pub async fn wait_async(&mut self, cx: &Cx) -> Result<ExitStatus, ProcessError> {
         // Match the synchronous wait path and std semantics so async wait does
         // not keep the child's stdin pipe open indefinitely.
@@ -1091,12 +1093,7 @@ impl Child {
     pub async fn wait_with_output_async(self, cx: &Cx) -> Result<Output, ProcessError> {
         #[cfg(windows)]
         {
-            let _ = cx;
-            return crate::runtime::spawn_blocking_io(move || {
-                self.wait_with_output_windows().map_err(io::Error::from)
-            })
-            .await
-            .map_err(ProcessError::Io);
+            return self.wait_with_output_windows_async(cx).await;
         }
 
         #[cfg(not(windows))]
@@ -1272,35 +1269,29 @@ impl Child {
         let stderr_handle = self.stderr.take().map(|handle| handle.inner);
         drop(self.stdin.take());
 
-        let stdout_thread = stdout_handle.map(|mut stream| {
-            std::thread::spawn(move || -> io::Result<Vec<u8>> {
-                let mut buf = Vec::new();
-                stream.read_to_end(&mut buf)?;
-                Ok(buf)
-            })
-        });
-        let stderr_thread = stderr_handle.map(|mut stream| {
-            std::thread::spawn(move || -> io::Result<Vec<u8>> {
-                let mut buf = Vec::new();
-                stream.read_to_end(&mut buf)?;
-                Ok(buf)
-            })
-        });
+        let stdout_thread = stdout_handle
+            .map(|stream| spawn_process_output_reader("stdout", stream))
+            .transpose()?;
+        let stderr_thread = stderr_handle
+            .map(|stream| spawn_process_output_reader("stderr", stream))
+            .transpose()?;
 
-        let status = self.wait()?;
+        let status = match self.wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = self.kill();
+                let _ = self.wait();
+                // Do not join pipe readers on an error path. A descendant
+                // process may have inherited a pipe write end, and blocking
+                // here would turn a wait error into an unbounded hang.
+                drop(stdout_thread);
+                drop(stderr_thread);
+                return Err(error);
+            }
+        };
 
-        let stdout = match stdout_thread {
-            Some(handle) => handle
-                .join()
-                .map_err(|_| io::Error::other("stdout reader thread panicked"))??,
-            None => Vec::new(),
-        };
-        let stderr = match stderr_thread {
-            Some(handle) => handle
-                .join()
-                .map_err(|_| io::Error::other("stderr reader thread panicked"))??,
-            None => Vec::new(),
-        };
+        let stdout = join_process_output_reader(stdout_thread)?;
+        let stderr = join_process_output_reader(stderr_thread)?;
 
         Ok(Output {
             status,
@@ -1308,6 +1299,188 @@ impl Child {
             stderr,
         })
     }
+
+    #[cfg(windows)]
+    async fn wait_with_output_windows_async(mut self, cx: &Cx) -> Result<Output, ProcessError> {
+        // Windows anonymous pipes are blocking handles unless they are
+        // created with overlapped mode. std::process does not expose that
+        // knob, so drain stdout/stderr on bounded helper threads while the
+        // owning async task drives process wait/cancel through wait_async().
+        let stdout_handle = self.stdout.take().map(|handle| handle.inner);
+        let stderr_handle = self.stderr.take().map(|handle| handle.inner);
+        drop(self.stdin.take());
+
+        let stdout_thread = stdout_handle
+            .map(|stream| spawn_process_output_reader("stdout", stream))
+            .transpose()?;
+        let stderr_thread = stderr_handle
+            .map(|stream| spawn_process_output_reader("stderr", stream))
+            .transpose()?;
+
+        let status = match self.wait_async(cx).await {
+            Ok(status) => status,
+            Err(error) => {
+                // Interrupted errors have already run the wait_async()
+                // cancel-drain escalation. Other wait errors may leave the
+                // child alive, so run the same best-effort drain before
+                // returning. Do not join pipe readers here: inherited pipe
+                // write handles in descendants can keep read_to_end() blocked
+                // after the direct child is gone, and cancellation must remain
+                // bounded.
+                let already_drained = matches!(&error, ProcessError::Io(err) if err.kind() == io::ErrorKind::Interrupted);
+                if !already_drained {
+                    self.cancel_drain_child().await;
+                }
+                drop(stdout_thread);
+                drop(stderr_thread);
+                return Err(error);
+            }
+        };
+
+        let (stdout, stderr) =
+            collect_process_output_readers(cx, stdout_thread, stderr_thread).await?;
+
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+#[cfg(windows)]
+struct ProcessOutputReader {
+    stream_name: &'static str,
+    result_rx: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl ProcessOutputReader {
+    fn try_finish(&mut self) -> io::Result<Option<Vec<u8>>> {
+        match self.result_rx.try_recv() {
+            Ok(result) => {
+                self.join_finished_thread()?;
+                result.map(Some)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.join_finished_thread()?;
+                Err(self.reader_exited_without_result())
+            }
+        }
+    }
+
+    fn finish_blocking(mut self) -> io::Result<Vec<u8>> {
+        let result = match self.result_rx.recv() {
+            Ok(result) => result,
+            Err(_) => {
+                self.join_finished_thread()?;
+                return Err(self.reader_exited_without_result());
+            }
+        };
+        self.join_finished_thread()?;
+        result
+    }
+
+    fn reader_exited_without_result(&self) -> io::Error {
+        io::Error::other(format!(
+            "{} reader thread exited without a result",
+            self.stream_name
+        ))
+    }
+
+    fn join_finished_thread(&mut self) -> io::Result<()> {
+        if let Some(handle) = self.handle.take() {
+            handle.join().map_err(|_| {
+                io::Error::other(format!("{} reader thread panicked", self.stream_name))
+            })?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn spawn_process_output_reader(
+    stream_name: &'static str,
+    mut stream: impl Read + Send + 'static,
+) -> io::Result<ProcessOutputReader> {
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let handle = std::thread::Builder::new()
+        .name(format!("asupersync-process-{stream_name}"))
+        .spawn(move || {
+            let mut buf = Vec::new();
+            let result = stream.read_to_end(&mut buf).map(|_| buf);
+            let _ = result_tx.send(result);
+        })
+        .map_err(|err| io::Error::other(format!("failed to spawn {stream_name} reader: {err}")))?;
+
+    Ok(ProcessOutputReader {
+        stream_name,
+        result_rx,
+        handle: Some(handle),
+    })
+}
+
+#[cfg(windows)]
+fn join_process_output_reader(reader: Option<ProcessOutputReader>) -> io::Result<Vec<u8>> {
+    match reader {
+        Some(reader) => reader.finish_blocking(),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[cfg(windows)]
+async fn collect_process_output_readers(
+    cx: &Cx,
+    mut stdout_reader: Option<ProcessOutputReader>,
+    mut stderr_reader: Option<ProcessOutputReader>,
+) -> Result<(Vec<u8>, Vec<u8>), ProcessError> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut backoff_ms = 1u64;
+
+    while stdout_reader.is_some() || stderr_reader.is_some() {
+        if cx.checkpoint().is_err() {
+            drop(stdout_reader);
+            drop(stderr_reader);
+            return Err(ProcessError::Io(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "cancelled",
+            )));
+        }
+
+        let mut progressed = false;
+        if let Some(reader) = stdout_reader.as_mut() {
+            if let Some(bytes) = reader.try_finish()? {
+                stdout = bytes;
+                stdout_reader = None;
+                progressed = true;
+            }
+        }
+        if let Some(reader) = stderr_reader.as_mut() {
+            if let Some(bytes) = reader.try_finish()? {
+                stderr = bytes;
+                stderr_reader = None;
+                progressed = true;
+            }
+        }
+
+        if stdout_reader.is_none() && stderr_reader.is_none() {
+            break;
+        }
+
+        if progressed {
+            backoff_ms = 1;
+            crate::runtime::yield_now().await;
+        } else {
+            let now = crate::time::wall_now();
+            crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
+            backoff_ms = (backoff_ms * 2).min(50);
+        }
+    }
+
+    Ok((stdout, stderr))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -33,7 +33,9 @@ This document covers the `src/process.rs` module and its parity with `tokio::pro
 ### 1.1 Out of Scope
 
 - PTY/terminal session support (PR-G2 — future `process/pty.rs`)
-- Windows-specific process semantics (PR-G3 — Track-I)
+- Windows direct child-pipe `AsyncRead` / `AsyncWrite` trait parity via
+  overlapped handles (PR-G3 — Track-I); Windows `wait_with_output_async()`
+  is runtime-cancel-aware and drains pipes through helper reader threads.
 - Process group management (future enhancement)
 
 ---
@@ -114,9 +116,9 @@ This enables graceful shutdown via `SIGTERM` before resorting to `SIGKILL`.
 |----------|-------------|-------------------|
 | `spawn()` | N/A (sync) | Process created or error |
 | `wait()` | N/A (sync blocking) | Blocks until exit |
-| `wait_async()` | Yes | Process continues running |
+| `wait_async()` | Yes | Child is cancelled, drained, and reaped before returning `Interrupted` |
 | `wait_with_output()` | N/A (sync) | Blocks until drain + exit |
-| `wait_with_output_async()` | Yes | Process continues, pipes may have partial data |
+| `wait_with_output_async()` | Yes | Child is cancelled/drained; pipe readers cannot delay returning `Interrupted` |
 | `kill()` | N/A (sync) | Signal sent or error |
 | `signal()` | N/A (sync) | Signal sent or error |
 | `ChildStdin::poll_write` | Yes | Partial write is fine |
@@ -145,9 +147,22 @@ If the child exits before `wait()` is called:
 
 ### 5.1 Non-Blocking I/O
 
-All child stdio handles are set to `O_NONBLOCK` via `fcntl()` at creation time. This enables:
+On Unix, child stdio handles are set to `O_NONBLOCK` via `fcntl()` at creation time. This enables:
 - Integration with the runtime's reactor via `IoRegistration`
 - `WouldBlock` → register interest → `Pending` pattern in `poll_read`/`poll_write`
+
+On Windows, `std::process` anonymous pipes are blocking handles unless they are
+created with overlapped I/O flags that `std::process::Command` does not expose.
+The Windows `wait_with_output()` path therefore drains stdout/stderr with helper
+reader threads. The Windows `wait_with_output_async()` path uses the same
+readers but drives process ownership through `wait_async(cx)` and polls reader
+completion through `Cx` checkpoints, so parent cancellation still terminates,
+drains, and reaps the child before returning. If cancellation or a wait error
+occurs, the helper readers are not joined on the cancellation path because
+inherited pipe write handles in descendants could otherwise turn cancellation
+into an unbounded wait.
+Direct `ChildStdin` / `ChildStdout` / `ChildStderr` async trait polling on
+Windows remains the narrower PR-G3 Track-I item.
 
 ### 5.2 Pipe Lifecycle
 

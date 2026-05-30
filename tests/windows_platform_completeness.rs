@@ -66,6 +66,10 @@ fn track_i_process_surface_contains_windows_output_path() {
     for token in [
         "#[cfg(windows)]",
         "fn wait_with_output_windows(mut self) -> Result<Output, ProcessError>",
+        "async fn wait_with_output_windows_async(mut self, cx: &Cx) -> Result<Output, ProcessError>",
+        "fn spawn_process_output_reader(",
+        "fn join_process_output_reader(",
+        "async fn collect_process_output_readers(",
     ] {
         assert!(
             process_src.contains(token),
@@ -84,8 +88,27 @@ fn track_i_process_surface_contains_windows_output_path() {
         "wait_with_output must route to windows-specific implementation on Windows"
     );
     assert!(
-        process_src.contains("self.wait_with_output_windows().map_err(io::Error::from)"),
-        "wait_with_output_async must route through windows-specific implementation on Windows"
+        process_src.contains("return self.wait_with_output_windows_async(cx).await;"),
+        "wait_with_output_async must route through the Cx-aware Windows implementation"
+    );
+    assert!(
+        process_src.contains("let status = match self.wait_async(cx).await"),
+        "Windows wait_with_output_async must preserve process cancellation through wait_async"
+    );
+    assert!(
+        process_src
+            .contains("collect_process_output_readers(cx, stdout_thread, stderr_thread).await"),
+        "Windows wait_with_output_async must collect pipe readers through the Cx-aware async drain"
+    );
+    assert!(
+        process_src.contains("if cx.checkpoint().is_err()")
+            && process_src.contains("drop(stdout_reader);")
+            && process_src.contains("drop(stderr_reader);"),
+        "Windows async output draining must keep cancellation bounded while waiting for reader threads"
+    );
+    assert!(
+        !process_src.contains("let _ = cx;\n            return crate::runtime::spawn_blocking_io"),
+        "Windows wait_with_output_async must not discard Cx and block the entire output path"
     );
 }
 
@@ -147,14 +170,16 @@ fn track_i_process_parity_artifacts_mark_windows_as_track_i_scope() {
     let process_json = load_source("docs/tokio_process_lifecycle_parity.json");
 
     assert!(
-        process_md.contains("Windows-specific process semantics (PR-G3 — Track-I)"),
-        "process lifecycle markdown must explicitly defer PR-G3 to Track-I"
+        process_md.contains("Windows direct child-pipe `AsyncRead` / `AsyncWrite` trait parity")
+            && process_md.contains("PR-G3 — Track-I"),
+        "process lifecycle markdown must explicitly narrow and defer PR-G3 to Track-I"
     );
     assert!(
         process_json.contains("\"id\": \"PR-G3\"")
+            && process_json.contains("\"title\": \"Windows direct async child-pipe trait parity\"")
             && process_json
                 .contains("\"deferred_to\": \"Track-I (Windows platform completeness)\""),
-        "process lifecycle json must preserve PR-G3 deferred-to Track-I linkage"
+        "process lifecycle json must preserve narrowed PR-G3 deferred-to Track-I linkage"
     );
 }
 

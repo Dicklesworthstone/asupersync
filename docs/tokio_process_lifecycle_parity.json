@@ -56,7 +56,7 @@
     },
     {
       "id": "PR-G3",
-      "title": "Cross-platform process semantics",
+      "title": "Windows direct async child-pipe trait parity",
       "severity": "Medium",
       "deferred_to": "Track-I (Windows platform completeness)"
     }
@@ -64,8 +64,8 @@
   "cancel_safety": {
     "spawn": "N/A (synchronous)",
     "wait": "N/A (synchronous blocking)",
-    "wait_async": "cancel-safe (process continues running)",
-    "wait_with_output_async": "cancel-safe (process continues, partial data possible)",
+    "wait_async": "cancel-safe (child cancelled, drained, and reaped before Interrupted)",
+    "wait_with_output_async": "cancel-safe (child cancelled/drained; pipe readers cannot delay Interrupted)",
     "kill": "N/A (synchronous)",
     "signal": "N/A (synchronous)",
     "poll_read": "cancel-safe (partial reads fine)",
