@@ -409,6 +409,218 @@ pub(crate) fn try_replayable_system_time() -> Option<std::time::SystemTime> {
     GLOBAL_OBSERVABILITY_CLOCK.get().map(|clock_fn| clock_fn())
 }
 
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+pub(crate) fn parse_http_retry_after(headers: &[(String, String)]) -> Option<std::time::Duration> {
+    parse_http_retry_after_at(headers, replayable_system_time())
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+pub(crate) fn parse_http_retry_after_at(
+    headers: &[(String, String)],
+    now: std::time::SystemTime,
+) -> Option<std::time::Duration> {
+    let value = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .map(|(_, value)| value.trim())?;
+
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(std::time::Duration::from_secs(seconds));
+    }
+
+    let target_seconds = parse_http_date_unix_seconds(value)?;
+    let now_seconds = system_time_unix_seconds(now);
+    if target_seconds <= now_seconds {
+        return Some(std::time::Duration::ZERO);
+    }
+
+    u64::try_from(target_seconds - now_seconds)
+        .ok()
+        .map(std::time::Duration::from_secs)
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn system_time_unix_seconds(time: std::time::SystemTime) -> i64 {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+        Err(err) => {
+            let duration = err.duration();
+            let seconds = i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
+            if duration.subsec_nanos() == 0 {
+                -seconds
+            } else {
+                seconds.saturating_neg().saturating_sub(1)
+            }
+        }
+    }
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn parse_http_date_unix_seconds(value: &str) -> Option<i64> {
+    parse_imf_fixdate(value)
+        .or_else(|| parse_rfc850_date(value))
+        .or_else(|| parse_asctime_date(value))
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn parse_imf_fixdate(value: &str) -> Option<i64> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() != 6 || !parts[0].ends_with(',') || !parts[5].eq_ignore_ascii_case("GMT") {
+        return None;
+    }
+
+    if parts[3].len() != 4 || !parts[3].bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let day = parts[1].parse::<u32>().ok()?;
+    let month = parse_http_month(parts[2])?;
+    let year = parts[3].parse::<i32>().ok()?;
+    let (hour, minute, second) = parse_http_time(parts[4])?;
+    unix_seconds_from_utc(year, month, day, hour, minute, second)
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn parse_rfc850_date(value: &str) -> Option<i64> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() != 4 || !parts[0].ends_with(',') || !parts[3].eq_ignore_ascii_case("GMT") {
+        return None;
+    }
+
+    let date_parts: Vec<&str> = parts[1].split('-').collect();
+    if date_parts.len() != 3 {
+        return None;
+    }
+
+    if date_parts[2].len() != 2 || !date_parts[2].bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let day = date_parts[0].parse::<u32>().ok()?;
+    let month = parse_http_month(date_parts[1])?;
+    let short_year = date_parts[2].parse::<i32>().ok()?;
+    let year = if short_year >= 70 {
+        1900 + short_year
+    } else {
+        2000 + short_year
+    };
+    let (hour, minute, second) = parse_http_time(parts[2])?;
+    unix_seconds_from_utc(year, month, day, hour, minute, second)
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn parse_asctime_date(value: &str) -> Option<i64> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() != 5 {
+        return None;
+    }
+
+    let month = parse_http_month(parts[1])?;
+    let day = parts[2].parse::<u32>().ok()?;
+    let (hour, minute, second) = parse_http_time(parts[3])?;
+    let year = parts[4].parse::<i32>().ok()?;
+    unix_seconds_from_utc(year, month, day, hour, minute, second)
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn parse_http_month(value: &str) -> Option<u32> {
+    match value.to_ascii_lowercase().as_str() {
+        "jan" => Some(1),
+        "feb" => Some(2),
+        "mar" => Some(3),
+        "apr" => Some(4),
+        "may" => Some(5),
+        "jun" => Some(6),
+        "jul" => Some(7),
+        "aug" => Some(8),
+        "sep" => Some(9),
+        "oct" => Some(10),
+        "nov" => Some(11),
+        "dec" => Some(12),
+        _ => None,
+    }
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn parse_http_time(value: &str) -> Option<(u32, u32, u32)> {
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let hour = parts[0].parse::<u32>().ok()?;
+    let minute = parts[1].parse::<u32>().ok()?;
+    let second = parts[2].parse::<u32>().ok()?;
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    Some((hour, minute, second.min(59)))
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn unix_seconds_from_utc(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<i64> {
+    if month == 0 || month > 12 || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day);
+    Some(
+        days.checked_mul(86_400)?
+            .checked_add(i64::from(hour) * 3_600)?
+            .checked_add(i64::from(minute) * 60)?
+            .checked_add(i64::from(second))?,
+    )
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+#[must_use]
+#[cfg(any(test, feature = "metrics"))]
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 #[cfg(test)]
 pub(crate) fn _reset_ambient_fallback_warned_for_test() {
     AMBIENT_FALLBACK_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -748,6 +960,68 @@ mod tests {
         assert!(
             observed.is_some(),
             "with the global clock populated, try_replayable_system_time must return Some"
+        );
+    }
+
+    #[test]
+    fn retry_after_parses_delay_seconds_and_http_date_formats() {
+        fn fixed_time(
+            year: i32,
+            month: u32,
+            day: u32,
+            hour: u32,
+            minute: u32,
+            second: u32,
+        ) -> std::time::SystemTime {
+            let unix_seconds = unix_seconds_from_utc(year, month, day, hour, minute, second)
+                .expect("valid fixed test time");
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_secs(
+                    u64::try_from(unix_seconds).expect("post-epoch time"),
+                )
+        }
+
+        let delay_headers = vec![("Retry-After".to_string(), " 42 ".to_string())];
+        assert_eq!(
+            parse_http_retry_after_at(&delay_headers, std::time::UNIX_EPOCH),
+            Some(std::time::Duration::from_secs(42))
+        );
+
+        let one_minute_before_imf = fixed_time(2015, 10, 21, 7, 27, 0);
+        let one_minute_before_obs = fixed_time(1994, 11, 6, 8, 48, 37);
+
+        for value in [
+            "Wed, 21 Oct 2015 07:28:00 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+        ] {
+            let now = if value.starts_with("Wed") {
+                one_minute_before_imf
+            } else {
+                one_minute_before_obs
+            };
+            let headers = vec![("Retry-After".to_string(), value.to_string())];
+            assert_eq!(
+                parse_http_retry_after_at(&headers, now),
+                Some(std::time::Duration::from_secs(60)),
+                "Retry-After HTTP-date should parse: {value}"
+            );
+        }
+
+        let past_headers = vec![(
+            "Retry-After".to_string(),
+            "Wed, 21 Oct 2015 07:28:00 GMT".to_string(),
+        )];
+        assert_eq!(
+            parse_http_retry_after_at(&past_headers, fixed_time(2015, 10, 21, 7, 29, 0)),
+            Some(std::time::Duration::ZERO),
+            "past Retry-After HTTP-date should allow immediate retry"
+        );
+
+        let malformed_headers = vec![("Retry-After".to_string(), "next Tuesday".to_string())];
+        assert_eq!(
+            parse_http_retry_after_at(&malformed_headers, std::time::UNIX_EPOCH),
+            None
         );
     }
 

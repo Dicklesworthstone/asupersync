@@ -15,7 +15,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     /// OTLP error types for retry classification testing.
     #[derive(Debug, Clone, PartialEq)]
@@ -65,12 +65,10 @@ mod tests {
             200..=299 => Ok(()),
             429 => {
                 // Rate limited - check for Retry-After header
-                let retry_after = response
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                    .and_then(|(_, value)| value.trim().parse::<u64>().ok())
-                    .map(Duration::from_secs);
+                let retry_after = crate::observability::parse_http_retry_after_at(
+                    &response.headers,
+                    SystemTime::now(),
+                );
                 Err(OtlpError::retryable(response.status, retry_after))
             }
             408 => {
@@ -202,13 +200,13 @@ mod tests {
                 "Malformed header should fallback to exponential backoff",
             ),
             (
-                "HTTP Date format (not supported)",
+                "HTTP-date format already elapsed",
                 vec![(
                     "Retry-After".to_string(),
                     "Wed, 21 Oct 2015 07:28:00 GMT".to_string(),
                 )],
-                None,
-                "Date format parsing not implemented - fallback to exponential backoff",
+                Some(Duration::ZERO),
+                "Past HTTP-date allows immediate retry after successful RFC date parsing",
             ),
         ];
 
@@ -494,7 +492,7 @@ mod tests {
         eprintln!("  ✅ Case-insensitive header name matching");
         eprintln!("  ✅ Optional field-value whitespace around delay-seconds handled");
         eprintln!("  ✅ Graceful fallback on malformed values");
-        eprintln!("  ⚠️  HTTP-date format not implemented (acceptable for OTLP)");
+        eprintln!("  ✅ HTTP-date format supported with immediate retry for past dates");
         eprintln!("  ⚠️  Multi-header edge cases may need improvement");
     }
 

@@ -170,6 +170,7 @@ impl PrivacyConfig {
     }
 
     /// Check if a field should be dropped based on privacy configuration.
+    #[cfg(any(test, feature = "tracing-integration"))]
     fn should_drop_field(&self, field_name: &str) -> bool {
         // Check explicit drop lists
         if self.drop_attributes.contains(&field_name.to_string())
@@ -194,6 +195,7 @@ impl PrivacyConfig {
     }
 
     /// Redact PII from field values.
+    #[cfg(any(test, feature = "tracing-integration"))]
     fn redact_pii(&self, _field_name: &str, value: &str) -> String {
         let mut redacted_value = value.to_string();
 
@@ -216,6 +218,7 @@ impl PrivacyConfig {
     }
 
     /// Apply automatic PII detection and redaction.
+    #[cfg(any(test, feature = "tracing-integration"))]
     fn apply_auto_pii_redaction(&self, value: &str) -> String {
         // Email pattern detection
         if value.contains('@') && value.contains('.') && value.len() > 5 {
@@ -2087,11 +2090,7 @@ impl OtlpHttpExporter {
 }
 
 fn parse_otlp_retry_after(headers: &[(String, String)]) -> Option<Duration> {
-    headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
+    crate::observability::parse_http_retry_after(headers)
 }
 
 fn classify_otlp_http_response(status: u16, headers: &[(String, String)]) -> Result<(), OtlpError> {
@@ -4747,7 +4746,7 @@ pub mod span_semantics {
 
     /// br-asupersync-6ofylg — OTel attribute keys are bounded by the
     /// 1 KiB cap from the OTel spec (and most collectors' wire-level
-    /// limits). MockSpan::set_attribute previously truncated only
+    /// limits). The deterministic span recorder previously truncated only
     /// the value, leaving the key path open as an asymmetric
     /// memory-amplification axis when combined with the cardinality
     /// tracker (an attacker-controlled key with fixed prefix
