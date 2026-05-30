@@ -55,11 +55,7 @@ fn conformance_timeout_creation() {
         (0, 0, 0),
         (0, 1, 1_000_000_000),
         (100, 5, 105_000_000_000),
-        (
-            u64::MAX / 2,
-            1,
-            (u64::MAX / 2).saturating_add(1_000_000_000),
-        ),
+        (u64::MAX / 2, 1, u64::MAX),
     ];
 
     for (now_secs, timeout_secs, expected_nanos) in test_cases {
@@ -192,9 +188,10 @@ fn conformance_effective_deadline() {
             existing_secs
         );
 
+        let expected_nanos = RefTime::from_secs(expected_secs).as_nanos();
         assert_eq!(
             ref_result.as_nanos(),
-            expected_secs * 1_000_000_000,
+            expected_nanos,
             "Expected effective deadline mismatch for requested={}, existing={:?}",
             requested_secs,
             existing_secs
@@ -315,7 +312,7 @@ fn conformance_timeout_from_duration() {
             duration_secs
         );
 
-        let expected_nanos = expected_secs * 1_000_000_000;
+        let expected_nanos = RefTime::from_secs(expected_secs).as_nanos();
         assert_eq!(
             ref_result.deadline.map(|d| d.as_nanos()),
             Some(expected_nanos),
