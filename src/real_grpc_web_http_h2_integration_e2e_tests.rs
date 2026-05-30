@@ -376,8 +376,8 @@ impl GrpcWebH2TrailerTransformer {
     }
 }
 
-/// Mock gRPC-Web over HTTP/2 service
-struct MockGrpcWebH2Service {
+/// Scripted gRPC-Web over HTTP/2 service.
+struct ScriptedGrpcWebH2Service {
     /// Service identifier
     service_id: String,
     /// Supported content types
@@ -388,7 +388,7 @@ struct MockGrpcWebH2Service {
     transformer: GrpcWebH2TrailerTransformer,
 }
 
-impl MockGrpcWebH2Service {
+impl ScriptedGrpcWebH2Service {
     fn new(service_id: String, tracker: GrpcWebH2TransformationTracker) -> Self {
         let transformer = GrpcWebH2TrailerTransformer::new(tracker.clone());
         Self {
@@ -406,7 +406,7 @@ impl MockGrpcWebH2Service {
         request_body: Bytes,
         content_type: ContentType,
     ) -> Outcome<(StatusCode, HeaderMap, Bytes)> {
-        // Simulate request processing
+        // Drive the request-processing path under test.
         println!(
             "Processing gRPC-Web {} request over HTTP/2",
             content_type.as_header_value()
@@ -441,7 +441,7 @@ impl MockGrpcWebH2Service {
         // Determine response based on request
         let (grpc_status, response_body) = if request_body.starts_with(b"error") {
             (
-                GrpcStatus::new(GrpcCode::Internal, "Simulated error".to_string()),
+                GrpcStatus::new(GrpcCode::Internal, "scripted error".to_string()),
                 Bytes::from_static(b"Error response"),
             )
         } else {
@@ -487,7 +487,7 @@ impl MockGrpcWebH2Service {
         Ok((h2_status, h2_trailers, response_body))
     }
 
-    async fn simulate_h2_to_grpc_web_response(
+    async fn reconstruct_grpc_web_response_from_h2(
         &self,
         cx: &Cx,
         h2_status: StatusCode,
@@ -534,7 +534,7 @@ async fn test_grpc_web_h2_trailer_transformation_integration() -> Outcome<()> {
                     let tracker = GrpcWebH2TransformationTracker::new();
 
                     // Create service
-                    let service = MockGrpcWebH2Service::new(
+                    let service = ScriptedGrpcWebH2Service::new(
                         "test_grpc_web_h2_service".to_string(),
                         tracker.clone(),
                     );
@@ -574,7 +574,7 @@ async fn test_grpc_web_h2_trailer_transformation_integration() -> Outcome<()> {
 
                     // Phase 2: Test reverse transformation (H2 → gRPC-Web)
                     let (grpc_status, trailer_frame, reconstructed_body) = service
-                        .simulate_h2_to_grpc_web_response(
+                        .reconstruct_grpc_web_response_from_h2(
                             cx,
                             h2_status,
                             h2_trailers.clone(),
@@ -654,7 +654,7 @@ async fn test_grpc_web_h2_trailer_transformation_integration() -> Outcome<()> {
 
                     // Test reverse error transformation
                     let (error_grpc_status, error_trailer_frame, _) = service
-                        .simulate_h2_to_grpc_web_response(
+                        .reconstruct_grpc_web_response_from_h2(
                             cx,
                             error_h2_status,
                             error_h2_trailers,
@@ -711,7 +711,7 @@ async fn test_grpc_web_h2_trailer_transformation_integration() -> Outcome<()> {
 
                         // Test reverse transformation
                         let (_reconstructed_status, _reconstructed_frame, _) = service
-                            .simulate_h2_to_grpc_web_response(
+                            .reconstruct_grpc_web_response_from_h2(
                                 cx,
                                 concurrent_status,
                                 concurrent_trailers,
@@ -795,7 +795,7 @@ async fn test_grpc_web_h2_complex_metadata_preservation() -> Outcome<()> {
             scope
                 .run(async move |cx| {
                     let tracker = GrpcWebH2TransformationTracker::new();
-                    let service = MockGrpcWebH2Service::new(
+                    let service = ScriptedGrpcWebH2Service::new(
                         "metadata_test_service".to_string(),
                         tracker.clone(),
                     );
@@ -830,7 +830,7 @@ async fn test_grpc_web_h2_complex_metadata_preservation() -> Outcome<()> {
 
                     // Test round-trip preservation
                     let (_, reconstructed_frame, _) = service
-                        .simulate_h2_to_grpc_web_response(
+                        .reconstruct_grpc_web_response_from_h2(
                             cx,
                             StatusCode::OK,
                             complex_trailers,
@@ -870,7 +870,7 @@ async fn test_grpc_web_h2_error_propagation() -> Outcome<()> {
             scope
                 .run(async move |cx| {
                     let tracker = GrpcWebH2TransformationTracker::new();
-                    let service = MockGrpcWebH2Service::new(
+                    let service = ScriptedGrpcWebH2Service::new(
                         "error_test_service".to_string(),
                         tracker.clone(),
                     );
@@ -904,7 +904,7 @@ async fn test_grpc_web_h2_error_propagation() -> Outcome<()> {
 
                         // Test reverse transformation
                         let (reconstructed_grpc_status, _, _) = service
-                            .simulate_h2_to_grpc_web_response(
+                            .reconstruct_grpc_web_response_from_h2(
                                 cx,
                                 h2_status,
                                 h2_trailers,

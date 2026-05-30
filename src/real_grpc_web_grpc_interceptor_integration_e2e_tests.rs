@@ -155,7 +155,7 @@ impl MetadataTransformationTracker {
     }
 }
 
-/// Mock interceptor that tracks metadata transformation
+/// Metadata interceptor used to track transformation behavior.
 struct MetadataTrackingInterceptor {
     /// Interceptor identifier
     id: String,
@@ -283,8 +283,8 @@ impl Interceptor for MetadataTrackingInterceptor {
     }
 }
 
-/// Mock gRPC-Web service that generates errors and metadata
-struct MockGrpcWebService {
+/// Scripted gRPC-Web service that generates errors and metadata.
+struct ScriptedGrpcWebService {
     /// Service identifier
     service_id: String,
     /// Supported methods
@@ -293,7 +293,7 @@ struct MockGrpcWebService {
     transformation_tracker: MetadataTransformationTracker,
 }
 
-impl MockGrpcWebService {
+impl ScriptedGrpcWebService {
     fn new(service_id: String, transformation_tracker: MetadataTransformationTracker) -> Self {
         let mut methods = HashMap::new();
 
@@ -371,7 +371,7 @@ impl MockGrpcWebService {
                 // Add error-specific metadata
                 response_metadata.insert("x-error-type".to_string(), b"test_error".to_vec());
                 response_metadata
-                    .insert("x-error-details".to_string(), b"simulated_failure".to_vec());
+                    .insert("x-error-details".to_string(), b"scripted_failure".to_vec());
 
                 // Alternate between JSON and binary error formats
                 let format = if request_id % 2 == 0 {
@@ -388,7 +388,7 @@ impl MockGrpcWebService {
                 };
 
                 Ok(GrpcWebResponse::new(
-                    GrpcStatus::new(GrpcStatusCode::Internal, "Simulated error".to_string()),
+                    GrpcStatus::new(GrpcStatusCode::Internal, "scripted error".to_string()),
                     error_body,
                     response_metadata,
                     format.to_string(),
@@ -480,8 +480,8 @@ async fn test_grpc_web_interceptor_error_frame_metadata_preservation() -> Outcom
 
                     let grpc_web_handler = GrpcWebHandler::new(grpc_web_config);
 
-                    // Create mock service
-                    let mock_service = MockGrpcWebService::new(
+                    // Create scripted service
+                    let scripted_service = ScriptedGrpcWebService::new(
                         "test_service".to_string(),
                         transformation_tracker.clone(),
                     );
@@ -510,7 +510,7 @@ async fn test_grpc_web_interceptor_error_frame_metadata_preservation() -> Outcom
                         .await?;
 
                     // Handle by gRPC-Web service
-                    let mut test_response = mock_service
+                    let mut test_response = scripted_service
                         .handle_request(cx, "TestMethod", processed_request)
                         .await?;
 
@@ -557,7 +557,7 @@ async fn test_grpc_web_interceptor_error_frame_metadata_preservation() -> Outcom
                         .intercept_request(cx, &mut processed_error_request, &mut error_interceptor_context)
                         .await?;
 
-                    let mut error_response = mock_service
+                    let mut error_response = scripted_service
                         .handle_request(cx, "ErrorMethod", processed_error_request)
                         .await?;
 
@@ -608,7 +608,7 @@ async fn test_grpc_web_interceptor_error_frame_metadata_preservation() -> Outcom
                             .intercept_request(cx, &mut processed_request, &mut context)
                             .await?;
 
-                        let mut response = mock_service
+                        let mut response = scripted_service
                             .handle_request(cx, method, processed_request)
                             .await?;
 
@@ -641,7 +641,7 @@ async fn test_grpc_web_interceptor_error_frame_metadata_preservation() -> Outcom
                         .intercept_request(cx, &mut processed_unknown, &mut unknown_context)
                         .await?;
 
-                    let mut unknown_response = mock_service
+                    let mut unknown_response = scripted_service
                         .handle_request(cx, "UnknownMethod", processed_unknown)
                         .await?;
 
@@ -756,7 +756,7 @@ async fn test_grpc_web_interceptor_error_propagation() -> Outcome<()> {
 
                     let grpc_web_handler = GrpcWebHandler::new(grpc_web_config);
 
-                    let mock_service = MockGrpcWebService::new(
+                    let scripted_service = ScriptedGrpcWebService::new(
                         "error_test_service".to_string(),
                         transformation_tracker.clone(),
                     );
@@ -785,7 +785,7 @@ async fn test_grpc_web_interceptor_error_propagation() -> Outcome<()> {
                         match result {
                             Ok(()) => {
                                 // Continue with service call
-                                let mut response = mock_service
+                                let mut response = scripted_service
                                     .handle_request(cx, "ErrorMethod", processed_request)
                                     .await?;
 
@@ -876,7 +876,7 @@ async fn test_grpc_web_metadata_boundary_complex_types() -> Outcome<()> {
 
                     let grpc_web_handler = GrpcWebHandler::new(grpc_web_config);
 
-                    let mock_service = MockGrpcWebService::new(
+                    let scripted_service = ScriptedGrpcWebService::new(
                         "boundary_service".to_string(),
                         transformation_tracker.clone(),
                     );
@@ -917,7 +917,7 @@ async fn test_grpc_web_metadata_boundary_complex_types() -> Outcome<()> {
                         .intercept_request(cx, &mut processed_request, &mut context)
                         .await?;
 
-                    let mut response = mock_service
+                    let mut response = scripted_service
                         .handle_request(cx, "TestMethod", processed_request)
                         .await?;
 

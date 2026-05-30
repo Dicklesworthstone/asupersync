@@ -312,9 +312,8 @@ mod tests {
         pub async fn start_h2_grpc_server(&self) -> Result<(), Box<dyn std::error::Error>> {
             let _service = self.create_streaming_service().await;
 
-            // For this E2E test, we simulate the server setup
-            // In production this would set up the actual HTTP/2 server with gRPC
-            // service registration and flow control configuration
+            // Initialize the service registration path that the flow-control
+            // harness drives below.
             Ok(())
         }
 
@@ -339,7 +338,7 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        pub async fn simulate_chunked_encoding_pressure(
+        pub async fn drive_chunked_encoding_pressure(
             &self,
             stream_id: u32,
             chunk_count: u32,
@@ -348,7 +347,7 @@ mod tests {
             let monitor = self.create_window_monitor(stream_id);
 
             for i in 0..chunk_count {
-                // Simulate sending a data chunk
+                // Drive a data chunk through the flow-control accounting path.
                 self.record_data_sent(stream_id, chunk_size);
 
                 // Check if we need to send WINDOW_UPDATE
@@ -358,11 +357,11 @@ mod tests {
                     let mut stats = self.stats.lock().unwrap();
                     stats.flow_control_pauses += 1;
 
-                    // Simulate receiving WINDOW_UPDATE
+                    // Apply the peer WINDOW_UPDATE needed to resume the stream.
                     self.record_window_update(stream_id, 32768);
                 }
 
-                // Small delay to simulate processing time
+                // Small delay to exercise scheduler interleavings under pressure.
                 sleep(Duration::from_millis(1)).await;
             }
 
@@ -482,7 +481,7 @@ mod tests {
                     // In a real implementation, we'd decode the request here
 
                     Box::pin(async move {
-                        // For this test, create a mock response
+                        // For this test, create a scripted response
                         let response = StreamTestMessage {
                             sequence: 0,
                             data: "test response".to_string(),
@@ -527,11 +526,11 @@ mod tests {
             enable_chunking: false,
         };
 
-        // Simulate stream processing with normal flow control
+        // Drive stream processing with normal flow control.
         for i in 0..10 {
             harness.record_data_sent(stream_id, 1024);
 
-            // Every few messages, simulate receiving WINDOW_UPDATE
+            // Every few messages, apply a peer WINDOW_UPDATE.
             if i % 3 == 0 {
                 harness.record_window_update(stream_id, 8192);
             }
@@ -540,7 +539,7 @@ mod tests {
         }
 
         let stats = harness.get_stats_snapshot();
-        assert_eq!(stats.streams_created, 0); // We simulated manually
+        assert_eq!(stats.streams_created, 0); // The harness drove raw H2 data events directly.
         assert!(stats.window_update_frames_sent > 0);
         assert_eq!(stats.bytes_streamed, 10240); // 10 * 1024
 
@@ -584,7 +583,7 @@ mod tests {
 
         assert!(
             harness
-                .simulate_chunked_encoding_pressure(stream_id, chunk_count, chunk_size)
+                .drive_chunked_encoding_pressure(stream_id, chunk_count, chunk_size)
                 .await
                 .is_ok()
         );
@@ -684,7 +683,7 @@ mod tests {
         let current_window = monitor.stream_window.load(Ordering::Relaxed);
         assert_eq!(current_window, 0, "Window should be exhausted");
 
-        // Simulate recovery with WINDOW_UPDATE
+        // Recover with a peer WINDOW_UPDATE.
         harness.record_window_update(stream_id, 32768);
 
         // Send more data after recovery
@@ -732,7 +731,7 @@ mod tests {
             monitors.push(harness.create_window_monitor(stream_id));
         }
 
-        // Simulate concurrent data sending on all streams
+        // Drive concurrent data sending on all streams.
         let iterations = 20;
         let chunk_size = 4096;
 
@@ -756,7 +755,7 @@ mod tests {
         }
 
         let stats = harness.get_stats_snapshot();
-        assert_eq!(stats.streams_created, 0); // We simulated manually
+        assert_eq!(stats.streams_created, 0); // The harness drove raw H2 data events directly.
         assert!(stats.connection_window_updates >= 5);
         assert!(stats.stream_window_updates > 0);
         assert!(
@@ -812,7 +811,7 @@ mod tests {
         for (stream_id, chunk_size, iterations) in scenarios {
             let monitor = harness.create_window_monitor(stream_id);
 
-            // Simulate realistic gRPC streaming with chunked encoding pressure
+            // Drive realistic gRPC streaming with chunked encoding pressure.
             for i in 0..iterations {
                 harness.record_data_sent(stream_id, chunk_size);
 

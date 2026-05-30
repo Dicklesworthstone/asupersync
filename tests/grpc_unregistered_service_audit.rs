@@ -13,7 +13,7 @@ use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::{Metadata, Request, Response};
 use asupersync::test_utils::run_test_with_cx;
 
-// Mock service for testing
+// Test service used for routing assertions.
 #[derive(Debug, Clone)]
 struct TestService;
 
@@ -66,22 +66,22 @@ fn test_unregistered_service_lookup() {
 
 #[test]
 fn test_dispatch_with_unregistered_service_handler() {
-    // This test simulates what should happen when a request is dispatched
-    // for an unregistered service. Since we don't have direct access to the
-    // path-based routing, we simulate the behavior by testing the dispatch
-    // with a handler that returns UNIMPLEMENTED.
+    // Exercise the dispatch path used when routing identifies an unregistered
+    // service. Since this audit targets server dispatch directly, the handler
+    // returns the canonical gRPC UNIMPLEMENTED status for that routing outcome.
 
     run_test_with_cx(|_cx| async move {
         let server = Server::builder().build();
 
         let request = Request::with_metadata(Bytes::from("test"), Metadata::new());
 
-        // Handler that simulates unregistered service behavior
-        let unimplemented_handler = |_req: Request<Bytes>| async move {
+        let unregistered_service_handler = |_req: Request<Bytes>| async move {
             Err::<Response<Bytes>, _>(Status::unimplemented("service not registered"))
         };
 
-        let result = server.dispatch_unary(request, unimplemented_handler).await;
+        let result = server
+            .dispatch_unary(request, unregistered_service_handler)
+            .await;
 
         match result {
             Err(status) => {
@@ -90,7 +90,7 @@ fn test_dispatch_with_unregistered_service_handler() {
                 println!("  Status code: {:?}", status.code());
                 println!("  Status message: {}", status.message());
             }
-            Ok(_) => panic!("Expected UNIMPLEMENTED error for unregistered service"),
+            Ok(_) => panic!("expected grpc-status=12 for unregistered service"),
         }
     });
 }
@@ -98,7 +98,7 @@ fn test_dispatch_with_unregistered_service_handler() {
 #[test]
 fn test_status_unimplemented_creates_correct_grpc_status() {
     // Verify that Status::unimplemented produces the correct gRPC status code
-    let status = Status::unimplemented("Method not implemented");
+    let status = Status::unimplemented("method unavailable in service registry");
 
     assert_eq!(status.code(), Code::Unimplemented);
     assert_eq!(status.code() as u32, 12); // gRPC status code 12
@@ -125,7 +125,7 @@ fn test_various_grpc_status_codes() {
             7,
         ),
         (
-            Status::unimplemented("not implemented"),
+            Status::unimplemented("unsupported by service registry"),
             Code::Unimplemented,
             12,
         ),

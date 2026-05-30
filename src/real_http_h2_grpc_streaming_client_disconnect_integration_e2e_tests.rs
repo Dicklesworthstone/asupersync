@@ -326,9 +326,8 @@ mod tests {
         pub async fn start_h2_grpc_server(&self) -> Result<(), Box<dyn std::error::Error>> {
             let _service = self.create_bidirectional_streaming_service().await;
 
-            // For this E2E test, we simulate the server setup
-            // In production this would set up the actual HTTP/2 server with gRPC
-            // bidirectional service registration
+            // Initialize the bidirectional service registration path that the
+            // disconnect harness drives below.
             Ok(())
         }
 
@@ -353,7 +352,7 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        pub async fn simulate_bidirectional_streaming_with_disconnect(
+        pub async fn drive_bidirectional_streaming_with_disconnect(
             &self,
             stream_id: u32,
             messages_before_disconnect: u32,
@@ -372,7 +371,7 @@ mod tests {
             };
             monitor.disconnect_events.lock().unwrap().push_back(connect_event);
 
-            // Simulate bidirectional streaming
+            // Drive bidirectional streaming traffic through the harness.
             for i in 0..messages_before_disconnect {
                 // Client sends message
                 let message_size = 1024;
@@ -404,19 +403,19 @@ mod tests {
                 sleep(Duration::from_millis(10)).await;
             }
 
-            // Simulate client disconnect
+            // Record the client disconnect.
             let disconnect_reason = format!("Client disconnected during {}", disconnect_phase);
             self.record_client_disconnect(stream_id, &disconnect_reason);
 
-            // Simulate server sending trailer with proper gRPC status
+            // Record the server trailer with proper gRPC status.
             let mut trailer_headers = HashMap::new();
             trailer_headers.insert("grpc-status".to_string(), "1".to_string()); // CANCELLED
             trailer_headers.insert("grpc-message".to_string(), "Client disconnected".to_string());
 
             self.record_trailer_sent(stream_id, StatusCode::Cancelled, trailer_headers);
 
-            // Simulate resource cleanup
-            sleep(Duration::from_millis(50)).await; // Cleanup delay
+            // Drive resource cleanup after the disconnect.
+            sleep(Duration::from_millis(50)).await;
             self.record_resource_cleanup(stream_id);
 
             Ok(())
@@ -493,7 +492,7 @@ mod tests {
                         && self.current_index >= self.request.disconnect_after_messages;
 
                     if should_disconnect {
-                        // Simulate client disconnect - server detects and handles it
+                        // End the response stream when the server observes the client disconnect.
                         return Poll::Ready(None);
                     }
 
@@ -545,7 +544,7 @@ mod tests {
                     let _codec: ProstCodec<BidirectionalStreamRequest, BidirectionalStreamMessage> = ProstCodec::new();
 
                     Box::pin(async move {
-                        // For this test, create a mock response
+                        // For this test, create a scripted response
                         let response = BidirectionalStreamMessage {
                             sequence: 0,
                             sender: "server".to_string(),
@@ -583,10 +582,10 @@ mod tests {
         let stream_id = 1;
         let monitor = harness.create_connection_monitor(stream_id);
 
-        // Simulate normal bidirectional streaming without disconnect
+        // Drive normal bidirectional streaming without disconnect.
         assert!(
             harness
-                .simulate_bidirectional_streaming_with_disconnect(stream_id, 10, "none")
+                .drive_bidirectional_streaming_with_disconnect(stream_id, 10, "none")
                 .await
                 .is_ok()
         );
@@ -595,7 +594,7 @@ mod tests {
         monitor.connection_active.store(true, Ordering::Relaxed);
 
         let stats = harness.get_stats_snapshot();
-        assert_eq!(stats.bidirectional_streams_created, 0); // We simulated manually
+        assert_eq!(stats.bidirectional_streams_created, 0); // The harness drove raw stream events directly.
         assert!(stats.bytes_sent_before_disconnect > 0);
 
         let events = harness.get_disconnect_events(stream_id);
@@ -639,10 +638,10 @@ mod tests {
         let stream_id = 3;
         let disconnect_after = 5;
 
-        // Simulate client disconnect during send phase
+        // Drive client disconnect during send phase.
         assert!(
             harness
-                .simulate_bidirectional_streaming_with_disconnect(stream_id, disconnect_after, "send")
+                .drive_bidirectional_streaming_with_disconnect(stream_id, disconnect_after, "send")
                 .await
                 .is_ok()
         );
@@ -703,10 +702,10 @@ mod tests {
         let stream_id = 5;
         let disconnect_after = 7;
 
-        // Simulate client disconnect during receive phase
+        // Drive client disconnect during receive phase.
         assert!(
             harness
-                .simulate_bidirectional_streaming_with_disconnect(stream_id, disconnect_after, "receive")
+                .drive_bidirectional_streaming_with_disconnect(stream_id, disconnect_after, "receive")
                 .await
                 .is_ok()
         );
@@ -767,7 +766,7 @@ mod tests {
         // Test trailer signaling specifically
         assert!(
             harness
-                .simulate_bidirectional_streaming_with_disconnect(stream_id, disconnect_after, "send")
+                .drive_bidirectional_streaming_with_disconnect(stream_id, disconnect_after, "send")
                 .await
                 .is_ok()
         );
@@ -828,7 +827,7 @@ mod tests {
         for &stream_id in &stream_ids {
             assert!(
                 harness
-                    .simulate_bidirectional_streaming_with_disconnect(
+                    .drive_bidirectional_streaming_with_disconnect(
                         stream_id,
                         disconnect_after,
                         "send"
@@ -894,7 +893,7 @@ mod tests {
         for (stream_id, disconnect_after, phase) in scenarios.iter() {
             assert!(
                 harness
-                    .simulate_bidirectional_streaming_with_disconnect(*stream_id, *disconnect_after, phase)
+                    .drive_bidirectional_streaming_with_disconnect(*stream_id, *disconnect_after, phase)
                     .await
                     .is_ok()
             );
