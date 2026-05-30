@@ -492,20 +492,23 @@ fn bench_local_queue_push_many(c: &mut Criterion) {
 fn bench_global_queue(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/global_queue");
 
-    // Single push/pop
+    // br-asupersync-uro906 (gauntlet PERF-NEW): reuse ONE GlobalQueue across iterations
+    // instead of constructing/dropping a fresh one per iteration. The per-iteration churn
+    // built and tore down a fresh FaaArrayQueue -> peril -> os-thread-local 0.1.3 hazard-
+    // pointer TLS registration each time, tripping os-thread-local's `left == right`
+    // registry assertion mid-suite (left:11, right:0). Production holds a single long-lived
+    // Arc<GlobalQueue> per runtime, so a warm reused queue is the representative measurement.
+
+    // Single push/pop (balanced -> queue stays empty across iterations)
     group.bench_function("push_pop_single", |b: &mut criterion::Bencher| {
-        b.iter_batched(
-            GlobalQueue::new,
-            |queue| {
-                queue.push(task(1));
-                let result = queue.pop();
-                black_box(result)
-            },
-            BatchSize::SmallInput,
-        )
+        let queue = GlobalQueue::new();
+        b.iter(|| {
+            queue.push(task(1));
+            black_box(queue.pop())
+        })
     });
 
-    // Batch operations
+    // Batch operations (shared queue drained in untimed setup -> timed routine is push-only)
     for &count in &[10, 100, 1000] {
         group.throughput(Throughput::Elements(count));
         group.bench_with_input(
@@ -513,9 +516,13 @@ fn bench_global_queue(c: &mut Criterion) {
             &count,
             |b, &count| {
                 let task_ids = tasks(count as usize);
+                let queue = GlobalQueue::new();
                 b.iter_batched(
-                    || (GlobalQueue::new(), task_ids.clone()),
-                    |(queue, tasks)| {
+                    || {
+                        while queue.pop().is_some() {}
+                        task_ids.clone()
+                    },
+                    |tasks| {
                         for t in &tasks {
                             queue.push(*t);
                         }
@@ -527,7 +534,7 @@ fn bench_global_queue(c: &mut Criterion) {
         );
     }
 
-    // FIFO ordering verification (pop all after push all)
+    // FIFO ordering verification (push all then pop all -> self-draining, reuse one queue)
     for &count in &[10, 100, 1000] {
         group.throughput(Throughput::Elements(count));
         group.bench_with_input(
@@ -535,18 +542,15 @@ fn bench_global_queue(c: &mut Criterion) {
             &count,
             |b, &count| {
                 let task_ids = tasks(count as usize);
-                b.iter_batched(
-                    || (GlobalQueue::new(), task_ids.clone()),
-                    |(queue, tasks)| {
-                        for t in &tasks {
-                            queue.push(*t);
-                        }
-                        for _ in 0..tasks.len() {
-                            let _ = black_box(queue.pop());
-                        }
-                    },
-                    BatchSize::SmallInput,
-                )
+                let queue = GlobalQueue::new();
+                b.iter(|| {
+                    for t in &task_ids {
+                        queue.push(*t);
+                    }
+                    for _ in 0..task_ids.len() {
+                        let _ = black_box(queue.pop());
+                    }
+                })
             },
         );
     }
