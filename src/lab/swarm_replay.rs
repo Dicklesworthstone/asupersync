@@ -9,7 +9,10 @@
 use super::config::LabConfig;
 use super::runtime::{LabRunReport, LabRuntime};
 use crate::cx::Cx;
-use crate::types::{Budget, CancelReason, RegionId, TaskId};
+use crate::types::{
+    Budget, CancelReason, CapabilityBudget, CapabilityBudgetDimension,
+    CapabilityBudgetRequirements, RegionId, TaskId,
+};
 use crate::util::DetRng;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -74,6 +77,21 @@ pub struct SwarmReplayScenario {
     pub cancellation_tree_depth: usize,
     /// Modeled proof/trace artifact bytes emitted by a completed task.
     pub artifact_bytes_per_task: usize,
+    /// Optional per-region runnable-task admission limit.
+    ///
+    /// `None` admits every modeled task in the region. `Some(0)` models an
+    /// empty runnable-task budget and must fail closed without scheduling work.
+    pub region_task_admission_limit: Option<usize>,
+    /// Decision used when requested region work exceeds the admission limit.
+    pub region_over_limit_decision: SwarmReplayAdmissionDecision,
+    /// Modeled memory envelope consumed by each admitted task.
+    pub region_memory_bytes_per_task: u64,
+    /// Modeled queue-depth envelope consumed by each admitted task.
+    pub region_queue_depth_units_per_task: u64,
+    /// Modeled blocking-pool submission envelope consumed by each admitted task.
+    pub region_blocking_pool_units_per_task: u64,
+    /// Modeled cleanup/drain poll quota consumed by each admitted task.
+    pub region_cleanup_poll_quota_per_task: u64,
     /// Scheduler steps to run before issuing a cancellation cascade.
     ///
     /// `None` means the scenario runs to normal quiescence without an explicit
@@ -102,6 +120,12 @@ impl Default for SwarmReplayScenario {
             timer_ticks_per_task: 1,
             cancellation_tree_depth: 2,
             artifact_bytes_per_task: 256,
+            region_task_admission_limit: None,
+            region_over_limit_decision: SwarmReplayAdmissionDecision::Shed,
+            region_memory_bytes_per_task: 1024,
+            region_queue_depth_units_per_task: 1,
+            region_blocking_pool_units_per_task: 1,
+            region_cleanup_poll_quota_per_task: 1,
             cancel_after_steps: Some(3),
             max_steps: 10_000,
         }
@@ -179,6 +203,13 @@ impl SwarmReplayScenario {
                 });
             }
         }
+        if let Some(limit) = self.region_task_admission_limit {
+            if limit < self.tasks_per_region
+                && self.region_over_limit_decision == SwarmReplayAdmissionDecision::Accept
+            {
+                return Err(SwarmReplayError::InvalidOverLimitAcceptDecision);
+            }
+        }
 
         self.artifact_bytes_per_task
             .checked_mul(task_count)
@@ -198,6 +229,22 @@ impl SwarmReplayScenario {
         self.timer_ticks_per_task
             .checked_mul(task_count)
             .ok_or(SwarmReplayError::TimerTickCountOverflow)?;
+        self.region_memory_bytes_per_task
+            .checked_mul(task_count as u64)
+            .ok_or(SwarmReplayError::RegionBudgetUnitOverflow)?;
+        self.region_queue_depth_units_per_task
+            .checked_mul(task_count as u64)
+            .ok_or(SwarmReplayError::RegionBudgetUnitOverflow)?;
+        self.region_blocking_pool_units_per_task
+            .checked_mul(task_count as u64)
+            .ok_or(SwarmReplayError::RegionBudgetUnitOverflow)?;
+        let cleanup_quota = self
+            .region_cleanup_poll_quota_per_task
+            .checked_mul(task_count as u64)
+            .ok_or(SwarmReplayError::RegionBudgetUnitOverflow)?;
+        if cleanup_quota > u64::from(u32::MAX) {
+            return Err(SwarmReplayError::RegionCleanupPollQuotaOverflow);
+        }
 
         Ok(())
     }
@@ -290,6 +337,12 @@ pub enum SwarmReplayError {
     ObligationCountOverflow,
     /// Modeled timer accounting overflowed `usize`.
     TimerTickCountOverflow,
+    /// Modeled region capability-budget unit accounting overflowed `u64`.
+    RegionBudgetUnitOverflow,
+    /// Modeled cleanup poll quota cannot fit the runtime budget type.
+    RegionCleanupPollQuotaOverflow,
+    /// Over-limit admission cannot use the accept decision.
+    InvalidOverLimitAcceptDecision,
     /// Region creation was rejected by the runtime state.
     RegionCreateRejected {
         /// Scenario region ordinal.
@@ -385,6 +438,15 @@ impl fmt::Display for SwarmReplayError {
             }
             Self::ObligationCountOverflow => f.write_str("obligation count overflowed usize"),
             Self::TimerTickCountOverflow => f.write_str("timer tick count overflowed usize"),
+            Self::RegionBudgetUnitOverflow => {
+                f.write_str("region capability-budget unit count overflowed u64")
+            }
+            Self::RegionCleanupPollQuotaOverflow => {
+                f.write_str("region cleanup poll quota exceeds u32::MAX")
+            }
+            Self::InvalidOverLimitAcceptDecision => {
+                f.write_str("over-limit admission decision cannot be accept")
+            }
             Self::RegionCreateRejected {
                 region_index,
                 reason,
@@ -407,6 +469,14 @@ impl std::error::Error for SwarmReplayError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwarmReplayEventKind {
+    /// A region admission was accepted.
+    AdmissionAccepted,
+    /// A region admission deferred excess work.
+    AdmissionDeferred,
+    /// A region admission shed excess work.
+    AdmissionShed,
+    /// A region admission cancelled admitted work to drain safely.
+    AdmissionCancelled,
     /// A task was inserted into the lab scheduler.
     TaskScheduled,
     /// A task modeled bounded channel reservation pressure.
@@ -442,14 +512,96 @@ pub struct SwarmReplayEvent {
     pub kind: SwarmReplayEventKind,
     /// Region ordinal from the scenario.
     pub region_index: usize,
+    /// Runtime region id when the event has an admitted region.
+    pub region_id: Option<u64>,
     /// Task ordinal within the region when the event is task-local.
     pub task_index: Option<usize>,
     /// Global task ordinal when the event is task-local.
     pub global_task_index: Option<usize>,
+    /// Budget class associated with admission events.
+    pub budget_class: Option<SwarmReplayBudgetClass>,
     /// Modeled queue depth after this event.
     pub queue_depth: usize,
     /// Modeled artifact bytes associated with this event.
     pub artifact_bytes: usize,
+}
+
+/// Budget class surfaced by deterministic region-admission evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayBudgetClass {
+    /// Runnable task slots in a region.
+    RunnableTaskSlots,
+    /// Region-local queue-depth envelope.
+    QueueDepth,
+    /// Region memory-estimate envelope.
+    MemoryEnvelope,
+    /// Blocking-pool submission envelope.
+    BlockingPoolSubmissions,
+    /// Cleanup/drain work budget.
+    CleanupDrainWork,
+    /// Artifact/proof byte envelope.
+    ArtifactBytes,
+}
+
+/// Region admission decision surfaced in swarm replay evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayAdmissionDecision {
+    /// Admit all requested work.
+    Accept,
+    /// Defer over-limit work for a later wave.
+    Defer,
+    /// Shed over-limit work.
+    #[default]
+    Shed,
+    /// Cancel admitted prefix work so the region drains safely.
+    Cancel,
+}
+
+/// Drain result associated with an admission decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayAdmissionDrainResult {
+    /// No cancellation/drain step was required.
+    NotRequired,
+    /// Admission failed before a child region was allocated.
+    RefusedBeforeRegion,
+    /// Cancellation was requested and the runtime still needs to report.
+    CancellationRequested,
+    /// Cancellation was requested and the lab run reached quiescence.
+    Quiescent,
+}
+
+/// Byte-stable admission evidence for one region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayAdmissionRecord {
+    /// Region ordinal from the scenario.
+    pub region_index: usize,
+    /// Runtime region id, absent when admission failed before region creation.
+    pub region_id: Option<u64>,
+    /// Budget class that made the admission decision.
+    pub budget_class: SwarmReplayBudgetClass,
+    /// Final admission decision.
+    pub decision: SwarmReplayAdmissionDecision,
+    /// Requested tasks for this region.
+    pub requested_tasks: usize,
+    /// Tasks admitted and scheduled for this region.
+    pub admitted_tasks: usize,
+    /// Tasks rejected/deferred/shed/cancelled by admission.
+    pub rejected_tasks: usize,
+    /// Remaining runnable-task slots before admission.
+    pub before_remaining_units: usize,
+    /// Remaining runnable-task slots after admission.
+    pub after_remaining_units: usize,
+    /// Refusal reason from capability-budget planning, if any.
+    pub refusal: Option<String>,
+    /// Whether admission requested runtime cancellation.
+    pub cancellation_requested: bool,
+    /// Cancellation/drain result for this admission record.
+    pub drain_result: SwarmReplayAdmissionDrainResult,
+    /// Runtime quiescence verdict after the lab run.
+    pub quiescence_verdict: bool,
 }
 
 /// Terminal task status recorded by the scenario.
@@ -1738,6 +1890,16 @@ pub struct SwarmReplaySummary {
     pub task_count: usize,
     /// Number of tasks scheduled into the lab runtime.
     pub scheduled_task_count: usize,
+    /// Number of tasks admitted by region admission control.
+    pub admitted_task_count: usize,
+    /// Number of tasks rejected by region admission control.
+    pub rejected_task_count: usize,
+    /// Number of tasks deferred by region admission control.
+    pub deferred_task_count: usize,
+    /// Number of tasks shed by region admission control.
+    pub shed_task_count: usize,
+    /// Number of tasks rejected by an admission-cancel decision.
+    pub admission_cancelled_task_count: usize,
     /// Number of cancellation requests scheduled into cancel lanes.
     pub cancellation_requests: usize,
     /// Number of tasks that reached a terminal state by the end of the run.
@@ -1794,6 +1956,70 @@ pub struct SwarmReplaySummary {
     pub task_outcomes: Vec<SwarmReplayTaskOutcome>,
     /// Deterministic shrink hint for replay minimization.
     pub shrink_hint: SwarmReplayShrinkHint,
+    /// Region-level admission evidence.
+    pub admission_records: Vec<SwarmReplayAdmissionRecord>,
+}
+
+fn region_admission_requirements() -> CapabilityBudgetRequirements {
+    CapabilityBudgetRequirements::new()
+        .require_cpu_units()
+        .require_memory_bytes()
+        .require_io_bytes()
+        .require_cleanup()
+        .require_artifact_bytes()
+}
+
+fn region_capability_budget(
+    scenario: &SwarmReplayScenario,
+    admitted_tasks: usize,
+) -> CapabilityBudget {
+    let admitted = admitted_tasks as u64;
+    let memory_bytes = scenario
+        .region_memory_bytes_per_task
+        .saturating_mul(admitted);
+    let io_bytes = scenario
+        .region_queue_depth_units_per_task
+        .saturating_mul(admitted)
+        .saturating_add(
+            scenario
+                .region_blocking_pool_units_per_task
+                .saturating_mul(admitted),
+        );
+    let cleanup_quota = scenario
+        .region_cleanup_poll_quota_per_task
+        .saturating_mul(admitted)
+        .min(u64::from(u32::MAX)) as u32;
+    let artifact_bytes = (scenario.artifact_bytes_per_task as u64).saturating_mul(admitted);
+
+    CapabilityBudget::new()
+        .with_cpu_units(admitted)
+        .with_memory_bytes(memory_bytes)
+        .with_io_bytes(io_bytes)
+        .with_cleanup_budget(Budget::new().with_poll_quota(cleanup_quota))
+        .with_artifact_bytes(artifact_bytes)
+}
+
+fn admission_event_kind(decision: SwarmReplayAdmissionDecision) -> SwarmReplayEventKind {
+    match decision {
+        SwarmReplayAdmissionDecision::Accept => SwarmReplayEventKind::AdmissionAccepted,
+        SwarmReplayAdmissionDecision::Defer => SwarmReplayEventKind::AdmissionDeferred,
+        SwarmReplayAdmissionDecision::Shed => SwarmReplayEventKind::AdmissionShed,
+        SwarmReplayAdmissionDecision::Cancel => SwarmReplayEventKind::AdmissionCancelled,
+    }
+}
+
+fn primary_budget_class_for_refusal(reason: &str) -> SwarmReplayBudgetClass {
+    if reason.contains(CapabilityBudgetDimension::MemoryBytes.as_str()) {
+        SwarmReplayBudgetClass::MemoryEnvelope
+    } else if reason.contains(CapabilityBudgetDimension::IoBytes.as_str()) {
+        SwarmReplayBudgetClass::QueueDepth
+    } else if reason.contains(CapabilityBudgetDimension::Cleanup.as_str()) {
+        SwarmReplayBudgetClass::CleanupDrainWork
+    } else if reason.contains(CapabilityBudgetDimension::ArtifactBytes.as_str()) {
+        SwarmReplayBudgetClass::ArtifactBytes
+    } else {
+        SwarmReplayBudgetClass::RunnableTaskSlots
+    }
 }
 
 /// Run a deterministic swarm replay scenario through [`LabRuntime`].
@@ -1814,20 +2040,101 @@ pub fn run_swarm_replay_scenario(
     let mut region_ids = Vec::with_capacity(scenario.region_count);
     let mut scheduled_tasks = Vec::with_capacity(scenario.task_count());
     let mut tracked_tasks = Vec::with_capacity(scenario.task_count());
+    let mut admission_records = Vec::with_capacity(scenario.region_count);
+    let mut admission_cancel_regions = Vec::new();
 
     let scenario_root = runtime.state.create_root_region(Budget::INFINITE);
 
     for region_index in 0..scenario.region_count {
-        let region = runtime
-            .state
-            .create_child_region(scenario_root, Budget::INFINITE)
-            .map_err(|err| SwarmReplayError::RegionCreateRejected {
-                region_index,
-                reason: format!("{err:?}"), // ubs:ignore - error path only
-            })?;
-        region_ids.push(region);
+        let requested_tasks = scenario.tasks_per_region;
+        let admission_limit = scenario
+            .region_task_admission_limit
+            .unwrap_or(requested_tasks);
+        let admitted_tasks = requested_tasks.min(admission_limit);
+        let rejected_tasks = requested_tasks.saturating_sub(admitted_tasks);
+        let admission_decision = if rejected_tasks == 0 {
+            SwarmReplayAdmissionDecision::Accept
+        } else {
+            scenario.region_over_limit_decision
+        };
+        let capability_budget = region_capability_budget(scenario, admitted_tasks);
+        let region = runtime.state.create_child_region_with_capability_budget(
+            scenario_root,
+            Budget::INFINITE,
+            capability_budget,
+            region_admission_requirements(),
+        );
+        let region = match region {
+            Ok(region) => region,
+            Err(err) => {
+                let reason = err.to_string();
+                events.lock().push(SwarmReplayEvent {
+                    kind: admission_event_kind(admission_decision),
+                    region_index,
+                    region_id: None,
+                    task_index: None,
+                    global_task_index: None,
+                    budget_class: Some(primary_budget_class_for_refusal(&reason)),
+                    queue_depth: rejected_tasks,
+                    artifact_bytes: 0,
+                });
+                admission_records.push(SwarmReplayAdmissionRecord {
+                    region_index,
+                    region_id: None,
+                    budget_class: primary_budget_class_for_refusal(&reason),
+                    decision: admission_decision,
+                    requested_tasks,
+                    admitted_tasks: 0,
+                    rejected_tasks: requested_tasks,
+                    before_remaining_units: admission_limit,
+                    after_remaining_units: 0,
+                    refusal: Some(reason),
+                    cancellation_requested: false,
+                    drain_result: SwarmReplayAdmissionDrainResult::RefusedBeforeRegion,
+                    quiescence_verdict: false,
+                });
+                continue;
+            }
+        };
+        let region_id = region.as_u64();
+        region_ids.push((region_index, region));
+        if admission_decision == SwarmReplayAdmissionDecision::Cancel && admitted_tasks > 0 {
+            admission_cancel_regions.push((region_index, region));
+        }
+        events.lock().push(SwarmReplayEvent {
+            kind: admission_event_kind(admission_decision),
+            region_index,
+            region_id: Some(region_id),
+            task_index: None,
+            global_task_index: None,
+            budget_class: Some(SwarmReplayBudgetClass::RunnableTaskSlots),
+            queue_depth: rejected_tasks,
+            artifact_bytes: 0,
+        });
+        admission_records.push(SwarmReplayAdmissionRecord {
+            region_index,
+            region_id: Some(region_id),
+            budget_class: SwarmReplayBudgetClass::RunnableTaskSlots,
+            decision: admission_decision,
+            requested_tasks,
+            admitted_tasks,
+            rejected_tasks,
+            before_remaining_units: admission_limit,
+            after_remaining_units: admission_limit.saturating_sub(admitted_tasks),
+            refusal: None,
+            cancellation_requested: admission_decision == SwarmReplayAdmissionDecision::Cancel
+                && admitted_tasks > 0,
+            drain_result: if admission_decision == SwarmReplayAdmissionDecision::Cancel
+                && admitted_tasks > 0
+            {
+                SwarmReplayAdmissionDrainResult::CancellationRequested
+            } else {
+                SwarmReplayAdmissionDrainResult::NotRequired
+            },
+            quiescence_verdict: false,
+        });
 
-        for task_index in 0..scenario.tasks_per_region {
+        for task_index in 0..admitted_tasks {
             let global_task_index = region_index
                 .saturating_mul(scenario.tasks_per_region)
                 .saturating_add(task_index);
@@ -1857,32 +2164,40 @@ pub fn run_swarm_replay_scenario(
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::SemaphoreAcquired,
                         region_index,
+                        region_id: Some(region_id),
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
+                        budget_class: Some(SwarmReplayBudgetClass::BlockingPoolSubmissions),
                         queue_depth: semaphore_permits,
                         artifact_bytes: 0,
                     });
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::PoolSlotCheckedOut,
                         region_index,
+                        region_id: Some(region_id),
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
+                        budget_class: Some(SwarmReplayBudgetClass::BlockingPoolSubmissions),
                         queue_depth: pool_slots,
                         artifact_bytes: 0,
                     });
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::MessageReserved,
                         region_index,
+                        region_id: Some(region_id),
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
+                        budget_class: Some(SwarmReplayBudgetClass::QueueDepth),
                         queue_depth,
                         artifact_bytes: 0,
                     });
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::TimerAdvanced,
                         region_index,
+                        region_id: Some(region_id),
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
+                        budget_class: Some(SwarmReplayBudgetClass::CleanupDrainWork),
                         queue_depth: timer_ticks,
                         artifact_bytes: 0,
                     });
@@ -1895,24 +2210,30 @@ pub fn run_swarm_replay_scenario(
                             events_for_task.lock().push(SwarmReplayEvent {
                                 kind: SwarmReplayEventKind::MessageAborted,
                                 region_index,
+                                region_id: Some(region_id),
                                 task_index: Some(task_index),
                                 global_task_index: Some(global_task_index),
+                                budget_class: Some(SwarmReplayBudgetClass::QueueDepth),
                                 queue_depth: messages_per_task,
                                 artifact_bytes: 0,
                             });
                             events_for_task.lock().push(SwarmReplayEvent {
                                 kind: SwarmReplayEventKind::ObligationAborted,
                                 region_index,
+                                region_id: Some(region_id),
                                 task_index: Some(task_index),
                                 global_task_index: Some(global_task_index),
+                                budget_class: Some(SwarmReplayBudgetClass::CleanupDrainWork),
                                 queue_depth: obligations_per_task,
                                 artifact_bytes: 0,
                             });
                             events_for_task.lock().push(SwarmReplayEvent {
                                 kind: SwarmReplayEventKind::CancelObserved,
                                 region_index,
+                                region_id: Some(region_id),
                                 task_index: Some(task_index),
                                 global_task_index: Some(global_task_index),
+                                budget_class: Some(SwarmReplayBudgetClass::CleanupDrainWork),
                                 queue_depth,
                                 artifact_bytes: 0,
                             });
@@ -1932,32 +2253,40 @@ pub fn run_swarm_replay_scenario(
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::MessageCommitted,
                         region_index,
+                        region_id: Some(region_id),
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
+                        budget_class: Some(SwarmReplayBudgetClass::QueueDepth),
                         queue_depth: messages_per_task,
                         artifact_bytes: 0,
                     });
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::ObligationCommitted,
                         region_index,
+                        region_id: Some(region_id),
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
+                        budget_class: Some(SwarmReplayBudgetClass::CleanupDrainWork),
                         queue_depth: obligations_per_task,
                         artifact_bytes: 0,
                     });
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::ArtifactEmitted,
                         region_index,
+                        region_id: Some(region_id),
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
+                        budget_class: Some(SwarmReplayBudgetClass::ArtifactBytes),
                         queue_depth,
                         artifact_bytes,
                     });
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::Completed,
                         region_index,
+                        region_id: Some(region_id),
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
+                        budget_class: None,
                         queue_depth,
                         artifact_bytes: 0,
                     });
@@ -1982,8 +2311,10 @@ pub fn run_swarm_replay_scenario(
                 SwarmReplayEvent {
                     kind: SwarmReplayEventKind::TaskScheduled,
                     region_index,
+                    region_id: Some(region_id),
                     task_index: Some(task_index),
                     global_task_index: Some(global_task_index),
+                    budget_class: Some(SwarmReplayBudgetClass::RunnableTaskSlots),
                     queue_depth: 0,
                     artifact_bytes: 0,
                 },
@@ -2001,23 +2332,48 @@ pub fn run_swarm_replay_scenario(
     }
 
     let mut cancellation_requests = 0usize;
+    for (region_index, region) in &admission_cancel_regions {
+        let tasks = runtime.state.cancel_request(
+            *region,
+            &CancelReason::user("swarm replay admission budget exhausted"),
+            None,
+        );
+        cancellation_requests = cancellation_requests.saturating_add(tasks.len());
+        events.lock().push(SwarmReplayEvent {
+            kind: SwarmReplayEventKind::CancellationRequested,
+            region_index: *region_index,
+            region_id: Some(region.as_u64()),
+            task_index: None,
+            global_task_index: None,
+            budget_class: Some(SwarmReplayBudgetClass::CleanupDrainWork),
+            queue_depth: 0,
+            artifact_bytes: 0,
+        });
+
+        let mut scheduler = runtime.scheduler.lock();
+        for (task_id, priority) in tasks {
+            scheduler.schedule_cancel(task_id, priority);
+        }
+    }
     if let Some(cancel_after_steps) = scenario.cancel_after_steps {
         for _ in 0..cancel_after_steps {
             runtime.step_for_test();
         }
 
-        for (region_index, region) in region_ids.into_iter().enumerate() {
+        for (region_index, region) in &region_ids {
             let tasks = runtime.state.cancel_request(
-                region,
+                *region,
                 &CancelReason::user("swarm replay cascade"),
                 None,
             );
             cancellation_requests = cancellation_requests.saturating_add(tasks.len());
             events.lock().push(SwarmReplayEvent {
                 kind: SwarmReplayEventKind::CancellationRequested,
-                region_index,
+                region_index: *region_index,
+                region_id: Some(region.as_u64()),
                 task_index: None,
                 global_task_index: None,
+                budget_class: Some(SwarmReplayBudgetClass::CleanupDrainWork),
                 queue_depth: 0,
                 artifact_bytes: 0,
             });
@@ -2030,6 +2386,14 @@ pub fn run_swarm_replay_scenario(
     }
 
     let report = runtime.run_until_quiescent_with_report();
+    for record in &mut admission_records {
+        record.quiescence_verdict = report.quiescent;
+        if record.drain_result == SwarmReplayAdmissionDrainResult::CancellationRequested
+            && report.quiescent
+        {
+            record.drain_result = SwarmReplayAdmissionDrainResult::Quiescent;
+        }
+    }
     let terminal_counts = terminal_counts(&runtime, &tracked_tasks);
     let mut event_log = events.lock().clone();
     let mut task_outcomes = outcomes.lock().clone();
@@ -2038,8 +2402,10 @@ pub fn run_swarm_replay_scenario(
     event_log.sort_by_key(|event| {
         (
             event.region_index,
+            event.region_id,
             event.global_task_index.unwrap_or(usize::MAX),
             event.kind,
+            event.budget_class,
             event.queue_depth,
             event.artifact_bytes,
         )
@@ -2055,6 +2421,7 @@ pub fn run_swarm_replay_scenario(
         event_log,
         task_outcomes,
         completion_order,
+        admission_records,
     ))
 }
 
@@ -2337,6 +2704,7 @@ fn build_summary(
     event_log: Vec<SwarmReplayEvent>,
     task_outcomes: Vec<SwarmReplayTaskOutcome>,
     completion_order: Vec<usize>,
+    admission_records: Vec<SwarmReplayAdmissionRecord>,
 ) -> SwarmReplaySummary {
     let channel_backlog_peak = event_log
         .iter()
@@ -2366,18 +2734,36 @@ fn build_summary(
         .filter(|outcome| outcome.status == SwarmReplayTaskStatus::Completed)
         .count();
     let task_count = scenario.task_count();
-    let channel_reservations = task_count.saturating_mul(scenario.messages_per_task);
+    let admitted_task_count = scheduled_task_count;
+    let rejected_task_count = task_count.saturating_sub(admitted_task_count);
+    let deferred_task_count = admission_records
+        .iter()
+        .filter(|record| record.decision == SwarmReplayAdmissionDecision::Defer)
+        .map(|record| record.rejected_tasks)
+        .sum::<usize>();
+    let shed_task_count = admission_records
+        .iter()
+        .filter(|record| record.decision == SwarmReplayAdmissionDecision::Shed)
+        .map(|record| record.rejected_tasks)
+        .sum::<usize>();
+    let admission_cancelled_task_count = admission_records
+        .iter()
+        .filter(|record| record.decision == SwarmReplayAdmissionDecision::Cancel)
+        .map(|record| record.rejected_tasks)
+        .sum::<usize>();
+    let channel_reservations = admitted_task_count.saturating_mul(scenario.messages_per_task);
     let channel_commits = completed_tasks.saturating_mul(scenario.messages_per_task);
     let channel_aborts = channel_reservations.saturating_sub(channel_commits);
-    let semaphore_acquires = task_count.saturating_mul(scenario.semaphore_permits_per_task);
+    let semaphore_acquires =
+        admitted_task_count.saturating_mul(scenario.semaphore_permits_per_task);
     let semaphore_releases = semaphore_acquires;
-    let pool_checkouts = task_count.saturating_mul(scenario.pool_slots_per_task);
+    let pool_checkouts = admitted_task_count.saturating_mul(scenario.pool_slots_per_task);
     let pool_checkins = pool_checkouts;
-    let total_obligations = task_count.saturating_mul(scenario.obligations_per_task);
+    let total_obligations = admitted_task_count.saturating_mul(scenario.obligations_per_task);
     let obligation_commits = completed_tasks.saturating_mul(scenario.obligations_per_task);
     let obligation_aborts = total_obligations.saturating_sub(obligation_commits);
-    let timer_registrations = task_count;
-    let timer_wakeups = task_count.saturating_mul(scenario.timer_ticks_per_task);
+    let timer_registrations = admitted_task_count;
+    let timer_wakeups = admitted_task_count.saturating_mul(scenario.timer_ticks_per_task);
     let cancellation_drain_steps = scenario.cancel_after_steps.map_or(0, |cancel_step| {
         report.steps_delta.saturating_sub(cancel_step)
     });
@@ -2391,6 +2777,11 @@ fn build_summary(
         region_count: scenario.region_count,
         task_count,
         scheduled_task_count,
+        admitted_task_count,
+        rejected_task_count,
+        deferred_task_count,
+        shed_task_count,
+        admission_cancelled_task_count,
         cancellation_requests,
         terminal_task_count: terminal_counts.0,
         non_terminal_task_count: terminal_counts.1,
@@ -2424,6 +2815,7 @@ fn build_summary(
             suggested_region_count: scenario.region_count.min(1),
             suggested_tasks_per_region: scenario.tasks_per_region.min(2),
         },
+        admission_records,
     }
 }
 

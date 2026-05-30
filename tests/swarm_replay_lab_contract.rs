@@ -7,7 +7,8 @@ use asupersync::lab::{
     SwarmHandoffCapsule, SwarmHandoffCommit, SwarmHandoffDecision, SwarmHandoffDirtyOwner,
     SwarmHandoffDirtyPath, SwarmHandoffInboxAck, SwarmHandoffProofCommand, SwarmHandoffReservation,
     SwarmPressureEventKind, SwarmPressureLane, SwarmPressureScenario, SwarmRchWorkerEvent,
-    SwarmRchWorkerEventKind, SwarmReplayError, SwarmReplayEventKind, SwarmReplayScenario,
+    SwarmRchWorkerEventKind, SwarmReplayAdmissionDecision, SwarmReplayAdmissionDrainResult,
+    SwarmReplayBudgetClass, SwarmReplayError, SwarmReplayEventKind, SwarmReplayScenario,
     SwarmReplayTaskStatus, run_swarm_agent_run_scenario, run_swarm_pressure_scenario,
     run_swarm_replay_scenario, verify_swarm_handoff_capsule,
 };
@@ -30,6 +31,12 @@ fn cancellation_scenario(seed: u64) -> SwarmReplayScenario {
         timer_ticks_per_task: 2,
         cancellation_tree_depth: 3,
         artifact_bytes_per_task: 128,
+        region_task_admission_limit: None,
+        region_over_limit_decision: SwarmReplayAdmissionDecision::Shed,
+        region_memory_bytes_per_task: 1024,
+        region_queue_depth_units_per_task: 1,
+        region_blocking_pool_units_per_task: 1,
+        region_cleanup_poll_quota_per_task: 1,
         cancel_after_steps: Some(4),
         max_steps: 20_000,
     }
@@ -53,6 +60,12 @@ fn completion_scenario(seed: u64) -> SwarmReplayScenario {
         timer_ticks_per_task: 1,
         cancellation_tree_depth: 2,
         artifact_bytes_per_task: 64,
+        region_task_admission_limit: None,
+        region_over_limit_decision: SwarmReplayAdmissionDecision::Shed,
+        region_memory_bytes_per_task: 1024,
+        region_queue_depth_units_per_task: 1,
+        region_blocking_pool_units_per_task: 1,
+        region_cleanup_poll_quota_per_task: 1,
         cancel_after_steps: None,
         max_steps: 20_000,
     }
@@ -178,6 +191,12 @@ fn replay_scale_scenario(
         timer_ticks_per_task: 2,
         cancellation_tree_depth: 3,
         artifact_bytes_per_task: 32,
+        region_task_admission_limit: None,
+        region_over_limit_decision: SwarmReplayAdmissionDecision::Shed,
+        region_memory_bytes_per_task: 1024,
+        region_queue_depth_units_per_task: 1,
+        region_blocking_pool_units_per_task: 1,
+        region_cleanup_poll_quota_per_task: 1,
         cancel_after_steps: None,
         max_steps: 80_000,
     }
@@ -775,6 +794,237 @@ fn swarm_replay_normal_completion_emits_artifact_and_backlog_summary() {
         summary.shrink_hint.event_prefix_len,
         summary.event_log.len(),
         "non-failing scenario shrink prefix should cover the full log"
+    );
+}
+
+#[test]
+fn swarm_replay_region_admission_accepts_exact_limit_without_leaks() {
+    let mut scenario = completion_scenario(0xAD1D_0001);
+    scenario.region_task_admission_limit = Some(scenario.tasks_per_region);
+    scenario.cancel_after_steps = None;
+
+    let summary = run_swarm_replay_scenario(&scenario).expect("exact admission scenario");
+
+    assert_eq!(summary.task_count, scenario.task_count());
+    assert_eq!(summary.scheduled_task_count, scenario.task_count());
+    assert_eq!(summary.admitted_task_count, scenario.task_count());
+    assert_eq!(summary.rejected_task_count, 0);
+    assert_eq!(summary.deferred_task_count, 0);
+    assert_eq!(summary.shed_task_count, 0);
+    assert_eq!(summary.admission_cancelled_task_count, 0);
+    assert_eq!(summary.terminal_task_count, summary.scheduled_task_count);
+    assert_eq!(summary.non_terminal_task_count, 0);
+    assert!(summary.quiescent);
+    assert_eq!(summary.admission_records.len(), scenario.region_count);
+    assert!(
+        summary.admission_records.iter().all(|record| {
+            record.region_id.is_some()
+                && record.budget_class == SwarmReplayBudgetClass::RunnableTaskSlots
+                && record.decision == SwarmReplayAdmissionDecision::Accept
+                && record.requested_tasks == scenario.tasks_per_region
+                && record.admitted_tasks == scenario.tasks_per_region
+                && record.rejected_tasks == 0
+                && record.after_remaining_units == 0
+                && record.refusal.is_none()
+                && !record.cancellation_requested
+                && record.drain_result == SwarmReplayAdmissionDrainResult::NotRequired
+                && record.quiescence_verdict
+        }),
+        "exact-limit records must include region id, budget class, counters, and quiescence"
+    );
+    assert!(
+        summary.event_log.iter().any(|event| {
+            event.kind == SwarmReplayEventKind::AdmissionAccepted
+                && event.region_id.is_some()
+                && event.budget_class == Some(SwarmReplayBudgetClass::RunnableTaskSlots)
+        }),
+        "event log must include accepted admission evidence"
+    );
+}
+
+#[test]
+fn swarm_replay_region_admission_sheds_over_limit_without_scheduling_rejected_work() {
+    let mut scenario = completion_scenario(0xAD1D_0002);
+    scenario.region_count = 2;
+    scenario.tasks_per_region = 5;
+    scenario.region_task_admission_limit = Some(2);
+    scenario.region_over_limit_decision = SwarmReplayAdmissionDecision::Shed;
+    scenario.cancel_after_steps = None;
+
+    let summary = run_swarm_replay_scenario(&scenario).expect("shed admission scenario");
+
+    assert_eq!(summary.task_count, 10);
+    assert_eq!(summary.scheduled_task_count, 4);
+    assert_eq!(summary.admitted_task_count, 4);
+    assert_eq!(summary.rejected_task_count, 6);
+    assert_eq!(summary.shed_task_count, 6);
+    assert_eq!(summary.deferred_task_count, 0);
+    assert_eq!(summary.admission_cancelled_task_count, 0);
+    assert_eq!(
+        summary.channel_reservations,
+        summary.scheduled_task_count * scenario.messages_per_task
+    );
+    assert_eq!(
+        summary.obligation_commits + summary.obligation_aborts,
+        summary.scheduled_task_count * scenario.obligations_per_task
+    );
+    assert_eq!(summary.terminal_task_count, summary.scheduled_task_count);
+    assert_eq!(summary.non_terminal_task_count, 0);
+    assert!(summary.quiescent);
+    assert!(
+        summary.admission_records.iter().all(|record| {
+            record.decision == SwarmReplayAdmissionDecision::Shed
+                && record.admitted_tasks == 2
+                && record.rejected_tasks == 3
+                && record.before_remaining_units == 2
+                && record.after_remaining_units == 0
+                && record.region_id.is_some()
+                && record.quiescence_verdict
+        }),
+        "shed records must preserve over-limit counters and quiescence"
+    );
+    assert!(
+        summary
+            .event_log
+            .iter()
+            .any(|event| event.kind == SwarmReplayEventKind::AdmissionShed),
+        "event log must include shed admission evidence"
+    );
+}
+
+#[test]
+fn swarm_replay_region_admission_defers_over_limit_without_resource_leaks() {
+    let mut scenario = completion_scenario(0xAD1D_0005);
+    scenario.region_count = 1;
+    scenario.tasks_per_region = 6;
+    scenario.region_task_admission_limit = Some(3);
+    scenario.region_over_limit_decision = SwarmReplayAdmissionDecision::Defer;
+    scenario.cancel_after_steps = None;
+
+    let summary = run_swarm_replay_scenario(&scenario).expect("defer admission scenario");
+
+    assert_eq!(summary.task_count, 6);
+    assert_eq!(summary.scheduled_task_count, 3);
+    assert_eq!(summary.admitted_task_count, 3);
+    assert_eq!(summary.rejected_task_count, 3);
+    assert_eq!(summary.deferred_task_count, 3);
+    assert_eq!(summary.shed_task_count, 0);
+    assert_eq!(summary.admission_cancelled_task_count, 0);
+    assert_eq!(summary.terminal_task_count, summary.scheduled_task_count);
+    assert_eq!(summary.non_terminal_task_count, 0);
+    assert_eq!(
+        summary.channel_reservations,
+        summary.scheduled_task_count * scenario.messages_per_task
+    );
+    assert_eq!(
+        summary.timer_registrations, summary.scheduled_task_count,
+        "deferred work must not register timers or scheduler resources"
+    );
+    assert!(summary.quiescent);
+    assert_eq!(summary.admission_records.len(), 1);
+    let record = &summary.admission_records[0];
+    assert_eq!(record.decision, SwarmReplayAdmissionDecision::Defer);
+    assert_eq!(record.requested_tasks, 6);
+    assert_eq!(record.admitted_tasks, 3);
+    assert_eq!(record.rejected_tasks, 3);
+    assert_eq!(record.before_remaining_units, 3);
+    assert_eq!(record.after_remaining_units, 0);
+    assert_eq!(
+        record.drain_result,
+        SwarmReplayAdmissionDrainResult::NotRequired
+    );
+    assert!(record.region_id.is_some());
+    assert!(record.quiescence_verdict);
+    assert!(
+        summary
+            .event_log
+            .iter()
+            .any(|event| event.kind == SwarmReplayEventKind::AdmissionDeferred),
+        "event log must include deferred admission evidence"
+    );
+}
+
+#[test]
+fn swarm_replay_region_admission_cancels_admitted_prefix_and_drains() {
+    let mut scenario = completion_scenario(0xAD1D_0003);
+    scenario.region_count = 1;
+    scenario.tasks_per_region = 5;
+    scenario.yields_per_task = 8;
+    scenario.yield_jitter = 0;
+    scenario.region_task_admission_limit = Some(2);
+    scenario.region_over_limit_decision = SwarmReplayAdmissionDecision::Cancel;
+    scenario.cancel_after_steps = None;
+
+    let summary = run_swarm_replay_scenario(&scenario).expect("cancel admission scenario");
+
+    assert_eq!(summary.task_count, 5);
+    assert_eq!(summary.scheduled_task_count, 2);
+    assert_eq!(summary.admitted_task_count, 2);
+    assert_eq!(summary.rejected_task_count, 3);
+    assert_eq!(summary.admission_cancelled_task_count, 3);
+    assert!(summary.cancellation_requests > 0);
+    assert_eq!(summary.terminal_task_count, summary.scheduled_task_count);
+    assert_eq!(summary.non_terminal_task_count, 0);
+    assert!(summary.quiescent);
+    assert!(
+        summary
+            .task_outcomes
+            .iter()
+            .any(|outcome| outcome.status == SwarmReplayTaskStatus::Cancelled),
+        "admission cancellation must be observed by admitted tasks"
+    );
+    assert!(
+        summary.admission_records.iter().all(|record| {
+            record.decision == SwarmReplayAdmissionDecision::Cancel
+                && record.cancellation_requested
+                && record.drain_result == SwarmReplayAdmissionDrainResult::Quiescent
+                && record.quiescence_verdict
+        }),
+        "cancel records must carry drain and quiescence evidence"
+    );
+    assert!(
+        summary.event_log.iter().any(|event| {
+            event.kind == SwarmReplayEventKind::CancellationRequested
+                && event.budget_class == Some(SwarmReplayBudgetClass::CleanupDrainWork)
+        }),
+        "event log must include cancellation/drain evidence"
+    );
+}
+
+#[test]
+fn swarm_replay_region_admission_empty_budget_fails_closed_without_leaks() {
+    let mut scenario = completion_scenario(0xAD1D_0004);
+    scenario.region_count = 2;
+    scenario.tasks_per_region = 3;
+    scenario.region_task_admission_limit = Some(0);
+    scenario.region_over_limit_decision = SwarmReplayAdmissionDecision::Cancel;
+    scenario.cancel_after_steps = None;
+
+    let summary = run_swarm_replay_scenario(&scenario).expect("empty admission scenario");
+
+    assert_eq!(summary.task_count, 6);
+    assert_eq!(summary.scheduled_task_count, 0);
+    assert_eq!(summary.admitted_task_count, 0);
+    assert_eq!(summary.rejected_task_count, 6);
+    assert_eq!(summary.admission_cancelled_task_count, 6);
+    assert_eq!(summary.terminal_task_count, 0);
+    assert_eq!(summary.non_terminal_task_count, 0);
+    assert_eq!(summary.channel_reservations, 0);
+    assert_eq!(summary.obligation_commits + summary.obligation_aborts, 0);
+    assert!(summary.quiescent);
+    assert_eq!(summary.admission_records.len(), scenario.region_count);
+    assert!(
+        summary.admission_records.iter().all(|record| {
+            record.region_id.is_none()
+                && record.decision == SwarmReplayAdmissionDecision::Cancel
+                && record.admitted_tasks == 0
+                && record.rejected_tasks == scenario.tasks_per_region
+                && record.refusal.is_some()
+                && !record.cancellation_requested
+                && record.drain_result == SwarmReplayAdmissionDrainResult::RefusedBeforeRegion
+                && record.quiescence_verdict
+        }),
+        "empty budget must fail closed before region creation"
     );
 }
 
