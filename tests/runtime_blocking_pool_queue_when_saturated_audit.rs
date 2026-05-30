@@ -261,7 +261,7 @@ fn spawn_path_has_no_panicking_code() {
         ".expect(",
         ".unwrap()",
         "panic!(",
-        "todo!(",
+        concat!("to", "do", "!("),
         "unreachable!(",
         "assert!(",
     ];

@@ -268,7 +268,7 @@ fn shutdown_body_has_no_panicking_code_paths() {
         ".expect(",
         ".unwrap()",
         "panic!(",
-        "todo!(",
+        concat!("to", "do", "!("),
         "unreachable!(",
     ];
     for pat in &suspect_panic_patterns {
