@@ -3236,7 +3236,7 @@ mod tests {
             Status::not_found("resource /api/v1/users/999 not found"),
             Status::permission_denied("insufficient privileges for admin operation"),
             Status::internal("database connection lost"),
-            Status::unimplemented("feature not yet implemented"),
+            Status::unimplemented("rpc method is unsupported"),
         ];
 
         for (i, status) in test_statuses.iter().enumerate() {

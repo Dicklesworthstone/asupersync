@@ -26,6 +26,22 @@
       "category": "conformance_placeholder"
     },
     {
+      "pattern": "src/grpc/status.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
+      "pattern": "src/grpc/streaming.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
+      "pattern": "src/grpc/web.rs",
+      "category": "canonical_grpc_status_code"
+    },
+    {
+      "pattern": "src/grpc/snapshots/asupersync__grpc__status__tests__grpc_status_http_mapping_all_codes.snap",
+      "category": "canonical_grpc_status_code"
+    },
+    {
       "pattern": "src/**/snapshots/**",
       "category": "fixture_reference_implementation"
     },
@@ -282,6 +298,19 @@
       "replacement_issue": "asupersync-oelvq2"
     },
     {
+      "group_id": "canonical-grpc-status-code-policy-2026-05-30",
+      "patterns": [
+        "src/grpc/status.rs",
+        "src/grpc/streaming.rs",
+        "src/grpc/web.rs",
+        "src/grpc/snapshots/asupersync__grpc__status__tests__grpc_status_http_mapping_all_codes.snap"
+      ],
+      "category": "canonical_grpc_status_code",
+      "owner": "grpc-core",
+      "reason": "The remaining lexical hits in these gRPC files are the protocol-defined UNIMPLEMENTED status code, constructor, or golden status fixture rather than incomplete runtime behavior.",
+      "revisit_condition": "Keep canonical gRPC status vocabulary covered while future non-status implementation gaps in these files continue to require direct source repair."
+    },
+    {
       "group_id": "stale-audit-prose-policy-2026-05-05",
       "patterns": [
         "src/**/*_audit_test.rs",
@@ -397,10 +426,7 @@
     {
       "group_id": "known-production-grpc-policy-hits-2026-05-05",
       "patterns": [
-        "src/grpc/mod.rs",
-        "src/grpc/status.rs",
-        "src/grpc/streaming.rs",
-        "src/grpc/web.rs"
+        "src/grpc/mod.rs"
       ],
       "category": "production_stub",
       "owner": "grpc-core",
