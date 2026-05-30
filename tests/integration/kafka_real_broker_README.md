@@ -1,8 +1,8 @@
 # Real Kafka Broker Integration Tests
 
-This directory contains **mock-free integration tests** for the Kafka producer and consumer implementations. These tests require a real Kafka broker and exercise the complete message lifecycle including network serialization, broker-side persistence, consumer group coordination, and transactional semantics.
+This directory contains **real-broker integration tests** for the Kafka producer and consumer implementations. These tests require a real Kafka broker and exercise the complete message lifecycle including network serialization, broker-side persistence, consumer group coordination, and transactional semantics.
 
-## Why Mock-Free Testing?
+## Why Real-Broker Testing?
 
 The `StubBroker` implementation hides critical production behaviors:
 
@@ -12,7 +12,7 @@ The `StubBroker` implementation hides critical production behaviors:
 - **Transactional semantics** - Transaction coordinator, zombie producers, isolation levels
 - **Broker-side persistence** - Disk I/O, replication, log compaction
 
-Mock-based tests would pass while these real-world scenarios fail in production.
+Substitute-broker tests would pass while these real-world scenarios fail in production.
 
 ## Test Environment Setup
 
@@ -239,13 +239,13 @@ docker logs test-kafka --tail 50
 docker logs test-zookeeper --tail 50
 ```
 
-## Migration from Mock Tests
+## Migration from Substitute-Broker Tests
 
 When replacing StubBroker tests with real broker tests:
 
 1. **Identify StubBroker usage:**
    ```rust
-   // Old: Mock behavior
+   // Old: Substitute behavior
    #[cfg(not(feature = "kafka"))]
    consumer.poll() // Uses StubBroker
    
@@ -255,7 +255,7 @@ When replacing StubBroker tests with real broker tests:
 
 2. **Add realistic timeouts:**
    ```rust
-   // Old: Instant mock responses
+   // Old: Instant substitute responses
    consumer.poll(&cx, Duration::ZERO)
    
    // New: Real broker coordination time
@@ -264,7 +264,7 @@ When replacing StubBroker tests with real broker tests:
 
 3. **Update assertions for real broker behavior:**
    ```rust
-   // Old: Predictable mock offsets
+   // Old: Predictable substitute offsets
    assert_eq!(metadata.offset, 0);
    
    // New: Broker-assigned offsets

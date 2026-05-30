@@ -22,15 +22,15 @@ async fn jetstream_tcp_reconnect_behavior_audit() {
     // This test verifies that JetStream client automatically reconnects
     // when the underlying TCP connection is lost
 
-    // Mock NATS server that can simulate connection failures
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+    // Scripted NATS server that can simulate connection failures.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted server");
     let addr = listener.local_addr().expect("get server address");
 
     let (disconnect_tx, disconnect_rx) = mpsc::channel();
     let (connected_tx, connected_rx) = mpsc::channel();
     let (reconnected_tx, reconnected_rx) = mpsc::channel();
 
-    // Mock NATS server thread
+    // Scripted NATS server thread.
     let server = thread::spawn(move || {
         // Initial connection
         let (mut stream1, _) = listener.accept().expect("accept first connection");
@@ -103,7 +103,7 @@ async fn jetstream_tcp_reconnect_behavior_audit() {
     config.max_reconnect_delay = Duration::from_secs(5);
     config.verbose = true; // Enable for easier testing
 
-    println!("✓ Connecting to mock NATS server at {}", addr);
+    println!("✓ Connecting to scripted NATS server at {}", addr);
 
     let mut client = NatsClient::connect_with_config(&cx, config)
         .await

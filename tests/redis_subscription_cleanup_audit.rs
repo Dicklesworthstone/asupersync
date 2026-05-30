@@ -46,7 +46,7 @@ fn test_pubsub_drop_does_not_send_unsubscribe() {
                             .unwrap()
                             .push(trimmed.to_string());
 
-                        // Mock Redis responses
+                        // Scripted Redis protocol responses.
                         if trimmed == "SUBSCRIBE" {
                             // SUBSCRIBE acknowledgment
                             let response = "*3\r\n$9\r\nsubscribe\r\n$7\r\ntestch1\r\n:1\r\n";
@@ -66,7 +66,7 @@ fn test_pubsub_drop_does_not_send_unsubscribe() {
             // Create PubSub connection and subscribe
             let client = RedisClient::connect(&cx, &url)
                 .await
-                .expect("connect to mock redis");
+                .expect("connect to scripted redis fixture");
             let mut pubsub = client.pubsub(&cx).await.expect("create pubsub connection");
 
             // Subscribe to a channel
@@ -88,7 +88,7 @@ fn test_pubsub_drop_does_not_send_unsubscribe() {
     // Check what commands were received
     let received_commands = commands_received.lock().unwrap();
     println!(
-        "Commands received by mock Redis server: {:?}",
+        "Commands received by scripted Redis server: {:?}",
         *received_commands
     );
 
@@ -165,7 +165,7 @@ fn test_explicit_unsubscribe_works() {
 
         let client = RedisClient::connect(&cx, &url)
             .await
-            .expect("connect to mock redis");
+            .expect("connect to scripted redis fixture");
         let mut pubsub = client.pubsub(&cx).await.expect("create pubsub connection");
 
         // Subscribe then explicitly unsubscribe

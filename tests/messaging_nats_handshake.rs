@@ -14,8 +14,8 @@
 //!
 //! ## What this test covers
 //!
-//! 1. **Wire-protocol handshake.** A minimal NATS protocol mock
-//!    server (`MockNatsServer`) running on `std::thread`:
+//! 1. **Wire-protocol handshake.** A minimal scripted NATS protocol
+//!    server (`ScriptedNatsServer`) running on `std::thread`:
 //!      - Sends `INFO { ... }` immediately on accept.
 //!      - Reads the client's `CONNECT { ... }` line.
 //!      - Records the raw CONNECT line so the assertion side can
@@ -25,7 +25,7 @@
 //!    lang=rust, protocol=1, headers=true (br-asupersync-byc2d1),
 //!    and no_responders=true (per the NATS spec when headers is on).
 //!
-//! 3. **TLS-required gate.** A second mock server scenario advertises
+//! 3. **TLS-required gate.** A second scripted server scenario advertises
 //!    `tls_required:true` in INFO. The asupersync client must abort
 //!    with `NatsError::TlsRequired` BEFORE sending CONNECT — verified
 //!    by the absence of any captured CONNECT line on the server side.
@@ -50,15 +50,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-/// Minimal NATS protocol mock-server harness.
-struct MockNatsServer {
+/// Minimal scripted NATS protocol server harness.
+struct ScriptedNatsServer {
     port: u16,
     /// Receives the captured CONNECT JSON line from the server thread,
     /// or `None` if the server closed before a CONNECT was sent.
     connect_rx: mpsc::Receiver<Option<String>>,
 }
 
-impl MockNatsServer {
+impl ScriptedNatsServer {
     fn start(tls_required: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let port = listener.local_addr().expect("local_addr").port();
@@ -75,10 +75,10 @@ impl MockNatsServer {
             stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
             stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-            // 1. Send INFO. `headers:false` because this mock does not
+            // 1. Send INFO. `headers:false` because this harness does not
             // implement HMSG dispatch.
             let info = format!(
-                r#"INFO {{"server_id":"mock","version":"0.0.0","go":"mock","host":"127.0.0.1","port":4222,"max_payload":1048576,"proto":1,"headers":false,"tls_required":{}}}"#,
+                r#"INFO {{"server_id":"scripted","version":"0.0.0","go":"rust","host":"127.0.0.1","port":4222,"max_payload":1048576,"proto":1,"headers":false,"tls_required":{}}}"#,
                 tls_required
             );
             if stream.write_all(info.as_bytes()).is_err() {
@@ -134,7 +134,7 @@ impl MockNatsServer {
 
 #[test]
 fn nats_handshake_sends_well_formed_connect_vynlt0() {
-    let server = MockNatsServer::start(false);
+    let server = ScriptedNatsServer::start(false);
     let url = server.url();
 
     let runtime = RuntimeBuilder::new()
@@ -148,7 +148,7 @@ fn nats_handshake_sends_well_formed_connect_vynlt0() {
     }));
     assert!(
         connected,
-        "NatsClient::connect must succeed against mock server"
+        "NatsClient::connect must succeed against scripted server"
     );
 
     let connect_line = server
@@ -182,9 +182,9 @@ fn nats_handshake_aborts_before_connect_when_tls_required_vynlt0() {
     // CONNECT (which would carry credentials in cleartext) when the
     // server advertises tls_required=true and no TLS upgrade is
     // wired. The expected error is NatsError::TlsRequired, and the
-    // mock server's CONNECT capture must report None (EOF before
+    // scripted server's CONNECT capture must report None (EOF before
     // any CONNECT line was sent).
-    let server = MockNatsServer::start(true);
+    let server = ScriptedNatsServer::start(true);
     let url = server.url();
 
     let runtime = RuntimeBuilder::new()

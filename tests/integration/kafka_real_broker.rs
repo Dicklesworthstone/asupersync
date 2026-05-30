@@ -1,4 +1,4 @@
-//! Real Kafka broker integration tests - no mocks.
+//! Real Kafka broker integration tests - no in-memory broker substitutes.
 //!
 //! These tests require a real Kafka broker running with specific configuration.
 //! Run with:
@@ -1127,7 +1127,7 @@ fn test_real_broker_producer_send_and_metadata() {
             Ok(meta) => {
                 log.kafka_operation("send", Some(meta), None);
 
-                // Assert against real broker responses (not mocked values)
+                // Assert against real broker responses, not in-memory substituted values.
                 assert!(log.assert_match("topic", &json!(topic), &json!(meta.topic)));
                 assert!(log.assert_match("partition", &json!(0), &json!(meta.partition)));
                 assert!(
@@ -1584,7 +1584,7 @@ fn test_real_broker_network_failure_recovery() {
 }
 
 /// Test payment message delivery with real broker (no StubBroker allowed).
-/// This test ensures critical financial messages are never lost due to mock semantics.
+/// This test ensures critical financial messages are never lost due to substituted-broker semantics.
 #[test]
 fn test_real_broker_payment_message_delivery() {
     let Some(config) = require_real_broker() else {

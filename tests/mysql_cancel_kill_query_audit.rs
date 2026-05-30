@@ -140,11 +140,11 @@ async fn mysql_cancel_sends_kill_query_audit() {
 
     let mut conn = MySqlConnection::connect(&cx, &url)
         .await
-        .expect("connect to mock MySQL server");
+        .expect("connect to scripted MySQL server");
 
     println!("✓ Connection established, starting long-running query");
 
-    // Start and poll the query until it is in flight. The mock server reads
+    // Start and poll the query until it is in flight. The scripted server reads
     // the COM_QUERY packet but deliberately withholds a response so the future
     // remains pending and can be cancelled by dropping it.
     {
@@ -200,7 +200,7 @@ fn create_handshake_v10_packet(connection_id: u32) -> Vec<u8> {
     packet.push(0x0a);
 
     // Server version (null-terminated)
-    packet.extend_from_slice(b"8.0.0-mock\0");
+    packet.extend_from_slice(b"8.0.0-scripted\0");
 
     // Connection ID (4 bytes, little-endian)
     packet.extend_from_slice(&connection_id.to_le_bytes());

@@ -54,11 +54,11 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Mock Implementations for Messaging and Scheduler Testing
+    // In-memory protocol and scheduler models for metamorphic testing
     // ═══════════════════════════════════════════════════════════════════════════
 
     #[derive(Debug, Clone, PartialEq)]
-    pub struct MockKafkaMessage {
+    pub struct KafkaRecordModel {
         pub topic: String,
         pub partition: u32,
         pub offset: u64,
@@ -68,7 +68,7 @@ mod tests {
         pub headers: HashMap<String, String>,
     }
 
-    impl MockKafkaMessage {
+    impl KafkaRecordModel {
         pub fn new(topic: &str, partition: u32, offset: u64, value: Vec<u8>) -> Self {
             Self {
                 topic: topic.to_string(),
@@ -96,14 +96,14 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockKafkaProducer {
-        pub sent_messages: Vec<MockKafkaMessage>,
+    pub struct KafkaProducerModel {
+        pub sent_messages: Vec<KafkaRecordModel>,
         pub transaction_active: bool,
         pub transaction_id: Option<String>,
         pub next_offset: HashMap<(String, u32), u64>, // (topic, partition) -> next_offset
     }
 
-    impl MockKafkaProducer {
+    impl KafkaProducerModel {
         pub fn new() -> Self {
             Self {
                 sent_messages: Vec::new(),
@@ -126,7 +126,7 @@ mod tests {
             &mut self,
             topic: &str,
             partition: u32,
-            message: MockKafkaMessage,
+            message: KafkaRecordModel,
         ) -> Result<u64, String> {
             if self.transaction_active {
                 // In transaction: messages are staged but not committed
@@ -188,14 +188,14 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockKafkaConsumer {
+    pub struct KafkaConsumerModel {
         pub group_id: String,
         pub assigned_partitions: Vec<(String, u32)>,
-        pub consumed_messages: Vec<MockKafkaMessage>,
+        pub consumed_messages: Vec<KafkaRecordModel>,
         pub committed_offsets: HashMap<(String, u32), u64>,
     }
 
-    impl MockKafkaConsumer {
+    impl KafkaConsumerModel {
         pub fn new(group_id: &str) -> Self {
             Self {
                 group_id: group_id.to_string(),
@@ -209,7 +209,11 @@ mod tests {
             self.assigned_partitions = partitions;
         }
 
-        pub fn consume_from_producer(&mut self, producer: &MockKafkaProducer, max_messages: usize) {
+        pub fn consume_from_producer(
+            &mut self,
+            producer: &KafkaProducerModel,
+            max_messages: usize,
+        ) {
             let mut consumed = 0;
             for message in &producer.sent_messages {
                 if consumed >= max_messages {
@@ -232,12 +236,12 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockNATSSubject {
+    pub struct NatsSubjectModel {
         pub subject: String,
         pub is_wildcard: bool,
     }
 
-    impl MockNATSSubject {
+    impl NatsSubjectModel {
         pub fn new(subject: &str) -> Self {
             Self {
                 subject: subject.to_string(),
@@ -281,7 +285,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockNATSMessage {
+    pub struct NatsMessageModel {
         pub subject: String,
         pub reply_to: Option<String>,
         pub data: Vec<u8>,
@@ -289,13 +293,13 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockNATSClient {
-        pub subscriptions: HashMap<String, MockNATSSubject>,
-        pub published_messages: Vec<MockNATSMessage>,
-        pub received_messages: Vec<MockNATSMessage>,
+    pub struct NatsClientModel {
+        pub subscriptions: HashMap<String, NatsSubjectModel>,
+        pub published_messages: Vec<NatsMessageModel>,
+        pub received_messages: Vec<NatsMessageModel>,
     }
 
-    impl MockNATSClient {
+    impl NatsClientModel {
         pub fn new() -> Self {
             Self {
                 subscriptions: HashMap::new(),
@@ -306,11 +310,11 @@ mod tests {
 
         pub fn subscribe(&mut self, subject: &str) {
             self.subscriptions
-                .insert(subject.to_string(), MockNATSSubject::new(subject));
+                .insert(subject.to_string(), NatsSubjectModel::new(subject));
         }
 
         pub fn publish(&mut self, subject: &str, data: Vec<u8>) {
-            let message = MockNATSMessage {
+            let message = NatsMessageModel {
                 subject: subject.to_string(),
                 reply_to: None,
                 data,
@@ -319,7 +323,7 @@ mod tests {
             self.published_messages.push(message.clone());
 
             // Route to matching subscriptions
-            for (sub_id, sub_subject) in &self.subscriptions {
+            for sub_subject in self.subscriptions.values() {
                 if sub_subject.matches(subject) {
                     self.received_messages.push(message.clone());
                 }
@@ -334,7 +338,7 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             );
-            let message = MockNATSMessage {
+            let message = NatsMessageModel {
                 subject: subject.to_string(),
                 reply_to: Some(reply_subject.clone()),
                 data,
@@ -345,7 +349,7 @@ mod tests {
         }
 
         pub fn reply(&mut self, reply_subject: &str, data: Vec<u8>) {
-            let message = MockNATSMessage {
+            let message = NatsMessageModel {
                 subject: reply_subject.to_string(),
                 reply_to: None,
                 data,
@@ -356,39 +360,39 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq)]
-    pub enum MockRedisValue {
+    pub enum Resp3ValueModel {
         SimpleString(String),
         Error(String),
         Integer(i64),
         BulkString(Vec<u8>),
-        Array(Vec<MockRedisValue>),
+        Array(Vec<Resp3ValueModel>),
         Null,
         Boolean(bool),
         Double(f64),
     }
 
-    impl MockRedisValue {
+    impl Resp3ValueModel {
         pub fn encode_resp3(&self) -> Vec<u8> {
             match self {
-                MockRedisValue::SimpleString(s) => {
+                Resp3ValueModel::SimpleString(s) => {
                     let mut result = vec![b'+'];
                     result.extend_from_slice(s.as_bytes());
                     result.extend_from_slice(b"\r\n");
                     result
                 }
-                MockRedisValue::Error(s) => {
+                Resp3ValueModel::Error(s) => {
                     let mut result = vec![b'-'];
                     result.extend_from_slice(s.as_bytes());
                     result.extend_from_slice(b"\r\n");
                     result
                 }
-                MockRedisValue::Integer(i) => {
+                Resp3ValueModel::Integer(i) => {
                     let mut result = vec![b':'];
                     result.extend_from_slice(i.to_string().as_bytes());
                     result.extend_from_slice(b"\r\n");
                     result
                 }
-                MockRedisValue::BulkString(data) => {
+                Resp3ValueModel::BulkString(data) => {
                     let mut result = vec![b'$'];
                     result.extend_from_slice(data.len().to_string().as_bytes());
                     result.extend_from_slice(b"\r\n");
@@ -396,7 +400,7 @@ mod tests {
                     result.extend_from_slice(b"\r\n");
                     result
                 }
-                MockRedisValue::Array(arr) => {
+                Resp3ValueModel::Array(arr) => {
                     let mut result = vec![b'*'];
                     result.extend_from_slice(arr.len().to_string().as_bytes());
                     result.extend_from_slice(b"\r\n");
@@ -405,14 +409,14 @@ mod tests {
                     }
                     result
                 }
-                MockRedisValue::Null => b"_\r\n".to_vec(),
-                MockRedisValue::Boolean(b) => {
+                Resp3ValueModel::Null => b"_\r\n".to_vec(),
+                Resp3ValueModel::Boolean(b) => {
                     let mut result = vec![b'#'];
                     result.extend_from_slice(if *b { b"t" } else { b"f" });
                     result.extend_from_slice(b"\r\n");
                     result
                 }
-                MockRedisValue::Double(d) => {
+                Resp3ValueModel::Double(d) => {
                     let mut result = vec![b','];
                     result.extend_from_slice(d.to_string().as_bytes());
                     result.extend_from_slice(b"\r\n");
@@ -430,7 +434,7 @@ mod tests {
                 b'+' => {
                     if let Some(end) = data[1..].windows(2).position(|w| w == b"\r\n") {
                         let string = String::from_utf8_lossy(&data[1..end + 1]).to_string();
-                        Ok((MockRedisValue::SimpleString(string), end + 3))
+                        Ok((Resp3ValueModel::SimpleString(string), end + 3))
                     } else {
                         Err("Incomplete simple string".to_string())
                     }
@@ -439,7 +443,7 @@ mod tests {
                     if let Some(end) = data[1..].windows(2).position(|w| w == b"\r\n") {
                         let int_str = String::from_utf8_lossy(&data[1..end + 1]);
                         let int_val = int_str.parse::<i64>().map_err(|_| "Invalid integer")?;
-                        Ok((MockRedisValue::Integer(int_val), end + 3))
+                        Ok((Resp3ValueModel::Integer(int_val), end + 3))
                     } else {
                         Err("Incomplete integer".to_string())
                     }
@@ -454,7 +458,7 @@ mod tests {
                         if data.len() >= data_start + length + 2 {
                             let bulk_data = data[data_start..data_start + length].to_vec();
                             Ok((
-                                MockRedisValue::BulkString(bulk_data),
+                                Resp3ValueModel::BulkString(bulk_data),
                                 data_start + length + 2,
                             ))
                         } else {
@@ -471,14 +475,14 @@ mod tests {
                             b'f' => false,
                             _ => return Err("Invalid boolean".to_string()),
                         };
-                        Ok((MockRedisValue::Boolean(bool_val), 4))
+                        Ok((Resp3ValueModel::Boolean(bool_val), 4))
                     } else {
                         Err("Incomplete boolean".to_string())
                     }
                 }
                 b'_' => {
                     if data.len() >= 3 && &data[..3] == b"_\r\n" {
-                        Ok((MockRedisValue::Null, 3))
+                        Ok((Resp3ValueModel::Null, 3))
                     } else {
                         Err("Incomplete null".to_string())
                     }
@@ -489,12 +493,12 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockRedisCluster {
+    pub struct RedisClusterModel {
         pub slots: HashMap<u16, String>,    // slot -> node_id
         pub nodes: HashMap<String, String>, // node_id -> address
     }
 
-    impl MockRedisCluster {
+    impl RedisClusterModel {
         pub fn new() -> Self {
             Self {
                 slots: HashMap::new(),
@@ -535,7 +539,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockJetStreamMessage {
+    pub struct JetStreamMessageModel {
         pub stream: String,
         pub subject: String,
         pub sequence: u64,
@@ -545,12 +549,12 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockJetStreamConsumer {
+    pub struct JetStreamConsumerModel {
         pub name: String,
         pub stream: String,
         pub durable: bool,
         pub ack_policy: AckPolicy,
-        pub delivered_messages: Vec<MockJetStreamMessage>,
+        pub delivered_messages: Vec<JetStreamMessageModel>,
         pub acked_sequences: HashSet<u64>,
         pub pending_acks: HashSet<u64>,
     }
@@ -562,7 +566,7 @@ mod tests {
         Explicit,
     }
 
-    impl MockJetStreamConsumer {
+    impl JetStreamConsumerModel {
         pub fn new(name: &str, stream: &str, durable: bool, ack_policy: AckPolicy) -> Self {
             Self {
                 name: name.to_string(),
@@ -575,7 +579,7 @@ mod tests {
             }
         }
 
-        pub fn deliver_message(&mut self, mut message: MockJetStreamMessage) -> u64 {
+        pub fn deliver_message(&mut self, mut message: JetStreamMessageModel) -> u64 {
             let sequence = message.sequence;
             message.ack_pending = matches!(self.ack_policy, AckPolicy::Explicit);
 
@@ -607,7 +611,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct MockTask {
+    pub struct SchedulerTaskModel {
         pub id: u64,
         pub priority: u32,
         pub deadline: Option<Instant>,
@@ -615,7 +619,7 @@ mod tests {
         pub created_at: Instant,
     }
 
-    impl MockTask {
+    impl SchedulerTaskModel {
         pub fn new(id: u64, priority: u32) -> Self {
             Self {
                 id,
@@ -637,13 +641,13 @@ mod tests {
         }
     }
 
-    impl PartialOrd for MockTask {
+    impl PartialOrd for SchedulerTaskModel {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }
     }
 
-    impl Ord for MockTask {
+    impl Ord for SchedulerTaskModel {
         fn cmp(&self, other: &Self) -> Ordering {
             // Higher priority first, then earlier deadline
             match self.priority.cmp(&other.priority).reverse() {
@@ -661,15 +665,15 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockScheduler {
-        pub cancel_lane: VecDeque<MockTask>,
-        pub timed_lane: VecDeque<MockTask>, // EDF scheduled
-        pub ready_lane: VecDeque<MockTask>,
-        pub completed_tasks: Vec<MockTask>,
+    pub struct ThreeLaneSchedulerModel {
+        pub cancel_lane: VecDeque<SchedulerTaskModel>,
+        pub timed_lane: VecDeque<SchedulerTaskModel>, // EDF scheduled
+        pub ready_lane: VecDeque<SchedulerTaskModel>,
+        pub completed_tasks: Vec<SchedulerTaskModel>,
         pub current_time: Instant,
     }
 
-    impl MockScheduler {
+    impl ThreeLaneSchedulerModel {
         pub fn new() -> Self {
             Self {
                 cancel_lane: VecDeque::new(),
@@ -680,7 +684,7 @@ mod tests {
             }
         }
 
-        pub fn enqueue_task(&mut self, task: MockTask) {
+        pub fn enqueue_task(&mut self, task: SchedulerTaskModel) {
             if task.priority == u32::MAX {
                 // Cancel lane
                 self.cancel_lane.push_back(task);
@@ -698,7 +702,7 @@ mod tests {
             }
         }
 
-        pub fn schedule_next(&mut self) -> Option<MockTask> {
+        pub fn schedule_next(&mut self) -> Option<SchedulerTaskModel> {
             // Strict 3-lane ordering: cancel > timed > ready
             if let Some(task) = self.cancel_lane.pop_front() {
                 return Some(task);
@@ -716,7 +720,7 @@ mod tests {
             self.ready_lane.pop_front()
         }
 
-        pub fn execute_task(&mut self, mut task: MockTask) {
+        pub fn execute_task(&mut self, mut task: SchedulerTaskModel) {
             task.work_amount = task.work_amount.saturating_sub(1);
             if task.work_amount == 0 {
                 self.completed_tasks.push(task);
@@ -735,26 +739,26 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockWorkStealingScheduler {
-        pub workers: Vec<MockWorker>,
-        pub global_queue: VecDeque<MockTask>,
+    pub struct WorkStealingSchedulerModel {
+        pub workers: Vec<WorkerModel>,
+        pub global_queue: VecDeque<SchedulerTaskModel>,
         pub steal_attempts: u64,
         pub successful_steals: u64,
     }
 
     #[derive(Debug, Clone)]
-    pub struct MockWorker {
+    pub struct WorkerModel {
         pub id: u64,
-        pub local_queue: VecDeque<MockTask>,
-        pub executed_tasks: Vec<MockTask>,
+        pub local_queue: VecDeque<SchedulerTaskModel>,
+        pub executed_tasks: Vec<SchedulerTaskModel>,
         pub steals_from_me: u64,
         pub steals_by_me: u64,
     }
 
-    impl MockWorkStealingScheduler {
+    impl WorkStealingSchedulerModel {
         pub fn new(worker_count: usize) -> Self {
             let workers = (0..worker_count)
-                .map(|id| MockWorker {
+                .map(|id| WorkerModel {
                     id: id as u64,
                     local_queue: VecDeque::new(),
                     executed_tasks: Vec::new(),
@@ -771,13 +775,13 @@ mod tests {
             }
         }
 
-        pub fn enqueue_task(&mut self, task: MockTask) {
+        pub fn enqueue_task(&mut self, task: SchedulerTaskModel) {
             // Simple round-robin assignment to worker local queues
             let worker_id = (task.id % self.workers.len() as u64) as usize;
             self.workers[worker_id].local_queue.push_back(task);
         }
 
-        pub fn worker_schedule_next(&mut self, worker_id: usize) -> Option<MockTask> {
+        pub fn worker_schedule_next(&mut self, worker_id: usize) -> Option<SchedulerTaskModel> {
             // Try local queue first
             if let Some(task) = self.workers[worker_id].local_queue.pop_front() {
                 return Some(task);
@@ -805,7 +809,7 @@ mod tests {
             None
         }
 
-        pub fn worker_execute_task(&mut self, worker_id: usize, task: MockTask) {
+        pub fn worker_execute_task(&mut self, worker_id: usize, task: SchedulerTaskModel) {
             self.workers[worker_id].executed_tasks.push(task);
         }
 
@@ -853,15 +857,15 @@ mod tests {
                 5..20
             )
         ) {
-            let mut producer = MockKafkaProducer::new();
-            let mut consumer = MockKafkaConsumer::new("test-group");
+            let mut producer = KafkaProducerModel::new();
+            let mut consumer = KafkaConsumerModel::new("test-group");
 
             let topic = "test-topic";
             let mut sent_by_partition: BTreeMap<u32, Vec<(u64, Vec<u8>)>> = BTreeMap::new();
 
             // Send messages
             for (data, partition) in messages {
-                let message = MockKafkaMessage::new(topic, partition, 0, data.clone());
+                let message = KafkaRecordModel::new(topic, partition, 0, data.clone());
                 let offset = producer.send_message(topic, partition, message)
                     .expect("Failed to send message");
 
@@ -924,8 +928,8 @@ mod tests {
             // Create two identical sets of consumers
             for i in 0..consumer_count {
                 let consumer_id = format!("consumer-{}", i);
-                consumers1.push(MockKafkaConsumer::new(&consumer_id));
-                consumers2.push(MockKafkaConsumer::new(&consumer_id));
+                consumers1.push(KafkaConsumerModel::new(&consumer_id));
+                consumers2.push(KafkaConsumerModel::new(&consumer_id));
             }
 
             // Simulate rebalancing (simplified round-robin assignment)
@@ -990,7 +994,7 @@ mod tests {
             ),
             should_commit in any::<bool>()
         ) {
-            let mut producer = MockKafkaProducer::new();
+            let mut producer = KafkaProducerModel::new();
             let topic = "test-topic";
             let partition = 0;
 
@@ -1001,7 +1005,7 @@ mod tests {
 
             // Send messages in transaction
             for data in &transaction_messages {
-                let message = MockKafkaMessage::new(topic, partition, 0, data.clone());
+                let message = KafkaRecordModel::new(topic, partition, 0, data.clone());
                 let offset = producer.send_message(topic, partition, message)
                     .expect("Failed to send message");
                 sent_offsets.push(offset);
@@ -1056,7 +1060,7 @@ mod tests {
             base_subject in "[a-z]{3,8}",
             sub_subjects in prop::collection::vec("[a-z]{2,6}", 2..5)
         ) {
-            let mut client = MockNATSClient::new();
+            let mut client = NatsClientModel::new();
 
             // Create specific and wildcard subscriptions
             let specific_subject = format!("{}.{}", base_subject, sub_subjects[0]);
@@ -1080,6 +1084,9 @@ mod tests {
 
             prop_assert!(specific_matches > 0,
                 "No routes found for specific subject {}", specific_subject);
+            prop_assert_eq!(specific_matches, expected_matches,
+                "Specific subject {} should match exactly {} subscriptions",
+                specific_subject, expected_matches);
 
             // Test wildcard independence: different subjects under same prefix
             for sub_subject in &sub_subjects[1..] {
@@ -1132,9 +1139,9 @@ mod tests {
             gt_pattern.push(">".to_string());
             let gt_pattern = gt_pattern.join(".");
 
-            let star_subject = MockNATSSubject::new(&star_pattern);
-            let gt_subject = MockNATSSubject::new(&gt_pattern);
-            let exact_subject = MockNATSSubject::new(&subject);
+            let star_subject = NatsSubjectModel::new(&star_pattern);
+            let gt_subject = NatsSubjectModel::new(&gt_pattern);
+            let exact_subject = NatsSubjectModel::new(&subject);
 
             // Exact matching: subject should match itself
             prop_assert!(exact_subject.matches(&subject),
@@ -1176,7 +1183,7 @@ mod tests {
             request_data in prop::collection::vec(any::<u8>(), 10..100),
             reply_data in prop::collection::vec(any::<u8>(), 10..100)
         ) {
-            let mut client = MockNATSClient::new();
+            let mut client = NatsClientModel::new();
 
             let initial_published = client.published_messages.len();
 
@@ -1235,12 +1242,12 @@ mod tests {
         fn mr_redis_resp_encode_decode(
             test_values in prop::collection::vec(
                 prop::sample::select(vec![
-                    MockRedisValue::SimpleString("OK".to_string()),
-                    MockRedisValue::Integer(42),
-                    MockRedisValue::BulkString(b"hello".to_vec()),
-                    MockRedisValue::Boolean(true),
-                    MockRedisValue::Boolean(false),
-                    MockRedisValue::Null,
+                    Resp3ValueModel::SimpleString("OK".to_string()),
+                    Resp3ValueModel::Integer(42),
+                    Resp3ValueModel::BulkString(b"hello".to_vec()),
+                    Resp3ValueModel::Boolean(true),
+                    Resp3ValueModel::Boolean(false),
+                    Resp3ValueModel::Null,
                 ]),
                 1..8
             )
@@ -1253,7 +1260,7 @@ mod tests {
                     "RESP3 encoding should not be empty for value: {:?}", original_value);
 
                 // Decoding should recover original value
-                match MockRedisValue::decode_resp3(&encoded) {
+                match Resp3ValueModel::decode_resp3(&encoded) {
                     Ok((decoded_value, consumed_bytes)) => {
                         prop_assert_eq!(decoded_value.clone(), original_value.clone(),
                             "RESP3 round-trip failed: {:?} -> {:?}", original_value, decoded_value);
@@ -1286,7 +1293,7 @@ mod tests {
         fn mr_redis_cluster_slot_determinism(
             keys in prop::collection::vec("[a-zA-Z0-9]{3,20}", 10..50)
         ) {
-            let cluster = MockRedisCluster::new();
+            let cluster = RedisClusterModel::new();
 
             // Determinism: slot calculation should be consistent
             for key in &keys {
@@ -1344,7 +1351,7 @@ mod tests {
             ),
             test_keys in prop::collection::vec("[a-zA-Z0-9]{5,15}", 20..50)
         ) {
-            let mut cluster = MockRedisCluster::new();
+            let mut cluster = RedisClusterModel::new();
 
             // Set up cluster topology
             for (i, (slots, address)) in node_configs.iter().enumerate() {
@@ -1412,7 +1419,7 @@ mod tests {
                 5..15
             )
         ) {
-            let mut consumer = MockJetStreamConsumer::new(
+            let mut consumer = JetStreamConsumerModel::new(
                 "test-consumer", "test-stream", true, AckPolicy::Explicit
             );
 
@@ -1420,7 +1427,7 @@ mod tests {
 
             // Deliver messages
             for (i, data) in messages.iter().enumerate() {
-                let message = MockJetStreamMessage {
+                let message = JetStreamMessageModel {
                     stream: "test-stream".to_string(),
                     subject: "test.subject".to_string(),
                     sequence: i as u64 + 1,
@@ -1484,7 +1491,7 @@ mod tests {
             priority_levels in prop::collection::vec(1u32..5u32, 2..5),
             tasks_per_priority in prop::collection::vec(3usize..10usize, 2..5)
         ) {
-            let mut scheduler = MockScheduler::new();
+            let mut scheduler = ThreeLaneSchedulerModel::new();
 
             // Create tasks with different priorities
             let mut task_id = 0u64;
@@ -1493,7 +1500,7 @@ mod tests {
             for (&priority, &task_count) in priority_levels.iter().zip(tasks_per_priority.iter()) {
                 let mut task_ids = Vec::new();
                 for _ in 0..task_count {
-                    let task = MockTask::new(task_id, priority).with_work_amount(1);
+                    let task = SchedulerTaskModel::new(task_id, priority).with_work_amount(1);
                     task_ids.push(task_id);
                     scheduler.enqueue_task(task);
                     task_id += 1;
@@ -1551,14 +1558,14 @@ mod tests {
             timed_tasks in prop::collection::vec(0u64..10u64, 1..5),
             ready_tasks in prop::collection::vec(0u64..10u64, 1..5)
         ) {
-            let mut scheduler = MockScheduler::new();
+            let mut scheduler = ThreeLaneSchedulerModel::new();
             let base_time = Instant::now();
             let mut task_id = 0u64;
 
             // Enqueue cancel lane tasks (highest priority)
             let mut cancel_task_ids = Vec::new();
             for _ in &cancel_tasks {
-                let task = MockTask::new(task_id, u32::MAX).with_work_amount(1);
+                let task = SchedulerTaskModel::new(task_id, u32::MAX).with_work_amount(1);
                 cancel_task_ids.push(task_id);
                 scheduler.enqueue_task(task);
                 task_id += 1;
@@ -1568,7 +1575,7 @@ mod tests {
             let mut timed_task_ids = Vec::new();
             for (i, _) in timed_tasks.iter().enumerate() {
                 let deadline = base_time + Duration::from_millis(100 * (i as u64 + 1));
-                let task = MockTask::new(task_id, 1)
+                let task = SchedulerTaskModel::new(task_id, 1)
                     .with_deadline(deadline)
                     .with_work_amount(1);
                 timed_task_ids.push(task_id);
@@ -1579,7 +1586,7 @@ mod tests {
             // Enqueue ready lane tasks (lowest priority)
             let mut ready_task_ids = Vec::new();
             for _ in &ready_tasks {
-                let task = MockTask::new(task_id, 1).with_work_amount(1);
+                let task = SchedulerTaskModel::new(task_id, 1).with_work_amount(1);
                 ready_task_ids.push(task_id);
                 scheduler.enqueue_task(task);
                 task_id += 1;
@@ -1643,11 +1650,11 @@ mod tests {
             worker_count in 2usize..8usize,
             task_count in 20usize..100usize
         ) {
-            let mut scheduler = MockWorkStealingScheduler::new(worker_count);
+            let mut scheduler = WorkStealingSchedulerModel::new(worker_count);
 
             // Enqueue tasks (they'll be assigned round-robin to workers)
             for i in 0..task_count {
-                let task = MockTask::new(i as u64, 1);
+                let task = SchedulerTaskModel::new(i as u64, 1);
                 scheduler.enqueue_task(task);
             }
 
@@ -1688,6 +1695,8 @@ mod tests {
                 // Some stealing should occur with realistic workloads
                 prop_assert!(scheduler.steal_attempts > 0,
                     "No steal attempts made with {} tasks on {} workers", task_count, worker_count);
+                prop_assert!((0.0..=1.0).contains(&steal_rate),
+                    "Steal success rate must be normalized, got {}", steal_rate);
             }
 
             // Completeness: all tasks should be executed
@@ -1724,10 +1733,10 @@ mod tests {
 
     #[test]
     fn test_kafka_producer_consumer_basic() {
-        let mut producer = MockKafkaProducer::new();
-        let mut consumer = MockKafkaConsumer::new("test-group");
+        let mut producer = KafkaProducerModel::new();
+        let mut consumer = KafkaConsumerModel::new("test-group");
 
-        let message = MockKafkaMessage::new("test", 0, 0, b"hello".to_vec());
+        let message = KafkaRecordModel::new("test", 0, 0, b"hello".to_vec());
         let offset = producer.send_message("test", 0, message).unwrap();
         assert_eq!(offset, 0);
 
@@ -1738,31 +1747,31 @@ mod tests {
 
     #[test]
     fn test_nats_subject_matching() {
-        let wildcard = MockNATSSubject::new("foo.*");
+        let wildcard = NatsSubjectModel::new("foo.*");
         assert!(wildcard.matches("foo.bar"));
         assert!(!wildcard.matches("foo.bar.baz"));
 
-        let catch_all = MockNATSSubject::new("foo.>");
+        let catch_all = NatsSubjectModel::new("foo.>");
         assert!(catch_all.matches("foo.bar"));
         assert!(catch_all.matches("foo.bar.baz"));
     }
 
     #[test]
     fn test_redis_resp_basic() {
-        let value = MockRedisValue::Integer(42);
+        let value = Resp3ValueModel::Integer(42);
         let encoded = value.encode_resp3();
-        let (decoded, _) = MockRedisValue::decode_resp3(&encoded).unwrap();
+        let (decoded, _) = Resp3ValueModel::decode_resp3(&encoded).unwrap();
         assert_eq!(decoded, value);
     }
 
     #[test]
     fn test_scheduler_three_lane() {
-        let mut scheduler = MockScheduler::new();
+        let mut scheduler = ThreeLaneSchedulerModel::new();
 
         // Add tasks to different lanes
-        scheduler.enqueue_task(MockTask::new(1, 1)); // ready
-        scheduler.enqueue_task(MockTask::new(2, u32::MAX)); // cancel
-        scheduler.enqueue_task(MockTask::new(3, 1).with_deadline(Instant::now())); // timed
+        scheduler.enqueue_task(SchedulerTaskModel::new(1, 1)); // ready
+        scheduler.enqueue_task(SchedulerTaskModel::new(2, u32::MAX)); // cancel
+        scheduler.enqueue_task(SchedulerTaskModel::new(3, 1).with_deadline(Instant::now())); // timed
 
         // Should get cancel task first
         let first = scheduler.schedule_next().unwrap();
@@ -1771,10 +1780,10 @@ mod tests {
 
     #[test]
     fn test_work_stealing_basic() {
-        let mut scheduler = MockWorkStealingScheduler::new(2);
+        let mut scheduler = WorkStealingSchedulerModel::new(2);
 
-        scheduler.enqueue_task(MockTask::new(1, 1));
-        scheduler.enqueue_task(MockTask::new(2, 1));
+        scheduler.enqueue_task(SchedulerTaskModel::new(1, 1));
+        scheduler.enqueue_task(SchedulerTaskModel::new(2, 1));
 
         // Worker 0 should get task 1, worker 1 should get task 2
         let task1 = scheduler.worker_schedule_next(0);

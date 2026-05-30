@@ -565,7 +565,7 @@ fn nats_real_queue_group_single_delivery() {
 /// The HMSG parser changes from br-asupersync-6xjxd7 made
 /// `reply_status_error` accept both the inline-status-line form
 /// (`NATS/1.0 503 No Responders\r\n\r\n`) and the separate-`Status:`-header
-/// form. Both unit tests for the parser use mock TCP listeners; this is the
+/// form. Both unit tests for the parser use scripted TCP listeners; this is the
 /// roundtrip proof that asupersync's `NatsClient::request` correctly drives
 /// the no-responders path against an actual `nats-server`.
 #[test]
