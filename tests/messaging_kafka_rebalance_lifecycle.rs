@@ -13,11 +13,11 @@
 //! at `KAFKA_BOOTSTRAP` (default `localhost:9092`). Skipped if the
 //! broker is unreachable.
 //!
-//! Without the `kafka` feature: uses the in-process stub broker that
+//! Without the `kafka` feature: uses the deterministic in-process broker that
 //! ships in `src/messaging/kafka.rs`. Per-test serialisation of the
-//! stub broker is handled via a process-wide mutex; this single
+//! deterministic broker is handled via a process-wide mutex; this single
 //! integration test stays correct because it does not run in
-//! parallel with other stub-broker consumers.
+//! parallel with other deterministic-broker consumers.
 
 #[cfg(feature = "kafka")]
 mod rebalance_lifecycle {

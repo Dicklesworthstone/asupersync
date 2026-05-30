@@ -2,16 +2,16 @@
 //!
 //! Verifies that every [`Compression`] variant is accepted by
 //! [`ProducerConfig`] and produces a valid producer instance under the
-//! `kafka` feature. The tests run against the in-process stub broker
+//! `kafka` feature. The tests run against the deterministic in-process broker
 //! that ships with the `messaging` module so CI does not need a real
-//! Kafka cluster — the wire format is exercised end-to-end inside the
-//! stub, including the compression-codec selection logic that the
+//! Kafka cluster — the wire format is exercised end-to-end inside that
+//! broker, including the compression-codec selection logic that the
 //! producer threads through to its underlying transport.
 //!
 //! # Broker dependency
 //!
-//! These tests run with the in-process stub broker provided by
-//! `src/messaging/kafka.rs` (see `STUB_BROKER`). No external Kafka
+//! These tests run with the deterministic in-process broker provided by
+//! `src/messaging/kafka.rs` (see `DETERMINISTIC_BROKER`). No external Kafka
 //! instance is required. To exercise against a real broker, set
 //! `KAFKA_BROKER_BOOTSTRAP` in the environment and the kafka feature
 //! flag — the tests will then hit that broker (a future follow-up).
@@ -59,7 +59,7 @@ mod compression_roundtrip {
     }
 
     /// huvyi0: each non-None variant maps to a distinct rdkafka
-    /// `compression.type` string. The stub broker accepts the same
+    /// `compression.type` string. The deterministic broker accepts the same
     /// labels, so the mapping is an end-to-end correctness gate.
     #[test]
     fn huvyi0_compression_codec_strings_distinct() {

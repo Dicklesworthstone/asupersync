@@ -6,8 +6,8 @@
 //!
 //! Source-truth status: the stale audit finding is fixed. `ConsumerConfig`
 //! exposes a bounded retry budget and `commit_offsets` routes real Kafka commits
-//! through `retry_consumer_operation`; the no-feature test path still uses the
-//! deterministic stub broker.
+//! through `retry_consumer_operation`; the no-feature test path uses the
+//! deterministic in-process broker.
 
 use asupersync::cx::Cx;
 use asupersync::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer, TopicPartitionOffset};
