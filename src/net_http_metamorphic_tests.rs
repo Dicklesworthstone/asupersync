@@ -30,7 +30,10 @@
 #[cfg(test)]
 use proptest::prelude::*;
 
-// Mock types and traits for testing networking protocols
+use crate::bytes::BytesMut;
+use crate::http::h2::{Header as HpackHeader, HpackDecoder, HpackEncoder};
+
+// Local protocol models for metamorphic networking properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockTcpConnection {
     pub local_addr: String,
@@ -140,11 +143,10 @@ pub enum HttpVersion {
     Http3,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct MockHpackContext {
-    pub dynamic_table: Vec<(String, String)>,
-    pub table_size: usize,
-    pub max_size: usize,
+#[derive(Debug)]
+pub struct HpackRoundTripContext {
+    encoder: HpackEncoder,
+    decoder: HpackDecoder,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -408,39 +410,25 @@ impl MockHttpMessage {
     }
 }
 
-impl MockHpackContext {
+impl HpackRoundTripContext {
     pub fn new(max_size: usize) -> Self {
         Self {
-            dynamic_table: Vec::new(),
-            table_size: 0,
-            max_size,
+            encoder: HpackEncoder::with_max_size(max_size),
+            decoder: HpackDecoder::with_max_size(max_size),
         }
     }
 
-    pub fn encode_header(&mut self, name: &str, value: &str) -> Vec<u8> {
-        // Simplified HPACK encoding - just store in dynamic table
-        let entry = (name.to_string(), value.to_string());
-        let entry_size = name.len() + value.len() + 32; // RFC overhead
-
-        if entry_size <= self.max_size {
-            self.dynamic_table.push(entry);
-            self.table_size += entry_size;
+    pub fn encode_decode(&mut self, headers: &[HpackHeader]) -> Result<Vec<HpackHeader>, String> {
+        let mut encoded = BytesMut::new();
+        self.encoder.encode(headers, &mut encoded);
+        if encoded.is_empty() {
+            return Err("production HPACK encoder produced an empty header block".to_string());
         }
 
-        // Return mock encoded data
-        format!("{}:{}", name, value).into_bytes()
-    }
-
-    pub fn decode_header(&self, data: &[u8]) -> Option<(String, String)> {
-        // Simplified HPACK decoding
-        let text = String::from_utf8_lossy(data);
-        if let Some(colon_pos) = text.find(':') {
-            let name = text[..colon_pos].to_string();
-            let value = text[colon_pos + 1..].to_string();
-            Some((name, value))
-        } else {
-            None
-        }
+        let mut bytes = encoded.freeze();
+        self.decoder
+            .decode(&mut bytes)
+            .map_err(|err| format!("production HPACK decoder rejected encoded block: {err}"))
     }
 }
 
@@ -829,33 +817,36 @@ fn test_mr_h2_hpack_encode_decode_round_trip() {
         headers: Vec<(String, String)>,
         max_table_size in 1024usize..=8192usize
     )| {
-        let mut hpack_context = MockHpackContext::new(max_table_size);
+        let valid_headers: Vec<HpackHeader> = headers
+            .iter()
+            .filter(|(name, value)| is_valid_hpack_header(name, value))
+            .take(16)
+            .map(|(name, value)| HpackHeader::new(name.clone(), value.clone()))
+            .collect();
 
-        for (name, value) in &headers {
-            if !name.is_empty() && !value.is_empty() &&
-               !name.contains(':') && !value.contains(':') {
+        if !valid_headers.is_empty() {
+            let mut hpack_context = HpackRoundTripContext::new(max_table_size);
+            let decoded_headers = hpack_context
+                .encode_decode(&valid_headers)
+                .map_err(TestCaseError::fail)?;
 
-                // Encode header
-                let encoded = hpack_context.encode_header(name, value);
-
-                // Decode header
-                if let Some((decoded_name, decoded_value)) = hpack_context.decode_header(&encoded) {
-                    // MR: HPACK encode→decode should preserve header name and value.
-                    // `.clone()` the borrowed name/value so the prop_assert_eq! macro
-                    // doesn't move out of the shared reference.
-                    prop_assert_eq!(
-                        decoded_name.clone(), name.clone(),
-                        "HPACK round-trip should preserve header name"
-                    );
-
-                    prop_assert_eq!(
-                        decoded_value.clone(), value.clone(),
-                        "HPACK round-trip should preserve header value"
-                    );
-                }
-            }
+            prop_assert_eq!(
+                decoded_headers,
+                valid_headers,
+                "production HPACK encode/decode should preserve valid headers"
+            );
         }
     });
+}
+
+fn is_valid_hpack_header(name: &str, value: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && value.len() <= 256
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !value.bytes().any(|byte| matches!(byte, 0 | b'\r' | b'\n'))
 }
 
 /// MR-H2FrameSerializationRoundTrip: HTTP/2 frame serialization should be reversible
