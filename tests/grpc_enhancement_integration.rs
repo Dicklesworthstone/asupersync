@@ -222,7 +222,7 @@ mod compression {
 
         // Highly compressible data (repeated bytes).
         let data = vec![b'A'; 10_000];
-        let compressed = gzip_frame_compress(&data).unwrap();
+        let compressed = gzip_frame_compress(Bytes::from(data.clone())).unwrap();
 
         assert!(
             compressed.len() < data.len(),
@@ -231,7 +231,7 @@ mod compression {
             data.len()
         );
 
-        let decompressed = gzip_frame_decompress(&compressed, 20_000).unwrap();
+        let decompressed = gzip_frame_decompress(compressed, 20_000).unwrap();
         assert_eq!(decompressed.as_ref(), data.as_slice());
     }
 
@@ -255,9 +255,9 @@ mod compression {
         use asupersync::grpc::codec::{gzip_frame_compress, gzip_frame_decompress};
 
         let data = vec![0u8; 8192];
-        let compressed = gzip_frame_compress(&data).unwrap();
+        let compressed = gzip_frame_compress(Bytes::from(data)).unwrap();
 
-        let result = gzip_frame_decompress(&compressed, 100);
+        let result = gzip_frame_decompress(compressed, 100);
         assert!(
             matches!(result, Err(GrpcError::MessageTooLarge)),
             "decompression bomb rejected"
@@ -317,10 +317,10 @@ mod compression {
         // Verify the functions actually work.
         let compress = gzip.frame_compressor().unwrap();
         let decompress = gzip.frame_decompressor().unwrap();
-        let data = b"test compression encoding resolution";
-        let compressed = compress(data).unwrap();
-        let decompressed = decompress(&compressed, 1024).unwrap();
-        assert_eq!(decompressed.as_ref(), data.as_slice());
+        let data = Bytes::from_static(b"test compression encoding resolution");
+        let compressed = compress(data.clone()).unwrap();
+        let decompressed = decompress(compressed, 1024).unwrap();
+        assert_eq!(decompressed, data);
     }
 
     #[test]
@@ -564,13 +564,15 @@ mod cross_feature {
 
         // Simulate a compressed data frame in grpc-web format.
         let payload = b"compressed-grpc-web-payload";
-        let compressed = gzip_frame_compress(payload).unwrap();
+        let compressed = gzip_frame_compress(Bytes::from_static(payload)).unwrap();
 
         let codec = WebFrameCodec::new();
         let mut buf = BytesMut::new();
 
         // Encode as compressed data frame.
-        codec.encode_data(&compressed, true, &mut buf).unwrap();
+        codec
+            .encode_data(compressed.as_ref(), true, &mut buf)
+            .unwrap();
 
         // Decode and verify.
         let frame = codec.decode(&mut buf).unwrap().unwrap();
@@ -582,7 +584,7 @@ mod cross_feature {
                 assert!(c, "compressed flag set");
                 // Decompress the payload.
                 use asupersync::grpc::codec::gzip_frame_decompress;
-                let decompressed = gzip_frame_decompress(&data, 4096).unwrap();
+                let decompressed = gzip_frame_decompress(data, 4096).unwrap();
                 assert_eq!(decompressed.as_ref(), payload.as_slice());
             }
             _ => panic!("expected data frame"),
@@ -596,12 +598,12 @@ mod cross_feature {
 
         // Build a gzip-compressed grpc-web stream in text mode.
         let payload = b"text-mode-gzip-payload-for-browser";
-        let compressed = gzip_frame_compress(payload).unwrap();
+        let compressed = gzip_frame_compress(Bytes::from_static(payload)).unwrap();
 
         let codec = WebFrameCodec::new();
         let mut binary_buf = BytesMut::new();
         codec
-            .encode_data(&compressed, true, &mut binary_buf)
+            .encode_data(compressed.as_ref(), true, &mut binary_buf)
             .unwrap();
         codec
             .encode_trailers(&Status::ok(), &Metadata::new(), &mut binary_buf)
@@ -623,7 +625,7 @@ mod cross_feature {
             } => {
                 assert!(c, "compressed flag preserved through text mode");
                 use asupersync::grpc::codec::gzip_frame_decompress;
-                let decompressed = gzip_frame_decompress(&data, 4096).unwrap();
+                let decompressed = gzip_frame_decompress(data, 4096).unwrap();
                 assert_eq!(decompressed.as_ref(), payload.as_slice());
             }
             _ => panic!("expected data frame"),
