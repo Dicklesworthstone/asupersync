@@ -1591,6 +1591,7 @@ mod tests {
             cancel_reason: cancel_reason.map(str::to_string),
             parent: Some(RegionId::new_for_test(0, 1)),
             metadata: metadata.to_vec(),
+            auth_tag: AuthenticationTag::zero(),
         }
     }
 
@@ -1948,6 +1949,7 @@ mod tests {
             cancel_reason: cancel_reason.map(str::to_string),
             parent: None,
             metadata: vec![],
+            auth_tag: AuthenticationTag::zero(),
         }
     }
 

@@ -309,7 +309,7 @@ mod tests {
     }
 
     trait AuthorizedAssignForTests {
-        fn assign(
+        fn assign_authorized(
             &self,
             symbols: &[Symbol],
             replicas: &[ReplicaInfo],
@@ -318,7 +318,7 @@ mod tests {
     }
 
     impl AuthorizedAssignForTests for SymbolAssigner {
-        fn assign(
+        fn assign_authorized(
             &self,
             symbols: &[Symbol],
             replicas: &[ReplicaInfo],
@@ -356,7 +356,7 @@ mod tests {
         let symbols = create_test_symbols(9);
         let replicas = create_test_replicas(3);
 
-        let assignments = assigner.assign(&symbols, &replicas, 5);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 5);
 
         // Each replica should get 3 symbols (9 / 3).
         for assignment in &assignments {
@@ -370,7 +370,7 @@ mod tests {
         let symbols = create_test_symbols(12);
         let replicas = create_test_replicas(3);
 
-        let assignments = assigner.assign(&symbols, &replicas, 4);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 4);
 
         // Collect all assigned indices.
         let mut all: Vec<usize> = Vec::new();
@@ -389,7 +389,7 @@ mod tests {
         let symbols = create_test_symbols(15);
         let replicas = create_test_replicas(3);
 
-        let assignments = assigner.assign(&symbols, &replicas, 10);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 10);
 
         for assignment in &assignments {
             assert!(
@@ -408,7 +408,7 @@ mod tests {
         let symbols: Vec<Symbol> = vec![];
         let replicas = create_test_replicas(3);
 
-        let assignments = assigner.assign(&symbols, &replicas, 5);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 5);
         assert!(assignments.is_empty());
     }
 
@@ -418,7 +418,7 @@ mod tests {
         let symbols = create_test_symbols(10);
         let replicas: Vec<ReplicaInfo> = vec![];
 
-        let assignments = assigner.assign(&symbols, &replicas, 5);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 5);
         assert!(assignments.is_empty());
     }
 
@@ -428,7 +428,7 @@ mod tests {
         let symbols = create_test_symbols(18);
         let replicas = create_test_replicas_with_symbol_counts(&[0, 4, 9]);
 
-        let assignments = assigner.assign(&symbols, &replicas, 3);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 3);
 
         let counts: Vec<_> = assignments
             .iter()
@@ -463,7 +463,7 @@ mod tests {
         let symbols = create_test_symbols(10);
         let replicas = create_test_replicas_with_symbol_counts(&[2, 2, 2]);
 
-        let assignments = assigner.assign(&symbols, &replicas, 3);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 3);
 
         let counts: Vec<_> = assignments
             .iter()
@@ -486,8 +486,8 @@ mod tests {
 
         for symbol_count in [1_usize, 2, 3, 4, 7, 11, 17] {
             let symbols = create_test_symbols(symbol_count);
-            let weighted_plan = weighted.assign(&symbols, &replicas, 99);
-            let striped_plan = striped.assign(&symbols, &replicas, 99);
+            let weighted_plan = weighted.assign_authorized(&symbols, &replicas, 99);
+            let striped_plan = striped.assign_authorized(&symbols, &replicas, 99);
 
             assert_eq!(
                 weighted_plan, striped_plan,
@@ -503,7 +503,7 @@ mod tests {
         let symbols = create_test_symbols(2);
         let replicas = create_test_replicas_with_symbol_counts(&[0, 100]);
 
-        let assignments = assigner.assign(&symbols, &replicas, 1);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 1);
         let counts: Vec<_> = assignments
             .iter()
             .map(|assignment| assignment.symbol_indices.len())
@@ -518,7 +518,7 @@ mod tests {
         let symbols = create_test_symbols(3);
         let replicas = create_test_replicas_with_symbol_counts(&[u32::MAX, u32::MAX - 1]);
 
-        let assignments = assigner.assign(&symbols, &replicas, 2);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 2);
 
         assert_eq!(assignments[0].symbol_indices, vec![1]);
         assert_eq!(assignments[1].symbol_indices, vec![0, 2]);
@@ -540,8 +540,8 @@ mod tests {
         let shifted_replicas =
             create_test_replicas_with_symbol_counts(&[10_000, 10_003, 10_009, 10_003]);
 
-        let baseline = assigner.assign(&symbols, &baseline_replicas, 4);
-        let shifted = assigner.assign(&symbols, &shifted_replicas, 4);
+        let baseline = assigner.assign_authorized(&symbols, &baseline_replicas, 4);
+        let shifted = assigner.assign_authorized(&symbols, &shifted_replicas, 4);
 
         assert_eq!(
             baseline, shifted,
@@ -559,7 +559,7 @@ mod tests {
         let symbols = create_test_symbols(3);
         let replicas = create_test_replicas(10);
 
-        let assignments = assigner.assign(&symbols, &replicas, 2);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 2);
 
         assert_eq!(assignments.len(), 10);
         for a in &assignments {
@@ -574,7 +574,7 @@ mod tests {
         let symbols = create_test_symbols(1);
         let replicas = create_test_replicas(3);
 
-        let assignments = assigner.assign(&symbols, &replicas, 1);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 1);
 
         for a in &assignments {
             assert_eq!(a.symbol_indices.len(), 1);
@@ -589,7 +589,7 @@ mod tests {
         let symbols = create_test_symbols(5);
         let replicas = create_test_replicas(2);
 
-        let assignments = assigner.assign(&symbols, &replicas, 10);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 10);
 
         for a in &assignments {
             assert_eq!(a.symbol_indices.len(), 5);
@@ -604,7 +604,7 @@ mod tests {
         let symbols = create_test_symbols(10);
         let replicas = create_test_replicas(3);
 
-        let assignments = assigner.assign(&symbols, &replicas, 3);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 3);
 
         let total: usize = assignments.iter().map(|a| a.symbol_indices.len()).sum();
         assert_eq!(total, 10, "all symbols assigned");
@@ -623,7 +623,7 @@ mod tests {
         let symbols = create_test_symbols(5);
         let replicas = create_test_replicas(1);
 
-        let assignments = assigner.assign(&symbols, &replicas, 3);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 3);
 
         assert_eq!(assignments.len(), 1);
         assert_eq!(assignments[0].symbol_indices.len(), 5);
@@ -637,7 +637,7 @@ mod tests {
         let symbols = create_test_symbols(3);
         let replicas = create_test_replicas(5);
 
-        let assignments = assigner.assign(&symbols, &replicas, 2);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 2);
 
         let total: usize = assignments.iter().map(|a| a.symbol_indices.len()).sum();
         assert_eq!(total, 3);
@@ -657,8 +657,8 @@ mod tests {
         let base_symbols = create_test_symbols(11);
         let extended_symbols = create_test_symbols(base_symbols.len() + replicas.len() * 2);
 
-        let base_plan = assigner.assign(&base_symbols, &replicas, 99);
-        let extended_plan = assigner.assign(&extended_symbols, &replicas, 99);
+        let base_plan = assigner.assign_authorized(&base_symbols, &replicas, 99);
+        let extended_plan = assigner.assign_authorized(&extended_symbols, &replicas, 99);
 
         assert_eq!(base_plan.len(), extended_plan.len());
         for (replica_idx, (base, extended)) in base_plan.iter().zip(&extended_plan).enumerate() {
@@ -704,7 +704,7 @@ mod tests {
         let symbols = create_test_symbols(10);
         let replicas = create_test_replicas(1);
 
-        let assignments = assigner.assign(&symbols, &replicas, 5);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 5);
 
         assert_eq!(assignments.len(), 1);
         assert!(assignments[0].symbol_indices.len() >= 5);
@@ -718,7 +718,7 @@ mod tests {
         let symbols = create_test_symbols(5);
         let replicas = create_test_replicas(3);
 
-        let assignments = assigner.assign(&symbols, &replicas, 5);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 5);
 
         for a in &assignments {
             assert_eq!(a.symbol_indices.len(), 5);
@@ -733,7 +733,7 @@ mod tests {
         let symbols = create_test_symbols(5);
         let replicas = create_test_replicas(2);
 
-        let assignments = assigner.assign(&symbols, &replicas, 10);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 10);
 
         for a in &assignments {
             assert!(!a.can_decode);
@@ -746,7 +746,7 @@ mod tests {
         let symbols = create_test_symbols(20);
         let replicas = create_test_replicas(4);
 
-        let assignments = assigner.assign(&symbols, &replicas, 8);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 8);
 
         for a in &assignments {
             let mut sorted = a.symbol_indices.clone();
@@ -867,7 +867,7 @@ mod tests {
         let symbols = create_test_symbols(5);
         let replicas = create_test_replicas(2);
 
-        let assignments = assigner.assign(&symbols, &replicas, 0);
+        let assignments = assigner.assign_authorized(&symbols, &replicas, 0);
 
         for a in &assignments {
             assert!(a.can_decode);
@@ -886,7 +886,7 @@ mod tests {
             AssignmentStrategy::MinimumK,
             AssignmentStrategy::Weighted,
         ] {
-            let plan = SymbolAssigner::new(strategy).assign(&symbols, &replicas, 4);
+            let plan = SymbolAssigner::new(strategy).assign_authorized(&symbols, &replicas, 4);
             assert_eq!(
                 plan.len(),
                 replicas.len(),
@@ -1022,28 +1022,28 @@ mod tests {
     #[test]
     fn golden_plan_full_strategy() {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
-        let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
+        let plan = assigner.assign_authorized(&golden_symbols(), &golden_replicas(), GOLDEN_K);
         insta::assert_debug_snapshot!(plan);
     }
 
     #[test]
     fn golden_plan_striped_strategy() {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Striped);
-        let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
+        let plan = assigner.assign_authorized(&golden_symbols(), &golden_replicas(), GOLDEN_K);
         insta::assert_debug_snapshot!(plan);
     }
 
     #[test]
     fn golden_plan_minimum_k_strategy() {
         let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
-        let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
+        let plan = assigner.assign_authorized(&golden_symbols(), &golden_replicas(), GOLDEN_K);
         insta::assert_debug_snapshot!(plan);
     }
 
     #[test]
     fn golden_plan_weighted_strategy() {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
-        let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
+        let plan = assigner.assign_authorized(&golden_symbols(), &golden_replicas(), GOLDEN_K);
         insta::assert_debug_snapshot!(plan);
     }
 
@@ -1061,7 +1061,7 @@ mod tests {
         let symbols = create_test_symbols(64);
         let replicas = create_test_replicas(4);
         let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
-        let plan = assigner.assign(&symbols, &replicas, 16);
+        let plan = assigner.assign_authorized(&symbols, &replicas, 16);
 
         for assignment in &plan {
             let mut sorted = assignment.symbol_indices.clone();
@@ -1081,9 +1081,9 @@ mod tests {
         let symbols = create_test_symbols(256);
         let replicas = create_test_replicas(8);
         let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
-        let p1 = assigner.assign(&symbols, &replicas, 64);
+        let p1 = assigner.assign_authorized(&symbols, &replicas, 64);
         for _ in 0..8 {
-            let pn = assigner.assign(&symbols, &replicas, 64);
+            let pn = assigner.assign_authorized(&symbols, &replicas, 64);
             assert_eq!(p1, pn, "assign_minimum_k must be deterministic");
         }
     }
@@ -1104,7 +1104,7 @@ mod tests {
         let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
 
         let started = std::time::Instant::now();
-        let plan = assigner.assign(&symbols, &replicas, k);
+        let plan = assigner.assign_authorized(&symbols, &replicas, k);
         let elapsed = started.elapsed();
 
         assert_eq!(plan.len(), 8);
@@ -1135,7 +1135,7 @@ mod tests {
         let symbols = create_test_symbols(32);
         let replicas = create_test_replicas(2);
         let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
-        let plan = assigner.assign(&symbols, &replicas, 32);
+        let plan = assigner.assign_authorized(&symbols, &replicas, 32);
         for assignment in &plan {
             assert_eq!(assignment.symbol_indices.len(), 32);
             // Sorted 0..32 by BTreeSet invariant.
@@ -1154,7 +1154,7 @@ mod tests {
         let symbols: Vec<Symbol> = Vec::new();
         let replicas = create_test_replicas(3);
         let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
-        let plan = assigner.assign(&symbols, &replicas, 4);
+        let plan = assigner.assign_authorized(&symbols, &replicas, 4);
         for assignment in &plan {
             assert!(assignment.symbol_indices.is_empty());
             assert!(!assignment.can_decode);
