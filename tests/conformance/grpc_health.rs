@@ -15,7 +15,8 @@ use std::thread;
 use std::time::Duration;
 
 use asupersync::grpc::health::{
-    HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, ServingStatus,
+    HealthAuthMode, HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService,
+    ServingStatus,
 };
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::{HealthWatchStream, Metadata, Request, Streaming};
@@ -849,7 +850,7 @@ mod conformance_tests {
     #[allow(dead_code)]
     fn conformance_health_runner_logs_async_auth_watch_cancel_and_shutdown() {
         let service_name = "auth.v1.AuthService";
-        let service = HealthService::new();
+        let service = HealthService::with_auth_mode(HealthAuthMode::bearer_token("test-token"));
         service.set_status(service_name, ServingStatus::Serving);
 
         let unauth = health_request(service_name, None);
