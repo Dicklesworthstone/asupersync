@@ -1563,7 +1563,7 @@ mod tests {
         use crate::trace::TraceBufferHandle;
         use std::sync::Arc;
 
-        let trace = TraceBufferHandle::noop();
+        let trace = TraceBufferHandle::new(1024);
         let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
             Arc::new(NoOpMetrics);
         let state = ShardedState::new(trace, metrics, test_config());
