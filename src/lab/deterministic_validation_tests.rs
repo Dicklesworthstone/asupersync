@@ -13,16 +13,13 @@
 
 #![cfg(test)]
 
-use super::*;
-use crate::lab::chaos::{ChaosConfig, ChaosStats};
+use crate::lab::chaos::ChaosConfig;
 use crate::lab::config::LabConfig;
-use crate::lab::oracle::OracleSuite;
 use crate::lab::runtime::{AutoAdvanceTermination, LabRuntime, VirtualTimeReport};
-use crate::lab::scenario::{SCENARIO_SCHEMA_VERSION, Scenario};
-use crate::runtime::RuntimeState;
+use crate::lab::scenario::SCENARIO_SCHEMA_VERSION;
 use crate::types::{Budget, Time};
+use crate::util::EntropySource;
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::time::Duration;
 
 // Test constants for deterministic validation
@@ -39,7 +36,7 @@ fn create_test_lab_config() -> LabConfig {
         .entropy_seed(TEST_ENTROPY_SEED)
         .trace_capacity(TEST_TRACE_CAPACITY)
         .max_steps(TEST_MAX_STEPS)
-        .panic_on_obligation_leak(true)
+        .panic_on_leak(true)
         .panic_on_futurelock(true)
         .futurelock_max_idle_steps(5000)
 }
@@ -99,17 +96,17 @@ fn test_lab_config_builder_pattern() {
         .entropy_seed(0xabcdef)
         .trace_capacity(16384)
         .max_steps(50000)
-        .panic_on_obligation_leak(false)
+        .panic_on_leak(false)
         .futurelock_max_idle_steps(1000);
 
     // All builder methods should preserve and update settings
-    assert_eq!(config.seed(), TEST_SEED);
-    assert_eq!(config.worker_count(), 8);
-    assert_eq!(config.entropy_seed(), 0xabcdef);
-    assert_eq!(config.trace_capacity(), 16384);
-    assert_eq!(config.max_steps(), Some(50000));
-    assert!(!config.panic_on_obligation_leak());
-    assert_eq!(config.futurelock_max_idle_steps(), 1000);
+    assert_eq!(config.seed, TEST_SEED);
+    assert_eq!(config.worker_count, 8);
+    assert_eq!(config.entropy_seed, 0xabcdef);
+    assert_eq!(config.trace_capacity, 16384);
+    assert_eq!(config.max_steps, Some(50000));
+    assert!(!config.panic_on_obligation_leak);
+    assert_eq!(config.futurelock_max_idle_steps, 1000);
 
     // Configuration should be deterministic
     let config2 = LabConfig::new(TEST_SEED)
@@ -117,12 +114,12 @@ fn test_lab_config_builder_pattern() {
         .entropy_seed(0xabcdef)
         .trace_capacity(16384)
         .max_steps(50000)
-        .panic_on_obligation_leak(false)
+        .panic_on_leak(false)
         .futurelock_max_idle_steps(1000);
 
-    assert_eq!(config.seed(), config2.seed());
-    assert_eq!(config.worker_count(), config2.worker_count());
-    assert_eq!(config.entropy_seed(), config2.entropy_seed());
+    assert_eq!(config.seed, config2.seed);
+    assert_eq!(config.worker_count, config2.worker_count);
+    assert_eq!(config.entropy_seed, config2.entropy_seed);
 }
 
 #[test]
@@ -130,10 +127,10 @@ fn test_lab_config_default_values() {
     let default_config = LabConfig::default();
 
     // Default configuration should have sensible values
-    assert_eq!(default_config.seed(), 42); // Default seed
-    assert!(default_config.worker_count() > 0);
-    assert!(default_config.trace_capacity() > 0);
-    assert!(default_config.panic_on_obligation_leak()); // Safe default
+    assert_eq!(default_config.seed, 42); // Default seed
+    assert!(default_config.worker_count > 0);
+    assert!(default_config.trace_capacity > 0);
+    assert!(default_config.panic_on_obligation_leak); // Safe default
     assert!(!default_config.has_chaos()); // Chaos off by default
 }
 
@@ -151,7 +148,7 @@ fn test_lab_config_chaos_integration() {
     let chaos = ChaosConfig::new(TEST_SEED)
         .with_delay_probability(0.1)
         .with_cancel_probability(0.05)
-        .with_fail_probability(0.02);
+        .with_io_error_probability(0.02);
 
     let custom_config = LabConfig::new(TEST_SEED).with_chaos(chaos);
     assert!(custom_config.has_chaos());
@@ -163,7 +160,7 @@ fn test_lab_config_chaos_integration() {
     let config1 = LabConfig::new(TEST_SEED).with_chaos(chaos1);
     let config2 = LabConfig::new(TEST_SEED).with_chaos(chaos2);
 
-    assert_eq!(config1.seed(), config2.seed());
+    assert_eq!(config1.seed, config2.seed);
 }
 
 #[test]
@@ -175,29 +172,31 @@ fn test_deterministic_scheduling_consistency() {
     let mut runtime2 = LabRuntime::new(config);
 
     // Create identical task structures
-    let region1 = runtime1.create_root_region(Budget::INFINITE);
-    let region2 = runtime2.create_root_region(Budget::INFINITE);
+    let region1 = runtime1.state.create_root_region(Budget::INFINITE);
+    let region2 = runtime2.state.create_root_region(Budget::INFINITE);
 
     // Simple deterministic task
     let task_fn = || async { 42u32 };
 
     let (task_id1, _handle1) = runtime1
+        .state
         .create_task(region1, Budget::INFINITE, task_fn())
         .expect("create task 1");
     let (task_id2, _handle2) = runtime2
+        .state
         .create_task(region2, Budget::INFINITE, task_fn())
         .expect("create task 2");
 
     // Schedule and run
-    runtime1.schedule(task_id1, 0);
-    runtime2.schedule(task_id2, 0);
+    runtime1.scheduler.lock().schedule(task_id1, 0);
+    runtime2.scheduler.lock().schedule(task_id2, 0);
 
-    runtime1.run_until_quiescent();
-    runtime2.run_until_quiescent();
+    let report1 = runtime1.run_until_quiescent_with_report();
+    let report2 = runtime2.run_until_quiescent_with_report();
 
     // Should produce identical trace certificates
-    let cert1 = runtime1.build_trace_certificate();
-    let cert2 = runtime2.build_trace_certificate();
+    let cert1 = report1.trace_certificate;
+    let cert2 = report2.trace_certificate;
 
     assert_eq!(cert1.event_hash, cert2.event_hash);
     assert_eq!(cert1.event_count, cert2.event_count);
@@ -209,27 +208,28 @@ fn test_virtual_time_advancement() {
     let config = create_test_lab_config();
     let mut runtime = LabRuntime::new(config);
 
-    let start_time = runtime.virtual_time();
+    let start_time = runtime.now();
 
     // Advance virtual time explicitly
-    runtime.advance_virtual_time(Duration::from_millis(1000));
-    let after_advance = runtime.virtual_time();
+    runtime.advance_time(Duration::from_millis(1000).as_nanos() as u64);
+    let after_advance = runtime.now();
 
     assert!(after_advance > start_time);
     assert_eq!(
-        after_advance.as_micros() - start_time.as_micros(),
-        1_000_000 // 1000ms = 1,000,000 microseconds
+        after_advance.as_nanos() - start_time.as_nanos(),
+        1_000_000_000 // 1000ms = 1,000,000,000 nanoseconds
     );
 
     // Virtual time should be deterministic across runs
     let mut runtime2 = LabRuntime::new(create_test_lab_config());
-    runtime2.advance_virtual_time(Duration::from_millis(1000));
-    let time2 = runtime2.virtual_time();
+    let runtime2_start = runtime2.now();
+    runtime2.advance_time(Duration::from_millis(1000).as_nanos() as u64);
+    let time2 = runtime2.now();
 
     // Should have same relative advancement
     assert_eq!(
-        after_advance.as_micros() - start_time.as_micros(),
-        time2.as_micros() - runtime2.initial_virtual_time().as_micros()
+        after_advance.as_nanos() - start_time.as_nanos(),
+        time2.as_nanos() - runtime2_start.as_nanos()
     );
 }
 
@@ -238,7 +238,7 @@ fn test_auto_advance_termination_conditions() {
     let config = create_test_lab_config().max_steps(100); // Low limit for testing
 
     let mut runtime = LabRuntime::new(config);
-    let region = runtime.create_root_region(Budget::INFINITE);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
 
     // Create a task that will hit step limit
     let busy_task = async {
@@ -250,10 +250,11 @@ fn test_auto_advance_termination_conditions() {
     };
 
     let (task_id, _handle) = runtime
+        .state
         .create_task(region, Budget::INFINITE, busy_task)
         .expect("create busy task");
 
-    runtime.schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Run with auto-advance
     let report = runtime.run_with_auto_advance();
@@ -261,7 +262,7 @@ fn test_auto_advance_termination_conditions() {
     // Should terminate due to step limit, not quiescence
     assert_eq!(report.termination, AutoAdvanceTermination::StepLimitReached);
     assert_eq!(report.steps, 100); // Should hit the configured limit
-    assert!(report.auto_advances >= 0); // May or may not auto-advance
+    assert_eq!(report.auto_advances, 0); // Runnable work never requires timer advancement
 }
 
 #[test]
@@ -269,20 +270,22 @@ fn test_virtual_time_report_consistency() {
     let config = create_test_lab_config();
     let mut runtime = LabRuntime::new(config);
 
-    let start_time = runtime.virtual_time();
+    let start_time = runtime.now();
 
     // Create a timer-based task
-    let region = runtime.create_root_region(Budget::INFINITE);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
     let timer_task = async {
-        crate::time::sleep(Duration::from_millis(100)).await;
+        let now = crate::cx::Cx::current().map_or(Time::ZERO, |cx| cx.now());
+        crate::time::sleep(now, Duration::from_millis(100)).await;
         "timer_done"
     };
 
     let (task_id, _handle) = runtime
+        .state
         .create_task(region, Budget::INFINITE, timer_task)
         .expect("create timer task");
 
-    runtime.schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Run with auto-advance to handle timer
     let report = runtime.run_with_auto_advance();
@@ -392,35 +395,39 @@ fn test_trace_certificate_determinism() {
 
     // Create identical simple scenarios
     let create_scenario = |runtime: &mut LabRuntime| {
-        let region = runtime.create_root_region(Budget::INFINITE);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
         let task = async {
             for i in 0..10 {
                 crate::runtime::yield_now().await;
                 if i % 3 == 0 {
-                    crate::time::sleep(Duration::from_micros(1)).await;
+                    let now = crate::cx::Cx::current().map_or(Time::ZERO, |cx| cx.now());
+                    crate::time::sleep(now, Duration::from_micros(1)).await;
                 }
             }
             42
         };
 
         let (task_id, _handle) = runtime
+            .state
             .create_task(region, Budget::INFINITE, task)
             .expect("create task");
 
-        runtime.schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         task_id
     };
 
-    let task_id1 = create_scenario(&mut runtime1);
-    let task_id2 = create_scenario(&mut runtime2);
+    let _task_id1 = create_scenario(&mut runtime1);
+    let _task_id2 = create_scenario(&mut runtime2);
 
     // Run both to completion
-    runtime1.run_with_auto_advance();
-    runtime2.run_with_auto_advance();
+    let run1 = runtime1.run_with_auto_advance();
+    let run2 = runtime2.run_with_auto_advance();
+    assert_eq!(run1.termination, AutoAdvanceTermination::Quiescent);
+    assert_eq!(run2.termination, AutoAdvanceTermination::Quiescent);
 
     // Build trace certificates
-    let cert1 = runtime1.build_trace_certificate();
-    let cert2 = runtime2.build_trace_certificate();
+    let cert1 = runtime1.report().trace_certificate;
+    let cert2 = runtime2.report().trace_certificate;
 
     // Certificates should be identical
     assert_eq!(cert1.event_hash, cert2.event_hash);
@@ -438,13 +445,13 @@ fn test_chaos_injection_bounds() {
     let chaos = ChaosConfig::new(TEST_SEED)
         .with_delay_probability(0.2)
         .with_cancel_probability(0.1)
-        .with_fail_probability(0.05);
+        .with_io_error_probability(0.05);
 
     let config = create_test_lab_config().with_chaos(chaos);
     let mut runtime = LabRuntime::new(config);
 
     // Create tasks that will be subject to chaos
-    let region = runtime.create_root_region(Budget::INFINITE);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
 
     for i in 0..50 {
         let task = async move {
@@ -453,10 +460,11 @@ fn test_chaos_injection_bounds() {
         };
 
         let (task_id, _handle) = runtime
+            .state
             .create_task(region, Budget::INFINITE, task)
             .expect("create chaos task");
 
-        runtime.schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Run and collect chaos statistics
@@ -466,19 +474,19 @@ fn test_chaos_injection_bounds() {
     // Validate chaos statistics are reasonable
     assert!(chaos_stats.delays <= 50); // Can't have more delays than tasks
     assert!(chaos_stats.cancellations <= 50); // Can't have more cancellations than tasks
-    assert!(chaos_stats.failures <= 50); // Can't have more failures than tasks
+    assert!(chaos_stats.io_errors <= 50); // Can't have more I/O errors than tasks
 
     // Injection rates should be roughly within bounds (allowing variance)
     let total_operations = 50u64;
     let delay_rate = chaos_stats.delays as f64 / total_operations as f64;
     let cancel_rate = chaos_stats.cancellations as f64 / total_operations as f64;
-    let fail_rate = chaos_stats.failures as f64 / total_operations as f64;
+    let io_error_rate = chaos_stats.io_errors as f64 / total_operations as f64;
 
     // Rates should be somewhat close to configured probabilities
     // (allowing for randomness and small sample size)
     assert!(delay_rate <= 0.5); // Should not exceed 50% even with variance
     assert!(cancel_rate <= 0.3); // Should not exceed 30% even with variance
-    assert!(fail_rate <= 0.2); // Should not exceed 20% even with variance
+    assert!(io_error_rate <= 0.2); // Should not exceed 20% even with variance
 }
 
 #[test]
@@ -487,20 +495,22 @@ fn test_oracle_suite_integration() {
     let mut runtime = LabRuntime::new(config);
 
     // Create a test scenario that should pass oracle checks
-    let region = runtime.create_root_region(Budget::INFINITE);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
 
     let well_behaved_task = async {
         // Simple task that should not violate invariants
         crate::runtime::yield_now().await;
-        crate::time::sleep(Duration::from_micros(10)).await;
+        let now = crate::cx::Cx::current().map_or(Time::ZERO, |cx| cx.now());
+        crate::time::sleep(now, Duration::from_micros(10)).await;
         "completed_successfully"
     };
 
     let (task_id, _handle) = runtime
+        .state
         .create_task(region, Budget::INFINITE, well_behaved_task)
         .expect("create well-behaved task");
 
-    runtime.schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Run with auto-advance
     let report = runtime.run_with_auto_advance();
@@ -544,14 +554,14 @@ fn test_futurelock_detection_configuration() {
         .futurelock_max_idle_steps(100) // Low threshold for testing
         .panic_on_futurelock(false); // Don't panic in test
 
-    let mut runtime = LabRuntime::new(config);
+    let runtime = LabRuntime::new(config);
 
     // Configuration should be applied
-    assert_eq!(runtime.config().futurelock_max_idle_steps(), 100);
-    assert!(!runtime.config().panic_on_futurelock());
+    assert_eq!(runtime.config().futurelock_max_idle_steps, 100);
+    assert!(!runtime.config().panic_on_futurelock);
 
     // Should be able to detect configuration in runtime
-    assert!(runtime.config().has_futurelock_detection());
+    assert!(runtime.config().futurelock_max_idle_steps > 0);
 }
 
 #[test]
@@ -567,31 +577,32 @@ fn test_deterministic_entropy_separation() {
     // But entropy-driven behavior should differ (different entropy seed)
 
     let create_entropy_task = |runtime: &mut LabRuntime| {
-        let region = runtime.create_root_region(Budget::INFINITE);
-        let task = async {
-            // Use entropy (this would be different between runtimes)
-            let rng = crate::util::DetEntropy::get();
-            rng.next_u32() % 100
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let entropy_seed = runtime.config().entropy_seed;
+        let task = async move {
+            let rng = crate::util::DetEntropy::new(entropy_seed);
+            rng.next_u64() % 100
         };
 
         let (task_id, handle) = runtime
+            .state
             .create_task(region, Budget::INFINITE, task)
             .expect("create entropy task");
 
-        runtime.schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         handle
     };
 
-    let handle1 = create_entropy_task(&mut runtime1);
-    let handle2 = create_entropy_task(&mut runtime2);
+    let _handle1 = create_entropy_task(&mut runtime1);
+    let _handle2 = create_entropy_task(&mut runtime2);
 
     // Run both
     runtime1.run_with_auto_advance();
     runtime2.run_with_auto_advance();
 
     // Scheduling decisions should be identical
-    let cert1 = runtime1.build_trace_certificate();
-    let cert2 = runtime2.build_trace_certificate();
+    let cert1 = runtime1.report().trace_certificate;
+    let cert2 = runtime2.report().trace_certificate;
 
     assert_eq!(cert1.schedule_hash, cert2.schedule_hash); // Scheduling identical
     // But entropy results may differ (not tested here due to complexity)
@@ -602,21 +613,22 @@ fn test_trace_capacity_bounds() {
     let config = create_test_lab_config().trace_capacity(10); // Very small for testing
 
     let mut runtime = LabRuntime::new(config);
-    let region = runtime.create_root_region(Budget::INFINITE);
+    let region = runtime.state.create_root_region(Budget::INFINITE);
 
     // Create many tasks to exceed trace capacity
     for i in 0..20 {
         let task = async move { i };
         let (task_id, _handle) = runtime
+            .state
             .create_task(region, Budget::INFINITE, task)
             .expect("create task");
-        runtime.schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_with_auto_advance();
 
     // Trace should respect capacity bounds
-    let cert = runtime.build_trace_certificate();
+    let cert = runtime.report().trace_certificate;
     assert!(cert.event_count <= TEST_TRACE_CAPACITY as u64 * 2); // Allow some overhead
 
     // Should still complete successfully despite trace limits
@@ -650,7 +662,7 @@ fn test_memory_usage_bounds_in_lab_runtime() {
     let runtime = LabRuntime::new(config);
 
     // Runtime should be created successfully
-    assert!(!runtime.is_quiescent()); // Should start in runnable state
+    assert!(runtime.is_quiescent()); // No tasks, obligations, or registered I/O yet
 }
 
 #[test]
@@ -667,14 +679,15 @@ fn test_cross_platform_determinism_validation() {
 
     // Create identical single-threaded-equivalent tasks
     let create_simple_task = |runtime: &mut LabRuntime| {
-        let region = runtime.create_root_region(Budget::INFINITE);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
         let task = async { 42u32 };
 
         let (task_id, _handle) = runtime
+            .state
             .create_task(region, Budget::INFINITE, task)
             .expect("create simple task");
 
-        runtime.schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     };
 
     create_simple_task(&mut runtime1);
