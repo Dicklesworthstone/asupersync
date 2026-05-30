@@ -16,7 +16,7 @@ use crate::types::{
 use crate::util::DetRng;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -28,6 +28,10 @@ pub const SWARM_REPLAY_SCHEMA_VERSION: &str = "asupersync.swarm-replay-lab.v1";
 
 /// Stable schema version for swarm pressure summaries.
 pub const SWARM_PRESSURE_SCHEMA_VERSION: &str = "asupersync.swarm-pressure-lab.v1";
+
+/// Stable schema version for operator-readable swarm pressure trace summaries.
+pub const SWARM_PRESSURE_TRACE_SUMMARY_SCHEMA_VERSION: &str =
+    "asupersync.swarm-pressure-trace-summary.v1";
 
 /// Stable schema version for deterministic agent-run summaries.
 pub const SWARM_AGENT_RUN_SCHEMA_VERSION: &str = "asupersync.swarm-agent-run-lab.v1";
@@ -887,6 +891,246 @@ pub struct SwarmPressureSummary {
     pub invariant_violations: Vec<String>,
     /// Deterministic event log for dashboard/future artifact consumers.
     pub event_log: Vec<SwarmPressureEvent>,
+}
+
+/// Source artifact kind consumed by the pressure trace summarizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmPressureTraceSourceKind {
+    /// A [`SwarmReplaySummary`] artifact with region/obligation details.
+    ReplayLab,
+    /// A [`SwarmPressureSummary`] artifact with pressure/admission details.
+    PressureLab,
+    /// A [`SwarmAgentRunSummary`] artifact with e2e agent-run details.
+    AgentRun,
+    /// The artifact schema was missing or not recognized.
+    Unknown,
+}
+
+/// Fail-closed verdict emitted by the pressure trace summarizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmPressureTraceVerdict {
+    /// Required fields were present and no invariant, task, or obligation leak was observed.
+    Pass,
+    /// Required fields were present but the artifact reports a concrete failure.
+    Fail,
+    /// The artifact can be summarized, but required proof fields are absent.
+    Incomplete,
+}
+
+/// Region lifecycle counters extracted from a pressure trace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceRegionLifecycle {
+    /// Regions declared by the source artifact.
+    pub regions_declared: usize,
+    /// Regions with a runtime id in the artifact.
+    pub regions_with_runtime_id: usize,
+    /// Region admission records that reached a quiescent verdict.
+    pub quiescent_regions: usize,
+    /// Region admission records that did not prove quiescence.
+    pub non_quiescent_regions: usize,
+}
+
+/// Task lifecycle counters extracted from a pressure trace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceTaskLifecycle {
+    /// Submitted task count when known.
+    pub submitted_tasks: usize,
+    /// Tasks scheduled into the lab runtime.
+    pub scheduled_tasks: usize,
+    /// Tasks that reached a terminal state.
+    pub terminal_tasks: usize,
+    /// Tasks still non-terminal at the end of the source run.
+    pub non_terminal_tasks: usize,
+    /// Task leaks derived from non-terminal tasks.
+    pub task_leaks: usize,
+}
+
+/// Cancellation and drain counters extracted from a pressure trace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceCancellation {
+    /// Cancellation requests modeled by the source artifact.
+    pub cancellation_requests: usize,
+    /// Tasks that explicitly observed cancellation.
+    pub cancelled_tasks: usize,
+    /// Scheduler steps spent after explicit cancellation was requested.
+    pub cancellation_drain_steps: u64,
+    /// Whether cancellation losers drained to a terminal state.
+    pub losers_drained: bool,
+}
+
+/// Obligation counters extracted from a pressure trace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceObligations {
+    /// Whether obligation fields were present in the source artifact.
+    pub fields_present: bool,
+    /// Modeled obligations resolved by commit or abort.
+    pub resolved_obligations: usize,
+    /// Modeled obligations committed by completed tasks.
+    pub committed_obligations: usize,
+    /// Modeled obligations aborted by cancelled tasks.
+    pub aborted_obligations: usize,
+    /// Obligations suspected to be unresolved.
+    pub unresolved_obligations: usize,
+}
+
+/// Queue pressure counters extracted from a pressure trace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceQueuePressure {
+    /// Maximum modeled queue depth in the event log.
+    pub peak_queue_depth: usize,
+    /// Number of events that carried non-zero queue pressure.
+    pub pressure_event_count: usize,
+    /// Stable scope for the peak queue event.
+    pub peak_scope: Option<String>,
+}
+
+/// Admission and combiner-style decision counters extracted from a trace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceAdmission {
+    /// Region or lane admissions accepted.
+    pub accepted: usize,
+    /// Region admissions deferred.
+    pub deferred: usize,
+    /// Region admissions shed.
+    pub shed: usize,
+    /// Region admissions that cancelled admitted work.
+    pub cancelled: usize,
+    /// Proof-lane admissions accepted.
+    pub proof_admitted: usize,
+    /// Proof-lane admissions throttled.
+    pub proof_throttled: usize,
+    /// Interactive-lane admissions accepted.
+    pub interactive_admitted: usize,
+    /// Cleanup requests observed.
+    pub cleanup_requested: usize,
+    /// Total admission/combiner decisions represented in the artifact.
+    pub combiner_or_admission_decisions: usize,
+    /// First refusal or blocker that should route a follow-up bead.
+    pub first_rejection: Option<String>,
+}
+
+/// Cleanup latency and authorization counters extracted from a trace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceCleanup {
+    /// Cleanup requests observed.
+    pub cleanup_requests: usize,
+    /// Cleanup requests left pending authorization.
+    pub authorization_required: usize,
+    /// Cleanup requests explicitly authorized.
+    pub authorized: usize,
+    /// Maximum modeled cleanup latency in lab steps.
+    pub max_cleanup_latency_steps: u64,
+    /// Whether the artifact attempted an auto-delete operation.
+    pub auto_delete_command_count: usize,
+}
+
+/// Region hotspot emitted by the pressure trace summarizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceHotRegion {
+    /// Region ordinal from the source artifact.
+    pub region_index: usize,
+    /// Runtime region id, when available.
+    pub region_id: Option<u64>,
+    /// Event count attributed to this region.
+    pub event_count: usize,
+    /// Task count attributed to this region.
+    pub task_count: usize,
+    /// Cancelled task count attributed to this region.
+    pub cancelled_task_count: usize,
+    /// Peak modeled queue depth attributed to this region.
+    pub queue_peak: usize,
+    /// Admission decisions attributed to this region.
+    pub admission_decision_count: usize,
+    /// Stable follow-up routing hint.
+    pub route_hint: String,
+}
+
+/// Drain hotspot emitted by the pressure trace summarizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceDrainHotSpot {
+    /// Scope for the drain hotspot.
+    pub scope: String,
+    /// Modeled drain latency in lab steps.
+    pub drain_steps: u64,
+    /// Whether the scope proved quiescent.
+    pub quiescent: bool,
+    /// Stable reason for surfacing the hotspot.
+    pub reason: String,
+}
+
+/// Queue hotspot emitted by the pressure trace summarizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceQueueHotSpot {
+    /// Scope for the queue hotspot.
+    pub scope: String,
+    /// Modeled queue depth at the hotspot.
+    pub queue_depth: usize,
+    /// Stable event kind or lane that produced the hotspot.
+    pub event_kind: String,
+    /// Stable follow-up routing hint.
+    pub route_hint: String,
+}
+
+/// Obligation leak suspect emitted by the pressure trace summarizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceObligationLeakSuspect {
+    /// Scope for the suspect.
+    pub scope: String,
+    /// Suspected unresolved obligation count.
+    pub unresolved_obligations: usize,
+    /// Stable evidence string suitable for closeout logs.
+    pub evidence: String,
+    /// Stable follow-up routing hint.
+    pub route_hint: String,
+}
+
+/// Operator-readable summary extracted from a pressure-lab or e2e trace artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPressureTraceSummary {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Source schema version copied from the artifact.
+    pub source_schema_version: String,
+    /// Source artifact kind.
+    pub source_kind: SwarmPressureTraceSourceKind,
+    /// Scenario id copied from the source artifact when present.
+    pub scenario_id: String,
+    /// Seed copied from the source artifact when present.
+    pub seed: u64,
+    /// Fail-closed summary verdict.
+    pub verdict: SwarmPressureTraceVerdict,
+    /// Whether all fields required for a pass verdict were present.
+    pub required_fields_present: bool,
+    /// Required fields missing from the source artifact.
+    pub missing_required_fields: Vec<String>,
+    /// First invariant violation reported by the runtime.
+    pub first_invariant_violation: Option<String>,
+    /// Region lifecycle counters.
+    pub region_lifecycle: SwarmPressureTraceRegionLifecycle,
+    /// Task lifecycle counters.
+    pub task_lifecycle: SwarmPressureTraceTaskLifecycle,
+    /// Cancellation and drain counters.
+    pub cancellation: SwarmPressureTraceCancellation,
+    /// Obligation counters.
+    pub obligations: SwarmPressureTraceObligations,
+    /// Queue pressure counters.
+    pub queue_pressure: SwarmPressureTraceQueuePressure,
+    /// Admission and combiner-style decisions.
+    pub admission: SwarmPressureTraceAdmission,
+    /// Cleanup counters.
+    pub cleanup: SwarmPressureTraceCleanup,
+    /// Hottest regions by event count and queue pressure.
+    pub top_hot_regions: Vec<SwarmPressureTraceHotRegion>,
+    /// Longest drain scopes.
+    pub longest_drains: Vec<SwarmPressureTraceDrainHotSpot>,
+    /// Largest queue scopes.
+    pub largest_queues: Vec<SwarmPressureTraceQueueHotSpot>,
+    /// Obligation leak suspects.
+    pub obligation_leak_suspects: Vec<SwarmPressureTraceObligationLeakSuspect>,
+    /// Stable follow-up routing hints for agents.
+    pub routing_hints: Vec<String>,
 }
 
 /// Work class used by the deterministic swarm what-if planner.
@@ -2652,6 +2896,1241 @@ pub fn run_swarm_pressure_scenario(
         invariant_violations: report.invariant_violations,
         event_log,
     })
+}
+
+/// Summarize a JSON swarm trace artifact with fail-closed required-field checks.
+///
+/// This entrypoint is intended for scripts and e2e harnesses that read artifacts
+/// before choosing the concrete typed summary. Missing quiescence or obligation
+/// fields force an [`SwarmPressureTraceVerdict::Incomplete`] verdict so an
+/// operator never gets a false green summary from a partial trace.
+#[must_use]
+pub fn summarize_swarm_trace_artifact_json(value: &serde_json::Value) -> SwarmPressureTraceSummary {
+    let source_schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    match source_schema_version {
+        SWARM_REPLAY_SCHEMA_VERSION => summarize_replay_artifact_json(value),
+        SWARM_PRESSURE_SCHEMA_VERSION => summarize_pressure_artifact_json(value),
+        SWARM_AGENT_RUN_SCHEMA_VERSION => summarize_agent_run_artifact_json(value),
+        _ => {
+            let missing_required_fields = if source_schema_version == "unknown" {
+                vec!["schema_version".to_string()]
+            } else {
+                Vec::new()
+            };
+            incomplete_trace_summary(
+                SwarmPressureTraceSourceKind::Unknown,
+                source_schema_version,
+                value,
+                missing_required_fields,
+                Some(format!(
+                    "unsupported swarm trace schema version `{source_schema_version}`"
+                )),
+            )
+        }
+    }
+}
+
+/// Summarize a typed replay-lab artifact into stable JSON-ready counters.
+#[must_use]
+pub fn summarize_swarm_replay_trace(summary: &SwarmReplaySummary) -> SwarmPressureTraceSummary {
+    let cancelled_tasks = summary
+        .task_outcomes
+        .iter()
+        .filter(|outcome| outcome.status == SwarmReplayTaskStatus::Cancelled)
+        .count();
+    let accepted = summary
+        .admission_records
+        .iter()
+        .filter(|record| record.decision == SwarmReplayAdmissionDecision::Accept)
+        .count();
+    let deferred = summary
+        .admission_records
+        .iter()
+        .filter(|record| record.decision == SwarmReplayAdmissionDecision::Defer)
+        .count();
+    let shed = summary
+        .admission_records
+        .iter()
+        .filter(|record| record.decision == SwarmReplayAdmissionDecision::Shed)
+        .count();
+    let cancelled_admissions = summary
+        .admission_records
+        .iter()
+        .filter(|record| record.decision == SwarmReplayAdmissionDecision::Cancel)
+        .count();
+    let cancellation_requests = summary.cancellation_requests;
+    let losers_drained =
+        cancellation_requests == 0 || (summary.quiescent && summary.non_terminal_task_count == 0);
+    let resolved_obligations = summary
+        .obligation_commits
+        .saturating_add(summary.obligation_aborts);
+    let unresolved_obligations = if summary.quiescent && summary.non_terminal_task_count == 0 {
+        0
+    } else {
+        summary
+            .non_terminal_task_count
+            .max(bool_as_usize(obligation_violation_present(
+                &summary.invariant_violations,
+            )))
+    };
+    let obligation_leak_suspects = replay_obligation_leak_suspects(summary, unresolved_obligations);
+    let first_invariant_violation = summary.invariant_violations.first().cloned();
+    let required_fields_present = true;
+    let verdict = trace_verdict(
+        required_fields_present,
+        summary.quiescent,
+        summary.non_terminal_task_count,
+        unresolved_obligations,
+        &summary.invariant_violations,
+    );
+    let top_hot_regions = replay_hot_regions(summary);
+    let largest_queues = replay_largest_queues(summary);
+    let longest_drains = replay_longest_drains(summary);
+    let queue_pressure = replay_queue_pressure(summary, &largest_queues);
+    let first_rejection = summary
+        .admission_records
+        .iter()
+        .find_map(|record| record.refusal.clone())
+        .or_else(|| {
+            summary
+                .admission_records
+                .iter()
+                .find(|record| record.rejected_tasks > 0)
+                .map(|record| {
+                    format!(
+                        "region {} {:?} rejected {} task(s)",
+                        record.region_index, record.decision, record.rejected_tasks
+                    )
+                })
+        });
+    let routing_hints = trace_routing_hints(
+        SwarmPressureTraceSourceKind::ReplayLab,
+        required_fields_present,
+        summary.quiescent,
+        summary.non_terminal_task_count,
+        unresolved_obligations,
+        first_invariant_violation.as_deref(),
+        first_rejection.as_deref(),
+    );
+
+    SwarmPressureTraceSummary {
+        schema_version: SWARM_PRESSURE_TRACE_SUMMARY_SCHEMA_VERSION.to_string(),
+        source_schema_version: summary.schema_version.clone(),
+        source_kind: SwarmPressureTraceSourceKind::ReplayLab,
+        scenario_id: summary.scenario_id.clone(),
+        seed: summary.seed,
+        verdict,
+        required_fields_present,
+        missing_required_fields: Vec::new(),
+        first_invariant_violation,
+        region_lifecycle: SwarmPressureTraceRegionLifecycle {
+            regions_declared: summary.region_count,
+            regions_with_runtime_id: summary
+                .admission_records
+                .iter()
+                .filter(|record| record.region_id.is_some())
+                .count(),
+            quiescent_regions: summary
+                .admission_records
+                .iter()
+                .filter(|record| record.quiescence_verdict)
+                .count(),
+            non_quiescent_regions: summary
+                .admission_records
+                .iter()
+                .filter(|record| !record.quiescence_verdict)
+                .count(),
+        },
+        task_lifecycle: SwarmPressureTraceTaskLifecycle {
+            submitted_tasks: summary.task_count,
+            scheduled_tasks: summary.scheduled_task_count,
+            terminal_tasks: summary.terminal_task_count,
+            non_terminal_tasks: summary.non_terminal_task_count,
+            task_leaks: summary.non_terminal_task_count,
+        },
+        cancellation: SwarmPressureTraceCancellation {
+            cancellation_requests,
+            cancelled_tasks,
+            cancellation_drain_steps: summary.cancellation_drain_steps,
+            losers_drained,
+        },
+        obligations: SwarmPressureTraceObligations {
+            fields_present: true,
+            resolved_obligations,
+            committed_obligations: summary.obligation_commits,
+            aborted_obligations: summary.obligation_aborts,
+            unresolved_obligations,
+        },
+        queue_pressure,
+        admission: SwarmPressureTraceAdmission {
+            accepted,
+            deferred,
+            shed,
+            cancelled: cancelled_admissions,
+            proof_admitted: 0,
+            proof_throttled: 0,
+            interactive_admitted: 0,
+            cleanup_requested: 0,
+            combiner_or_admission_decisions: summary.admission_records.len(),
+            first_rejection,
+        },
+        cleanup: SwarmPressureTraceCleanup {
+            cleanup_requests: cancellation_requests,
+            authorization_required: 0,
+            authorized: cancellation_requests,
+            max_cleanup_latency_steps: summary.cancellation_drain_steps,
+            auto_delete_command_count: 0,
+        },
+        top_hot_regions,
+        longest_drains,
+        largest_queues,
+        obligation_leak_suspects,
+        routing_hints,
+    }
+}
+
+/// Summarize a typed pressure-lab artifact into stable JSON-ready counters.
+#[must_use]
+pub fn summarize_swarm_pressure_trace(summary: &SwarmPressureSummary) -> SwarmPressureTraceSummary {
+    let proof_admitted = summary
+        .event_log
+        .iter()
+        .filter(|event| event.kind == SwarmPressureEventKind::ProofAdmitted)
+        .count();
+    let proof_throttled = summary
+        .event_log
+        .iter()
+        .filter(|event| event.kind == SwarmPressureEventKind::ProofThrottled)
+        .count();
+    let interactive_admitted = summary
+        .event_log
+        .iter()
+        .filter(|event| event.kind == SwarmPressureEventKind::InteractiveAdmitted)
+        .count();
+    let cleanup_requested = summary
+        .event_log
+        .iter()
+        .filter(|event| event.kind == SwarmPressureEventKind::CleanupRequested)
+        .count();
+    let required_fields_present = false;
+    let missing_required_fields = pressure_missing_required_fields();
+    let largest_queues = pressure_largest_queues(summary);
+    let queue_pressure = pressure_queue_pressure(summary, &largest_queues);
+    let first_invariant_violation = summary.invariant_violations.first().cloned();
+    let verdict = trace_verdict(
+        required_fields_present,
+        summary.quiescent,
+        summary.non_terminal_task_count,
+        0,
+        &summary.invariant_violations,
+    );
+    let routing_hints = trace_routing_hints(
+        SwarmPressureTraceSourceKind::PressureLab,
+        required_fields_present,
+        summary.quiescent,
+        summary.non_terminal_task_count,
+        0,
+        first_invariant_violation.as_deref(),
+        None,
+    );
+
+    SwarmPressureTraceSummary {
+        schema_version: SWARM_PRESSURE_TRACE_SUMMARY_SCHEMA_VERSION.to_string(),
+        source_schema_version: summary.schema_version.clone(),
+        source_kind: SwarmPressureTraceSourceKind::PressureLab,
+        scenario_id: summary.scenario_id.clone(),
+        seed: summary.seed,
+        verdict,
+        required_fields_present,
+        missing_required_fields,
+        first_invariant_violation,
+        region_lifecycle: SwarmPressureTraceRegionLifecycle {
+            regions_declared: 0,
+            regions_with_runtime_id: 0,
+            quiescent_regions: bool_as_usize(summary.quiescent),
+            non_quiescent_regions: bool_as_usize(!summary.quiescent),
+        },
+        task_lifecycle: SwarmPressureTraceTaskLifecycle {
+            submitted_tasks: summary
+                .interactive_tasks
+                .saturating_add(summary.proof_tasks)
+                .saturating_add(summary.cleanup_requests),
+            scheduled_tasks: summary.scheduled_task_count,
+            terminal_tasks: summary.terminal_task_count,
+            non_terminal_tasks: summary.non_terminal_task_count,
+            task_leaks: summary.task_leaks,
+        },
+        cancellation: SwarmPressureTraceCancellation {
+            cancellation_requests: 0,
+            cancelled_tasks: 0,
+            cancellation_drain_steps: 0,
+            losers_drained: summary.quiescent && summary.non_terminal_task_count == 0,
+        },
+        obligations: SwarmPressureTraceObligations {
+            fields_present: false,
+            resolved_obligations: 0,
+            committed_obligations: 0,
+            aborted_obligations: 0,
+            unresolved_obligations: 0,
+        },
+        queue_pressure,
+        admission: SwarmPressureTraceAdmission {
+            accepted: proof_admitted.saturating_add(interactive_admitted),
+            deferred: 0,
+            shed: 0,
+            cancelled: 0,
+            proof_admitted,
+            proof_throttled,
+            interactive_admitted,
+            cleanup_requested,
+            combiner_or_admission_decisions: summary.event_log.len(),
+            first_rejection: (proof_throttled > 0)
+                .then(|| format!("{proof_throttled} proof task(s) throttled by disk/RCH pressure")),
+        },
+        cleanup: SwarmPressureTraceCleanup {
+            cleanup_requests: summary.cleanup_requests,
+            authorization_required: summary.cleanup_authorization_required_count,
+            authorized: summary
+                .cleanup_requests
+                .saturating_sub(summary.cleanup_authorization_required_count),
+            max_cleanup_latency_steps: summary
+                .event_log
+                .iter()
+                .filter(|event| event.kind == SwarmPressureEventKind::CleanupRequested)
+                .map(|event| event.admission_latency_steps)
+                .max()
+                .unwrap_or(0),
+            auto_delete_command_count: summary.auto_delete_command_count,
+        },
+        top_hot_regions: Vec::new(),
+        longest_drains: pressure_longest_drains(summary),
+        largest_queues,
+        obligation_leak_suspects: pressure_obligation_leak_suspects(summary),
+        routing_hints,
+    }
+}
+
+/// Summarize a typed e2e agent-run artifact into stable JSON-ready counters.
+#[must_use]
+pub fn summarize_swarm_agent_run_trace(
+    summary: &SwarmAgentRunSummary,
+) -> SwarmPressureTraceSummary {
+    let required_fields_present = false;
+    let missing_required_fields = agent_run_missing_required_fields();
+    let first_invariant_violation = summary.invariant_violations.first().cloned();
+    let unresolved_obligations = bool_as_usize(!summary.no_leaked_reservations)
+        .saturating_add(bool_as_usize(!summary.no_false_green_proof));
+    let verdict = trace_verdict(
+        required_fields_present,
+        summary.quiescent,
+        summary.non_terminal_task_count,
+        unresolved_obligations,
+        &summary.invariant_violations,
+    );
+    let first_rejection = summary.first_blocker.clone();
+    let routing_hints = trace_routing_hints(
+        SwarmPressureTraceSourceKind::AgentRun,
+        required_fields_present,
+        summary.quiescent,
+        summary.non_terminal_task_count,
+        unresolved_obligations,
+        first_invariant_violation.as_deref(),
+        first_rejection.as_deref(),
+    );
+
+    SwarmPressureTraceSummary {
+        schema_version: SWARM_PRESSURE_TRACE_SUMMARY_SCHEMA_VERSION.to_string(),
+        source_schema_version: summary.schema_version.clone(),
+        source_kind: SwarmPressureTraceSourceKind::AgentRun,
+        scenario_id: summary.scenario_id.clone(),
+        seed: summary.seed,
+        verdict,
+        required_fields_present,
+        missing_required_fields,
+        first_invariant_violation,
+        region_lifecycle: SwarmPressureTraceRegionLifecycle {
+            regions_declared: 0,
+            regions_with_runtime_id: 0,
+            quiescent_regions: bool_as_usize(summary.quiescent),
+            non_quiescent_regions: bool_as_usize(!summary.quiescent),
+        },
+        task_lifecycle: SwarmPressureTraceTaskLifecycle {
+            submitted_tasks: summary.agent_count,
+            scheduled_tasks: summary.scheduled_task_count,
+            terminal_tasks: summary.terminal_task_count,
+            non_terminal_tasks: summary.non_terminal_task_count,
+            task_leaks: summary.task_leaks,
+        },
+        cancellation: SwarmPressureTraceCancellation {
+            cancellation_requests: summary.recovery_handoff_count,
+            cancelled_tasks: summary.crashed_agent_count,
+            cancellation_drain_steps: 0,
+            losers_drained: summary.quiescent && summary.non_terminal_task_count == 0,
+        },
+        obligations: SwarmPressureTraceObligations {
+            fields_present: false,
+            resolved_obligations: summary.file_reservations_released,
+            committed_obligations: summary.commit_count,
+            aborted_obligations: summary.recovery_handoff_count,
+            unresolved_obligations,
+        },
+        queue_pressure: SwarmPressureTraceQueuePressure {
+            peak_queue_depth: summary.rch_proof_attempt_count,
+            pressure_event_count: summary.rch_remote_refusal_count,
+            peak_scope: Some("agent_run:rch_proof_attempts".to_string()),
+        },
+        admission: SwarmPressureTraceAdmission {
+            accepted: summary.bead_claim_count,
+            deferred: summary.validation_blocker_count,
+            shed: summary.rch_remote_refusal_count,
+            cancelled: summary.crashed_agent_count,
+            proof_admitted: summary.proof_pass_count,
+            proof_throttled: summary
+                .rch_remote_refusal_count
+                .saturating_add(summary.validation_blocker_count),
+            interactive_admitted: summary.bead_claim_count,
+            cleanup_requested: summary.recovery_handoff_count,
+            combiner_or_admission_decisions: summary.event_log.len(),
+            first_rejection,
+        },
+        cleanup: SwarmPressureTraceCleanup {
+            cleanup_requests: summary.recovery_handoff_count,
+            authorization_required: 0,
+            authorized: summary.recovery_handoff_count,
+            max_cleanup_latency_steps: 0,
+            auto_delete_command_count: bool_as_usize(
+                summary.forbidden_actions.runs_destructive_command,
+            ),
+        },
+        top_hot_regions: Vec::new(),
+        longest_drains: agent_run_longest_drains(summary),
+        largest_queues: agent_run_largest_queues(summary),
+        obligation_leak_suspects: agent_run_obligation_leak_suspects(summary),
+        routing_hints,
+    }
+}
+
+/// Render a stable text summary for operator logs and closeout evidence.
+#[must_use]
+pub fn render_swarm_pressure_trace_text(summary: &SwarmPressureTraceSummary) -> String {
+    let mut lines = vec![
+        "Swarm Pressure Trace Summary".to_string(),
+        format!("schema_version: {}", summary.schema_version),
+        format!(
+            "source: {:?} schema={} scenario={} seed={}",
+            summary.source_kind, summary.source_schema_version, summary.scenario_id, summary.seed
+        ),
+        format!(
+            "verdict: {:?} required_fields_present={} missing={}",
+            summary.verdict,
+            summary.required_fields_present,
+            if summary.missing_required_fields.is_empty() {
+                "none".to_string()
+            } else {
+                summary.missing_required_fields.join(",")
+            }
+        ),
+        format!(
+            "regions: declared={} runtime_ids={} quiescent={} non_quiescent={}",
+            summary.region_lifecycle.regions_declared,
+            summary.region_lifecycle.regions_with_runtime_id,
+            summary.region_lifecycle.quiescent_regions,
+            summary.region_lifecycle.non_quiescent_regions
+        ),
+        format!(
+            "tasks: submitted={} scheduled={} terminal={} non_terminal={} leaks={}",
+            summary.task_lifecycle.submitted_tasks,
+            summary.task_lifecycle.scheduled_tasks,
+            summary.task_lifecycle.terminal_tasks,
+            summary.task_lifecycle.non_terminal_tasks,
+            summary.task_lifecycle.task_leaks
+        ),
+        format!(
+            "cancellation: requests={} cancelled_tasks={} drain_steps={} losers_drained={}",
+            summary.cancellation.cancellation_requests,
+            summary.cancellation.cancelled_tasks,
+            summary.cancellation.cancellation_drain_steps,
+            summary.cancellation.losers_drained
+        ),
+        format!(
+            "obligations: fields_present={} resolved={} committed={} aborted={} unresolved={}",
+            summary.obligations.fields_present,
+            summary.obligations.resolved_obligations,
+            summary.obligations.committed_obligations,
+            summary.obligations.aborted_obligations,
+            summary.obligations.unresolved_obligations
+        ),
+        format!(
+            "queue: peak={} pressure_events={} peak_scope={}",
+            summary.queue_pressure.peak_queue_depth,
+            summary.queue_pressure.pressure_event_count,
+            summary
+                .queue_pressure
+                .peak_scope
+                .as_deref()
+                .unwrap_or("none")
+        ),
+        format!(
+            "admission: accepted={} deferred={} shed={} cancelled={} proof_admitted={} proof_throttled={} interactive_admitted={} cleanup_requested={} decisions={}",
+            summary.admission.accepted,
+            summary.admission.deferred,
+            summary.admission.shed,
+            summary.admission.cancelled,
+            summary.admission.proof_admitted,
+            summary.admission.proof_throttled,
+            summary.admission.interactive_admitted,
+            summary.admission.cleanup_requested,
+            summary.admission.combiner_or_admission_decisions
+        ),
+        format!(
+            "cleanup: requests={} authorization_required={} authorized={} max_latency_steps={} auto_delete_commands={}",
+            summary.cleanup.cleanup_requests,
+            summary.cleanup.authorization_required,
+            summary.cleanup.authorized,
+            summary.cleanup.max_cleanup_latency_steps,
+            summary.cleanup.auto_delete_command_count
+        ),
+        format!(
+            "first_invariant_violation: {}",
+            summary
+                .first_invariant_violation
+                .as_deref()
+                .unwrap_or("none")
+        ),
+    ];
+
+    lines.push("top_hot_regions:".to_string());
+    if summary.top_hot_regions.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for region in &summary.top_hot_regions {
+            lines.push(format!(
+                "- region={} runtime_id={} events={} tasks={} cancelled={} queue_peak={} admissions={} route={}",
+                region.region_index,
+                region
+                    .region_id
+                    .map_or_else(|| "none".to_string(), |id| id.to_string()),
+                region.event_count,
+                region.task_count,
+                region.cancelled_task_count,
+                region.queue_peak,
+                region.admission_decision_count,
+                region.route_hint
+            ));
+        }
+    }
+
+    lines.push("longest_drains:".to_string());
+    if summary.longest_drains.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for drain in &summary.longest_drains {
+            lines.push(format!(
+                "- scope={} drain_steps={} quiescent={} reason={}",
+                drain.scope, drain.drain_steps, drain.quiescent, drain.reason
+            ));
+        }
+    }
+
+    lines.push("largest_queues:".to_string());
+    if summary.largest_queues.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for queue in &summary.largest_queues {
+            lines.push(format!(
+                "- scope={} depth={} event={} route={}",
+                queue.scope, queue.queue_depth, queue.event_kind, queue.route_hint
+            ));
+        }
+    }
+
+    lines.push("obligation_leak_suspects:".to_string());
+    if summary.obligation_leak_suspects.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for suspect in &summary.obligation_leak_suspects {
+            lines.push(format!(
+                "- scope={} unresolved={} evidence={} route={}",
+                suspect.scope, suspect.unresolved_obligations, suspect.evidence, suspect.route_hint
+            ));
+        }
+    }
+
+    lines.push("routing_hints:".to_string());
+    if summary.routing_hints.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for hint in &summary.routing_hints {
+            lines.push(format!("- {hint}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
+const REPLAY_TRACE_REQUIRED_FIELDS: &[&str] = &[
+    "schema_version",
+    "scenario_id",
+    "seed",
+    "region_count",
+    "task_count",
+    "scheduled_task_count",
+    "terminal_task_count",
+    "non_terminal_task_count",
+    "obligation_commits",
+    "obligation_aborts",
+    "cancellation_drain_steps",
+    "quiescent",
+    "trace_event_count",
+    "invariant_violations",
+    "event_log",
+    "admission_records",
+];
+
+const PRESSURE_TRACE_REQUIRED_FOR_PASS: &[&str] = &[
+    "region_count",
+    "obligation_commits",
+    "obligation_aborts",
+    "cancellation_drain_steps",
+    "admission_records",
+];
+
+const AGENT_RUN_TRACE_REQUIRED_FOR_PASS: &[&str] = &[
+    "region_count",
+    "obligation_commits",
+    "obligation_aborts",
+    "queue_pressure",
+    "admission_records",
+];
+
+#[derive(Debug, Clone)]
+struct RegionTraceAccum {
+    region_index: usize,
+    region_id: Option<u64>,
+    event_count: usize,
+    task_count: usize,
+    cancelled_task_count: usize,
+    queue_peak: usize,
+    admission_decision_count: usize,
+}
+
+fn summarize_replay_artifact_json(value: &serde_json::Value) -> SwarmPressureTraceSummary {
+    let missing = missing_top_level_fields(value, REPLAY_TRACE_REQUIRED_FIELDS);
+    if !missing.is_empty() {
+        return incomplete_trace_summary(
+            SwarmPressureTraceSourceKind::ReplayLab,
+            SWARM_REPLAY_SCHEMA_VERSION,
+            value,
+            missing,
+            Some("replay artifact missing fields required for a pass verdict".to_string()),
+        );
+    }
+    match serde_json::from_value::<SwarmReplaySummary>(value.clone()) {
+        Ok(summary) => summarize_swarm_replay_trace(&summary),
+        Err(error) => incomplete_trace_summary(
+            SwarmPressureTraceSourceKind::ReplayLab,
+            SWARM_REPLAY_SCHEMA_VERSION,
+            value,
+            Vec::new(),
+            Some(format!("replay artifact failed to deserialize: {error}")),
+        ),
+    }
+}
+
+fn summarize_pressure_artifact_json(value: &serde_json::Value) -> SwarmPressureTraceSummary {
+    match serde_json::from_value::<SwarmPressureSummary>(value.clone()) {
+        Ok(summary) => summarize_swarm_pressure_trace(&summary),
+        Err(error) => incomplete_trace_summary(
+            SwarmPressureTraceSourceKind::PressureLab,
+            SWARM_PRESSURE_SCHEMA_VERSION,
+            value,
+            pressure_missing_required_fields(),
+            Some(format!("pressure artifact failed to deserialize: {error}")),
+        ),
+    }
+}
+
+fn summarize_agent_run_artifact_json(value: &serde_json::Value) -> SwarmPressureTraceSummary {
+    match serde_json::from_value::<SwarmAgentRunSummary>(value.clone()) {
+        Ok(summary) => summarize_swarm_agent_run_trace(&summary),
+        Err(error) => incomplete_trace_summary(
+            SwarmPressureTraceSourceKind::AgentRun,
+            SWARM_AGENT_RUN_SCHEMA_VERSION,
+            value,
+            agent_run_missing_required_fields(),
+            Some(format!("agent-run artifact failed to deserialize: {error}")),
+        ),
+    }
+}
+
+fn incomplete_trace_summary(
+    source_kind: SwarmPressureTraceSourceKind,
+    source_schema_version: &str,
+    value: &serde_json::Value,
+    missing_required_fields: Vec<String>,
+    first_invariant_violation: Option<String>,
+) -> SwarmPressureTraceSummary {
+    let scenario_id = value
+        .get("scenario_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let seed = value
+        .get("seed")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let mut routing_hints =
+        vec!["source artifact cannot prove success until required fields are present".to_string()];
+    if !missing_required_fields.is_empty() {
+        routing_hints.push(format!(
+            "missing required fields: {}",
+            missing_required_fields.join(",")
+        ));
+    }
+    if let Some(violation) = &first_invariant_violation {
+        routing_hints.push(format!("first parse/schema issue: {violation}"));
+    }
+
+    SwarmPressureTraceSummary {
+        schema_version: SWARM_PRESSURE_TRACE_SUMMARY_SCHEMA_VERSION.to_string(),
+        source_schema_version: source_schema_version.to_string(),
+        source_kind,
+        scenario_id,
+        seed,
+        verdict: SwarmPressureTraceVerdict::Incomplete,
+        required_fields_present: false,
+        missing_required_fields,
+        first_invariant_violation,
+        region_lifecycle: SwarmPressureTraceRegionLifecycle {
+            regions_declared: 0,
+            regions_with_runtime_id: 0,
+            quiescent_regions: 0,
+            non_quiescent_regions: 0,
+        },
+        task_lifecycle: SwarmPressureTraceTaskLifecycle {
+            submitted_tasks: 0,
+            scheduled_tasks: 0,
+            terminal_tasks: 0,
+            non_terminal_tasks: 0,
+            task_leaks: 0,
+        },
+        cancellation: SwarmPressureTraceCancellation {
+            cancellation_requests: 0,
+            cancelled_tasks: 0,
+            cancellation_drain_steps: 0,
+            losers_drained: false,
+        },
+        obligations: SwarmPressureTraceObligations {
+            fields_present: false,
+            resolved_obligations: 0,
+            committed_obligations: 0,
+            aborted_obligations: 0,
+            unresolved_obligations: 0,
+        },
+        queue_pressure: SwarmPressureTraceQueuePressure {
+            peak_queue_depth: 0,
+            pressure_event_count: 0,
+            peak_scope: None,
+        },
+        admission: SwarmPressureTraceAdmission {
+            accepted: 0,
+            deferred: 0,
+            shed: 0,
+            cancelled: 0,
+            proof_admitted: 0,
+            proof_throttled: 0,
+            interactive_admitted: 0,
+            cleanup_requested: 0,
+            combiner_or_admission_decisions: 0,
+            first_rejection: None,
+        },
+        cleanup: SwarmPressureTraceCleanup {
+            cleanup_requests: 0,
+            authorization_required: 0,
+            authorized: 0,
+            max_cleanup_latency_steps: 0,
+            auto_delete_command_count: 0,
+        },
+        top_hot_regions: Vec::new(),
+        longest_drains: Vec::new(),
+        largest_queues: Vec::new(),
+        obligation_leak_suspects: Vec::new(),
+        routing_hints,
+    }
+}
+
+fn trace_verdict(
+    required_fields_present: bool,
+    quiescent: bool,
+    non_terminal_task_count: usize,
+    unresolved_obligations: usize,
+    invariant_violations: &[String],
+) -> SwarmPressureTraceVerdict {
+    if !required_fields_present {
+        return SwarmPressureTraceVerdict::Incomplete;
+    }
+    if quiescent
+        && non_terminal_task_count == 0
+        && unresolved_obligations == 0
+        && invariant_violations.is_empty()
+    {
+        SwarmPressureTraceVerdict::Pass
+    } else {
+        SwarmPressureTraceVerdict::Fail
+    }
+}
+
+const fn bool_as_usize(value: bool) -> usize {
+    if value { 1 } else { 0 }
+}
+
+fn missing_top_level_fields(value: &serde_json::Value, fields: &[&str]) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|field| value.get(**field).is_none())
+        .map(|field| (*field).to_string())
+        .collect()
+}
+
+fn pressure_missing_required_fields() -> Vec<String> {
+    PRESSURE_TRACE_REQUIRED_FOR_PASS
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect()
+}
+
+fn agent_run_missing_required_fields() -> Vec<String> {
+    AGENT_RUN_TRACE_REQUIRED_FOR_PASS
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect()
+}
+
+fn obligation_violation_present(violations: &[String]) -> bool {
+    violations.iter().any(|violation| {
+        let lower = violation.to_ascii_lowercase();
+        lower.contains("obligation") || lower.contains("leak")
+    })
+}
+
+fn trace_routing_hints(
+    source_kind: SwarmPressureTraceSourceKind,
+    required_fields_present: bool,
+    quiescent: bool,
+    non_terminal_task_count: usize,
+    unresolved_obligations: usize,
+    first_invariant_violation: Option<&str>,
+    first_rejection: Option<&str>,
+) -> Vec<String> {
+    let mut hints = Vec::new();
+    if !required_fields_present {
+        hints.push(format!(
+            "{source_kind:?} artifact is useful for triage but cannot be used as pass evidence"
+        ));
+    }
+    if !quiescent {
+        hints.push("route follow-up to lab/runtime quiescence owner".to_string());
+    }
+    if non_terminal_task_count > 0 {
+        hints.push(format!(
+            "route {} non-terminal task(s) to scheduler/region lifecycle owner",
+            non_terminal_task_count
+        ));
+    }
+    if unresolved_obligations > 0 {
+        hints.push(format!(
+            "route {} unresolved obligation(s) to obligation/cancel owner",
+            unresolved_obligations
+        ));
+    }
+    if let Some(violation) = first_invariant_violation {
+        hints.push(format!("first invariant violation: {violation}"));
+    }
+    if let Some(rejection) = first_rejection {
+        hints.push(format!("first admission blocker: {rejection}"));
+    }
+    hints
+}
+
+fn replay_hot_regions(summary: &SwarmReplaySummary) -> Vec<SwarmPressureTraceHotRegion> {
+    let mut regions: BTreeMap<usize, RegionTraceAccum> = BTreeMap::new();
+    for record in &summary.admission_records {
+        let entry = regions
+            .entry(record.region_index)
+            .or_insert_with(|| RegionTraceAccum {
+                region_index: record.region_index,
+                region_id: record.region_id,
+                event_count: 0,
+                task_count: 0,
+                cancelled_task_count: 0,
+                queue_peak: 0,
+                admission_decision_count: 0,
+            });
+        entry.region_id = entry.region_id.or(record.region_id);
+        entry.task_count = entry.task_count.saturating_add(record.admitted_tasks);
+        entry.admission_decision_count = entry.admission_decision_count.saturating_add(1);
+    }
+    for outcome in &summary.task_outcomes {
+        let entry = regions
+            .entry(outcome.region_index)
+            .or_insert_with(|| RegionTraceAccum {
+                region_index: outcome.region_index,
+                region_id: None,
+                event_count: 0,
+                task_count: 0,
+                cancelled_task_count: 0,
+                queue_peak: 0,
+                admission_decision_count: 0,
+            });
+        if outcome.status == SwarmReplayTaskStatus::Cancelled {
+            entry.cancelled_task_count = entry.cancelled_task_count.saturating_add(1);
+        }
+    }
+    for event in &summary.event_log {
+        let entry = regions
+            .entry(event.region_index)
+            .or_insert_with(|| RegionTraceAccum {
+                region_index: event.region_index,
+                region_id: event.region_id,
+                event_count: 0,
+                task_count: 0,
+                cancelled_task_count: 0,
+                queue_peak: 0,
+                admission_decision_count: 0,
+            });
+        entry.region_id = entry.region_id.or(event.region_id);
+        entry.event_count = entry.event_count.saturating_add(1);
+        entry.queue_peak = entry.queue_peak.max(event.queue_depth);
+    }
+
+    let mut hot_regions: Vec<_> = regions
+        .into_values()
+        .map(|region| SwarmPressureTraceHotRegion {
+            region_index: region.region_index,
+            region_id: region.region_id,
+            event_count: region.event_count,
+            task_count: region.task_count,
+            cancelled_task_count: region.cancelled_task_count,
+            queue_peak: region.queue_peak,
+            admission_decision_count: region.admission_decision_count,
+            route_hint: format!("src/lab/swarm_replay.rs region {}", region.region_index),
+        })
+        .collect();
+    hot_regions.sort_by(|left, right| {
+        right
+            .event_count
+            .cmp(&left.event_count)
+            .then_with(|| right.queue_peak.cmp(&left.queue_peak))
+            .then_with(|| left.region_index.cmp(&right.region_index))
+    });
+    hot_regions.truncate(5);
+    hot_regions
+}
+
+fn replay_largest_queues(summary: &SwarmReplaySummary) -> Vec<SwarmPressureTraceQueueHotSpot> {
+    let mut queues_by_key: BTreeMap<(String, String), SwarmPressureTraceQueueHotSpot> =
+        BTreeMap::new();
+    for event in summary
+        .event_log
+        .iter()
+        .filter(|event| event.queue_depth > 0)
+    {
+        let scope = format!("region:{}", event.region_index);
+        let event_kind = format!("{:?}", event.kind);
+        let key = (scope.clone(), event_kind.clone());
+        let candidate = SwarmPressureTraceQueueHotSpot {
+            scope,
+            queue_depth: event.queue_depth,
+            event_kind,
+            route_hint: format!("region {} event {:?}", event.region_index, event.kind),
+        };
+        queues_by_key
+            .entry(key)
+            .and_modify(|existing| {
+                if candidate.queue_depth > existing.queue_depth {
+                    *existing = candidate.clone();
+                }
+            })
+            .or_insert(candidate);
+    }
+    let mut queues: Vec<_> = queues_by_key.into_values().collect();
+    queues.sort_by(|left, right| {
+        right
+            .queue_depth
+            .cmp(&left.queue_depth)
+            .then_with(|| left.scope.cmp(&right.scope))
+            .then_with(|| left.event_kind.cmp(&right.event_kind))
+    });
+    queues.truncate(5);
+    queues
+}
+
+fn replay_queue_pressure(
+    summary: &SwarmReplaySummary,
+    largest_queues: &[SwarmPressureTraceQueueHotSpot],
+) -> SwarmPressureTraceQueuePressure {
+    SwarmPressureTraceQueuePressure {
+        peak_queue_depth: largest_queues.first().map_or(0, |queue| queue.queue_depth),
+        pressure_event_count: summary
+            .event_log
+            .iter()
+            .filter(|event| event.queue_depth > 0)
+            .count(),
+        peak_scope: largest_queues.first().map(|queue| queue.scope.clone()),
+    }
+}
+
+fn replay_longest_drains(summary: &SwarmReplaySummary) -> Vec<SwarmPressureTraceDrainHotSpot> {
+    let mut drains = Vec::new();
+    if summary.cancellation_drain_steps > 0 || summary.cancellation_requests > 0 {
+        drains.push(SwarmPressureTraceDrainHotSpot {
+            scope: "global:cancellation".to_string(),
+            drain_steps: summary.cancellation_drain_steps,
+            quiescent: summary.quiescent,
+            reason: format!(
+                "{} cancellation request(s), {} cancelled task(s)",
+                summary.cancellation_requests,
+                summary
+                    .task_outcomes
+                    .iter()
+                    .filter(|outcome| outcome.status == SwarmReplayTaskStatus::Cancelled)
+                    .count()
+            ),
+        });
+    }
+    for record in &summary.admission_records {
+        if record.cancellation_requested || !record.quiescence_verdict {
+            drains.push(SwarmPressureTraceDrainHotSpot {
+                scope: format!("region:{}", record.region_index),
+                drain_steps: summary.cancellation_drain_steps,
+                quiescent: record.quiescence_verdict,
+                reason: format!(
+                    "{:?} admission drain {:?}",
+                    record.decision, record.drain_result
+                ),
+            });
+        }
+    }
+    drains.sort_by(|left, right| {
+        right
+            .drain_steps
+            .cmp(&left.drain_steps)
+            .then_with(|| left.scope.cmp(&right.scope))
+    });
+    drains.truncate(5);
+    drains
+}
+
+fn replay_obligation_leak_suspects(
+    summary: &SwarmReplaySummary,
+    unresolved_obligations: usize,
+) -> Vec<SwarmPressureTraceObligationLeakSuspect> {
+    let mut suspects = Vec::new();
+    if unresolved_obligations > 0 {
+        suspects.push(SwarmPressureTraceObligationLeakSuspect {
+            scope: "global:obligations".to_string(),
+            unresolved_obligations,
+            evidence: format!(
+                "quiescent={} non_terminal_tasks={} invariant_violations={}",
+                summary.quiescent,
+                summary.non_terminal_task_count,
+                summary.invariant_violations.len()
+            ),
+            route_hint: "src/obligation and src/cancel".to_string(),
+        });
+    }
+    for violation in summary.invariant_violations.iter().filter(|violation| {
+        let lower = violation.to_ascii_lowercase();
+        lower.contains("obligation") || lower.contains("leak")
+    }) {
+        suspects.push(SwarmPressureTraceObligationLeakSuspect {
+            scope: "runtime:invariant".to_string(),
+            unresolved_obligations: unresolved_obligations.max(1),
+            evidence: violation.clone(),
+            route_hint: "runtime invariant violation points at obligation cleanup".to_string(),
+        });
+    }
+    suspects
+}
+
+fn pressure_largest_queues(summary: &SwarmPressureSummary) -> Vec<SwarmPressureTraceQueueHotSpot> {
+    let mut queues_by_key: BTreeMap<(String, String), SwarmPressureTraceQueueHotSpot> =
+        BTreeMap::new();
+    for event in summary
+        .event_log
+        .iter()
+        .filter(|event| event.queue_depth > 0)
+    {
+        let scope = event.lane.map_or_else(
+            || "pressure:global".to_string(),
+            |lane| format!("pressure:{lane:?}"),
+        );
+        let event_kind = format!("{:?}", event.kind);
+        let key = (scope.clone(), event_kind.clone());
+        let candidate = SwarmPressureTraceQueueHotSpot {
+            scope,
+            queue_depth: event.queue_depth,
+            event_kind,
+            route_hint: format!(
+                "pressure event {:?} at step {} disk={:?} rch_workers={}",
+                event.kind, event.step, event.disk_pressure, event.rch_workers_available
+            ),
+        };
+        queues_by_key
+            .entry(key)
+            .and_modify(|existing| {
+                if candidate.queue_depth > existing.queue_depth {
+                    *existing = candidate.clone();
+                }
+            })
+            .or_insert(candidate);
+    }
+    let mut queues: Vec<_> = queues_by_key.into_values().collect();
+    queues.sort_by(|left, right| {
+        right
+            .queue_depth
+            .cmp(&left.queue_depth)
+            .then_with(|| left.scope.cmp(&right.scope))
+            .then_with(|| left.event_kind.cmp(&right.event_kind))
+    });
+    queues.truncate(5);
+    queues
+}
+
+fn pressure_queue_pressure(
+    summary: &SwarmPressureSummary,
+    largest_queues: &[SwarmPressureTraceQueueHotSpot],
+) -> SwarmPressureTraceQueuePressure {
+    SwarmPressureTraceQueuePressure {
+        peak_queue_depth: largest_queues.first().map_or(0, |queue| queue.queue_depth),
+        pressure_event_count: summary
+            .event_log
+            .iter()
+            .filter(|event| event.queue_depth > 0)
+            .count(),
+        peak_scope: largest_queues.first().map(|queue| queue.scope.clone()),
+    }
+}
+
+fn pressure_longest_drains(summary: &SwarmPressureSummary) -> Vec<SwarmPressureTraceDrainHotSpot> {
+    let mut drains = Vec::new();
+    if summary.cleanup_requests > 0 {
+        drains.push(SwarmPressureTraceDrainHotSpot {
+            scope: "pressure:cleanup".to_string(),
+            drain_steps: summary
+                .event_log
+                .iter()
+                .filter(|event| event.kind == SwarmPressureEventKind::CleanupRequested)
+                .map(|event| event.admission_latency_steps)
+                .max()
+                .unwrap_or(0),
+            quiescent: summary.quiescent,
+            reason: format!(
+                "{} cleanup request(s), {} requiring authorization",
+                summary.cleanup_requests, summary.cleanup_authorization_required_count
+            ),
+        });
+    }
+    if summary.non_terminal_task_count > 0 {
+        drains.push(SwarmPressureTraceDrainHotSpot {
+            scope: "pressure:task-leak".to_string(),
+            drain_steps: 0,
+            quiescent: false,
+            reason: format!(
+                "{} non-terminal pressure task(s)",
+                summary.non_terminal_task_count
+            ),
+        });
+    }
+    drains
+}
+
+fn pressure_obligation_leak_suspects(
+    summary: &SwarmPressureSummary,
+) -> Vec<SwarmPressureTraceObligationLeakSuspect> {
+    let mut suspects = Vec::new();
+    if !summary.quiescent || summary.non_terminal_task_count > 0 {
+        suspects.push(SwarmPressureTraceObligationLeakSuspect {
+            scope: "pressure:missing-obligation-fields".to_string(),
+            unresolved_obligations: summary.non_terminal_task_count,
+            evidence: "pressure summaries do not carry obligation commit/abort counters"
+                .to_string(),
+            route_hint: "rerun with replay-lab artifact when obligation proof is required"
+                .to_string(),
+        });
+    }
+    suspects
+}
+
+fn agent_run_longest_drains(summary: &SwarmAgentRunSummary) -> Vec<SwarmPressureTraceDrainHotSpot> {
+    let mut drains = Vec::new();
+    if summary.recovery_handoff_count > 0 || summary.crashed_agent_count > 0 {
+        drains.push(SwarmPressureTraceDrainHotSpot {
+            scope: "agent-run:recovery".to_string(),
+            drain_steps: 0,
+            quiescent: summary.quiescent,
+            reason: format!(
+                "{} handoff(s), {} crashed agent(s)",
+                summary.recovery_handoff_count, summary.crashed_agent_count
+            ),
+        });
+    }
+    drains
+}
+
+fn agent_run_largest_queues(summary: &SwarmAgentRunSummary) -> Vec<SwarmPressureTraceQueueHotSpot> {
+    let mut queues = Vec::new();
+    if summary.rch_proof_attempt_count > 0 {
+        queues.push(SwarmPressureTraceQueueHotSpot {
+            scope: "agent-run:proof".to_string(),
+            queue_depth: summary.rch_proof_attempt_count,
+            event_kind: "rch_proof_attempts".to_string(),
+            route_hint: "proof lane pressure from synthetic agent run".to_string(),
+        });
+    }
+    if summary.mail_message_count > 0 {
+        queues.push(SwarmPressureTraceQueueHotSpot {
+            scope: "agent-run:mail".to_string(),
+            queue_depth: summary.mail_message_count,
+            event_kind: "mail_messages".to_string(),
+            route_hint: "coordination queue pressure from synthetic agent run".to_string(),
+        });
+    }
+    queues.sort_by(|left, right| {
+        right
+            .queue_depth
+            .cmp(&left.queue_depth)
+            .then_with(|| left.scope.cmp(&right.scope))
+    });
+    queues
+}
+
+fn agent_run_obligation_leak_suspects(
+    summary: &SwarmAgentRunSummary,
+) -> Vec<SwarmPressureTraceObligationLeakSuspect> {
+    let mut suspects = Vec::new();
+    if !summary.no_leaked_reservations {
+        suspects.push(SwarmPressureTraceObligationLeakSuspect {
+            scope: "agent-run:file-reservations".to_string(),
+            unresolved_obligations: summary
+                .file_reservations_acquired
+                .saturating_sub(summary.file_reservations_released),
+            evidence: "modeled file reservations were not all released".to_string(),
+            route_hint: "Agent Mail reservation closeout".to_string(),
+        });
+    }
+    if !summary.no_false_green_proof {
+        suspects.push(SwarmPressureTraceObligationLeakSuspect {
+            scope: "agent-run:proof".to_string(),
+            unresolved_obligations: 1,
+            evidence: "modeled commit appeared without a green proof".to_string(),
+            route_hint: "proof gate and closeout verifier".to_string(),
+        });
+    }
+    suspects
 }
 
 /// Run a deterministic synthetic agent coordination scenario through [`LabRuntime`].
