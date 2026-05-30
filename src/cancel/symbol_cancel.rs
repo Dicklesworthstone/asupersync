@@ -5654,7 +5654,7 @@ mod tests {
     /// More complex retry scenarios are tested via integration tests.
     #[test]
     fn cancel_broadcaster_tracks_pending_retries_in_metrics() {
-        // Mock sink for testing - not used in this test
+        // Test sink is only needed to satisfy the broadcaster type parameter.
         #[derive(Debug)]
         struct TestSink;
 

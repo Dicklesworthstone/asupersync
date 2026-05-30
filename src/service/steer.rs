@@ -325,7 +325,7 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    // Mock services.
+    // Deterministic test services.
     #[derive(Debug, Clone)]
     struct IdService {
         id: usize,

@@ -2547,7 +2547,7 @@ impl FixtureService for TempDirFixture {
 /// Wraps a closure-based in-process service behind [`FixtureService`].
 ///
 /// Use this for lightweight, in-process test servers (WebSocket echo, HTTP
-/// mock, etc.) where a full Docker container is unnecessary.
+/// fixture services, etc.) where a full Docker container is unnecessary.
 ///
 /// The `start_fn` receives a mutable reference to `state` and should spawn
 /// whatever background work is needed, storing handles in `state`.

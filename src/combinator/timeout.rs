@@ -837,14 +837,14 @@ mod tests {
     use proptest::prelude::*;
 
     #[derive(Debug, Clone)]
-    enum MockOperationOutcome {
+    enum ScriptedOperationOutcome {
         Complete(i32),
         Error(&'static str),
         Cancel,
         Panic,
     }
 
-    impl MockOperationOutcome {
+    impl ScriptedOperationOutcome {
         fn into_outcome(self) -> Outcome<i32, &'static str> {
             match self {
                 Self::Complete(val) => Outcome::Ok(val),
@@ -857,12 +857,12 @@ mod tests {
         }
     }
 
-    fn mock_operation_strategy() -> impl Strategy<Value = MockOperationOutcome> {
+    fn scripted_operation_strategy() -> impl Strategy<Value = ScriptedOperationOutcome> {
         prop_oneof![
-            any::<i16>().prop_map(|v| MockOperationOutcome::Complete(i32::from(v))),
-            Just(MockOperationOutcome::Error("mock error")),
-            Just(MockOperationOutcome::Cancel),
-            Just(MockOperationOutcome::Panic),
+            any::<i16>().prop_map(|v| ScriptedOperationOutcome::Complete(i32::from(v))),
+            Just(ScriptedOperationOutcome::Error("scripted error")),
+            Just(ScriptedOperationOutcome::Cancel),
+            Just(ScriptedOperationOutcome::Panic),
         ]
     }
 
@@ -1049,7 +1049,7 @@ mod tests {
     #[test]
     fn metamorphic_zero_duration_timeout_matches_drop_immediately() {
         proptest!(|(
-            operation_outcome in mock_operation_strategy(),
+            operation_outcome in scripted_operation_strategy(),
             base_time in 0u64..1_000_000_000,
         )| {
             let now = Time::from_nanos(base_time);
@@ -1176,7 +1176,7 @@ mod tests {
             (timeout_duration, epsilon) in (2u64..100_000_000)
                 .prop_flat_map(|duration| (Just(duration), 1u64..duration)),
             completion_offset in 0u64..150_000_000,
-            operation in mock_operation_strategy(),
+            operation in scripted_operation_strategy(),
         )| {
             let start = Time::from_nanos(base_time);
             let full_deadline = start.saturating_add_nanos(timeout_duration);
@@ -1211,7 +1211,7 @@ mod tests {
     #[test]
     fn metamorphic_operation_timeout_race_correctness() {
         proptest!(|(
-            operation_outcome in mock_operation_strategy(),
+            operation_outcome in scripted_operation_strategy(),
             timeout_duration in 10_000_000u64..100_000_000,
             completion_duration in 1_000_000u64..150_000_000,
             base_time in 0u64..1_000_000_000,

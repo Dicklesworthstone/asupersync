@@ -4196,16 +4196,16 @@ mod tests {
         let m = collector
             .collect_memory_usage()
             .expect("memory usage read should succeed on supported platform");
-        // The old mock always returned 512 MiB exactly; the real
+        // The old constant-only reader always returned 512 MiB exactly; the real
         // reader yields the live VmRSS / ru_maxrss which is virtually
         // never that exact value. We assert (a) non-zero current
         // (this test process necessarily has resident memory),
-        // (b) max_limit > 0, (c) we did NOT get the mock constant.
+        // (b) max_limit > 0, (c) we did NOT get the legacy constants.
         assert!(m.current > 0, "current bytes should be > 0");
         assert!(m.max_limit > 0, "max_limit should be > 0");
         assert!(
             m.current != 512 * 1024 * 1024 || m.max_limit != 2048 * 1024 * 1024,
-            "appears to still be returning the legacy mock constants"
+            "appears to still be returning the legacy constant-only values"
         );
         assert!(m.soft_limit <= m.hard_limit, "soft <= hard");
         assert!(m.hard_limit <= m.max_limit, "hard <= max");
@@ -4264,7 +4264,7 @@ mod tests {
             .expect("connection count read should succeed on Linux or Android");
         // Connection count can legitimately be 0 (a fresh test
         // process opens no sockets), so assert only that the ceiling
-        // is sane and the reader did not return the legacy mock 50.
+        // is sane and the reader did not return the legacy constant 50.
         assert!(m.max_limit > 0, "connection ceiling > 0");
         assert!(m.soft_limit <= m.hard_limit);
         assert!(m.hard_limit <= m.max_limit);

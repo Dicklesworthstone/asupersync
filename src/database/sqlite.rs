@@ -4760,11 +4760,11 @@ mod tests {
     }
 
     // ========================================================================
-    // REAL DATABASE INTEGRATION TESTS (Mock-Free Testing Pattern)
+    // REAL DATABASE INTEGRATION TESTS (Live Fixture Testing Pattern)
     // ========================================================================
     //
     // These tests replace tempfile-based testing with real database integration
-    // following the testing-perfect-e2e-integration-tests-with-logging-and-no-mocks pattern.
+    // following the real-service E2E testing pattern.
     //
     // **Setup:**
     // 1. Uses real SQLite databases with transaction rollback isolation

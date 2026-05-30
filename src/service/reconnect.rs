@@ -456,13 +456,13 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    // Mock maker and service for testing.
+    // Scripted maker and service for deterministic reconnect tests.
     #[derive(Debug, Clone)]
-    struct MockMaker {
+    struct ScriptedMaker {
         fail_count: std::cell::Cell<u32>,
     }
 
-    impl MockMaker {
+    impl ScriptedMaker {
         fn new() -> Self {
             Self {
                 fail_count: std::cell::Cell::new(0),
@@ -477,32 +477,32 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct MockMakerError;
+    struct ScriptedMakerError;
 
-    impl fmt::Display for MockMakerError {
+    impl fmt::Display for ScriptedMakerError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "mock maker error")
+            write!(f, "scripted maker error")
         }
     }
 
-    impl std::error::Error for MockMakerError {}
+    impl std::error::Error for ScriptedMakerError {}
 
     #[derive(Debug)]
-    struct MockSvc {
+    struct ScriptedSvc {
         id: u32,
     }
 
-    impl MakeService for MockMaker {
-        type Service = MockSvc;
-        type Error = MockMakerError;
+    impl MakeService for ScriptedMaker {
+        type Service = ScriptedSvc;
+        type Error = ScriptedMakerError;
 
-        fn make_service(&self) -> Result<MockSvc, MockMakerError> {
+        fn make_service(&self) -> Result<ScriptedSvc, ScriptedMakerError> {
             let remaining = self.fail_count.get();
             if remaining > 0 {
                 self.fail_count.set(remaining - 1);
-                Err(MockMakerError)
+                Err(ScriptedMakerError)
             } else {
-                Ok(MockSvc { id: 42 })
+                Ok(ScriptedSvc { id: 42 })
             }
         }
     }
@@ -616,7 +616,7 @@ mod tests {
 
     impl MakeService for ReconnectingMaker {
         type Service = ReconnectingSvc;
-        type Error = MockMakerError;
+        type Error = ScriptedMakerError;
 
         fn make_service(&self) -> Result<Self::Service, Self::Error> {
             Ok(ReconnectingSvc {
@@ -662,7 +662,7 @@ mod tests {
 
     impl MakeService for CountingReconnectMaker {
         type Service = CountingReconnectSvc;
-        type Error = MockMakerError;
+        type Error = ScriptedMakerError;
 
         fn make_service(&self) -> Result<Self::Service, Self::Error> {
             Ok(CountingReconnectSvc {
@@ -693,7 +693,7 @@ mod tests {
 
     impl MakeService for PanicReconnectMaker {
         type Service = PanicReconnectSvc;
-        type Error = MockMakerError;
+        type Error = ScriptedMakerError;
 
         fn make_service(&self) -> Result<Self::Service, Self::Error> {
             Ok(PanicReconnectSvc {
@@ -737,7 +737,7 @@ mod tests {
 
     impl MakeService for StaleFailureMaker {
         type Service = StaleFailureSvc;
-        type Error = MockMakerError;
+        type Error = ScriptedMakerError;
 
         fn make_service(&self) -> Result<Self::Service, Self::Error> {
             Ok(StaleFailureSvc {
@@ -788,26 +788,26 @@ mod tests {
     }
 
     // ================================================================
-    // MakeService / MockMaker
+    // MakeService / ScriptedMaker
     // ================================================================
 
     #[test]
-    fn mock_maker_creates_service() {
-        init_test("mock_maker_creates_service");
-        let maker = MockMaker::new();
+    fn scripted_maker_creates_service() {
+        init_test("scripted_maker_creates_service");
+        let maker = ScriptedMaker::new();
         let svc = maker.make_service().unwrap();
         assert_eq!(svc.id, 42);
-        crate::test_complete!("mock_maker_creates_service");
+        crate::test_complete!("scripted_maker_creates_service");
     }
 
     #[test]
-    fn mock_maker_fails_then_succeeds() {
-        init_test("mock_maker_fails_then_succeeds");
-        let maker = MockMaker::failing(2);
+    fn scripted_maker_fails_then_succeeds() {
+        init_test("scripted_maker_fails_then_succeeds");
+        let maker = ScriptedMaker::failing(2);
         assert!(maker.make_service().is_err());
         assert!(maker.make_service().is_err());
         assert!(maker.make_service().is_ok());
-        crate::test_complete!("mock_maker_fails_then_succeeds");
+        crate::test_complete!("scripted_maker_fails_then_succeeds");
     }
 
     // ================================================================
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn reconnect_new() {
         init_test("reconnect_new");
-        let maker = MockMaker::new();
+        let maker = ScriptedMaker::new();
         let svc = maker.make_service().unwrap();
         let rc = Reconnect::new(maker, svc);
         assert!(rc.is_connected());
@@ -829,7 +829,7 @@ mod tests {
     #[test]
     fn reconnect_lazy() {
         init_test("reconnect_lazy");
-        let maker = MockMaker::new();
+        let maker = ScriptedMaker::new();
         let rc = Reconnect::lazy(maker);
         assert!(!rc.is_connected());
         crate::test_complete!("reconnect_lazy");
@@ -838,7 +838,7 @@ mod tests {
     #[test]
     fn reconnect_manual() {
         init_test("reconnect_manual");
-        let maker = MockMaker::new();
+        let maker = ScriptedMaker::new();
         let mut rc = Reconnect::lazy(maker);
         assert!(!rc.is_connected());
         rc.reconnect().unwrap();
@@ -850,7 +850,7 @@ mod tests {
     #[test]
     fn reconnect_after_disconnect() {
         init_test("reconnect_after_disconnect");
-        let maker = MockMaker::new();
+        let maker = ScriptedMaker::new();
         let svc = maker.make_service().unwrap();
         let mut rc = Reconnect::new(maker, svc);
         assert!(rc.is_connected());
@@ -865,7 +865,7 @@ mod tests {
     #[test]
     fn reconnect_failure_tracked() {
         init_test("reconnect_failure_tracked");
-        let maker = MockMaker::failing(1);
+        let maker = ScriptedMaker::failing(1);
         let mut rc = Reconnect::lazy(maker);
         assert!(rc.reconnect().is_err());
         assert_eq!(rc.error_count(), 1);
@@ -1155,7 +1155,7 @@ mod tests {
 
     #[test]
     fn reconnect_inner_ref() {
-        let maker = MockMaker::new();
+        let maker = ScriptedMaker::new();
         let svc = maker.make_service().unwrap();
         let rc = Reconnect::new(maker, svc);
         assert!(rc.inner().is_some());
@@ -1164,7 +1164,7 @@ mod tests {
 
     #[test]
     fn reconnect_inner_mut() {
-        let maker = MockMaker::new();
+        let maker = ScriptedMaker::new();
         let svc = maker.make_service().unwrap();
         let mut rc = Reconnect::new(maker, svc);
         assert!(rc.inner_mut().is_some());
@@ -1172,7 +1172,7 @@ mod tests {
 
     #[test]
     fn reconnect_maker_ref() {
-        let maker = MockMaker::new();
+        let maker = ScriptedMaker::new();
         let svc = maker.make_service().unwrap();
         let rc = Reconnect::new(maker, svc);
         let _ = rc.maker();
@@ -1180,7 +1180,7 @@ mod tests {
 
     #[test]
     fn reconnect_debug() {
-        let maker = MockMaker::new();
+        let maker = ScriptedMaker::new();
         let svc = maker.make_service().unwrap();
         let rc = Reconnect::new(maker, svc);
         let dbg = format!("{rc:?}");
@@ -1248,7 +1248,7 @@ mod tests {
 
     #[test]
     fn reconnect_layer_new() {
-        let layer = ReconnectLayer::new(MockMaker::new());
+        let layer = ReconnectLayer::new(ScriptedMaker::new());
         let dbg = format!("{layer:?}");
         assert!(dbg.contains("ReconnectLayer"));
     }
@@ -1256,8 +1256,8 @@ mod tests {
     #[test]
     fn reconnect_layer_applies() {
         init_test("reconnect_layer_applies");
-        let layer = ReconnectLayer::new(MockMaker::new());
-        let initial = MockSvc { id: 1 };
+        let layer = ReconnectLayer::new(ScriptedMaker::new());
+        let initial = ScriptedSvc { id: 1 };
         let svc = layer.layer(initial);
         assert!(svc.is_connected());
         assert_eq!(svc.inner().unwrap().id, 1);

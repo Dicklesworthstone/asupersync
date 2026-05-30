@@ -258,7 +258,7 @@ impl PriorityInversionOracle {
     }
 
     /// Returns the oracle's current view of "now" via the installed
-    /// time source. Exposing this lets lab tests assert the mock
+    /// time source. Exposing this lets lab tests assert the virtual
     /// clock is wired.
     #[must_use]
     pub fn now(&self) -> Instant {

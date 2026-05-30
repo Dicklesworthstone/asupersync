@@ -377,7 +377,7 @@ impl RegionLeakOracle {
 
     /// Returns the oracle's current view of "now" via the installed
     /// time source. All internal threshold checks read this value;
-    /// exposing it lets lab tests assert that the mock clock is wired.
+    /// exposing it lets lab tests assert that the virtual clock is wired.
     #[must_use]
     pub fn now(&self) -> Instant {
         (self.time_source)()

@@ -1361,13 +1361,13 @@ mod tests {
     // LoadBalancer
     // ================================================================
 
-    // Simple mock service for testing.
+    // Simple deterministic service for testing.
     #[derive(Clone, Debug)]
-    struct MockService {
+    struct NumberedService {
         id: usize,
     }
 
-    impl MockService {
+    impl NumberedService {
         fn new(id: usize) -> Self {
             Self { id }
         }
@@ -1851,7 +1851,7 @@ mod tests {
         init_test("lb_new_and_len");
         let lb = LoadBalancer::new(
             RoundRobin::new(),
-            vec![MockService::new(1), MockService::new(2)],
+            vec![NumberedService::new(1), NumberedService::new(2)],
         );
         assert_eq!(lb.len(), 2);
         assert!(!lb.is_empty());
@@ -1860,7 +1860,7 @@ mod tests {
 
     #[test]
     fn lb_empty() {
-        let lb = LoadBalancer::<MockService, _>::empty(RoundRobin::new());
+        let lb = LoadBalancer::<NumberedService, _>::empty(RoundRobin::new());
         assert!(lb.is_empty());
         assert_eq!(lb.len(), 0);
     }
@@ -1903,15 +1903,15 @@ mod tests {
 
     #[test]
     fn lb_push() {
-        let lb = LoadBalancer::<MockService, _>::empty(RoundRobin::new());
-        lb.push(MockService::new(1));
-        lb.push(MockService::new(2));
+        let lb = LoadBalancer::<NumberedService, _>::empty(RoundRobin::new());
+        lb.push(NumberedService::new(1));
+        lb.push(NumberedService::new(2));
         assert_eq!(lb.len(), 2);
     }
 
     #[test]
     fn lb_remove() {
-        let lb = LoadBalancer::new(RoundRobin::new(), vec![MockService::new(1)]);
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![NumberedService::new(1)]);
         let svc = lb.remove(0);
         assert!(svc.is_some());
         assert_eq!(svc.unwrap().id, 1);
@@ -1920,7 +1920,7 @@ mod tests {
 
     #[test]
     fn lb_remove_out_of_bounds() {
-        let lb = LoadBalancer::new(RoundRobin::new(), vec![MockService::new(1)]);
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![NumberedService::new(1)]);
         assert!(lb.remove(5).is_none());
     }
 
@@ -1928,7 +1928,7 @@ mod tests {
     fn lbload_metrics() {
         let lb = LoadBalancer::new(
             RoundRobin::new(),
-            vec![MockService::new(1), MockService::new(2)],
+            vec![NumberedService::new(1), NumberedService::new(2)],
         );
         let loads = lb.loads();
         assert_eq!(loads, vec![0, 0]);
@@ -1936,13 +1936,13 @@ mod tests {
 
     #[test]
     fn lb_strategy() {
-        let lb = LoadBalancer::new(RoundRobin::new(), vec![MockService::new(1)]);
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![NumberedService::new(1)]);
         let _ = lb.strategy();
     }
 
     #[test]
     fn lb_debug() {
-        let lb = LoadBalancer::new(RoundRobin::new(), vec![MockService::new(1)]);
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![NumberedService::new(1)]);
         let dbg = format!("{lb:?}");
         assert!(dbg.contains("LoadBalancer"));
     }
@@ -2882,9 +2882,9 @@ mod tests {
         let lb = LoadBalancer::new(
             PickFirst::new(),
             vec![
-                MockService::new(1), // Primary
-                MockService::new(2), // Fallback
-                MockService::new(3), // Fallback
+                NumberedService::new(1), // Primary
+                NumberedService::new(2), // Fallback
+                NumberedService::new(3), // Fallback
             ],
         );
 
@@ -2926,10 +2926,10 @@ mod tests {
         let lb = LoadBalancer::new(
             RoundRobin::new(),
             vec![
-                MockService::new(1),
-                MockService::new(2),
-                MockService::new(3),
-                MockService::new(4),
+                NumberedService::new(1),
+                NumberedService::new(2),
+                NumberedService::new(3),
+                NumberedService::new(4),
             ],
         );
 
@@ -2970,7 +2970,7 @@ mod tests {
         // Start with initial backends
         let lb = LoadBalancer::new(
             RoundRobin::new(),
-            vec![MockService::new(1), MockService::new(2)],
+            vec![NumberedService::new(1), NumberedService::new(2)],
         );
 
         // Verify initial state
@@ -2979,7 +2979,7 @@ mod tests {
         assert_eq!(loads.len(), 2);
 
         // Add a backend atomically
-        lb.push(MockService::new(3));
+        lb.push(NumberedService::new(3));
 
         // Verify immediate visibility
         assert_eq!(lb.len(), 3);
@@ -3054,9 +3054,9 @@ mod tests {
         let lb = LoadBalancer::new(
             RoundRobin::new(),
             vec![
-                MockService::new(1),
-                MockService::new(2),
-                MockService::new(3),
+                NumberedService::new(1),
+                NumberedService::new(2),
+                NumberedService::new(3),
             ],
         );
 
@@ -3122,14 +3122,14 @@ mod tests {
 
         // Create identical backend sets for comparison
         let backends_pf = vec![
-            MockService::new(1),
-            MockService::new(2),
-            MockService::new(3),
+            NumberedService::new(1),
+            NumberedService::new(2),
+            NumberedService::new(3),
         ];
         let backends_rr = vec![
-            MockService::new(1),
-            MockService::new(2),
-            MockService::new(3),
+            NumberedService::new(1),
+            NumberedService::new(2),
+            NumberedService::new(3),
         ];
 
         let lb_pick_first = LoadBalancer::new(PickFirst::new(), backends_pf);

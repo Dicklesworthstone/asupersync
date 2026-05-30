@@ -1816,7 +1816,7 @@ mod tests {
         // post-handshake gate. We verify the validate semantics here
         // (the unit-of-fix for the connector's gate logic) — the
         // gate's *invocation* is exercised end-to-end by integration
-        // tests that need a real TLS handshake. Without a mock
+        // tests that need a real TLS handshake. Without a synthetic
         // stream the connect() path can't run in a unit test, so
         // pinning the validate semantics + the wiring (above) is
         // the maximal regression we can land here.

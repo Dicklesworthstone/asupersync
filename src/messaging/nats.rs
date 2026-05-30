@@ -4074,7 +4074,7 @@ mod tests {
     /// never consulted it, sending CONNECT (with user/pass/token in
     /// cleartext) to a server that claimed to require TLS.
     ///
-    /// The mock server scripts the wire exchange:
+    /// The test server scripts the wire exchange:
     ///   1. Accept the TCP connection.
     ///   2. Write an INFO frame with tls_required = true.
     ///   3. Read whatever the client sends. Plaintext CONNECT is
