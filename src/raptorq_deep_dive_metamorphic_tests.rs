@@ -33,6 +33,8 @@
 //! - MR-GaussianEliminationInvariants: matrix operations preserve rank
 //! - MR-MatrixInversionConsistency: A * A^-1 = I for invertible matrices
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     #[cfg(test)]

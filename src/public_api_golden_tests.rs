@@ -18,6 +18,8 @@
 //! backward compatible. Changes to CLI help, diagnostic output, or config
 //! format require careful review to avoid breaking user scripts and workflows.
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

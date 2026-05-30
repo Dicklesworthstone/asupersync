@@ -20,6 +20,8 @@
 //! execution orders, and memory layouts. Critical for formal verification,
 //! model checking, and deterministic replay validation.
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -561,7 +563,7 @@ mod tests {
 
         // Generate multiplicative inverse table
         let mut inv_table = vec![0u8; 256];
-        for i in 1..256u8 {
+        for i in 1..=255u8 {
             inv_table[i as usize] = gf256_inverse(i);
         }
         inv_table[0] = 0; // 0 has no inverse
@@ -582,7 +584,7 @@ mod tests {
         }
 
         output.push_str("\nSelf-Inverse Elements:\n");
-        for i in 1..256u8 {
+        for i in 1..=255u8 {
             if gf256_inverse(i) == i {
                 output.push_str(&format!("  {} is self-inverse\n", i));
             }

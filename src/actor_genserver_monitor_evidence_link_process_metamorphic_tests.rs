@@ -44,6 +44,8 @@
 //! - MR-ProcessIORedirectionEquivalence: IO redirection preserves data integrity
 //! - MR-ProcessSignalDeliveryDeterminism: Signal delivery follows deterministic ordering
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     #[cfg(test)]

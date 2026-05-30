@@ -4,6 +4,8 @@
 //! transaction isolation, and test data factories following
 //! testing-perfect-e2e-integration-tests-with-logging-and-no-mocks skill.
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     use crate::atp::cache::{AtpCache, CacheConfig, CacheKey};

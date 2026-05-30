@@ -22,6 +22,8 @@
 //! - **MUST**: Update coalescing preserves most recent value
 //! - **SHOULD**: Notification semantics are consistent under concurrent updates
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;

@@ -19,6 +19,7 @@
 #![cfg(any(test, feature = "test-internals"))]
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::cast_possible_truncation)]
+#![allow(dead_code)]
 
 #[cfg(test)]
 mod tests {

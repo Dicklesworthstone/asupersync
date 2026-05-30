@@ -29,6 +29,8 @@
 //! - MR-SavepointNesting: nested savepoints follow stack discipline
 //! - MR-IsolationLevelMonotonicity: higher isolation levels preserve lower-level guarantees
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     #[cfg(test)]

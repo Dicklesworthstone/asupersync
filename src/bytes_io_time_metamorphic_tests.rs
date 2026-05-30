@@ -4,6 +4,7 @@
 //! and time operations (timer wheel/sleep/interval) using metamorphic relations.
 
 #![allow(clippy::too_many_lines)]
+#![allow(dead_code)]
 
 #[cfg(all(test, feature = "test-internals"))]
 mod bytes_io_time_tests {

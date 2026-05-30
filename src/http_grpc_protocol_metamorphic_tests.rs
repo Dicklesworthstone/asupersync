@@ -38,6 +38,8 @@
 //! - MR-GrpcCompressionRoundTrip: compress/decompress preserves message content
 //! - MR-GrpcWebUpgradeDeterminism: Web upgrade path deterministic for same inputs
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     #[cfg(test)]

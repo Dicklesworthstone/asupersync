@@ -22,6 +22,8 @@
 //! - **MUST**: Heap remains valid after arbitrary cancellation patterns
 //! - **SHOULD**: Cancellation completion within bounded operations
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;

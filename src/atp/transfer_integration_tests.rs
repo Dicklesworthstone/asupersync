@@ -4,6 +4,8 @@
 //! following testing-perfect-e2e-integration-tests-with-logging-and-no-mocks skill.
 //! NO MOCKS for transfer protocol, peer connections, or data flows.
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     use crate::atp::actor::{TransferActorTopology, TransferChildRole, TransferRegionId};

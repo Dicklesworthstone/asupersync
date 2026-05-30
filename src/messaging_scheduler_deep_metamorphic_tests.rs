@@ -43,6 +43,8 @@
 //! - MR-EDFSchedulabilityPreservation: schedulable task sets remain schedulable
 //! - MR-EDFLatenessMonotonicity: increased deadlines never increase task lateness
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     #[cfg(test)]

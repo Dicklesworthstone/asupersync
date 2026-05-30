@@ -29,6 +29,8 @@
 //! - MR-RemoteTaskLeaseExpiryDeterminism: Lease expiry behavior is deterministic
 //! - MR-RemoteResultDeliveryExactlyOnce: Result delivery maintains exactly-once semantics
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     #[cfg(test)]

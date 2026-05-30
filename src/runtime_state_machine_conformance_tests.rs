@@ -22,6 +22,8 @@
 //! - **MUST**: False positive quiescence detection is impossible
 //! - **SHOULD**: False negative detection is rare and bounded
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;

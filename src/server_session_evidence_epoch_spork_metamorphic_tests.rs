@@ -42,6 +42,8 @@
 //! - MR-SporkSupervisionTreeQuiescence: Supervision trees reach quiescent state
 //! - MR-SporkNameRegistryIdempotency: Name registry operations are idempotent
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     #[cfg(test)]

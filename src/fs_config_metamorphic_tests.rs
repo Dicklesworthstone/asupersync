@@ -4,6 +4,7 @@
 //! and configuration parsing/environment handling using metamorphic relations.
 
 #![allow(clippy::too_many_lines)]
+#![allow(dead_code)]
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod fs_config_tests {

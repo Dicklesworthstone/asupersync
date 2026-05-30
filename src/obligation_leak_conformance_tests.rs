@@ -22,6 +22,8 @@
 //! - **MUST**: Quiescent state has zero potential
 //! - **SHOULD**: Function decreases monotonically toward quiescence
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;

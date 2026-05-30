@@ -36,6 +36,8 @@
 //! - MR-PathOperationCommutativity: Path operations commute where expected
 //! - MR-FilesystemTransactionAtomicity: FS operations are atomic or rolled back
 
+#![allow(dead_code)]
+
 #[cfg(test)]
 mod tests {
     #[cfg(test)]
