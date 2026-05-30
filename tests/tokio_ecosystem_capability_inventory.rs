@@ -395,7 +395,9 @@ fn quic_http3_public_boundary_wiring_is_explicit() {
 
     assert!(
         !net_mod.contains("#[cfg(all(feature = \"quic-compat\", not(feature = \"quic\")))]")
-            && net_mod.contains("#[cfg(feature = \"quic\")]\npub mod quic {"),
+            && net_mod.contains(
+                "#[cfg(all(feature = \"quic\", not(target_arch = \"wasm32\")))]\npub mod quic {"
+            ),
         "net::quic public boundary must expose only the native core surface"
     );
     assert!(
@@ -405,8 +407,11 @@ fn quic_http3_public_boundary_wiring_is_explicit() {
     );
 
     assert!(
-        net_quic_test.contains("#![cfg(feature = \"quic-compat\")]"),
-        "historical compat integration coverage must stay parked behind the non-core compat gate"
+        !net_quic_test.contains("quic-compat")
+            && net_quic_test
+                .contains("#![cfg(all(feature = \"quic\", not(target_arch = \"wasm32\")))]")
+            && net_quic_test.contains("QuicConnection::new"),
+        "net_quic integration coverage must exercise the native core quic surface"
     );
 }
 
