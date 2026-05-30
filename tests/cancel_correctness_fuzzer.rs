@@ -393,9 +393,11 @@ impl CancelCorrectnessFuzzer {
             CombinatorType::Race3 => self.test_race3(scenario, root_region, trace),
             CombinatorType::RaceAll => self.test_race_all(scenario, root_region, trace),
             CombinatorType::Join2 => self.test_join2(scenario, root_region, trace),
+            CombinatorType::Join3 => self.test_join_fixed(scenario, root_region, trace, 3, "join3"),
             CombinatorType::JoinAll => self.test_join_all(scenario, root_region, trace),
             CombinatorType::Timeout => self.test_timeout(scenario, root_region, trace),
-            _ => Err("Combinator type not yet implemented".into()),
+            CombinatorType::Select => self.test_select(scenario, root_region, trace),
+            CombinatorType::TryJoin => self.test_try_join(scenario, root_region, trace),
         }
     }
 
@@ -551,41 +553,44 @@ impl CancelCorrectnessFuzzer {
         // Create root Cx for testing
         let _cx = Cx::for_testing();
 
-        // Create three controllable futures
-        let fut1 = ControllableFuture::new(1);
-        let fut2 = ControllableFuture::new(2);
-        let fut3 = ControllableFuture::new(3);
+        // Create three controllable futures.
+        let mut fut1 = Some(ControllableFuture::new(1));
+        let mut fut2 = Some(ControllableFuture::new(2));
+        let mut fut3 = Some(ControllableFuture::new(3));
 
-        let fut1_ready = Arc::clone(&fut1.ready);
-        let fut2_ready = Arc::clone(&fut2.ready);
-        let fut3_ready = Arc::clone(&fut3.ready);
+        let fut1_ready = Arc::clone(&fut1.as_ref().expect("fut1 present").ready);
+        let fut2_ready = Arc::clone(&fut2.as_ref().expect("fut2 present").ready);
+        let fut3_ready = Arc::clone(&fut3.as_ref().expect("fut3 present").ready);
+        let fut1_drain_flag = Arc::clone(&fut1.as_ref().expect("fut1 present").drain_flag);
+        let fut2_drain_flag = Arc::clone(&fut2.as_ref().expect("fut2 present").drain_flag);
+        let fut3_drain_flag = Arc::clone(&fut3.as_ref().expect("fut3 present").drain_flag);
 
         // Apply cancel timing pattern
         match &scenario.cancel_timing {
             CancelTiming::NaturalCompletion => {
                 // Let first future win
-                fut1.make_ready();
+                fut1.as_ref().expect("fut1 present").make_ready();
             }
             CancelTiming::MidDrain => {
                 // Let second future win
-                fut2.make_ready();
+                fut2.as_ref().expect("fut2 present").make_ready();
             }
             CancelTiming::Partial(pattern) => {
                 if pattern.len() >= 3 {
                     if pattern[0] {
-                        fut1.make_ready();
+                        fut1.as_ref().expect("fut1 present").make_ready();
                     }
                     if pattern[1] {
-                        fut2.make_ready();
+                        fut2.as_ref().expect("fut2 present").make_ready();
                     }
                     if pattern[2] {
-                        fut3.make_ready();
+                        fut3.as_ref().expect("fut3 present").make_ready();
                     }
                 }
             }
             _ => {
                 // Default to first future winning
-                fut1.make_ready();
+                fut1.as_ref().expect("fut1 present").make_ready();
             }
         }
 
@@ -600,10 +605,26 @@ impl CancelCorrectnessFuzzer {
             return Err("No futures completed in race3 scenario".into());
         };
 
+        match winner {
+            1 => {
+                drop(fut2.take());
+                drop(fut3.take());
+            }
+            2 => {
+                drop(fut1.take());
+                drop(fut3.take());
+            }
+            3 => {
+                drop(fut1.take());
+                drop(fut2.take());
+            }
+            _ => unreachable!(),
+        }
+
         // Check drain status for all futures
-        let fut1_drained = fut1.was_drained();
-        let fut2_drained = fut2.was_drained();
-        let fut3_drained = fut3.was_drained();
+        let fut1_drained = fut1_drain_flag.load(Ordering::Acquire);
+        let fut2_drained = fut2_drain_flag.load(Ordering::Acquire);
+        let fut3_drained = fut3_drain_flag.load(Ordering::Acquire);
 
         let mut oracle_results = OracleResults {
             loser_drain_violations: Vec::new(),
@@ -666,6 +687,106 @@ impl CancelCorrectnessFuzzer {
                 "fut2_drained": fut2_drained,
                 "fut3_drained": fut3_drained,
                 "cancel_timing": scenario.cancel_timing
+            }),
+        });
+
+        Ok(oracle_results)
+    }
+
+    fn test_first_ready_drains_rest(
+        &mut self,
+        scenario: &CancelScenario,
+        _region: RegionId,
+        trace: &mut ExecutionTrace,
+        participant_count: usize,
+        label: &'static str,
+    ) -> Result<OracleResults, Box<dyn std::error::Error>> {
+        let participant_count = participant_count.max(2);
+        trace.task_count = participant_count;
+
+        let mut futures: Vec<Option<ControllableFuture<usize>>> = (0..participant_count)
+            .map(|idx| Some(ControllableFuture::new(idx)))
+            .collect();
+        let ready_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").ready))
+            .collect();
+        let drain_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").drain_flag))
+            .collect();
+
+        match &scenario.cancel_timing {
+            CancelTiming::Early => {}
+            CancelTiming::MidDrain => {
+                if participant_count > 1 {
+                    futures[1].as_ref().expect("future present").make_ready();
+                }
+            }
+            CancelTiming::Partial(pattern) => {
+                for (idx, ready) in pattern.iter().copied().take(participant_count).enumerate() {
+                    if ready {
+                        futures[idx].as_ref().expect("future present").make_ready();
+                    }
+                }
+            }
+            CancelTiming::Precise { delay_ms } if *delay_ms >= 100 => {}
+            _ => {
+                futures[0].as_ref().expect("future present").make_ready();
+            }
+        }
+
+        let winner_idx = ready_flags
+            .iter()
+            .position(|ready| ready.load(Ordering::Acquire));
+        let mut oracle_results = OracleResults::default();
+
+        match winner_idx {
+            Some(winner_idx) => {
+                trace.completion_order.push(TaskId::testing_default());
+                for idx in 0..participant_count {
+                    if idx != winner_idx {
+                        drop(futures[idx].take());
+                        trace.drain_confirmations.push(TaskId::testing_default());
+                    }
+                }
+                for idx in 0..participant_count {
+                    if idx != winner_idx && !drain_flags[idx].load(Ordering::Acquire) {
+                        oracle_results.loser_drain_violations.push(format!(
+                            "{label} non-selected future {} was not properly drained",
+                            idx + 1
+                        ));
+                    }
+                }
+            }
+            None => {
+                for future in &mut futures {
+                    drop(future.take());
+                    trace.drain_confirmations.push(TaskId::testing_default());
+                }
+                for (idx, drained) in drain_flags.iter().enumerate() {
+                    if !drained.load(Ordering::Acquire) {
+                        oracle_results.loser_drain_violations.push(format!(
+                            "{label} future {} was not drained under external cancellation",
+                            idx + 1
+                        ));
+                    }
+                }
+            }
+        }
+
+        trace.cancellation_events.push(CancellationEvent {
+            task_id: TaskId::testing_default(),
+            timestamp_ms: 0,
+            event_type: match winner_idx {
+                Some(idx) => format!("{label}_completed_winner_{}", idx + 1),
+                None => format!("{label}_externally_cancelled"),
+            },
+            details: serde_json::json!({
+                "winner": winner_idx.map(|idx| idx + 1),
+                "participant_count": participant_count,
+                "drain_count": trace.drain_confirmations.len(),
+                "cancel_timing": scenario.cancel_timing,
             }),
         });
 
@@ -885,6 +1006,102 @@ impl CancelCorrectnessFuzzer {
         Ok(oracle_results)
     }
 
+    fn test_join_fixed(
+        &mut self,
+        scenario: &CancelScenario,
+        _region: RegionId,
+        trace: &mut ExecutionTrace,
+        participant_count: usize,
+        label: &'static str,
+    ) -> Result<OracleResults, Box<dyn std::error::Error>> {
+        let participant_count = participant_count.max(2);
+        trace.task_count = participant_count;
+
+        let mut futures: Vec<Option<ControllableFuture<usize>>> = (0..participant_count)
+            .map(|idx| Some(ControllableFuture::new(idx)))
+            .collect();
+        let ready_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").ready))
+            .collect();
+        let drain_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").drain_flag))
+            .collect();
+
+        match &scenario.cancel_timing {
+            CancelTiming::NaturalCompletion => {
+                for future in &futures {
+                    future.as_ref().expect("future present").make_ready();
+                }
+            }
+            CancelTiming::Partial(pattern) => {
+                for (idx, ready) in pattern.iter().copied().take(participant_count).enumerate() {
+                    if ready {
+                        futures[idx].as_ref().expect("future present").make_ready();
+                    }
+                }
+            }
+            CancelTiming::Precise { delay_ms } if *delay_ms < 100 => {
+                for future in &futures {
+                    future.as_ref().expect("future present").make_ready();
+                }
+            }
+            CancelTiming::MidDrain => {
+                futures[0].as_ref().expect("future present").make_ready();
+            }
+            _ => {}
+        }
+
+        let completed: Vec<bool> = ready_flags
+            .iter()
+            .map(|ready| ready.load(Ordering::Acquire))
+            .collect();
+        let completed_count = completed.iter().filter(|completed| **completed).count();
+        let mut oracle_results = OracleResults::default();
+
+        for completed in &completed {
+            if *completed {
+                trace.completion_order.push(TaskId::testing_default());
+            }
+        }
+
+        if completed_count < participant_count {
+            for (idx, completed) in completed.iter().copied().enumerate() {
+                if !completed {
+                    drop(futures[idx].take());
+                    trace.drain_confirmations.push(TaskId::testing_default());
+                }
+            }
+            for (idx, completed) in completed.iter().copied().enumerate() {
+                if !completed && !drain_flags[idx].load(Ordering::Acquire) {
+                    oracle_results.loser_drain_violations.push(format!(
+                        "{label} pending future {} was not drained under cancellation",
+                        idx + 1
+                    ));
+                }
+            }
+        }
+
+        trace.cancellation_events.push(CancellationEvent {
+            task_id: TaskId::testing_default(),
+            timestamp_ms: 0,
+            event_type: if completed_count == participant_count {
+                format!("{label}_completed")
+            } else {
+                format!("{label}_cancelled_pending")
+            },
+            details: serde_json::json!({
+                "participant_count": participant_count,
+                "completed_count": completed_count,
+                "drained_pending_count": trace.drain_confirmations.len(),
+                "cancel_timing": scenario.cancel_timing,
+            }),
+        });
+
+        Ok(oracle_results)
+    }
+
     fn test_join_all(
         &mut self,
         scenario: &CancelScenario,
@@ -967,6 +1184,110 @@ impl CancelCorrectnessFuzzer {
                 "join_all_completed".to_string()
             } else {
                 "join_all_cancelled_pending".to_string()
+            },
+            details: serde_json::json!({
+                "participant_count": participant_count,
+                "completed_count": completed_count,
+                "drained_pending_count": trace.drain_confirmations.len(),
+                "cancel_timing": scenario.cancel_timing,
+            }),
+        });
+
+        Ok(oracle_results)
+    }
+
+    fn test_select(
+        &mut self,
+        scenario: &CancelScenario,
+        region: RegionId,
+        trace: &mut ExecutionTrace,
+    ) -> Result<OracleResults, Box<dyn std::error::Error>> {
+        let participant_count = scenario.participant_count.max(2);
+        self.test_first_ready_drains_rest(scenario, region, trace, participant_count, "select")
+    }
+
+    fn test_try_join(
+        &mut self,
+        scenario: &CancelScenario,
+        _region: RegionId,
+        trace: &mut ExecutionTrace,
+    ) -> Result<OracleResults, Box<dyn std::error::Error>> {
+        let participant_count = scenario.participant_count.max(2);
+        trace.task_count = participant_count;
+
+        let mut futures: Vec<Option<ControllableFuture<usize>>> = (0..participant_count)
+            .map(|idx| Some(ControllableFuture::new(idx)))
+            .collect();
+        let ready_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").ready))
+            .collect();
+        let drain_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").drain_flag))
+            .collect();
+
+        match &scenario.cancel_timing {
+            CancelTiming::NaturalCompletion => {
+                for future in &futures {
+                    future.as_ref().expect("future present").make_ready();
+                }
+            }
+            CancelTiming::Partial(pattern) => {
+                for (idx, ready) in pattern.iter().copied().take(participant_count).enumerate() {
+                    if ready {
+                        futures[idx].as_ref().expect("future present").make_ready();
+                    }
+                }
+            }
+            CancelTiming::Precise { delay_ms } if *delay_ms < 100 => {
+                for future in &futures {
+                    future.as_ref().expect("future present").make_ready();
+                }
+            }
+            CancelTiming::MidDrain => {
+                futures[0].as_ref().expect("future present").make_ready();
+            }
+            _ => {}
+        }
+
+        let completed: Vec<bool> = ready_flags
+            .iter()
+            .map(|ready| ready.load(Ordering::Acquire))
+            .collect();
+        let completed_count = completed.iter().filter(|completed| **completed).count();
+        let mut oracle_results = OracleResults::default();
+
+        for completed in &completed {
+            if *completed {
+                trace.completion_order.push(TaskId::testing_default());
+            }
+        }
+
+        if completed_count < participant_count {
+            for (idx, completed) in completed.iter().copied().enumerate() {
+                if !completed {
+                    drop(futures[idx].take());
+                    trace.drain_confirmations.push(TaskId::testing_default());
+                }
+            }
+            for (idx, completed) in completed.iter().copied().enumerate() {
+                if !completed && !drain_flags[idx].load(Ordering::Acquire) {
+                    oracle_results.loser_drain_violations.push(format!(
+                        "try_join pending future {} was not drained after fail-fast cancellation",
+                        idx + 1
+                    ));
+                }
+            }
+        }
+
+        trace.cancellation_events.push(CancellationEvent {
+            task_id: TaskId::testing_default(),
+            timestamp_ms: 0,
+            event_type: if completed_count == participant_count {
+                "try_join_completed".to_string()
+            } else {
+                "try_join_fail_fast_cancelled_pending".to_string()
             },
             details: serde_json::json!({
                 "participant_count": participant_count,
@@ -1353,6 +1674,96 @@ mod tests {
         assert_eq!(
             result.execution_trace.cancellation_events[0].event_type,
             "join_all_cancelled_pending"
+        );
+    }
+
+    #[test]
+    fn test_join3_partial_drains_pending_futures() {
+        let mut fuzzer = CancelCorrectnessFuzzer::new(11223);
+
+        let scenario = CancelScenario {
+            scenario_id: "test_join3_partial".to_string(),
+            seed: 11223,
+            combinator_type: CombinatorType::Join3,
+            cancel_timing: CancelTiming::Partial(vec![true, false, true]),
+            participant_count: 3,
+            expected_winner: None,
+            chaos_config: ChaosConfig::default(),
+        };
+
+        let result = fuzzer.fuzz_scenario(scenario);
+
+        assert!(matches!(result.outcome, FuzzOutcome::Pass));
+        assert_eq!(result.execution_trace.task_count, 3);
+        assert_eq!(result.execution_trace.completion_order.len(), 2);
+        assert_eq!(result.execution_trace.drain_confirmations.len(), 1);
+        assert!(
+            result.oracle_results.loser_drain_violations.is_empty(),
+            "Join3 should drain its pending future under cancellation"
+        );
+        assert_eq!(
+            result.execution_trace.cancellation_events[0].event_type,
+            "join3_cancelled_pending"
+        );
+    }
+
+    #[test]
+    fn test_select_partial_drains_non_selected_futures() {
+        let mut fuzzer = CancelCorrectnessFuzzer::new(44556);
+
+        let scenario = CancelScenario {
+            scenario_id: "test_select_partial".to_string(),
+            seed: 44556,
+            combinator_type: CombinatorType::Select,
+            cancel_timing: CancelTiming::Partial(vec![false, true, true, false]),
+            participant_count: 4,
+            expected_winner: Some(2),
+            chaos_config: ChaosConfig::default(),
+        };
+
+        let result = fuzzer.fuzz_scenario(scenario);
+
+        assert!(matches!(result.outcome, FuzzOutcome::Pass));
+        assert_eq!(result.execution_trace.task_count, 4);
+        assert_eq!(result.execution_trace.completion_order.len(), 1);
+        assert_eq!(result.execution_trace.drain_confirmations.len(), 3);
+        assert!(
+            result.oracle_results.loser_drain_violations.is_empty(),
+            "Select should drain every non-selected branch"
+        );
+        assert_eq!(
+            result.execution_trace.cancellation_events[0].event_type,
+            "select_completed_winner_2"
+        );
+    }
+
+    #[test]
+    fn test_try_join_partial_drains_pending_futures() {
+        let mut fuzzer = CancelCorrectnessFuzzer::new(77889);
+
+        let scenario = CancelScenario {
+            scenario_id: "test_try_join_partial".to_string(),
+            seed: 77889,
+            combinator_type: CombinatorType::TryJoin,
+            cancel_timing: CancelTiming::Partial(vec![true, false, false]),
+            participant_count: 3,
+            expected_winner: None,
+            chaos_config: ChaosConfig::default(),
+        };
+
+        let result = fuzzer.fuzz_scenario(scenario);
+
+        assert!(matches!(result.outcome, FuzzOutcome::Pass));
+        assert_eq!(result.execution_trace.task_count, 3);
+        assert_eq!(result.execution_trace.completion_order.len(), 1);
+        assert_eq!(result.execution_trace.drain_confirmations.len(), 2);
+        assert!(
+            result.oracle_results.loser_drain_violations.is_empty(),
+            "TryJoin should drain pending futures after fail-fast cancellation"
+        );
+        assert_eq!(
+            result.execution_trace.cancellation_events[0].event_type,
+            "try_join_fail_fast_cancelled_pending"
         );
     }
 
