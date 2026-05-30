@@ -191,16 +191,12 @@ impl RingConformanceTest for NodeVnodeCorrelationTest {
                     ring.add_node(format!("node-{i}"));
                 }
 
-                let expected_vnodes = if vnodes_per_node == 0 {
-                    0
-                } else {
-                    node_count * vnodes_per_node
-                };
+                let expected_vnodes = node_count * vnodes_per_node.max(1);
 
                 if ring.vnode_count() != expected_vnodes {
                     return TestResult::Fail {
                         reason: format!(
-                            "Vnode correlation failed: {} nodes × {} vnodes/node = {} expected, got {}",
+                            "Vnode correlation failed: {} nodes × effective({}) vnodes/node = {} expected, got {}",
                             node_count,
                             vnodes_per_node,
                             expected_vnodes,
@@ -219,6 +215,13 @@ impl RingConformanceTest for NodeVnodeCorrelationTest {
                     };
                 }
             }
+        }
+
+        if HashRing::try_new(0, TEST_RING_SEED).is_ok() {
+            return TestResult::Fail {
+                reason: "try_new accepted zero vnodes instead of rejecting invalid config"
+                    .to_string(),
+            };
         }
 
         TestResult::Pass
