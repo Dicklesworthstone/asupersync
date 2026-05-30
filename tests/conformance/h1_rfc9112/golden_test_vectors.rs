@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Golden test vectors for RFC 9112 HTTP/1.1 chunked encoding.
 //!
 //! Contains known-good test cases from RFC examples and edge cases
@@ -15,7 +13,7 @@ pub const RFC9112_EXAMPLE_CHUNKED: &[u8] = concat!(
     "\r\n",
     "7\r\n",
     "Mozilla\r\n",
-    "11\r\n",
+    "12\r\n",
     " Developer Network\r\n",
     "0\r\n",
     "\r\n"
@@ -32,7 +30,7 @@ pub const CHUNKED_WITH_EXTENSIONS: &[u8] = concat!(
     "\r\n",
     "7;charset=utf-8\r\n",
     "Mozilla\r\n",
-    "11;lang=en\r\n",
+    "12;lang=en\r\n",
     " Developer Network\r\n",
     "0\r\n",
     "\r\n"
@@ -46,7 +44,7 @@ pub const CHUNKED_WITH_TRAILERS: &[u8] = concat!(
     "\r\n",
     "7\r\n",
     "Mozilla\r\n",
-    "11\r\n",
+    "12\r\n",
     " Developer Network\r\n",
     "0\r\n",
     "Content-MD5: Q2h1Y2sgSW50ZWdyaXR5IQ==\r\n",
@@ -198,7 +196,6 @@ pub mod malformed {
 
 /// Test all golden test vectors.
 #[test]
-#[allow(dead_code)]
 fn test_all_golden_vectors() {
     let harness = H1ConformanceHarness::new();
 
@@ -253,7 +250,6 @@ fn test_all_golden_vectors() {
 
 /// Test all malformed vectors are properly rejected.
 #[test]
-#[allow(dead_code)]
 fn test_malformed_vectors_rejected() {
     let harness = H1ConformanceHarness::new();
 
@@ -283,7 +279,6 @@ fn test_malformed_vectors_rejected() {
 
 /// Test large hex variants.
 #[test]
-#[allow(dead_code)]
 fn test_large_hex_variants() {
     let harness = H1ConformanceHarness::new();
 

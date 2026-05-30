@@ -36,13 +36,17 @@
 use crate::channel::mpsc;
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPool, BlockingPoolHandle};
+use crate::time::{sleep, wall_now};
 use crate::types::{CancelReason, Outcome};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::poll_fn;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::task::Poll;
 use std::time::Duration;
 
 /// Global blocking pool for SQLite operations.
@@ -55,6 +59,39 @@ const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_STATEMENT_CACHE_CAPACITY: usize = 64;
 const SQLITE_ROW_STREAM_CHANNEL_CAPACITY: usize = 1;
 const SQLITE_ROW_STREAM_FULL_BACKOFF: Duration = Duration::from_millis(1);
+
+fn sqlite_cancelled_reason(cx: &Cx) -> CancelReason {
+    cx.cancel_reason()
+        .unwrap_or_else(|| CancelReason::user("cancelled"))
+}
+
+async fn sqlite_wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> {
+    if delay.is_zero() {
+        cx.checkpoint().map_err(|_| sqlite_cancelled_reason(cx))?;
+        crate::runtime::yield_now().await;
+        return cx.checkpoint().map_err(|_| sqlite_cancelled_reason(cx));
+    }
+
+    let now = cx
+        .timer_driver()
+        .map_or_else(wall_now, |driver| driver.now());
+    let mut sleeper = sleep(now, delay);
+    poll_fn(|task_cx| {
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(sqlite_cancelled_reason(cx)));
+        }
+        Pin::new(&mut sleeper).poll(task_cx).map(Ok)
+    })
+    .await
+}
+
+fn wal_checkpoint_i64(row: &SqliteRow, column: &str) -> Result<i64, SqliteError> {
+    row.get_i64(column).map_err(|err| {
+        SqliteError::WalCheckpointFailed(format!(
+            "WAL checkpoint status column {column:?} was missing or non-integer: {err}"
+        ))
+    })
+}
 
 fn get_sqlite_pool() -> BlockingPoolHandle {
     SQLITE_POOL.get_or_init(|| BlockingPool::new(1, 4)).handle()
@@ -158,20 +195,17 @@ fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
     // SECURITY FIX: Use sqlparser-rs to eliminate parser divergence vulnerabilities
     // This ensures we use the same SQL parsing logic as execution (asupersync-dn5hn8)
 
-    use sqlparser::ast::{SetExpr, Statement};
     use sqlparser::dialect::SQLiteDialect;
     use sqlparser::parser::Parser;
 
     let dialect = SQLiteDialect {};
-    let mut parser = match Parser::parse_sql(&dialect, sql) {
-        Ok(statements) => return check_parsed_statements(&statements),
+    match Parser::parse_sql(&dialect, sql) {
+        Ok(statements) => check_parsed_statements(&statements),
         Err(_) => {
             // If parsing fails, fall back to keyword detection for safety
-            return check_sql_keywords_fallback(sql);
+            check_sql_keywords_fallback(sql)
         }
-    };
-
-    None
+    }
 }
 
 /// Check parsed SQL AST statements for violations
@@ -182,12 +216,21 @@ fn check_parsed_statements(
 
     for statement in statements {
         match statement {
-            // PRAGMA statements are always blocked on checked surface
+            // PRAGMA statements are always blocked on checked surface.
+            Statement::Pragma { .. } => {
+                return Some(SqlSurfaceViolation::Pragma);
+            }
+            // Older sqlparser versions and non-SQLite dialect paths represented
+            // some session-control forms as SetVariable. Keep this defensive
+            // guard so future parser drift does not silently reopen PRAGMA-like
+            // checked-surface control statements.
             Statement::SetVariable { .. } if is_pragma_statement(statement) => {
                 return Some(SqlSurfaceViolation::Pragma);
             }
             // ATTACH/DETACH statements are always blocked
-            Statement::AttachDatabase { .. } | Statement::DetachDatabase { .. } => {
+            Statement::AttachDatabase { .. }
+            | Statement::AttachDuckDBDatabase { .. }
+            | Statement::DetachDuckDBDatabase { .. } => {
                 return Some(SqlSurfaceViolation::AttachDetach);
             }
             // Transaction control statements are blocked on checked surface
@@ -200,9 +243,8 @@ fn check_parsed_statements(
             // CREATE TRIGGER can contain BEGIN/END but should be allowed
             Statement::CreateTrigger { .. } => {
                 // Allow triggers - they have their own transaction scope
-                continue;
             }
-            _ => continue,
+            _ => {}
         }
     }
     None
@@ -213,9 +255,9 @@ fn is_pragma_statement(statement: &sqlparser::ast::Statement) -> bool {
     use sqlparser::ast::Statement;
 
     // SQLite PRAGMA statements may be parsed as SetVariable or other forms
-    if let Statement::SetVariable { variable, .. } = statement {
+    if let Statement::SetVariable { variables, .. } = statement {
         // Check if variable name starts with pragma-like patterns
-        return variable.to_string().to_uppercase().starts_with("PRAGMA");
+        return variables.to_string().to_uppercase().starts_with("PRAGMA");
     }
     false
 }
@@ -270,7 +312,7 @@ fn remove_sql_comments(sql: &str) -> String {
             '-' if chars.peek() == Some(&'-') => {
                 // Skip line comment
                 chars.next(); // Skip second '-'
-                while let Some(ch) = chars.next() {
+                for ch in chars.by_ref() {
                     if ch == '\n' || ch == '\r' {
                         result.push(' ');
                         break;
@@ -1630,10 +1672,13 @@ impl SqliteConnection {
     /// This operation checks for cancellation before starting.
     pub async fn begin(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
         match self.execute_unchecked(cx, "BEGIN", &[]).await {
-            Outcome::Ok(_) => Outcome::Ok(SqliteTransaction {
-                conn: self,
-                finished: false,
-            }),
+            Outcome::Ok(_) => {
+                *self.transaction_state.lock() = TransactionState::InTransaction;
+                Outcome::Ok(SqliteTransaction {
+                    conn: self,
+                    finished: false,
+                })
+            }
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -1647,10 +1692,13 @@ impl SqliteConnection {
     /// This operation checks for cancellation before starting.
     pub async fn begin_immediate(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
         match self.execute_unchecked(cx, "BEGIN IMMEDIATE", &[]).await {
-            Outcome::Ok(_) => Outcome::Ok(SqliteTransaction {
-                conn: self,
-                finished: false,
-            }),
+            Outcome::Ok(_) => {
+                *self.transaction_state.lock() = TransactionState::InTransaction;
+                Outcome::Ok(SqliteTransaction {
+                    conn: self,
+                    finished: false,
+                })
+            }
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -1664,10 +1712,13 @@ impl SqliteConnection {
     /// This operation checks for cancellation before starting.
     pub async fn begin_exclusive(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
         match self.execute_unchecked(cx, "BEGIN EXCLUSIVE", &[]).await {
-            Outcome::Ok(_) => Outcome::Ok(SqliteTransaction {
-                conn: self,
-                finished: false,
-            }),
+            Outcome::Ok(_) => {
+                *self.transaction_state.lock() = TransactionState::InTransaction;
+                Outcome::Ok(SqliteTransaction {
+                    conn: self,
+                    finished: false,
+                })
+            }
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -1891,14 +1942,9 @@ impl SqliteConnection {
                         )));
                     }
 
-                    // Brief delay before retry (async-friendly)
-                    if let Outcome::Cancelled(r) = crate::time::sleep(
-                        cx,
-                        std::time::Duration::from_millis(50 * attempt as u64),
-                    )
-                    .await
-                    {
-                        return Outcome::Cancelled(r);
+                    let retry_delay = Duration::from_millis(50 * u64::from(attempt));
+                    if let Err(reason) = sqlite_wait_retry_delay(cx, retry_delay).await {
+                        return Outcome::Cancelled(reason);
                     }
                 }
                 Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -1921,9 +1967,18 @@ impl SqliteConnection {
                 match self.query_unchecked(cx, "PRAGMA wal_checkpoint", &[]).await {
                     Outcome::Ok(rows) => {
                         if let Some(row) = rows.first() {
-                            let busy: i64 = row.get("busy").unwrap_or(0);
-                            let log_pages: i64 = row.get("log").unwrap_or(0);
-                            let checkpointed_pages: i64 = row.get("checkpointed").unwrap_or(0);
+                            let busy = match wal_checkpoint_i64(row, "busy") {
+                                Ok(value) => value,
+                                Err(err) => return Outcome::Err(err),
+                            };
+                            let log_pages = match wal_checkpoint_i64(row, "log") {
+                                Ok(value) => value,
+                                Err(err) => return Outcome::Err(err),
+                            };
+                            let checkpointed_pages = match wal_checkpoint_i64(row, "checkpointed") {
+                                Ok(value) => value,
+                                Err(err) => return Outcome::Err(err),
+                            };
 
                             if busy != 0 {
                                 return Outcome::Err(SqliteError::WalCheckpointFailed(
@@ -1994,6 +2049,7 @@ impl SqliteTransaction<'_> {
         }
         match self.conn.execute_unchecked(cx, "COMMIT", &[]).await {
             Outcome::Ok(_) => {
+                *self.conn.transaction_state.lock() = TransactionState::Autocommit;
                 self.finished = true;
                 Outcome::Ok(())
             }
@@ -2014,6 +2070,7 @@ impl SqliteTransaction<'_> {
         }
         match self.conn.execute_unchecked(cx, "ROLLBACK", &[]).await {
             Outcome::Ok(_) => {
+                *self.conn.transaction_state.lock() = TransactionState::Autocommit;
                 self.finished = true;
                 Outcome::Ok(())
             }
@@ -2256,8 +2313,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_toctou_fix_prevents_symlink_attack() {
-        use std::fs;
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
 
@@ -2299,8 +2356,7 @@ mod tests {
         use tempfile::NamedTempFile;
 
         // Create a temporary database file
-        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
-        let db_path = temp_file.path();
+        let _temp_file = NamedTempFile::new().expect("Failed to create temp file");
 
         // Test that WAL checkpoint errors are now propagated instead of ignored
         // This test verifies the fail-closed behavior by checking error propagation
@@ -2512,7 +2568,6 @@ mod tests {
 
         use std::sync::Arc;
         use std::thread;
-        use std::time::Duration;
 
         let transaction_state = Arc::new(Mutex::new(TransactionState::Autocommit));
         let state_for_thread = Arc::clone(&transaction_state);

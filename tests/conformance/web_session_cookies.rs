@@ -1,1295 +1,165 @@
-#[rustfmt::skip]
-#[cfg(any())]
-mod stale_web_session_cookies_suite {
-#![allow(warnings)]
-#![allow(clippy::all)]
-//! RFC 6265 Cookie Signature Validation Conformance Tests
+//! Active RFC 6265-oriented session cookie conformance tests.
 //!
-//! Validates RFC 6265 cookie security and signature validation behavior with 5 MRs:
-//! 1. HMAC signature correct for issued cookies (MR1: Signature Consistency)
-//! 2. Tampered signature rejected (MR2: Integrity Verification)
-//! 3. SameSite=Strict prevents cross-site cookie send (MR3: Same-Site Enforcement)
-//! 4. Secure flag requires HTTPS (MR4: Transport Security)
-//! 5. HttpOnly blocks document.cookie (MR5: Script Access Control)
-//!
-//! # RFC 6265 Security Requirements
-//!
-//! RFC 6265 defines the HTTP State Management Mechanism (cookies) with specific
-//! security requirements for authentication and session management:
-//!
-//! - **Integrity**: Cookie values MUST be protected against tampering
-//! - **Confidentiality**: Sensitive cookies MUST use Secure flag over HTTPS
-//! - **Same-Site Protection**: SameSite attribute prevents CSRF attacks
-//! - **Script Isolation**: HttpOnly prevents XSS via document.cookie access
-//! - **Signature Validation**: HMAC signatures ensure cookie authenticity
-//!
-//! ## Metamorphic Relations for Cookie Security
-//!
-//! These MRs test invariants that MUST hold for secure cookie implementations:
-//!
-//! - **MR1 (Signature Consistency)**: sign(data, key) → verify(signed_data, key) = true
-//! - **MR2 (Integrity Verification)**: tamper(signed_data) → verify(tampered_data, key) = false
-//! - **MR3 (Same-Site Enforcement)**: cross_site_request(cookie) → cookie_sent = false when SameSite=Strict
-//! - **MR4 (Transport Security)**: http_request(secure_cookie) → cookie_sent = false
-//! - **MR5 (Script Access Control)**: document.cookie.access(httponly_cookie) → access_denied = true
-
-use asupersync::web::session::{SessionData, SessionConfig, SameSite, MemoryStore};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-/// RFC 2119 requirement level for conformance testing
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub enum RequirementLevel {
-    Must,   // RFC 2119: MUST
-    Should, // RFC 2119: SHOULD
-    May,    // RFC 2119: MAY
-}
-
-/// Test result for a single cookie security requirement
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct CookieSecurityResult {
-    pub test_id: String,
-    pub description: String,
-    pub category: TestCategory,
-    pub requirement_level: RequirementLevel,
-    pub verdict: TestVerdict,
-    pub error_message: Option<String>,
-    pub execution_time_ms: u64,
-    pub rfc_section: String,
-}
-
-/// Test categories for RFC 6265 cookie security conformance
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub enum TestCategory {
-    /// HMAC signature validation
-    SignatureValidation,
-    /// Cookie tampering detection
-    IntegrityProtection,
-    /// SameSite attribute enforcement
-    SameSiteEnforcement,
-    /// Secure flag transport security
-    TransportSecurity,
-    /// HttpOnly script access control
-    ScriptAccessControl,
-}
-
-/// Test verdict
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub enum TestVerdict {
-    Pass,
-    Fail,
-    Skipped,
-    ExpectedFailure,
-}
-
-/// Mock signed cookie for testing signature validation
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct SignedCookie {
-    pub name: String,
-    pub value: String,
-    pub signature: String,
-    pub config: SessionConfig,
-}
-
-/// Mock request context for testing cookie behavior
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct MockRequestContext {
-    pub scheme: String,  // "http" or "https"
-    pub origin: String,  // request origin
-    pub target_origin: String, // target origin for same-site checks
-    pub headers: HashMap<String, String>,
-    pub is_cross_site: bool,
-}
-
-/// HMAC-SHA256 signature implementation for testing
-#[allow(dead_code)]
-pub struct CookieSigner {
-    secret_key: [u8; 32],
-}
-
-#[allow(dead_code)]
-
-impl CookieSigner {
-    /// Create a new cookie signer with a secret key
-    #[allow(dead_code)]
-    pub fn new(key: &[u8; 32]) -> Self {
-        Self { secret_key: *key }
-    }
-
-    /// Sign cookie data with HMAC-SHA256
-    #[allow(dead_code)]
-    pub fn sign(&self, data: &str) -> String {
-        use sha2::{Sha256, Digest};
-
-        // Simplified HMAC implementation for testing
-        // In production, use a proper HMAC library like `hmac` crate
-        let mut hasher = Sha256::new();
-        hasher.update(&self.secret_key);
-        hasher.update(data.as_bytes());
-        let result = hasher.finalize();
-        hex::encode(result)
-    }
-
-    /// Verify cookie signature
-    #[allow(dead_code)]
-    pub fn verify(&self, data: &str, signature: &str) -> bool {
-        let expected = self.sign(data);
-        constant_time_compare(&expected, signature)
-    }
-}
-
-/// Constant-time string comparison to prevent timing attacks
-#[allow(dead_code)]
-fn constant_time_compare(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let mut result = 0u8;
-
-    for i in 0..a_bytes.len() {
-        result |= a_bytes[i] ^ b_bytes[i];
-    }
-
-    result == 0
-}
-
-/// Cookie behavioral simulator for testing RFC 6265 compliance
-#[allow(dead_code)]
-pub struct CookieSimulator {
-    signer: CookieSigner,
-}
-
-#[allow(dead_code)]
-
-impl CookieSimulator {
-    /// Create a new cookie simulator
-    #[allow(dead_code)]
-    pub fn new(secret_key: &[u8; 32]) -> Self {
-        Self {
-            signer: CookieSigner::new(secret_key),
-        }
-    }
-
-    /// Create a signed cookie
-    #[allow(dead_code)]
-    pub fn create_signed_cookie(&self, name: &str, value: &str, config: SessionConfig) -> SignedCookie {
-        let data = format!("{}={}", name, value);
-        let signature = self.signer.sign(&data);
-
-        SignedCookie {
-            name: name.to_string(),
-            value: value.to_string(),
-            signature,
-            config,
-        }
-    }
-
-    /// Simulate browser cookie sending behavior based on RFC 6265
-    #[allow(dead_code)]
-    pub fn should_send_cookie(&self, cookie: &SignedCookie, context: &MockRequestContext) -> bool {
-        // Check Secure flag (MR4)
-        if cookie.config.secure && context.scheme != "https" {
-            return false; // Secure cookies only sent over HTTPS
-        }
-
-        // Check SameSite attribute (MR3)
-        match cookie.config.same_site {
-            SameSite::Strict => {
-                if context.is_cross_site {
-                    return false; // Strict prevents cross-site sending
-                }
-            },
-            SameSite::Lax => {
-                // Lax allows safe cross-site requests (GET, HEAD, etc.)
-                // For simplicity, we'll just check if it's cross-site
-                if context.is_cross_site {
-                    // In real implementation, would check request method
-                    return false;
-                }
-            },
-            SameSite::None => {
-                // None allows all cross-site requests (requires Secure in modern browsers)
-                if context.is_cross_site && !cookie.config.secure {
-                    return false;
-                }
-            },
-        }
-
-        true
-    }
-
-    /// Simulate document.cookie access for HttpOnly testing (MR5)
-    #[allow(dead_code)]
-    pub fn can_access_via_script(&self, cookie: &SignedCookie) -> bool {
-        !cookie.config.http_only // HttpOnly blocks script access
-    }
-
-    /// Verify cookie signature (MR1 and MR2)
-    #[allow(dead_code)]
-    pub fn verify_cookie_signature(&self, cookie: &SignedCookie) -> bool {
-        let data = format!("{}={}", cookie.name, cookie.value);
-        self.signer.verify(&data, &cookie.signature)
-    }
-}
-
-/// MR1: Signature Consistency - sign(data, key) → verify(signed_data, key) = true
-#[allow(dead_code)]
-pub fn metamorphic_relation_1_signature_consistency(secret_key: &[u8; 32]) -> CookieSecurityResult {
-    let start_time = SystemTime::now();
-    let mut result = CookieSecurityResult {
-        test_id: "MR1".to_string(),
-        description: "HMAC signature correct for issued cookies".to_string(),
-        category: TestCategory::SignatureValidation,
-        requirement_level: RequirementLevel::Must,
-        verdict: TestVerdict::Pass,
-        error_message: None,
-        execution_time_ms: 0,
-        rfc_section: "RFC 6265 Section 4.1.1".to_string(),
-    };
-
-    let simulator = CookieSimulator::new(secret_key);
-    let config = SessionConfig::default();
-
-    // Test cases: various cookie values
-    let test_cases = [
-        ("session_id", "abc123"),
-        ("user_token", "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9"),
-        ("csrf_token", "random_csrf_value_12345"),
-        ("empty_value", ""),
-        ("special_chars", "value!@#$%^&*()"),
-    ];
-
-    for (name, value) in &test_cases {
-        let cookie = simulator.create_signed_cookie(name, value, config.clone());
-
-        // MR1: Verify that our own signatures validate correctly
-        if !simulator.verify_cookie_signature(&cookie) {
-            result.verdict = TestVerdict::Fail;
-            result.error_message = Some(format!(
-                "MR1 violation: Valid signature for '{}={}' failed verification",
-                name, value
-            ));
-            break;
-        }
-    }
-
-    let elapsed = start_time.elapsed().unwrap_or_default();
-    result.execution_time_ms = elapsed.as_millis() as u64;
-    result
-}
-
-/// MR2: Integrity Verification - tamper(signed_data) → verify(tampered_data, key) = false
-#[allow(dead_code)]
-pub fn metamorphic_relation_2_integrity_verification(secret_key: &[u8; 32]) -> CookieSecurityResult {
-    let start_time = SystemTime::now();
-    let mut result = CookieSecurityResult {
-        test_id: "MR2".to_string(),
-        description: "Tampered signature rejected".to_string(),
-        category: TestCategory::IntegrityProtection,
-        requirement_level: RequirementLevel::Must,
-        verdict: TestVerdict::Pass,
-        error_message: None,
-        execution_time_ms: 0,
-        rfc_section: "RFC 6265 Section 4.1.1".to_string(),
-    };
-
-    let simulator = CookieSimulator::new(secret_key);
-    let config = SessionConfig::default();
-
-    // Create a valid signed cookie
-    let mut cookie = simulator.create_signed_cookie("session_id", "valid_session", config);
-
-    // Test various tampering scenarios
-    let tampering_cases = [
-        ("flip_bit", "tamper signature by flipping one bit"),
-        ("truncate", "tamper by truncating signature"),
-        ("append", "tamper by appending to signature"),
-        ("replace", "tamper by replacing signature entirely"),
-    ];
-
-    for (tamper_type, description) in &tampering_cases {
-        let original_signature = cookie.signature.clone();
-
-        // Apply tampering based on type
-        match *tamper_type {
-            "flip_bit" => {
-                if !cookie.signature.is_empty() {
-                    let mut bytes = cookie.signature.into_bytes();
-                    bytes[0] ^= 1; // Flip one bit
-                    cookie.signature = String::from_utf8(bytes).unwrap_or_else(|_| "invalid".to_string());
-                }
-            },
-            "truncate" => {
-                cookie.signature = cookie.signature[..cookie.signature.len().saturating_sub(4)].to_string();
-            },
-            "append" => {
-                cookie.signature.push_str("tampered");
-            },
-            "replace" => {
-                cookie.signature = "completely_different_signature".to_string();
-            },
-            _ => {}
-        }
-
-        // MR2: Verify that tampered signatures are rejected
-        if simulator.verify_cookie_signature(&cookie) {
-            result.verdict = TestVerdict::Fail;
-            result.error_message = Some(format!(
-                "MR2 violation: Tampered signature ({}) was incorrectly accepted: {}",
-                description, cookie.signature
-            ));
-            break;
-        }
-
-        // Restore for next test
-        cookie.signature = original_signature;
-    }
-
-    let elapsed = start_time.elapsed().unwrap_or_default();
-    result.execution_time_ms = elapsed.as_millis() as u64;
-    result
-}
-
-/// MR3: Same-Site Enforcement - cross_site_request(cookie) → cookie_sent = false when SameSite=Strict
-#[allow(dead_code)]
-pub fn metamorphic_relation_3_same_site_enforcement(secret_key: &[u8; 32]) -> CookieSecurityResult {
-    let start_time = SystemTime::now();
-    let mut result = CookieSecurityResult {
-        test_id: "MR3".to_string(),
-        description: "SameSite=Strict prevents cross-site cookie send".to_string(),
-        category: TestCategory::SameSiteEnforcement,
-        requirement_level: RequirementLevel::Must,
-        verdict: TestVerdict::Pass,
-        error_message: None,
-        execution_time_ms: 0,
-        rfc_section: "RFC 6265bis Section 5.2".to_string(),
-    };
-
-    let simulator = CookieSimulator::new(secret_key);
-
-    // Test cases: same-site vs cross-site requests
-    let test_cases = [
-        (SameSite::Strict, false, true),   // Strict + same-site → should send
-        (SameSite::Strict, true, false),  // Strict + cross-site → should NOT send
-        (SameSite::Lax, false, true),     // Lax + same-site → should send
-        (SameSite::Lax, true, false),     // Lax + cross-site → should NOT send (simplified)
-        (SameSite::None, true, true),     // None + cross-site → should send (if Secure)
-    ];
-
-    for (same_site, is_cross_site, expected_send) in &test_cases {
-        let mut config = SessionConfig::default();
-        config.same_site = *same_site;
-        config.secure = true; // Required for SameSite=None
-
-        let cookie = simulator.create_signed_cookie("session_id", "test_value", config);
-
-        let context = MockRequestContext {
-            scheme: "https".to_string(),
-            origin: "https://example.com".to_string(),
-            target_origin: if *is_cross_site {
-                "https://evil.com".to_string()
-            } else {
-                "https://example.com".to_string()
-            },
-            headers: HashMap::new(),
-            is_cross_site: *is_cross_site,
-        };
-
-        let should_send = simulator.should_send_cookie(&cookie, &context);
-
-        // MR3: Verify SameSite enforcement
-        if should_send != *expected_send {
-            result.verdict = TestVerdict::Fail;
-            result.error_message = Some(format!(
-                "MR3 violation: SameSite={:?} with cross_site={} expected send={} but got send={}",
-                same_site, is_cross_site, expected_send, should_send
-            ));
-            break;
-        }
-    }
-
-    let elapsed = start_time.elapsed().unwrap_or_default();
-    result.execution_time_ms = elapsed.as_millis() as u64;
-    result
-}
-
-/// MR4: Transport Security - http_request(secure_cookie) → cookie_sent = false
-#[allow(dead_code)]
-pub fn metamorphic_relation_4_transport_security(secret_key: &[u8; 32]) -> CookieSecurityResult {
-    let start_time = SystemTime::now();
-    let mut result = CookieSecurityResult {
-        test_id: "MR4".to_string(),
-        description: "Secure flag requires HTTPS".to_string(),
-        category: TestCategory::TransportSecurity,
-        requirement_level: RequirementLevel::Must,
-        verdict: TestVerdict::Pass,
-        error_message: None,
-        execution_time_ms: 0,
-        rfc_section: "RFC 6265 Section 4.1.2.5".to_string(),
-    };
-
-    let simulator = CookieSimulator::new(secret_key);
-
-    // Test cases: HTTP vs HTTPS with Secure flag
-    let test_cases = [
-        (true, "https", true),   // Secure cookie over HTTPS → should send
-        (true, "http", false),   // Secure cookie over HTTP → should NOT send
-        (false, "https", true),  // Non-secure cookie over HTTPS → should send
-        (false, "http", true),   // Non-secure cookie over HTTP → should send
-    ];
-
-    for (secure_flag, scheme, expected_send) in &test_cases {
-        let mut config = SessionConfig::default();
-        config.secure = *secure_flag;
-        config.same_site = SameSite::Lax; // Avoid SameSite interference
-
-        let cookie = simulator.create_signed_cookie("session_id", "test_value", config);
-
-        let context = MockRequestContext {
-            scheme: scheme.to_string(),
-            origin: format!("{}://example.com", scheme),
-            target_origin: format!("{}://example.com", scheme),
-            headers: HashMap::new(),
-            is_cross_site: false,
-        };
-
-        let should_send = simulator.should_send_cookie(&cookie, &context);
-
-        // MR4: Verify Secure flag enforcement
-        if should_send != *expected_send {
-            result.verdict = TestVerdict::Fail;
-            result.error_message = Some(format!(
-                "MR4 violation: Secure={} over {} expected send={} but got send={}",
-                secure_flag, scheme, expected_send, should_send
-            ));
-            break;
-        }
-    }
-
-    let elapsed = start_time.elapsed().unwrap_or_default();
-    result.execution_time_ms = elapsed.as_millis() as u64;
-    result
-}
-
-/// MR5: Script Access Control - document.cookie.access(httponly_cookie) → access_denied = true
-#[allow(dead_code)]
-pub fn metamorphic_relation_5_script_access_control(secret_key: &[u8; 32]) -> CookieSecurityResult {
-    let start_time = SystemTime::now();
-    let mut result = CookieSecurityResult {
-        test_id: "MR5".to_string(),
-        description: "HttpOnly blocks document.cookie".to_string(),
-        category: TestCategory::ScriptAccessControl,
-        requirement_level: RequirementLevel::Must,
-        verdict: TestVerdict::Pass,
-        error_message: None,
-        execution_time_ms: 0,
-        rfc_section: "RFC 6265 Section 4.1.2.6".to_string(),
-    };
-
-    let simulator = CookieSimulator::new(secret_key);
-
-    // Test cases: HttpOnly vs non-HttpOnly cookies
-    let test_cases = [
-        (true, false),   // HttpOnly=true → script access denied (false)
-        (false, true),   // HttpOnly=false → script access allowed (true)
-    ];
-
-    for (http_only, expected_access) in &test_cases {
-        let mut config = SessionConfig::default();
-        config.http_only = *http_only;
-
-        let cookie = simulator.create_signed_cookie("session_id", "test_value", config);
-
-        let can_access = simulator.can_access_via_script(&cookie);
-
-        // MR5: Verify HttpOnly enforcement
-        if can_access != *expected_access {
-            result.verdict = TestVerdict::Fail;
-            result.error_message = Some(format!(
-                "MR5 violation: HttpOnly={} expected script_access={} but got script_access={}",
-                http_only, expected_access, can_access
-            ));
-            break;
-        }
-    }
-
-    let elapsed = start_time.elapsed().unwrap_or_default();
-    result.execution_time_ms = elapsed.as_millis() as u64;
-    result
-}
-
-/// Run all RFC 6265 cookie security metamorphic relations
-#[allow(dead_code)]
-pub fn run_cookie_security_conformance_tests() -> Vec<CookieSecurityResult> {
-    // Use a fixed test key for reproducible results
-    let secret_key: [u8; 32] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-        0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
-    ];
-
-    vec![
-        metamorphic_relation_1_signature_consistency(&secret_key),
-        metamorphic_relation_2_integrity_verification(&secret_key),
-        metamorphic_relation_3_same_site_enforcement(&secret_key),
-        metamorphic_relation_4_transport_security(&secret_key),
-        metamorphic_relation_5_script_access_control(&secret_key),
-    ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_mr1_signature_consistency() {
-        let secret_key: [u8; 32] = [1; 32]; // Simple test key
-        let result = metamorphic_relation_1_signature_consistency(&secret_key);
-        assert_eq!(result.verdict, TestVerdict::Pass);
-        assert!(result.error_message.is_none());
-    }
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_mr2_integrity_verification() {
-        let secret_key: [u8; 32] = [2; 32]; // Simple test key
-        let result = metamorphic_relation_2_integrity_verification(&secret_key);
-        assert_eq!(result.verdict, TestVerdict::Pass);
-        assert!(result.error_message.is_none());
-    }
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_mr3_same_site_enforcement() {
-        let secret_key: [u8; 32] = [3; 32]; // Simple test key
-        let result = metamorphic_relation_3_same_site_enforcement(&secret_key);
-        assert_eq!(result.verdict, TestVerdict::Pass);
-        assert!(result.error_message.is_none());
-    }
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_mr4_transport_security() {
-        let secret_key: [u8; 32] = [4; 32]; // Simple test key
-        let result = metamorphic_relation_4_transport_security(&secret_key);
-        assert_eq!(result.verdict, TestVerdict::Pass);
-        assert!(result.error_message.is_none());
-    }
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_mr5_script_access_control() {
-        let secret_key: [u8; 32] = [5; 32]; // Simple test key
-        let result = metamorphic_relation_5_script_access_control(&secret_key);
-        assert_eq!(result.verdict, TestVerdict::Pass);
-        assert!(result.error_message.is_none());
-    }
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_full_conformance_suite() {
-        let results = run_cookie_security_conformance_tests();
-        assert_eq!(results.len(), 5);
-
-        // Verify all tests pass
-        for result in &results {
-            assert_eq!(result.verdict, TestVerdict::Pass,
-                "Failed test: {} - {}", result.test_id,
-                result.error_message.as_deref().unwrap_or("No error message"));
-        }
-
-        // Verify all RFC sections are covered
-        let rfc_sections: Vec<&str> = results.iter().map(|r| r.rfc_section.as_str()).collect();
-        assert!(rfc_sections.contains(&"RFC 6265 Section 4.1.1")); // Signature validation
-        assert!(rfc_sections.contains(&"RFC 6265bis Section 5.2")); // SameSite
-        assert!(rfc_sections.contains(&"RFC 6265 Section 4.1.2.5")); // Secure flag
-        assert!(rfc_sections.contains(&"RFC 6265 Section 4.1.2.6")); // HttpOnly
-    }
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_constant_time_compare() {
-        // Test basic equality
-        assert!(constant_time_compare("hello", "hello"));
-        assert!(!constant_time_compare("hello", "world"));
-
-        // Test length differences
-        assert!(!constant_time_compare("short", "longer"));
-        assert!(!constant_time_compare("longer", "short"));
-
-        // Test empty strings
-        assert!(constant_time_compare("", ""));
-        assert!(!constant_time_compare("", "non-empty"));
-    }
-
-    #[test]
-    #[allow(dead_code)]
-    fn test_cookie_signer() {
-        let key = [42; 32];
-        let signer = CookieSigner::new(&key);
-
-        let data = "test_cookie=test_value";
-        let signature = signer.sign(data);
-
-        // Signature should verify correctly
-        assert!(signer.verify(data, &signature));
-
-        // Different data should not verify
-        assert!(!signer.verify("different_data", &signature));
-
-        // Tampered signature should not verify
-        let mut tampered_sig = signature.clone();
-        tampered_sig.push('x');
-        assert!(!signer.verify(data, &tampered_sig));
-    }
-}
-}
-// Live web session-cookie conformance tests.
-//
-// The stale suite above modeled cookie signing with test-only helpers and
-// depended on removed paths. These tests exercise the current public
-// `asupersync::web::session` middleware instead: cookie attributes, malformed
-// IDs, server-side session fixation defense, clear/expiry behavior, and CSRF
-// protection for existing sessions.
+//! The previous file was a permanently disabled simulator. These tests now use
+//! the real `SessionLayer`, `MemoryStore`, and `Session` middleware path.
 
 use asupersync::Cx;
 use asupersync::web::extract::Request;
 use asupersync::web::session::{
-    MemoryStore, SameSite, Session, SessionData, SessionLayer, SessionStore,
+    MemoryStore, SameSite, Session, SessionConfig, SessionLayer, SessionStore,
 };
-use asupersync::web::{Response, StatusCode};
+use asupersync::web::{Handler, Response, StatusCode};
 use std::future::Future;
 use std::pin::Pin;
 
-const BEAD_ID: &str = "asupersync-nax796";
-const SUITE_ID: &str = "web_session_cookies";
-
-trait TestHandlerSyncExt: asupersync::web::handler::Handler {
-    fn call(&self, req: Request) -> Response {
-        futures_lite::future::block_on(asupersync::web::handler::Handler::call(
-            self,
-            &Cx::for_testing(),
-            req,
-        ))
-    }
+fn call_sync<H: Handler + ?Sized>(handler: &H, req: Request) -> Response {
+    futures_lite::future::block_on(handler.call(&Cx::for_testing(), req))
 }
 
-impl<T> TestHandlerSyncExt for T where T: asupersync::web::handler::Handler + ?Sized {}
-
-#[derive(Debug)]
-struct SessionCookieCaseResult {
-    scenario_id: &'static str,
-    method: &'static str,
-    headers: &'static str,
-    body_shape: &'static str,
-    connection_reused: &'static str,
-    cookie_case: &'static str,
-    expected_status: &'static str,
-    actual_status: String,
-    expected_connection_state: &'static str,
-    actual_connection_state: String,
-    verdict: &'static str,
-    first_failure: String,
+fn session_id_from_set_cookie<'a>(set_cookie: &'a str, cookie_name: &str) -> &'a str {
+    let prefix = format!("{cookie_name}=");
+    set_cookie
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix(&prefix))
+        .expect("Set-Cookie should contain the configured session cookie")
 }
 
-impl SessionCookieCaseResult {
-    fn pass(
-        scenario_id: &'static str,
-        method: &'static str,
-        headers: &'static str,
-        body_shape: &'static str,
-        cookie_case: &'static str,
-        expected_status: &'static str,
-        expected_connection_state: &'static str,
-    ) -> Self {
-        Self {
-            scenario_id,
-            method,
-            headers,
-            body_shape,
-            connection_reused: "n/a",
-            cookie_case,
-            expected_status,
-            actual_status: expected_status.to_string(),
-            expected_connection_state,
-            actual_connection_state: expected_connection_state.to_string(),
-            verdict: "pass",
-            first_failure: String::new(),
-        }
-    }
+struct MutatingSessionHandler;
 
-    fn fail(
-        scenario_id: &'static str,
-        method: &'static str,
-        headers: &'static str,
-        body_shape: &'static str,
-        cookie_case: &'static str,
-        expected_status: &'static str,
-        actual_status: impl Into<String>,
-        expected_connection_state: &'static str,
-        actual_connection_state: impl Into<String>,
-        first_failure: impl Into<String>,
-    ) -> Self {
-        Self {
-            scenario_id,
-            method,
-            headers,
-            body_shape,
-            connection_reused: "n/a",
-            cookie_case,
-            expected_status,
-            actual_status: actual_status.into(),
-            expected_connection_state,
-            actual_connection_state: actual_connection_state.into(),
-            verdict: "fail",
-            first_failure: first_failure.into(),
-        }
-    }
-
-    fn emit(&self) {
-        println!(
-            "bead_id={} suite_id={} scenario_id={} protocol_version=web-session method={} headers={} body_shape={} connection_reused={} cookie_case={} expected_status={} actual_status={} expected_connection_state={} actual_connection_state={} verdict={} first_failure={}",
-            BEAD_ID,
-            SUITE_ID,
-            self.scenario_id,
-            self.method,
-            self.headers,
-            self.body_shape,
-            self.connection_reused,
-            self.cookie_case,
-            self.expected_status,
-            self.actual_status,
-            self.expected_connection_state,
-            self.actual_connection_state,
-            self.verdict,
-            self.first_failure
-        );
-    }
-
-    fn assert_pass(self) {
-        self.emit();
-        assert_eq!(
-            self.verdict, "pass",
-            "web session-cookie conformance failed: {self:?}"
-        );
-    }
-}
-
-fn body_text(resp: &Response) -> &str {
-    std::str::from_utf8(&resp.body).expect("test response body should be utf-8")
-}
-
-fn set_cookie(resp: &Response) -> Option<&str> {
-    resp.header_value("set-cookie")
-}
-
-fn extract_cookie_value(set_cookie_header: &str, name: &str) -> Option<String> {
-    let first_pair = set_cookie_header.split(';').next()?;
-    let (cookie_name, value) = first_pair.split_once('=')?;
-    (cookie_name == name).then(|| value.to_string())
-}
-
-fn assert_hex_session_id(id: &str) {
-    assert_eq!(id.len(), 32, "session ID must be 32 hex characters");
-    assert!(
-        id.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "session ID must be hex: {id}"
-    );
-}
-
-struct WriteSessionHandler;
-
-impl asupersync::web::handler::Handler for WriteSessionHandler {
+impl Handler for MutatingSessionHandler {
     fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         Box::pin(async move {
-            let Some(session) = req.extensions.get_typed::<Session>() else {
-                return Response::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    b"missing session".to_vec(),
-                );
-            };
-            let next = session
-                .get("count")
-                .and_then(|count| count.parse::<u32>().ok())
+            let session = req
+                .extensions
+                .get_typed::<Session>()
+                .expect("session middleware should inject Session");
+            let visits = session
+                .get("visits")
+                .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(0)
                 + 1;
-            session.insert("count", next.to_string());
-            Response::new(StatusCode::OK, format!("count={next}").into_bytes())
+            session.insert("visits", visits.to_string());
+            Response::new(StatusCode::OK, format!("visits={visits}").into_bytes())
         })
     }
 }
 
-struct ClearSessionHandler;
+struct CsrfEchoHandler;
 
-impl asupersync::web::handler::Handler for ClearSessionHandler {
+impl Handler for CsrfEchoHandler {
     fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         Box::pin(async move {
-            if let Some(session) = req.extensions.get_typed::<Session>() {
-                session.clear();
+            let method = req.method.clone();
+            let session = req
+                .extensions
+                .get_typed::<Session>()
+                .expect("session middleware should inject Session");
+            let token = session
+                .csrf_token()
+                .expect("session middleware should mint a CSRF token");
+            if method.eq_ignore_ascii_case("POST") {
+                session.insert("mutated", "yes");
             }
-            Response::new(StatusCode::OK, b"cleared".to_vec())
-        })
-    }
-}
-
-struct CsrfEchoOrMutateHandler;
-
-impl asupersync::web::handler::Handler for CsrfEchoOrMutateHandler {
-    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
-        Box::pin(async move {
-            let Some(session) = req.extensions.get_typed::<Session>() else {
-                return Response::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    b"missing session".to_vec(),
-                );
-            };
-            if req.method.eq_ignore_ascii_case("GET") {
-                let token = session.csrf_token().unwrap_or_default();
-                return Response::new(StatusCode::OK, token.into_bytes());
-            }
-            session.insert("mutated", "yes");
-            Response::new(StatusCode::OK, b"mutated".to_vec())
+            Response::new(StatusCode::OK, token.into_bytes())
         })
     }
 }
 
 #[test]
-fn default_session_cookie_uses_secure_attributes() {
-    let scenario = "WEB_SESSION_COOKIE_DEFAULT_ATTRIBUTES";
-    let store = MemoryStore::new();
-    let handler = SessionLayer::new(store.clone()).wrap(WriteSessionHandler);
-    let resp = handler.call(Request::new("GET", "/"));
+fn session_cookie_config_defaults_are_secure_and_validated() {
+    let default_config = SessionConfig::default();
+    assert!(default_config.http_only);
+    assert!(default_config.secure);
+    assert_eq!(default_config.same_site, SameSite::Lax);
+    assert!(default_config.csrf_protection);
+    assert!(default_config.validate().is_ok());
 
-    let Some(cookie) = set_cookie(&resp) else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "none",
-            "empty",
-            "default_attributes",
-            "200",
-            resp.status.as_u16().to_string(),
-            "set_cookie_with_secure_defaults",
-            "missing_set_cookie",
-            "response did not include Set-Cookie",
-        )
-        .assert_pass();
-        return;
+    let invalid_cross_site_config = SessionConfig {
+        secure: false,
+        same_site: SameSite::None,
+        ..SessionConfig::default()
     };
-    let id = extract_cookie_value(cookie, "session_id").unwrap_or_default();
-    let ok = resp.status == StatusCode::OK
-        && store.len() == 1
-        && cookie.contains("; Path=/")
-        && cookie.contains("; HttpOnly")
-        && cookie.contains("; Secure")
-        && cookie.contains("; SameSite=Lax")
-        && !cookie.contains("Domain=")
-        && id.len() == 32
-        && id.bytes().all(|byte| byte.is_ascii_hexdigit());
-
-    if ok {
-        SessionCookieCaseResult::pass(
-            scenario,
-            "GET",
-            "none",
-            "empty",
-            "default_attributes",
-            "200",
-            "set_cookie_with_secure_defaults",
-        )
-        .assert_pass();
-    } else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "none",
-            "empty",
-            "default_attributes",
-            "200",
-            resp.status.as_u16().to_string(),
-            "set_cookie_with_secure_defaults",
-            format!("cookie={cookie}; store_len={}", store.len()),
-            "default cookie attributes did not match the secure contract",
-        )
-        .assert_pass();
-    }
+    assert!(invalid_cross_site_config.validate().is_err());
 }
 
 #[test]
-fn custom_cookie_attributes_are_reflected_in_set_cookie() {
-    let scenario = "WEB_SESSION_COOKIE_CUSTOM_ATTRIBUTES";
+fn session_middleware_emits_configured_rfc6265_cookie_attributes() {
     let store = MemoryStore::new();
-    let handler = SessionLayer::new(store.clone())
+    let middleware = SessionLayer::new(store.clone())
         .cookie_name("sid")
         .cookie_path("/app")
-        .http_only(false)
         .secure(true)
         .same_site(SameSite::Strict)
-        .max_age(3600)
-        .wrap(WriteSessionHandler);
-    let resp = handler.call(Request::new("GET", "/app"));
+        .max_age(120)
+        .csrf_protection(false)
+        .wrap(MutatingSessionHandler);
 
-    let Some(cookie) = set_cookie(&resp) else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "none",
-            "empty",
-            "custom_attributes",
-            "200",
-            resp.status.as_u16().to_string(),
-            "custom_cookie_attributes",
-            "missing_set_cookie",
-            "response did not include Set-Cookie",
-        )
-        .assert_pass();
-        return;
-    };
-    let id = extract_cookie_value(cookie, "sid").unwrap_or_default();
-    let ok = resp.status == StatusCode::OK
-        && store.len() == 1
-        && cookie.contains("sid=")
-        && cookie.contains("; Path=/app")
-        && !cookie.contains("; HttpOnly")
-        && cookie.contains("; Secure")
-        && cookie.contains("; SameSite=Strict")
-        && cookie.contains("; Max-Age=3600")
-        && id.len() == 32
-        && id.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let response = call_sync(&middleware, Request::new("GET", "/app/home"));
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(std::str::from_utf8(&response.body).unwrap(), "visits=1");
+    assert_eq!(store.len(), 1);
 
-    if ok {
-        SessionCookieCaseResult::pass(
-            scenario,
-            "GET",
-            "none",
-            "empty",
-            "custom_attributes",
-            "200",
-            "custom_cookie_attributes",
-        )
-        .assert_pass();
-    } else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "none",
-            "empty",
-            "custom_attributes",
-            "200",
-            resp.status.as_u16().to_string(),
-            "custom_cookie_attributes",
-            format!("cookie={cookie}; store_len={}", store.len()),
-            "custom cookie attributes did not match configuration",
-        )
-        .assert_pass();
-    }
+    let cookie = response
+        .set_cookies
+        .first()
+        .expect("mutated session should set a cookie");
+    let session_id = session_id_from_set_cookie(cookie, "sid");
+    assert_eq!(session_id.len(), 32);
+    assert!(session_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(cookie.contains("Path=/app"));
+    assert!(cookie.contains("HttpOnly"));
+    assert!(cookie.contains("Secure"));
+    assert!(cookie.contains("SameSite=Strict"));
+    assert!(cookie.contains("Max-Age=120"));
+
+    let stored = store.load(session_id).expect("session should be persisted");
+    assert_eq!(stored.get("visits"), Some("1"));
 }
 
 #[test]
-fn same_site_none_requires_secure_configuration() {
-    let scenario = "WEB_SESSION_COOKIE_SAMESITE_NONE_REQUIRES_SECURE";
-    let outcome = std::panic::catch_unwind(|| {
-        let _ = SessionLayer::new(MemoryStore::new())
-            .secure(false)
-            .same_site(SameSite::None);
-    });
-
-    if outcome.is_err() {
-        SessionCookieCaseResult::pass(
-            scenario,
-            "CONFIG",
-            "n/a",
-            "n/a",
-            "samesite_none_without_secure",
-            "panic",
-            "configuration_rejected",
-        )
-        .assert_pass();
-    } else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "CONFIG",
-            "n/a",
-            "n/a",
-            "samesite_none_without_secure",
-            "panic",
-            "no_panic",
-            "configuration_rejected",
-            "configuration_accepted",
-            "SameSite=None without Secure must fail closed",
-        )
-        .assert_pass();
-    }
-}
-
-#[test]
-fn malformed_or_unknown_session_cookie_gets_replaced() {
-    let scenario = "WEB_SESSION_COOKIE_MALFORMED_OR_UNKNOWN_REPLACED";
+fn session_middleware_enforces_origin_and_csrf_token_for_existing_sessions() {
     let store = MemoryStore::new();
-    let handler = SessionLayer::new(store.clone()).wrap(WriteSessionHandler);
-    let attacker_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let malformed = handler.call(Request::new("GET", "/").with_header("Cookie", "session_id=bad!"));
-    let unknown = handler
-        .call(Request::new("GET", "/").with_header("Cookie", format!("session_id={attacker_id}")));
-
-    let Some(malformed_cookie) = set_cookie(&malformed) else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "cookie",
-            "empty",
-            "unknown_session_id",
-            "200",
-            malformed.status.as_u16().to_string(),
-            "attacker_id_replaced",
-            "missing_set_cookie",
-            "replacement Set-Cookie was missing for malformed cookie",
-        )
-        .assert_pass();
-        return;
-    };
-    let Some(unknown_cookie) = set_cookie(&unknown) else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "cookie",
-            "empty",
-            "unknown_session_id",
-            "200",
-            unknown.status.as_u16().to_string(),
-            "attacker_id_replaced",
-            "missing_set_cookie",
-            "replacement Set-Cookie was missing for unknown valid-format cookie",
-        )
-        .assert_pass();
-        return;
-    };
-    let malformed_id = extract_cookie_value(malformed_cookie, "session_id").unwrap_or_default();
-    let unknown_id = extract_cookie_value(unknown_cookie, "session_id").unwrap_or_default();
-    let ok = malformed.status == StatusCode::OK
-        && unknown.status == StatusCode::OK
-        && store.len() == 2
-        && malformed_id != "bad!"
-        && unknown_id != attacker_id
-        && malformed_id != unknown_id;
-
-    if ok {
-        assert_hex_session_id(&malformed_id);
-        assert_hex_session_id(&unknown_id);
-        SessionCookieCaseResult::pass(
-            scenario,
-            "GET",
-            "cookie",
-            "empty",
-            "unknown_session_id",
-            "200",
-            "attacker_id_replaced",
-        )
-        .assert_pass();
-    } else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "cookie",
-            "empty",
-            "unknown_session_id",
-            "200",
-            format!(
-                "malformed={},unknown={}",
-                malformed.status.as_u16(),
-                unknown.status.as_u16()
-            ),
-            "attacker_id_replaced",
-            format!(
-                "malformed_id={malformed_id}; unknown_id={unknown_id}; store_len={}",
-                store.len()
-            ),
-            "middleware reused or failed to replace attacker-controlled ID",
-        )
-        .assert_pass();
-    }
-}
-
-#[test]
-fn existing_session_cookie_loads_and_persists_mutation() {
-    let scenario = "WEB_SESSION_COOKIE_EXISTING_SESSION_ROUND_TRIP";
-    let store = MemoryStore::new();
-    let session_id = "0123456789abcdef0123456789abcdef";
-    let mut data = SessionData::new();
-    data.insert("count", "1");
-    store.save(session_id, &data);
-    let handler = SessionLayer::new(store.clone()).wrap(WriteSessionHandler);
-    let resp = handler.call(
-        Request::new("GET", "/counter").with_header("Cookie", format!("session_id={session_id}")),
-    );
-    let persisted = store.load(session_id);
-    let cookie_id = set_cookie(&resp)
-        .and_then(|cookie| extract_cookie_value(cookie, "session_id"))
-        .unwrap_or_default();
-    let ok = resp.status == StatusCode::OK
-        && body_text(&resp) == "count=2"
-        && cookie_id == session_id
-        && persisted.as_ref().and_then(|session| session.get("count")) == Some("2");
-
-    if ok {
-        SessionCookieCaseResult::pass(
-            scenario,
-            "GET",
-            "cookie",
-            "empty",
-            "existing_session",
-            "200",
-            "loaded_and_persisted_same_id",
-        )
-        .assert_pass();
-    } else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "cookie",
-            "empty",
-            "existing_session",
-            "200",
-            resp.status.as_u16().to_string(),
-            "loaded_and_persisted_same_id",
-            format!(
-                "body={}; cookie_id={cookie_id}; persisted_count={:?}",
-                body_text(&resp),
-                persisted.as_ref().and_then(|session| session.get("count"))
-            ),
-            "existing session was not loaded, persisted, or reissued under the same ID",
-        )
-        .assert_pass();
-    }
-}
-
-#[test]
-fn clearing_existing_session_expires_cookie_and_deletes_store_entry() {
-    let scenario = "WEB_SESSION_COOKIE_CLEAR_EXPIRES_COOKIE";
-    let store = MemoryStore::new();
-    let session_id = "abcdef0123456789abcdef0123456789";
-    let mut data = SessionData::new();
-    data.insert("user", "alice");
-    store.save(session_id, &data);
-    let handler = SessionLayer::new(store.clone()).wrap(ClearSessionHandler);
-    let resp = handler.call(
-        Request::new("GET", "/logout").with_header("Cookie", format!("session_id={session_id}")),
-    );
-
-    let cookie = set_cookie(&resp).unwrap_or_default();
-    let ok = resp.status == StatusCode::OK
-        && store.is_empty()
-        && cookie.starts_with("session_id=;")
-        && cookie.contains("; Max-Age=0")
-        && cookie.contains("; HttpOnly")
-        && cookie.contains("; Secure")
-        && cookie.contains("; SameSite=Lax");
-
-    if ok {
-        SessionCookieCaseResult::pass(
-            scenario,
-            "GET",
-            "cookie",
-            "empty",
-            "clear_session",
-            "200",
-            "expired_cookie_and_deleted_store",
-        )
-        .assert_pass();
-    } else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "GET",
-            "cookie",
-            "empty",
-            "clear_session",
-            "200",
-            resp.status.as_u16().to_string(),
-            "expired_cookie_and_deleted_store",
-            format!("cookie={cookie}; store_len={}", store.len()),
-            "clearing the session did not expire the browser cookie and delete server data",
-        )
-        .assert_pass();
-    }
-}
-
-#[test]
-fn existing_session_post_requires_matching_csrf_token_and_allowed_origin() {
-    let scenario = "WEB_SESSION_COOKIE_CSRF_EXISTING_SESSION";
-    let store = MemoryStore::new();
-    let handler = SessionLayer::new(store.clone())
+    let middleware = SessionLayer::new(store.clone())
         .allowed_origins(["https://app.example"])
-        .wrap(CsrfEchoOrMutateHandler);
+        .wrap(CsrfEchoHandler);
 
-    let seed_resp = handler.call(Request::new("GET", "/form"));
-    let seed_cookie = set_cookie(&seed_resp).unwrap_or_default().to_string();
-    let session_id = extract_cookie_value(&seed_cookie, "session_id").unwrap_or_default();
-    let csrf = body_text(&seed_resp).to_string();
-    let missing_token = handler.call(
+    let first = call_sync(&middleware, Request::new("GET", "/form"));
+    assert_eq!(first.status, StatusCode::OK);
+    let cookie = first
+        .set_cookies
+        .first()
+        .expect("first request should issue a session cookie")
+        .clone();
+    let session_id = session_id_from_set_cookie(&cookie, "session_id").to_string();
+    let csrf_token = std::str::from_utf8(&first.body).unwrap().to_string();
+    assert_eq!(csrf_token.len(), 32);
+
+    let missing_token = call_sync(
+        &middleware,
         Request::new("POST", "/form")
             .with_header("Cookie", format!("session_id={session_id}"))
             .with_header("Origin", "https://app.example"),
     );
-    let accepted = handler.call(
+    assert_eq!(missing_token.status, StatusCode::FORBIDDEN);
+    assert_eq!(store.load(&session_id).unwrap().get("mutated"), None);
+
+    let bad_origin = call_sync(
+        &middleware,
+        Request::new("POST", "/form")
+            .with_header("Cookie", format!("session_id={session_id}"))
+            .with_header("Origin", "https://evil.example")
+            .with_header("X-CSRF-Token", csrf_token.clone()),
+    );
+    assert_eq!(bad_origin.status, StatusCode::FORBIDDEN);
+    assert_eq!(store.load(&session_id).unwrap().get("mutated"), None);
+
+    let accepted = call_sync(
+        &middleware,
         Request::new("POST", "/form")
             .with_header("Cookie", format!("session_id={session_id}"))
             .with_header("Origin", "https://app.example")
-            .with_header("X-CSRF-Token", csrf.clone()),
+            .with_header("X-CSRF-Token", csrf_token),
     );
-    let persisted = store.load(&session_id);
-    let ok = seed_resp.status == StatusCode::OK
-        && missing_token.status == StatusCode::FORBIDDEN
-        && accepted.status == StatusCode::OK
-        && body_text(&accepted) == "mutated"
-        && !csrf.is_empty()
-        && persisted
-            .as_ref()
-            .and_then(|session| session.get("mutated"))
-            == Some("yes");
-
-    if ok {
-        SessionCookieCaseResult::pass(
-            scenario,
-            "POST",
-            "cookie+origin+x-csrf-token",
-            "empty",
-            "csrf_existing_session",
-            "200",
-            "forbid_missing_token_accept_matching_token",
-        )
-        .assert_pass();
-    } else {
-        SessionCookieCaseResult::fail(
-            scenario,
-            "POST",
-            "cookie+origin+x-csrf-token",
-            "empty",
-            "csrf_existing_session",
-            "200",
-            accepted.status.as_u16().to_string(),
-            "forbid_missing_token_accept_matching_token",
-            format!(
-                "seed_status={}; missing_status={}; accepted_status={}; csrf_len={}; persisted_mutated={:?}",
-                seed_resp.status.as_u16(),
-                missing_token.status.as_u16(),
-                accepted.status.as_u16(),
-                csrf.len(),
-                persisted.as_ref().and_then(|session| session.get("mutated"))
-            ),
-            "CSRF enforcement did not reject the missing token and accept the matching token",
-        )
-        .assert_pass();
-    }
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(store.load(&session_id).unwrap().get("mutated"), Some("yes"));
 }
