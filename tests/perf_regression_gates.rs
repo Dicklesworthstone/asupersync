@@ -486,14 +486,14 @@ fn capture_baseline_default_run_requires_rch() {
 fn capture_baseline_default_run_uses_rch_override() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_minimal_criterion_output(temp.path());
-    let fake_log = temp.path().join("fake-rch.log");
-    let fake_rch = temp.path().join("fake-rch");
+    let rch_argv_log = temp.path().join("rch-shim-argv.log");
+    let rch_shim = temp.path().join("rch-shim");
     let save_dir = temp.path().join("baselines");
     write_executable_script(
-        &fake_rch,
+        &rch_shim,
         &format!(
             "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" > {}\n",
-            fake_log.display()
+            rch_argv_log.display()
         ),
     );
 
@@ -504,18 +504,18 @@ fn capture_baseline_default_run_uses_rch_override() {
         .arg("--save")
         .arg(&save_dir)
         .env("CRITERION_DIR", temp.path().join("criterion"))
-        .env("RCH_BIN", &fake_rch)
+        .env("RCH_BIN", &rch_shim)
         .output()
         .expect("run capture_baseline.sh");
 
     assert!(
         output.status.success(),
-        "capture_baseline should succeed with fake rch: status={:?}, stderr={}",
+        "capture_baseline should succeed with scripted rch shim: status={:?}, stderr={}",
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let argv = fs::read_to_string(&fake_log).expect("read fake rch log");
+    let argv = fs::read_to_string(&rch_argv_log).expect("read rch argv log");
     for token in [
         "exec",
         "--",
@@ -1029,7 +1029,7 @@ fn capture_baseline_swarm_ledger_derives_rch_provenance_from_run_log() {
 2026-05-30T06:19:27Z INFO Rewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/x -> /data/projects/asupersync/.rch-target-vmi-log-ledger-job-29863361030127998-1780121916439450732-0
 ",
     )
-    .expect("write fake rch run log");
+    .expect("write rch provenance run log");
 
     let repo = repo_root();
     let script = repo.join("scripts/capture_baseline.sh");
@@ -1607,7 +1607,7 @@ fn gate_on_disk_baseline_self_check() {
 
 #[test]
 fn smoke_test_synthetic_regression_detected() {
-    // Simulate a real CI scenario: current run has a regression on one bench.
+    // Model a real CI scenario: current run has a regression on one bench.
     let baseline = make_report(vec![
         make_benchmark("arena/insert", 14.0, 13.9),
         make_benchmark("arena/get_hit", 1.0, 0.9),
@@ -1641,7 +1641,7 @@ fn smoke_test_synthetic_regression_detected() {
 
 #[test]
 fn smoke_test_clean_run_passes_gate() {
-    // Simulate CI with no regressions (small noise within tolerance).
+    // Model CI with no regressions: small noise remains within tolerance.
     let baseline = make_report(vec![
         make_benchmark("arena/insert", 14.0, 13.9),
         make_benchmark("scheduler/local_queue/push_pop", 45.0, 43.0),

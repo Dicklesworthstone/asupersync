@@ -870,20 +870,20 @@ fn coordination_fixture_refuses_missing_scenario_dimensions() {
 fn workload_runner_rejects_rch_local_fallback() {
     let root = temp_root("rch-local-fallback");
     let output_root = root.join("out");
-    let fake_rch = root.join("fake-rch");
+    let rch_shim = root.join("rch-shim");
     std::fs::create_dir_all(&output_root).expect("create output root");
     std::fs::write(
-        &fake_rch,
+        &rch_shim,
         "#!/usr/bin/env bash\nprintf '[RCH] local (all worker circuits open)\\n'\nexit 0\n",
     )
-    .expect("write fake rch");
+    .expect("write rch shim");
     #[cfg(unix)]
     {
-        let mut perms = std::fs::metadata(&fake_rch)
-            .expect("fake rch metadata")
+        let mut perms = std::fs::metadata(&rch_shim)
+            .expect("rch shim metadata")
             .permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&fake_rch, perms).expect("chmod fake rch");
+        std::fs::set_permissions(&rch_shim, perms).expect("chmod rch shim");
     }
 
     let out = run_workload_script_with_env(
@@ -893,7 +893,7 @@ fn workload_runner_rejects_rch_local_fallback() {
             "--output-root".into(),
             output_root.to_string_lossy().into_owned(),
         ],
-        &[("RCH_BIN", fake_rch.as_path())],
+        &[("RCH_BIN", rch_shim.as_path())],
     );
     assert!(
         !out.status.success(),

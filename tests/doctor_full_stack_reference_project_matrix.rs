@@ -528,9 +528,9 @@ fn orchestration_stage_script_rejects_rch_local_fallback() {
     fs::create_dir_all(&shim_dir).expect("failed to create shim dir");
     fs::create_dir_all(&script_tmp).expect("failed to create tmp dir");
 
-    let fake_rch = shim_dir.join("fake-rch");
+    let rch_shim = shim_dir.join("rch-shim");
     write_executable_script(
-        &fake_rch,
+        &rch_shim,
         r#"#!/usr/bin/env bash
 set -euo pipefail
 cat <<'ENDLOG'
@@ -550,7 +550,7 @@ ENDLOG
     let output = Command::new("bash")
         .arg(repo_root().join(ORCHESTRATION_SCRIPT_PATH))
         .env("TMPDIR", &script_tmp)
-        .env("RCH_BIN", &fake_rch)
+        .env("RCH_BIN", &rch_shim)
         .env("TEST_SEED", "4242:rch-local-fallback")
         .env("DOCTOR_FULLSTACK_SINGLE_RUN", "1")
         .output()
@@ -588,9 +588,9 @@ fn workspace_scan_stage_script_rejects_rch_local_fallback() {
     let shim_dir = temp_root.join("shim");
     fs::create_dir_all(&shim_dir).expect("failed to create shim dir");
 
-    let fake_rch = shim_dir.join("fake-rch");
+    let rch_shim = shim_dir.join("rch-shim");
     write_executable_script(
-        &fake_rch,
+        &rch_shim,
         r#"#!/usr/bin/env bash
 set -euo pipefail
 cat <<'ENDLOG'
@@ -603,7 +603,7 @@ ENDLOG
     let seed = unique_test_seed("4242:workspace-scan-rch-local-fallback");
     let output = Command::new("bash")
         .arg(repo_root().join(WORKSPACE_SCAN_SCRIPT_PATH))
-        .env("RCH_BIN", &fake_rch)
+        .env("RCH_BIN", &rch_shim)
         .env("TEST_SEED", &seed)
         .env("DOCTOR_FULLSTACK_SINGLE_RUN", "1")
         .env("RCH_RETRY_ATTEMPTS", "1")
@@ -648,9 +648,9 @@ fn report_export_stage_script_rejects_rch_local_fallback() {
     let shim_dir = temp_root.join("shim");
     fs::create_dir_all(&shim_dir).expect("failed to create shim dir");
 
-    let fake_rch = shim_dir.join("fake-rch");
+    let rch_shim = shim_dir.join("rch-shim");
     write_executable_script(
-        &fake_rch,
+        &rch_shim,
         r#"#!/usr/bin/env bash
 set -euo pipefail
 cat <<'ENDLOG'
@@ -663,7 +663,7 @@ ENDLOG
     let seed = unique_test_seed("4242:report-export-rch-local-fallback");
     let output = Command::new("bash")
         .arg(repo_root().join(REPORT_EXPORT_SCRIPT_PATH))
-        .env("RCH_BIN", &fake_rch)
+        .env("RCH_BIN", &rch_shim)
         .env("TEST_SEED", &seed)
         .env("DOCTOR_FULLSTACK_SINGLE_RUN", "1")
         .env("RCH_RETRY_ATTEMPTS", "1")
@@ -832,8 +832,8 @@ fn resolved_stage_failure_class_prefers_child_summary_reason() {
 
 #[test]
 fn resolved_stage_repro_command_prefers_child_summary_repro() {
-    let stage_repro = "DOCTOR_FULLSTACK_SINGLE_RUN=1 TEST_SEED=4242:medium RCH_BIN=/tmp/fake-rch bash /repo/scripts/test_doctor_orchestration_state_machine_e2e.sh";
-    let summary_repro = "TEST_LOG_LEVEL=info RUST_LOG=asupersync=info TEST_SEED=4242:medium RCH_BIN=/tmp/fake-rch bash /repo/scripts/test_doctor_orchestration_state_machine_e2e.sh";
+    let stage_repro = "DOCTOR_FULLSTACK_SINGLE_RUN=1 TEST_SEED=4242:medium RCH_BIN=/tmp/rch-shim bash /repo/scripts/test_doctor_orchestration_state_machine_e2e.sh";
+    let summary_repro = "TEST_LOG_LEVEL=info RUST_LOG=asupersync=info TEST_SEED=4242:medium RCH_BIN=/tmp/rch-shim bash /repo/scripts/test_doctor_orchestration_state_machine_e2e.sh";
 
     assert_eq!(
         resolved_stage_repro_command(stage_repro, Some(summary_repro)),

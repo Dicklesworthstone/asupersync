@@ -9,14 +9,14 @@ use asupersync::types::{RegionId, Time};
 use std::time::Duration;
 
 #[test]
-fn orchestrator_trusts_fake_verified_symbol() {
-    // Setup security context with a specific key
+fn orchestrator_rechecks_forged_verified_symbol() {
+    // Set up security context with a specific key.
     let ctx = SecurityContext::for_testing(123);
 
-    // Create parameters
+    // Create parameters.
     let params = ObjectParams::new(ObjectId::new_for_test(1), 1000, 128, 1, 1);
 
-    // Create a FAKE symbol (invalid tag)
+    // Create a forged symbol with an invalid tag.
     let symbol_data = vec![0u8; 128];
     let symbol = Symbol::new(
         SymbolId::new(params.object_id, 0, 0),
@@ -25,16 +25,16 @@ fn orchestrator_trusts_fake_verified_symbol() {
     );
     let invalid_tag = AuthenticationTag::zero(); // This tag is definitely invalid for key 123
 
-    // Create a CollectedSymbol that CLAIMS to be verified
-    let fake_verified_symbol = CollectedSymbol {
+    // Create a CollectedSymbol that claims to be verified.
+    let forged_verified_symbol = CollectedSymbol {
         symbol,
         tag: invalid_tag,
         source_replica: "malicious".to_string(),
         collected_at: Time::ZERO,
-        verified: true, // LIE!
+        verified: true, // Intentionally forged claim.
     };
 
-    // Configure orchestrator to VERIFY integrity
+    // Configure orchestrator to verify integrity.
     let orchestrator_config = RecoveryDecodingConfig {
         verify_integrity: true,
         auth_context: Some(ctx),
@@ -55,7 +55,7 @@ fn orchestrator_trusts_fake_verified_symbol() {
     // If the orchestrator respects `verify_integrity=true`, it should re-verify, see the invalid tag, and FAIL.
     let result = orchestrator.recover_from_symbols(
         &trigger,
-        &[fake_verified_symbol],
+        &[forged_verified_symbol],
         params,
         Duration::ZERO,
     );
