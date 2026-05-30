@@ -171,12 +171,14 @@ mod kafka_mod {
         let source = include_str!("../../src/messaging/kafka.rs");
 
         assert!(
-            source.contains("#[cfg(all(not(feature = \"kafka\"), test))]\npub struct StubConsumer"),
-            "no-feature StubConsumer must be crate-local-test-only"
+            source.contains(
+                "#[cfg(all(not(feature = \"kafka\"), test))]\npub struct DeterministicConsumer"
+            ),
+            "no-feature deterministic consumer must be crate-local-test-only"
         );
         assert!(
-            source.contains("#[cfg(test)]\n    consumer: Option<StubConsumer>"),
-            "KafkaClient must not store a StubConsumer field in non-test builds"
+            source.contains("#[cfg(test)]\n    consumer: Option<DeterministicConsumer>"),
+            "KafkaClient must not store a deterministic consumer field in non-test builds"
         );
         assert!(
             source.contains("Err(KafkaError::FeatureDisabled)"),
