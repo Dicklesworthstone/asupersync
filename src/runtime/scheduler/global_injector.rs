@@ -10,7 +10,7 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use super::global_queue::{CountReservation, FaaFifoQueue};
+use super::global_queue::{CountReservation, GlobalFifoQueue};
 
 const READY_COMBINER_IN_FLIGHT_THRESHOLD: usize = 4;
 const READY_COMBINER_BACKLOG_THRESHOLD: usize = 256;
@@ -167,11 +167,11 @@ impl PartialOrd for TimedTask {
 #[derive(Debug)]
 pub struct GlobalInjector {
     /// Cancel lane: tasks with pending cancellation (highest priority).
-    cancel_queue: FaaFifoQueue<PriorityTask>,
+    cancel_queue: GlobalFifoQueue<PriorityTask>,
     /// Timed lane: tasks with deadlines (EDF ordering via min-heap).
     timed_queue: Mutex<TimedQueue>,
     /// Ready lane: general ready tasks.
-    ready_queue: FaaFifoQueue<PriorityTask>,
+    ready_queue: GlobalFifoQueue<PriorityTask>,
     /// Contention-gated combiner for ready-lane producer storms.
     ready_combiner: ReadyCombiner,
     /// Approximate count of timed-lane tasks, allowing callers to skip
@@ -201,9 +201,9 @@ struct TimedQueue {
 impl Default for GlobalInjector {
     fn default() -> Self {
         Self {
-            cancel_queue: FaaFifoQueue::default(),
+            cancel_queue: GlobalFifoQueue::default(),
             timed_queue: Mutex::new(TimedQueue::default()),
-            ready_queue: FaaFifoQueue::default(),
+            ready_queue: GlobalFifoQueue::default(),
             ready_combiner: ReadyCombiner::default(),
             timed_count: CachePadded::new(AtomicUsize::new(0)),
             cached_earliest_deadline: CachePadded::new(AtomicU64::new(u64::MAX)),

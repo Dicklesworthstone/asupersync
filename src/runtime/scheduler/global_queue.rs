@@ -6,7 +6,7 @@
 use crate::types::TaskId;
 use crate::util::CachePadded;
 #[cfg(not(target_family = "wasm"))]
-use faa_array_queue::FaaArrayQueue;
+use crossbeam_queue::SegQueue;
 #[cfg(target_family = "wasm")]
 use parking_lot::Mutex;
 #[cfg(target_family = "wasm")]
@@ -15,39 +15,39 @@ use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(not(target_family = "wasm"))]
-struct FaaQueueInner<T: Send> {
-    queue: FaaArrayQueue<T>,
+struct NativeQueueInner<T: Send> {
+    queue: SegQueue<T>,
 }
 
 #[cfg(not(target_family = "wasm"))]
-impl<T: Send> Default for FaaQueueInner<T> {
+impl<T: Send> Default for NativeQueueInner<T> {
     fn default() -> Self {
         Self {
-            queue: FaaArrayQueue::default(),
+            queue: SegQueue::new(),
         }
     }
 }
 
 #[cfg(not(target_family = "wasm"))]
-impl<T: Send> FaaQueueInner<T> {
+impl<T: Send> NativeQueueInner<T> {
     #[inline]
     fn enqueue(&self, item: T) {
-        self.queue.enqueue(item);
+        self.queue.push(item);
     }
 
     #[inline]
     fn dequeue(&self) -> Option<T> {
-        self.queue.dequeue()
+        self.queue.pop()
     }
 }
 
 #[cfg(target_family = "wasm")]
-struct FaaQueueInner<T: Send> {
+struct NativeQueueInner<T: Send> {
     queue: Mutex<VecDeque<T>>,
 }
 
 #[cfg(target_family = "wasm")]
-impl<T: Send> Default for FaaQueueInner<T> {
+impl<T: Send> Default for NativeQueueInner<T> {
     fn default() -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
@@ -56,7 +56,7 @@ impl<T: Send> Default for FaaQueueInner<T> {
 }
 
 #[cfg(target_family = "wasm")]
-impl<T: Send> FaaQueueInner<T> {
+impl<T: Send> NativeQueueInner<T> {
     #[inline]
     fn enqueue(&self, item: T) {
         self.queue.lock().push_back(item);
@@ -68,37 +68,38 @@ impl<T: Send> FaaQueueInner<T> {
     }
 }
 
-/// Fetch-and-add FIFO queue with a best-effort count snapshot.
+/// Lock-free FIFO queue with a best-effort count snapshot.
 ///
-/// This wraps an unbounded FAA-based linked-array queue so the scheduler keeps
-/// FIFO semantics without taking the GPL/C-FFI path of `liblcrq-sys`. Browser
-/// wasm builds use a mutex-backed FIFO because the native FAA queue currently
-/// depends on OS thread-local APIs that wasm32 does not expose.
-pub(crate) struct FaaFifoQueue<T: Send> {
-    inner: FaaQueueInner<T>,
+/// This wraps `crossbeam_queue::SegQueue` on native targets so the scheduler
+/// keeps unbounded MPMC FIFO semantics without the pthread-key teardown hazards
+/// seen in `faa_array_queue`'s `os-thread-local` dependency. Browser wasm
+/// builds use a mutex-backed FIFO because portable atomics are not guaranteed
+/// there.
+pub(crate) struct GlobalFifoQueue<T: Send> {
+    inner: NativeQueueInner<T>,
     count: CachePadded<AtomicUsize>,
     published: CachePadded<AtomicUsize>,
 }
 
-impl<T: Send> Default for FaaFifoQueue<T> {
+impl<T: Send> Default for GlobalFifoQueue<T> {
     fn default() -> Self {
         Self {
-            inner: FaaQueueInner::default(),
+            inner: NativeQueueInner::default(),
             count: CachePadded::new(AtomicUsize::new(0)),
             published: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 }
 
-impl<T: Send> fmt::Debug for FaaFifoQueue<T> {
+impl<T: Send> fmt::Debug for GlobalFifoQueue<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FaaFifoQueue")
+        f.debug_struct("GlobalFifoQueue")
             .field("count", &self.len())
             .finish_non_exhaustive()
     }
 }
 
-impl<T: Send> FaaFifoQueue<T> {
+impl<T: Send> GlobalFifoQueue<T> {
     #[inline]
     fn saturating_decrement(counter: &AtomicUsize) {
         let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
@@ -248,7 +249,7 @@ impl<T: Send> FaaFifoQueue<T> {
 }
 
 pub(crate) struct CountReservation<'a, T: Send> {
-    queue: &'a FaaFifoQueue<T>,
+    queue: &'a GlobalFifoQueue<T>,
     remaining: usize,
 }
 
@@ -268,7 +269,7 @@ impl<T: Send> Drop for CountReservation<'_, T> {
 /// A global task queue.
 #[derive(Debug, Default)]
 pub struct GlobalQueue {
-    inner: FaaFifoQueue<TaskId>,
+    inner: GlobalFifoQueue<TaskId>,
 }
 
 impl GlobalQueue {
@@ -674,6 +675,56 @@ mod tests {
         // Queue should still be functional after contention
         queue.push(task(999_999));
         assert_eq!(queue.pop(), Some(task(999_999)));
+    }
+
+    #[test]
+    fn test_global_queue_drop_after_worker_threads_does_not_depend_on_os_tls_registry() {
+        const WORKERS: usize = 11;
+        const OPS_PER_WORKER: usize = 128;
+        const ROUNDS: usize = 8;
+
+        for round in 0..ROUNDS {
+            let queue = Arc::new(GlobalQueue::new());
+            let popped = Arc::new(AtomicUsize::new(0));
+            let barrier = Arc::new(Barrier::new(WORKERS));
+
+            let handles: Vec<_> = (0..WORKERS)
+                .map(|worker| {
+                    let queue = Arc::clone(&queue);
+                    let popped = Arc::clone(&popped);
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        barrier.wait();
+                        let base = (round * 100_000 + worker * 1_000) as u32;
+                        for offset in 0..OPS_PER_WORKER {
+                            queue.push(task(base + offset as u32));
+                            if offset % 3 == 0 && queue.pop().is_some() {
+                                popped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                handle.join().expect("global queue worker should not panic");
+            }
+
+            while queue.pop().is_some() {
+                popped.fetch_add(1, Ordering::Relaxed);
+            }
+
+            assert_eq!(
+                popped.load(Ordering::Relaxed),
+                WORKERS * OPS_PER_WORKER,
+                "round {round}: every injected task should be drained before queue drop"
+            );
+            assert_eq!(
+                queue.len(),
+                0,
+                "round {round}: queue count should converge before queue drop"
+            );
+        }
     }
 
     #[test]
