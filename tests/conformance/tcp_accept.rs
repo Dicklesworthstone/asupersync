@@ -13,6 +13,7 @@
 //! Uses metamorphic relations to verify core TCP accept protocol invariants.
 
 use asupersync::cx::Cx;
+use asupersync::net::TcpSocket;
 use asupersync::net::tcp::listener::TcpListener;
 use asupersync::runtime::{IoDriverHandle, LabReactor};
 use asupersync::types::{Budget, RegionId, TaskId};
@@ -46,6 +47,17 @@ fn test_cx() -> Cx {
 
 fn bind_listener() -> TcpListener {
     block_on(TcpListener::bind("127.0.0.1:0")).expect("bind listener")
+}
+
+#[allow(dead_code)]
+fn bind_listener_with_backlog(backlog: u32) -> TcpListener {
+    let socket = TcpSocket::new_v4().expect("create tcp socket");
+    socket
+        .bind("127.0.0.1:0".parse().expect("parse loopback address"))
+        .expect("bind tcp socket");
+    socket
+        .listen(backlog)
+        .expect("listen with explicit backlog")
 }
 
 /// Connection attempt result for tracking
@@ -174,14 +186,16 @@ fn test_mr1_backlog_bounded_by_somaxconn() {
         let cx = test_cx();
         let _guard = Cx::set_current(Some(cx));
 
-        // Bind listener
-        let listener = bind_listener();
+        // Bind with a tiny explicit backlog so this test observes backlog pressure
+        // instead of depending on the host's default listen backlog.
+        let listener = bind_listener_with_backlog(1);
         let listener_addr = listener.local_addr().unwrap();
 
-        // Get system SOMAXCONN (usually 128 on Linux, 128 on macOS, varies)
-        // We'll approximate by testing the actual behavior
+        // Track the actual pressure mode because platforms differ on whether
+        // a full accept queue appears as refusal, timeout, or another connect error.
         let mut successful_connects = Vec::new();
         let mut refused_connects = Vec::new();
+        let mut backpressure_seen = false;
 
         // Attempt many connections without accepting to test backlog limit
         for i in 0..connection_count.min(300) {
@@ -192,30 +206,40 @@ fn test_mr1_backlog_bounded_by_somaxconn() {
                 }
                 Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
                     refused_connects.push(i);
+                    backpressure_seen = true;
                 }
                 Err(e) if e.kind() == ErrorKind::TimedOut => {
-                    // Connection may be in backlog queue
+                    // Linux often reports a full accept queue on loopback as a
+                    // timed-out connect instead of an immediate refusal.
+                    backpressure_seen = true;
                     break;
                 }
-                Err(_) => break,
+                Err(_) => {
+                    backpressure_seen = true;
+                    break;
+                }
             }
 
-            // If we've hit the backlog limit, subsequent connections should be refused
+            // Once pressure appears, a few post-pressure successes are enough
+            // to prove the listener remains usable without extending the test.
             if refused_connects.len() > 0 && successful_connects.len() > 10 {
                 break;
             }
         }
 
-        // MR1: Backlog behavior - once backlog is full, new connections are refused
-        // The system should refuse connections beyond SOMAXCONN, not accept unlimited
-        let total_attempted = successful_connects.len() + refused_connects.len();
+        // MR1: backlog behavior - a listener with explicit backlog 1 must
+        // eventually expose pressure under a larger burst instead of accepting
+        // every attempted connection.
+        let max_attempted = connection_count.min(300);
 
-        if total_attempted >= 50 {
-            // With sufficient connection attempts, we should see some refused
-            prop_assert!(refused_connects.len() > 0,
-                "Expected some connection refusals when attempting {} connections, \
-                 but all {} were accepted (backlog may be unbounded)",
-                total_attempted, successful_connects.len());
+        if max_attempted >= 50 {
+            // With an explicit backlog of 1, a large burst should hit either
+            // refusal or timeout pressure before every attempted connection
+            // completes successfully.
+            prop_assert!(backpressure_seen || successful_connects.len() < max_attempted,
+                "Expected backlog pressure when attempting {} connections, \
+                 but all {} completed without refusal or timeout",
+                max_attempted, successful_connects.len());
         }
 
         // MR1 Property: Accepted connections should be bounded by a reasonable limit
