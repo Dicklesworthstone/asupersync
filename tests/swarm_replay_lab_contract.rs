@@ -17,12 +17,18 @@ fn cancellation_scenario(seed: u64) -> SwarmReplayScenario {
         scenario_id: "swarm-cancel-cascade".to_string(),
         seed,
         worker_count: 3,
+        cohort_count: 3,
         region_count: 3,
         tasks_per_region: 5,
         yields_per_task: 8,
         yield_jitter: 3,
         channel_capacity: 6,
         messages_per_task: 3,
+        semaphore_permits_per_task: 1,
+        pool_slots_per_task: 1,
+        obligations_per_task: 3,
+        timer_ticks_per_task: 2,
+        cancellation_tree_depth: 3,
         artifact_bytes_per_task: 128,
         cancel_after_steps: Some(4),
         max_steps: 20_000,
@@ -34,12 +40,18 @@ fn completion_scenario(seed: u64) -> SwarmReplayScenario {
         scenario_id: "swarm-normal-completion".to_string(),
         seed,
         worker_count: 2,
+        cohort_count: 1,
         region_count: 2,
         tasks_per_region: 4,
         yields_per_task: 2,
         yield_jitter: 4,
         channel_capacity: 8,
         messages_per_task: 2,
+        semaphore_permits_per_task: 1,
+        pool_slots_per_task: 2,
+        obligations_per_task: 2,
+        timer_ticks_per_task: 1,
+        cancellation_tree_depth: 2,
         artifact_bytes_per_task: 64,
         cancel_after_steps: None,
         max_steps: 20_000,
@@ -141,6 +153,36 @@ fn agent_run_scenario(seed: u64) -> SwarmAgentRunScenario {
     }
 }
 
+fn replay_scale_scenario(
+    label: &str,
+    seed: u64,
+    worker_count: usize,
+    cohort_count: usize,
+    region_count: usize,
+    tasks_per_region: usize,
+) -> SwarmReplayScenario {
+    SwarmReplayScenario {
+        scenario_id: format!("swarm-replay-{label}"),
+        seed,
+        worker_count,
+        cohort_count,
+        region_count,
+        tasks_per_region,
+        yields_per_task: 2,
+        yield_jitter: 2,
+        channel_capacity: tasks_per_region.saturating_mul(2).max(4),
+        messages_per_task: 2,
+        semaphore_permits_per_task: 1,
+        pool_slots_per_task: 1,
+        obligations_per_task: 2,
+        timer_ticks_per_task: 2,
+        cancellation_tree_depth: 3,
+        artifact_bytes_per_task: 32,
+        cancel_after_steps: None,
+        max_steps: 80_000,
+    }
+}
+
 fn fresh_handoff_capsule() -> SwarmHandoffCapsule {
     SwarmHandoffCapsule {
         capsule_id: "handoff-asw10-0001".to_string(),
@@ -189,11 +231,46 @@ fn swarm_replay_summary_is_byte_stable_for_same_seed() {
     assert_eq!(first, second, "same seed and knobs must replay identically");
     assert_eq!(first.schema_version, SWARM_REPLAY_SCHEMA_VERSION);
     assert!(first.quiescent, "cancel cascade must drain to quiescence");
+    assert_eq!(first.worker_count, scenario.worker_count);
+    assert_eq!(first.cohort_count, scenario.cohort_count);
     assert_eq!(first.task_count, scenario.task_count());
     assert_eq!(first.scheduled_task_count, scenario.task_count());
     assert_eq!(first.terminal_task_count, scenario.task_count());
     assert_eq!(first.non_terminal_task_count, 0);
     assert!(first.cancellation_requests > 0);
+    assert!(first.cancellation_drain_steps > 0);
+    assert_eq!(
+        first.cancellation_tree_depth,
+        scenario.cancellation_tree_depth
+    );
+    assert_eq!(
+        first.channel_reservations,
+        scenario.task_count() * scenario.messages_per_task
+    );
+    assert_eq!(
+        first.channel_commits + first.channel_aborts,
+        first.channel_reservations
+    );
+    assert_eq!(
+        first.semaphore_acquires,
+        scenario.task_count() * scenario.semaphore_permits_per_task
+    );
+    assert_eq!(first.semaphore_releases, first.semaphore_acquires);
+    assert_eq!(
+        first.pool_checkouts,
+        scenario.task_count() * scenario.pool_slots_per_task
+    );
+    assert_eq!(first.pool_checkins, first.pool_checkouts);
+    assert_eq!(
+        first.obligation_commits + first.obligation_aborts,
+        scenario.task_count() * scenario.obligations_per_task
+    );
+    assert_eq!(first.timer_registrations, scenario.task_count());
+    assert_eq!(
+        first.timer_wakeups,
+        scenario.task_count() * scenario.timer_ticks_per_task
+    );
+    assert_eq!(first.trace_digest.len(), 16);
     assert!(first.invariant_violations.is_empty());
     assert!(
         first
@@ -202,6 +279,19 @@ fn swarm_replay_summary_is_byte_stable_for_same_seed() {
             .any(|event| event.kind == SwarmReplayEventKind::CancellationRequested),
         "summary must record runtime cancellation requests"
     );
+    for kind in [
+        SwarmReplayEventKind::SemaphoreAcquired,
+        SwarmReplayEventKind::PoolSlotCheckedOut,
+        SwarmReplayEventKind::MessageReserved,
+        SwarmReplayEventKind::TimerAdvanced,
+        SwarmReplayEventKind::ObligationAborted,
+        SwarmReplayEventKind::MessageAborted,
+    ] {
+        assert!(
+            first.event_log.iter().any(|event| event.kind == kind),
+            "summary must record {kind:?}"
+        );
+    }
     assert!(
         first
             .task_outcomes
@@ -647,6 +737,21 @@ fn swarm_replay_normal_completion_emits_artifact_and_backlog_summary() {
     assert_eq!(summary.task_count, scenario.task_count());
     assert_eq!(summary.terminal_task_count, scenario.task_count());
     assert_eq!(summary.non_terminal_task_count, 0);
+    assert_eq!(
+        summary.channel_commits,
+        scenario.task_count() * scenario.messages_per_task
+    );
+    assert_eq!(summary.channel_aborts, 0);
+    assert_eq!(
+        summary.obligation_commits,
+        scenario.task_count() * scenario.obligations_per_task
+    );
+    assert_eq!(summary.obligation_aborts, 0);
+    assert_eq!(summary.timer_registrations, scenario.task_count());
+    assert_eq!(
+        summary.timer_wakeups,
+        scenario.task_count() * scenario.timer_ticks_per_task
+    );
     assert_eq!(summary.task_outcomes.len(), scenario.task_count());
     assert!(
         summary
@@ -671,6 +776,89 @@ fn swarm_replay_normal_completion_emits_artifact_and_backlog_summary() {
         summary.event_log.len(),
         "non-failing scenario shrink prefix should cover the full log"
     );
+}
+
+#[test]
+fn swarm_replay_models_resource_surfaces_for_small_medium_and_large_configs() {
+    for scenario in [
+        replay_scale_scenario("small", 0x5A11, 2, 1, 2, 3),
+        replay_scale_scenario("medium", 0x5A12, 8, 2, 5, 10),
+        replay_scale_scenario("large", 0x5A13, 64, 8, 10, 20),
+    ] {
+        let first = run_swarm_replay_scenario(&scenario).expect("first scale run");
+        let second = run_swarm_replay_scenario(&scenario).expect("second scale run");
+        let task_count = scenario.task_count();
+
+        assert_eq!(
+            first, second,
+            "{} must replay byte-identically",
+            scenario.scenario_id
+        );
+        assert!(first.quiescent, "{} must quiesce", scenario.scenario_id);
+        assert_eq!(first.worker_count, scenario.worker_count);
+        assert_eq!(first.cohort_count, scenario.cohort_count);
+        assert_eq!(first.region_count, scenario.region_count);
+        assert_eq!(first.task_count, task_count);
+        assert_eq!(first.scheduled_task_count, task_count);
+        assert_eq!(first.terminal_task_count, task_count);
+        assert_eq!(first.non_terminal_task_count, 0);
+        assert_eq!(
+            first.channel_reservations,
+            task_count * scenario.messages_per_task
+        );
+        assert_eq!(first.channel_commits, first.channel_reservations);
+        assert_eq!(first.channel_aborts, 0);
+        assert_eq!(
+            first.semaphore_acquires,
+            task_count * scenario.semaphore_permits_per_task
+        );
+        assert_eq!(first.semaphore_releases, first.semaphore_acquires);
+        assert_eq!(
+            first.pool_checkouts,
+            task_count * scenario.pool_slots_per_task
+        );
+        assert_eq!(first.pool_checkins, first.pool_checkouts);
+        assert_eq!(
+            first.obligation_commits,
+            task_count * scenario.obligations_per_task
+        );
+        assert_eq!(first.obligation_aborts, 0);
+        assert_eq!(first.timer_registrations, task_count);
+        assert_eq!(
+            first.timer_wakeups,
+            task_count * scenario.timer_ticks_per_task
+        );
+        assert_eq!(
+            first.cancellation_tree_depth,
+            scenario.cancellation_tree_depth
+        );
+        assert_eq!(first.cancellation_drain_steps, 0);
+        assert_eq!(
+            first.trace_digest,
+            format!("{:016x}", first.trace_fingerprint)
+        );
+        assert!(
+            first.invariant_violations.is_empty(),
+            "{} must not produce runtime invariant violations",
+            scenario.scenario_id
+        );
+        for kind in [
+            SwarmReplayEventKind::SemaphoreAcquired,
+            SwarmReplayEventKind::PoolSlotCheckedOut,
+            SwarmReplayEventKind::MessageReserved,
+            SwarmReplayEventKind::TimerAdvanced,
+            SwarmReplayEventKind::MessageCommitted,
+            SwarmReplayEventKind::ObligationCommitted,
+            SwarmReplayEventKind::ArtifactEmitted,
+            SwarmReplayEventKind::Completed,
+        ] {
+            assert!(
+                first.event_log.iter().any(|event| event.kind == kind),
+                "{} missing {kind:?}",
+                scenario.scenario_id
+            );
+        }
+    }
 }
 
 #[test]

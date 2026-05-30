@@ -40,6 +40,7 @@ const MAX_FIRST_SLICE_TASKS: usize = 10_000;
 
 /// Deterministic workload knobs for a swarm replay lab run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SwarmReplayScenario {
     /// Stable scenario identifier used in logs and artifacts.
     pub scenario_id: String,
@@ -47,6 +48,8 @@ pub struct SwarmReplayScenario {
     pub seed: u64,
     /// Virtual workers modeled by [`LabConfig`].
     pub worker_count: usize,
+    /// Logical worker cohorts used by later placement and NUMA policy beads.
+    pub cohort_count: usize,
     /// Number of modeled child regions under the scenario root.
     pub region_count: usize,
     /// Number of tasks spawned in each region.
@@ -59,6 +62,16 @@ pub struct SwarmReplayScenario {
     pub channel_capacity: usize,
     /// Modeled messages reserved by each task before it starts yielding.
     pub messages_per_task: usize,
+    /// Modeled semaphore permits touched by each task.
+    pub semaphore_permits_per_task: usize,
+    /// Modeled pool slots checked out by each task.
+    pub pool_slots_per_task: usize,
+    /// Modeled linear obligations resolved by each task.
+    pub obligations_per_task: usize,
+    /// Modeled virtual timer wakeups associated with each task.
+    pub timer_ticks_per_task: usize,
+    /// Depth of the modeled cancellation tree from root to leaf tasks.
+    pub cancellation_tree_depth: usize,
     /// Modeled proof/trace artifact bytes emitted by a completed task.
     pub artifact_bytes_per_task: usize,
     /// Scheduler steps to run before issuing a cancellation cascade.
@@ -76,12 +89,18 @@ impl Default for SwarmReplayScenario {
             scenario_id: "swarm-replay-default".to_string(),
             seed: 0xA5A5_5EED,
             worker_count: 2,
+            cohort_count: 1,
             region_count: 2,
             tasks_per_region: 4,
             yields_per_task: 4,
             yield_jitter: 2,
             channel_capacity: 8,
             messages_per_task: 2,
+            semaphore_permits_per_task: 1,
+            pool_slots_per_task: 1,
+            obligations_per_task: 2,
+            timer_ticks_per_task: 1,
+            cancellation_tree_depth: 2,
             artifact_bytes_per_task: 256,
             cancel_after_steps: Some(3),
             max_steps: 10_000,
@@ -101,6 +120,18 @@ impl SwarmReplayScenario {
         if self.scenario_id.trim().is_empty() {
             return Err(SwarmReplayError::EmptyScenarioId);
         }
+        if self.worker_count == 0 {
+            return Err(SwarmReplayError::ZeroWorkerCount);
+        }
+        if self.cohort_count == 0 {
+            return Err(SwarmReplayError::ZeroCohortCount);
+        }
+        if self.cohort_count > self.worker_count {
+            return Err(SwarmReplayError::CohortCountExceedsWorkers {
+                cohort_count: self.cohort_count,
+                worker_count: self.worker_count,
+            });
+        }
         if self.region_count == 0 {
             return Err(SwarmReplayError::ZeroRegionCount);
         }
@@ -109,6 +140,21 @@ impl SwarmReplayScenario {
         }
         if self.channel_capacity == 0 {
             return Err(SwarmReplayError::ZeroChannelCapacity);
+        }
+        if self.semaphore_permits_per_task == 0 {
+            return Err(SwarmReplayError::ZeroSemaphorePermits);
+        }
+        if self.pool_slots_per_task == 0 {
+            return Err(SwarmReplayError::ZeroPoolSlots);
+        }
+        if self.obligations_per_task == 0 {
+            return Err(SwarmReplayError::ZeroObligationsPerTask);
+        }
+        if self.timer_ticks_per_task == 0 {
+            return Err(SwarmReplayError::ZeroTimerTicks);
+        }
+        if self.cancellation_tree_depth == 0 {
+            return Err(SwarmReplayError::ZeroCancellationTreeDepth);
         }
         if self.max_steps == 0 {
             return Err(SwarmReplayError::ZeroMaxSteps);
@@ -137,6 +183,21 @@ impl SwarmReplayScenario {
         self.artifact_bytes_per_task
             .checked_mul(task_count)
             .ok_or(SwarmReplayError::ArtifactByteCountOverflow)?;
+        self.messages_per_task
+            .checked_mul(task_count)
+            .ok_or(SwarmReplayError::ChannelOperationCountOverflow)?;
+        self.semaphore_permits_per_task
+            .checked_mul(task_count)
+            .ok_or(SwarmReplayError::SemaphoreOperationCountOverflow)?;
+        self.pool_slots_per_task
+            .checked_mul(task_count)
+            .ok_or(SwarmReplayError::PoolOperationCountOverflow)?;
+        self.obligations_per_task
+            .checked_mul(task_count)
+            .ok_or(SwarmReplayError::ObligationCountOverflow)?;
+        self.timer_ticks_per_task
+            .checked_mul(task_count)
+            .ok_or(SwarmReplayError::TimerTickCountOverflow)?;
 
         Ok(())
     }
@@ -157,6 +218,25 @@ pub enum SwarmReplayError {
     ZeroMaxSteps,
     /// No logical workers were requested.
     ZeroWorkerCount,
+    /// No logical worker cohorts were requested.
+    ZeroCohortCount,
+    /// More cohorts were requested than logical workers.
+    CohortCountExceedsWorkers {
+        /// Requested cohort count.
+        cohort_count: usize,
+        /// Requested worker count.
+        worker_count: usize,
+    },
+    /// No modeled semaphore permits were requested per task.
+    ZeroSemaphorePermits,
+    /// No modeled pool slots were requested per task.
+    ZeroPoolSlots,
+    /// No modeled obligations were requested per task.
+    ZeroObligationsPerTask,
+    /// No modeled timer ticks were requested per task.
+    ZeroTimerTicks,
+    /// No modeled cancellation tree depth was requested.
+    ZeroCancellationTreeDepth,
     /// No interactive work was requested.
     ZeroInteractiveTasks,
     /// No synthetic agents were requested.
@@ -200,6 +280,16 @@ pub enum SwarmReplayError {
     },
     /// Artifact byte accounting overflowed `usize`.
     ArtifactByteCountOverflow,
+    /// Modeled channel operation accounting overflowed `usize`.
+    ChannelOperationCountOverflow,
+    /// Modeled semaphore operation accounting overflowed `usize`.
+    SemaphoreOperationCountOverflow,
+    /// Modeled pool operation accounting overflowed `usize`.
+    PoolOperationCountOverflow,
+    /// Modeled obligation accounting overflowed `usize`.
+    ObligationCountOverflow,
+    /// Modeled timer accounting overflowed `usize`.
+    TimerTickCountOverflow,
     /// Region creation was rejected by the runtime state.
     RegionCreateRejected {
         /// Scenario region ordinal.
@@ -227,6 +317,25 @@ impl fmt::Display for SwarmReplayError {
             Self::ZeroChannelCapacity => f.write_str("channel_capacity must be greater than zero"),
             Self::ZeroMaxSteps => f.write_str("max_steps must be greater than zero"),
             Self::ZeroWorkerCount => f.write_str("worker_count must be greater than zero"),
+            Self::ZeroCohortCount => f.write_str("cohort_count must be greater than zero"),
+            Self::CohortCountExceedsWorkers {
+                cohort_count,
+                worker_count,
+            } => write!(
+                f,
+                "cohort_count {cohort_count} must not exceed worker_count {worker_count}"
+            ),
+            Self::ZeroSemaphorePermits => {
+                f.write_str("semaphore_permits_per_task must be greater than zero")
+            }
+            Self::ZeroPoolSlots => f.write_str("pool_slots_per_task must be greater than zero"),
+            Self::ZeroObligationsPerTask => {
+                f.write_str("obligations_per_task must be greater than zero")
+            }
+            Self::ZeroTimerTicks => f.write_str("timer_ticks_per_task must be greater than zero"),
+            Self::ZeroCancellationTreeDepth => {
+                f.write_str("cancellation_tree_depth must be greater than zero")
+            }
             Self::ZeroInteractiveTasks => {
                 f.write_str("interactive_tasks must be greater than zero")
             }
@@ -265,6 +374,17 @@ impl fmt::Display for SwarmReplayError {
                 "cancel_after_steps {cancel_after_steps} must be less than max_steps {max_steps}"
             ),
             Self::ArtifactByteCountOverflow => f.write_str("artifact byte count overflowed usize"),
+            Self::ChannelOperationCountOverflow => {
+                f.write_str("channel operation count overflowed usize")
+            }
+            Self::SemaphoreOperationCountOverflow => {
+                f.write_str("semaphore operation count overflowed usize")
+            }
+            Self::PoolOperationCountOverflow => {
+                f.write_str("pool operation count overflowed usize")
+            }
+            Self::ObligationCountOverflow => f.write_str("obligation count overflowed usize"),
+            Self::TimerTickCountOverflow => f.write_str("timer tick count overflowed usize"),
             Self::RegionCreateRejected {
                 region_index,
                 reason,
@@ -291,6 +411,20 @@ pub enum SwarmReplayEventKind {
     TaskScheduled,
     /// A task modeled bounded channel reservation pressure.
     MessageReserved,
+    /// A task modeled committing reserved channel sends.
+    MessageCommitted,
+    /// A task modeled aborting reserved channel sends after cancellation.
+    MessageAborted,
+    /// A task modeled taking semaphore permits.
+    SemaphoreAcquired,
+    /// A task modeled checking out object-pool slots.
+    PoolSlotCheckedOut,
+    /// A task modeled virtual timer wakeups.
+    TimerAdvanced,
+    /// A task modeled committing linear obligations.
+    ObligationCommitted,
+    /// A task modeled aborting linear obligations after cancellation.
+    ObligationAborted,
     /// A region cancellation request was issued through runtime state.
     CancellationRequested,
     /// A task observed cancellation at a `Cx` checkpoint.
@@ -1594,6 +1728,10 @@ pub struct SwarmReplaySummary {
     pub scenario_id: String,
     /// Lab runtime seed.
     pub seed: u64,
+    /// Logical worker count modeled by the scenario.
+    pub worker_count: usize,
+    /// Logical worker cohort count modeled by the scenario.
+    pub cohort_count: usize,
     /// Number of regions created.
     pub region_count: usize,
     /// Number of tasks modeled.
@@ -1606,8 +1744,34 @@ pub struct SwarmReplaySummary {
     pub terminal_task_count: usize,
     /// Number of tracked tasks still non-terminal at the end of the run.
     pub non_terminal_task_count: usize,
+    /// Number of modeled channel reservations.
+    pub channel_reservations: usize,
+    /// Number of modeled channel sends committed by completed tasks.
+    pub channel_commits: usize,
+    /// Number of modeled channel reservations aborted by cancelled tasks.
+    pub channel_aborts: usize,
     /// Maximum modeled channel backlog.
     pub channel_backlog_peak: usize,
+    /// Number of modeled semaphore acquisitions.
+    pub semaphore_acquires: usize,
+    /// Number of modeled semaphore releases.
+    pub semaphore_releases: usize,
+    /// Number of modeled pool slot checkouts.
+    pub pool_checkouts: usize,
+    /// Number of modeled pool slot checkins.
+    pub pool_checkins: usize,
+    /// Number of modeled obligations committed by completed tasks.
+    pub obligation_commits: usize,
+    /// Number of modeled obligations aborted by cancelled tasks.
+    pub obligation_aborts: usize,
+    /// Number of modeled virtual timer registrations.
+    pub timer_registrations: usize,
+    /// Number of modeled virtual timer wakeups.
+    pub timer_wakeups: usize,
+    /// Depth of the modeled cancellation tree.
+    pub cancellation_tree_depth: usize,
+    /// Scheduler steps spent after explicit cancellation was requested.
+    pub cancellation_drain_steps: u64,
     /// Total modeled artifact bytes emitted by normally completed tasks.
     pub artifact_bytes_emitted: usize,
     /// Scheduler steps run by `LabRuntime`.
@@ -1616,6 +1780,8 @@ pub struct SwarmReplaySummary {
     pub quiescent: bool,
     /// Canonical trace fingerprint from the lab run report.
     pub trace_fingerprint: u64,
+    /// Hex digest of the canonical trace fingerprint for JSON/NDJSON artifacts.
+    pub trace_digest: String,
     /// Trace event count from the lab run report.
     pub trace_event_count: usize,
     /// Runtime invariant violations from the lab run report.
@@ -1675,6 +1841,11 @@ pub fn run_swarm_replay_scenario(
                 .messages_per_task
                 .saturating_add(jitter)
                 .min(scenario.channel_capacity);
+            let messages_per_task = scenario.messages_per_task;
+            let semaphore_permits = scenario.semaphore_permits_per_task;
+            let pool_slots = scenario.pool_slots_per_task;
+            let obligations_per_task = scenario.obligations_per_task;
+            let timer_ticks = scenario.timer_ticks_per_task;
             let events_for_task = Arc::clone(&events);
             let outcomes_for_task = Arc::clone(&outcomes);
             let order_for_task = Arc::clone(&completion_order);
@@ -1684,11 +1855,35 @@ pub fn run_swarm_replay_scenario(
                 .state
                 .create_task(region, Budget::INFINITE, async move {
                     events_for_task.lock().push(SwarmReplayEvent {
+                        kind: SwarmReplayEventKind::SemaphoreAcquired,
+                        region_index,
+                        task_index: Some(task_index),
+                        global_task_index: Some(global_task_index),
+                        queue_depth: semaphore_permits,
+                        artifact_bytes: 0,
+                    });
+                    events_for_task.lock().push(SwarmReplayEvent {
+                        kind: SwarmReplayEventKind::PoolSlotCheckedOut,
+                        region_index,
+                        task_index: Some(task_index),
+                        global_task_index: Some(global_task_index),
+                        queue_depth: pool_slots,
+                        artifact_bytes: 0,
+                    });
+                    events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::MessageReserved,
                         region_index,
                         task_index: Some(task_index),
                         global_task_index: Some(global_task_index),
                         queue_depth,
+                        artifact_bytes: 0,
+                    });
+                    events_for_task.lock().push(SwarmReplayEvent {
+                        kind: SwarmReplayEventKind::TimerAdvanced,
+                        region_index,
+                        task_index: Some(task_index),
+                        global_task_index: Some(global_task_index),
+                        queue_depth: timer_ticks,
                         artifact_bytes: 0,
                     });
 
@@ -1697,6 +1892,22 @@ pub fn run_swarm_replay_scenario(
                             return;
                         };
                         if cx.checkpoint().is_err() {
+                            events_for_task.lock().push(SwarmReplayEvent {
+                                kind: SwarmReplayEventKind::MessageAborted,
+                                region_index,
+                                task_index: Some(task_index),
+                                global_task_index: Some(global_task_index),
+                                queue_depth: messages_per_task,
+                                artifact_bytes: 0,
+                            });
+                            events_for_task.lock().push(SwarmReplayEvent {
+                                kind: SwarmReplayEventKind::ObligationAborted,
+                                region_index,
+                                task_index: Some(task_index),
+                                global_task_index: Some(global_task_index),
+                                queue_depth: obligations_per_task,
+                                artifact_bytes: 0,
+                            });
                             events_for_task.lock().push(SwarmReplayEvent {
                                 kind: SwarmReplayEventKind::CancelObserved,
                                 region_index,
@@ -1718,6 +1929,22 @@ pub fn run_swarm_replay_scenario(
                         yield_once().await;
                     }
 
+                    events_for_task.lock().push(SwarmReplayEvent {
+                        kind: SwarmReplayEventKind::MessageCommitted,
+                        region_index,
+                        task_index: Some(task_index),
+                        global_task_index: Some(global_task_index),
+                        queue_depth: messages_per_task,
+                        artifact_bytes: 0,
+                    });
+                    events_for_task.lock().push(SwarmReplayEvent {
+                        kind: SwarmReplayEventKind::ObligationCommitted,
+                        region_index,
+                        task_index: Some(task_index),
+                        global_task_index: Some(global_task_index),
+                        queue_depth: obligations_per_task,
+                        artifact_bytes: 0,
+                    });
                     events_for_task.lock().push(SwarmReplayEvent {
                         kind: SwarmReplayEventKind::ArtifactEmitted,
                         region_index,
@@ -2113,6 +2340,7 @@ fn build_summary(
 ) -> SwarmReplaySummary {
     let channel_backlog_peak = event_log
         .iter()
+        .filter(|event| event.kind == SwarmReplayEventKind::MessageReserved)
         .map(|event| event.queue_depth)
         .max()
         .unwrap_or(0);
@@ -2133,22 +2361,58 @@ fn build_summary(
             })
             .map_or(event_log.len(), |index| index + 1)
     });
+    let completed_tasks = task_outcomes
+        .iter()
+        .filter(|outcome| outcome.status == SwarmReplayTaskStatus::Completed)
+        .count();
+    let task_count = scenario.task_count();
+    let channel_reservations = task_count.saturating_mul(scenario.messages_per_task);
+    let channel_commits = completed_tasks.saturating_mul(scenario.messages_per_task);
+    let channel_aborts = channel_reservations.saturating_sub(channel_commits);
+    let semaphore_acquires = task_count.saturating_mul(scenario.semaphore_permits_per_task);
+    let semaphore_releases = semaphore_acquires;
+    let pool_checkouts = task_count.saturating_mul(scenario.pool_slots_per_task);
+    let pool_checkins = pool_checkouts;
+    let total_obligations = task_count.saturating_mul(scenario.obligations_per_task);
+    let obligation_commits = completed_tasks.saturating_mul(scenario.obligations_per_task);
+    let obligation_aborts = total_obligations.saturating_sub(obligation_commits);
+    let timer_registrations = task_count;
+    let timer_wakeups = task_count.saturating_mul(scenario.timer_ticks_per_task);
+    let cancellation_drain_steps = scenario.cancel_after_steps.map_or(0, |cancel_step| {
+        report.steps_delta.saturating_sub(cancel_step)
+    });
 
     SwarmReplaySummary {
         schema_version: SWARM_REPLAY_SCHEMA_VERSION.to_string(),
         scenario_id: scenario.scenario_id.clone(),
         seed: scenario.seed,
+        worker_count: scenario.worker_count,
+        cohort_count: scenario.cohort_count,
         region_count: scenario.region_count,
-        task_count: scenario.task_count(),
+        task_count,
         scheduled_task_count,
         cancellation_requests,
         terminal_task_count: terminal_counts.0,
         non_terminal_task_count: terminal_counts.1,
+        channel_reservations,
+        channel_commits,
+        channel_aborts,
         channel_backlog_peak,
+        semaphore_acquires,
+        semaphore_releases,
+        pool_checkouts,
+        pool_checkins,
+        obligation_commits,
+        obligation_aborts,
+        timer_registrations,
+        timer_wakeups,
+        cancellation_tree_depth: scenario.cancellation_tree_depth,
+        cancellation_drain_steps,
         artifact_bytes_emitted,
         steps_delta: report.steps_delta,
         quiescent: report.quiescent,
         trace_fingerprint: report.trace_fingerprint,
+        trace_digest: format!("{:016x}", report.trace_fingerprint),
         trace_event_count: report.trace_len,
         invariant_violations: report.invariant_violations,
         completion_order,
