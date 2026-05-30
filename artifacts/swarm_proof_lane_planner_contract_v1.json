@@ -1,0 +1,385 @@
+{
+  "contract_version": "swarm-proof-lane-planner-v1",
+  "schema_version": "asupersync.swarm-proof-lane-plan.v1",
+  "bead_id": "asupersync-vssefs.9.2",
+  "description": "Stable proof-lane planner contract for mapping swarm scenario fixtures to remote-only RCH validation commands with provenance, stale-input checks, and Agent Mail handoff text.",
+  "source_of_truth": {
+    "contract": "artifacts/swarm_proof_lane_planner_contract_v1.json",
+    "contract_test": "tests/swarm_proof_lane_planner_contract.rs",
+    "runtime_request_type": "asupersync::lab::SwarmProofLaneRequest",
+    "runtime_plan_type": "asupersync::lab::SwarmProofLanePlan",
+    "runtime_planner_source": "src/lab/swarm_replay.rs",
+    "runtime_planner": "asupersync::lab::plan_swarm_proof_lane",
+    "runtime_text_renderer": "asupersync::lab::render_swarm_proof_lane_agent_mail_summary"
+  },
+  "schema": {
+    "required_request_fields": [
+      "lane_id",
+      "scenario_id",
+      "source_artifacts",
+      "touched_surfaces",
+      "command",
+      "target_dir",
+      "features",
+      "expected_artifacts",
+      "timeout_secs",
+      "remote_required",
+      "local_fallback_authorized",
+      "expected_head",
+      "observed_head",
+      "rch_provenance",
+      "transcript_markers",
+      "covers",
+      "does_not_cover"
+    ],
+    "required_plan_fields": [
+      "schema_version",
+      "lane_id",
+      "scenario_id",
+      "command",
+      "target_dir",
+      "features",
+      "expected_artifacts",
+      "timeout_secs",
+      "remote_required",
+      "fallback_policy",
+      "decision",
+      "batch_key",
+      "cache_key_fingerprint",
+      "stale_head",
+      "missing_target_dir",
+      "local_fallback_marker_detected",
+      "remote_provenance_required",
+      "remote_provenance_observed",
+      "covers",
+      "does_not_cover",
+      "findings",
+      "agent_mail_summary",
+      "mutates_external_state",
+      "destructive_cleanup_required",
+      "branch_or_worktree_required"
+    ],
+    "reject_finding_codes": [
+      "missing_remote_requirement",
+      "missing_rch_provenance",
+      "local_fallback_marker",
+      "stale_head",
+      "missing_target_dir",
+      "missing_feature_scope",
+      "missing_expected_artifact",
+      "missing_claim_scope",
+      "proof_not_green"
+    ],
+    "local_fallback_markers": [
+      "[RCH] local",
+      "local fallback",
+      "fallback to local",
+      "executing locally",
+      "RCH_REQUIRE_REMOTE=0"
+    ]
+  },
+  "lanes": [
+    {
+      "lane_id": "swarm-workload-corpus-focused",
+      "maps_scenario_fixture": "swarm-minimal-healthy-run",
+      "planner_request": {
+        "lane_id": "swarm-workload-corpus-focused",
+        "scenario_id": "swarm-minimal-healthy-run",
+        "source_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json",
+          "src/lab/swarm_replay.rs"
+        ],
+        "touched_surfaces": [
+          "src/lab/swarm_replay.rs",
+          "tests/swarm_workload_scenario_corpus_contract.rs",
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus cargo test -p asupersync --test swarm_workload_scenario_corpus_contract --features test-internals -- --nocapture",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+        "features": [
+          "test-internals"
+        ],
+        "expected_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json",
+          "tests/swarm_workload_scenario_corpus_contract.rs",
+          "target/lab-replay/swarm-workload/proof.json"
+        ],
+        "timeout_secs": 1200,
+        "remote_required": true,
+        "local_fallback_authorized": false,
+        "expected_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rch_provenance": {
+          "worker_id": "rch-worker-fixture-01",
+          "remote_observed": true,
+          "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+          "exit_status": 0
+        },
+        "transcript_markers": [
+          "remote worker rch-worker-fixture-01",
+          "test result: ok"
+        ],
+        "covers": [
+          "scenario_schema_validation",
+          "focused_lab_runtime_replay",
+          "stable_swarm_workload_json"
+        ],
+        "does_not_cover": [
+          "broad_conformance",
+          "workspace_release_health"
+        ]
+      }
+    }
+  ],
+  "malformed_examples": [
+    {
+      "lane_id": "missing-rch-provenance",
+      "expected_finding_code": "missing_rch_provenance",
+      "planner_request": {
+        "lane_id": "missing-rch-provenance",
+        "scenario_id": "swarm-minimal-healthy-run",
+        "source_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "touched_surfaces": [
+          "tests/swarm_workload_scenario_corpus_contract.rs"
+        ],
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus cargo test -p asupersync --test swarm_workload_scenario_corpus_contract --features test-internals -- --nocapture",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+        "features": [
+          "test-internals"
+        ],
+        "expected_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "timeout_secs": 1200,
+        "remote_required": true,
+        "local_fallback_authorized": false,
+        "expected_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rch_provenance": null,
+        "transcript_markers": [],
+        "covers": [
+          "scenario_schema_validation"
+        ],
+        "does_not_cover": [
+          "workspace_release_health"
+        ]
+      }
+    },
+    {
+      "lane_id": "local-fallback-marker",
+      "expected_finding_code": "local_fallback_marker",
+      "planner_request": {
+        "lane_id": "local-fallback-marker",
+        "scenario_id": "swarm-minimal-healthy-run",
+        "source_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "touched_surfaces": [
+          "tests/swarm_workload_scenario_corpus_contract.rs"
+        ],
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus cargo test -p asupersync --test swarm_workload_scenario_corpus_contract --features test-internals -- --nocapture",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+        "features": [
+          "test-internals"
+        ],
+        "expected_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "timeout_secs": 1200,
+        "remote_required": true,
+        "local_fallback_authorized": false,
+        "expected_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rch_provenance": {
+          "worker_id": "local-shell",
+          "remote_observed": true,
+          "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+          "exit_status": 0
+        },
+        "transcript_markers": [
+          "[RCH] local fallback executed after worker refusal"
+        ],
+        "covers": [
+          "scenario_schema_validation"
+        ],
+        "does_not_cover": [
+          "workspace_release_health"
+        ]
+      }
+    },
+    {
+      "lane_id": "stale-head",
+      "expected_finding_code": "stale_head",
+      "planner_request": {
+        "lane_id": "stale-head",
+        "scenario_id": "swarm-minimal-healthy-run",
+        "source_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "touched_surfaces": [
+          "tests/swarm_workload_scenario_corpus_contract.rs"
+        ],
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus cargo test -p asupersync --test swarm_workload_scenario_corpus_contract --features test-internals -- --nocapture",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+        "features": [
+          "test-internals"
+        ],
+        "expected_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "timeout_secs": 1200,
+        "remote_required": true,
+        "local_fallback_authorized": false,
+        "expected_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "observed_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "rch_provenance": {
+          "worker_id": "rch-worker-fixture-01",
+          "remote_observed": true,
+          "observed_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+          "exit_status": 0
+        },
+        "transcript_markers": [
+          "remote worker rch-worker-fixture-01"
+        ],
+        "covers": [
+          "scenario_schema_validation"
+        ],
+        "does_not_cover": [
+          "workspace_release_health"
+        ]
+      }
+    },
+    {
+      "lane_id": "missing-target-dir",
+      "expected_finding_code": "missing_target_dir",
+      "planner_request": {
+        "lane_id": "missing-target-dir",
+        "scenario_id": "swarm-minimal-healthy-run",
+        "source_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "touched_surfaces": [
+          "tests/swarm_workload_scenario_corpus_contract.rs"
+        ],
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env cargo test -p asupersync --test swarm_workload_scenario_corpus_contract --features test-internals -- --nocapture",
+        "target_dir": "",
+        "features": [
+          "test-internals"
+        ],
+        "expected_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "timeout_secs": 1200,
+        "remote_required": true,
+        "local_fallback_authorized": false,
+        "expected_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rch_provenance": {
+          "worker_id": "rch-worker-fixture-01",
+          "remote_observed": true,
+          "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_dir": "",
+          "exit_status": 0
+        },
+        "transcript_markers": [
+          "remote worker rch-worker-fixture-01"
+        ],
+        "covers": [
+          "scenario_schema_validation"
+        ],
+        "does_not_cover": [
+          "workspace_release_health"
+        ]
+      }
+    },
+    {
+      "lane_id": "missing-feature-scope",
+      "expected_finding_code": "missing_feature_scope",
+      "planner_request": {
+        "lane_id": "missing-feature-scope",
+        "scenario_id": "swarm-minimal-healthy-run",
+        "source_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "touched_surfaces": [
+          "tests/swarm_workload_scenario_corpus_contract.rs"
+        ],
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+        "features": [],
+        "expected_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "timeout_secs": 1200,
+        "remote_required": true,
+        "local_fallback_authorized": false,
+        "expected_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rch_provenance": {
+          "worker_id": "rch-worker-fixture-01",
+          "remote_observed": true,
+          "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+          "exit_status": 0
+        },
+        "transcript_markers": [
+          "remote worker rch-worker-fixture-01"
+        ],
+        "covers": [
+          "scenario_schema_validation"
+        ],
+        "does_not_cover": [
+          "workspace_release_health"
+        ]
+      }
+    },
+    {
+      "lane_id": "missing-remote-requirement",
+      "expected_finding_code": "missing_remote_requirement",
+      "planner_request": {
+        "lane_id": "missing-remote-requirement",
+        "scenario_id": "swarm-minimal-healthy-run",
+        "source_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "touched_surfaces": [
+          "tests/swarm_workload_scenario_corpus_contract.rs"
+        ],
+        "command": "env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus cargo test -p asupersync --test swarm_workload_scenario_corpus_contract --features test-internals -- --nocapture",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+        "features": [
+          "test-internals"
+        ],
+        "expected_artifacts": [
+          "artifacts/swarm_workload_scenario_corpus_v1.json"
+        ],
+        "timeout_secs": 1200,
+        "remote_required": true,
+        "local_fallback_authorized": false,
+        "expected_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rch_provenance": {
+          "worker_id": "rch-worker-fixture-01",
+          "remote_observed": true,
+          "observed_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus",
+          "exit_status": 0
+        },
+        "transcript_markers": [
+          "remote worker rch-worker-fixture-01"
+        ],
+        "covers": [
+          "scenario_schema_validation"
+        ],
+        "does_not_cover": [
+          "workspace_release_health"
+        ]
+      }
+    }
+  ]
+}

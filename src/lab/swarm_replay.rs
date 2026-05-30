@@ -43,6 +43,9 @@ pub const SWARM_WHAT_IF_PLAN_SCHEMA_VERSION: &str = "asupersync.swarm-what-if-pl
 pub const SWARM_HANDOFF_VERIFICATION_SCHEMA_VERSION: &str =
     "asupersync.swarm-handoff-verification.v1";
 
+/// Stable schema version for remote-only swarm proof-lane plans.
+pub const SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION: &str = "asupersync.swarm-proof-lane-plan.v1";
+
 const MAX_FIRST_SLICE_TASKS: usize = 10_000;
 
 /// Deterministic workload knobs for a swarm replay lab run.
@@ -1344,6 +1347,164 @@ pub struct SwarmWhatIfPlan {
     pub branch_or_worktree_required: bool,
 }
 
+/// Fallback policy for a proof lane when remote execution cannot be proven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmProofLaneFallbackPolicy {
+    /// Remote RCH execution is mandatory; local fallback invalidates the lane.
+    RemoteOnly,
+    /// Local execution was explicitly authorized by the operator.
+    LocalAuthorized,
+    /// The lane is only a report and does not establish proof evidence.
+    ReportOnly,
+}
+
+/// Planner decision for a proof lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmProofLaneDecision {
+    /// The lane has enough evidence to be used as proof.
+    Ready,
+    /// The lane needs a fresh commit, target directory, or cache observation.
+    RefreshStaleInputs,
+    /// The lane is unsafe until remote-only proof evidence is captured.
+    RefuseUntilRemoteProof,
+}
+
+/// Severity attached to a proof-lane planner finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmProofLaneFindingSeverity {
+    /// Informational finding that does not block the proof lane.
+    Info,
+    /// Finding that requires a narrow refresh before widening proof scope.
+    RefreshRequired,
+    /// Finding that invalidates the proof lane until corrected.
+    Unsafe,
+}
+
+/// Remote-worker provenance captured for one proof lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmProofLaneRchProvenance {
+    /// Stable worker identifier reported by RCH.
+    pub worker_id: String,
+    /// Whether the proof observed remote RCH execution.
+    pub remote_observed: bool,
+    /// Commit or source snapshot observed by the proof lane.
+    pub observed_head: String,
+    /// Cargo target directory observed by the proof lane.
+    pub target_dir: String,
+    /// Process exit status observed for the proof command.
+    pub exit_status: Option<i32>,
+}
+
+/// Deterministic input for planning and validating one proof lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmProofLaneRequest {
+    /// Stable proof-lane id.
+    pub lane_id: String,
+    /// Scenario fixture or source surface this lane proves.
+    pub scenario_id: String,
+    /// Repository-relative source artifacts consumed by the lane.
+    pub source_artifacts: Vec<String>,
+    /// Touched source or test surfaces the lane is intended to cover.
+    pub touched_surfaces: Vec<String>,
+    /// Exact command that should be run or was run.
+    pub command: String,
+    /// Cargo target directory required for isolated proof artifacts.
+    pub target_dir: String,
+    /// Explicit Cargo feature scope used by the command.
+    pub features: Vec<String>,
+    /// Artifacts expected from the proof lane.
+    pub expected_artifacts: Vec<String>,
+    /// Timeout budget in seconds.
+    pub timeout_secs: u64,
+    /// Whether the command must prove remote RCH execution.
+    pub remote_required: bool,
+    /// Whether the operator explicitly authorized local fallback.
+    pub local_fallback_authorized: bool,
+    /// Commit or source snapshot the proof was planned against.
+    pub expected_head: Option<String>,
+    /// Commit or source snapshot observed when proof evidence was captured.
+    pub observed_head: Option<String>,
+    /// Remote-worker provenance, if the proof lane has run.
+    pub rch_provenance: Option<SwarmProofLaneRchProvenance>,
+    /// Transcript markers captured from proof output.
+    pub transcript_markers: Vec<String>,
+    /// Claims this lane is allowed to prove.
+    pub covers: Vec<String>,
+    /// Claims this lane explicitly does not prove.
+    pub does_not_cover: Vec<String>,
+}
+
+/// One proof-lane planner finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmProofLaneFinding {
+    /// Stable machine-readable finding code.
+    pub code: String,
+    /// Operator-readable finding detail.
+    pub detail: String,
+    /// Concrete next action.
+    pub action: String,
+    /// Finding severity.
+    pub severity: SwarmProofLaneFindingSeverity,
+}
+
+/// Byte-stable proof-lane plan and validation result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmProofLanePlan {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Stable proof-lane id.
+    pub lane_id: String,
+    /// Scenario fixture or source surface copied from the request.
+    pub scenario_id: String,
+    /// Exact command copied from the request.
+    pub command: String,
+    /// Cargo target directory copied from the request.
+    pub target_dir: String,
+    /// Explicit Cargo feature scope, sorted and deduplicated.
+    pub features: Vec<String>,
+    /// Expected artifacts, sorted and deduplicated.
+    pub expected_artifacts: Vec<String>,
+    /// Timeout budget in seconds.
+    pub timeout_secs: u64,
+    /// Whether remote RCH execution is mandatory.
+    pub remote_required: bool,
+    /// Fallback policy inferred from the request.
+    pub fallback_policy: SwarmProofLaneFallbackPolicy,
+    /// Planner decision after fail-closed validation.
+    pub decision: SwarmProofLaneDecision,
+    /// Stable key for batching compatible proof lanes.
+    pub batch_key: String,
+    /// Stable cache key carrying command, target, feature, artifact, and head inputs.
+    pub cache_key_fingerprint: String,
+    /// Whether expected and observed HEAD evidence disagree.
+    pub stale_head: bool,
+    /// Whether the request omitted an isolated target directory.
+    pub missing_target_dir: bool,
+    /// Whether proof output shows local fallback without authorization.
+    pub local_fallback_marker_detected: bool,
+    /// Whether remote provenance is required by this plan.
+    pub remote_provenance_required: bool,
+    /// Whether remote provenance was observed.
+    pub remote_provenance_observed: bool,
+    /// Claims this lane is allowed to prove.
+    pub covers: Vec<String>,
+    /// Claims this lane explicitly does not prove.
+    pub does_not_cover: Vec<String>,
+    /// Fail-closed planner findings.
+    pub findings: Vec<SwarmProofLaneFinding>,
+    /// Concise deterministic text for Agent Mail handoffs.
+    pub agent_mail_summary: String,
+    /// Planner never mutates live services.
+    pub mutates_external_state: bool,
+    /// Planner never asks for file deletion.
+    pub destructive_cleanup_required: bool,
+    /// Planner never asks for branch/worktree creation.
+    pub branch_or_worktree_required: bool,
+}
+
 /// Self-contained capsule emitted before compaction or session handoff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmHandoffCapsule {
@@ -1617,6 +1778,269 @@ pub fn plan_swarm_admission_wave(
         destructive_cleanup_required: false,
         branch_or_worktree_required: false,
     })
+}
+
+/// Plans and validates a remote-only proof lane without running live work.
+#[must_use]
+pub fn plan_swarm_proof_lane(request: &SwarmProofLaneRequest) -> SwarmProofLanePlan {
+    let mut decision = SwarmProofLaneDecision::Ready;
+    let mut findings = Vec::new();
+    let features = sorted_unique_strings(&request.features);
+    let expected_artifacts = sorted_unique_strings(&request.expected_artifacts);
+    let covers = sorted_unique_strings(&request.covers);
+    let does_not_cover = sorted_unique_strings(&request.does_not_cover);
+    let fallback_policy = if request.remote_required {
+        if request.local_fallback_authorized {
+            SwarmProofLaneFallbackPolicy::LocalAuthorized
+        } else {
+            SwarmProofLaneFallbackPolicy::RemoteOnly
+        }
+    } else {
+        SwarmProofLaneFallbackPolicy::ReportOnly
+    };
+    let remote_provenance_observed = request
+        .rch_provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.remote_observed);
+    let local_fallback_marker_detected = proof_lane_local_fallback_marker_detected(request);
+    let stale_head = proof_lane_stale_head(request);
+    let missing_target_dir = request.target_dir.trim().is_empty();
+    let remote_provenance_required = request.remote_required;
+
+    if request.lane_id.trim().is_empty() {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefuseUntilRemoteProof,
+            SwarmProofLaneFindingSeverity::Unsafe,
+            "missing_lane_id",
+            "proof lane is missing a stable id",
+            "assign a stable lane id before publishing proof evidence",
+        );
+    }
+    if request.scenario_id.trim().is_empty() {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefuseUntilRemoteProof,
+            SwarmProofLaneFindingSeverity::Unsafe,
+            "missing_scenario_id",
+            "proof lane is missing a scenario or source fixture id",
+            "attach the proof lane to a concrete scenario fixture or source surface",
+        );
+    }
+    if request.command.trim().is_empty() {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefuseUntilRemoteProof,
+            SwarmProofLaneFindingSeverity::Unsafe,
+            "missing_command",
+            "proof lane is missing an exact replayable command",
+            "capture the exact rch exec command before accepting the lane",
+        );
+    }
+    if missing_target_dir {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefreshStaleInputs,
+            SwarmProofLaneFindingSeverity::RefreshRequired,
+            "missing_target_dir",
+            "proof lane does not declare an isolated Cargo target directory",
+            "set CARGO_TARGET_DIR to a lane-specific remote target directory",
+        );
+    } else if !request.command.contains(&request.target_dir)
+        && !request.command.contains("CARGO_TARGET_DIR")
+    {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefreshStaleInputs,
+            SwarmProofLaneFindingSeverity::RefreshRequired,
+            "target_dir_not_in_command",
+            "proof command does not expose the declared target directory",
+            "publish the command with an explicit CARGO_TARGET_DIR assignment",
+        );
+    }
+    if request.timeout_secs == 0 {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefreshStaleInputs,
+            SwarmProofLaneFindingSeverity::RefreshRequired,
+            "missing_timeout",
+            "proof lane has no timeout budget",
+            "set a deterministic timeout budget for operator handoffs",
+        );
+    }
+    if expected_artifacts.is_empty() {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefuseUntilRemoteProof,
+            SwarmProofLaneFindingSeverity::Unsafe,
+            "missing_expected_artifact",
+            "proof lane declares no expected artifacts",
+            "list at least one source, test, or evidence artifact the lane proves",
+        );
+    }
+    if covers.is_empty() || does_not_cover.is_empty() {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefuseUntilRemoteProof,
+            SwarmProofLaneFindingSeverity::Unsafe,
+            "missing_claim_scope",
+            "proof lane must include both covers and does_not_cover claims",
+            "separate the exact proof claim from surfaces this lane does not validate",
+        );
+    }
+    if proof_lane_needs_feature_scope(&request.command) && !proof_lane_has_feature_scope(request) {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefuseUntilRemoteProof,
+            SwarmProofLaneFindingSeverity::Unsafe,
+            "missing_feature_scope",
+            "Cargo proof command does not carry an explicit feature scope",
+            "add --features, --all-features, or --no-default-features and mirror it in features",
+        );
+    }
+    if request.remote_required {
+        if !proof_lane_command_requires_remote(&request.command) {
+            add_proof_lane_finding(
+                &mut findings,
+                &mut decision,
+                SwarmProofLaneDecision::RefuseUntilRemoteProof,
+                SwarmProofLaneFindingSeverity::Unsafe,
+                "missing_remote_requirement",
+                "remote-required proof command lacks RCH_REQUIRE_REMOTE=1 rch exec",
+                "rerun through RCH with RCH_REQUIRE_REMOTE=1 and capture the exact command",
+            );
+        }
+        if !remote_provenance_observed {
+            add_proof_lane_finding(
+                &mut findings,
+                &mut decision,
+                SwarmProofLaneDecision::RefuseUntilRemoteProof,
+                SwarmProofLaneFindingSeverity::Unsafe,
+                "missing_rch_provenance",
+                "remote-required proof lane has no observed remote worker provenance",
+                "capture remote worker id, observed head, target directory, and status",
+            );
+        }
+    }
+    if local_fallback_marker_detected && !request.local_fallback_authorized {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefuseUntilRemoteProof,
+            SwarmProofLaneFindingSeverity::Unsafe,
+            "local_fallback_marker",
+            "proof transcript or command shows local fallback without authorization",
+            "discard the result and rerun with remote-required RCH semantics",
+        );
+    }
+    if stale_head {
+        add_proof_lane_finding(
+            &mut findings,
+            &mut decision,
+            SwarmProofLaneDecision::RefreshStaleInputs,
+            SwarmProofLaneFindingSeverity::RefreshRequired,
+            "stale_head",
+            "expected and observed proof HEAD evidence do not match",
+            "refresh git state and rerun the proof lane against current main",
+        );
+    }
+    if let Some(provenance) = &request.rch_provenance {
+        if provenance.exit_status != Some(0) {
+            add_proof_lane_finding(
+                &mut findings,
+                &mut decision,
+                SwarmProofLaneDecision::RefuseUntilRemoteProof,
+                SwarmProofLaneFindingSeverity::Unsafe,
+                "proof_not_green",
+                "proof command did not report a successful exit status",
+                "surface the first blocker instead of treating the lane as green",
+            );
+        }
+        if !request.target_dir.trim().is_empty()
+            && !provenance.target_dir.trim().is_empty()
+            && provenance.target_dir != request.target_dir
+        {
+            add_proof_lane_finding(
+                &mut findings,
+                &mut decision,
+                SwarmProofLaneDecision::RefreshStaleInputs,
+                SwarmProofLaneFindingSeverity::RefreshRequired,
+                "stale_target_dir",
+                "remote provenance target directory differs from the requested target directory",
+                "rerun with the published target directory before reusing cache evidence",
+            );
+        }
+    }
+
+    let mut plan = SwarmProofLanePlan {
+        schema_version: SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION.to_string(),
+        lane_id: request.lane_id.clone(),
+        scenario_id: request.scenario_id.clone(),
+        command: request.command.clone(),
+        target_dir: request.target_dir.clone(),
+        features,
+        expected_artifacts,
+        timeout_secs: request.timeout_secs,
+        remote_required: request.remote_required,
+        fallback_policy,
+        decision,
+        batch_key: proof_lane_batch_key(request),
+        cache_key_fingerprint: proof_lane_cache_key(request),
+        stale_head,
+        missing_target_dir,
+        local_fallback_marker_detected,
+        remote_provenance_required,
+        remote_provenance_observed,
+        covers,
+        does_not_cover,
+        findings,
+        agent_mail_summary: String::new(),
+        mutates_external_state: false,
+        destructive_cleanup_required: false,
+        branch_or_worktree_required: false,
+    };
+    plan.agent_mail_summary = render_swarm_proof_lane_agent_mail_summary(&plan);
+    plan
+}
+
+/// Render a stable Agent Mail proof-lane handoff summary.
+#[must_use]
+pub fn render_swarm_proof_lane_agent_mail_summary(plan: &SwarmProofLanePlan) -> String {
+    let finding_codes = if plan.findings.is_empty() {
+        "none".to_string()
+    } else {
+        plan.findings
+            .iter()
+            .map(|finding| finding.code.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    vec![
+        format!("proof_lane: {}", plan.lane_id),
+        format!("schema_version: {}", plan.schema_version),
+        format!("scenario: {}", plan.scenario_id),
+        format!("decision: {:?}", plan.decision),
+        format!(
+            "remote_required={} remote_observed={} fallback={:?}",
+            plan.remote_required, plan.remote_provenance_observed, plan.fallback_policy
+        ),
+        format!("target_dir: {}", plan.target_dir),
+        format!("features: {}", plan.features.join(",")),
+        format!("covers: {}", plan.covers.join(",")),
+        format!("does_not_cover: {}", plan.does_not_cover.join(",")),
+        format!("findings: {finding_codes}"),
+        format!("command: {}", plan.command),
+    ]
+    .join("\n")
 }
 
 /// Verifies a compaction-safe handoff capsule without touching live services.
@@ -5029,6 +5453,144 @@ fn sorted_rch_events(scenario: &SwarmPressureScenario) -> Vec<SwarmRchWorkerEven
     let mut events = scenario.rch_worker_events.clone();
     events.sort_by_key(|event| (event.at_step, event.kind, event.worker_delta));
     events
+}
+
+fn sorted_unique_strings(values: &[String]) -> Vec<String> {
+    let mut sorted = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    sorted.sort();
+    sorted.dedup();
+    sorted
+}
+
+fn proof_lane_batch_key(request: &SwarmProofLaneRequest) -> String {
+    format!(
+        "target={};features={};surfaces={}",
+        if request.target_dir.trim().is_empty() {
+            "missing-target"
+        } else {
+            request.target_dir.trim()
+        },
+        sorted_unique_strings(&request.features).join("+"),
+        sorted_unique_strings(&request.touched_surfaces).join("+")
+    )
+}
+
+fn proof_lane_cache_key(request: &SwarmProofLaneRequest) -> String {
+    format!(
+        "head={};target={};features={};artifacts={};command={}",
+        request
+            .expected_head
+            .as_deref()
+            .or(request.observed_head.as_deref())
+            .unwrap_or("missing-head"),
+        if request.target_dir.trim().is_empty() {
+            "missing-target"
+        } else {
+            request.target_dir.trim()
+        },
+        sorted_unique_strings(&request.features).join("+"),
+        sorted_unique_strings(&request.expected_artifacts).join("+"),
+        request.command.trim()
+    )
+}
+
+fn proof_lane_local_fallback_marker_detected(request: &SwarmProofLaneRequest) -> bool {
+    std::iter::once(request.command.as_str())
+        .chain(
+            request
+                .transcript_markers
+                .iter()
+                .map(std::string::String::as_str),
+        )
+        .any(|text| {
+            let lower = text.to_ascii_lowercase();
+            lower.contains("[rch] local")
+                || lower.contains("local fallback")
+                || lower.contains("fallback to local")
+                || lower.contains("executing locally")
+                || lower.contains("rch_require_remote=0")
+        })
+}
+
+fn proof_lane_stale_head(request: &SwarmProofLaneRequest) -> bool {
+    let request_stale = request
+        .expected_head
+        .as_deref()
+        .zip(request.observed_head.as_deref())
+        .is_some_and(|(expected, observed)| {
+            !expected.trim().is_empty() && !observed.trim().is_empty() && expected != observed
+        });
+    let provenance_stale = request
+        .expected_head
+        .as_deref()
+        .zip(
+            request
+                .rch_provenance
+                .as_ref()
+                .map(|provenance| provenance.observed_head.as_str()),
+        )
+        .is_some_and(|(expected, observed)| {
+            !expected.trim().is_empty() && !observed.trim().is_empty() && expected != observed
+        });
+    request_stale || provenance_stale
+}
+
+fn proof_lane_needs_feature_scope(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    command.contains("cargo test")
+        || command.contains("cargo check")
+        || command.contains("cargo clippy")
+}
+
+fn proof_lane_has_feature_scope(request: &SwarmProofLaneRequest) -> bool {
+    !sorted_unique_strings(&request.features).is_empty()
+        && (request.command.contains("--features")
+            || request.command.contains("--all-features")
+            || request.command.contains("--no-default-features"))
+}
+
+fn proof_lane_command_requires_remote(command: &str) -> bool {
+    command.contains("RCH_REQUIRE_REMOTE=1") && command.contains("rch exec")
+}
+
+fn add_proof_lane_finding(
+    findings: &mut Vec<SwarmProofLaneFinding>,
+    decision: &mut SwarmProofLaneDecision,
+    candidate: SwarmProofLaneDecision,
+    severity: SwarmProofLaneFindingSeverity,
+    code: impl Into<String>,
+    detail: impl Into<String>,
+    action: impl Into<String>,
+) {
+    escalate_proof_lane_decision(decision, candidate);
+    findings.push(SwarmProofLaneFinding {
+        code: code.into(),
+        detail: detail.into(),
+        action: action.into(),
+        severity,
+    });
+}
+
+fn escalate_proof_lane_decision(
+    decision: &mut SwarmProofLaneDecision,
+    candidate: SwarmProofLaneDecision,
+) {
+    if proof_lane_decision_rank(candidate) > proof_lane_decision_rank(*decision) {
+        *decision = candidate;
+    }
+}
+
+const fn proof_lane_decision_rank(decision: SwarmProofLaneDecision) -> u8 {
+    match decision {
+        SwarmProofLaneDecision::Ready => 0,
+        SwarmProofLaneDecision::RefreshStaleInputs => 1,
+        SwarmProofLaneDecision::RefuseUntilRemoteProof => 2,
+    }
 }
 
 fn disk_pressure_at_step(
