@@ -154,8 +154,10 @@ fn rfc7541_c4_literal_without_indexing_new_name() {
 fn rfc7541_c4_literal_without_indexing_indexed_name() {
     let mut decoder = Decoder::new();
 
-    // From RFC 7541 Appendix C.4.2
-    let encoded = &[0x18, 0x08, 0x6e, 0x6f, 0x2d, 0x63, 0x61, 0x63, 0x68, 0x65];
+    // Static index 24 is encoded with a saturated 4-bit prefix plus continuation.
+    let encoded = &[
+        0x0f, 0x09, 0x08, 0x6e, 0x6f, 0x2d, 0x63, 0x61, 0x63, 0x68, 0x65,
+    ];
 
     let mut bytes = Bytes::copy_from_slice(encoded);
     let headers = decoder.decode(&mut bytes).expect("decode should succeed");
@@ -173,8 +175,8 @@ fn rfc7541_c4_literal_without_indexing_indexed_name() {
 fn rfc7541_c4_literal_without_indexing_indexed_name_huffman() {
     let mut decoder = Decoder::new();
 
-    // From RFC 7541 Appendix C.4.3
-    let encoded = &[0x18, 0x86, 0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf];
+    // Static index 24 is encoded with a saturated 4-bit prefix plus continuation.
+    let encoded = &[0x0f, 0x09, 0x86, 0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf];
 
     let mut bytes = Bytes::copy_from_slice(encoded);
     let headers = decoder.decode(&mut bytes).expect("decode should succeed");
@@ -214,8 +216,10 @@ fn rfc7541_c5_literal_never_indexed_new_name() {
 fn rfc7541_c5_literal_never_indexed_indexed_name() {
     let mut decoder = Decoder::new();
 
-    // From RFC 7541 Appendix C.5.2
-    let encoded = &[0x18, 0x08, 0x6e, 0x6f, 0x2d, 0x63, 0x61, 0x63, 0x68, 0x65];
+    // Static index 24 is encoded with a saturated 4-bit prefix plus continuation.
+    let encoded = &[
+        0x1f, 0x09, 0x08, 0x6e, 0x6f, 0x2d, 0x63, 0x61, 0x63, 0x68, 0x65,
+    ];
 
     let mut bytes = Bytes::copy_from_slice(encoded);
     let headers = decoder.decode(&mut bytes).expect("decode should succeed");
@@ -233,8 +237,8 @@ fn rfc7541_c5_literal_never_indexed_indexed_name() {
 fn rfc7541_c5_literal_never_indexed_indexed_name_huffman() {
     let mut decoder = Decoder::new();
 
-    // From RFC 7541 Appendix C.5.3
-    let encoded = &[0x18, 0x86, 0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf];
+    // Static index 24 is encoded with a saturated 4-bit prefix plus continuation.
+    let encoded = &[0x1f, 0x09, 0x86, 0xa8, 0xeb, 0x10, 0x64, 0x9c, 0xbf];
 
     let mut bytes = Bytes::copy_from_slice(encoded);
     let headers = decoder.decode(&mut bytes).expect("decode should succeed");
