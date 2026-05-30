@@ -177,6 +177,7 @@ fn test_query_execution_log_server_error() {
             message: "relation \"nonexistent_table\" does not exist".to_string(),
             detail: Some("The table name might be misspelled".to_string()),
             hint: Some("Check the spelling and case of the table name".to_string()),
+            diagnostic: Default::default(),
         }),
     };
 
@@ -199,6 +200,7 @@ fn test_query_execution_log_constraint_violation() {
                 .to_string(),
             detail: Some("Key (email)=(alice@example.com) already exists.".to_string()),
             hint: None,
+            diagnostic: Default::default(),
         }),
     };
 
@@ -247,6 +249,7 @@ fn test_query_execution_log_transaction_error() {
             message: "could not serialize access due to concurrent update".to_string(),
             detail: None,
             hint: Some("The transaction might succeed if retried.".to_string()),
+            diagnostic: Default::default(),
         }),
     };
 

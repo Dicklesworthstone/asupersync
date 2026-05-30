@@ -182,6 +182,7 @@ fn unwrap_pg<T>(out: Outcome<T, PgError>, log: &PgMigrationTestLogger, op: &str)
     }
 }
 
+#[allow(dead_code)]
 fn assert_user_cancelled<T, E>(outcome: Outcome<T, E>) {
     match outcome {
         Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
@@ -189,6 +190,7 @@ fn assert_user_cancelled<T, E>(outcome: Outcome<T, E>) {
     }
 }
 
+#[allow(dead_code)]
 fn cancelled_cx() -> Cx {
     let cx = Cx::for_testing();
     cx.cancel_fast(CancelKind::User);

@@ -380,6 +380,7 @@ mod tests {
                 message: message.to_string(),
                 detail: None,
                 hint: None,
+                diagnostic: Default::default(),
             }
         }
 
@@ -443,6 +444,7 @@ mod tests {
                 message: "relation does not exist".to_string(),
                 detail: Some("table \"missing\" not found".to_string()),
                 hint: Some("Create the table first.".to_string()),
+                diagnostic: Default::default(),
             };
             assert_eq!(err.code(), Some("42P01"));
             let display = format!("{err}");

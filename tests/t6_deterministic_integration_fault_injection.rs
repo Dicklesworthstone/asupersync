@@ -277,6 +277,7 @@ mod error_classification {
             message: "could not serialize".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(err.is_serialization_failure());
         assert!(err.is_transient());
@@ -295,6 +296,7 @@ mod error_classification {
             message: "deadlock detected".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(err.is_deadlock());
         assert!(err.is_transient()); // 40xxx is transient
@@ -309,6 +311,7 @@ mod error_classification {
             message: "duplicate key".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(err.is_unique_violation());
         assert!(err.is_constraint_violation());
@@ -325,6 +328,7 @@ mod error_classification {
                 message: "constraint".to_string(),
                 detail: None,
                 hint: None,
+                diagnostic: Default::default(),
             };
             assert!(
                 err.is_constraint_violation(),
@@ -341,6 +345,7 @@ mod error_classification {
             message: "connection does not exist".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(err.is_connection_error());
         assert!(err.is_transient()); // 08xxx is transient
@@ -374,6 +379,7 @@ mod error_classification {
             message: "insufficient resources".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(err.is_transient());
         assert!(err.is_retryable());
@@ -387,6 +393,7 @@ mod error_classification {
             message: "syntax error".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(!err.is_transient());
         assert!(!err.is_retryable());
@@ -620,6 +627,7 @@ mod cross_backend_equivalence {
             message: "serialization failure".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         let mysql = MySqlError::Server {
             code: 1213,
@@ -645,6 +653,7 @@ mod cross_backend_equivalence {
             message: "duplicate key value violates unique constraint".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         let mysql = MySqlError::Server {
             code: 1062,
@@ -710,6 +719,7 @@ mod cross_backend_equivalence {
             message: "unique".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         let mysql_constraint = MySqlError::Server {
             code: 1062,
@@ -728,6 +738,7 @@ mod cross_backend_equivalence {
             message: "syntax error".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(!pg_syntax.is_retryable());
     }
@@ -795,6 +806,7 @@ mod transaction_retry_eligibility {
             message: "serialization failure".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(retryable.is_serialization_failure());
 
@@ -804,6 +816,7 @@ mod transaction_retry_eligibility {
             message: "duplicate".to_string(),
             detail: None,
             hint: None,
+            diagnostic: Default::default(),
         };
         assert!(!not_retryable.is_serialization_failure());
     }
