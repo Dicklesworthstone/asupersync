@@ -158,7 +158,6 @@ def main() -> int:
         baseline_source = args.history_dir
 
     metric = args.metric
-    per_bench_thr = args.per_bench_max_regression_pct / 100.0
 
     scored: list[dict] = []
     blocked: list[dict] = []

@@ -475,9 +475,12 @@ impl ObligationLedger {
     /// br-asupersync-qyf37e / -u1gcfp / -12cqs2 and gauntlet finding CONF-001.
     ///
     /// Tokens captured across the region boundary (e.g. in a Drop impl
-    /// outside the scope) that arrive after this point are rejected
-    /// with a clear error instead of silently mutating an
-    /// already-finalized region's audit trail — once wiring lands.
+    /// outside the scope) that arrive after `mark_region_finalized` are
+    /// fenced off: [`Self::try_commit`] / [`Self::try_abort`] return
+    /// [`LedgerError::RegionFinalized`], and the infallible
+    /// [`Self::commit`] / [`Self::abort`] / [`Self::abort_by_id`] fail
+    /// closed (no mutation, return `0`) instead of silently mutating an
+    /// already-finalized region's audit trail.
     pub fn mark_region_finalized(&mut self, region: RegionId) {
         self.finalized_regions.insert(region);
     }
