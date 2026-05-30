@@ -6,7 +6,8 @@
 use asupersync::{
     cx::Cx,
     sync::{AcquireError, Barrier, BarrierWaitError, LockError, Mutex, Semaphore},
-    types::{CancelKind, Time},
+    types::{Budget, CancelKind, RegionId, TaskId, Time},
+    util::ArenaIndex,
 };
 use std::sync::{
     Arc,
@@ -29,6 +30,9 @@ use std::sync::{
 #[cfg(test)]
 mod conformance_tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     /// Conformance test case for structured verification.
     #[derive(Debug)]
@@ -63,6 +67,26 @@ mod conformance_tests {
         let cx = Cx::for_testing();
         cx.cancel_fast(CancelKind::User);
         cx
+    }
+
+    fn non_root_test_cx() -> Cx {
+        Cx::new(
+            RegionId::from_arena(ArenaIndex::new(1, 0)),
+            TaskId::from_arena(ArenaIndex::new(1, 1)),
+            Budget::INFINITE,
+        )
+    }
+
+    fn poll_once<T, F>(future: &mut F) -> Option<T>
+    where
+        F: Future<Output = T> + Unpin,
+    {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(future).poll(&mut context) {
+            Poll::Ready(value) => Some(value),
+            Poll::Pending => None,
+        }
     }
 
     /// MUTEX CONFORMANCE TESTS
@@ -328,17 +352,41 @@ mod conformance_tests {
     #[tokio::test]
     async fn future_completion_state_enforcement() {
         // REQUIREMENT: PolledAfterCompletion errors for all primitives
-        // This is tricky to test directly since it requires polling completed futures
-        // In practice, this would be caught by the async runtime or through
-        // careful future implementation testing
+        let cx = non_root_test_cx();
 
-        // For now, we verify that the error types exist and can be created
-        let _mutex_error = LockError::PolledAfterCompletion;
-        let _semaphore_error = AcquireError::PolledAfterCompletion;
-        let _barrier_error = BarrierWaitError::PolledAfterCompletion;
+        let mutex = Mutex::new(42);
+        let mut lock_future = mutex.lock(&cx);
+        let guard = poll_once(&mut lock_future)
+            .expect("uncontended mutex lock should complete")
+            .expect("mutex lock should succeed");
+        assert_eq!(*guard, 42);
+        assert!(matches!(
+            poll_once(&mut lock_future),
+            Some(Err(LockError::PolledAfterCompletion))
+        ));
+        drop(guard);
 
-        // TODO: Add actual polling-after-completion tests when we have
-        // infrastructure to manually drive futures
+        let semaphore = Semaphore::new(1);
+        let mut acquire_future = semaphore.acquire(&cx, 1);
+        let permit = poll_once(&mut acquire_future)
+            .expect("available semaphore permit should complete")
+            .expect("semaphore acquire should succeed");
+        assert!(matches!(
+            poll_once(&mut acquire_future),
+            Some(Err(AcquireError::PolledAfterCompletion))
+        ));
+        drop(permit);
+
+        let barrier = Barrier::new(1);
+        let mut wait_future = barrier.wait(&cx);
+        let result = poll_once(&mut wait_future)
+            .expect("single-party barrier should complete")
+            .expect("barrier wait should succeed");
+        assert!(result.is_leader());
+        assert!(matches!(
+            poll_once(&mut wait_future),
+            Some(Err(BarrierWaitError::PolledAfterCompletion))
+        ));
     }
 
     #[tokio::test]
