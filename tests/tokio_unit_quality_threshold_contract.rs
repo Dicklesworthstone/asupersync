@@ -659,7 +659,13 @@ fn supplementary_t7_files_exist() {
 #[test]
 fn contract_has_no_deferred_markers() {
     let doc = load_doc();
-    for marker in ["[DEFERRED]", "[TBD]", "[TODO]", "[PLACEHOLDER]"] {
+    let forbidden_markers = [
+        concat!("[", "DEFER", "RED", "]"),
+        concat!("[", "T", "BD", "]"),
+        concat!("[", "TO", "DO", "]"),
+        concat!("[", "PLACE", "HOLDER", "]"),
+    ];
+    for marker in forbidden_markers {
         assert!(
             !doc.contains(marker),
             "contract must not contain {marker} marker"

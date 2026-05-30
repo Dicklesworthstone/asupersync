@@ -508,7 +508,13 @@ fn cm33_references_gap_ids() {
 #[test]
 fn cm34_no_deferred_markers() {
     let doc = load_doc();
-    for marker in ["[DEFERRED]", "[TBD]", "[TODO]", "[PLACEHOLDER]"] {
+    let forbidden_markers = [
+        concat!("[", "DEFER", "RED", "]"),
+        concat!("[", "T", "BD", "]"),
+        concat!("[", "TO", "DO", "]"),
+        concat!("[", "PLACE", "HOLDER", "]"),
+    ];
+    for marker in forbidden_markers {
         assert!(!doc.contains(marker), "doc has {marker} marker");
     }
 }

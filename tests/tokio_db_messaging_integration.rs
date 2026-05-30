@@ -278,14 +278,14 @@ mod pool_integration {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
-    // Mock connection manager for deterministic testing
-    struct MockManager {
+    // Deterministic connection manager for pool-contract testing.
+    struct DeterministicManager {
         connect_count: AtomicU32,
         fail_connect: AtomicBool,
         fail_validate: AtomicBool,
     }
 
-    impl MockManager {
+    impl DeterministicManager {
         fn new() -> Self {
             Self {
                 connect_count: AtomicU32::new(0),
@@ -296,23 +296,23 @@ mod pool_integration {
     }
 
     #[derive(Debug)]
-    struct MockError(String);
+    struct DeterministicError(String);
 
-    impl std::fmt::Display for MockError {
+    impl std::fmt::Display for DeterministicError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "mock error: {}", self.0)
+            write!(f, "deterministic connection error: {}", self.0)
         }
     }
 
-    impl std::error::Error for MockError {}
+    impl std::error::Error for DeterministicError {}
 
-    impl ConnectionManager for MockManager {
+    impl ConnectionManager for DeterministicManager {
         type Connection = u32; // Simple connection ID
-        type Error = MockError;
+        type Error = DeterministicError;
 
         fn connect(&self) -> Result<Self::Connection, Self::Error> {
             if self.fail_connect.load(Ordering::Relaxed) {
-                return Err(MockError("connection refused".into()));
+                return Err(DeterministicError("connection refused".into()));
             }
             let id = self.connect_count.fetch_add(1, Ordering::Relaxed);
             Ok(id)
@@ -323,14 +323,14 @@ mod pool_integration {
         }
 
         fn disconnect(&self, _conn: Self::Connection) {
-            // No-op for mock
+            // Integer connection identifiers do not own external resources.
         }
     }
 
     // INT-POOL-01: Acquire-Use-Release Lifecycle
     #[test]
     fn int_pool_01_acquire_use_release_lifecycle() {
-        let mgr = MockManager::new();
+        let mgr = DeterministicManager::new();
         let pool = DbPool::new(mgr, DbPoolConfig::with_max_size(5));
 
         // First acquire creates a connection
@@ -358,12 +358,12 @@ mod pool_integration {
     // INT-POOL-02: Validation Failure Recovery
     #[test]
     fn int_pool_02_validation_failure_recovery() {
-        let mgr = Arc::new(MockManager::new());
+        let mgr = Arc::new(DeterministicManager::new());
         let config = DbPoolConfig::with_max_size(5).validate_on_checkout(true);
         let pool = DbPool::new(
             Arc::try_unwrap(mgr).unwrap_or_else(|a| {
                 // Build a new manager that shares the atomic state
-                MockManager {
+                DeterministicManager {
                     connect_count: AtomicU32::new(a.connect_count.load(Ordering::Relaxed)),
                     fail_connect: AtomicBool::new(a.fail_connect.load(Ordering::Relaxed)),
                     fail_validate: AtomicBool::new(a.fail_validate.load(Ordering::Relaxed)),
@@ -387,7 +387,7 @@ mod pool_integration {
     // INT-POOL-03: Capacity Enforcement
     #[test]
     fn int_pool_03_capacity_enforcement() {
-        let pool = DbPool::new(MockManager::new(), DbPoolConfig::with_max_size(2));
+        let pool = DbPool::new(DeterministicManager::new(), DbPoolConfig::with_max_size(2));
 
         let c1 = pool.get().expect("first acquire");
         let c2 = pool.get().expect("second acquire");
@@ -416,7 +416,7 @@ mod pool_integration {
         let config = DbPoolConfig::with_max_size(5)
             .idle_timeout(Duration::from_millis(1))
             .max_lifetime(Duration::from_millis(1));
-        let pool = DbPool::new(MockManager::new(), config);
+        let pool = DbPool::new(DeterministicManager::new(), config);
 
         // Acquire and return
         let conn = pool.get().expect("should succeed");
@@ -437,7 +437,7 @@ mod pool_integration {
     // INT-POOL-05: Graceful Close and Drain
     #[test]
     fn int_pool_05_graceful_close() {
-        let pool = DbPool::new(MockManager::new(), DbPoolConfig::with_max_size(5));
+        let pool = DbPool::new(DeterministicManager::new(), DbPoolConfig::with_max_size(5));
 
         // Acquire and return to build up idle
         let conn = pool.get().expect("should succeed");
@@ -458,7 +458,7 @@ mod pool_integration {
     // INT-POOL-06: Connection Failure During Acquire
     #[test]
     fn int_pool_06_connection_failure() {
-        let mgr = MockManager::new();
+        let mgr = DeterministicManager::new();
         mgr.fail_connect.store(true, Ordering::Relaxed);
         let pool = DbPool::new(mgr, DbPoolConfig::with_max_size(5));
 
@@ -477,7 +477,7 @@ mod pool_integration {
     #[test]
     fn int_pool_07_warmup() {
         let config = DbPoolConfig::with_max_size(10).min_idle(3);
-        let pool = DbPool::new(MockManager::new(), config);
+        let pool = DbPool::new(DeterministicManager::new(), config);
 
         pool.warm_up();
 

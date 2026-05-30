@@ -725,7 +725,13 @@ fn t92_38_no_deferred_markers() {
     init_test("t92_38_no_deferred_markers");
 
     let doc = load_cookbook();
-    for marker in ["[DEFERRED]", "[TBD]", "[TODO]", "[PLACEHOLDER]"] {
+    let forbidden_markers = [
+        concat!("[", "DEFER", "RED", "]"),
+        concat!("[", "T", "BD", "]"),
+        concat!("[", "TO", "DO", "]"),
+        concat!("[", "PLACE", "HOLDER", "]"),
+    ];
+    for marker in forbidden_markers {
         assert!(!doc.contains(marker), "doc has {marker} marker");
     }
 

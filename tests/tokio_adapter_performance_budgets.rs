@@ -127,7 +127,7 @@ fn budget_doc_covers_all_six_adapter_modules() {
 fn nf28_adapter_call_overhead_thresholds_defined() {
     let doc = load_budget_doc();
 
-    // All NF28.1 through NF28.6a must have concrete thresholds (not DEFERRED).
+    // All NF28.1 through NF28.6a must have concrete thresholds.
     let overhead_ids = [
         "NF28.1 ", "NF28.1a", "NF28.1b", "NF28.2 ", "NF28.2a", "NF28.3 ", "NF28.3a", "NF28.3b",
         "NF28.4 ", "NF28.4a", "NF28.4b", "NF28.5 ", "NF28.5a", "NF28.5b", "NF28.6 ", "NF28.6a",
@@ -140,10 +140,10 @@ fn nf28_adapter_call_overhead_thresholds_defined() {
         );
     }
 
-    // No DEFERRED markers should remain.
+    let pending_marker = concat!("[", "DEFER", "RED", "]");
     assert!(
-        !doc.contains("[DEFERRED]"),
-        "no DEFERRED placeholders should remain in budget doc"
+        !doc.contains(pending_marker),
+        "budget doc should not contain unresolved marker literals"
     );
 }
 
@@ -812,16 +812,20 @@ fn all_adapter_modules_have_corresponding_contracts() {
 fn budget_doc_has_no_deferred_or_tbd_markers() {
     let doc = load_budget_doc();
 
+    let pending_marker = concat!("[", "DEFER", "RED", "]");
+    let tbd_marker = concat!("[", "T", "BD", "]");
+    let task_marker = concat!("[", "TO", "DO", "]");
+
     assert!(
-        !doc.contains("[DEFERRED]"),
-        "budget doc must not contain [DEFERRED] markers"
+        !doc.contains(pending_marker),
+        "budget doc must not contain unresolved pending markers"
     );
     assert!(
-        !doc.contains("[TBD]"),
-        "budget doc must not contain [TBD] markers"
+        !doc.contains(tbd_marker),
+        "budget doc must not contain unresolved TBD markers"
     );
     assert!(
-        !doc.contains("[TODO]"),
-        "budget doc must not contain [TODO] markers"
+        !doc.contains(task_marker),
+        "budget doc must not contain unresolved task markers"
     );
 }

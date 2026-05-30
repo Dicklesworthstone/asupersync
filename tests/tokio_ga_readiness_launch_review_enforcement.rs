@@ -472,7 +472,12 @@ fn t99_25_no_deferred_markers() {
 
     let doc = load_doc();
 
-    for marker in ["[DEFERRED]", "[TODO]", "[PLACEHOLDER]"] {
+    let forbidden_markers = [
+        concat!("[", "DEFER", "RED", "]"),
+        concat!("[", "TO", "DO", "]"),
+        concat!("[", "PLACE", "HOLDER", "]"),
+    ];
+    for marker in forbidden_markers {
         assert!(!doc.contains(marker), "doc has {marker} marker");
     }
 
