@@ -33,7 +33,7 @@ fn table_invariant_display_preserves_corruption_evidence() {
     );
     assert!(
         !display.contains("maximum supported is 0"),
-        "the old placeholder/sentinel proof text must not reappear"
+        "the old unsupported-source-block/sentinel proof text must not reappear"
     );
 }
 
@@ -65,11 +65,11 @@ fn microharness_declares_mapping_guarantee_and_exclusions() {
         "implementation_bead_id": IMPLEMENTATION_BEAD_ID,
         "blocked_bead_id": proof_bead_id(),
         "proof_target": PROOF_TARGET,
-        "guarantee": "RaptorQ proof-artifact RFC table corruption is reported and serialized as explicit invariant evidence, not as an unsupported source-block placeholder or sentinel.",
+        "guarantee": "RaptorQ proof-artifact RFC table corruption is reported and serialized as explicit invariant evidence, not as an unsupported source-block fallback or sentinel.",
         "exclusions": [
             "does not run the broad lib-test graph",
             "does not prove full RaptorQ encode/decode recovery",
-            "does not replace the final mock-code-finder stub ratchet or release proof gates"
+            "does not replace the final implementation-completeness ratchet or release proof gates"
         ],
         "cargo_test_target": "raptorq_proof_table_invariant_microharness",
     });

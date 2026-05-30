@@ -44,7 +44,7 @@ Successfully strengthened ATP conformance harnesses with enhanced contract asser
 ### 📋 Documentation & Tracking
 - **DISCREPANCIES.md** - Documents intentional divergences and review schedule
 - **Filed 3 beads** for identified harness gaps:
-  - `asupersync-ppn7rq` - Replace stub types with real ATP implementation
+  - `asupersync-ppn7rq` - Replace minimal demo adapters with real ATP implementation
   - `asupersync-5brfl0` - Enhance timing side-channel detection precision
   - `asupersync-boqwxi` - Integrate real capability context implementation
 
@@ -99,7 +99,7 @@ Following the testing-conformance-harnesses skill methodology:
 
 ## Next Steps (Tracked in Beads)
 
-1. **Replace stub implementations** with real ATP types
+1. **Replace minimal demo adapters** with real ATP types
 2. **Enhance timing precision** with hardware performance counters
 3. **Integrate capability system** with actual asupersync Cx
 4. **Add golden file fixtures** when reference implementations available

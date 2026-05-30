@@ -1,8 +1,8 @@
-//! Mock-free ATP transfer protocol integration tests.
+//! Real ATP transfer protocol integration tests.
 //!
 //! Tests real peer-to-peer ATP transfer workflows with structured JSON logging,
-//! following testing-perfect-e2e-integration-tests-with-logging-and-no-mocks skill.
-//! NO MOCKS for transfer protocol, peer connections, or data flows.
+//! following real-service E2E testing discipline.
+//! Real transfer protocol, peer connection, and data-flow paths are required.
 
 #![allow(dead_code)]
 

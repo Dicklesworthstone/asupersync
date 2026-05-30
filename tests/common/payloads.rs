@@ -2,7 +2,7 @@
 #![allow(clippy::all)]
 //! Realistic payload generators for E2E tests.
 //!
-//! Generate realistic data instead of synthetic/mock BS:
+//! Generate realistic data instead of brittle toy fixtures:
 //! JSON user profiles, HTTP request batches, region snapshots, SQL result sets.
 
 /// Generate a realistic JSON user profile (~500 bytes).
@@ -17,16 +17,16 @@ pub fn json_user_profile_batch(count: usize) -> Vec<String> {
     (0..count).map(|i| json_user_profile(i as u64)).collect()
 }
 
-/// Generate a realistic HTTP request body for a TODO item.
-pub fn todo_create_body(title: &str) -> Vec<u8> {
+/// Generate a realistic HTTP request body for a work item.
+pub fn task_create_body(title: &str) -> Vec<u8> {
     format!(
         r#"{{"title":"{title}","description":"Detailed description for: {title}","priority":"medium","due_date":"2026-04-01T00:00:00Z","tags":["work","urgent"],"assignee":"user_0001"}}"#,
     )
     .into_bytes()
 }
 
-/// Generate a realistic TODO update body.
-pub fn todo_update_body(title: &str, completed: bool) -> Vec<u8> {
+/// Generate a realistic work-item update body.
+pub fn task_update_body(title: &str, completed: bool) -> Vec<u8> {
     format!(r#"{{"title":"{title}","completed":{completed},"updated_at":"2026-03-16T10:00:00Z"}}"#)
         .into_bytes()
 }

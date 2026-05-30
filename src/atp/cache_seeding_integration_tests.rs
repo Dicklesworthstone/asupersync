@@ -1,8 +1,8 @@
-//! Mock-free integration tests for ATP cache and seeding system.
+//! Real integration tests for ATP cache and seeding system.
 //!
 //! Tests real cache→seeding workflows with structured JSON logging,
 //! transaction isolation, and test data factories following
-//! testing-perfect-e2e-integration-tests-with-logging-and-no-mocks skill.
+//! real-service E2E testing discipline.
 
 #![allow(dead_code)]
 

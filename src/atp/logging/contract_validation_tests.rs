@@ -658,33 +658,55 @@ fn test_cross_subsystem_correlation() {
 
 // Helper functions for the test module
 
-/// Apply redaction policy to an event (mock implementation for testing).
+/// Apply the ATP event redaction policy used by the contract tests.
 fn apply_redaction_policy(event: &AtpEvent) -> AtpEvent {
     let mut redacted_event = event.clone();
     let mut redacted_fields = Vec::new();
 
-    // Mock redaction logic - check for sensitive field patterns
     let sensitive_patterns = get_sensitive_field_patterns();
-    let data_str = event.data.to_string();
-
-    for pattern in sensitive_patterns {
-        if data_str.contains(pattern) {
-            redacted_fields.push(pattern.to_string());
-        }
-    }
-
+    redact_sensitive_value(
+        &mut redacted_event.data,
+        &sensitive_patterns,
+        &mut redacted_fields,
+    );
+    redacted_fields.sort();
+    redacted_fields.dedup();
+    redacted_fields.truncate(100);
     redacted_event.redacted_fields = redacted_fields;
+    redacted_event
+}
 
-    // Replace sensitive data with redacted markers
-    if let Value::Object(ref mut map) = redacted_event.data {
-        for key in map.keys().cloned().collect::<Vec<_>>() {
-            if get_sensitive_field_patterns().contains(&key.as_str()) {
-                map.insert(key, Value::String("[REDACTED]".to_string()));
+fn redact_sensitive_value(
+    value: &mut Value,
+    sensitive_patterns: &[&'static str],
+    redacted_fields: &mut Vec<String>,
+) {
+    match value {
+        Value::Object(map) => {
+            let keys = map.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                if is_sensitive_field(&key, sensitive_patterns) {
+                    redacted_fields.push(key.clone());
+                    map.insert(key, Value::String("[REDACTED]".to_string()));
+                } else if let Some(child) = map.get_mut(&key) {
+                    redact_sensitive_value(child, sensitive_patterns, redacted_fields);
+                }
             }
         }
+        Value::Array(items) => {
+            for item in items {
+                redact_sensitive_value(item, sensitive_patterns, redacted_fields);
+            }
+        }
+        _ => {}
     }
+}
 
-    redacted_event
+fn is_sensitive_field(key: &str, sensitive_patterns: &[&'static str]) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    sensitive_patterns
+        .iter()
+        .any(|pattern| normalized == *pattern || normalized.contains(pattern))
 }
 
 /// Get list of sensitive field patterns for redaction.

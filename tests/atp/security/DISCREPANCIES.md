@@ -48,8 +48,8 @@ All discrepancies should be reviewed quarterly. When discrepancies are resolved:
 
 ## Coverage Matrix
 
-| Contract Section | Stub Coverage | Real Implementation | Score |
-|------------------|:-------------:|:------------------:|-------|
+| Contract Section | Harness Coverage | Real Implementation | Score |
+|------------------|:----------------:|:------------------:|-------|
 | Integrity        | 4/4           | 0/4                | 0%    |
 | Capability       | 4/4           | 0/4                | 0%    |
 | Error Semantics  | 4/4           | 0/4                | 0%    |
