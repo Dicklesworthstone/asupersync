@@ -195,8 +195,10 @@ impl ObligationInvariantHarness {
             if test.is_negative_test() {
                 // Negative test should detect expected violations
                 let expected = test.expected_violations();
-                let detected_types: Vec<_> = post_violations
+                let detected_types: Vec<_> = result
+                    .violations
                     .iter()
+                    .chain(post_violations.iter())
                     .map(|v| v.violation_type.clone())
                     .collect();
 

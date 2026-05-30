@@ -395,9 +395,11 @@ impl ObligationInvariantTest for ErrorPathCleanupTest {
                 metrics.obligations_created += 1;
 
                 if i % 3 == 0 {
-                    // Simulate error - obligation gets cancelled instead of resolved
+                    // Simulate error: cancellation requests still need final drain/finalize.
                     ctx.tracker.track_obligation_cancellation(obligation_id);
+                    ctx.tracker.track_obligation_resolution(obligation_id);
                     metrics.cancellation_events += 1;
+                    metrics.obligations_resolved += 1;
                 } else {
                     // Normal resolution
                     ctx.tracker.track_obligation_resolution(obligation_id);
