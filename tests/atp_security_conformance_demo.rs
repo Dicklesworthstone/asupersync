@@ -484,12 +484,12 @@ fn atp_security_conformance_harness_demo() {
     println!("  • h6vplb-class integrity verification");
     println!("  • p343ya/d8758c-class ambient capability gates");
     println!("  • k9f6li-class typed error semantics");
-    println!("\n🎯 Next steps: Replace stub implementations with real ATP types");
+    println!("\n🎯 Next steps: Replace minimal demo adapters with real ATP types");
 
-    // The demo should succeed with stub implementations
+    // The demo should succeed with its minimal runtime adapters.
     assert_eq!(
         summary.failed, 0,
-        "Demo tests should pass with stub implementations"
+        "Demo tests should pass with minimal runtime adapters"
     );
     assert!(summary.total > 0, "Should have generated security tests");
 

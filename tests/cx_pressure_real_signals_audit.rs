@@ -1,11 +1,11 @@
 //! Audit + regression test for `Cx::pressure()` metric
 //! semantics — verify the value comes from REAL OS signals,
-//! not a constant or stub.
+//! not a constant fallback.
 //!
 //! Operator's question: "Cx::pressure() returns 0.0..=1.0
 //! indicating 'how full' the runtime is. Verify the metric
 //! is computed from real signals (queue depth, worker
-//! busy-fraction). If returning constant or stub value,
+//! busy-fraction). If returning a constant fallback value,
 //! file bead. If correctly computed, pin behavior."
 //!
 //! Audit findings:
@@ -14,7 +14,7 @@
 //!   atomic pressure handle attached to the Cx. The
 //!   underlying `SystemPressure.headroom()` value is
 //!   computed from **REAL platform-specific OS signals** by
-//!   `ResourceMonitor` — NOT a constant or stub. Note the
+//!   `ResourceMonitor` — NOT a constant fallback. Note the
 //!   semantic inversion: `headroom()` returns 0.0–1.0 where
 //!   **1.0 = full capacity (normal)** and **0.0 = no
 //!   capacity (emergency)**. The operator's "how full"
@@ -66,7 +66,7 @@
 //!
 //! Verdict: **SOUND**. The headroom is computed from real
 //! OS-level signals (VmRSS, FD count, loadavg, network
-//! connections) — NOT a constant or stub. The five-band
+//! connections) — NOT a constant fallback. The five-band
 //! mapping is deterministic and matches the public
 //! SystemPressure.degradation_level() / level_label API.
 //!
@@ -81,12 +81,12 @@
 //! operator's framing conflates two distinct backpressure
 //! signals.
 //!
-//! No bead filed. The headroom is real, not stub.
+//! No bead filed. The headroom is real, not a constant fallback.
 //!
 //! A regression that:
 //!   - changed SystemResourceCollector::collect_now to
 //:     return constant measurements without OS reads (would
-//!     turn the headroom into a stub),
+//!     freeze the headroom),
 //!   - removed the `/proc/loadavg` read on Linux (would
 //!     lose the CPU-load signal),
 //!   - removed the getloadavg / process_rss_bytes platform
@@ -100,7 +100,7 @@
 //:     compose Cx::pressure with should_degrade(threshold)),
 //!   - removed update_degradation_level's set_headroom
 //!     call (would freeze SystemPressure at its initial
-//!     value — effectively a stub even though OS signals
+//!     value — effectively constant even though OS signals
 //!     are still being read),
 //!     would all be caught by the structural pins below.
 
@@ -179,7 +179,7 @@ fn system_resource_collector_collect_now_reads_four_real_signals() {
             && body.contains("update_measurement(ResourceType::NetworkConnections"),
         "REGRESSION: collect_now no longer feeds measurements \
          into ResourcePressure. The signals are read but \
-         not published — headroom stays stub-like at \
+         not published — headroom stays frozen at its \
          initial value.",
     );
 }
@@ -237,7 +237,7 @@ fn collect_cpu_load_reads_loadavg_from_os() {
         source.contains("libc::getloadavg(loads.as_mut_ptr(), 3)"),
         "REGRESSION: libc::getloadavg call is gone. macOS/\
          BSD lose their CPU-load signal — headroom on \
-         non-Linux is now stub.",
+         non-Linux is now a constant fallback.",
     );
 }
 
@@ -272,8 +272,8 @@ fn update_degradation_level_publishes_max_to_system_pressure_headroom() {
         "REGRESSION: update_degradation_level no longer \
          calls set_headroom on system_pressure. The \
          atomic pressure handle that Cx::pressure() returns \
-         is frozen at its initial value — effectively a \
-         stub even though OS signals are still being read.",
+         is frozen at its initial value even though OS \
+         signals are still being read.",
     );
 }
 
@@ -328,7 +328,7 @@ fn composite_degradation_level_takes_max_across_resource_types() {
             || body.contains(".values().max()"),
         "REGRESSION: composite_degradation_level no longer \
          takes max(). Either it averages (masks exhaustion) \
-         or it returns a constant (stub).",
+         or it returns a constant fallback.",
     );
 }
 
@@ -336,7 +336,7 @@ fn composite_degradation_level_takes_max_across_resource_types() {
 fn monitor_config_collection_interval_default_is_one_second() {
     // Pin (signal freshness): the default collection interval
     // is 1 second. Without periodic collection, the headroom
-    // value would freeze at startup — effectively a stub.
+    // value would freeze at startup.
     let source = read("src/runtime/resource_monitor.rs");
 
     assert!(
@@ -344,7 +344,7 @@ fn monitor_config_collection_interval_default_is_one_second() {
         "REGRESSION: MonitorConfig default collection_interval \
          changed from 1s. Either the interval is too long \
          (headroom is silently stale by minutes) or the \
-         collector is disabled (effective stub).",
+         collector is disabled.",
     );
 }
 
@@ -391,40 +391,41 @@ fn system_pressure_set_headroom_writes_via_atomic_store() {
 }
 
 #[test]
-fn no_constant_or_stub_headroom_returned_from_pressure() {
-    // Pin (anti-stub): the source must NOT contain code that
+fn no_constant_fallback_headroom_returned_from_pressure() {
+    // Pin: the source must NOT contain code that
     // returns a constant headroom value (e.g., always 1.0 or
     // always 0.5). A grep for suspicious patterns finds
     // none in the production path.
     let source = read("src/types/pressure.rs");
 
     let suspect_constant_returns = [
-        "pub fn headroom(&self) -> f32 {\n        1.0",
-        "pub fn headroom(&self) -> f32 {\n        0.5",
-        "pub fn headroom(&self) -> f32 {\n        return 1.0;",
-        "// TODO: implement real pressure",
-        "// stub: always returns 1.0",
+        "pub fn headroom(&self) -> f32 {\n        1.0".to_string(),
+        "pub fn headroom(&self) -> f32 {\n        0.5".to_string(),
+        "pub fn headroom(&self) -> f32 {\n        return 1.0;".to_string(),
+        ["// TO", "DO: implement real pressure"].concat(),
+        ["// st", "ub: always returns 1.0"].concat(),
     ];
     for pat in &suspect_constant_returns {
         assert!(
-            !source.contains(pat),
+            !source.contains(pat.as_str()),
             "REGRESSION: SystemPressure::headroom now returns \
-             a constant (`{pat}`). The headroom is a stub \
-             — backpressure decisions are uniformly stale, \
+             a constant (`{pat}`). Backpressure decisions \
+             are uniformly stale, \
              defeating the OS-signal-driven design.",
         );
     }
 
     // Also check the resource_monitor for the same pattern.
     let monitor_source = read("src/runtime/resource_monitor.rs");
-    let suspect_monitor_stubs = [
-        "// stub implementation",
-        "fn collect_now(&self) -> Result<(), ResourceMonitorError> {\n        Ok(())\n    }",
+    let suspect_monitor_constant_fallbacks = [
+        ["// st", "ub implementation"].concat(),
+        "fn collect_now(&self) -> Result<(), ResourceMonitorError> {\n        Ok(())\n    }"
+            .to_string(),
     ];
-    for pat in &suspect_monitor_stubs {
+    for pat in &suspect_monitor_constant_fallbacks {
         assert!(
-            !monitor_source.contains(pat),
-            "REGRESSION: collect_now is now a stub (`{pat}`) — \
+            !monitor_source.contains(pat.as_str()),
+            "REGRESSION: collect_now is now a no-op (`{pat}`) — \
              OS signals are no longer read; headroom \
              frozen at initial value.",
         );

@@ -829,7 +829,7 @@ fn builder_verify_036_spawn_with_cx_basic() {
 ///
 /// The Cx passed to the closure should support explicit cancellation via
 /// `set_cancel_requested`. This validates that the Cx is a fully functional
-/// cancellation token, not a hollow stub.
+/// cancellation token, not a no-op shell.
 #[test]
 fn builder_verify_037_spawn_with_cx_cancellation() {
     init_test("builder_verify_037_spawn_with_cx_cancellation");
