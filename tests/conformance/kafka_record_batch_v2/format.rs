@@ -344,7 +344,7 @@ impl RecordBatchV2 {
         // Skip CRC for now - we'll calculate it later
         let crc_pos = buffer.len();
         buffer.extend_from_slice(&0u32.to_be_bytes()); // Reserved for CRC backpatch
-        buffer.push(self.attributes.as_u8());
+        buffer.extend_from_slice(&(self.attributes.as_u8() as i16).to_be_bytes());
         buffer.extend_from_slice(&self.last_offset_delta.to_be_bytes());
         buffer.extend_from_slice(&self.base_timestamp.to_be_bytes());
         buffer.extend_from_slice(&self.max_timestamp.to_be_bytes());
@@ -389,7 +389,9 @@ impl RecordBatchV2 {
         }
 
         let stored_crc = read_u32(&mut cursor)?;
-        let attributes = RecordAttribute::from_u8(read_u8(&mut cursor)?);
+        let crc_start = cursor.position() as usize;
+        let attributes_raw = read_i16(&mut cursor)? as u16;
+        let attributes = RecordAttribute::from_u8((attributes_raw & 0x00ff) as u8);
         let last_offset_delta = read_i32(&mut cursor)?;
         let base_timestamp = read_i64(&mut cursor)?;
         let max_timestamp = read_i64(&mut cursor)?;
@@ -398,8 +400,7 @@ impl RecordBatchV2 {
         let base_sequence = read_i32(&mut cursor)?;
         let record_count = read_i32(&mut cursor)?;
 
-        // Verify CRC
-        let crc_start = cursor.position() as usize;
+        // Verify CRC over all bytes after the CRC field, starting at attributes.
         let crc_data = &data[crc_start..];
         let calculated_crc = crc32fast::hash(crc_data);
         if stored_crc != calculated_crc {
@@ -440,6 +441,7 @@ fn encode_record(record: &RecordV2, buffer: &mut Vec<u8>) {
     let record_start = buffer.len();
 
     // Reserve length field for backpatch after encoding the record body
+    let reserved_length_bytes = varint_size(0);
     encode_varint(0, buffer);
 
     buffer.push(record.attributes.as_u8());
@@ -470,12 +472,15 @@ fn encode_record(record: &RecordV2, buffer: &mut Vec<u8>) {
     }
 
     // Calculate and write record length
-    let record_length = (buffer.len() - record_start - varint_size(0)) as i32;
+    let record_length = (buffer.len() - record_start - reserved_length_bytes) as i32;
     let mut length_bytes = Vec::new();
     encode_varint(record_length, &mut length_bytes);
 
     // Backpatch encoded record length
-    buffer[record_start..record_start + length_bytes.len()].copy_from_slice(&length_bytes);
+    buffer.splice(
+        record_start..record_start + reserved_length_bytes,
+        length_bytes,
+    );
 }
 
 /// Decode a single record.
