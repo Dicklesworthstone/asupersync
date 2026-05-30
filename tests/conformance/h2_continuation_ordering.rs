@@ -131,7 +131,8 @@ fn continuation_before_any_headers_is_rejected() {
 
     assert_eq!(err.code, ErrorCode::ProtocolError);
     assert!(
-        err.message.contains("CONTINUATION for unknown stream"),
+        err.message
+            .contains("CONTINUATION without preceding HEADERS/PUSH_PROMISE"),
         "unexpected error: {err:?}"
     );
 }
