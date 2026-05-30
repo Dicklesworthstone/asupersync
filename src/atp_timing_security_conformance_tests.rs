@@ -16,6 +16,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    type TimingConformanceCase = fn(&TimingSideChannelDetector) -> SideChannelDetectionResult;
+
     /// Mock ATP cryptographic operation for testing.
     struct MockCryptoOperation {
         key: [u8; 32],
@@ -95,7 +97,7 @@ mod tests {
     #[test]
     fn test_tsc_timing_precision() {
         // Test that TSC-based timing provides higher precision than Duration
-        let detector = TimingSideChannelDetector::default();
+        let _detector = TimingSideChannelDetector::default();
 
         // Test very short operation timing precision
         let mut measurements = Vec::new();
@@ -112,7 +114,7 @@ mod tests {
 
         // Should be able to measure operations faster than 10 microseconds
         assert!(
-            avg_measurement < 10_000, // Less than 10μs
+            avg_measurement < 10_000.0, // Less than 10μs
             "Enhanced timing precision insufficient: average {}ns",
             avg_measurement
         );
@@ -219,9 +221,18 @@ mod tests {
 
         // Test common ATP cryptographic operations
         let test_cases = vec![
-            ("hmac_computation", test_hmac_timing),
-            ("key_derivation", test_key_derivation_timing),
-            ("signature_verification", test_signature_timing),
+            (
+                "hmac_computation",
+                test_hmac_timing as TimingConformanceCase,
+            ),
+            (
+                "key_derivation",
+                test_key_derivation_timing as TimingConformanceCase,
+            ),
+            (
+                "signature_verification",
+                test_signature_timing as TimingConformanceCase,
+            ),
         ];
 
         let mut results = HashMap::new();
@@ -308,13 +319,14 @@ mod tests {
             |signature| {
                 // Mock signature verification (constant-time comparison)
                 let expected = [0x55u8; 64];
-                let mut valid = true;
+                let mut mismatch = 0u8;
                 for (i, &sig_byte) in signature.iter().enumerate() {
                     if i < expected.len() {
                         // Constant-time comparison
-                        valid &= sig_byte == expected[i];
+                        mismatch |= sig_byte ^ expected[i];
                     }
                 }
+                std::hint::black_box(mismatch == 0);
                 // Always do same amount of work regardless of result
                 let _dummy_work: u64 = (0..100).sum();
             },
@@ -327,7 +339,7 @@ mod tests {
     #[test]
     fn test_hardware_performance_counter_availability() {
         // Test detection of hardware timing sources
-        let detector = TimingSideChannelDetector::default();
+        let _detector = TimingSideChannelDetector::default();
 
         // Should be able to take high-resolution timing measurements
         let start = std::time::Instant::now();
