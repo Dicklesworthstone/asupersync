@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Conformance tests for gRPC status codes and trailers per gRPC specification.
 //!
 //! Tests the implementation in `src/grpc/status.rs` against the gRPC status code
@@ -14,7 +12,7 @@
 //! Reference: https://grpc.github.io/grpc/core/md_doc_statuscodes.html
 
 use asupersync::bytes::Bytes;
-use asupersync::grpc::status::{Code, GrpcError, Status};
+use asupersync::grpc::status::{Code, GrpcError, Status, TransportErrorKind};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -44,7 +42,6 @@ const GRPC_STATUS_CODES: &[(Code, i32, &str)] = &[
 ];
 
 #[test]
-#[allow(dead_code)]
 fn test_all_17_standard_grpc_status_codes() {
     // Test that all 17 standard gRPC status codes are correctly defined
     // with proper numeric values and string representations
@@ -108,7 +105,6 @@ fn test_all_17_standard_grpc_status_codes() {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_invalid_status_codes_map_to_unknown() {
     // Per gRPC spec, any unrecognized status code should map to UNKNOWN (2)
     let invalid_codes = [-1, 17, 18, 99, 255, 1000, i32::MAX, i32::MIN];
@@ -126,7 +122,6 @@ fn test_invalid_status_codes_map_to_unknown() {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_status_code_default_is_unknown() {
     // Default status code should be UNKNOWN per gRPC specification
     let default_code = Code::default();
@@ -142,70 +137,75 @@ fn test_status_code_default_is_unknown() {
 // CONFORMANCE TEST 2: HTTP to gRPC Mapping for Transport Errors
 // ============================================================================
 
-/// HTTP status code to gRPC status code mappings per gRPC specification.
-/// These mappings apply when translating HTTP transport errors to gRPC errors.
-const HTTP_TO_GRPC_MAPPINGS: &[(u16, Code)] = &[
-    (400, Code::Internal),          // Bad Request -> Internal (protocol error)
-    (401, Code::Unauthenticated),   // Unauthorized -> Unauthenticated
-    (403, Code::PermissionDenied),  // Forbidden -> Permission Denied
-    (404, Code::Unimplemented),     // Not Found -> Unimplemented (method not found)
-    (429, Code::ResourceExhausted), // Too Many Requests -> Resource Exhausted
-    (502, Code::Unavailable),       // Bad Gateway -> Unavailable
-    (503, Code::Unavailable),       // Service Unavailable -> Unavailable
-    (504, Code::DeadlineExceeded),  // Gateway Timeout -> Deadline Exceeded
+/// Transport-kind to gRPC status mappings used by the public error API.
+const TRANSPORT_KIND_TO_GRPC_MAPPINGS: &[(TransportErrorKind, &str, Code)] = &[
+    (
+        TransportErrorKind::Timeout,
+        "gateway timeout",
+        Code::DeadlineExceeded,
+    ),
+    (
+        TransportErrorKind::ConnectFailed,
+        "connection refused",
+        Code::Unavailable,
+    ),
+    (
+        TransportErrorKind::ResetByPeer,
+        "stream reset",
+        Code::Unavailable,
+    ),
+    (
+        TransportErrorKind::ProtocolViolation,
+        "bad HTTP/2 preface",
+        Code::Internal,
+    ),
+    (
+        TransportErrorKind::Other,
+        "unclassified proxy error",
+        Code::Unavailable,
+    ),
 ];
 
 #[test]
-#[allow(dead_code)]
-fn test_http_to_grpc_status_mapping() {
-    // Test HTTP status code to gRPC status code mappings
-    // This validates transport error conversion logic
+fn test_typed_transport_kind_to_grpc_status_mapping() {
+    for &(kind, message, expected_grpc_code) in TRANSPORT_KIND_TO_GRPC_MAPPINGS {
+        let grpc_status = GrpcError::transport_kind(kind, message).into_status();
 
-    for &(http_status, expected_grpc_code) in HTTP_TO_GRPC_MAPPINGS {
-        // Test the mapping through GrpcError conversion
-        let transport_error = GrpcError::transport(format!("HTTP {}", http_status));
-        let grpc_status = transport_error.into_status();
-
-        match http_status {
-            504 => assert_eq!(
-                grpc_status.code(),
-                expected_grpc_code,
-                "gateway timeout transport errors should surface DEADLINE_EXCEEDED"
-            ),
-            _ => assert_eq!(
-                grpc_status.code(),
-                Code::Unavailable,
-                "transport error should map to UNAVAILABLE for HTTP {}",
-                http_status
-            ),
-        }
+        assert_eq!(
+            grpc_status.code(),
+            expected_grpc_code,
+            "typed transport kind {kind:?} mapped to {:?} instead of {expected_grpc_code:?}",
+            grpc_status.code()
+        );
+        assert!(
+            grpc_status.message().contains(message),
+            "Status message should contain the original typed transport message"
+        );
     }
 }
 
 #[test]
-#[allow(dead_code)]
-fn test_grpc_error_transport_error_conversion() {
-    // Test various transport error scenarios and their gRPC status mappings
-
-    let transport_errors = vec![
-        ("connection refused", Code::Unavailable),
-        ("network unreachable", Code::Unavailable),
-        ("timeout", Code::DeadlineExceeded),
-        ("dns resolution failed", Code::Unavailable),
-        ("ssl handshake failed", Code::Unavailable),
+fn test_bare_transport_error_conversion_does_not_classify_by_substring() {
+    let transport_errors = [
+        "connection refused",
+        "network unreachable",
+        "timeout",
+        "deadline exceeded",
+        "HTTP 504",
+        "dns resolution failed",
+        "ssl handshake failed",
     ];
 
-    for (error_msg, expected_code) in transport_errors {
+    for error_msg in transport_errors {
         let grpc_error = GrpcError::transport(error_msg);
         let status = grpc_error.into_status();
 
         assert_eq!(
             status.code(),
-            expected_code,
-            "Transport error '{}' mapped to {:?} instead of {:?}",
+            Code::Unavailable,
+            "Bare transport error '{}' should default to UNAVAILABLE instead of substring classification; got {:?}",
             error_msg,
-            status.code(),
-            expected_code
+            status.code()
         );
         assert!(
             status.message().contains(error_msg),
@@ -215,7 +215,6 @@ fn test_grpc_error_transport_error_conversion() {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_grpc_error_protocol_error_conversion() {
     // Test protocol error conversion to gRPC status codes
 
@@ -277,7 +276,6 @@ const UTF8_ENCODING_TEST_CASES: &[(&str, &str)] = &[
 ];
 
 /// Escape special characters in gRPC message for HTTP/2 header transmission.
-#[allow(dead_code)]
 fn escape_grpc_message(message: &str) -> String {
     message
         .chars()
@@ -293,7 +291,6 @@ fn escape_grpc_message(message: &str) -> String {
 }
 
 /// Unescape special characters from HTTP/2 header value.
-#[allow(dead_code)]
 fn unescape_grpc_message(escaped: &str) -> String {
     let mut result = String::with_capacity(escaped.len());
     let mut chars = escaped.chars().peekable();
@@ -321,7 +318,6 @@ fn unescape_grpc_message(escaped: &str) -> String {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_grpc_message_utf8_encoding() {
     // Test UTF-8 encoding and escaping for grpc-message trailer values
 
@@ -351,7 +347,6 @@ fn test_grpc_message_utf8_encoding() {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_grpc_message_percent_encoding_edge_cases() {
     // Test edge cases for percent encoding in grpc-message
 
@@ -392,7 +387,6 @@ fn test_grpc_message_percent_encoding_edge_cases() {
 // ============================================================================
 
 #[test]
-#[allow(dead_code)]
 fn test_trailer_only_response_conformance() {
     // Test that trailer-only responses are properly supported per gRPC spec
     // Trailer-only responses contain only HTTP/2 trailers, no data frames
@@ -452,11 +446,10 @@ fn test_trailer_only_response_conformance() {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_trailer_metadata_format() {
     // Test gRPC trailer metadata format conformance
 
-    let test_cases = vec![
+    let test_cases: &[(Code, &str, Option<&'static [u8]>)] = &[
         (Code::Ok, "", None),
         (Code::NotFound, "user 123 not found", None),
         (
@@ -466,7 +459,7 @@ fn test_trailer_metadata_format() {
         ),
     ];
 
-    for (code, message, details_data) in test_cases {
+    for &(code, message, details_data) in test_cases {
         let status = if let Some(details) = details_data {
             Status::with_details(code, message, Bytes::from(details))
         } else {
@@ -509,14 +502,13 @@ fn test_trailer_metadata_format() {
 // ============================================================================
 
 #[test]
-#[allow(dead_code)]
 fn test_grpc_status_details_bin_conformance() {
     // Test grpc-status-details-bin trailer for rich error details
     // This allows structured error information beyond simple messages
 
     // Test cases with binary details
-    let test_cases = vec![
-        // Protobuf-encoded error details (simulated)
+    let test_cases: &[(Code, &str, &'static [u8])] = &[
+        // Protobuf-encoded error details.
         (
             Code::InvalidArgument,
             "validation failed",
@@ -538,14 +530,15 @@ fn test_grpc_status_details_bin_conformance() {
         (Code::NotFound, "not found", b""),
     ];
 
-    for (code, message, details_data) in test_cases {
-        if details_data.is_empty() {
+    for &(code, message, details_data) in test_cases {
+        let status = if details_data.is_empty() {
             // Test status without details
             let status = Status::new(code, message);
             assert!(
                 status.details().is_none(),
                 "Empty details should result in None"
             );
+            status
         } else {
             // Test status with details
             let details = Bytes::from(details_data);
@@ -573,7 +566,8 @@ fn test_grpc_status_details_bin_conformance() {
                 details_data,
                 "Details content should be preserved"
             );
-        }
+            status
+        };
 
         // Test core status properties are preserved regardless of details
         assert_eq!(status.code(), code, "Code should be preserved with details");
@@ -586,7 +580,6 @@ fn test_grpc_status_details_bin_conformance() {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_status_details_binary_safety() {
     // Test that status details handle arbitrary binary data safely
 
@@ -620,14 +613,13 @@ fn test_status_details_binary_safety() {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_status_details_size_limits() {
     // Test handling of various detail sizes including edge cases
 
     let size_test_cases = vec![
         // Small details
-        1, // Medium details
-        1024, // Large details (still reasonable for trailers)
+        1,     // Medium details
+        1024,  // Large details (still reasonable for trailers)
         16384, // Very large details (may be problematic for HTTP/2 headers)
         65536,
     ];
@@ -663,7 +655,6 @@ fn test_status_details_size_limits() {
 // ============================================================================
 
 #[test]
-#[allow(dead_code)]
 fn test_complete_grpc_status_conformance() {
     // Comprehensive integration test covering all aspects of gRPC status conformance
 
@@ -744,7 +735,6 @@ fn test_complete_grpc_status_conformance() {
 }
 
 #[test]
-#[allow(dead_code)]
 fn test_grpc_status_error_conversion_chain() {
     // Test error conversion chain: std::io::Error -> GrpcError -> Status
 
@@ -753,7 +743,7 @@ fn test_grpc_status_error_conversion_chain() {
     // std::io::Error -> GrpcError
     let grpc_error: GrpcError = GrpcError::from(io_error);
     assert!(
-        matches!(grpc_error, GrpcError::Transport(_)),
+        matches!(grpc_error, GrpcError::Transport(..)),
         "IO error should become transport error"
     );
 

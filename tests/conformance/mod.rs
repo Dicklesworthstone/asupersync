@@ -66,6 +66,7 @@ pub mod grpc_deadline;
 pub mod grpc_health;
 pub mod grpc_max_message_size;
 pub mod grpc_message_framing;
+pub mod grpc_status;
 pub mod grpc_status_mapping;
 pub mod grpc_trailer_forwarding_rfc9113;
 pub mod grpc_web_frame_format;
@@ -133,9 +134,8 @@ pub mod tls_sni;
 pub mod actor_mailbox_protocol; // repaired by br-asupersync-8m6dfx actor mailbox sub-slice
 // pub mod broadcast_lag;            // asupersync::cx::test_cx + asupersync::time::{Duration} renamed/removed
 pub mod dns_cache; // repaired by br-asupersync-2qssae DNS cache sub-slice
-// grpc_deadline and grpc_health were repaired by br-asupersync-pfvsch and are
-// wired as live modules above.
-// pub mod grpc_status;              // bit-rot vs current grpc::status API
+// grpc_deadline, grpc_health, and grpc_status were repaired and are wired as
+// live modules above.
 // pub mod h3_settings;              // bit-rot vs current h3 API (Setting enum is private)
 pub mod http_h1_chunked_rfc9112; // repaired by br-asupersync-lhx6m4 HTTP/1 chunked vector sub-slice
 // pub mod obligation_recovery;      // FailFast type moved out of asupersync::cx::scope
