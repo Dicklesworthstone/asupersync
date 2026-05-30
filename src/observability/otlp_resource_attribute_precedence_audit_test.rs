@@ -18,7 +18,7 @@ mod tests {
 
     use super::super::{OtlpResourceBuilder, parse_otel_resource_attributes, create_otlp_resource_attributes};
 
-    /// Mock resource builder for testing attribute precedence.
+    /// Resource builder fixture for testing attribute precedence.
     fn create_test_resource_builder() -> OtlpResourceBuilder {
         OtlpResourceBuilder::new()
     }

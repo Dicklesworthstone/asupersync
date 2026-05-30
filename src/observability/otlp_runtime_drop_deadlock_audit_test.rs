@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Mock OTLP HTTP exporter that simulates the async context requirement defect.
+/// OTLP HTTP exporter fixture that simulates the async context requirement defect.
 struct AsyncContextRequiredExporter {
     export_attempts: Arc<AtomicU64>,
     blocking_export_flag: Arc<AtomicBool>,

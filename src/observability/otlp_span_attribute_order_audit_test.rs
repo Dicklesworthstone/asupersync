@@ -19,15 +19,15 @@ use std::collections::{BTreeMap, HashMap};
 mod tests {
     use super::*;
 
-    /// Mock span structure to test attribute ordering behavior.
+    /// Span fixture structure to test attribute ordering behavior.
     #[derive(Debug, Clone)]
-    struct MockSpan {
+    struct SpanFixture {
         name: String,
         attributes_hashmap: HashMap<String, String>,
         attributes_btreemap: BTreeMap<String, String>,
     }
 
-    impl MockSpan {
+    impl SpanFixture {
         fn new(name: &str) -> Self {
             Self {
                 name: name.to_string(),
@@ -65,12 +65,12 @@ mod tests {
     fn test_attribute_order_independence() {
         // AUDIT POINT 1: Verify that attribute semantics are preserved regardless of order
 
-        let mut span1 = MockSpan::new("test_span");
+        let mut span1 = SpanFixture::new("test_span");
         span1.set_attribute("service.name", "checkout");
         span1.set_attribute("http.method", "POST");
         span1.set_attribute("http.url", "https://api.example.com/v1/orders");
 
-        let mut span2 = MockSpan::new("test_span");
+        let mut span2 = SpanFixture::new("test_span");
         // Set attributes in different order
         span2.set_attribute("http.url", "https://api.example.com/v1/orders");
         span2.set_attribute("service.name", "checkout");
@@ -99,7 +99,7 @@ mod tests {
     fn test_fragile_snapshot_detection() {
         // AUDIT POINT 2: Demonstrate how snapshot tests can be fragile to attribute order
 
-        let mut span = MockSpan::new("http.request");
+        let mut span = SpanFixture::new("http.request");
         span.set_attribute("service.name", "checkout");
         span.set_attribute("http.method", "POST");
         span.set_attribute("http.url", "https://api.example.com/v1/orders");
@@ -146,12 +146,12 @@ mod tests {
         eprintln!("   • Tests should not assume specific ordering");
 
         // Test what SHOULD be true per spec
-        let mut span_a = MockSpan::new("test");
+        let mut span_a = SpanFixture::new("test");
         span_a.set_attribute("z.last", "value1");
         span_a.set_attribute("a.first", "value2");
         span_a.set_attribute("m.middle", "value3");
 
-        let mut span_b = MockSpan::new("test");
+        let mut span_b = SpanFixture::new("test");
         span_b.set_attribute("a.first", "value2");
         span_b.set_attribute("m.middle", "value3");
         span_b.set_attribute("z.last", "value1");
@@ -213,7 +213,7 @@ mod tests {
         let mut hash_outputs = Vec::new();
 
         for scenario in scenarios {
-            let mut span = MockSpan::new("http.request");
+            let mut span = SpanFixture::new("http.request");
             for (key, value) in scenario.attributes {
                 span.set_attribute(key, value);
             }
@@ -250,7 +250,7 @@ mod tests {
     fn demonstrate_snapshot_fix_approach() {
         // AUDIT POINT 5: Show how to make snapshot tests order-robust
 
-        let mut span = MockSpan::new("http.request");
+        let mut span = SpanFixture::new("http.request");
         span.set_attribute("service.name", "checkout");
         span.set_attribute("http.method", "POST");
         span.set_attribute("http.url", "https://api.example.com/v1/orders");

@@ -19,15 +19,15 @@
 
 #![cfg(test)]
 
-/// Mock HTTP response for testing 426 Upgrade Required scenarios.
+/// HTTP response fixture for testing 426 Upgrade Required scenarios.
 #[derive(Debug, Clone)]
-struct MockUpgradeResponse {
+struct UpgradeResponseFixture {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
-impl MockUpgradeResponse {
+impl UpgradeResponseFixture {
     fn new_upgrade_required_tls() -> Self {
         Self {
             status: 426,
@@ -73,14 +73,14 @@ impl MockUpgradeResponse {
     }
 }
 
-/// Mock OTLP error handler for testing upgrade required scenarios.
+/// OTLP error handler fixture for testing upgrade required scenarios.
 #[derive(Debug)]
-struct MockUpgradeHandler {
-    responses_received: Vec<MockUpgradeResponse>,
+struct UpgradeHandlerFixture {
+    responses_received: Vec<UpgradeResponseFixture>,
     error_messages: Vec<String>,
 }
 
-impl MockUpgradeHandler {
+impl UpgradeHandlerFixture {
     fn new() -> Self {
         Self {
             responses_received: Vec::new(),
@@ -89,7 +89,10 @@ impl MockUpgradeHandler {
     }
 
     /// Current defective implementation: treats 426 as generic 4xx.
-    fn handle_response_defective(&mut self, response: MockUpgradeResponse) -> Result<(), String> {
+    fn handle_response_defective(
+        &mut self,
+        response: UpgradeResponseFixture,
+    ) -> Result<(), String> {
         self.responses_received.push(response.clone());
 
         match response.status {
@@ -109,7 +112,7 @@ impl MockUpgradeHandler {
     }
 
     /// Correct implementation: specific 426 handling with upgrade guidance.
-    fn handle_response_correct(&mut self, response: MockUpgradeResponse) -> Result<(), String> {
+    fn handle_response_correct(&mut self, response: UpgradeResponseFixture) -> Result<(), String> {
         self.responses_received.push(response.clone());
 
         match response.status {
@@ -168,7 +171,7 @@ fn audit_upgrade_required_tls_scenario() {
     println!("   • NOT: retry without upgrade (RFC violation)");
     println!("   • NOT: treat as generic 4xx (user confusion)");
 
-    let tls_upgrade_response = MockUpgradeResponse::new_upgrade_required_tls();
+    let tls_upgrade_response = UpgradeResponseFixture::new_upgrade_required_tls();
 
     println!("📊 Test scenario:");
     println!("   Status: 426 Upgrade Required");
@@ -177,7 +180,7 @@ fn audit_upgrade_required_tls_scenario() {
 
     // **DEFECTIVE APPROACH**: Current implementation
     println!("📊 Testing defective implementation (current behavior):");
-    let mut defective_handler = MockUpgradeHandler::new();
+    let mut defective_handler = UpgradeHandlerFixture::new();
 
     let defective_result =
         defective_handler.handle_response_defective(tls_upgrade_response.clone());
@@ -199,7 +202,7 @@ fn audit_upgrade_required_tls_scenario() {
 
     // **CORRECT APPROACH**: Specific 426 handling
     println!("📊 Testing correct implementation (RFC 9110 compliant):");
-    let mut correct_handler = MockUpgradeHandler::new();
+    let mut correct_handler = UpgradeHandlerFixture::new();
 
     let correct_result = correct_handler.handle_response_correct(tls_upgrade_response);
 
@@ -232,7 +235,7 @@ fn audit_upgrade_required_tls_scenario() {
 fn audit_upgrade_required_h2_scenario() {
     println!("🔍 AUDIT: OTLP 426 Upgrade Required (HTTP/2) response handling");
 
-    let h2_upgrade_response = MockUpgradeResponse::new_upgrade_required_h2();
+    let h2_upgrade_response = UpgradeResponseFixture::new_upgrade_required_h2();
 
     println!("📊 HTTP/2 upgrade scenario:");
     println!("   Status: 426 Upgrade Required");
@@ -240,8 +243,8 @@ fn audit_upgrade_required_h2_scenario() {
     println!("   Expected: HTTP/2 specific upgrade guidance");
 
     // Test both implementations
-    let mut defective_handler = MockUpgradeHandler::new();
-    let mut correct_handler = MockUpgradeHandler::new();
+    let mut defective_handler = UpgradeHandlerFixture::new();
+    let mut correct_handler = UpgradeHandlerFixture::new();
 
     let _defective_result =
         defective_handler.handle_response_defective(h2_upgrade_response.clone());
@@ -276,7 +279,7 @@ fn audit_upgrade_required_h2_scenario() {
 fn audit_upgrade_required_h3_scenario() {
     println!("🔍 AUDIT: OTLP 426 Upgrade Required (HTTP/3) response handling");
 
-    let h3_upgrade_response = MockUpgradeResponse::new_upgrade_required_h3();
+    let h3_upgrade_response = UpgradeResponseFixture::new_upgrade_required_h3();
     assert!(
         String::from_utf8_lossy(&h3_upgrade_response.body).contains("HTTP/3"),
         "HTTP/3 upgrade fixture body should describe the requested protocol"
@@ -289,7 +292,7 @@ fn audit_upgrade_required_h3_scenario() {
         "HTTP/3 upgrade responses should carry an h3 Alt-Svc hint"
     );
 
-    let mut correct_handler = MockUpgradeHandler::new();
+    let mut correct_handler = UpgradeHandlerFixture::new();
     let correct_result = correct_handler.handle_response_correct(h3_upgrade_response);
 
     assert!(correct_result.is_err());
@@ -313,14 +316,14 @@ fn audit_upgrade_required_h3_scenario() {
 fn audit_upgrade_required_no_header_scenario() {
     println!("🔍 AUDIT: OTLP 426 Upgrade Required without Upgrade header");
 
-    let no_header_response = MockUpgradeResponse::new_upgrade_required_no_header();
+    let no_header_response = UpgradeResponseFixture::new_upgrade_required_no_header();
 
     println!("📊 Malformed 426 scenario:");
     println!("   Status: 426 Upgrade Required");
     println!("   Missing: Upgrade header (RFC 9110 violation by server)");
     println!("   Expected: Fallback guidance with RFC reference");
 
-    let mut correct_handler = MockUpgradeHandler::new();
+    let mut correct_handler = UpgradeHandlerFixture::new();
     let _correct_result = correct_handler.handle_response_correct(no_header_response);
 
     println!("📊 Correct fallback behavior:");

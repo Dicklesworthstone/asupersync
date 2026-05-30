@@ -147,7 +147,7 @@ fn audit_properly_ended_spans_do_not_leak() {
         None,
     ));
 
-    // Mock tracer for ending spans
+    // Test tracer for ending spans
     #[cfg(feature = "metrics")]
     let tracer = opentelemetry::global::tracer("test");
     #[cfg(not(feature = "metrics"))]

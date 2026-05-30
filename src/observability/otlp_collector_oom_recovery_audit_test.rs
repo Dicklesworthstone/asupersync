@@ -21,18 +21,18 @@
 
 use std::sync::{Arc, Mutex};
 
-/// Mock HTTP response for testing collector behavior.
+/// HTTP response fixture for testing collector behavior.
 #[derive(Debug, Clone)]
-pub struct MockHttpResponse {
-    /// HTTP status returned by the mock collector.
+pub struct CollectorResponseFixture {
+    /// HTTP status returned by the collector fixture.
     pub status: u16,
-    /// Response headers returned by the mock collector.
+    /// Response headers returned by the collector fixture.
     pub headers: Vec<(String, String)>,
-    /// Response body returned by the mock collector.
+    /// Response body returned by the collector fixture.
     pub body: Vec<u8>,
 }
 
-impl MockHttpResponse {
+impl CollectorResponseFixture {
     fn new_oom_error() -> Self {
         Self {
             status: 500,
@@ -54,9 +54,9 @@ impl MockHttpResponse {
     }
 }
 
-/// Mock collector that tracks batch sizes and simulates OOM on large batches.
+/// Collector fixture that tracks batch sizes and simulates OOM on large batches.
 #[derive(Debug)]
-pub struct MockOomCollector {
+pub struct OomCollectorFixture {
     /// Batch sizes observed by the collector.
     pub received_requests: Arc<Mutex<Vec<usize>>>,
     /// Request-body byte threshold above which the collector simulates OOM.
@@ -65,7 +65,7 @@ pub struct MockOomCollector {
     pub request_count: Arc<Mutex<usize>>,
 }
 
-impl MockOomCollector {
+impl OomCollectorFixture {
     fn new(oom_threshold: usize) -> Self {
         Self {
             received_requests: Arc::new(Mutex::new(Vec::new())),
@@ -74,7 +74,7 @@ impl MockOomCollector {
         }
     }
 
-    fn handle_request(&self, request_body: &[u8]) -> MockHttpResponse {
+    fn handle_request(&self, request_body: &[u8]) -> CollectorResponseFixture {
         let mut requests = self.received_requests.lock().unwrap();
         let mut count = self.request_count.lock().unwrap();
 
@@ -88,7 +88,7 @@ impl MockOomCollector {
                 self.oom_threshold,
                 *count
             );
-            MockHttpResponse::new_oom_error()
+            CollectorResponseFixture::new_oom_error()
         } else {
             println!(
                 "📊 OOM Collector: Accepting batch size {} <= threshold {} (request #{})",
@@ -96,7 +96,7 @@ impl MockOomCollector {
                 self.oom_threshold,
                 *count
             );
-            MockHttpResponse::new_success()
+            CollectorResponseFixture::new_success()
         }
     }
 
@@ -105,21 +105,21 @@ impl MockOomCollector {
     }
 }
 
-/// Mock OTLP exporter for testing OOM recovery behavior.
+/// OTLP exporter fixture for testing OOM recovery behavior.
 #[derive(Debug)]
-pub struct MockOomRecoveryExporter {
+pub struct OomRecoveryExporterFixture {
     /// Collector receiving serialized OTLP batches.
-    pub collector: MockOomCollector,
+    pub collector: OomCollectorFixture,
     /// Ordered `(batch_size, result)` audit log for export attempts.
     pub attempts: Arc<Mutex<Vec<(usize, String)>>>,
     /// Current candidate span batch size.
     pub current_batch_size: usize,
 }
 
-impl MockOomRecoveryExporter {
+impl OomRecoveryExporterFixture {
     fn new_defective(oom_threshold: usize) -> Self {
         Self {
-            collector: MockOomCollector::new(oom_threshold),
+            collector: OomCollectorFixture::new(oom_threshold),
             attempts: Arc::new(Mutex::new(Vec::new())),
             current_batch_size: 10000, // Start with large batch
         }
@@ -127,14 +127,14 @@ impl MockOomRecoveryExporter {
 
     fn new_correct(oom_threshold: usize) -> Self {
         Self {
-            collector: MockOomCollector::new(oom_threshold),
+            collector: OomCollectorFixture::new(oom_threshold),
             attempts: Arc::new(Mutex::new(Vec::new())),
             current_batch_size: 10000, // Start with large batch
         }
     }
 
     /// Current defective implementation: drops batch on 500.
-    fn export_batch_defective(&mut self, spans: &[MockSpan]) -> Result<(), String> {
+    fn export_batch_defective(&mut self, spans: &[SpanFixture]) -> Result<(), String> {
         let request_body = self.serialize_spans(spans);
         let response = self.collector.handle_request(&request_body);
 
@@ -160,7 +160,7 @@ impl MockOomRecoveryExporter {
     }
 
     /// Correct implementation: reduce batch size on OOM and retry.
-    fn export_batch_correct(&mut self, spans: &[MockSpan]) -> Result<(), String> {
+    fn export_batch_correct(&mut self, spans: &[SpanFixture]) -> Result<(), String> {
         let mut current_spans = spans.to_vec();
         let mut attempt_count = 0;
         let max_attempts = 5;
@@ -214,13 +214,13 @@ impl MockOomRecoveryExporter {
         Err("Max OOM recovery attempts exceeded".to_string())
     }
 
-    fn serialize_spans(&self, spans: &[MockSpan]) -> Vec<u8> {
+    fn serialize_spans(&self, spans: &[SpanFixture]) -> Vec<u8> {
         // Simulate protobuf serialization overhead
         let base_overhead = 100; // bytes for headers/metadata
         let per_span_size = 50; // bytes per span
         let total_size = base_overhead + (spans.len() * per_span_size);
 
-        vec![0u8; total_size] // Mock payload of calculated size
+        vec![0u8; total_size] // Synthetic payload of calculated size
     }
 
     fn get_attempts(&self) -> Vec<(usize, String)> {
@@ -228,16 +228,16 @@ impl MockOomRecoveryExporter {
     }
 }
 
-/// Mock span for testing.
+/// Span fixture for testing.
 #[derive(Debug, Clone)]
-pub struct MockSpan {
-    /// Span name used by the mock payload.
+pub struct SpanFixture {
+    /// Span name used by the synthetic payload.
     pub name: String,
-    /// Span identifier used by the mock payload.
+    /// Span identifier used by the synthetic payload.
     pub span_id: u64,
 }
 
-impl MockSpan {
+impl SpanFixture {
     fn new(name: &str, span_id: u64) -> Self {
         Self {
             name: name.to_string(),
@@ -263,8 +263,8 @@ fn audit_collector_oom_recovery() {
     println!("   • Worst: drop batch silently (data loss)");
 
     // Create large batch that will trigger OOM
-    let large_batch: Vec<MockSpan> = (0..100)
-        .map(|i| MockSpan::new(&format!("span_{}", i), i as u64))
+    let large_batch: Vec<SpanFixture> = (0..100)
+        .map(|i| SpanFixture::new(&format!("span_{}", i), i as u64))
         .collect();
 
     println!("📊 Test scenario:");
@@ -275,7 +275,7 @@ fn audit_collector_oom_recovery() {
 
     // **DEFECTIVE APPROACH**: Current implementation
     println!("📊 Testing defective implementation (current behavior):");
-    let mut defective_exporter = MockOomRecoveryExporter::new_defective(3000);
+    let mut defective_exporter = OomRecoveryExporterFixture::new_defective(3000);
 
     let defective_result = defective_exporter.export_batch_defective(&large_batch);
     let defective_attempts = defective_exporter.get_attempts();
@@ -292,7 +292,7 @@ fn audit_collector_oom_recovery() {
 
     // **CORRECT APPROACH**: Batch size reduction
     println!("📊 Testing correct implementation (graceful degradation):");
-    let mut correct_exporter = MockOomRecoveryExporter::new_correct(3000);
+    let mut correct_exporter = OomRecoveryExporterFixture::new_correct(3000);
 
     let correct_result = correct_exporter.export_batch_correct(&large_batch);
     let correct_attempts = correct_exporter.get_attempts();
@@ -349,7 +349,7 @@ fn audit_current_error_classification() {
 
     println!("📊 Correct OOM-aware classification should be:");
     println!("   500: retryable_with_batch_reduction (OOM recovery)");
-    println!("   501: non_retryable (Not Implemented)");
+    println!("   501: non_retryable (method unsupported)");
     println!("   502: retryable (Bad Gateway)");
     println!("   503: retryable (Service Unavailable)");
     println!("   504: retryable (Gateway Timeout)");
@@ -374,8 +374,8 @@ fn audit_batch_size_strategy_performance() {
 
     // Simulate workload: 1000 spans to export
     let total_spans = 1000;
-    let spans: Vec<MockSpan> = (0..total_spans)
-        .map(|i| MockSpan::new(&format!("span_{}", i), i as u64))
+    let spans: Vec<SpanFixture> = (0..total_spans)
+        .map(|i| SpanFixture::new(&format!("span_{}", i), i as u64))
         .collect();
 
     println!("📊 Workload: {} spans to export", total_spans);
@@ -383,7 +383,7 @@ fn audit_batch_size_strategy_performance() {
 
     // **FIXED BATCH STRATEGY** (current defective approach)
     println!("📊 Fixed batch strategy (current defective):");
-    let mut fixed_batch_exporter = MockOomRecoveryExporter::new_defective(2000);
+    let mut fixed_batch_exporter = OomRecoveryExporterFixture::new_defective(2000);
 
     // Try to export in fixed chunks of 100 spans
     let chunk_size = 100;
@@ -404,7 +404,7 @@ fn audit_batch_size_strategy_performance() {
 
     // **ADAPTIVE BATCH STRATEGY** (correct approach)
     println!("📊 Adaptive batch strategy (graceful degradation):");
-    let mut adaptive_exporter = MockOomRecoveryExporter::new_correct(2000);
+    let mut adaptive_exporter = OomRecoveryExporterFixture::new_correct(2000);
 
     let mut adaptive_exported = 0;
     let mut adaptive_attempts = 0;
@@ -413,7 +413,7 @@ fn audit_batch_size_strategy_performance() {
     let mut remaining_spans = spans.clone();
     while !remaining_spans.is_empty() {
         let current_batch_size = std::cmp::min(100, remaining_spans.len());
-        let current_batch: Vec<MockSpan> = remaining_spans.drain(..current_batch_size).collect();
+        let current_batch: Vec<SpanFixture> = remaining_spans.drain(..current_batch_size).collect();
 
         match adaptive_exporter.export_batch_correct(&current_batch) {
             Ok(()) => {
@@ -473,19 +473,19 @@ fn audit_proposed_graceful_degradation_solution() {
 
     // Demonstrate the complete solution
     struct GracefulDegradationExporter {
-        collector: MockOomCollector,
+        collector: OomCollectorFixture,
         pub degradation_log: Arc<Mutex<Vec<String>>>,
     }
 
     impl GracefulDegradationExporter {
         fn new(oom_threshold: usize) -> Self {
             Self {
-                collector: MockOomCollector::new(oom_threshold),
+                collector: OomCollectorFixture::new(oom_threshold),
                 degradation_log: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
-        fn export_with_oom_recovery(&self, spans: Vec<MockSpan>) -> Result<(), String> {
+        fn export_with_oom_recovery(&self, spans: Vec<SpanFixture>) -> Result<(), String> {
             let mut remaining_spans = spans;
             let mut total_exported = 0;
 
@@ -496,7 +496,7 @@ fn audit_proposed_graceful_degradation_solution() {
                 let max_attempts = 6; // Allow up to 6 size reductions (100→1)
 
                 loop {
-                    let request_body = vec![0u8; 100 + (current_batch_size * 50)]; // Mock serialization
+                    let request_body = vec![0u8; 100 + (current_batch_size * 50)]; // Synthetic serialization
                     let response = self.collector.handle_request(&request_body);
 
                     match response.status {
@@ -544,8 +544,8 @@ fn audit_proposed_graceful_degradation_solution() {
     }
 
     // Test the complete solution
-    let spans: Vec<MockSpan> = (0..200)
-        .map(|i| MockSpan::new(&format!("span_{}", i), i as u64))
+    let spans: Vec<SpanFixture> = (0..200)
+        .map(|i| SpanFixture::new(&format!("span_{}", i), i as u64))
         .collect();
 
     println!("📊 Testing complete graceful degradation solution:");

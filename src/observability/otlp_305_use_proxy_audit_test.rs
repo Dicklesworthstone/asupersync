@@ -25,14 +25,14 @@ use crate::observability::otel::{OtlpError, OtlpHttpExporter, TraceSpan};
 use crate::time::Instant;
 use crate::types::{Outcome, TraceId};
 
-/// Mock HTTP client that returns HTTP 305 Use Proxy responses.
+/// Scripted HTTP client that returns HTTP 305 Use Proxy responses.
 #[derive(Clone)]
-struct Mock305HttpClient {
+struct Scripted305HttpClient {
     responses: Arc<Mutex<Vec<Response>>>,
     request_log: Arc<Mutex<Vec<(Method, String)>>>,
 }
 
-impl Mock305HttpClient {
+impl Scripted305HttpClient {
     fn new(responses: Vec<Response>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
@@ -49,7 +49,7 @@ impl Mock305HttpClient {
     }
 }
 
-impl HttpClient for Mock305HttpClient {
+impl HttpClient for Scripted305HttpClient {
     async fn request(
         &self,
         _cx: &Cx,
@@ -107,7 +107,7 @@ mod tests {
     fn test_305_use_proxy_is_terminal() {
         // AUDIT POINT 1: Verify 305 is correctly classified as terminal for security
 
-        let mock_client = Mock305HttpClient::new(vec![Response {
+        let scripted_client = Scripted305HttpClient::new(vec![Response {
             status: 305,
             headers: vec![
                 ("location".to_string(), "http://proxy.malicious.com:8080".to_string()),
@@ -120,7 +120,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -159,7 +159,7 @@ mod tests {
             ),
         }
 
-        assert_eq!(mock_client.request_count(), 1);
+        assert_eq!(scripted_client.request_count(), 1);
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod tests {
         eprintln!("============================================");
 
         for test_case in redirect_tests {
-            let mock_client = Mock305HttpClient::new(vec![Response {
+            let scripted_client = Scripted305HttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: vec![
                     ("location".to_string(), "http://redirect.example.com/otlp".to_string()),
@@ -216,7 +216,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -292,7 +292,7 @@ mod tests {
         eprintln!("===================================");
 
         for scenario in scenarios {
-            let mock_client = Mock305HttpClient::new(vec![Response {
+            let scripted_client = Scripted305HttpClient::new(vec![Response {
                 status: 305,
                 headers: vec![
                     ("location".to_string(), scenario.proxy_location.to_string()),
@@ -305,7 +305,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -351,7 +351,7 @@ mod tests {
         eprintln!("   • Security concerns led to deprecation");
         eprintln!("   • Clients SHOULD NOT automatically follow proxy redirects");
 
-        let mock_client = Mock305HttpClient::new(vec![Response {
+        let scripted_client = Scripted305HttpClient::new(vec![Response {
             status: 305,
             headers: vec![
                 ("location".to_string(), "http://legacy-proxy.deprecated.com:8080".to_string()),
@@ -364,7 +364,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -428,7 +428,7 @@ mod tests {
         eprintln!("   • Security benefit: Operator controls proxy choice");
         eprintln!("   • OTLP spec: Supports standard HTTP proxy configuration");
 
-        let mock_client = Mock305HttpClient::new(vec![Response {
+        let scripted_client = Scripted305HttpClient::new(vec![Response {
             status: 305,
             headers: vec![
                 ("location".to_string(), "http://suggested-proxy.example.com:8080".to_string()),
@@ -440,7 +440,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 

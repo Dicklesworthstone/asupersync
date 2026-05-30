@@ -25,7 +25,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-/// Mock exporter that simulates network partition (always fails).
+/// Exporter fixture that simulates network partition (always fails).
 #[derive(Debug)]
 struct NetworkPartitionExporter {
     export_attempts: Arc<AtomicU64>,

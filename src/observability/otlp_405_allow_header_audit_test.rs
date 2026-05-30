@@ -25,14 +25,14 @@ use crate::observability::otel::{OtlpError, OtlpHttpExporter, TraceSpan};
 use crate::time::Instant;
 use crate::types::{Outcome, TraceId};
 
-/// Mock HTTP client that returns HTTP 405 Method Not Allowed responses.
+/// Scripted HTTP client that returns HTTP 405 Method Not Allowed responses.
 #[derive(Clone)]
-struct Mock405HttpClient {
+struct Scripted405HttpClient {
     responses: Arc<Mutex<Vec<Response>>>,
     request_log: Arc<Mutex<Vec<(Method, String)>>>,
 }
 
-impl Mock405HttpClient {
+impl Scripted405HttpClient {
     fn new(responses: Vec<Response>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
@@ -49,7 +49,7 @@ impl Mock405HttpClient {
     }
 }
 
-impl HttpClient for Mock405HttpClient {
+impl HttpClient for Scripted405HttpClient {
     async fn request(
         &self,
         _cx: &Cx,
@@ -107,7 +107,7 @@ mod tests {
     fn test_405_allow_header_extracted_and_included() {
         // AUDIT POINT 1: Verify Allow header is extracted and included in error message
 
-        let mock_client = Mock405HttpClient::new(vec![Response {
+        let scripted_client = Scripted405HttpClient::new(vec![Response {
             status: 405,
             headers: vec![
                 ("allow".to_string(), "POST, OPTIONS, HEAD".to_string()),
@@ -121,7 +121,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -165,14 +165,14 @@ mod tests {
             ),
         }
 
-        assert_eq!(mock_client.request_count(), 1);
+        assert_eq!(scripted_client.request_count(), 1);
     }
 
     #[test]
     fn test_405_missing_allow_header_graceful_fallback() {
         // AUDIT POINT 2: Verify missing Allow header is handled gracefully
 
-        let mock_client = Mock405HttpClient::new(vec![Response {
+        let scripted_client = Scripted405HttpClient::new(vec![Response {
             status: 405,
             headers: vec![
                 ("server".to_string(), "apache/2.4".to_string()),
@@ -186,7 +186,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -254,7 +254,7 @@ mod tests {
         eprintln!("===================================");
 
         for case_test in case_tests {
-            let mock_client = Mock405HttpClient::new(vec![Response {
+            let scripted_client = Scripted405HttpClient::new(vec![Response {
                 status: 405,
                 headers: vec![
                     (case_test.header_name.to_string(), "POST, PUT".to_string()),
@@ -266,7 +266,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -357,7 +357,7 @@ mod tests {
         eprintln!("==============================================");
 
         for test_case in test_cases {
-            let mock_client = Mock405HttpClient::new(vec![Response {
+            let scripted_client = Scripted405HttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: test_case.headers.clone(),
                 body: format!("{} {}", test_case.status, test_case.description).into_bytes(),
@@ -367,7 +367,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -479,7 +479,7 @@ mod tests {
         eprintln!("===============================");
 
         for scenario in scenarios {
-            let mock_client = Mock405HttpClient::new(vec![Response {
+            let scripted_client = Scripted405HttpClient::new(vec![Response {
                 status: 405,
                 headers: vec![
                     ("allow".to_string(), scenario.allowed_methods.to_string()),
@@ -493,7 +493,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -544,7 +544,7 @@ mod tests {
         eprintln!("   • Must indicate batch was dropped");
         eprintln!("   • Should be actionable for developers/operators");
 
-        let mock_client = Mock405HttpClient::new(vec![Response {
+        let scripted_client = Scripted405HttpClient::new(vec![Response {
             status: 405,
             headers: vec![
                 ("allow".to_string(), "POST, OPTIONS".to_string()),
@@ -557,7 +557,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 

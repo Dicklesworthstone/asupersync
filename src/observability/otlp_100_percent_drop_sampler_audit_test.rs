@@ -22,16 +22,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Mock span for testing 100% drop sampler behavior.
+/// Span fixture for testing 100% drop sampler behavior.
 #[derive(Debug, Clone)]
-pub struct MockDropSamplerSpan {
+pub struct DropSamplerSpanFixture {
     span_id: String,
     name: String,
     trace_flags: u8, // 0 = not sampled, 1 = sampled
     attributes: Vec<(String, String)>,
 }
 
-impl MockDropSamplerSpan {
+impl DropSamplerSpanFixture {
     fn new_unsampled(span_id: &str, name: &str) -> Self {
         Self {
             span_id: span_id.to_string(),
@@ -55,16 +55,16 @@ impl MockDropSamplerSpan {
     }
 }
 
-/// Mock span batch for testing drop sampler scenarios.
+/// Span batch fixture for testing drop sampler scenarios.
 #[derive(Debug, Clone)]
-pub struct MockDropSamplerBatch {
+pub struct DropSamplerBatchFixture {
     batch_id: u64,
-    spans: Vec<MockDropSamplerSpan>,
+    spans: Vec<DropSamplerSpanFixture>,
     created_at: Instant,
 }
 
-impl MockDropSamplerBatch {
-    fn new(batch_id: u64, spans: Vec<MockDropSamplerSpan>) -> Self {
+impl DropSamplerBatchFixture {
+    fn new(batch_id: u64, spans: Vec<DropSamplerSpanFixture>) -> Self {
         Self {
             batch_id,
             spans,
@@ -74,14 +74,24 @@ impl MockDropSamplerBatch {
 
     fn all_unsampled(batch_id: u64, span_count: usize) -> Self {
         let spans = (0..span_count)
-            .map(|i| MockDropSamplerSpan::new_unsampled(&format!("span_{}", i), &format!("operation_{}", i)))
+            .map(|i| {
+                DropSamplerSpanFixture::new_unsampled(
+                    &format!("span_{}", i),
+                    &format!("operation_{}", i),
+                )
+            })
             .collect();
         Self::new(batch_id, spans)
     }
 
     fn all_sampled(batch_id: u64, span_count: usize) -> Self {
         let spans = (0..span_count)
-            .map(|i| MockDropSamplerSpan::new_sampled(&format!("span_{}", i), &format!("operation_{}", i)))
+            .map(|i| {
+                DropSamplerSpanFixture::new_sampled(
+                    &format!("span_{}", i),
+                    &format!("operation_{}", i),
+                )
+            })
             .collect();
         Self::new(batch_id, spans)
     }
@@ -91,29 +101,35 @@ impl MockDropSamplerBatch {
 
         // Add sampled spans
         for i in 0..sampled_count {
-            spans.push(MockDropSamplerSpan::new_sampled(&format!("sampled_{}", i), &format!("operation_{}", i)));
+            spans.push(DropSamplerSpanFixture::new_sampled(
+                &format!("sampled_{}", i),
+                &format!("operation_{}", i),
+            ));
         }
 
         // Add unsampled spans
         for i in 0..unsampled_count {
-            spans.push(MockDropSamplerSpan::new_unsampled(&format!("unsampled_{}", i), &format!("operation_{}", i + sampled_count)));
+            spans.push(DropSamplerSpanFixture::new_unsampled(
+                &format!("unsampled_{}", i),
+                &format!("operation_{}", i + sampled_count),
+            ));
         }
 
         Self::new(batch_id, spans)
     }
 }
 
-/// Mock OTLP exporter for testing 100% drop optimization.
+/// OTLP exporter fixture for testing 100% drop optimization.
 #[derive(Debug)]
-pub struct MockDropSamplerOtlpExporter {
+pub struct DropSamplerOtlpExporterFixture {
     export_calls: AtomicU64,
     network_calls: AtomicU64,
     memory_allocations: AtomicU64,
-    exported_batches: parking_lot::Mutex<Vec<MockDropSamplerBatch>>,
+    exported_batches: parking_lot::Mutex<Vec<DropSamplerBatchFixture>>,
     processing_log: parking_lot::Mutex<Vec<String>>,
 }
 
-impl MockDropSamplerOtlpExporter {
+impl DropSamplerOtlpExporterFixture {
     fn new() -> Self {
         Self {
             export_calls: AtomicU64::new(0),
@@ -125,7 +141,7 @@ impl MockDropSamplerOtlpExporter {
     }
 
     /// Current SOUND implementation: Skip export pipeline for unsampled spans.
-    fn export_optimized(&self, batch: &MockDropSamplerBatch) -> Result<(), String> {
+    fn export_optimized(&self, batch: &DropSamplerBatchFixture) -> Result<(), String> {
         self.export_calls.fetch_add(1, Ordering::Relaxed);
 
         self.processing_log.lock().push(format!(
@@ -134,7 +150,7 @@ impl MockDropSamplerOtlpExporter {
         ));
 
         // **HEAD-BASED SAMPLING**: Filter out unsampled spans (current implementation logic)
-        let sampled_spans: Vec<MockDropSamplerSpan> = batch
+        let sampled_spans: Vec<DropSamplerSpanFixture> = batch
             .spans
             .iter()
             .filter(|span| span.is_sampled())
@@ -159,7 +175,7 @@ impl MockDropSamplerOtlpExporter {
         self.network_calls.fetch_add(1, Ordering::Relaxed);
         self.memory_allocations.fetch_add(sampled_spans.len() as u64, Ordering::Relaxed);
 
-        let filtered_batch = MockDropSamplerBatch::new(batch.batch_id, sampled_spans);
+        let filtered_batch = DropSamplerBatchFixture::new(batch.batch_id, sampled_spans);
         self.exported_batches.lock().push(filtered_batch);
 
         self.processing_log.lock().push(format!(
@@ -171,7 +187,7 @@ impl MockDropSamplerOtlpExporter {
     }
 
     /// Wrong implementation: Always send to network (even empty batches).
-    fn export_wasteful(&self, batch: &MockDropSamplerBatch) -> Result<(), String> {
+    fn export_wasteful(&self, batch: &DropSamplerBatchFixture) -> Result<(), String> {
         self.export_calls.fetch_add(1, Ordering::Relaxed);
 
         // WRONG: Always make network call regardless of sampling
@@ -179,7 +195,7 @@ impl MockDropSamplerOtlpExporter {
         self.memory_allocations.fetch_add(batch.spans.len() as u64, Ordering::Relaxed);
 
         // Filter spans but still send (wasteful)
-        let sampled_spans: Vec<MockDropSamplerSpan> = batch
+        let sampled_spans: Vec<DropSamplerSpanFixture> = batch
             .spans
             .iter()
             .filter(|span| span.is_sampled())
@@ -187,7 +203,7 @@ impl MockDropSamplerOtlpExporter {
             .collect();
 
         // Even if empty, still "send" the batch (network waste)
-        let filtered_batch = MockDropSamplerBatch::new(batch.batch_id, sampled_spans);
+        let filtered_batch = DropSamplerBatchFixture::new(batch.batch_id, sampled_spans);
         self.exported_batches.lock().push(filtered_batch);
 
         self.processing_log.lock().push(format!(
@@ -210,7 +226,7 @@ impl MockDropSamplerOtlpExporter {
         self.memory_allocations.load(Ordering::Relaxed)
     }
 
-    fn get_exported_batches(&self) -> Vec<MockDropSamplerBatch> {
+    fn get_exported_batches(&self) -> Vec<DropSamplerBatchFixture> {
         self.exported_batches.lock().clone()
     }
 
@@ -236,7 +252,7 @@ fn audit_100_percent_drop_sampler_optimization() {
     println!("   • NOT: collect unsampled spans (memory waste)");
 
     // **TEST SCENARIO**: Batch with 1000 unsampled spans (100% drop rate)
-    let drop_batch = MockDropSamplerBatch::all_unsampled(123, 1000);
+    let drop_batch = DropSamplerBatchFixture::all_unsampled(123, 1000);
 
     println!("📊 100% drop scenario:");
     println!("   Batch: {} spans", drop_batch.spans.len());
@@ -244,7 +260,7 @@ fn audit_100_percent_drop_sampler_optimization() {
     println!("   Unsampled spans: {}", drop_batch.spans.iter().filter(|s| !s.is_sampled()).count());
 
     // **CURRENT IMPLEMENTATION (SOUND)**
-    let optimized_exporter = MockDropSamplerOtlpExporter::new();
+    let optimized_exporter = DropSamplerOtlpExporterFixture::new();
     let result = optimized_exporter.export_optimized(&drop_batch);
 
     println!("📊 Optimized implementation results:");
@@ -270,7 +286,7 @@ fn audit_100_percent_drop_sampler_optimization() {
     println!("✅ PROCESSING LOG: Optimization decision logged");
 
     // **WRONG IMPLEMENTATION (WASTEFUL)**
-    let wasteful_exporter = MockDropSamplerOtlpExporter::new();
+    let wasteful_exporter = DropSamplerOtlpExporterFixture::new();
     let wasteful_result = wasteful_exporter.export_wasteful(&drop_batch);
 
     println!("📊 Wasteful implementation results:");
@@ -304,14 +320,14 @@ fn audit_mixed_sampling_scenario() {
     println!("🔍 AUDIT: Mixed sampling scenario (30% sampled, 70% dropped)");
 
     // **TEST SCENARIO**: 300 sampled + 700 unsampled = 1000 total spans
-    let mixed_batch = MockDropSamplerBatch::mixed_sampling(456, 300, 700);
+    let mixed_batch = DropSamplerBatchFixture::mixed_sampling(456, 300, 700);
 
     println!("📊 Mixed sampling scenario:");
     println!("   Total spans: {}", mixed_batch.spans.len());
     println!("   Sampled spans: {}", mixed_batch.spans.iter().filter(|s| s.is_sampled()).count());
     println!("   Unsampled spans: {}", mixed_batch.spans.iter().filter(|s| !s.is_sampled()).count());
 
-    let exporter = MockDropSamplerOtlpExporter::new();
+    let exporter = DropSamplerOtlpExporterFixture::new();
     let result = exporter.export_optimized(&mixed_batch);
 
     println!("📊 Mixed sampling results:");
@@ -345,14 +361,14 @@ fn audit_100_percent_sampled_scenario() {
     println!("🔍 AUDIT: 100% sampled scenario (no optimization)");
 
     // **TEST SCENARIO**: All 500 spans are sampled
-    let sampled_batch = MockDropSamplerBatch::all_sampled(789, 500);
+    let sampled_batch = DropSamplerBatchFixture::all_sampled(789, 500);
 
     println!("📊 100% sampled scenario:");
     println!("   Total spans: {}", sampled_batch.spans.len());
     println!("   Sampled spans: {}", sampled_batch.spans.iter().filter(|s| s.is_sampled()).count());
     println!("   Unsampled spans: {}", sampled_batch.spans.iter().filter(|s| !s.is_sampled()).count());
 
-    let exporter = MockDropSamplerOtlpExporter::new();
+    let exporter = DropSamplerOtlpExporterFixture::new();
     let result = exporter.export_optimized(&sampled_batch);
 
     println!("📊 100% sampled results:");

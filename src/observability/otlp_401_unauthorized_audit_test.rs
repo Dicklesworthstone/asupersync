@@ -64,14 +64,14 @@ use crate::observability::otel::{OtlpError, OtlpHttpExporter, TraceSpan};
 use crate::time::Instant;
 use crate::types::{Outcome, TraceId};
 
-/// Mock HTTP client that returns configurable status codes for OTLP requests.
+/// Scripted HTTP client that returns configurable status codes for OTLP requests.
 #[derive(Clone)]
-struct MockAuthHttpClient {
+struct ScriptedAuthHttpClient {
     responses: Arc<Mutex<Vec<Response>>>,
     request_log: Arc<Mutex<Vec<(Method, String)>>>,
 }
 
-impl MockAuthHttpClient {
+impl ScriptedAuthHttpClient {
     fn new(responses: Vec<Response>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
@@ -88,7 +88,7 @@ impl MockAuthHttpClient {
     }
 }
 
-impl HttpClient for MockAuthHttpClient {
+impl HttpClient for ScriptedAuthHttpClient {
     async fn request(
         &self,
         _cx: &Cx,
@@ -144,7 +144,7 @@ mod tests {
     fn test_401_unauthorized_is_terminal() {
         // AUDIT POINT 1: HTTP 401 must be treated as terminal (non-retryable)
 
-        let mock_client = MockAuthHttpClient::new(vec![Response {
+        let scripted_client = ScriptedAuthHttpClient::new(vec![Response {
             status: 401,
             headers: vec![("www-authenticate".to_string(), "Bearer".to_string())],
             body: b"Authentication required".to_vec(),
@@ -154,7 +154,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -188,7 +188,7 @@ mod tests {
 
         // Should only make one request - no retries for auth failures
         assert_eq!(
-            mock_client.request_count(),
+            scripted_client.request_count(),
             1,
             "Should make exactly one request for 401 (no retries)"
         );
@@ -199,7 +199,7 @@ mod tests {
         // AUDIT POINT 2: HTTP 403 Forbidden should also be terminal
         // (falls into same 400..=499 client error range)
 
-        let mock_client = MockAuthHttpClient::new(vec![Response {
+        let scripted_client = ScriptedAuthHttpClient::new(vec![Response {
             status: 403,
             headers: vec![],
             body: b"Access denied".to_vec(),
@@ -209,7 +209,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -236,7 +236,7 @@ mod tests {
         }
 
         assert_eq!(
-            mock_client.request_count(),
+            scripted_client.request_count(),
             1,
             "Should make exactly one request for 403 (no retries)"
         );
@@ -291,7 +291,7 @@ mod tests {
         ];
 
         for test_case in test_cases {
-            let mock_client = MockAuthHttpClient::new(vec![Response {
+            let scripted_client = ScriptedAuthHttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: vec![],
                 body: format!("Error {}", test_case.status).into_bytes(),
@@ -301,7 +301,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -345,7 +345,7 @@ mod tests {
     fn test_401_with_www_authenticate_header() {
         // AUDIT POINT 4: WWW-Authenticate header present (realistic 401 scenario)
 
-        let mock_client = MockAuthHttpClient::new(vec![Response {
+        let scripted_client = ScriptedAuthHttpClient::new(vec![Response {
             status: 401,
             headers: vec![
                 ("www-authenticate".to_string(), "Bearer realm=\"OTLP\"".to_string()),
@@ -358,7 +358,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -380,9 +380,9 @@ mod tests {
         }
 
         // Verify only one request was made (no retries)
-        assert_eq!(mock_client.request_count(), 1);
+        assert_eq!(scripted_client.request_count(), 1);
 
-        let requests = mock_client.get_requests();
+        let requests = scripted_client.get_requests();
         assert_eq!(requests[0].0, Method::Post);
         assert!(requests[0].1.contains("/v1/traces"));
     }
@@ -392,7 +392,7 @@ mod tests {
         // AUDIT POINT 5: 401 terminates sequence even after previous successes
         // (e.g., auth token expired between requests)
 
-        let mock_client = MockAuthHttpClient::new(vec![
+        let scripted_client = ScriptedAuthHttpClient::new(vec![
             // Responses are popped in reverse order
             Response {
                 status: 401,
@@ -410,7 +410,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -433,7 +433,7 @@ mod tests {
         }
 
         // Should have made exactly 2 requests (no retries on the 401)
-        assert_eq!(mock_client.request_count(), 2);
+        assert_eq!(scripted_client.request_count(), 2);
     }
 
     #[test]
@@ -449,7 +449,7 @@ mod tests {
                 continue;
             }
 
-            let mock_client = MockAuthHttpClient::new(vec![Response {
+            let scripted_client = ScriptedAuthHttpClient::new(vec![Response {
                 status,
                 headers: vec![],
                 body: format!("Client error {}", status).into_bytes(),
@@ -459,7 +459,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -486,7 +486,7 @@ mod tests {
             }
 
             assert_eq!(
-                mock_client.request_count(),
+                scripted_client.request_count(),
                 1,
                 "Should make exactly one request for status {} (no retries)",
                 status

@@ -13,7 +13,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    /// Mock KeyValue for testing OTLP attribute serialization.
+    /// KeyValue fixture for testing OTLP attribute serialization.
     #[derive(Debug, Clone, PartialEq)]
     pub struct KeyValue {
         pub key: String,

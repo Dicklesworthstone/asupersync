@@ -23,14 +23,14 @@ use crate::observability::otel::{OtlpError, OtlpHttpExporter, TraceSpan};
 use crate::time::Instant;
 use crate::types::{Outcome, TraceId};
 
-/// Mock HTTP client that returns configurable status codes for OTLP requests.
+/// Scripted HTTP client that returns configurable status codes for OTLP requests.
 #[derive(Clone)]
-struct MockServiceUnavailableHttpClient {
+struct ScriptedServiceUnavailableHttpClient {
     responses: Arc<Mutex<Vec<Response>>>,
     request_log: Arc<Mutex<Vec<(Method, String)>>>,
 }
 
-impl MockServiceUnavailableHttpClient {
+impl ScriptedServiceUnavailableHttpClient {
     fn new(responses: Vec<Response>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
@@ -47,7 +47,7 @@ impl MockServiceUnavailableHttpClient {
     }
 }
 
-impl HttpClient for MockServiceUnavailableHttpClient {
+impl HttpClient for ScriptedServiceUnavailableHttpClient {
     async fn request(
         &self,
         _cx: &Cx,
@@ -103,7 +103,7 @@ mod tests {
     fn test_503_ignores_retry_after_header_bug() {
         // AUDIT POINT 1: Demonstrate that 503 currently IGNORES Retry-After header
 
-        let mock_client = MockServiceUnavailableHttpClient::new(vec![Response {
+        let scripted_client = ScriptedServiceUnavailableHttpClient::new(vec![Response {
             status: 503,
             headers: vec![
                 ("retry-after".to_string(), "0".to_string()), // Should retry immediately
@@ -116,7 +116,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -156,14 +156,14 @@ mod tests {
             ),
         }
 
-        assert_eq!(mock_client.request_count(), 1);
+        assert_eq!(scripted_client.request_count(), 1);
     }
 
     #[test]
     fn test_429_correctly_honors_retry_after() {
         // AUDIT POINT 2: Verify that 429 correctly honors Retry-After (for comparison)
 
-        let mock_client = MockServiceUnavailableHttpClient::new(vec![Response {
+        let scripted_client = ScriptedServiceUnavailableHttpClient::new(vec![Response {
             status: 429,
             headers: vec![
                 ("retry-after".to_string(), "0".to_string()),
@@ -176,7 +176,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -253,7 +253,7 @@ mod tests {
         eprintln!("===================================");
 
         for test_case in test_cases {
-            let mock_client = MockServiceUnavailableHttpClient::new(vec![Response {
+            let scripted_client = ScriptedServiceUnavailableHttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: vec![
                     ("retry-after".to_string(), test_case.retry_after_value.to_string()),
@@ -265,7 +265,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -317,7 +317,7 @@ mod tests {
         // Note: This test only covers the error classification, not the actual retry logic
         // The retry logic with exponential backoff and max attempts should prevent infinite loops
 
-        let mock_client = MockServiceUnavailableHttpClient::new(vec![Response {
+        let scripted_client = ScriptedServiceUnavailableHttpClient::new(vec![Response {
             status: 503,
             headers: vec![
                 ("retry-after".to_string(), "0".to_string()),
@@ -329,7 +329,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -379,7 +379,7 @@ mod tests {
         eprintln!("=================================");
 
         for (retry_after_value, description) in malformed_cases {
-            let mock_client = MockServiceUnavailableHttpClient::new(vec![Response {
+            let scripted_client = ScriptedServiceUnavailableHttpClient::new(vec![Response {
                 status: 503,
                 headers: vec![
                     ("retry-after".to_string(), retry_after_value.to_string()),
@@ -391,7 +391,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 

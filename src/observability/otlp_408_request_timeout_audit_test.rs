@@ -25,14 +25,14 @@ use crate::observability::otel::{OtlpError, OtlpHttpExporter, TraceSpan};
 use crate::time::Instant;
 use crate::types::{Outcome, TraceId};
 
-/// Mock HTTP client that returns HTTP 408 Request Timeout responses.
+/// Scripted HTTP client that returns HTTP 408 Request Timeout responses.
 #[derive(Clone)]
-struct MockTimeoutHttpClient {
+struct ScriptedTimeoutHttpClient {
     responses: Arc<Mutex<Vec<Response>>>,
     request_log: Arc<Mutex<Vec<(Method, String)>>>,
 }
 
-impl MockTimeoutHttpClient {
+impl ScriptedTimeoutHttpClient {
     fn new(responses: Vec<Response>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
@@ -49,7 +49,7 @@ impl MockTimeoutHttpClient {
     }
 }
 
-impl HttpClient for MockTimeoutHttpClient {
+impl HttpClient for ScriptedTimeoutHttpClient {
     async fn request(
         &self,
         _cx: &Cx,
@@ -105,7 +105,7 @@ mod tests {
     fn test_408_request_timeout_is_retryable() {
         // AUDIT POINT 1: Verify 408 is correctly classified as retryable
 
-        let mock_client = MockTimeoutHttpClient::new(vec![Response {
+        let scripted_client = ScriptedTimeoutHttpClient::new(vec![Response {
             status: 408,
             headers: vec![
                 ("server".to_string(), "nginx/1.18.0".to_string()),
@@ -118,7 +118,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -151,14 +151,14 @@ mod tests {
             ),
         }
 
-        assert_eq!(mock_client.request_count(), 1);
+        assert_eq!(scripted_client.request_count(), 1);
     }
 
     #[test]
     fn test_408_with_retry_after_header() {
         // AUDIT POINT 2: Verify 408 honors Retry-After header per OTLP spec
 
-        let mock_client = MockTimeoutHttpClient::new(vec![Response {
+        let scripted_client = ScriptedTimeoutHttpClient::new(vec![Response {
             status: 408,
             headers: vec![
                 ("retry-after".to_string(), "5".to_string()), // 5 seconds
@@ -171,7 +171,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -259,7 +259,7 @@ mod tests {
         eprintln!("====================================");
 
         for test_case in test_cases {
-            let mock_client = MockTimeoutHttpClient::new(vec![Response {
+            let scripted_client = ScriptedTimeoutHttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: vec![],
                 body: format!("{} {}", test_case.status, test_case.description).into_bytes(),
@@ -269,7 +269,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -314,7 +314,7 @@ mod tests {
         eprintln!("   • Should honor Retry-After header when present");
         eprintln!("   • Distinguishes server timeout from client errors");
 
-        let mock_client = MockTimeoutHttpClient::new(vec![Response {
+        let scripted_client = ScriptedTimeoutHttpClient::new(vec![Response {
             status: 408,
             headers: vec![
                 ("retry-after".to_string(), "2".to_string()),
@@ -326,7 +326,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -410,7 +410,7 @@ mod tests {
         eprintln!("============================");
 
         for scenario in scenarios {
-            let mock_client = MockTimeoutHttpClient::new(vec![Response {
+            let scripted_client = ScriptedTimeoutHttpClient::new(vec![Response {
                 status: 408,
                 headers: scenario.headers,
                 body: scenario.body.as_bytes().to_vec(),
@@ -420,7 +420,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 

@@ -27,15 +27,15 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Mock span batch for testing export cancellation scenarios.
+/// Span batch fixture for testing export cancellation scenarios.
 #[derive(Debug, Clone)]
-pub struct MockSpanBatch {
+pub struct SpanBatchFixture {
     pub span_count: usize,
     pub batch_id: String,
     pub size_bytes: usize,
 }
 
-impl MockSpanBatch {
+impl SpanBatchFixture {
     fn new(batch_id: &str, span_count: usize) -> Self {
         Self {
             span_count,
@@ -45,9 +45,9 @@ impl MockSpanBatch {
     }
 }
 
-/// Mock export metrics for tracking span loss.
+/// Export metrics fixture for tracking span loss.
 #[derive(Debug, Default)]
-pub struct MockExportMetrics {
+pub struct ExportMetricsFixture {
     pub spans_exported_success: usize,
     pub spans_dropped_cancellation: usize,
     pub spans_dropped_error: usize,
@@ -55,7 +55,7 @@ pub struct MockExportMetrics {
     pub export_attempts: usize,
 }
 
-impl MockExportMetrics {
+impl ExportMetricsFixture {
     fn record_export_success(&mut self, span_count: usize) {
         self.spans_exported_success += span_count;
         self.export_attempts += 1;
@@ -86,19 +86,19 @@ impl MockExportMetrics {
     }
 }
 
-/// Mock OTLP exporter for testing cancellation behavior.
+/// OTLP exporter fixture for testing cancellation behavior.
 #[derive(Debug)]
-pub struct MockCancellationAwareExporter {
-    pub metrics: Arc<Mutex<MockExportMetrics>>,
+pub struct CancellationAwareExporterFixture {
+    pub metrics: Arc<Mutex<ExportMetricsFixture>>,
     pub export_results: Vec<(String, String)>, // (batch_id, result)
     pub should_cancel_after_ms: Option<u64>,
     pub should_error: bool,
 }
 
-impl MockCancellationAwareExporter {
+impl CancellationAwareExporterFixture {
     fn new() -> Self {
         Self {
-            metrics: Arc::new(Mutex::new(MockExportMetrics::default())),
+            metrics: Arc::new(Mutex::new(ExportMetricsFixture::default())),
             export_results: Vec::new(),
             should_cancel_after_ms: None,
             should_error: false,
@@ -116,7 +116,7 @@ impl MockCancellationAwareExporter {
     }
 
     /// Current defective implementation: no cancellation awareness.
-    async fn export_batch_defective(&mut self, batch: MockSpanBatch) -> Result<(), String> {
+    async fn export_batch_defective(&mut self, batch: SpanBatchFixture) -> Result<(), String> {
         // Simulate export delay where cancellation can occur
         if let Some(cancel_ms) = self.should_cancel_after_ms {
             std::thread::sleep(Duration::from_millis(cancel_ms / 2));
@@ -137,7 +137,7 @@ impl MockCancellationAwareExporter {
     }
 
     /// Correct implementation: cancellation-aware with metrics.
-    async fn export_batch_correct(&mut self, batch: MockSpanBatch) -> Result<(), String> {
+    async fn export_batch_correct(&mut self, batch: SpanBatchFixture) -> Result<(), String> {
         // Simulate export delay where cancellation can occur
         if let Some(cancel_ms) = self.should_cancel_after_ms {
             std::thread::sleep(Duration::from_millis(cancel_ms / 2));
@@ -173,7 +173,7 @@ impl MockCancellationAwareExporter {
         Ok(())
     }
 
-    fn get_metrics(&self) -> MockExportMetrics {
+    fn get_metrics(&self) -> ExportMetricsFixture {
         self.metrics.lock().unwrap().clone()
     }
 }
@@ -193,7 +193,7 @@ fn audit_export_cancellation_span_loss() {
     println!("   • Operators need visibility into data loss events");
     println!("   • Bounded loss preferred over unbounded buffering");
 
-    let test_batch = MockSpanBatch::new("batch-001", 100);
+    let test_batch = SpanBatchFixture::new("batch-001", 100);
 
     println!("📊 Test scenario:");
     println!("   Batch: {} spans ({} bytes)", test_batch.span_count, test_batch.size_bytes);
@@ -202,7 +202,7 @@ fn audit_export_cancellation_span_loss() {
 
     // **DEFECTIVE IMPLEMENTATION**: Silent span loss
     println!("📊 Testing defective implementation (silent loss):");
-    let mut defective_exporter = MockCancellationAwareExporter::new()
+    let mut defective_exporter = CancellationAwareExporterFixture::new()
         .with_cancellation_after(100);
 
     let defective_result = futures::executor::block_on(
@@ -225,7 +225,7 @@ fn audit_export_cancellation_span_loss() {
 
     // **CORRECT IMPLEMENTATION**: Cancellation-aware metrics
     println!("📊 Testing correct implementation (metrics-aware):");
-    let mut correct_exporter = MockCancellationAwareExporter::new()
+    let mut correct_exporter = CancellationAwareExporterFixture::new()
         .with_cancellation_after(100);
 
     let correct_result = futures::executor::block_on(
@@ -265,7 +265,7 @@ fn audit_export_error_span_loss_metrics() {
     println!("   • Different error types may require different retry strategies");
     println!("   • Metrics should distinguish error causes for debugging");
 
-    let error_batch = MockSpanBatch::new("batch-error", 50);
+    let error_batch = SpanBatchFixture::new("batch-error", 50);
 
     println!("📊 Error scenario:");
     println!("   Batch: {} spans", error_batch.span_count);
@@ -273,7 +273,7 @@ fn audit_export_error_span_loss_metrics() {
     println!("   Expected: Error-specific span loss metrics");
 
     // Test correct implementation with error handling
-    let mut exporter = MockCancellationAwareExporter::new().with_error();
+    let mut exporter = CancellationAwareExporterFixture::new().with_error();
 
     let result = futures::executor::block_on(
         exporter.export_batch_correct(error_batch)
@@ -311,15 +311,15 @@ fn audit_data_loss_rate_monitoring() {
     println!("   • Support alerting on high data loss rates");
     println!("   • Distinguish temporary vs persistent loss patterns");
 
-    let mut exporter = MockCancellationAwareExporter::new();
+    let mut exporter = CancellationAwareExporterFixture::new();
 
     // Simulate mixed export scenarios
     let scenarios = vec![
-        (MockSpanBatch::new("success-1", 100), false, false),
-        (MockSpanBatch::new("success-2", 150), false, false),
-        (MockSpanBatch::new("cancelled-1", 75), true, false),  // with_cancellation
-        (MockSpanBatch::new("error-1", 50), false, true),     // with_error
-        (MockSpanBatch::new("success-3", 200), false, false),
+        (SpanBatchFixture::new("success-1", 100), false, false),
+        (SpanBatchFixture::new("success-2", 150), false, false),
+        (SpanBatchFixture::new("cancelled-1", 75), true, false), // with_cancellation
+        (SpanBatchFixture::new("error-1", 50), false, true),     // with_error
+        (SpanBatchFixture::new("success-3", 200), false, false),
     ];
 
     println!("📊 Mixed export scenario:");
@@ -419,7 +419,7 @@ fn audit_otlp_best_practice_compliance() {
 
     // Demonstrate what full compliance would look like
     println!("📊 Full compliance example:");
-    let mut compliant_metrics = MockExportMetrics::default();
+    let mut compliant_metrics = ExportMetricsFixture::default();
     compliant_metrics.record_export_success(1000);
     compliant_metrics.record_export_cancellation(50);
     compliant_metrics.record_export_error(25);
@@ -453,14 +453,14 @@ fn audit_proposed_cancellation_aware_design() {
     #[derive(Debug)]
     struct CancellationAwareExportTracker {
         spans_in_flight: Arc<Mutex<usize>>,
-        export_metrics: Arc<Mutex<MockExportMetrics>>,
+        export_metrics: Arc<Mutex<ExportMetricsFixture>>,
     }
 
     impl CancellationAwareExportTracker {
         fn new() -> Self {
             Self {
                 spans_in_flight: Arc::new(Mutex::new(0)),
-                export_metrics: Arc::new(Mutex::new(MockExportMetrics::default())),
+                export_metrics: Arc::new(Mutex::new(ExportMetricsFixture::default())),
             }
         }
 
@@ -490,7 +490,7 @@ fn audit_proposed_cancellation_aware_design() {
             }
         }
 
-        fn get_metrics(&self) -> MockExportMetrics {
+        fn get_metrics(&self) -> ExportMetricsFixture {
             self.export_metrics.lock().unwrap().clone()
         }
     }

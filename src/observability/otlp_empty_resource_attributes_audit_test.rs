@@ -18,13 +18,13 @@
 
 use std::collections::HashMap;
 
-/// Mock resource attribute builder to test empty string handling.
+/// Resource attribute builder fixture to test empty string handling.
 #[derive(Debug, Default)]
-struct MockResourceAttributeBuilder {
+struct ResourceAttributeBuilderFixture {
     attributes: HashMap<String, String>,
 }
 
-impl MockResourceAttributeBuilder {
+impl ResourceAttributeBuilderFixture {
     fn new() -> Self {
         Self::default()
     }
@@ -132,7 +132,7 @@ fn audit_otlp_empty_resource_attribute_handling() {
     // **RESOURCE BUILDER TEST**: Full resource with mixed empty/valid attributes
     println!("📊 Full resource attribute handling:");
 
-    let mixed_attributes = MockResourceAttributeBuilder::new()
+    let mixed_attributes = ResourceAttributeBuilderFixture::new()
         .add_attribute("service.name", "") // Empty - should be dropped
         .add_attribute("service.version", "1.0.0") // Valid - should be kept
         .add_attribute("deployment.environment", "") // Empty - should be dropped

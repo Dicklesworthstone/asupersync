@@ -146,7 +146,7 @@ fn audit_retry_timing_verification_strategy() {
     println!("🔍 AUDIT: Retry timing verification strategy");
 
     println!("📋 Wire-level verification approach:");
-    println!("   1. Mock OTLP collector that returns 429 with Retry-After: 5");
+    println!("   1. Scripted OTLP collector that returns 429 with Retry-After: 5");
     println!("   2. Capture timestamps of retry attempts");
     println!("   3. Verify delay ≈ 5 seconds ± tolerance");
     println!("   4. Ensure delay is NOT exponential backoff value");
@@ -158,7 +158,7 @@ fn audit_retry_timing_verification_strategy() {
     println!("   Scenario D: 502 (no Retry-After) -> expect exponential backoff");
 
     println!("📋 Implementation verification checklist:");
-    println!("   1. Mock HttpClient to return test responses");
+    println!("   1. Scripted HttpClient to return test responses");
     println!("   2. Instrument sleep() calls to capture actual delays");
     println!("   3. Assert retry_after path vs exponential backoff path");
     println!("   4. Verify max_retry_delay capping behavior");

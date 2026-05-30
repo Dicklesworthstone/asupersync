@@ -30,14 +30,14 @@ use crate::observability::otel::{OtlpError, OtlpHttpExporter, TraceSpan};
 use crate::time::Instant;
 use crate::types::{Outcome, TraceId};
 
-/// Mock HTTP client that returns HTTP 304 Not Modified responses.
+/// Scripted HTTP client that returns HTTP 304 Not Modified responses.
 #[derive(Clone)]
-struct Mock304HttpClient {
+struct Scripted304HttpClient {
     responses: Arc<Mutex<Vec<Response>>>,
     request_log: Arc<Mutex<Vec<(Method, String)>>>,
 }
 
-impl Mock304HttpClient {
+impl Scripted304HttpClient {
     fn new(responses: Vec<Response>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
@@ -54,7 +54,7 @@ impl Mock304HttpClient {
     }
 }
 
-impl HttpClient for Mock304HttpClient {
+impl HttpClient for Scripted304HttpClient {
     async fn request(
         &self,
         _cx: &Cx,
@@ -112,7 +112,7 @@ mod tests {
     fn test_304_not_modified_is_terminal() {
         // AUDIT POINT 1: Verify 304 is correctly classified as terminal
 
-        let mock_client = Mock304HttpClient::new(vec![Response {
+        let scripted_client = Scripted304HttpClient::new(vec![Response {
             status: 304,
             headers: vec![
                 ("cache-control".to_string(), "max-age=3600".to_string()),
@@ -126,7 +126,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -165,7 +165,7 @@ mod tests {
             ),
         }
 
-        assert_eq!(mock_client.request_count(), 1);
+        assert_eq!(scripted_client.request_count(), 1);
     }
 
     #[test]
@@ -204,7 +204,7 @@ mod tests {
         eprintln!("===============================================");
 
         for test_case in caching_tests {
-            let mock_client = Mock304HttpClient::new(vec![Response {
+            let scripted_client = Scripted304HttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: vec![
                     ("cache-control".to_string(), "no-cache".to_string()),
@@ -216,7 +216,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -311,7 +311,7 @@ mod tests {
         eprintln!("=========================================");
 
         for scenario in scenarios {
-            let mock_client = Mock304HttpClient::new(vec![Response {
+            let scripted_client = Scripted304HttpClient::new(vec![Response {
                 status: 304,
                 headers: scenario.headers.clone(),
                 body: b"Not Modified - cached response".to_vec(),
@@ -321,7 +321,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -374,7 +374,7 @@ mod tests {
         eprintln!("   3. Problem: POST creates/sends data, doesn't retrieve cached resource");
         eprintln!("   ❌ Invalid: POST requests for data ingestion should not use caching");
 
-        let mock_client = Mock304HttpClient::new(vec![Response {
+        let scripted_client = Scripted304HttpClient::new(vec![Response {
             status: 304,
             headers: vec![
                 ("cache-control".to_string(), "max-age=3600".to_string()),
@@ -386,7 +386,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -436,7 +436,7 @@ mod tests {
         eprintln!("   • 304 response violates POST method semantics");
         eprintln!("   • Indicates misconfiguration in caching layer");
 
-        let mock_client = Mock304HttpClient::new(vec![Response {
+        let scripted_client = Scripted304HttpClient::new(vec![Response {
             status: 304,
             headers: vec![
                 ("server".to_string(), "compliant-server/1.0.0".to_string()),
@@ -449,7 +449,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 

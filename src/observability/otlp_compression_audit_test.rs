@@ -124,7 +124,7 @@ fn audit_wire_level_compression_verification_strategy() {
     println!("   Body: [0x1f, 0x8b, 0x08, ...] // GZIP magic + compressed protobuf");
 
     println!("📋 Test strategy for wire-level verification:");
-    println!("   1. Create mock HTTP client that captures request headers and body");
+    println!("   1. Create scripted HTTP client that captures request headers and body");
     println!("   2. Configure OtlpHttpExporter with compression=true");
     println!("   3. Export test span batch");
     println!("   4. Verify Content-Encoding: gzip header present");

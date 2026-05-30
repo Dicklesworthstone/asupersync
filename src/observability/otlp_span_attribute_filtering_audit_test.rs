@@ -15,7 +15,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    /// Mock span attribute for testing filtering behavior.
+    /// Span attribute fixture for testing filtering behavior.
     #[derive(Debug, Clone, PartialEq)]
     pub struct TestSpanAttribute {
         pub key: String,
@@ -23,7 +23,7 @@ mod tests {
         pub is_sensitive: bool,
     }
 
-    /// Mock OTLP KeyValue for wire format testing.
+    /// OTLP KeyValue fixture for wire format testing.
     #[derive(Debug, Clone, PartialEq)]
     pub struct KeyValue {
         pub key: String,

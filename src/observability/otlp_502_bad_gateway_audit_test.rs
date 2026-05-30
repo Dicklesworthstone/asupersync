@@ -56,8 +56,8 @@ mod tests {
         }
     }
 
-    /// Mock HTTP response for testing status code classification.
-    struct MockResponse {
+    /// HTTP response fixture for testing status code classification.
+    struct ResponseFixture {
         status: u16,
         headers: Vec<(String, String)>,
     }
@@ -65,7 +65,7 @@ mod tests {
     /// Current OTLP response status classifier (from otel.rs lines 1112-1154).
     ///
     /// **SOUND**: Correctly classifies 502 as retryable in explicit 502|503|504 case.
-    fn current_otlp_status_classifier(response: &MockResponse) -> Result<(), OtlpError> {
+    fn current_otlp_status_classifier(response: &ResponseFixture) -> Result<(), OtlpError> {
         match response.status {
             200..=299 => Ok(()),
             429 => {
@@ -143,7 +143,7 @@ mod tests {
         eprintln!("\n📊 Testing 5xx retry classification:");
 
         for (status_code, status_name, should_be_retryable, reasoning) in test_cases {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: status_code,
                 headers: vec![],
             };
@@ -205,7 +205,7 @@ mod tests {
         let gateway_codes = vec![502, 503, 504];
 
         for code in gateway_codes {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: code,
                 headers: vec![],
             };
@@ -233,7 +233,7 @@ mod tests {
         eprintln!("   4. API gateway detecting protocol violations from collector");
         eprintln!("   → All scenarios benefit from retry as collector may recover");
 
-        let response_502 = MockResponse {
+        let response_502 = ResponseFixture {
             status: 502,
             headers: vec![],
         };
@@ -271,7 +271,7 @@ mod tests {
         eprintln!("\n✅ DEMONSTRATING 502 RETRY CORRECTNESS");
         eprintln!("======================================");
 
-        let bad_gateway_response = MockResponse {
+        let bad_gateway_response = ResponseFixture {
             status: 502,
             headers: vec![],
         };
@@ -305,7 +305,7 @@ mod tests {
 
         // Compare with related gateway error codes
         for gateway_code in [503, 504] {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: gateway_code,
                 headers: vec![],
             };
@@ -343,7 +343,7 @@ mod tests {
         // Test gateway errors (should be retryable)
         let gateway_errors = vec![(502, "Bad Gateway"), (503, "Service Unavailable"), (504, "Gateway Timeout")];
         for (code, name) in gateway_errors {
-            let response = MockResponse { status: code, headers: vec![] };
+            let response = ResponseFixture { status: code, headers: vec![] };
             let result = current_otlp_status_classifier(&response);
             let is_retryable = matches!(result, Err(ref e) if e.is_retryable());
             assert!(is_retryable, "{} should be retryable", name);
@@ -353,7 +353,7 @@ mod tests {
         // Test general server errors (should be terminal)
         let server_errors = vec![(500, "Internal Server Error"), (501, "Not Implemented"), (505, "HTTP Version Not Supported")];
         for (code, name) in server_errors {
-            let response = MockResponse { status: code, headers: vec![] };
+            let response = ResponseFixture { status: code, headers: vec![] };
             let result = current_otlp_status_classifier(&response);
             let is_terminal = matches!(result, Err(ref e) if e.is_terminal());
             assert!(is_terminal, "{} should be terminal", name);

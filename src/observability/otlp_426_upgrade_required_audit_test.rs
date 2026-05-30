@@ -26,12 +26,12 @@ mod tests {
     use crate::http::h1::http_client::HttpClient;
     use crate::http::h1::types::{HttpResponse, Method};
 
-    /// Mock HTTP client that returns HTTP 426 Upgrade Required with Upgrade header.
-    struct Mock426UpgradeRequiredClient {
+    /// Scripted HTTP client that returns HTTP 426 Upgrade Required with Upgrade header.
+    struct Scripted426UpgradeRequiredClient {
         upgrade_protocols: String,
     }
 
-    impl Mock426UpgradeRequiredClient {
+    impl Scripted426UpgradeRequiredClient {
         fn new(upgrade_protocols: impl Into<String>) -> Self {
             Self {
                 upgrade_protocols: upgrade_protocols.into(),
@@ -64,16 +64,16 @@ mod tests {
         // Create minimal OTLP trace batch
         let trace_data = create_minimal_otlp_trace_batch();
 
-        // Mock would return 426 with Upgrade: TLS/1.2, HTTP/2
-        let mock_client = Mock426UpgradeRequiredClient::new("TLS/1.2, HTTP/2");
+        // Scripted client would return 426 with Upgrade: TLS/1.2, HTTP/2
+        let _scripted_client = Scripted426UpgradeRequiredClient::new("TLS/1.2, HTTP/2");
 
-        // In a real test, we would inject the mock client
+        // In a real test, we would inject the scripted client
         // For audit purposes, we document the expected behavior
 
         // EXPECTED BEHAVIOR: Export should fail with non-retryable error
         // containing helpful upgrade information
 
-        // Note: Since we can't easily mock the HTTP client in the current architecture,
+        // Note: Since we can't easily inject the HTTP client in the current architecture,
         // this test documents the expected behavior for manual verification
         assert!(
             true,
@@ -250,8 +250,8 @@ mod tests {
 
     /// Create minimal OTLP trace batch for testing.
     fn create_minimal_otlp_trace_batch() -> Vec<u8> {
-        // Mock OTLP protobuf data
-        b"mock-otlp-trace-batch-426".to_vec()
+        // Synthetic OTLP protobuf data
+        b"scripted-otlp-trace-batch-426".to_vec()
     }
 
     #[test]

@@ -14,7 +14,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    /// Mock span for testing deep hierarchy serialization.
+    /// Span fixture for testing deep hierarchy serialization.
     #[derive(Debug, Clone)]
     pub struct TestSpan {
         pub span_id: String,
@@ -40,7 +40,7 @@ mod tests {
         }
     }
 
-    /// Mock protobuf span for wire format testing.
+    /// Protobuf span fixture for wire format testing.
     #[derive(Debug, Clone, PartialEq)]
     pub struct ProtoSpan {
         pub span_id: String,

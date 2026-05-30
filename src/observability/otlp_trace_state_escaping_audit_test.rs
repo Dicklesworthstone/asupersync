@@ -16,7 +16,7 @@
 mod tests {
     use std::collections::HashMap;
 
-    /// Mock trace context for testing special character escaping.
+    /// Trace context fixture for testing special character escaping.
     #[derive(Debug, Clone, PartialEq)]
     pub struct TestTraceContext {
         pub trace_id: String,

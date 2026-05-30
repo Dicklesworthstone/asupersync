@@ -56,8 +56,8 @@ mod tests {
         }
     }
 
-    /// Mock HTTP response for testing status code classification.
-    struct MockResponse {
+    /// HTTP response fixture for testing status code classification.
+    struct ResponseFixture {
         status: u16,
         headers: Vec<(String, String)>,
     }
@@ -66,7 +66,7 @@ mod tests {
     ///
     /// **SOUND**: HTTP 405 Method Not Allowed correctly falls into 400..=499 range
     /// and is classified as non_retryable (terminal).
-    fn current_otlp_status_classifier(response: &MockResponse) -> Result<(), OtlpError> {
+    fn current_otlp_status_classifier(response: &ResponseFixture) -> Result<(), OtlpError> {
         match response.status {
             200..=299 => Ok(()),
             429 => {
@@ -133,7 +133,7 @@ mod tests {
         eprintln!("  • Load balancer misconfiguration routing to wrong service");
 
         // Test HTTP 405 Method Not Allowed specifically
-        let response_405 = MockResponse {
+        let response_405 = ResponseFixture {
             status: 405,
             headers: vec![
                 ("Allow".to_string(), "POST, OPTIONS".to_string()), // RFC 9110 requirement
@@ -229,7 +229,7 @@ mod tests {
         eprintln!("\n📊 Testing 4xx error classification:");
 
         for (status_code, status_name, should_be_retryable, reasoning) in client_error_test_cases {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: status_code,
                 headers: vec![],
             };
@@ -313,7 +313,7 @@ mod tests {
             eprintln!("  Problem: {}", description);
             eprintln!("  Solution: {}", fix);
 
-            let response_405 = MockResponse {
+            let response_405 = ResponseFixture {
                 status: 405,
                 headers: vec![("Allow".to_string(), "GET, OPTIONS".to_string())],
             };
@@ -354,7 +354,7 @@ mod tests {
         eprintln!("🎯 Contrasting 405 (terminal) vs 503 (retryable) behavior:");
 
         // Test 405 Method Not Allowed (should be terminal)
-        let method_not_allowed = MockResponse {
+        let method_not_allowed = ResponseFixture {
             status: 405,
             headers: vec![("Allow".to_string(), "POST".to_string())],
         };
@@ -374,7 +374,7 @@ mod tests {
         }
 
         // Test 503 Service Unavailable (should be retryable)
-        let service_unavailable = MockResponse {
+        let service_unavailable = ResponseFixture {
             status: 503,
             headers: vec![("Retry-After".to_string(), "30".to_string())],
         };

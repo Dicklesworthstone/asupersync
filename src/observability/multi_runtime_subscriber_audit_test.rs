@@ -17,13 +17,13 @@ use crate::tracing_compat::info;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Mock trace collector to capture tracing output per runtime.
+/// Trace collector fixture to capture tracing output per runtime.
 #[derive(Debug, Clone)]
-struct MockTraceCollector {
+struct TraceCollectorFixture {
     traces: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
-impl MockTraceCollector {
+impl TraceCollectorFixture {
     fn new() -> Self {
         Self {
             traces: Arc::new(Mutex::new(HashMap::new())),
@@ -59,7 +59,7 @@ impl MockTraceCollector {
 fn audit_multi_runtime_subscriber_isolation() {
     println!("🔍 AUDIT: Multi-runtime subscriber isolation");
 
-    let collector = MockTraceCollector::new();
+    let collector = TraceCollectorFixture::new();
     let mut runtime_traces = Vec::new();
 
     // Simulate 3 separate runtime instantiations

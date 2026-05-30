@@ -23,9 +23,9 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-/// Mock span for testing end() call deduplication behavior.
+/// Span fixture for testing end() call deduplication behavior.
 #[derive(Debug, Clone)]
-pub struct MockSpan {
+pub struct SpanFixture {
     name: String,
     start_time: SystemTime,
     end_time: Option<SystemTime>,
@@ -35,7 +35,7 @@ pub struct MockSpan {
     ended_flag: bool,
 }
 
-impl MockSpan {
+impl SpanFixture {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -87,14 +87,14 @@ impl MockSpan {
     }
 }
 
-/// Mock span exporter for testing span count integrity.
+/// Span exporter fixture for testing span count integrity.
 #[derive(Debug)]
-pub struct MockSpanExporter {
-    exported_spans: Vec<MockSpan>,
+pub struct SpanExporterFixture {
+    exported_spans: Vec<SpanFixture>,
     export_call_count: usize,
 }
 
-impl MockSpanExporter {
+impl SpanExporterFixture {
     fn new() -> Self {
         Self {
             exported_spans: Vec::new(),
@@ -102,7 +102,7 @@ impl MockSpanExporter {
         }
     }
 
-    fn export_span(&mut self, span: MockSpan) {
+    fn export_span(&mut self, span: SpanFixture) {
         if span.is_ended() {
             self.exported_spans.push(span);
             self.export_call_count += 1;
@@ -113,7 +113,7 @@ impl MockSpanExporter {
         self.export_call_count
     }
 
-    fn get_exported_spans(&self) -> &[MockSpan] {
+    fn get_exported_spans(&self) -> &[SpanFixture] {
         &self.exported_spans
     }
 }
@@ -148,7 +148,7 @@ fn audit_otlp_span_end_idempotency() {
         println!("   Testing: {} ({} calls)", description, call_count);
 
         // **CURRENT IMPLEMENTATION** (correct behavior)
-        let mut correct_span = MockSpan::new("test-span");
+        let mut correct_span = SpanFixture::new("test-span");
         let mut call_times = Vec::new();
 
         for i in 0..call_count {
@@ -182,7 +182,7 @@ fn audit_otlp_span_end_idempotency() {
         // **VERIFY AGAINST DEFECTIVE IMPLEMENTATIONS**
 
         // Test defective behavior (b): data corruption
-        let mut defective_span = MockSpan::new("test-span-defective");
+        let mut defective_span = SpanFixture::new("test-span-defective");
         let mut defective_times = Vec::new();
 
         for _i in 0..call_count {
@@ -221,7 +221,7 @@ fn audit_span_export_count_integrity() {
     println!("   • Duplicate end() calls should not increase export count");
     println!("   • Exporter should receive spans only once regardless of end() calls");
 
-    let mut exporter = MockSpanExporter::new();
+    let mut exporter = SpanExporterFixture::new();
     let unique_span_count = 5;
 
     println!("📊 Testing span export integrity:");
@@ -231,7 +231,7 @@ fn audit_span_export_count_integrity() {
 
     for (i, &end_calls) in duplicate_patterns.iter().enumerate() {
         let span_name = format!("span-{}", i + 1);
-        let mut span = MockSpan::new(&span_name);
+        let mut span = SpanFixture::new(&span_name);
 
         println!("   {}: {} end() calls", span_name, end_calls);
 
@@ -344,7 +344,7 @@ fn audit_span_end_timing_accuracy() {
     println!("   • end_time should reflect actual first completion time");
 
     // **RAPID CALL SIMULATION**
-    let mut span = MockSpan::new("timing-test-span");
+    let mut span = SpanFixture::new("timing-test-span");
 
     println!("📊 Testing rapid end() call scenarios:");
 

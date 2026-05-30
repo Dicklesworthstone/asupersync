@@ -149,15 +149,15 @@ impl OtlpCircuitBreaker {
     }
 }
 
-/// Mock collector that simulates sustained 503 failures.
+/// Collector fixture that simulates sustained 503 failures.
 #[derive(Debug)]
-pub struct FailingMockCollector {
+pub struct FailingCollectorFixture {
     request_count: Arc<AtomicU64>,
     failure_count: u64,
     recovery_after: u64,
 }
 
-impl FailingMockCollector {
+impl FailingCollectorFixture {
     fn new(failure_count: u64) -> Self {
         Self {
             request_count: Arc::new(AtomicU64::new(0)),
@@ -207,7 +207,7 @@ fn audit_otlp_circuit_breaker_consecutive_failures() {
     println!("   • NOT: waste resources during collector outage");
 
     let circuit_breaker = OtlpCircuitBreaker::new();
-    let failing_collector = FailingMockCollector::new(10); // Fail first 10 requests
+    let failing_collector = FailingCollectorFixture::new(10); // Fail first 10 requests
 
     println!("📊 Testing consecutive collector failures:");
 
@@ -305,7 +305,7 @@ fn audit_circuit_breaker_recovery_detection() {
     println!("🔍 AUDIT: Circuit breaker recovery detection");
 
     let circuit_breaker = OtlpCircuitBreaker::new();
-    let collector = FailingMockCollector::new(7).with_recovery_after(10);
+    let collector = FailingCollectorFixture::new(7).with_recovery_after(10);
 
     // **PHASE 1**: Trigger circuit breaker to open
     for _i in 1..=8 {

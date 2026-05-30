@@ -25,14 +25,14 @@ use crate::observability::otel::{OtlpError, OtlpHttpExporter, TraceSpan};
 use crate::time::Instant;
 use crate::types::{Outcome, TraceId};
 
-/// Mock HTTP client that returns HTTP 421 Misdirected Request responses.
+/// Scripted HTTP client that returns HTTP 421 Misdirected Request responses.
 #[derive(Clone)]
-struct Mock421HttpClient {
+struct Scripted421HttpClient {
     responses: Arc<Mutex<Vec<Response>>>,
     request_log: Arc<Mutex<Vec<(Method, String)>>>,
 }
 
-impl Mock421HttpClient {
+impl Scripted421HttpClient {
     fn new(responses: Vec<Response>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
@@ -49,7 +49,7 @@ impl Mock421HttpClient {
     }
 }
 
-impl HttpClient for Mock421HttpClient {
+impl HttpClient for Scripted421HttpClient {
     async fn request(
         &self,
         _cx: &Cx,
@@ -107,7 +107,7 @@ mod tests {
     fn test_421_misdirected_request_is_terminal() {
         // AUDIT POINT 1: Verify 421 is correctly classified as terminal (non-retryable)
 
-        let mock_client = Mock421HttpClient::new(vec![Response {
+        let scripted_client = Scripted421HttpClient::new(vec![Response {
             status: 421,
             headers: vec![
                 ("server".to_string(), "loadbalancer/2.1.0".to_string()),
@@ -120,7 +120,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -164,7 +164,7 @@ mod tests {
             ),
         }
 
-        assert_eq!(mock_client.request_count(), 1);
+        assert_eq!(scripted_client.request_count(), 1);
     }
 
     #[test]
@@ -209,7 +209,7 @@ mod tests {
         eprintln!("==============================================");
 
         for test_case in test_cases {
-            let mock_client = Mock421HttpClient::new(vec![Response {
+            let scripted_client = Scripted421HttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: vec![],
                 body: format!("{} {}", test_case.status, test_case.description).into_bytes(),
@@ -219,7 +219,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -299,7 +299,7 @@ mod tests {
         eprintln!("========================================");
 
         for scenario in scenarios {
-            let mock_client = Mock421HttpClient::new(vec![Response {
+            let scripted_client = Scripted421HttpClient::new(vec![Response {
                 status: 421,
                 headers: vec![
                     ("server".to_string(), scenario.server_type.to_string()),
@@ -312,7 +312,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -353,7 +353,7 @@ mod tests {
         eprintln!("==========================================");
 
         // Test 421 Misdirected Request (should be terminal)
-        let misdirected_client = Mock421HttpClient::new(vec![Response {
+        let misdirected_client = Scripted421HttpClient::new(vec![Response {
             status: 421,
             headers: vec![],
             body: b"Request sent to wrong endpoint".to_vec(),
@@ -386,7 +386,7 @@ mod tests {
         }
 
         // Test 503 Service Unavailable (should be retryable for comparison)
-        let unavailable_client = Mock421HttpClient::new(vec![Response {
+        let unavailable_client = Scripted421HttpClient::new(vec![Response {
             status: 503,
             headers: vec![("retry-after".to_string(), "30".to_string())],
             body: b"Service temporarily unavailable".to_vec(),
@@ -438,7 +438,7 @@ mod tests {
         eprintln!("   • Retrying to same endpoint will always fail");
         eprintln!("   • MUST be classified as terminal to prevent resource waste");
 
-        let mock_client = Mock421HttpClient::new(vec![Response {
+        let scripted_client = Scripted421HttpClient::new(vec![Response {
             status: 421,
             headers: vec![
                 ("server".to_string(), "otel-gateway/1.0.0".to_string()),
@@ -450,7 +450,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 

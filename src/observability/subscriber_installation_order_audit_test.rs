@@ -24,14 +24,14 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::Interest;
 use tracing::{Event, Metadata, Subscriber};
 
-/// Mock subscriber to capture tracing events and detect overrides.
+/// Subscriber fixture to capture tracing events and detect overrides.
 #[derive(Debug, Clone)]
-struct MockApplicationSubscriber {
+struct ApplicationSubscriberFixture {
     events: Arc<Mutex<VecDeque<String>>>,
     subscriber_id: String,
 }
 
-impl MockApplicationSubscriber {
+impl ApplicationSubscriberFixture {
     fn new(subscriber_id: String) -> Self {
         Self {
             events: Arc::new(Mutex::new(VecDeque::new())),
@@ -54,7 +54,7 @@ impl MockApplicationSubscriber {
     }
 }
 
-impl Subscriber for MockApplicationSubscriber {
+impl Subscriber for ApplicationSubscriberFixture {
     fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
         true
     }
@@ -117,7 +117,7 @@ fn audit_subscriber_installation_order_composability() {
     // than the process-global default so this audit remains order-independent
     // when other tests install tracing.
     println!("📊 Phase 1: Application installs Subscriber A");
-    let app_subscriber = MockApplicationSubscriber::new("AppSubscriber".to_string());
+    let app_subscriber = ApplicationSubscriberFixture::new("AppSubscriber".to_string());
     let app_dispatch = tracing::Dispatch::new(app_subscriber.clone());
 
     let (initial_events, final_events, result) =
@@ -182,7 +182,7 @@ fn audit_old_api_subscriber_conflict_defect() {
     println!("   • Expected: Global subscriber conflict");
 
     // Phase 1: Application installs subscriber
-    let app_subscriber = MockApplicationSubscriber::new("OldApiApp".to_string());
+    let app_subscriber = ApplicationSubscriberFixture::new("OldApiApp".to_string());
     let app_dispatch = tracing::Dispatch::new(app_subscriber.clone());
     tracing::dispatcher::with_default(&app_dispatch, || {
         crate::tracing_compat::info!("Old API app subscriber baseline event");
@@ -231,7 +231,7 @@ fn audit_new_api_subscriber_isolation_fix() {
     println!("   • No conflicts between the two");
 
     // Phase 1: Application subscriber (global)
-    let app_subscriber = MockApplicationSubscriber::new("GlobalApp".to_string());
+    let app_subscriber = ApplicationSubscriberFixture::new("GlobalApp".to_string());
     let app_dispatch = tracing::Dispatch::new(app_subscriber.clone());
     tracing::dispatcher::with_default(&app_dispatch, || {
         crate::tracing_compat::info!("Global app subscriber baseline event");
@@ -343,7 +343,7 @@ fn audit_real_world_web_app_scenario() {
     println!("   3. Both should work without interference");
 
     // Phase 1: Web application sets up tracing (typical startup)
-    let web_subscriber = MockApplicationSubscriber::new("WebApp".to_string());
+    let web_subscriber = ApplicationSubscriberFixture::new("WebApp".to_string());
     let web_dispatch = tracing::Dispatch::new(web_subscriber.clone());
 
     // Simulate web app startup logging

@@ -56,8 +56,8 @@ mod tests {
         }
     }
 
-    /// Mock HTTP response for testing status code classification.
-    struct MockResponse {
+    /// HTTP response fixture for testing status code classification.
+    struct ResponseFixture {
         status: u16,
         headers: Vec<(String, String)>,
     }
@@ -65,7 +65,7 @@ mod tests {
     /// Current OTLP response status classifier (from otel.rs lines 1112-1154).
     ///
     /// **SOUND**: Correctly classifies 504 as retryable in explicit 502|503|504 case.
-    fn current_otlp_status_classifier(response: &MockResponse) -> Result<(), OtlpError> {
+    fn current_otlp_status_classifier(response: &ResponseFixture) -> Result<(), OtlpError> {
         match response.status {
             200..=299 => Ok(()),
             429 => {
@@ -143,7 +143,7 @@ mod tests {
         eprintln!("\n📊 Testing 5xx retry classification:");
 
         for (status_code, status_name, should_be_retryable, reasoning) in test_cases {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: status_code,
                 headers: vec![],
             };
@@ -206,7 +206,7 @@ mod tests {
         let other_5xx_codes = vec![500, 501, 505, 507, 508, 509, 510, 511];
 
         for code in explicit_retryable_codes {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: code,
                 headers: vec![],
             };
@@ -217,7 +217,7 @@ mod tests {
         }
 
         for code in other_5xx_codes {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: code,
                 headers: vec![],
             };
@@ -245,7 +245,7 @@ mod tests {
         eprintln!("   4. API gateway timeout on collector service restart");
         eprintln!("   → All scenarios benefit from retry with backoff");
 
-        let response_504 = MockResponse {
+        let response_504 = ResponseFixture {
             status: 504,
             headers: vec![],
         };
@@ -283,7 +283,7 @@ mod tests {
         eprintln!("\n✅ DEMONSTRATING 504 RETRY CORRECTNESS");
         eprintln!("======================================");
 
-        let gateway_timeout_response = MockResponse {
+        let gateway_timeout_response = ResponseFixture {
             status: 504,
             headers: vec![],
         };
@@ -317,7 +317,7 @@ mod tests {
 
         // Compare with related gateway error codes
         for gateway_code in [502, 503] {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: gateway_code,
                 headers: vec![],
             };

@@ -19,9 +19,9 @@
 use crate::observability::otel::{ExportError, OtlpHttpExporter};
 use std::time::Duration;
 
-/// Mock collector behavior that returns 200 OK with corrupted response body.
+/// Scripted collector behavior that returns 200 OK with corrupted response body.
 #[derive(Debug, Clone)]
-pub enum MockCollectorBehavior {
+pub enum ScriptedCollectorBehavior {
     /// Returns 200 OK with valid (empty) response body.
     HealthyResponse,
     /// Returns 200 OK with invalid protobuf in response body.
@@ -36,7 +36,7 @@ pub enum MockCollectorBehavior {
     RateLimited,
 }
 
-impl MockCollectorBehavior {
+impl ScriptedCollectorBehavior {
     fn http_status(&self) -> u16 {
         match self {
             Self::HealthyResponse
@@ -96,10 +96,10 @@ fn audit_otlp_exporter_ignores_response_body_on_success() {
 
     // **TEST SCENARIOS**: Various collector misbehavior patterns
     let test_scenarios = vec![
-        MockCollectorBehavior::HealthyResponse,
-        MockCollectorBehavior::CorruptedResponseBody,
-        MockCollectorBehavior::GarbageResponseBody,
-        MockCollectorBehavior::EmptyResponseBody,
+        ScriptedCollectorBehavior::HealthyResponse,
+        ScriptedCollectorBehavior::CorruptedResponseBody,
+        ScriptedCollectorBehavior::GarbageResponseBody,
+        ScriptedCollectorBehavior::EmptyResponseBody,
     ];
 
     println!("📊 Testing collector misbehavior scenarios:");
@@ -114,7 +114,7 @@ fn audit_otlp_exporter_ignores_response_body_on_success() {
         println!("     HTTP Status: {}", status);
         println!(
             "     Response body valid: {}",
-            matches!(behavior, MockCollectorBehavior::HealthyResponse)
+            matches!(behavior, ScriptedCollectorBehavior::HealthyResponse)
         );
 
         // **OTLP COMPLIANCE CHECK**: Status-based decision making
@@ -136,7 +136,7 @@ fn audit_otlp_exporter_ignores_response_body_on_success() {
     println!("📊 OTLP specification compliance analysis:");
 
     // Test actual exporter behavior (conceptual - would need real HTTP mocking)
-    let exporter = OtlpHttpExporter::new("http://mock-collector:4318");
+    let exporter = OtlpHttpExporter::new("http://scripted-collector:4318");
 
     println!("   Current implementation analysis:");
     println!("     • Status-based decision: response.status match");

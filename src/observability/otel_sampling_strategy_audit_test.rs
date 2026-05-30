@@ -22,7 +22,7 @@ use crate::observability::w3c_trace_context::extract_from_http;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Mock OpenTelemetry sampling strategy implementation.
+/// OpenTelemetry sampling strategy fixture implementation.
 #[derive(Debug, Clone)]
 enum OtelSamplingStrategy {
     /// Always sample (AlwaysOn).

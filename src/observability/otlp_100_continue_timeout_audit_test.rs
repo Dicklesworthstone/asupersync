@@ -9,12 +9,12 @@
 //!
 //! **Expected Behavior**:
 //! - Exporter sends POST request with 10s timeout
-//! - Mock collector sends "HTTP/1.1 100 Continue" immediately
-//! - Mock collector never sends final response
+//! - Scripted collector sends "HTTP/1.1 100 Continue" immediately
+//! - Scripted collector never sends final response
 //! - After 10s timeout, exporter returns non-retryable error
 //! - Error message indicates timeout (not 100 status classification)
 //!
-//! **Test Strategy**: Use mock HTTP client that simulates the deadlock
+//! **Test Strategy**: Use scripted HTTP client that simulates the deadlock
 //! scenario and verify proper timeout behavior.
 
 #[cfg(all(test, feature = "metrics"))]
@@ -25,18 +25,18 @@ mod tests {
     use crate::time::{Budget, Duration, Instant};
     use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
-    /// Mock HTTP client that simulates HTTP 100 Continue timeout scenario.
+    /// Scripted HTTP client that simulates HTTP 100 Continue timeout scenario.
     ///
     /// Behavior:
     /// 1. Immediately returns HTTP 100 Continue response
     /// 2. Never returns a final response (simulates server deadlock)
     /// 3. Forces timeout path in OTLP exporter
-    struct Mock100ContinueTimeoutClient {
+    struct Scripted100ContinueTimeoutClient {
         /// Tracks whether the request was attempted
         request_attempted: Arc<AtomicBool>,
     }
 
-    impl Mock100ContinueTimeoutClient {
+    impl Scripted100ContinueTimeoutClient {
         fn new() -> Self {
             Self {
                 request_attempted: Arc::new(AtomicBool::new(false)),
@@ -48,7 +48,7 @@ mod tests {
         }
     }
 
-    // Note: In a real implementation, we would need to mock the HTTP client
+    // Note: In a real implementation, we would need to inject the HTTP client
     // at a lower level to intercept the actual HTTP request and simulate
     // the 100 Continue + timeout scenario. This test demonstrates the
     // expected behavior and test structure.
@@ -169,9 +169,9 @@ mod tests {
     /// Create minimal OTLP trace batch for testing.
     /// Returns protobuf-encoded trace data suitable for HTTP POST.
     fn create_minimal_otlp_trace_batch() -> Vec<u8> {
-        // In a real implementation, this would create a valid OTLP protobuf
-        // For audit purposes, we use mock data to focus on HTTP timeout behavior
-        b"mock-otlp-trace-batch".to_vec()
+        // In a real implementation, this would create a valid OTLP protobuf.
+        // For audit purposes, synthetic data keeps the focus on HTTP timeout behavior.
+        b"scripted-otlp-trace-batch".to_vec()
     }
 
     #[test]

@@ -56,8 +56,8 @@ mod tests {
         }
     }
 
-    /// Mock HTTP response for testing status code classification.
-    struct MockResponse {
+    /// HTTP response fixture for testing status code classification.
+    struct ResponseFixture {
         status: u16,
         headers: Vec<(String, String)>,
     }
@@ -66,7 +66,7 @@ mod tests {
     ///
     /// **SOUND**: HTTP 414 URI Too Long correctly falls into 400..=499 range
     /// and is classified as non_retryable (terminal).
-    fn current_otlp_status_classifier(response: &MockResponse) -> Result<(), OtlpError> {
+    fn current_otlp_status_classifier(response: &ResponseFixture) -> Result<(), OtlpError> {
         match response.status {
             200..=299 => Ok(()),
             429 => {
@@ -133,7 +133,7 @@ mod tests {
         eprintln!("  • Misconfigured path with redundant segments");
 
         // Test HTTP 414 URI Too Long specifically
-        let response_414 = MockResponse {
+        let response_414 = ResponseFixture {
             status: 414,
             headers: vec![
                 ("Content-Type".to_string(), "application/json".to_string()),
@@ -230,7 +230,7 @@ mod tests {
             eprintln!("  Problem: {}", description);
             eprintln!("  Solution: {}", fix);
 
-            let response_414 = MockResponse {
+            let response_414 = ResponseFixture {
                 status: 414,
                 headers: vec![
                     ("Content-Type".to_string(), "text/plain".to_string()),
@@ -306,7 +306,7 @@ mod tests {
         eprintln!("\n📊 Testing length-related error classifications:");
 
         for (status_code, name, should_retry, cause, solution) in length_errors {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: status_code,
                 headers: vec![],
             };
@@ -397,7 +397,7 @@ mod tests {
         ];
 
         for (status, description) in test_cases {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status,
                 headers: vec![],
             };
@@ -423,7 +423,7 @@ mod tests {
         eprintln!("🎯 Why HTTP 414 MUST be terminal in OTLP context:");
 
         // Test 414 URI Too Long (should be terminal)
-        let uri_too_long = MockResponse {
+        let uri_too_long = ResponseFixture {
             status: 414,
             headers: vec![
                 ("Content-Type".to_string(), "text/plain".to_string()),
@@ -446,7 +446,7 @@ mod tests {
         }
 
         // Compare with successful URL processing
-        let success = MockResponse {
+        let success = ResponseFixture {
             status: 200,
             headers: vec![("Content-Type".to_string(), "application/json".to_string())],
         };

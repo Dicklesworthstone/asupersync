@@ -51,8 +51,8 @@ mod tests {
         }
     }
 
-    /// Mock HTTP response for testing status code classification.
-    struct MockResponse {
+    /// HTTP response fixture for testing status code classification.
+    struct ResponseFixture {
         status: u16,
         headers: Vec<(String, String)>,
     }
@@ -60,7 +60,7 @@ mod tests {
     /// Current OTLP response status classifier (from otel.rs).
     ///
     /// **DEFECT**: Classifies 408 as non-retryable due to 400-499 range.
-    fn current_otlp_status_classifier(response: &MockResponse) -> Result<(), OtlpError> {
+    fn current_otlp_status_classifier(response: &ResponseFixture) -> Result<(), OtlpError> {
         match response.status {
             200..=299 => Ok(()),
             429 => {
@@ -105,7 +105,7 @@ mod tests {
     /// Corrected OTLP response status classifier (RFC 9110 compliant).
     ///
     /// **FIX**: Explicitly handles 408 as retryable before generic 400-499 range.
-    fn corrected_otlp_status_classifier(response: &MockResponse) -> Result<(), OtlpError> {
+    fn corrected_otlp_status_classifier(response: &ResponseFixture) -> Result<(), OtlpError> {
         match response.status {
             200..=299 => Ok(()),
             429 => {
@@ -177,7 +177,7 @@ mod tests {
         eprintln!("\n📊 Testing retry classification:");
 
         for (status_code, status_name, should_be_retryable) in test_cases {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: status_code,
                 headers: vec![],
             };
@@ -248,7 +248,7 @@ mod tests {
         eprintln!("\n❌ DEMONSTRATING 408 BATCH DROPPING DEFECT");
         eprintln!("==========================================");
 
-        let timeout_response = MockResponse {
+        let timeout_response = ResponseFixture {
             status: 408,
             headers: vec![],
         };

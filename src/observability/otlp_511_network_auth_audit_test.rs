@@ -56,8 +56,8 @@ mod tests {
         }
     }
 
-    /// Mock HTTP response for testing status code classification.
-    struct MockResponse {
+    /// HTTP response fixture for testing status code classification.
+    struct ResponseFixture {
         status: u16,
         headers: Vec<(String, String)>,
     }
@@ -65,7 +65,7 @@ mod tests {
     /// Current OTLP response status classifier (from otel.rs).
     ///
     /// **SOUND**: Correctly classifies 511 as non-retryable in 500-599 range.
-    fn current_otlp_status_classifier(response: &MockResponse) -> Result<(), OtlpError> {
+    fn current_otlp_status_classifier(response: &ResponseFixture) -> Result<(), OtlpError> {
         match response.status {
             200..=299 => Ok(()),
             429 => {
@@ -138,7 +138,7 @@ mod tests {
         eprintln!("\n📊 Testing HTTP 5xx retry classification:");
 
         for (status_code, status_name, should_be_retryable, reasoning) in test_cases {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: status_code,
                 headers: vec![],
             };
@@ -206,7 +206,7 @@ mod tests {
         eprintln!("   ❌ Do NOT retry - will fail until network auth complete");
 
         // Verify 511 classification
-        let response = MockResponse {
+        let response = ResponseFixture {
             status: 511,
             headers: vec![],
         };
@@ -237,7 +237,7 @@ mod tests {
         eprintln!("   5. Current implementation: drops batches (correct)");
         eprintln!("   6. Alternative (incorrect): retry forever until auth");
 
-        let response_511 = MockResponse {
+        let response_511 = ResponseFixture {
             status: 511,
             headers: vec![],
         };
@@ -270,7 +270,7 @@ mod tests {
         eprintln!("\n✅ DEMONSTRATING 511 TERMINAL CLASSIFICATION CORRECTNESS");
         eprintln!("========================================================");
 
-        let auth_required_response = MockResponse {
+        let auth_required_response = ResponseFixture {
             status: 511,
             headers: vec![],
         };
@@ -300,7 +300,7 @@ mod tests {
 
         // Compare with genuinely retryable server errors
         for retryable_code in [502, 503, 504] {
-            let response = MockResponse {
+            let response = ResponseFixture {
                 status: retryable_code,
                 headers: vec![],
             };

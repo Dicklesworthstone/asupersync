@@ -24,15 +24,15 @@ use std::collections::HashMap;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-/// Mock span event for testing timestamp behavior.
+/// Span event fixture for testing timestamp behavior.
 #[derive(Debug, Clone)]
-pub struct MockSpanEvent {
+pub struct SpanEventFixture {
     name: String,
     timestamp: SystemTime, // Current defective behavior
     attributes: HashMap<String, String>,
 }
 
-impl MockSpanEvent {
+impl SpanEventFixture {
     fn new_with_system_time(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -54,16 +54,16 @@ impl MockSpanEvent {
     }
 }
 
-/// Mock span with configurable timestamping strategy.
+/// Span fixture with configurable timestamping strategy.
 #[derive(Debug)]
-pub struct MockTimestampSpan {
+pub struct TimestampSpanFixture {
     name: String,
-    events: Vec<MockSpanEvent>,
+    events: Vec<SpanEventFixture>,
     creation_instant: Instant, // For monotonic reference
     use_monotonic: bool,       // Configuration flag
 }
 
-impl MockTimestampSpan {
+impl TimestampSpanFixture {
     fn new_defective(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -84,7 +84,7 @@ impl MockTimestampSpan {
 
     /// Current defective implementation: uses SystemTime::now().
     fn add_event_defective(&mut self, name: &str) {
-        let event = MockSpanEvent::new_with_system_time(name);
+        let event = SpanEventFixture::new_with_system_time(name);
         self.events.push(event);
     }
 
@@ -92,7 +92,7 @@ impl MockTimestampSpan {
     fn add_event_correct(&mut self, name: &str) {
         let event_offset = self.creation_instant.elapsed();
         let event =
-            MockSpanEvent::new_with_monotonic_offset(name, self.creation_instant, event_offset);
+            SpanEventFixture::new_with_monotonic_offset(name, self.creation_instant, event_offset);
         self.events.push(event);
     }
 
@@ -104,7 +104,7 @@ impl MockTimestampSpan {
         }
     }
 
-    fn events(&self) -> &[MockSpanEvent] {
+    fn events(&self) -> &[SpanEventFixture] {
         &self.events
     }
 
@@ -140,7 +140,7 @@ fn audit_add_event_implicit_timestamping() {
 
     // **DEFECTIVE APPROACH**: SystemTime::now()
     println!("📊 Testing defective SystemTime approach:");
-    let mut defective_span = MockTimestampSpan::new_defective("http_request");
+    let mut defective_span = TimestampSpanFixture::new_defective("http_request");
 
     // Add events rapidly
     for i in 0..5 {
@@ -162,7 +162,7 @@ fn audit_add_event_implicit_timestamping() {
 
     // **CORRECT APPROACH**: Monotonic timing
     println!("📊 Testing correct monotonic approach:");
-    let mut correct_span = MockTimestampSpan::new_correct("http_request");
+    let mut correct_span = TimestampSpanFixture::new_correct("http_request");
 
     for i in 0..5 {
         correct_span.add_event(&format!("event_{}", i));
@@ -200,7 +200,7 @@ fn audit_ntp_clock_adjustment_scenario() {
     println!("   • Event chronological order is violated");
     println!("   • Trace analysis tools fail on backward timestamps");
 
-    // Simulate the problem with mock timestamps
+    // Simulate the problem with scripted timestamps
     let mut span_events = Vec::new();
 
     // Event 1: Before NTP adjustment

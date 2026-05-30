@@ -28,17 +28,17 @@ use crate::observability::otel::{OtlpError, OtlpHttpExporter, TraceSpan};
 use crate::time::Instant;
 use crate::types::{Outcome, TraceId};
 
-/// Mock HTTP client that returns HTTP 100 Continue responses.
+/// Scripted HTTP client that returns HTTP 100 Continue responses.
 ///
 /// **NOTE**: In a proper HTTP client implementation, 100 Continue should be
 /// handled transparently and not exposed to the application layer.
 #[derive(Clone)]
-struct Mock100HttpClient {
+struct Scripted100HttpClient {
     responses: Arc<Mutex<Vec<Response>>>,
     request_log: Arc<Mutex<Vec<(Method, String)>>>,
 }
 
-impl Mock100HttpClient {
+impl Scripted100HttpClient {
     fn new(responses: Vec<Response>) -> Self {
         Self {
             responses: Arc::new(Mutex::new(responses)),
@@ -55,7 +55,7 @@ impl Mock100HttpClient {
     }
 }
 
-impl HttpClient for Mock100HttpClient {
+impl HttpClient for Scripted100HttpClient {
     async fn request(
         &self,
         _cx: &Cx,
@@ -114,7 +114,7 @@ mod tests {
         eprintln!("\n🚨 BUG AUDIT: HTTP 100 Continue Handling");
         eprintln!("=========================================");
 
-        let mock_client = Mock100HttpClient::new(vec![Response {
+        let scripted_client = Scripted100HttpClient::new(vec![Response {
             status: 100,
             headers: vec![],
             body: b"Continue".to_vec(),
@@ -124,7 +124,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -171,7 +171,7 @@ mod tests {
         eprintln!("   HTTP client: Should handle 1xx transparently");
         eprintln!("   Application: Should only see final 2xx/3xx/4xx/5xx response");
 
-        assert_eq!(mock_client.request_count(), 1);
+        assert_eq!(scripted_client.request_count(), 1);
     }
 
     #[test]
@@ -216,7 +216,7 @@ mod tests {
         eprintln!("===================================================");
 
         for test_case in informational_codes {
-            let mock_client = Mock100HttpClient::new(vec![Response {
+            let scripted_client = Scripted100HttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: vec![],
                 body: test_case.name.as_bytes().to_vec(),
@@ -226,7 +226,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -285,7 +285,7 @@ mod tests {
         eprintln!("   • OTLP exporter treats 100 as terminal error");
         eprintln!("   • Export fails instead of completing normally");
 
-        let mock_client = Mock100HttpClient::new(vec![Response {
+        let scripted_client = Scripted100HttpClient::new(vec![Response {
             status: 100,
             headers: vec![],
             body: b"Continue".to_vec(),
@@ -295,7 +295,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 
@@ -372,7 +372,7 @@ mod tests {
         ];
 
         for test_case in response_tests {
-            let mock_client = Mock100HttpClient::new(vec![Response {
+            let scripted_client = Scripted100HttpClient::new(vec![Response {
                 status: test_case.status,
                 headers: vec![],
                 body: test_case.description.as_bytes().to_vec(),
@@ -382,7 +382,7 @@ mod tests {
                 "http://localhost:4318/v1/traces".to_string(),
                 HashMap::new(),
                 Duration::from_secs(30),
-                mock_client.clone(),
+                scripted_client.clone(),
             )
             .expect("Failed to create OTLP exporter");
 
@@ -432,7 +432,7 @@ mod tests {
         eprintln!("   • Client MUST ignore unexpected 1xx responses");
         eprintln!("   • Final response will follow after any 1xx responses");
 
-        let mock_client = Mock100HttpClient::new(vec![Response {
+        let scripted_client = Scripted100HttpClient::new(vec![Response {
             status: 100,
             headers: vec![],
             body: b"Continue - send request body".to_vec(),
@@ -442,7 +442,7 @@ mod tests {
             "http://localhost:4318/v1/traces".to_string(),
             HashMap::new(),
             Duration::from_secs(30),
-            mock_client.clone(),
+            scripted_client.clone(),
         )
         .expect("Failed to create OTLP exporter");
 

@@ -21,10 +21,10 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Mock span with SystemTime-based timing (current defective implementation).
+/// Span fixture with SystemTime-based timing (current defective implementation).
 #[derive(Debug, Clone)]
 pub struct DefectiveSystemTimeSpan {
-    /// Span operation name used in the mock payload.
+    /// Span operation name used in the synthetic payload.
     pub name: String,
     /// Wall-clock span start time.
     pub start_time: SystemTime,
@@ -59,10 +59,10 @@ impl DefectiveSystemTimeSpan {
     }
 }
 
-/// Mock span with Instant-based timing (correct implementation).
+/// Span fixture with Instant-based timing (correct implementation).
 #[derive(Debug, Clone)]
 pub struct CorrectInstantSpan {
-    /// Span operation name used in the mock payload.
+    /// Span operation name used in the synthetic payload.
     pub name: String,
     /// Monotonic span start instant used for elapsed-time calculation.
     pub start_instant: Instant,
@@ -107,16 +107,16 @@ impl CorrectInstantSpan {
     }
 }
 
-/// Mock DST clock manager for testing backward jumps.
+/// Scripted DST clock manager for testing backward jumps.
 #[derive(Debug)]
-pub struct MockDstClock {
+pub struct ScriptedDstClock {
     /// Current simulated wall-clock time.
     pub current_time: SystemTime,
     /// Recorded `(label, before, after)` clock-jump events.
     pub jump_events: Vec<(String, SystemTime, SystemTime)>,
 }
 
-impl MockDstClock {
+impl ScriptedDstClock {
     fn new() -> Self {
         Self {
             current_time: SystemTime::now(),
@@ -171,7 +171,7 @@ fn audit_dst_backward_jump_span_duration() {
     println!("   • Spans crossing transition vulnerable to negative duration");
     println!("   • SystemTime.duration_since() can return Err or panic");
 
-    let mut clock = MockDstClock::new();
+    let mut clock = ScriptedDstClock::new();
 
     // Create span that will experience DST clock jump
     let (start_time, end_time, jump_time) = clock.create_span_with_dst_jump("http_request");
