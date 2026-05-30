@@ -456,6 +456,10 @@ pub const SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION: &str =
 /// Stable schema for memory budget plans derived from swarm capacity snapshots.
 pub const SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION: &str = "asupersync.swarm-memory-budget-plan.v1";
 
+/// Stable schema for memory residency and brownout policy plans.
+pub const SWARM_MEMORY_RESIDENCY_POLICY_SCHEMA_VERSION: &str =
+    "asupersync.swarm-memory-residency-policy.v1";
+
 /// Deterministic, capability-supplied host capacity snapshot.
 ///
 /// This type is intentionally inert: it records capacity and coordination
@@ -575,6 +579,128 @@ impl SwarmCapacitySnapshot {
             proof_artifact_staging_bytes,
             compiler_cache_bytes,
             total_planned_bytes,
+        })
+    }
+
+    /// Plan region/workload memory residency without reading ambient host state.
+    ///
+    /// The decision uses the explicit capacity snapshot plus a caller-supplied
+    /// request. It never authorizes cleanup or disables critical runtime
+    /// surfaces; when inputs are stale or contradictory it emits a no-win
+    /// receipt instead of overclaiming available memory.
+    pub fn memory_residency_policy(
+        &self,
+        request: &SwarmMemoryResidencyRequest,
+    ) -> Result<SwarmMemoryResidencyPlan, SchedulerEvidenceError> {
+        self.validate()?;
+        request.validate()?;
+
+        let budget = self.memory_budget_plan()?;
+        let lane_budget_bytes = request.workload_class.lane_budget_bytes(&budget);
+        let before = SwarmMemoryResidencyEnvelope {
+            available_bytes: budget.available_bytes,
+            emergency_reserve_bytes: budget.emergency_reserve_bytes,
+            lane_budget_bytes,
+            pressure_tier: budget.pressure_tier,
+            host_tier: budget.host_tier,
+        };
+        let metrics_stale = request.metrics_age_secs > request.max_metrics_age_secs;
+        let contradictory_policy = request.minimum_hot_bytes > request.requested_bytes;
+
+        let (decision, fallback_reason) = if contradictory_policy {
+            (
+                SwarmMemoryResidencyDecision::RefuseNoWin,
+                Some(SwarmMemoryResidencyFallbackReason::ContradictoryPolicy),
+            )
+        } else if metrics_stale {
+            (
+                SwarmMemoryResidencyDecision::RefuseNoWin,
+                Some(SwarmMemoryResidencyFallbackReason::StaleMetrics),
+            )
+        } else if lane_budget_bytes == 0 && request.requested_bytes > 0 {
+            (
+                SwarmMemoryResidencyDecision::RefuseNoWin,
+                Some(SwarmMemoryResidencyFallbackReason::EmptyBudget),
+            )
+        } else if request.requested_bytes <= lane_budget_bytes {
+            (SwarmMemoryResidencyDecision::AdmitHot, None)
+        } else if request.spill_allowed && request.minimum_hot_bytes <= lane_budget_bytes {
+            (SwarmMemoryResidencyDecision::SpillCold, None)
+        } else if request.brownout_allowed && request.workload_class.brownout_eligible() {
+            (SwarmMemoryResidencyDecision::BrownoutOptional, None)
+        } else {
+            (
+                SwarmMemoryResidencyDecision::RefuseNoWin,
+                Some(SwarmMemoryResidencyFallbackReason::NoSafeResidencyTier),
+            )
+        };
+
+        let minimum_hot_bytes = request.minimum_hot_bytes.min(request.requested_bytes);
+        let (
+            hot_resident_bytes,
+            warm_resident_bytes,
+            spilled_bytes,
+            browned_out_bytes,
+            refused_bytes,
+        ) = memory_residency_counts(
+            request.requested_bytes,
+            minimum_hot_bytes,
+            lane_budget_bytes,
+            decision,
+        );
+        let after = SwarmMemoryResidencyEnvelope {
+            available_bytes: before
+                .available_bytes
+                .saturating_sub(hot_resident_bytes.saturating_add(warm_resident_bytes)),
+            emergency_reserve_bytes: before.emergency_reserve_bytes,
+            lane_budget_bytes: before.lane_budget_bytes,
+            pressure_tier: before.pressure_tier,
+            host_tier: before.host_tier,
+        };
+        let residency_tier = residency_tier_for_decision(decision);
+        let brownout_class = brownout_class_for_decision(decision, budget.pressure_tier);
+        let no_win_decision = decision == SwarmMemoryResidencyDecision::RefuseNoWin;
+        let explanation = memory_residency_explanation(
+            request,
+            decision,
+            fallback_reason,
+            lane_budget_bytes,
+            hot_resident_bytes,
+            warm_resident_bytes,
+            spilled_bytes,
+            browned_out_bytes,
+            refused_bytes,
+        );
+
+        Ok(SwarmMemoryResidencyPlan {
+            schema_version: SWARM_MEMORY_RESIDENCY_POLICY_SCHEMA_VERSION.to_string(),
+            source_snapshot_id: self.snapshot_id.clone(),
+            policy_id: request.policy_id.clone(),
+            workload_id: request.workload_id.clone(),
+            workload_class: request.workload_class,
+            affected_region_id: request.affected_region_id.clone(),
+            affected_task_ids: sorted_unique_strings(&request.affected_task_ids),
+            proof_lane_id: request.proof_lane_id.clone(),
+            proof_command: request.proof_command.clone(),
+            decision,
+            residency_tier,
+            brownout_class,
+            fallback_reason,
+            before,
+            after,
+            requested_bytes: request.requested_bytes,
+            minimum_hot_bytes,
+            hot_resident_bytes,
+            warm_resident_bytes,
+            spilled_bytes,
+            browned_out_bytes,
+            refused_bytes,
+            metrics_age_secs: request.metrics_age_secs,
+            max_metrics_age_secs: request.max_metrics_age_secs,
+            metrics_stale,
+            no_win_decision,
+            preserved_invariants: SwarmMemoryProtectedInvariant::all(),
+            explanation,
         })
     }
 
@@ -828,6 +954,247 @@ pub struct SwarmMemoryBudgetPlan {
     pub compiler_cache_bytes: u64,
     /// Sum of lane budgets, excluding emergency reserve.
     pub total_planned_bytes: u64,
+}
+
+/// Workload class for the memory residency planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmMemoryResidencyWorkloadClass {
+    /// Region/task state that must stay resident for runtime progress.
+    InteractiveRuntime,
+    /// Trace replay buffers that can be resized but should not disappear.
+    TraceReplay,
+    /// Remote-proof artifacts that can spill to external artifact storage.
+    ProofArtifact,
+    /// Compiler/cache growth that is useful but noncritical.
+    CompilerCache,
+    /// Rich diagnostics and formatting that can be browned out first.
+    OptionalDiagnostics,
+}
+
+impl SwarmMemoryResidencyWorkloadClass {
+    const fn lane_budget_bytes(self, budget: &SwarmMemoryBudgetPlan) -> u64 {
+        match self {
+            Self::InteractiveRuntime => budget.interactive_runtime_bytes,
+            Self::TraceReplay => budget.trace_replay_bytes,
+            Self::ProofArtifact => budget.proof_artifact_staging_bytes,
+            Self::CompilerCache | Self::OptionalDiagnostics => budget.compiler_cache_bytes,
+        }
+    }
+
+    const fn brownout_eligible(self) -> bool {
+        matches!(
+            self,
+            Self::ProofArtifact | Self::CompilerCache | Self::OptionalDiagnostics
+        )
+    }
+}
+
+/// Residency tier selected for a workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmMemoryResidencyTier {
+    /// The whole request remains hot and resident.
+    Hot,
+    /// The request remains resident, but not all bytes are hot-priority.
+    Warm,
+    /// Cold bytes should spill to an explicit artifact/cache surface.
+    SpillEligible,
+    /// Optional bytes should be browned out before runtime state is touched.
+    BrownoutEligible,
+    /// No safe residency tier exists for this request.
+    Refused,
+}
+
+/// Brownout class selected by the residency planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmMemoryBrownoutClass {
+    /// No brownout is needed.
+    None,
+    /// Inputs are healthy enough to observe only.
+    Observe,
+    /// Optional bytes are degraded under pressure.
+    DegradeOptional,
+    /// Optional bytes are shed or excluded.
+    ShedOptional,
+    /// The planner emitted a no-win receipt.
+    NoWin,
+}
+
+/// Deterministic memory residency decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmMemoryResidencyDecision {
+    /// Admit the whole request as hot resident state.
+    AdmitHot,
+    /// Keep hot/warm bytes resident and spill the cold remainder.
+    SpillCold,
+    /// Preserve hot/warm bytes and brown out optional remainder.
+    BrownoutOptional,
+    /// Refuse or defer with an explicit no-win reason.
+    RefuseNoWin,
+}
+
+/// Fail-closed fallback reason for no-win memory decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmMemoryResidencyFallbackReason {
+    /// The selected workload lane had no usable memory budget.
+    EmptyBudget,
+    /// Metrics were older than the request allows.
+    StaleMetrics,
+    /// The request contradicted itself.
+    ContradictoryPolicy,
+    /// No hot, spill, or brownout tier could preserve invariants.
+    NoSafeResidencyTier,
+}
+
+/// Runtime invariants that memory brownout must preserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmMemoryProtectedInvariant {
+    /// Scheduler and worker progress remain available.
+    CoreScheduling,
+    /// Cancellation request/drain/finalize remains available.
+    CancellationDrain,
+    /// Race losers remain drainable.
+    LoserDrain,
+    /// Region close still implies quiescence.
+    RegionQuiescence,
+    /// Permits, acks, and leases still resolve.
+    ObligationCleanup,
+}
+
+impl SwarmMemoryProtectedInvariant {
+    fn all() -> Vec<Self> {
+        vec![
+            Self::CoreScheduling,
+            Self::CancellationDrain,
+            Self::LoserDrain,
+            Self::RegionQuiescence,
+            Self::ObligationCleanup,
+        ]
+    }
+}
+
+/// Memory envelope before or after a residency decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmMemoryResidencyEnvelope {
+    /// Available bytes from the explicit capacity snapshot.
+    pub available_bytes: u64,
+    /// Emergency reserve that must remain outside lane budgets.
+    pub emergency_reserve_bytes: u64,
+    /// Budget selected for the workload class.
+    pub lane_budget_bytes: u64,
+    /// Memory pressure tier copied from the capacity snapshot.
+    pub pressure_tier: SwarmMemoryPressureTier,
+    /// Host tier derived from the capacity snapshot.
+    pub host_tier: SwarmMemoryHostTier,
+}
+
+/// Request for a deterministic memory residency decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmMemoryResidencyRequest {
+    /// Stable policy/run identifier.
+    pub policy_id: String,
+    /// Stable workload identifier.
+    pub workload_id: String,
+    /// Class used to select the applicable lane budget.
+    pub workload_class: SwarmMemoryResidencyWorkloadClass,
+    /// Region affected by this decision, if known.
+    pub affected_region_id: Option<String>,
+    /// Task ids affected by this decision.
+    pub affected_task_ids: Vec<String>,
+    /// Bytes requested by the workload.
+    pub requested_bytes: u64,
+    /// Minimum bytes that must remain hot to preserve progress.
+    pub minimum_hot_bytes: u64,
+    /// Whether cold bytes may spill to a non-resident artifact/cache surface.
+    pub spill_allowed: bool,
+    /// Whether optional bytes may brown out.
+    pub brownout_allowed: bool,
+    /// Age of the capacity and scheduler metrics.
+    pub metrics_age_secs: u64,
+    /// Maximum accepted metrics age for this request.
+    pub max_metrics_age_secs: u64,
+    /// Proof lane that should validate this policy, if known.
+    pub proof_lane_id: Option<String>,
+    /// Exact proof command for handoff, if known.
+    pub proof_command: Option<String>,
+}
+
+impl SwarmMemoryResidencyRequest {
+    fn validate(&self) -> Result<(), SchedulerEvidenceError> {
+        if self.policy_id.trim().is_empty() {
+            return Err(SchedulerEvidenceError::EmptyMemoryResidencyPolicyId);
+        }
+        if self.workload_id.trim().is_empty() {
+            return Err(SchedulerEvidenceError::EmptyMemoryResidencyWorkloadId);
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic memory residency and brownout policy report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmMemoryResidencyPlan {
+    /// Version tag for this schema.
+    pub schema_version: String,
+    /// Capacity snapshot id copied from the source snapshot.
+    pub source_snapshot_id: String,
+    /// Policy id copied from the request.
+    pub policy_id: String,
+    /// Workload id copied from the request.
+    pub workload_id: String,
+    /// Workload class copied from the request.
+    pub workload_class: SwarmMemoryResidencyWorkloadClass,
+    /// Region affected by this decision, if known.
+    pub affected_region_id: Option<String>,
+    /// Task ids affected by this decision, sorted and deduplicated.
+    pub affected_task_ids: Vec<String>,
+    /// Proof lane that should validate this policy, if known.
+    pub proof_lane_id: Option<String>,
+    /// Exact proof command for handoff, if known.
+    pub proof_command: Option<String>,
+    /// Deterministic residency decision.
+    pub decision: SwarmMemoryResidencyDecision,
+    /// Residency tier selected for the workload.
+    pub residency_tier: SwarmMemoryResidencyTier,
+    /// Brownout class selected for optional work.
+    pub brownout_class: SwarmMemoryBrownoutClass,
+    /// Fail-closed fallback reason, if any.
+    pub fallback_reason: Option<SwarmMemoryResidencyFallbackReason>,
+    /// Memory envelope before applying the decision.
+    pub before: SwarmMemoryResidencyEnvelope,
+    /// Memory envelope after resident bytes are admitted.
+    pub after: SwarmMemoryResidencyEnvelope,
+    /// Requested bytes copied from the request.
+    pub requested_bytes: u64,
+    /// Minimum hot bytes after request normalization.
+    pub minimum_hot_bytes: u64,
+    /// Bytes kept in the hot resident tier.
+    pub hot_resident_bytes: u64,
+    /// Bytes kept in the warm resident tier.
+    pub warm_resident_bytes: u64,
+    /// Bytes assigned to an explicit spill surface.
+    pub spilled_bytes: u64,
+    /// Bytes browned out from optional surfaces.
+    pub browned_out_bytes: u64,
+    /// Bytes refused by a no-win decision.
+    pub refused_bytes: u64,
+    /// Age of the metrics used by the decision.
+    pub metrics_age_secs: u64,
+    /// Maximum metrics age accepted by the request.
+    pub max_metrics_age_secs: u64,
+    /// Whether metrics age exceeded the accepted bound.
+    pub metrics_stale: bool,
+    /// Whether this plan is a no-win receipt.
+    pub no_win_decision: bool,
+    /// Runtime invariants preserved by every decision.
+    pub preserved_invariants: Vec<SwarmMemoryProtectedInvariant>,
+    /// Deterministic operator-facing explanation lines.
+    pub explanation: Vec<String>,
 }
 
 /// Work lanes that swarm-scale admission policy classifies.
@@ -1180,6 +1547,12 @@ pub enum SchedulerEvidenceError {
     /// The capacity snapshot id was empty.
     #[error("swarm capacity snapshot id must not be empty")]
     EmptyCapacitySnapshotId,
+    /// A memory residency policy id was empty.
+    #[error("swarm memory residency policy id must not be empty")]
+    EmptyMemoryResidencyPolicyId,
+    /// A memory residency workload id was empty.
+    #[error("swarm memory residency workload id must not be empty")]
+    EmptyMemoryResidencyWorkloadId,
     /// A required capacity dimension was zero or otherwise invalid.
     #[error("swarm capacity dimension is invalid: {field}")]
     InvalidCapacityDimension {
@@ -1194,6 +1567,113 @@ pub enum SchedulerEvidenceError {
         /// Field that reported the total value.
         total_field: &'static str,
     },
+}
+
+fn memory_residency_counts(
+    requested_bytes: u64,
+    minimum_hot_bytes: u64,
+    lane_budget_bytes: u64,
+    decision: SwarmMemoryResidencyDecision,
+) -> (u64, u64, u64, u64, u64) {
+    match decision {
+        SwarmMemoryResidencyDecision::AdmitHot => (requested_bytes, 0, 0, 0, 0),
+        SwarmMemoryResidencyDecision::SpillCold => {
+            let hot = minimum_hot_bytes.min(lane_budget_bytes);
+            let warm = requested_bytes
+                .saturating_sub(hot)
+                .min(lane_budget_bytes.saturating_sub(hot));
+            let spilled = requested_bytes.saturating_sub(hot).saturating_sub(warm);
+            (hot, warm, spilled, 0, 0)
+        }
+        SwarmMemoryResidencyDecision::BrownoutOptional => {
+            let hot = minimum_hot_bytes.min(lane_budget_bytes);
+            let warm = requested_bytes
+                .saturating_sub(hot)
+                .min(lane_budget_bytes.saturating_sub(hot));
+            let browned_out = requested_bytes.saturating_sub(hot).saturating_sub(warm);
+            (hot, warm, 0, browned_out, 0)
+        }
+        SwarmMemoryResidencyDecision::RefuseNoWin => (0, 0, 0, 0, requested_bytes),
+    }
+}
+
+const fn residency_tier_for_decision(
+    decision: SwarmMemoryResidencyDecision,
+) -> SwarmMemoryResidencyTier {
+    match decision {
+        SwarmMemoryResidencyDecision::AdmitHot => SwarmMemoryResidencyTier::Hot,
+        SwarmMemoryResidencyDecision::SpillCold => SwarmMemoryResidencyTier::SpillEligible,
+        SwarmMemoryResidencyDecision::BrownoutOptional => {
+            SwarmMemoryResidencyTier::BrownoutEligible
+        }
+        SwarmMemoryResidencyDecision::RefuseNoWin => SwarmMemoryResidencyTier::Refused,
+    }
+}
+
+const fn brownout_class_for_decision(
+    decision: SwarmMemoryResidencyDecision,
+    pressure_tier: SwarmMemoryPressureTier,
+) -> SwarmMemoryBrownoutClass {
+    match decision {
+        SwarmMemoryResidencyDecision::BrownoutOptional => SwarmMemoryBrownoutClass::ShedOptional,
+        SwarmMemoryResidencyDecision::RefuseNoWin => SwarmMemoryBrownoutClass::NoWin,
+        SwarmMemoryResidencyDecision::AdmitHot | SwarmMemoryResidencyDecision::SpillCold => {
+            match pressure_tier {
+                SwarmMemoryPressureTier::Critical | SwarmMemoryPressureTier::Saturated => {
+                    SwarmMemoryBrownoutClass::DegradeOptional
+                }
+                SwarmMemoryPressureTier::Low | SwarmMemoryPressureTier::Unknown => {
+                    SwarmMemoryBrownoutClass::Observe
+                }
+                SwarmMemoryPressureTier::Healthy => SwarmMemoryBrownoutClass::None,
+            }
+        }
+    }
+}
+
+fn memory_residency_explanation(
+    request: &SwarmMemoryResidencyRequest,
+    decision: SwarmMemoryResidencyDecision,
+    fallback_reason: Option<SwarmMemoryResidencyFallbackReason>,
+    lane_budget_bytes: u64,
+    hot_resident_bytes: u64,
+    warm_resident_bytes: u64,
+    spilled_bytes: u64,
+    browned_out_bytes: u64,
+    refused_bytes: u64,
+) -> Vec<String> {
+    let mut explanation = vec![format!(
+        "workload={} class={:?} requested={}B lane_budget={}B decision={:?}",
+        request.workload_id,
+        request.workload_class,
+        request.requested_bytes,
+        lane_budget_bytes,
+        decision
+    )];
+    if let Some(reason) = fallback_reason {
+        explanation.push(format!("fallback_reason={reason:?}"));
+    }
+    explanation.push(format!(
+        "resident_hot={}B resident_warm={}B spilled={}B browned_out={}B refused={}B",
+        hot_resident_bytes, warm_resident_bytes, spilled_bytes, browned_out_bytes, refused_bytes
+    ));
+    explanation.push(
+        "core scheduling, cancellation drain, loser drain, region quiescence, and obligation cleanup remain preserved"
+            .to_string(),
+    );
+    explanation
+}
+
+fn sorted_unique_strings(values: &[String]) -> Vec<String> {
+    let mut sorted = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    sorted.sort();
+    sorted.dedup();
+    sorted
 }
 
 fn validate_percentiles<T: Ord>(

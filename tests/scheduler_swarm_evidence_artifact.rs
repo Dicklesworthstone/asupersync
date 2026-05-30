@@ -4,12 +4,16 @@ use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{
     SCHEDULER_EVIDENCE_SCHEMA_VERSION, SWARM_ADMISSION_POLICY_REPORT_SCHEMA_VERSION,
     SWARM_CAPACITY_SNAPSHOT_SCHEMA_VERSION, SWARM_MEMORY_BUDGET_PLAN_SCHEMA_VERSION,
-    SchedulerEvidenceArtifact, SchedulerEvidenceError, SchedulerEvidenceMetrics,
-    SchedulerKnobProfile, SchedulerRecommendationReason, SchedulerTopologyDescriptor,
-    SchedulerWorkloadClass, SwarmAdmissionDecision, SwarmAdmissionLane, SwarmAdmissionReasonCode,
-    SwarmAdmissionReport, SwarmCapacitySnapshot, SwarmCoordinationBacklogSignals,
-    SwarmCpuTopologyHints, SwarmDiskCapacity, SwarmDiskPressureLevel, SwarmMemoryBudgetPlan,
-    SwarmMemoryCapacity, SwarmMemoryHostTier, SwarmMemoryPressureTier, SwarmRchAdmissibility,
+    SWARM_MEMORY_RESIDENCY_POLICY_SCHEMA_VERSION, SchedulerEvidenceArtifact,
+    SchedulerEvidenceError, SchedulerEvidenceMetrics, SchedulerKnobProfile,
+    SchedulerRecommendationReason, SchedulerTopologyDescriptor, SchedulerWorkloadClass,
+    SwarmAdmissionDecision, SwarmAdmissionLane, SwarmAdmissionReasonCode, SwarmAdmissionReport,
+    SwarmCapacitySnapshot, SwarmCoordinationBacklogSignals, SwarmCpuTopologyHints,
+    SwarmDiskCapacity, SwarmDiskPressureLevel, SwarmMemoryBrownoutClass, SwarmMemoryBudgetPlan,
+    SwarmMemoryCapacity, SwarmMemoryHostTier, SwarmMemoryPressureTier,
+    SwarmMemoryProtectedInvariant, SwarmMemoryResidencyDecision,
+    SwarmMemoryResidencyFallbackReason, SwarmMemoryResidencyPlan, SwarmMemoryResidencyRequest,
+    SwarmMemoryResidencyTier, SwarmMemoryResidencyWorkloadClass, SwarmRchAdmissibility,
     SwarmRchCapacity, SwarmValidationClass, ThreeLaneScheduler,
 };
 use asupersync::sync::ContendedMutex;
@@ -122,6 +126,59 @@ fn assert_memory_plan_invariants(plan: &SwarmMemoryBudgetPlan) {
         plan.total_planned_bytes <= allocatable_bytes,
         "planned bytes must fit inside memory left after emergency reserve"
     );
+}
+
+fn sample_memory_residency_request(
+    workload_class: SwarmMemoryResidencyWorkloadClass,
+    requested_bytes: u64,
+) -> SwarmMemoryResidencyRequest {
+    SwarmMemoryResidencyRequest {
+        policy_id: "swarm-memory-residency-fixture".to_string(),
+        workload_id: "trace-replay-window".to_string(),
+        workload_class,
+        affected_region_id: Some("region-42".to_string()),
+        affected_task_ids: vec![
+            "task-042-002".to_string(),
+            "task-042-001".to_string(),
+            "task-042-001".to_string(),
+        ],
+        requested_bytes,
+        minimum_hot_bytes: requested_bytes.min(1024 * 1024 * 1024),
+        spill_allowed: false,
+        brownout_allowed: false,
+        metrics_age_secs: 15,
+        max_metrics_age_secs: 60,
+        proof_lane_id: Some("swarm-memory-residency-contract".to_string()),
+        proof_command: Some("RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_swarm_memory_residency cargo test -p asupersync --test scheduler_swarm_evidence_artifact swarm_memory_residency -- --nocapture".to_string()),
+    }
+}
+
+fn assert_residency_invariants(plan: &SwarmMemoryResidencyPlan) {
+    assert_eq!(
+        plan.hot_resident_bytes
+            + plan.warm_resident_bytes
+            + plan.spilled_bytes
+            + plan.browned_out_bytes
+            + plan.refused_bytes,
+        plan.requested_bytes,
+        "memory residency plan must account for every requested byte"
+    );
+    assert!(
+        plan.hot_resident_bytes + plan.warm_resident_bytes <= plan.before.lane_budget_bytes,
+        "resident bytes must fit in the selected lane budget"
+    );
+    for invariant in [
+        SwarmMemoryProtectedInvariant::CoreScheduling,
+        SwarmMemoryProtectedInvariant::CancellationDrain,
+        SwarmMemoryProtectedInvariant::LoserDrain,
+        SwarmMemoryProtectedInvariant::RegionQuiescence,
+        SwarmMemoryProtectedInvariant::ObligationCleanup,
+    ] {
+        assert!(
+            plan.preserved_invariants.contains(&invariant),
+            "memory policy must preserve {invariant:?}"
+        );
+    }
 }
 
 #[test]
@@ -756,6 +813,268 @@ fn swarm_memory_budget_planner_emits_stable_golden_shapes() {
             "total_planned_bytes": 34_359_738_367_u64,
         })
     );
+}
+
+#[test]
+fn swarm_memory_residency_policy_contract_artifact_is_source_backed() {
+    let raw = std::fs::read_to_string("artifacts/swarm_memory_residency_policy_contract_v1.json")
+        .expect("read memory residency contract artifact");
+    let artifact: Value = serde_json::from_str(&raw).expect("parse memory residency artifact");
+
+    assert_eq!(
+        artifact["contract_version"].as_str(),
+        Some("swarm-memory-residency-policy-contract-v1")
+    );
+    assert_eq!(artifact["bead_id"].as_str(), Some("asupersync-vssefs.9.3"));
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some(SWARM_MEMORY_RESIDENCY_POLICY_SCHEMA_VERSION)
+    );
+
+    let source = artifact
+        .get("source_of_truth")
+        .expect("source_of_truth object");
+    for key in ["contract", "contract_test", "runtime_policy_source"] {
+        let path = source
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("source_of_truth.{key} must be a string"));
+        assert!(
+            Path::new(path).exists(),
+            "source_of_truth.{key} must point to a live repo file: {path}"
+        );
+    }
+}
+
+#[test]
+fn swarm_memory_residency_policy_admits_exact_limit_as_hot_resident() {
+    let snapshot = sample_capacity_snapshot("memory-residency-exact-limit");
+    let budget = snapshot
+        .memory_budget_plan()
+        .expect("snapshot should produce memory budget");
+    let request = sample_memory_residency_request(
+        SwarmMemoryResidencyWorkloadClass::TraceReplay,
+        budget.trace_replay_bytes,
+    );
+
+    let plan = snapshot
+        .memory_residency_policy(&request)
+        .expect("exact limit should plan");
+
+    assert_eq!(
+        plan.schema_version,
+        SWARM_MEMORY_RESIDENCY_POLICY_SCHEMA_VERSION
+    );
+    assert_eq!(plan.decision, SwarmMemoryResidencyDecision::AdmitHot);
+    assert_eq!(plan.residency_tier, SwarmMemoryResidencyTier::Hot);
+    assert_eq!(plan.brownout_class, SwarmMemoryBrownoutClass::None);
+    assert_eq!(plan.hot_resident_bytes, budget.trace_replay_bytes);
+    assert_eq!(plan.warm_resident_bytes, 0);
+    assert_eq!(plan.spilled_bytes, 0);
+    assert_eq!(plan.browned_out_bytes, 0);
+    assert_eq!(plan.refused_bytes, 0);
+    assert_eq!(
+        plan.affected_task_ids,
+        vec!["task-042-001".to_string(), "task-042-002".to_string()]
+    );
+    assert_residency_invariants(&plan);
+}
+
+#[test]
+fn swarm_memory_residency_policy_spills_over_limit_proof_artifacts() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let snapshot = sample_capacity_snapshot("memory-residency-spill");
+    let budget = snapshot
+        .memory_budget_plan()
+        .expect("snapshot should produce memory budget");
+    let mut request = sample_memory_residency_request(
+        SwarmMemoryResidencyWorkloadClass::ProofArtifact,
+        budget.proof_artifact_staging_bytes + 6 * GIB,
+    );
+    request.minimum_hot_bytes = 4 * GIB;
+    request.spill_allowed = true;
+
+    let plan = snapshot
+        .memory_residency_policy(&request)
+        .expect("spill request should plan");
+
+    assert_eq!(plan.decision, SwarmMemoryResidencyDecision::SpillCold);
+    assert_eq!(plan.residency_tier, SwarmMemoryResidencyTier::SpillEligible);
+    assert_eq!(plan.hot_resident_bytes, 4 * GIB);
+    assert_eq!(
+        plan.hot_resident_bytes + plan.warm_resident_bytes,
+        budget.proof_artifact_staging_bytes
+    );
+    assert_eq!(plan.spilled_bytes, 6 * GIB);
+    assert_eq!(plan.refused_bytes, 0);
+    assert_residency_invariants(&plan);
+}
+
+#[test]
+fn swarm_memory_residency_policy_browns_out_optional_work_preserving_core_invariants() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let mut snapshot = sample_capacity_snapshot("memory-residency-brownout");
+    snapshot.memory.pressure_tier = SwarmMemoryPressureTier::Saturated;
+    let budget = snapshot
+        .memory_budget_plan()
+        .expect("snapshot should produce memory budget");
+    let mut request = sample_memory_residency_request(
+        SwarmMemoryResidencyWorkloadClass::OptionalDiagnostics,
+        budget.compiler_cache_bytes + 8 * GIB,
+    );
+    request.minimum_hot_bytes = 0;
+    request.brownout_allowed = true;
+
+    let plan = snapshot
+        .memory_residency_policy(&request)
+        .expect("brownout request should plan");
+
+    assert_eq!(
+        plan.decision,
+        SwarmMemoryResidencyDecision::BrownoutOptional
+    );
+    assert_eq!(
+        plan.residency_tier,
+        SwarmMemoryResidencyTier::BrownoutEligible
+    );
+    assert_eq!(plan.brownout_class, SwarmMemoryBrownoutClass::ShedOptional);
+    assert_eq!(plan.browned_out_bytes, 8 * GIB);
+    assert_eq!(plan.refused_bytes, 0);
+    assert_residency_invariants(&plan);
+    assert!(
+        plan.explanation
+            .iter()
+            .any(|line| line.contains("obligation cleanup remain preserved"))
+    );
+}
+
+#[test]
+fn swarm_memory_residency_policy_empty_budget_emits_no_win_receipt() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let mut snapshot = sample_capacity_snapshot("memory-residency-empty-budget");
+    snapshot.memory.available_bytes = Some(0);
+    snapshot.memory.pressure_tier = SwarmMemoryPressureTier::Critical;
+    let request =
+        sample_memory_residency_request(SwarmMemoryResidencyWorkloadClass::InteractiveRuntime, GIB);
+
+    let plan = snapshot
+        .memory_residency_policy(&request)
+        .expect("empty budget should produce fail-closed plan");
+
+    assert_eq!(plan.decision, SwarmMemoryResidencyDecision::RefuseNoWin);
+    assert_eq!(
+        plan.fallback_reason,
+        Some(SwarmMemoryResidencyFallbackReason::EmptyBudget)
+    );
+    assert_eq!(plan.brownout_class, SwarmMemoryBrownoutClass::NoWin);
+    assert!(plan.no_win_decision);
+    assert_eq!(plan.refused_bytes, GIB);
+    assert_residency_invariants(&plan);
+}
+
+#[test]
+fn swarm_memory_residency_policy_stale_metrics_emit_no_win_receipt() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let snapshot = sample_capacity_snapshot("memory-residency-stale-metrics");
+    let mut request =
+        sample_memory_residency_request(SwarmMemoryResidencyWorkloadClass::TraceReplay, GIB);
+    request.metrics_age_secs = 90;
+    request.max_metrics_age_secs = 60;
+
+    let plan = snapshot
+        .memory_residency_policy(&request)
+        .expect("stale metrics should produce fail-closed plan");
+
+    assert_eq!(plan.decision, SwarmMemoryResidencyDecision::RefuseNoWin);
+    assert_eq!(
+        plan.fallback_reason,
+        Some(SwarmMemoryResidencyFallbackReason::StaleMetrics)
+    );
+    assert!(plan.metrics_stale);
+    assert!(plan.no_win_decision);
+    assert_eq!(plan.refused_bytes, GIB);
+    assert_residency_invariants(&plan);
+}
+
+#[test]
+fn swarm_memory_residency_policy_contradictory_policy_emits_no_win_receipt() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let snapshot = sample_capacity_snapshot("memory-residency-contradictory");
+    let mut request =
+        sample_memory_residency_request(SwarmMemoryResidencyWorkloadClass::TraceReplay, GIB);
+    request.minimum_hot_bytes = 2 * GIB;
+
+    let plan = snapshot
+        .memory_residency_policy(&request)
+        .expect("contradictory request should produce fail-closed plan");
+
+    assert_eq!(plan.decision, SwarmMemoryResidencyDecision::RefuseNoWin);
+    assert_eq!(
+        plan.fallback_reason,
+        Some(SwarmMemoryResidencyFallbackReason::ContradictoryPolicy)
+    );
+    assert_eq!(plan.refused_bytes, GIB);
+    assert_residency_invariants(&plan);
+}
+
+#[test]
+fn swarm_memory_residency_policy_never_discards_core_invariants_across_decisions() {
+    const GIB: u64 = 1_024 * 1_024 * 1_024;
+
+    let mut cases = Vec::new();
+
+    let snapshot = sample_capacity_snapshot("memory-residency-metamorphic-exact");
+    let budget = snapshot
+        .memory_budget_plan()
+        .expect("snapshot should produce memory budget");
+    cases.push((
+        snapshot.clone(),
+        sample_memory_residency_request(
+            SwarmMemoryResidencyWorkloadClass::TraceReplay,
+            budget.trace_replay_bytes,
+        ),
+    ));
+
+    let mut spill = sample_memory_residency_request(
+        SwarmMemoryResidencyWorkloadClass::ProofArtifact,
+        budget.proof_artifact_staging_bytes + GIB,
+    );
+    spill.minimum_hot_bytes = GIB;
+    spill.spill_allowed = true;
+    cases.push((snapshot.clone(), spill));
+
+    let mut brownout_snapshot = sample_capacity_snapshot("memory-residency-metamorphic-brownout");
+    brownout_snapshot.memory.pressure_tier = SwarmMemoryPressureTier::Saturated;
+    let brownout_budget = brownout_snapshot
+        .memory_budget_plan()
+        .expect("brownout snapshot should produce memory budget");
+    let mut brownout = sample_memory_residency_request(
+        SwarmMemoryResidencyWorkloadClass::OptionalDiagnostics,
+        brownout_budget.compiler_cache_bytes + GIB,
+    );
+    brownout.minimum_hot_bytes = 0;
+    brownout.brownout_allowed = true;
+    cases.push((brownout_snapshot, brownout));
+
+    let mut no_win_snapshot = sample_capacity_snapshot("memory-residency-metamorphic-no-win");
+    no_win_snapshot.memory.available_bytes = Some(0);
+    no_win_snapshot.memory.pressure_tier = SwarmMemoryPressureTier::Critical;
+    cases.push((
+        no_win_snapshot,
+        sample_memory_residency_request(SwarmMemoryResidencyWorkloadClass::InteractiveRuntime, GIB),
+    ));
+
+    for (snapshot, request) in cases {
+        let plan = snapshot
+            .memory_residency_policy(&request)
+            .unwrap_or_else(|error| panic!("{} should plan: {error}", request.workload_id));
+        assert_residency_invariants(&plan);
+    }
 }
 
 #[test]

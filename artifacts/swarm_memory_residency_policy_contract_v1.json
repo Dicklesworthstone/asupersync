@@ -1,0 +1,128 @@
+{
+  "contract_version": "swarm-memory-residency-policy-contract-v1",
+  "schema_version": "asupersync.swarm-memory-residency-policy.v1",
+  "bead_id": "asupersync-vssefs.9.3",
+  "purpose": "Define the source-backed contract for deterministic swarm memory residency, spill, brownout, and no-win policy receipts.",
+  "source_of_truth": {
+    "contract": "artifacts/swarm_memory_residency_policy_contract_v1.json",
+    "contract_test": "tests/scheduler_swarm_evidence_artifact.rs",
+    "runtime_policy_source": "src/runtime/scheduler/swarm_evidence.rs",
+    "runtime_policy": "asupersync::runtime::scheduler::SwarmCapacitySnapshot::memory_residency_policy",
+    "runtime_request_type": "asupersync::runtime::scheduler::SwarmMemoryResidencyRequest",
+    "runtime_plan_type": "asupersync::runtime::scheduler::SwarmMemoryResidencyPlan"
+  },
+  "required_plan_fields": [
+    "schema_version",
+    "source_snapshot_id",
+    "policy_id",
+    "workload_id",
+    "workload_class",
+    "affected_region_id",
+    "affected_task_ids",
+    "proof_lane_id",
+    "proof_command",
+    "decision",
+    "residency_tier",
+    "brownout_class",
+    "fallback_reason",
+    "before",
+    "after",
+    "requested_bytes",
+    "minimum_hot_bytes",
+    "hot_resident_bytes",
+    "warm_resident_bytes",
+    "spilled_bytes",
+    "browned_out_bytes",
+    "refused_bytes",
+    "metrics_age_secs",
+    "max_metrics_age_secs",
+    "metrics_stale",
+    "no_win_decision",
+    "preserved_invariants",
+    "explanation"
+  ],
+  "residency_envelope_fields": [
+    "available_bytes",
+    "emergency_reserve_bytes",
+    "lane_budget_bytes",
+    "pressure_tier",
+    "host_tier"
+  ],
+  "required_decisions": [
+    "admit_hot",
+    "spill_cold",
+    "brownout_optional",
+    "refuse_no_win"
+  ],
+  "required_residency_tiers": [
+    "hot",
+    "spill_eligible",
+    "brownout_eligible",
+    "refused"
+  ],
+  "required_brownout_classes": [
+    "none",
+    "observe",
+    "degrade_optional",
+    "shed_optional",
+    "no_win"
+  ],
+  "required_fallback_reasons": [
+    "empty_budget",
+    "stale_metrics",
+    "contradictory_policy",
+    "no_safe_residency_tier"
+  ],
+  "protected_invariants": [
+    "core_scheduling",
+    "cancellation_drain",
+    "loser_drain",
+    "region_quiescence",
+    "obligation_cleanup"
+  ],
+  "scenarios": [
+    {
+      "name": "exact_limit_hot_resident",
+      "requirement": "A workload that fits its lane budget is admitted fully hot with no spill, brownout, or refusal."
+    },
+    {
+      "name": "over_limit_spill",
+      "requirement": "A proof-artifact workload with explicit spill permission keeps the requested hot floor resident and spills only the cold remainder."
+    },
+    {
+      "name": "optional_brownout",
+      "requirement": "Optional diagnostics under saturated pressure brown out optional bytes while preserving all core runtime invariants."
+    },
+    {
+      "name": "empty_budget_no_win",
+      "requirement": "A nonzero request against a zero lane budget produces an explicit no-win receipt rather than pretending the workload is resident."
+    },
+    {
+      "name": "stale_metrics_no_win",
+      "requirement": "Metrics older than the request bound produce a fail-closed no-win receipt."
+    },
+    {
+      "name": "contradictory_policy_no_win",
+      "requirement": "Requests whose minimum hot byte floor exceeds requested bytes produce a fail-closed no-win receipt."
+    }
+  ],
+  "semantic_rules": {
+    "account_for_every_byte": "hot_resident_bytes + warm_resident_bytes + spilled_bytes + browned_out_bytes + refused_bytes must equal requested_bytes.",
+    "resident_bytes_fit_lane": "hot_resident_bytes + warm_resident_bytes must never exceed before.lane_budget_bytes.",
+    "no_ambient_memory_probe": "The planner derives decisions only from the explicit SwarmCapacitySnapshot and SwarmMemoryResidencyRequest.",
+    "stable_task_identity": "affected_task_ids are trimmed, sorted, deduplicated, and preserved in the plan.",
+    "fail_closed_receipts": "Empty budgets, stale metrics, contradictory policy, and no safe residency tier all return refuse_no_win with a fallback_reason.",
+    "core_runtime_protection": "Memory brownout never discards core scheduling, cancellation drain, loser drain, region quiescence, or obligation cleanup."
+  },
+  "proof_lane": {
+    "id": "swarm-memory-residency-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_swarm_memory_residency cargo test -p asupersync --test scheduler_swarm_evidence_artifact swarm_memory_residency --features test-internals -- --nocapture",
+    "scope": "Focused contract tests for the scheduler swarm memory residency planner and its artifact."
+  },
+  "forbidden_semantics": [
+    "delete files as part of memory pressure handling",
+    "create git branches or worktrees for this policy",
+    "drop structured concurrency, cancellation, loser-drain, region-quiescence, or obligation-cleanup invariants during brownout",
+    "treat stale or contradictory inputs as successful admission"
+  ]
+}
