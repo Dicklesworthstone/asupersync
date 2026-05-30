@@ -57,6 +57,7 @@ pub mod chaos;
 pub mod config;
 pub mod conformal;
 pub mod crashpack;
+pub mod deadlock_radar;
 pub mod dual_run;
 pub mod explorer;
 pub mod fixtures;
@@ -104,6 +105,12 @@ pub use crashpack::{
     AtpTransferOracle, AtpTransferState, CrashpackBuilder, CrashpackError, ReplayError,
     TraceMinimizer, TraceMinimizerConfig, TransferOracle, TransferOracleResult, TransferState,
     TransferViolation, ViolationSeverity,
+};
+pub use deadlock_radar::{
+    DEADLOCK_RADAR_SCHEMA_VERSION, DeadlockRadarCandidate, DeadlockRadarEvidence,
+    DeadlockRadarFinding, DeadlockRadarHazardClass, DeadlockRadarInterleavingStep,
+    DeadlockRadarLockRank, DeadlockRadarProofStatus, DeadlockRadarReport, DeadlockRadarVerdict,
+    run_deadlock_radar,
 };
 pub use dual_run::{
     CancelTerminalPhase, CancellationRecord, CaptureAnnotation, CaptureManifest, ComparisonVerdict,
