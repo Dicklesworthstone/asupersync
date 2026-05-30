@@ -38,6 +38,8 @@ struct BaselineBenchmark {
     p95_ns: Option<f64>,
     #[serde(default)]
     p99_ns: Option<f64>,
+    #[serde(default)]
+    sample_count: Option<usize>,
 }
 
 /// Root structure of baseline JSON files.
@@ -219,6 +221,7 @@ fn make_benchmark(name: &str, mean_ns: f64, median_ns: f64) -> BaselineBenchmark
         cv_pct: Some(10.0),
         p95_ns: Some(mean_ns * 1.3),
         p99_ns: Some(mean_ns * 1.8),
+        sample_count: Some(100),
     }
 }
 
@@ -268,6 +271,27 @@ fn write_minimal_criterion_output(root: &Path) {
     write_criterion_benchmark(root, "bench", 1.0, 1.0, 0.0, &[1], &[1]);
 }
 
+fn write_criterion_benchmark_without_samples(
+    root: &Path,
+    bench_path: &str,
+    mean_ns: f64,
+    median_ns: f64,
+    std_dev_ns: f64,
+) {
+    let bench_dir = root.join("criterion").join(bench_path).join("new");
+    fs::create_dir_all(&bench_dir).expect("create criterion fixture directories");
+    let estimates = serde_json::json!({
+        "mean": {"point_estimate": mean_ns},
+        "median": {"point_estimate": median_ns},
+        "std_dev": {"point_estimate": std_dev_ns},
+    });
+    fs::write(
+        bench_dir.join("estimates.json"),
+        serde_json::to_vec(&estimates).expect("serialize estimates"),
+    )
+    .expect("write estimates.json");
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
@@ -296,6 +320,19 @@ fn run_capture_baseline_with_command(arg_name: &str, arg_value: &str) -> std::pr
         .env("CRITERION_DIR", temp.path().join("criterion"))
         .output()
         .expect("run capture_baseline.sh")
+}
+
+fn add_valid_swarm_ledger_env(command: &mut Command) -> &mut Command {
+    command
+        .env("RCH_REQUIRE_REMOTE", "1")
+        .env("SWARM_LEDGER_RCH_WORKER_ID", "vmi-ledger-test")
+        .env("SWARM_LEDGER_RCH_BUILD_ID", "29863361030127999")
+        .env(
+            "SWARM_LEDGER_RCH_COMMAND",
+            "rch exec -- cargo bench --bench phase0_baseline",
+        )
+        .env("SWARM_LEDGER_MEMORY_ENVELOPE_BYTES", "1073741824")
+        .env("SWARM_LEDGER_QUIESCENCE_VERDICT", "pass")
 }
 
 // =========================================================================
@@ -853,6 +890,343 @@ fn capture_baseline_bench_history_is_opt_in_and_appends_runs_log() {
 }
 
 #[test]
+fn capture_baseline_swarm_ledger_is_opt_in_and_appends_rich_records() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_criterion_benchmark(
+        temp.path(),
+        "swarm/pressure",
+        2_000.0,
+        1_900.0,
+        50.0,
+        &[1, 1, 1, 1, 1],
+        &[1_800, 1_900, 2_000, 2_100, 2_200],
+    );
+
+    let repo = repo_root();
+    let script = repo.join("scripts/capture_baseline.sh");
+    let ledger_dir = temp.path().join("swarm-ledger");
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env("SWARM_LEDGER_DIR", &ledger_dir)
+        .current_dir(&repo)
+        .output()
+        .expect("run capture_baseline.sh without swarm ledger");
+    assert!(
+        output.status.success(),
+        "plain capture should succeed before ledger opt-in: status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !ledger_dir.exists(),
+        "plain capture must not create swarm ledger artifacts without --swarm-ledger"
+    );
+
+    let mut command = Command::new("bash");
+    command
+        .arg(&script)
+        .arg("--swarm-ledger")
+        .arg("--swarm-ledger-dir")
+        .arg(&ledger_dir)
+        .arg("--scenario-id")
+        .arg("scheduler-global-queue")
+        .arg("--profile")
+        .arg("release-perf")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env("BENCH_FEATURES", "messaging-fabric,cli,benchmark-adapters")
+        .current_dir(&repo);
+    let output = add_valid_swarm_ledger_env(&mut command)
+        .output()
+        .expect("run capture_baseline.sh with swarm ledger");
+
+    eprintln!(
+        "capture_baseline swarm-ledger status={:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        output.status.success(),
+        "swarm ledger capture should succeed with complete provenance"
+    );
+    let report: BaselineReport =
+        serde_json::from_slice(&output.stdout).expect("stdout must remain baseline JSON");
+    let bench = report
+        .benchmarks
+        .iter()
+        .find(|bench| bench.name == "swarm/pressure")
+        .expect("captured swarm benchmark");
+    assert_eq!(
+        bench.sample_count,
+        Some(5),
+        "baseline records should expose sample_count for ledger consumers"
+    );
+
+    let ledger_path = ledger_dir.join("ledger.jsonl");
+    let ledger = fs::read_to_string(&ledger_path)
+        .unwrap_or_else(|err| panic!("read ledger {}: {err}", ledger_path.display()));
+    let records: Vec<serde_json::Value> = ledger
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("ledger line should parse"))
+        .collect();
+    assert_eq!(
+        records.len(),
+        1,
+        "ledger should append one record for the synthetic benchmark: {ledger}"
+    );
+    let record = &records[0];
+    assert_eq!(
+        record["schema_version"],
+        "asupersync.swarm-performance-ledger.v1"
+    );
+    assert_eq!(record["scenario_id"], "scheduler-global-queue");
+    assert_eq!(record["benchmark_name"], "swarm/pressure");
+    assert_eq!(record["sample_count"], 5);
+    assert_eq!(record["latency_ns"]["p50"], 1_900.0);
+    assert_eq!(record["latency_ns"]["p95"], 2_180.0);
+    assert_eq!(record["latency_ns"]["p99"], 2_196.0);
+    assert_eq!(record["cv_pct"], 2.5);
+    assert_eq!(record["cargo_profile"], "release-perf");
+    assert_eq!(
+        record["cargo_features"],
+        "messaging-fabric,cli,benchmark-adapters"
+    );
+    assert_eq!(record["rch"]["worker_id"], "vmi-ledger-test");
+    assert_eq!(record["rch"]["build_id"], "29863361030127999");
+    assert_eq!(record["rch"]["remote_required"], true);
+    assert_eq!(record["memory"]["memory_envelope_bytes"], 1_073_741_824);
+    assert_eq!(record["quiescence"]["verdict"], "pass");
+    assert_eq!(record["verdict"], "pass");
+    assert!(
+        record["git_sha"].as_str().is_some_and(|sha| sha.len() >= 7),
+        "ledger records should carry current git SHA attribution: {record}"
+    );
+    assert!(
+        record["throughput_ops_per_sec"]
+            .as_f64()
+            .is_some_and(|throughput| throughput > 0.0),
+        "ledger should derive positive throughput from p50 latency: {record}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("swarm performance ledger updated"),
+        "ledger update receipt should be logged to stderr"
+    );
+}
+
+#[test]
+fn capture_baseline_swarm_ledger_derives_rch_provenance_from_run_log() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+
+    let run_log = temp.path().join("rch-run.log");
+    fs::write(
+        &run_log,
+        "\
+2026-05-30T06:18:34Z INFO Selected worker: vmi-log-ledger at ubuntu@example
+2026-05-30T06:19:27Z INFO Rewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /tmp/x -> /data/projects/asupersync/.rch-target-vmi-log-ledger-job-29863361030127998-1780121916439450732-0
+",
+    )
+    .expect("write fake rch run log");
+
+    let repo = repo_root();
+    let script = repo.join("scripts/capture_baseline.sh");
+    let ledger_dir = temp.path().join("swarm-ledger");
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--swarm-ledger")
+        .arg("--swarm-ledger-dir")
+        .arg(&ledger_dir)
+        .arg("--scenario-id")
+        .arg("scheduler-log-derived-rch")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env("RUN_OUTPUT_LOG", &run_log)
+        .env(
+            "RUN_COMMAND_DISPLAY",
+            "rch exec -- cargo bench --bench phase0_baseline",
+        )
+        .env("RCH_REQUIRE_REMOTE", "1")
+        .env("SWARM_LEDGER_MEMORY_ENVELOPE_BYTES", "4096")
+        .env("SWARM_LEDGER_QUIESCENCE_VERDICT", "not_applicable")
+        .current_dir(&repo)
+        .output()
+        .expect("run capture_baseline.sh with RCH log-derived provenance");
+
+    assert!(
+        output.status.success(),
+        "swarm ledger should accept provenance derived from RUN_OUTPUT_LOG: status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ledger_path = ledger_dir.join("ledger.jsonl");
+    let ledger = fs::read_to_string(&ledger_path)
+        .unwrap_or_else(|err| panic!("read ledger {}: {err}", ledger_path.display()));
+    let record: serde_json::Value =
+        serde_json::from_str(ledger.trim()).expect("single ledger row should parse");
+    assert_eq!(record["rch"]["worker_id"], "vmi-log-ledger");
+    assert_eq!(record["rch"]["build_id"], "29863361030127998");
+    assert_eq!(
+        record["rch"]["command"],
+        "rch exec -- cargo bench --bench phase0_baseline"
+    );
+}
+
+#[test]
+fn capture_baseline_swarm_ledger_rejects_missing_tail_metrics() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_criterion_benchmark_without_samples(
+        temp.path(),
+        "swarm/missing-tail",
+        1_000.0,
+        950.0,
+        10.0,
+    );
+
+    let repo = repo_root();
+    let script = repo.join("scripts/capture_baseline.sh");
+    let ledger_dir = temp.path().join("swarm-ledger");
+    let mut command = Command::new("bash");
+    command
+        .arg(&script)
+        .arg("--swarm-ledger")
+        .arg("--swarm-ledger-dir")
+        .arg(&ledger_dir)
+        .arg("--scenario-id")
+        .arg("scheduler-missing-tail")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .current_dir(&repo);
+    let output = add_valid_swarm_ledger_env(&mut command)
+        .output()
+        .expect("run capture_baseline.sh with missing sample data");
+
+    assert!(
+        !output.status.success(),
+        "swarm ledger should reject records without p95/p99 samples"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("missing finite p95_ns") || stderr.contains("missing finite p99_ns"),
+        "tail metric failure should be explicit: {stderr}"
+    );
+    assert!(
+        !ledger_dir.join("ledger.jsonl").exists(),
+        "invalid records must not create an append-only ledger file"
+    );
+}
+
+#[test]
+fn capture_baseline_swarm_ledger_rejects_stale_commit_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+
+    let repo = repo_root();
+    let script = repo.join("scripts/capture_baseline.sh");
+    let mut command = Command::new("bash");
+    command
+        .arg(&script)
+        .arg("--swarm-ledger")
+        .arg("--swarm-ledger-dir")
+        .arg(temp.path().join("swarm-ledger"))
+        .arg("--scenario-id")
+        .arg("scheduler-stale-sha")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env(
+            "SWARM_LEDGER_EXPECT_GIT_SHA",
+            "0000000000000000000000000000000000000000",
+        )
+        .current_dir(&repo);
+    let output = add_valid_swarm_ledger_env(&mut command)
+        .output()
+        .expect("run capture_baseline.sh with stale commit metadata");
+
+    assert!(
+        !output.status.success(),
+        "swarm ledger should reject stale expected git metadata"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("stale commit metadata"),
+        "stale git metadata failure should be explicit: {stderr}"
+    );
+}
+
+#[test]
+fn capture_baseline_swarm_ledger_rejects_malformed_rch_provenance() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+
+    let repo = repo_root();
+    let script = repo.join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--swarm-ledger")
+        .arg("--swarm-ledger-dir")
+        .arg(temp.path().join("swarm-ledger"))
+        .arg("--scenario-id")
+        .arg("scheduler-bad-rch")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env("SWARM_LEDGER_RCH_WORKER_ID", "bad worker id")
+        .env("SWARM_LEDGER_RCH_BUILD_ID", "not-a-number")
+        .env("SWARM_LEDGER_MEMORY_ENVELOPE_BYTES", "1024")
+        .current_dir(&repo)
+        .output()
+        .expect("run capture_baseline.sh with malformed RCH provenance");
+
+    assert!(
+        !output.status.success(),
+        "swarm ledger should reject malformed RCH provenance"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("valid RCH worker id") || stderr.contains("numeric RCH build id"),
+        "malformed RCH provenance failure should be explicit: {stderr}"
+    );
+}
+
+#[test]
+fn capture_baseline_swarm_ledger_rejects_non_monotonic_history_timestamps() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+
+    let ledger_dir = temp.path().join("swarm-ledger");
+    fs::create_dir_all(&ledger_dir).expect("create ledger dir");
+    fs::write(
+        ledger_dir.join("ledger.jsonl"),
+        r#"{"generated_at":"9999-01-01T00:00:00Z"}"#,
+    )
+    .expect("write future ledger row");
+
+    let repo = repo_root();
+    let script = repo.join("scripts/capture_baseline.sh");
+    let mut command = Command::new("bash");
+    command
+        .arg(&script)
+        .arg("--swarm-ledger")
+        .arg("--swarm-ledger-dir")
+        .arg(&ledger_dir)
+        .arg("--scenario-id")
+        .arg("scheduler-nonmonotonic")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .current_dir(&repo);
+    let output = add_valid_swarm_ledger_env(&mut command)
+        .output()
+        .expect("run capture_baseline.sh with future ledger history");
+
+    assert!(
+        !output.status.success(),
+        "swarm ledger should reject non-monotonic append timestamps"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("non-monotonic history timestamp"),
+        "timestamp regression failure should be explicit: {stderr}"
+    );
+}
+
+#[test]
 fn capture_baseline_help_documents_perf_history_options() {
     let script = repo_root().join("scripts/capture_baseline.sh");
     let output = Command::new("bash")
@@ -871,6 +1245,10 @@ fn capture_baseline_help_documents_perf_history_options() {
         "--no-bench-history",
         "--bench-history-dir <dir>",
         "--cv-pct-flake-threshold <pct>",
+        "--swarm-ledger",
+        "--no-swarm-ledger",
+        "--swarm-ledger-dir <dir>",
+        "--scenario-id <id>",
     ] {
         assert!(
             stdout.contains(expected),

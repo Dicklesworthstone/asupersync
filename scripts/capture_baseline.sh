@@ -39,6 +39,9 @@ BENCH_HISTORY_DIR="${BENCH_HISTORY_DIR:-.bench-history}"
 BENCH_PROFILE="${BENCH_PROFILE:-}"
 WRITE_BENCH_HISTORY="${WRITE_BENCH_HISTORY:-0}"
 CV_PCT_FLAKE_THRESHOLD="${CV_PCT_FLAKE_THRESHOLD:-5.0}"
+SWARM_LEDGER_DIR="${SWARM_LEDGER_DIR:-artifacts/swarm-perf-ledger}"
+SWARM_LEDGER_SCENARIO_ID="${SWARM_LEDGER_SCENARIO_ID:-criterion-release-perf}"
+WRITE_SWARM_LEDGER="${WRITE_SWARM_LEDGER:-0}"
 
 usage() {
     cat <<'USAGE'
@@ -63,6 +66,10 @@ Options:
   --no-bench-history             Disable bench-history writes, overriding env defaults
   --bench-history-dir <dir>      Bench-history output dir (default: .bench-history)
   --cv-pct-flake-threshold <pct> Mark benchmarks with cv_pct above this threshold (default: 5.0)
+  --swarm-ledger                 Append records to the swarm performance ledger
+  --no-swarm-ledger              Disable swarm performance ledger writes, overriding env defaults
+  --swarm-ledger-dir <dir>       Swarm ledger output dir (default: artifacts/swarm-perf-ledger)
+  --scenario-id <id>             Scenario id recorded in swarm ledger records
   -h, --help                     Show help
 
 Examples:
@@ -71,6 +78,7 @@ Examples:
   ./scripts/capture_baseline.sh --run --save baselines/
   ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
   ./scripts/capture_baseline.sh --bench-history --profile release-perf
+  ./scripts/capture_baseline.sh --swarm-ledger --scenario-id scheduler-global-queue
 USAGE
 }
 
@@ -129,6 +137,12 @@ while [[ $# -gt 0 ]]; do
         --bench-history-dir=*) BENCH_HISTORY_DIR="${1#--bench-history-dir=}"; require_arg "--bench-history-dir" "$BENCH_HISTORY_DIR"; shift ;;
         --cv-pct-flake-threshold) require_arg "$1" "${2:-}"; CV_PCT_FLAKE_THRESHOLD="$2"; shift 2 ;;
         --cv-pct-flake-threshold=*) CV_PCT_FLAKE_THRESHOLD="${1#--cv-pct-flake-threshold=}"; require_arg "--cv-pct-flake-threshold" "$CV_PCT_FLAKE_THRESHOLD"; shift ;;
+        --swarm-ledger) WRITE_SWARM_LEDGER=1; shift ;;
+        --no-swarm-ledger) WRITE_SWARM_LEDGER=0; shift ;;
+        --swarm-ledger-dir) require_arg "$1" "${2:-}"; SWARM_LEDGER_DIR="$2"; shift 2 ;;
+        --swarm-ledger-dir=*) SWARM_LEDGER_DIR="${1#--swarm-ledger-dir=}"; require_arg "--swarm-ledger-dir" "$SWARM_LEDGER_DIR"; shift ;;
+        --scenario-id) require_arg "$1" "${2:-}"; SWARM_LEDGER_SCENARIO_ID="$2"; shift 2 ;;
+        --scenario-id=*) SWARM_LEDGER_SCENARIO_ID="${1#--scenario-id=}"; require_arg "--scenario-id" "$SWARM_LEDGER_SCENARIO_ID"; shift ;;
         --seed) require_arg "$1" "${2:-}"; SMOKE_SEED="$2"; shift 2 ;;
         --seed=*) SMOKE_SEED="${1#--seed=}"; require_arg "--seed" "$SMOKE_SEED"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -169,6 +183,13 @@ case "$WRITE_BENCH_HISTORY" in
     0|1) ;;
     *)
         echo "ERROR: WRITE_BENCH_HISTORY must be 0 or 1" >&2
+        exit 1
+        ;;
+esac
+case "$WRITE_SWARM_LEDGER" in
+    0|1) ;;
+    *)
+        echo "ERROR: WRITE_SWARM_LEDGER must be 0 or 1" >&2
         exit 1
         ;;
 esac
@@ -255,7 +276,7 @@ find "$CRITERION_DIR" -path '*/new/estimates.json' -type f | sort | while read -
     mean_ns=$(jq -r '.mean.point_estimate' "$est_file")
     median_ns=$(jq -r '.median.point_estimate' "$est_file")
     std_dev=$(jq -r '.std_dev.point_estimate // .median_abs_dev.point_estimate // 0' "$est_file")
-    read -r p95_ns p99_ns < <(
+    read -r p95_ns p99_ns sample_count < <(
         python3 - "$sample_file" <<'PY'
 import json
 import math
@@ -266,7 +287,7 @@ try:
     with open(path, "r") as fh:
         data = json.load(fh)
 except FileNotFoundError:
-    print("null null")
+    print("null null 0")
     sys.exit(0)
 
 iters = data.get("iters", [])
@@ -277,7 +298,7 @@ for it, t in zip(iters, times):
         values.append(t / it)
 
 if not values:
-    print("null null")
+    print("null null 0")
     sys.exit(0)
 
 values.sort()
@@ -293,7 +314,7 @@ def quantile(p: float) -> float:
     frac = idx - lo
     return values[lo] * (1 - frac) + values[hi] * frac
 
-print(f"{quantile(0.95)} {quantile(0.99)}")
+print(f"{quantile(0.95)} {quantile(0.99)} {len(values)}")
 PY
     )
 
@@ -304,8 +325,10 @@ PY
         --argjson p95 "$p95_ns" \
         --argjson p99 "$p99_ns" \
         --argjson std_dev "$std_dev" \
+        --argjson sample_count "$sample_count" \
         '{name: $name, mean_ns: $mean, median_ns: $median, p95_ns: $p95, p99_ns: $p99, std_dev_ns: $std_dev,
-          cv_pct: (if (($mean // 0) > 0) then (($std_dev / $mean) * 100) else null end)}'
+          cv_pct: (if (($mean // 0) > 0) then (($std_dev / $mean) * 100) else null end),
+          sample_count: $sample_count}'
 done | jq -s --argjson flake_threshold "$CV_PCT_FLAKE_THRESHOLD" '{
     schema_version: "asupersync.baseline.v2",
     generated_at: (now | todate),
@@ -478,5 +501,264 @@ with open(runs_path, "a") as runs:
         runs.write(json.dumps(rec, sort_keys=True) + "\n")
         n += 1
 print(f".bench-history updated: {hist} ({n} benches, profile={profile}, sha={sha})", file=sys.stderr)
+PY
+fi
+
+# br-asupersync-vssefs.4: durable, append-only p95/p99/CV ledger for swarm
+# pressure evidence. This intentionally complements .bench-history: history
+# remains the certification ratchet, while the swarm ledger captures richer
+# RCH/scenario provenance for cross-commit pressure-lab comparisons.
+if [[ "$WRITE_SWARM_LEDGER" -eq 1 ]]; then
+    BASELINE_TMP_PATH="$BASELINE_TMP_PATH" \
+    SWARM_LEDGER_DIR="$SWARM_LEDGER_DIR" \
+    SWARM_LEDGER_SCENARIO_ID="$SWARM_LEDGER_SCENARIO_ID" \
+    BENCH_PROFILE="$BENCH_PROFILE" \
+    BENCH_CARGO_PROFILE="$BENCH_CARGO_PROFILE" \
+    BENCH_FEATURES="$BENCH_FEATURES" \
+    SMOKE_SEED="$SMOKE_SEED" \
+    CRITERION_DIR="$CRITERION_DIR" \
+    RUN_OUTPUT_LOG="$RUN_OUTPUT_LOG" \
+    RUN_COMMAND_DISPLAY="${RUN_COMMAND_DISPLAY:-}" \
+    python3 - <<'PY'
+import datetime as dt
+import json
+import math
+import os
+import platform
+import re
+import socket
+import subprocess
+import sys
+
+SCHEMA_VERSION = "asupersync.swarm-performance-ledger.v1"
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: swarm ledger {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def env_first(*names):
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def git_sha() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception as exc:
+        fail(f"requires current git commit metadata: {exc}")
+
+
+def parse_utc(value: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        fail(f"timestamp {value!r} is not RFC3339/ISO-8601: {exc}")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def now_utc() -> str:
+    override = os.environ.get("SWARM_LEDGER_GENERATED_AT")
+    if override:
+        parse_utc(override)
+        return override
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def finite_number(record: dict, field: str) -> float:
+    value = record.get(field)
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        fail(f"record for {record.get('name')!r} is missing finite {field}")
+    return float(value)
+
+
+def positive_sample_count(record: dict) -> int:
+    value = record.get("sample_count")
+    if not isinstance(value, int) or value <= 0:
+        fail(f"record for {record.get('name')!r} is missing positive sample_count")
+    return value
+
+
+def optional_nonnegative_int(name: str):
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    if not re.fullmatch(r"[0-9]+", value):
+        fail(f"{name} must be a non-negative integer")
+    return int(value)
+
+
+def validate_scenario_id(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", value):
+        fail("--scenario-id must be 1-128 chars of letters, digits, '.', '_', ':', '/', or '-'")
+    return value
+
+
+def parse_rch_log_provenance() -> dict:
+    path = os.environ.get("RUN_OUTPUT_LOG")
+    if not path:
+        return {}
+    try:
+        with open(path, "r", errors="replace") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return {}
+    result = {}
+    worker = re.search(r"Selected worker:\s+([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\b", text)
+    if worker:
+        result["worker_id"] = worker.group(1)
+    build = re.search(r"\.rch-target-[A-Za-z0-9._:-]+-job-([0-9]+)-", text)
+    if build:
+        result["build_id"] = build.group(1)
+    return result
+
+
+def validate_rch_provenance() -> dict:
+    parsed = parse_rch_log_provenance()
+    worker_id = env_first("SWARM_LEDGER_RCH_WORKER_ID", "RCH_WORKER_ID", "RCH_WORKER")
+    build_id = env_first("SWARM_LEDGER_RCH_BUILD_ID", "RCH_BUILD_ID", "RCH_BUILD")
+    command = env_first("SWARM_LEDGER_RCH_COMMAND", "RCH_COMMAND", "RUN_COMMAND_DISPLAY")
+    worker_id = worker_id or parsed.get("worker_id")
+    build_id = build_id or parsed.get("build_id")
+    if not worker_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", worker_id):
+        fail("requires valid RCH worker id via env or RUN_OUTPUT_LOG")
+    if not build_id or not re.fullmatch(r"[0-9]+", build_id):
+        fail("requires numeric RCH build id via env or RUN_OUTPUT_LOG")
+    return {
+        "worker_id": worker_id,
+        "build_id": build_id,
+        "command": command,
+        "remote_required": os.environ.get("RCH_REQUIRE_REMOTE") == "1",
+        "run_output_log": os.environ.get("RUN_OUTPUT_LOG"),
+    }
+
+
+baseline_path = os.environ["BASELINE_TMP_PATH"]
+ledger_dir = os.environ.get("SWARM_LEDGER_DIR", "artifacts/swarm-perf-ledger")
+scenario_id = validate_scenario_id(os.environ.get("SWARM_LEDGER_SCENARIO_ID", "criterion-release-perf"))
+generated_at = now_utc()
+generated_dt = parse_utc(generated_at)
+sha = git_sha()
+expected_sha = os.environ.get("SWARM_LEDGER_EXPECT_GIT_SHA")
+if expected_sha and expected_sha != sha:
+    fail(f"stale commit metadata: expected {expected_sha}, current HEAD is {sha}")
+
+memory_envelope_bytes = optional_nonnegative_int("SWARM_LEDGER_MEMORY_ENVELOPE_BYTES")
+max_rss_bytes = optional_nonnegative_int("SWARM_LEDGER_MAX_RSS_BYTES")
+if memory_envelope_bytes is None and max_rss_bytes is None:
+    fail("requires SWARM_LEDGER_MEMORY_ENVELOPE_BYTES or SWARM_LEDGER_MAX_RSS_BYTES")
+
+quiescence_verdict = os.environ.get("SWARM_LEDGER_QUIESCENCE_VERDICT", "not_applicable")
+if quiescence_verdict not in {"pass", "fail", "not_applicable"}:
+    fail("SWARM_LEDGER_QUIESCENCE_VERDICT must be pass, fail, or not_applicable")
+
+verdict = os.environ.get("SWARM_LEDGER_VERDICT", "pass")
+if verdict not in {"pass", "fail"}:
+    fail("SWARM_LEDGER_VERDICT must be pass or fail")
+
+rch = validate_rch_provenance()
+with open(baseline_path, "r") as fh:
+    baseline = json.load(fh)
+
+os.makedirs(ledger_dir, exist_ok=True)
+ledger_path = os.path.join(ledger_dir, "ledger.jsonl")
+
+if os.path.exists(ledger_path):
+    with open(ledger_path, "r") as existing:
+        for line_no, line in enumerate(existing, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                previous = json.loads(line)
+            except json.JSONDecodeError as exc:
+                fail(f"existing ledger line {line_no} is malformed JSON: {exc}")
+            previous_ts = previous.get("generated_at")
+            if not isinstance(previous_ts, str):
+                fail(f"existing ledger line {line_no} is missing generated_at")
+            if parse_utc(previous_ts) > generated_dt:
+                fail(
+                    f"non-monotonic history timestamp: existing {previous_ts} is newer than {generated_at}"
+                )
+
+features = os.environ.get("BENCH_FEATURES", "")
+feature_set = [part for part in re.split(r"[,\s]+", features) if part]
+seed = env_first("SWARM_LEDGER_SEED", "SMOKE_SEED", "ASUPERSYNC_SEED")
+profile = os.environ.get("BENCH_PROFILE") or os.environ.get("BENCH_CARGO_PROFILE") or "unknown"
+host = socket.gethostname()
+
+records = []
+for bench in baseline.get("benchmarks", []):
+    name = bench.get("name")
+    if not isinstance(name, str) or not name:
+        fail("benchmark record is missing non-empty name")
+    p50_ns = finite_number(bench, "median_ns")
+    p95_ns = finite_number(bench, "p95_ns")
+    p99_ns = finite_number(bench, "p99_ns")
+    cv_pct = finite_number(bench, "cv_pct")
+    sample_count = positive_sample_count(bench)
+    if not (p50_ns <= p95_ns <= p99_ns):
+        fail(f"record for {name!r} has non-monotonic p50/p95/p99 latencies")
+    throughput = 1_000_000_000.0 / p50_ns if p50_ns > 0 else None
+    if throughput is None or not math.isfinite(throughput):
+        fail(f"record for {name!r} cannot derive finite throughput_ops_per_sec")
+
+    records.append(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "record_id": f"{sha}:{scenario_id}:{name}:{generated_at}",
+            "generated_at": generated_at,
+            "git_sha": sha,
+            "scenario_id": scenario_id,
+            "benchmark_name": name,
+            "seed": seed,
+            "sample_count": sample_count,
+            "cargo_profile": profile,
+            "cargo_features": features,
+            "feature_set": feature_set,
+            "criterion_dir": os.environ.get("CRITERION_DIR"),
+            "latency_ns": {
+                "p50": p50_ns,
+                "p95": p95_ns,
+                "p99": p99_ns,
+            },
+            "cv_pct": cv_pct,
+            "throughput_ops_per_sec": throughput,
+            "memory": {
+                "max_rss_bytes": max_rss_bytes,
+                "memory_envelope_bytes": memory_envelope_bytes,
+            },
+            "quiescence": {
+                "verdict": quiescence_verdict,
+            },
+            "rch": rch,
+            "machine": {
+                "hostname": host,
+                "platform": platform.platform(),
+                "arch": platform.machine(),
+            },
+            "verdict": verdict,
+        }
+    )
+
+if not records:
+    fail("baseline contains no benchmark records")
+
+with open(ledger_path, "a") as ledger:
+    for record in records:
+        ledger.write(json.dumps(record, sort_keys=True) + "\n")
+
+print(
+    "swarm performance ledger updated: "
+    f"{ledger_path} ({len(records)} records, schema={SCHEMA_VERSION}, scenario={scenario_id}, "
+    f"sha={sha}, rch_worker={rch['worker_id']}, rch_build={rch['build_id']})",
+    file=sys.stderr,
+)
 PY
 fi
