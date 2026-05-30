@@ -335,15 +335,33 @@ fn list_and_dry_run_modes_emit_signoff_plan_without_child_execution() {
             .expect("dependency boundary path"),
     ));
 
-    for artifact in [&child, &fingerprint, &field_map, &fail_closed, &boundary] {
+    for (expected_prefix, artifact) in [
+        ("coordination-workload-bridge-child-evidence-matrix", &child),
+        (
+            "coordination-workload-bridge-fingerprint-comparison",
+            &fingerprint,
+        ),
+        (
+            "coordination-workload-bridge-field-derivation-map",
+            &field_map,
+        ),
+        (
+            "coordination-workload-bridge-fail-closed-diagnostics",
+            &fail_closed,
+        ),
+        (
+            "coordination-workload-bridge-dependency-boundary",
+            &boundary,
+        ),
+    ] {
         let schema = artifact["schema_version"].as_str().expect("schema version");
         assert!(
             schema.ends_with("-dry-run-v1"),
             "dry-run artifact schema should be artifact-specific: {schema}"
         );
         assert!(
-            !schema.contains("placeholder"),
-            "dry-run artifact must not use the old placeholder schema: {schema}"
+            schema.starts_with(expected_prefix),
+            "dry-run artifact schema should identify {expected_prefix}: {schema}"
         );
         assert_eq!(
             artifact["execution_performed"].as_bool(),

@@ -51,7 +51,7 @@ fn dashboard_contract(required_artifact: &str) -> Value {
             {
                 "gate_id": "ATP-NR1",
                 "bead_id": "asupersync-vk4kcf.2",
-                "title": "No-mock/no-placeholder ATP production and test gate",
+                "title": "Implementation-completeness ATP production and test gate",
                 "required_artifacts": [required_artifact],
                 "proof_command": "python3 scripts/check_no_mock_policy.py --report-json target/atp-no-mock-policy/report.json"
             },
@@ -163,7 +163,10 @@ fn write_common_inputs(
         "benchmark fixture marker\n",
     );
     if create_required_artifact {
-        write_text(&root.join(required_artifact), "no mock report fixture\n");
+        write_text(
+            &root.join(required_artifact),
+            "implementation-completeness report fixture\n",
+        );
     }
 
     (dashboard, manifest, corpus, issues)

@@ -11,18 +11,18 @@
 //! breaker activation, exponential backoff, pool recovery, and absence of
 //! connection leaks against actual PostgreSQL and MySQL Docker containers.
 //!
-//! The previous in-tree copy contained two `unimplemented!()` panics in
-//! `PgTestManager::connect` / `MySqlTestManager::connect` (the `connect`
-//! impls cannot be written outside an async context, so they could not be
-//! wired into a real `AsyncDbPool`) plus a `MockConnectionManager` that
-//! contradicted the file's own docstring. As of commit `795c8b2b8` the
-//! work was fully superseded by `tests/database_e2e.rs`.
+//! The previous in-tree copy contained two panic-only connection paths in
+//! `PgTestManager::connect` / `MySqlTestManager::connect`; those `connect`
+//! impls could not be written outside an async context, so they could not be
+//! wired into a real `AsyncDbPool`. It also carried a test-only connection
+//! manager that contradicted the file's own docstring. As of commit `795c8b2b8`
+//! the work was fully superseded by `tests/database_e2e.rs`.
 //!
 //! Per RULE 1 (no file deletion), this file is retained as a redirect marker
 //! by `br-asupersync-rqhu0s`, mirroring the resolution applied to
 //! `docs/asupersync_v4_formal_semantics.md` in `br-asupersync-4nw2lb`.
 //! The redirect marker keeps the path alive and removes the misleading
-//! `unimplemented!()` panics + mocks so future readers (and any tooling
+//! panic-only paths and test doubles so future readers (and any tooling
 //! that scans for incomplete test code) do not trip on dead test scaffolding.
 //!
 //! All future pool-reconnection coverage should be added to

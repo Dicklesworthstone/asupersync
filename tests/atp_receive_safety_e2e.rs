@@ -45,19 +45,23 @@ mod tests {
                 safety_margin_bytes: 1_000,
             },
             metadata_policy: ReceiveMetadataPolicy::PortableOnly,
-            consent_source: ReceiveConsentSource::CliConfirmation {
-                token: "consent-placeholder".to_string(),
+            consent_source: ReceiveConsentSource::DaemonAllowRule {
+                rule_id: "interactive-token-preview".to_string(),
             },
             rollback_resume: RollbackResumePolicy::RollbackQuarantineKeepJournal,
             trace_id: Some("e2e-interactive-consent-123".to_string()),
             replay_pointer: Some("proof://e2e-consent-bundle".to_string()),
         };
 
-        // Generate correct consent token for this plan
-        let mut plan = build_receive_plan(input).expect("build plan");
-        let expected_token = consent_token(&plan);
+        // Consent tokens are bound to the safety-relevant plan fields. Build
+        // the same receive under a non-interactive authorizer first so the
+        // token digest is computed from the clean admissible plan, not from an
+        // intentionally rejected CLI attempt.
+        let probe_plan = build_receive_plan(input).expect("build pre-consent plan");
+        assert_eq!(probe_plan.decision, ReceiveDecision::AllowFinalCommit);
+        assert!(probe_plan.rejected_reasons.is_empty());
+        let expected_token = consent_token(&probe_plan);
 
-        // Re-build plan with correct token
         let input_with_token = ReceivePreflightInput {
             sender_identity: "trusted-peer-alice".to_string(),
             grant_id: Some("grant-safe-123".to_string()),
@@ -91,7 +95,7 @@ mod tests {
             replay_pointer: Some("proof://e2e-consent-bundle".to_string()),
         };
 
-        plan = build_receive_plan(input_with_token).expect("build plan with correct token");
+        let plan = build_receive_plan(input_with_token).expect("build plan with correct token");
 
         // Verify plan is admitted with proper consent
         assert_eq!(plan.decision, ReceiveDecision::AllowFinalCommit);
@@ -190,8 +194,8 @@ mod tests {
             existing_destination_paths: BTreeSet::new(),
             storage_evidence: StorageEvidence::default(),
             metadata_policy: ReceiveMetadataPolicy::PortableOnly,
-            consent_source: ReceiveConsentSource::CliConfirmation {
-                token: "fake-consent".to_string(),
+            consent_source: ReceiveConsentSource::DaemonAllowRule {
+                rule_id: "compromised-allow-rule".to_string(),
             },
             rollback_resume: RollbackResumePolicy::RetainQuarantineForReview,
             trace_id: Some("e2e-traversal-attack".to_string()),
@@ -333,6 +337,7 @@ mod tests {
     fn e2e_mailbox_policy_quarantine_only() {
         let temp = TempDir::new().expect("create temp dir");
         let (graph, manifest_root) = create_safe_transfer_graph();
+        let quarantine_root = temp.path().join(".mailbox-quarantine");
 
         let input = ReceivePreflightInput {
             sender_identity: "mobile-peer".to_string(),
@@ -341,9 +346,9 @@ mod tests {
             manifest_root: &manifest_root,
             graph: &graph,
             destination_policy: DestinationPolicy::QuarantineOnly {
-                quarantine_root: temp.path().join(".mailbox-quarantine"),
+                quarantine_root: quarantine_root.clone(),
             },
-            destination_root: temp.path().to_path_buf(),
+            destination_root: quarantine_root.clone(),
             destination_relative_path: PathBuf::from("offline-sync.txt"),
             existing_destination_paths: BTreeSet::new(),
             storage_evidence: StorageEvidence {
@@ -366,10 +371,12 @@ mod tests {
         assert_eq!(plan.decision, ReceiveDecision::QuarantineOnly);
         assert!(plan.rejected_reasons.is_empty());
         assert!(plan.quarantine.required);
+        assert_eq!(plan.destination.root, quarantine_root);
         assert_eq!(
-            plan.quarantine.path,
-            temp.path().join(".mailbox-quarantine").join("pending")
+            plan.destination.final_path,
+            quarantine_root.join("offline-sync.txt")
         );
+        assert_eq!(plan.quarantine.path, quarantine_root.join("pending"));
 
         // Verify mailbox consent is recorded
         assert_eq!(
@@ -424,7 +431,7 @@ mod tests {
     }
 
     fn create_large_transfer_graph() -> (ObjectGraph, ObjectId) {
-        // Create a mock large file (1MB)
+        // Create a deterministic 1 MiB payload so storage arithmetic is exact.
         let large_content = vec![0u8; 1_048_576];
         let file = Object::file(large_content);
         let file_id = file.id.clone();

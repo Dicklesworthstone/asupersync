@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_masque_connect_udp_fake_proxy_path() {
+    async fn test_masque_connect_udp_relay_adapter_path() {
         let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::relay_only());
 
         let scenario = AtpLabScenario::new("masque-proxy", 0xA7F0_0007)

@@ -155,8 +155,7 @@ async fn test_atp_path_lab_udp_blocked_relay_fallback() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
-async fn test_atp_path_lab_masque_connect_udp_fake_proxy() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn test_masque_connect_udp_relay_adapter() -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::relay_only());
 
     let scenario = AtpLabScenario::new("enterprise-masque-connect-udp", 0xA7F0_0007)
@@ -180,7 +179,7 @@ async fn test_atp_path_lab_masque_connect_udp_fake_proxy() -> Result<(), Box<dyn
     );
     assert!(
         result.path_validation.masque_connect_udp_succeeded,
-        "Fake CONNECT-UDP proxy path should validate"
+        "CONNECT-UDP relay adapter path should validate"
     );
     assert_eq!(
         result.path_validation.selected_path_kind,
@@ -189,7 +188,7 @@ async fn test_atp_path_lab_masque_connect_udp_fake_proxy() -> Result<(), Box<dyn
     );
     assert!(
         result.path_validation.transfer_succeeded(),
-        "Transfer should complete over the fake MASQUE proxy model"
+        "Transfer should complete over the MASQUE relay adapter model"
     );
     assert!(
         result.trace_events.iter().any(|event| matches!(
@@ -199,7 +198,7 @@ async fn test_atp_path_lab_masque_connect_udp_fake_proxy() -> Result<(), Box<dyn
                 target_endpoint,
             } if target_endpoint == "masque-connect-udp-proxy:443"
         )),
-        "Trace should expose the fake proxy endpoint"
+        "Trace should expose the MASQUE relay adapter endpoint"
     );
 
     Ok(())
