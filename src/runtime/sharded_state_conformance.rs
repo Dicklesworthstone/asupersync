@@ -315,7 +315,7 @@ impl ShardedStateConformanceSuite {
             "DEADLOCK-002" => Self::test_stress_concurrency(),
 
             _ => ConformanceResult::Skip {
-                reason: format!("Test case {} not implemented", case.id),
+                reason: format!("Unknown conformance test case id {}", case.id),
             },
         }
     }

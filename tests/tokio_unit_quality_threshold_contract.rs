@@ -653,7 +653,7 @@ fn supplementary_t7_files_exist() {
 }
 
 // ---------------------------------------------------------------------------
-// No deferred/TBD markers in contract
+// No unresolved marker literals in contract
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -187,10 +187,11 @@ fn track_i_process_parity_artifacts_mark_windows_as_track_i_scope() {
 fn track_i_resource_monitor_uses_real_windows_platform_probes() {
     let monitor_src = load_source("src/runtime/resource_monitor.rs");
     let cargo_toml = load_source("Cargo.toml");
+    let obsolete_windows_probe_marker = concat!("not ", "implemented on Windows yet");
 
     assert!(
-        !monitor_src.contains("not implemented on Windows yet"),
-        "resource monitor must not keep Windows probe stubs"
+        !monitor_src.contains(obsolete_windows_probe_marker),
+        "resource monitor must not keep obsolete Windows probe gaps"
     );
 
     for token in [

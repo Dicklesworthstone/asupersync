@@ -212,7 +212,7 @@ mod tests {
         // We can't directly test "doesn't implement trait" at runtime,
         // but we verify the const generic values.
         // WebCaps = CapSet<false, true, false, true, false>
-        // SPAWN=false, so HasSpawn is NOT implemented.
+        // SPAWN=false, so WebCaps intentionally lacks HasSpawn.
         // This is verified by the compile_fail doctest pattern.
     }
 

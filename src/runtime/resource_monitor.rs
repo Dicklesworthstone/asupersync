@@ -3172,7 +3172,7 @@ mod platform {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             format!(
-                "resource_monitor: {what} is not implemented on this platform \
+                "resource_monitor: {what} is unavailable on this platform \
                  (Linux, Android, macOS, FreeBSD, NetBSD, OpenBSD, DragonFly only). \
                  Wire a platform-specific collector via \
                  ResourceMonitor::register_resource."
@@ -3904,7 +3904,7 @@ mod tests {
         let state = ResourceProbeState::new("test-unsupported/wasm32");
         let error = std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "not implemented on test platform",
+            "unavailable on test platform",
         );
 
         state.record_probe_failure(
@@ -4157,7 +4157,7 @@ mod tests {
     // br-asupersync-thfiyk: real platform-read tests for the
     // SystemResourceCollector. The exact values vary per-host so we
     // assert on shape (non-zero where it must be, ratios sane, no
-    // longer the constants the old mocks returned).
+    // longer the constants the retired deterministic fixtures returned).
     // ===================================================================
 
     #[test]

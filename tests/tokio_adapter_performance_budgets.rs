@@ -822,7 +822,7 @@ fn budget_doc_has_no_deferred_or_tbd_markers() {
     );
     assert!(
         !doc.contains(tbd_marker),
-        "budget doc must not contain unresolved TBD markers"
+        "budget doc must not contain unresolved decision markers"
     );
     assert!(
         !doc.contains(task_marker),

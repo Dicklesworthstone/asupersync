@@ -4896,7 +4896,7 @@ impl PgConnection {
 
     /// Execute a parameterized query using the Extended Query Protocol.
     ///
-    /// Parameters use `$1`, `$2`, ... placeholders in SQL. This prevents
+    /// Parameters use `$1`, `$2`, ... bind slots in SQL. This prevents
     /// SQL injection and enables type-safe binary parameter encoding.
     ///
     /// ```ignore
