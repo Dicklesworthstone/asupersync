@@ -130,6 +130,7 @@ use crate::obligation::lyapunov::{
     LyapunovGovernor, PotentialWeights, SchedulingSuggestion, StateSnapshot,
 };
 use crate::observability::spectral_health::{SpectralHealthMonitor, SpectralThresholds};
+use crate::runtime::config::SchedulerPlacementMode;
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::scheduler::global_injector::{GlobalInjector, PriorityTask};
 use crate::runtime::scheduler::local_queue::{self, LocalQueue};
@@ -1300,6 +1301,10 @@ pub struct ThreeLaneScheduler {
     governor_bypass_spawns: CachePadded<AtomicU64>,
     /// Optional shared collector for runtime scheduler evidence snapshots.
     scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
+    /// Deterministic placement mode for cohort-aware stealing.
+    placement_mode: SchedulerPlacementMode,
+    /// Explicit worker-to-cohort map currently applied to the scheduler.
+    worker_cohort_map: Option<Vec<usize>>,
     /// Number of configured worker cohorts used for locality-aware stealing.
     cohort_count: usize,
 }
@@ -1510,6 +1515,9 @@ impl ThreeLaneScheduler {
                 .filter(|(i, _)| *i != id)
                 .map(|(_, sched)| Arc::clone(sched))
                 .collect();
+            let heap_stealer_locality: SmallVec<[StealerLocality; 16]> = (0..stealers.len())
+                .map(|_| StealerLocality::SameCohort)
+                .collect();
 
             // Fast stealers: O(1) steal from other workers' LocalQueues
             let fast_stealers: SmallVec<[local_queue::Stealer; 16]> = fast_queues
@@ -1518,16 +1526,21 @@ impl ThreeLaneScheduler {
                 .filter(|(i, _)| *i != id)
                 .map(|(_, q)| q.stealer())
                 .collect();
+            let fast_stealer_locality: SmallVec<[StealerLocality; 16]> = (0..fast_stealers.len())
+                .map(|_| StealerLocality::SameCohort)
+                .collect();
 
             workers.push(ThreeLaneWorker {
                 id,
                 local: Arc::clone(&local_schedulers[id]),
                 stealers,
                 preferred_heap_stealer_count: worker_count.saturating_sub(1),
+                heap_stealer_locality,
                 fast_queue: fast_queues[id].clone(),
                 global_ready_buffer: Vec::with_capacity(steal_batch_size),
                 fast_stealers,
                 preferred_fast_stealer_count: worker_count.saturating_sub(1),
+                fast_stealer_locality,
                 local_ready: Arc::clone(&local_ready[id]),
                 all_local_ready: local_ready.clone(),
                 global: Arc::clone(&global),
@@ -1620,6 +1633,8 @@ impl ThreeLaneScheduler {
             governor_throttled_spawns: CachePadded::new(AtomicU64::new(0)),
             governor_bypass_spawns: CachePadded::new(AtomicU64::new(0)),
             scheduler_evidence,
+            placement_mode: SchedulerPlacementMode::default(),
+            worker_cohort_map: None,
             cohort_count: 1,
         }
     }
@@ -1731,11 +1746,68 @@ impl ThreeLaneScheduler {
             .seed_ready_combiner_pressure_for_test(max_in_flight, combiner_claim_failures);
     }
 
+    fn ordered_steal_peers(
+        worker_id: usize,
+        worker_to_cohort: &[usize],
+        mode: SchedulerPlacementMode,
+    ) -> Vec<usize> {
+        let worker_count = worker_to_cohort.len();
+        let my_cohort = worker_to_cohort[worker_id];
+        let mut peers = (0..worker_count)
+            .filter(|&peer_id| peer_id != worker_id)
+            .collect::<Vec<_>>();
+
+        match mode {
+            SchedulerPlacementMode::LocalityFirst => {
+                peers.sort_by_key(|&peer_id| (worker_to_cohort[peer_id] != my_cohort, peer_id));
+            }
+            SchedulerPlacementMode::LatencyFirst => {
+                peers.sort_by_key(|&peer_id| {
+                    (
+                        worker_to_cohort[peer_id] != my_cohort,
+                        Self::worker_slot_distance(worker_id, peer_id, worker_count),
+                        peer_id,
+                    )
+                });
+            }
+            SchedulerPlacementMode::ThroughputFirst => {
+                peers.sort_unstable();
+            }
+        }
+
+        peers
+    }
+
+    #[inline]
+    fn preferred_stealer_count(
+        mode: SchedulerPlacementMode,
+        my_cohort: usize,
+        worker_to_cohort: &[usize],
+        ordered_peers: &[usize],
+    ) -> usize {
+        if matches!(mode, SchedulerPlacementMode::ThroughputFirst) {
+            return ordered_peers.len();
+        }
+        ordered_peers
+            .iter()
+            .take_while(|&&peer_id| worker_to_cohort[peer_id] == my_cohort)
+            .count()
+    }
+
+    #[inline]
+    fn worker_slot_distance(lhs: usize, rhs: usize, worker_count: usize) -> usize {
+        let forward = if rhs >= lhs {
+            rhs - lhs
+        } else {
+            worker_count - (lhs - rhs)
+        };
+        forward.min(worker_count.saturating_sub(forward))
+    }
+
     /// Applies an explicit worker-to-cohort map for locality-aware stealing.
     ///
-    /// Peers in the same cohort are placed at the front of each worker's
-    /// stealer lists so the steal path can prefer them deterministically while
-    /// still falling back to remote cohorts when local peers are empty.
+    /// The active [`SchedulerPlacementMode`] determines whether same-cohort
+    /// peers are preferred first or all peers share one randomized steal set.
     pub fn set_worker_cohort_map(
         &mut self,
         worker_to_cohort: &[usize],
@@ -1754,6 +1826,33 @@ impl ThreeLaneScheduler {
             );
         }
 
+        self.rebuild_worker_stealers(worker_to_cohort);
+        self.worker_cohort_map = Some(worker_to_cohort.to_vec());
+        self.cohort_count = worker_to_cohort
+            .iter()
+            .copied()
+            .max()
+            .map_or(1, |max_cohort| max_cohort.saturating_add(1));
+
+        Ok(())
+    }
+
+    /// Sets the scheduler placement mode and rebuilds cohort steal order.
+    pub fn set_scheduler_placement_mode(&mut self, mode: SchedulerPlacementMode) {
+        self.placement_mode = mode;
+        if let Some(worker_to_cohort) = self.worker_cohort_map.clone() {
+            self.rebuild_worker_stealers(&worker_to_cohort);
+        }
+    }
+
+    /// Returns the active scheduler placement mode.
+    #[must_use]
+    pub const fn scheduler_placement_mode(&self) -> SchedulerPlacementMode {
+        self.placement_mode
+    }
+
+    fn rebuild_worker_stealers(&mut self, worker_to_cohort: &[usize]) {
+        let worker_count = self.workers.len();
         let fast_queues: Vec<_> = self
             .workers
             .iter()
@@ -1763,42 +1862,40 @@ impl ThreeLaneScheduler {
 
         for (worker_id, worker) in self.workers.iter_mut().enumerate() {
             let my_cohort = worker_to_cohort[worker_id];
-            let mut preferred_fast = SmallVec::<[local_queue::Stealer; 16]>::new();
-            let mut remote_fast = SmallVec::<[local_queue::Stealer; 16]>::new();
-            let mut preferred_heap = SmallVec::<[Arc<Mutex<PriorityScheduler>>; 16]>::new();
-            let mut remote_heap = SmallVec::<[Arc<Mutex<PriorityScheduler>>; 16]>::new();
+            let ordered_peers =
+                Self::ordered_steal_peers(worker_id, worker_to_cohort, self.placement_mode);
+            let preferred_count = Self::preferred_stealer_count(
+                self.placement_mode,
+                my_cohort,
+                worker_to_cohort,
+                &ordered_peers,
+            );
 
-            for peer_id in 0..worker_count {
-                if peer_id == worker_id {
-                    continue;
-                }
-                if worker_to_cohort[peer_id] == my_cohort {
-                    preferred_fast.push(fast_queues[peer_id].stealer());
-                    preferred_heap.push(Arc::clone(&local_schedulers[peer_id]));
-                } else {
-                    remote_fast.push(fast_queues[peer_id].stealer());
-                    remote_heap.push(Arc::clone(&local_schedulers[peer_id]));
-                }
+            let mut fast_stealers = SmallVec::<[local_queue::Stealer; 16]>::new();
+            let mut fast_stealer_locality = SmallVec::<[StealerLocality; 16]>::new();
+            let mut heap_stealers = SmallVec::<[Arc<Mutex<PriorityScheduler>>; 16]>::new();
+            let mut heap_stealer_locality = SmallVec::<[StealerLocality; 16]>::new();
+
+            for peer_id in ordered_peers {
+                let locality =
+                    StealerLocality::from_same_cohort(worker_to_cohort[peer_id] == my_cohort);
+                fast_stealers.push(fast_queues[peer_id].stealer());
+                fast_stealer_locality.push(locality);
+                heap_stealers.push(Arc::clone(&local_schedulers[peer_id]));
+                heap_stealer_locality.push(locality);
             }
 
-            let preferred_fast_count = preferred_fast.len();
-            preferred_fast.extend(remote_fast);
-            let preferred_heap_count = preferred_heap.len();
-            preferred_heap.extend(remote_heap);
+            debug_assert_eq!(fast_stealers.len(), worker_count.saturating_sub(1));
+            debug_assert_eq!(heap_stealers.len(), worker_count.saturating_sub(1));
 
-            worker.fast_stealers = preferred_fast;
-            worker.preferred_fast_stealer_count = preferred_fast_count;
-            worker.stealers = preferred_heap;
-            worker.preferred_heap_stealer_count = preferred_heap_count;
+            worker.fast_stealers = fast_stealers;
+            worker.preferred_fast_stealer_count = preferred_count;
+            worker.fast_stealer_locality = fast_stealer_locality;
+            worker.stealers = heap_stealers;
+            worker.preferred_heap_stealer_count = preferred_count;
+            worker.heap_stealer_locality = heap_stealer_locality;
             worker.steal_locality_counters = StealLocalityCounters::default();
         }
-        self.cohort_count = worker_to_cohort
-            .iter()
-            .copied()
-            .max()
-            .map_or(1, |max_cohort| max_cohort.saturating_add(1));
-
-        Ok(())
     }
 
     #[doc(hidden)]
@@ -1977,6 +2074,7 @@ impl ThreeLaneScheduler {
             metrics,
             notes: vec![
                 "runtime_capture".to_string(),
+                format!("placement_mode={}", self.placement_mode.as_str()),
                 format!("sample_window={sample_window}"),
                 format!(
                     "sample_counts=wake_to_run:{wake_to_run_samples},queue_residency:{queue_residency_samples},ready_backlog:{ready_backlog_samples},cancel_debt:{cancel_samples}"
@@ -2476,6 +2574,28 @@ impl ThreeLaneScheduler {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StealerLocality {
+    SameCohort,
+    CrossCohort,
+}
+
+impl StealerLocality {
+    #[inline]
+    const fn from_same_cohort(same_cohort: bool) -> Self {
+        if same_cohort {
+            Self::SameCohort
+        } else {
+            Self::CrossCohort
+        }
+    }
+
+    #[inline]
+    const fn is_same_cohort(self) -> bool {
+        matches!(self, Self::SameCohort)
+    }
+}
+
 /// A worker thread for the 3-lane scheduler.
 #[derive(Debug)]
 pub struct ThreeLaneWorker {
@@ -2485,8 +2605,13 @@ pub struct ThreeLaneWorker {
     pub local: Arc<Mutex<PriorityScheduler>>,
     /// References to other workers' local schedulers for stealing.
     pub stealers: SmallVec<[Arc<Mutex<PriorityScheduler>>; 16]>,
-    /// Number of same-cohort heap stealers at the front of `stealers`.
+    /// Number of heap stealers in the first randomized placement segment.
+    ///
+    /// Locality/latency modes use same-cohort peers for this segment;
+    /// throughput mode includes every peer in one load-balancing segment.
     preferred_heap_stealer_count: usize,
+    /// Locality classification matching each heap stealer slot.
+    heap_stealer_locality: SmallVec<[StealerLocality; 16]>,
     /// O(1) local queue for ready tasks (work-stealing fast path).
     ///
     /// Ready tasks spawned/woken on the worker thread are pushed here
@@ -2502,8 +2627,13 @@ pub struct ThreeLaneWorker {
     global_ready_buffer: Vec<PriorityTask>,
     /// Stealers for other workers' fast queues (O(1) steal).
     fast_stealers: SmallVec<[local_queue::Stealer; 16]>,
-    /// Number of same-cohort fast stealers at the front of `fast_stealers`.
+    /// Number of fast stealers in the first randomized placement segment.
+    ///
+    /// Locality/latency modes use same-cohort peers for this segment;
+    /// throughput mode includes every peer in one load-balancing segment.
     preferred_fast_stealer_count: usize,
+    /// Locality classification matching each fast stealer slot.
+    fast_stealer_locality: SmallVec<[StealerLocality; 16]>,
     /// Non-stealable queue for local (`!Send`) tasks.
     ///
     /// Local tasks are pinned to their owner worker and must never be stolen.
@@ -5229,7 +5359,11 @@ impl ThreeLaneWorker {
                             "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
                         );
 
-                        self.steal_locality_counters.preferred_fast_steals += 1;
+                        if self.fast_stealer_locality[idx].is_same_cohort() {
+                            self.steal_locality_counters.preferred_fast_steals += 1;
+                        } else {
+                            self.steal_locality_counters.remote_fast_steals += 1;
+                        }
                         self.invariant_monitor
                             .lock()
                             .record_task_dispatch(task, Time::from_nanos(self.current_time_ns()));
@@ -5253,7 +5387,11 @@ impl ThreeLaneWorker {
                             "BUG: stole a local (!Send) task {task:?} from another worker's fast_queue"
                         );
 
-                        self.steal_locality_counters.remote_fast_steals += 1;
+                        if self.fast_stealer_locality[idx].is_same_cohort() {
+                            self.steal_locality_counters.preferred_fast_steals += 1;
+                        } else {
+                            self.steal_locality_counters.remote_fast_steals += 1;
+                        }
                         self.invariant_monitor
                             .lock()
                             .record_task_dispatch(task, Time::from_nanos(self.current_time_ns()));
@@ -5271,12 +5409,11 @@ impl ThreeLaneWorker {
 
         let preferred_len = self.preferred_heap_stealer_count.min(self.stealers.len());
 
-        for &(segment_start, segment_len, preferred) in &[
-            (0usize, preferred_len, true),
+        for &(segment_start, segment_len) in &[
+            (0usize, preferred_len),
             (
                 preferred_len,
                 self.stealers.len().saturating_sub(preferred_len),
-                false,
             ),
         ] {
             if segment_len == 0 {
@@ -5308,7 +5445,7 @@ impl ThreeLaneWorker {
                         }
 
                         let (first_task, _) = self.steal_buffer[0];
-                        if preferred {
+                        if self.heap_stealer_locality[idx].is_same_cohort() {
                             self.steal_locality_counters.preferred_heap_steals += 1;
                         } else {
                             self.steal_locality_counters.remote_heap_steals += 1;
@@ -11627,6 +11764,68 @@ mod tests {
             "preferred fast steal counter should record the local-cohort win"
         );
         assert_eq!(thief.steal_locality_counters().remote_fast_steals, 0);
+    }
+
+    #[test]
+    fn throughput_first_placement_balances_across_cohorts_without_losing_remote_evidence() {
+        let state = LocalQueue::test_state(10);
+
+        let mut locality_first = ThreeLaneScheduler::new(4, &state);
+        locality_first
+            .set_worker_cohort_map(&[0, 0, 1, 1])
+            .expect("cohort map should apply");
+        locality_first.workers[2]
+            .fast_queue
+            .push(TaskId::new_for_test(1, 0));
+        locality_first.workers[0]
+            .fast_queue
+            .push(TaskId::new_for_test(2, 0));
+        let mut locality_workers = locality_first.take_workers();
+        let locality_thief = &mut locality_workers[3];
+        assert_eq!(
+            locality_thief.try_steal(),
+            Some(TaskId::new_for_test(1, 0)),
+            "locality-first should inspect same-cohort victims before remote peers"
+        );
+        assert_eq!(
+            locality_thief
+                .steal_locality_counters()
+                .preferred_fast_steals,
+            1
+        );
+
+        let mut throughput_first = ThreeLaneScheduler::new(4, &state);
+        throughput_first
+            .set_worker_cohort_map(&[0, 0, 1, 1])
+            .expect("cohort map should apply");
+        throughput_first.set_scheduler_placement_mode(SchedulerPlacementMode::ThroughputFirst);
+        throughput_first.workers[2]
+            .fast_queue
+            .push(TaskId::new_for_test(3, 0));
+        throughput_first.workers[0]
+            .fast_queue
+            .push(TaskId::new_for_test(4, 0));
+        let mut throughput_workers = throughput_first.take_workers();
+        let throughput_thief = &mut throughput_workers[3];
+
+        assert_eq!(
+            throughput_thief.try_steal(),
+            Some(TaskId::new_for_test(4, 0)),
+            "throughput-first should treat all peers as one randomized victim set"
+        );
+        assert_eq!(
+            throughput_thief
+                .steal_locality_counters()
+                .remote_fast_steals,
+            1,
+            "cross-cohort evidence must still be counted even when remote peers are not deferred"
+        );
+        assert_eq!(
+            throughput_thief
+                .steal_locality_counters()
+                .preferred_fast_steals,
+            0
+        );
     }
 
     #[test]

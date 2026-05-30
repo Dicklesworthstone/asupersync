@@ -1392,6 +1392,34 @@ impl WorkerCohortMapping {
     }
 }
 
+/// Worker placement policy for topology-aware scheduler stealing.
+///
+/// The policy only changes deterministic victim ordering. It never creates
+/// background tuning or host-probed ambient topology; callers must still supply
+/// an explicit [`WorkerCohortMapping`] when they want cohort-aware behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SchedulerPlacementMode {
+    /// Prefer same-cohort workers before crossing cohort boundaries.
+    #[default]
+    LocalityFirst,
+    /// Prefer same-cohort workers, ordering peers by worker-slot proximity.
+    LatencyFirst,
+    /// Treat all peer workers as one randomized steal set for load balancing.
+    ThroughputFirst,
+}
+
+impl SchedulerPlacementMode {
+    /// Stable operator-facing mode name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalityFirst => "locality_first",
+            Self::LatencyFirst => "latency_first",
+            Self::ThroughputFirst => "throughput_first",
+        }
+    }
+}
+
 /// Policy surface for deterministic arena-locality planning.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ArenaLocalityPolicy {
@@ -1869,6 +1897,8 @@ pub struct RuntimeConfig {
     pub worker_threads: usize,
     /// Optional explicit worker-to-cohort mapping for locality-aware steals.
     pub worker_cohort_map: Option<WorkerCohortMapping>,
+    /// Deterministic scheduler placement mode used with worker cohorts.
+    pub scheduler_placement_mode: SchedulerPlacementMode,
     /// Stack size per worker thread (default: 2MB).
     pub thread_stack_size: usize,
     /// Name prefix for worker threads.
@@ -2144,6 +2174,7 @@ impl Default for RuntimeConfig {
         Self {
             worker_threads: Self::default_worker_threads(),
             worker_cohort_map: None,
+            scheduler_placement_mode: SchedulerPlacementMode::default(),
             thread_stack_size: 2 * 1024 * 1024,
             thread_name_prefix: "asupersync-worker".to_string(),
             global_queue_limit: 0,
@@ -9388,6 +9419,7 @@ mod tests {
         RuntimeConfig {
             worker_threads: 0,
             worker_cohort_map: None,
+            scheduler_placement_mode: SchedulerPlacementMode::default(),
             thread_stack_size: 0,
             thread_name_prefix: String::new(),
             global_queue_limit: 0,
@@ -9689,6 +9721,7 @@ mod tests {
         let mut config = RuntimeConfig {
             worker_threads: 4,
             worker_cohort_map: None,
+            scheduler_placement_mode: SchedulerPlacementMode::LatencyFirst,
             thread_stack_size: 1024,
             thread_name_prefix: "custom".to_string(),
             global_queue_limit: 64,
@@ -9779,6 +9812,12 @@ mod tests {
             "trace_storage_profile",
             TraceStorageProfile::LargeMemory256G,
             config.trace_storage_profile
+        );
+        crate::assert_with_log!(
+            config.scheduler_placement_mode == SchedulerPlacementMode::LatencyFirst,
+            "scheduler_placement_mode",
+            SchedulerPlacementMode::LatencyFirst,
+            config.scheduler_placement_mode
         );
         let capacity_hints = config
             .capacity_hints

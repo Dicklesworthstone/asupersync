@@ -28,7 +28,7 @@ use asupersync::runtime::scheduler::stealing::steal_task;
 use asupersync::runtime::scheduler::three_lane::AdaptiveBatchSizingProfile;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, QUEUE_TAG_READY, Scheduler,
-    ThreeLaneScheduler,
+    SchedulerPlacementMode, ThreeLaneScheduler,
 };
 use asupersync::runtime::{BlockingPool, BlockingPoolOptions, Runtime, RuntimeBuilder};
 use asupersync::sync::ContendedMutex;
@@ -1008,11 +1008,69 @@ fn bench_try_steal_locality(c: &mut Criterion) {
     group.measurement_time(Duration::from_millis(600));
     group.sample_size(30);
 
-    for &(cohort_count, worker_threads) in &[(1usize, 4usize), (2usize, 4usize), (4usize, 8usize)] {
+    for &(case_name, mode, cohort_count, worker_threads) in &[
+        ("baseline", None, 1usize, 8usize),
+        (
+            "locality_first",
+            Some(SchedulerPlacementMode::LocalityFirst),
+            2usize,
+            8usize,
+        ),
+        (
+            "latency_first",
+            Some(SchedulerPlacementMode::LatencyFirst),
+            2usize,
+            8usize,
+        ),
+        (
+            "throughput_first",
+            Some(SchedulerPlacementMode::ThroughputFirst),
+            2usize,
+            8usize,
+        ),
+        ("baseline", None, 1usize, 32usize),
+        (
+            "locality_first",
+            Some(SchedulerPlacementMode::LocalityFirst),
+            4usize,
+            32usize,
+        ),
+        (
+            "latency_first",
+            Some(SchedulerPlacementMode::LatencyFirst),
+            4usize,
+            32usize,
+        ),
+        (
+            "throughput_first",
+            Some(SchedulerPlacementMode::ThroughputFirst),
+            4usize,
+            32usize,
+        ),
+        ("baseline", None, 1usize, 64usize),
+        (
+            "locality_first",
+            Some(SchedulerPlacementMode::LocalityFirst),
+            8usize,
+            64usize,
+        ),
+        (
+            "latency_first",
+            Some(SchedulerPlacementMode::LatencyFirst),
+            8usize,
+            64usize,
+        ),
+        (
+            "throughput_first",
+            Some(SchedulerPlacementMode::ThroughputFirst),
+            8usize,
+            64usize,
+        ),
+    ] {
         group.bench_with_input(
-            BenchmarkId::new("fast_queue_preferred_first", cohort_count),
-            &cohort_count,
-            |b, _| {
+            BenchmarkId::new(case_name, format!("{worker_threads}w_{cohort_count}c")),
+            &(mode, cohort_count, worker_threads),
+            |b, &(mode, cohort_count, worker_threads)| {
                 b.iter_batched(
                     || {
                         let state = LocalQueue::test_state(32);
@@ -1020,21 +1078,24 @@ fn bench_try_steal_locality(c: &mut Criterion) {
                         let worker_to_cohort = (0..worker_threads)
                             .map(|worker| worker % cohort_count)
                             .collect::<Vec<_>>();
-                        scheduler
-                            .set_worker_cohort_map(&worker_to_cohort)
-                            .expect("bench cohort map should apply");
+                        if let Some(mode) = mode {
+                            scheduler.set_scheduler_placement_mode(mode);
+                            scheduler
+                                .set_worker_cohort_map(&worker_to_cohort)
+                                .expect("bench cohort map should apply");
+                        }
 
                         let thief_id = worker_threads - 1;
-                        let thief_cohort = worker_to_cohort[thief_id];
-                        let local_victim = (0..thief_id)
-                            .find(|&worker| worker_to_cohort[worker] == thief_cohort)
-                            .unwrap_or(0);
-                        scheduler.seed_worker_fast_ready_for_test(local_victim, task(1));
+                        let first_victim = 0;
+                        scheduler.seed_worker_fast_ready_for_test(first_victim, task(1));
 
-                        if let Some(remote_victim) =
-                            (0..thief_id).find(|&worker| worker_to_cohort[worker] != thief_cohort)
-                        {
-                            scheduler.seed_worker_fast_ready_for_test(remote_victim, task(2));
+                        if cohort_count > 1 {
+                            let thief_cohort = worker_to_cohort[thief_id];
+                            if let Some(cohort_victim) = (0..thief_id)
+                                .find(|&worker| worker_to_cohort[worker] == thief_cohort)
+                            {
+                                scheduler.seed_worker_fast_ready_for_test(cohort_victim, task(2));
+                            }
                         }
 
                         let mut workers = scheduler.take_workers();

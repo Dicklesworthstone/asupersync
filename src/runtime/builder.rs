@@ -158,7 +158,8 @@ use crate::record::RegionLimits;
 use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
 use crate::runtime::config::{
-    AdaptiveReadyBatchConfig, RuntimeCapacityHints, RuntimeConfig, WorkerCohortMapping,
+    AdaptiveReadyBatchConfig, RuntimeCapacityHints, RuntimeConfig, SchedulerPlacementMode,
+    WorkerCohortMapping,
 };
 use crate::runtime::deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineTaskSnapshot, DeadlineWarning, MonitorConfig,
@@ -2236,6 +2237,16 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the scheduler placement mode used with explicit worker cohorts.
+    ///
+    /// The mode is deterministic and only affects worker victim ordering. Use
+    /// [`worker_cohorts`](Self::worker_cohorts) to provide the actual topology.
+    #[must_use]
+    pub fn scheduler_placement_mode(mut self, mode: SchedulerPlacementMode) -> Self {
+        self.config.scheduler_placement_mode = mode;
+        self
+    }
+
     /// Set the response policy for obligation leaks.
     #[must_use]
     pub fn obligation_leak_response(
@@ -3886,6 +3897,7 @@ impl RuntimeInner {
         scheduler.set_enable_parking(config.enable_parking);
         scheduler.set_global_queue_limit(config.global_queue_limit);
         scheduler.set_browser_ready_handoff_limit(config.browser_ready_handoff_limit);
+        scheduler.set_scheduler_placement_mode(config.scheduler_placement_mode);
         scheduler.set_adaptive_cancel_streak(
             config.enable_adaptive_cancel_streak,
             config.adaptive_cancel_streak_epoch_steps,
@@ -6494,6 +6506,19 @@ worker_threads = 16
     }
 
     #[test]
+    fn runtime_builder_scheduler_placement_mode_sets_explicit_policy() {
+        init_test_logging();
+
+        let builder =
+            RuntimeBuilder::new().scheduler_placement_mode(SchedulerPlacementMode::ThroughputFirst);
+
+        assert_eq!(
+            builder.config.scheduler_placement_mode,
+            SchedulerPlacementMode::ThroughputFirst
+        );
+    }
+
+    #[test]
     fn runtime_builder_rejects_mismatched_worker_cohort_map() {
         init_test_logging();
 
@@ -6527,6 +6552,23 @@ worker_threads = 16
         assert_eq!(
             runtime.config().worker_cohort_map,
             Some(WorkerCohortMapping::new(vec![0, 1]))
+        );
+    }
+
+    #[test]
+    fn runtime_builder_build_preserves_scheduler_placement_mode() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .worker_cohorts(vec![0, 1])
+            .scheduler_placement_mode(SchedulerPlacementMode::LatencyFirst)
+            .build()
+            .expect("matching cohort map should build");
+
+        assert_eq!(
+            runtime.config().scheduler_placement_mode,
+            SchedulerPlacementMode::LatencyFirst
         );
     }
 

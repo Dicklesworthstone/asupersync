@@ -47,6 +47,7 @@ pub mod work_stealing_checker;
 pub mod work_stealing_fairness_metamorphic;
 pub mod worker;
 
+pub use crate::runtime::config::SchedulerPlacementMode;
 pub use autotuner::{
     AutotunerConfig, AutotunerRecommendation, HotPathObservation, SchedulerAutotuner,
     extract_observation,
