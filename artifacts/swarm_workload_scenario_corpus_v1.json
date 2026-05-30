@@ -1,0 +1,446 @@
+{
+  "contract_version": "swarm-workload-scenario-corpus-v1",
+  "scenario_schema_version": "asupersync.swarm-workload-scenario.v1",
+  "runtime_schema_version": "asupersync.swarm-replay-lab.v1",
+  "bead_id": "asupersync-vssefs.9.1",
+  "description": "Stable workload scenario corpus for massive agent-swarm replay planning, LabRuntime execution, and future no-mock swarm proof runners.",
+  "source_of_truth": {
+    "contract": "artifacts/swarm_workload_scenario_corpus_v1.json",
+    "contract_test": "tests/swarm_workload_scenario_corpus_contract.rs",
+    "runtime_scenario_type": "asupersync::lab::SwarmReplayScenario",
+    "runtime_scenario_source": "src/lab/swarm_replay.rs",
+    "runtime_runner": "asupersync::lab::run_swarm_replay_scenario"
+  },
+  "schema": {
+    "required_replay_fields": [
+      "scenario_id",
+      "seed",
+      "worker_count",
+      "cohort_count",
+      "region_count",
+      "tasks_per_region",
+      "yields_per_task",
+      "yield_jitter",
+      "channel_capacity",
+      "messages_per_task",
+      "semaphore_permits_per_task",
+      "pool_slots_per_task",
+      "obligations_per_task",
+      "timer_ticks_per_task",
+      "cancellation_tree_depth",
+      "artifact_bytes_per_task",
+      "region_task_admission_limit",
+      "region_over_limit_decision",
+      "region_memory_bytes_per_task",
+      "region_queue_depth_units_per_task",
+      "region_blocking_pool_units_per_task",
+      "region_cleanup_poll_quota_per_task",
+      "cancel_after_steps",
+      "max_steps"
+    ],
+    "scale_knobs": [
+      "worker_count",
+      "cohort_count",
+      "region_count",
+      "tasks_per_region",
+      "yields_per_task",
+      "yield_jitter"
+    ],
+    "pressure_knobs": [
+      "channel_capacity",
+      "messages_per_task",
+      "semaphore_permits_per_task",
+      "pool_slots_per_task",
+      "obligations_per_task",
+      "timer_ticks_per_task",
+      "artifact_bytes_per_task",
+      "region_memory_bytes_per_task",
+      "region_queue_depth_units_per_task",
+      "region_blocking_pool_units_per_task",
+      "region_cleanup_poll_quota_per_task"
+    ],
+    "failure_mode_knobs": [
+      "region_task_admission_limit",
+      "region_over_limit_decision",
+      "cancel_after_steps",
+      "max_steps"
+    ],
+    "forbidden_fixture_markers": [
+      "placeholder",
+      "fake_success",
+      "mock_success",
+      "todo"
+    ]
+  },
+  "runner_contract": {
+    "lab_runtime_adapter": "run_swarm_replay_scenario",
+    "lab_runtime_adapter_status": "live",
+    "future_no_mock_runner_adapter": "no-mock swarm pressure proof runner consumes the same replay_scenario object and must add only provenance, command, and artifact-envelope fields around it",
+    "same_shape_policy": "Scenario rows own semantic workload knobs; runners may add execution provenance but must not reinterpret scale, pressure, admission, cancellation, or timeout fields.",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus cargo test -p asupersync --test swarm_workload_scenario_corpus_contract --features test-internals -- --nocapture"
+  },
+  "required_semantic_dimensions": [
+    "healthy_run",
+    "cancellation_storm",
+    "channel_backpressure",
+    "memory_pressure",
+    "admission_rejection",
+    "admission_cancel_drain",
+    "forced_timeout",
+    "saturated_scale"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "swarm-minimal-healthy-run",
+      "description": "Smallest nonempty run proving the schema has a deterministic one-task baseline.",
+      "execution_mode": "run_in_contract",
+      "semantic_dimensions": [
+        "healthy_run"
+      ],
+      "replay_scenario": {
+        "scenario_id": "swarm-minimal-healthy-run",
+        "seed": 12648430,
+        "worker_count": 1,
+        "cohort_count": 1,
+        "region_count": 1,
+        "tasks_per_region": 1,
+        "yields_per_task": 1,
+        "yield_jitter": 0,
+        "channel_capacity": 1,
+        "messages_per_task": 1,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 1,
+        "timer_ticks_per_task": 1,
+        "cancellation_tree_depth": 1,
+        "artifact_bytes_per_task": 1,
+        "region_task_admission_limit": null,
+        "region_over_limit_decision": "shed",
+        "region_memory_bytes_per_task": 1,
+        "region_queue_depth_units_per_task": 1,
+        "region_blocking_pool_units_per_task": 1,
+        "region_cleanup_poll_quota_per_task": 1,
+        "cancel_after_steps": null,
+        "max_steps": 100
+      }
+    },
+    {
+      "scenario_id": "swarm-fanout-healthy-baseline",
+      "description": "Healthy multi-region fanout with enough channel and obligation pressure for trace-summary consumers.",
+      "execution_mode": "run_in_contract",
+      "semantic_dimensions": [
+        "healthy_run",
+        "channel_backpressure"
+      ],
+      "replay_scenario": {
+        "scenario_id": "swarm-fanout-healthy-baseline",
+        "seed": 12648431,
+        "worker_count": 4,
+        "cohort_count": 2,
+        "region_count": 4,
+        "tasks_per_region": 8,
+        "yields_per_task": 3,
+        "yield_jitter": 2,
+        "channel_capacity": 16,
+        "messages_per_task": 4,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 2,
+        "obligations_per_task": 3,
+        "timer_ticks_per_task": 2,
+        "cancellation_tree_depth": 3,
+        "artifact_bytes_per_task": 64,
+        "region_task_admission_limit": null,
+        "region_over_limit_decision": "shed",
+        "region_memory_bytes_per_task": 4096,
+        "region_queue_depth_units_per_task": 2,
+        "region_blocking_pool_units_per_task": 1,
+        "region_cleanup_poll_quota_per_task": 2,
+        "cancel_after_steps": null,
+        "max_steps": 20000
+      }
+    },
+    {
+      "scenario_id": "swarm-cancellation-storm",
+      "description": "Cancel-heavy workload that should still drain losers and resolve obligations.",
+      "execution_mode": "run_in_contract",
+      "semantic_dimensions": [
+        "cancellation_storm"
+      ],
+      "replay_scenario": {
+        "scenario_id": "swarm-cancellation-storm",
+        "seed": 12648432,
+        "worker_count": 6,
+        "cohort_count": 3,
+        "region_count": 3,
+        "tasks_per_region": 6,
+        "yields_per_task": 10,
+        "yield_jitter": 3,
+        "channel_capacity": 8,
+        "messages_per_task": 3,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 3,
+        "timer_ticks_per_task": 2,
+        "cancellation_tree_depth": 4,
+        "artifact_bytes_per_task": 128,
+        "region_task_admission_limit": null,
+        "region_over_limit_decision": "shed",
+        "region_memory_bytes_per_task": 4096,
+        "region_queue_depth_units_per_task": 1,
+        "region_blocking_pool_units_per_task": 1,
+        "region_cleanup_poll_quota_per_task": 2,
+        "cancel_after_steps": 2,
+        "max_steps": 20000
+      }
+    },
+    {
+      "scenario_id": "swarm-channel-backpressure-tight",
+      "description": "Message-heavy run with a deliberately tight modeled channel envelope.",
+      "execution_mode": "validate_only",
+      "semantic_dimensions": [
+        "channel_backpressure"
+      ],
+      "replay_scenario": {
+        "scenario_id": "swarm-channel-backpressure-tight",
+        "seed": 12648433,
+        "worker_count": 4,
+        "cohort_count": 2,
+        "region_count": 4,
+        "tasks_per_region": 10,
+        "yields_per_task": 4,
+        "yield_jitter": 2,
+        "channel_capacity": 2,
+        "messages_per_task": 8,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 2,
+        "timer_ticks_per_task": 1,
+        "cancellation_tree_depth": 3,
+        "artifact_bytes_per_task": 32,
+        "region_task_admission_limit": null,
+        "region_over_limit_decision": "shed",
+        "region_memory_bytes_per_task": 2048,
+        "region_queue_depth_units_per_task": 4,
+        "region_blocking_pool_units_per_task": 1,
+        "region_cleanup_poll_quota_per_task": 1,
+        "cancel_after_steps": null,
+        "max_steps": 30000
+      }
+    },
+    {
+      "scenario_id": "swarm-memory-pressure-admission-shed",
+      "description": "Per-region admission envelope sheds excess work under high modeled memory pressure.",
+      "execution_mode": "run_in_contract",
+      "semantic_dimensions": [
+        "memory_pressure",
+        "admission_rejection"
+      ],
+      "replay_scenario": {
+        "scenario_id": "swarm-memory-pressure-admission-shed",
+        "seed": 12648434,
+        "worker_count": 4,
+        "cohort_count": 2,
+        "region_count": 4,
+        "tasks_per_region": 8,
+        "yields_per_task": 4,
+        "yield_jitter": 1,
+        "channel_capacity": 8,
+        "messages_per_task": 2,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 2,
+        "timer_ticks_per_task": 1,
+        "cancellation_tree_depth": 3,
+        "artifact_bytes_per_task": 64,
+        "region_task_admission_limit": 2,
+        "region_over_limit_decision": "shed",
+        "region_memory_bytes_per_task": 1048576,
+        "region_queue_depth_units_per_task": 2,
+        "region_blocking_pool_units_per_task": 1,
+        "region_cleanup_poll_quota_per_task": 2,
+        "cancel_after_steps": null,
+        "max_steps": 20000
+      }
+    },
+    {
+      "scenario_id": "swarm-admission-cancel-drain",
+      "description": "Admission overrun requests cancellation of the admitted prefix and proves drain semantics.",
+      "execution_mode": "run_in_contract",
+      "semantic_dimensions": [
+        "admission_cancel_drain",
+        "cancellation_storm"
+      ],
+      "replay_scenario": {
+        "scenario_id": "swarm-admission-cancel-drain",
+        "seed": 12648435,
+        "worker_count": 3,
+        "cohort_count": 3,
+        "region_count": 3,
+        "tasks_per_region": 5,
+        "yields_per_task": 6,
+        "yield_jitter": 2,
+        "channel_capacity": 6,
+        "messages_per_task": 2,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 3,
+        "timer_ticks_per_task": 2,
+        "cancellation_tree_depth": 3,
+        "artifact_bytes_per_task": 96,
+        "region_task_admission_limit": 1,
+        "region_over_limit_decision": "cancel",
+        "region_memory_bytes_per_task": 8192,
+        "region_queue_depth_units_per_task": 2,
+        "region_blocking_pool_units_per_task": 1,
+        "region_cleanup_poll_quota_per_task": 2,
+        "cancel_after_steps": null,
+        "max_steps": 20000
+      }
+    },
+    {
+      "scenario_id": "swarm-forced-timeout-envelope",
+      "description": "Bounded timeout envelope for future no-mock runners; schema-valid but not executed by this fast contract.",
+      "execution_mode": "validate_only",
+      "semantic_dimensions": [
+        "forced_timeout"
+      ],
+      "replay_scenario": {
+        "scenario_id": "swarm-forced-timeout-envelope",
+        "seed": 12648436,
+        "worker_count": 4,
+        "cohort_count": 2,
+        "region_count": 4,
+        "tasks_per_region": 12,
+        "yields_per_task": 64,
+        "yield_jitter": 16,
+        "channel_capacity": 8,
+        "messages_per_task": 4,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 2,
+        "timer_ticks_per_task": 4,
+        "cancellation_tree_depth": 4,
+        "artifact_bytes_per_task": 64,
+        "region_task_admission_limit": null,
+        "region_over_limit_decision": "shed",
+        "region_memory_bytes_per_task": 4096,
+        "region_queue_depth_units_per_task": 1,
+        "region_blocking_pool_units_per_task": 1,
+        "region_cleanup_poll_quota_per_task": 1,
+        "cancel_after_steps": 8,
+        "max_steps": 32
+      }
+    },
+    {
+      "scenario_id": "swarm-saturated-contract-boundary",
+      "description": "Upper-bound fixture at the committed first-slice task limit; validation-only so the contract stays cheap.",
+      "execution_mode": "validate_only",
+      "semantic_dimensions": [
+        "saturated_scale"
+      ],
+      "replay_scenario": {
+        "scenario_id": "swarm-saturated-contract-boundary",
+        "seed": 12648437,
+        "worker_count": 64,
+        "cohort_count": 16,
+        "region_count": 100,
+        "tasks_per_region": 100,
+        "yields_per_task": 1,
+        "yield_jitter": 0,
+        "channel_capacity": 128,
+        "messages_per_task": 1,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 1,
+        "timer_ticks_per_task": 1,
+        "cancellation_tree_depth": 5,
+        "artifact_bytes_per_task": 1,
+        "region_task_admission_limit": null,
+        "region_over_limit_decision": "shed",
+        "region_memory_bytes_per_task": 1024,
+        "region_queue_depth_units_per_task": 1,
+        "region_blocking_pool_units_per_task": 1,
+        "region_cleanup_poll_quota_per_task": 1,
+        "cancel_after_steps": null,
+        "max_steps": 100000
+      }
+    }
+  ],
+  "malformed_examples": [
+    {
+      "case_id": "empty-scenario-id",
+      "expected_error_contains": "scenario_id",
+      "replay_scenario": {
+        "scenario_id": "",
+        "worker_count": 1,
+        "cohort_count": 1,
+        "region_count": 1,
+        "tasks_per_region": 1,
+        "channel_capacity": 1,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 1,
+        "timer_ticks_per_task": 1,
+        "cancellation_tree_depth": 1,
+        "max_steps": 10
+      }
+    },
+    {
+      "case_id": "zero-workers",
+      "expected_error_contains": "worker_count",
+      "replay_scenario": {
+        "scenario_id": "invalid-zero-workers",
+        "worker_count": 0,
+        "cohort_count": 1,
+        "region_count": 1,
+        "tasks_per_region": 1,
+        "channel_capacity": 1,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 1,
+        "timer_ticks_per_task": 1,
+        "cancellation_tree_depth": 1,
+        "max_steps": 10
+      }
+    },
+    {
+      "case_id": "cancel-after-max",
+      "expected_error_contains": "cancel_after_steps",
+      "replay_scenario": {
+        "scenario_id": "invalid-cancel-after-max",
+        "worker_count": 1,
+        "cohort_count": 1,
+        "region_count": 1,
+        "tasks_per_region": 1,
+        "channel_capacity": 1,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 1,
+        "timer_ticks_per_task": 1,
+        "cancellation_tree_depth": 1,
+        "cancel_after_steps": 10,
+        "max_steps": 10
+      }
+    },
+    {
+      "case_id": "over-limit-accept",
+      "expected_error_contains": "over-limit admission decision",
+      "replay_scenario": {
+        "scenario_id": "invalid-over-limit-accept",
+        "worker_count": 1,
+        "cohort_count": 1,
+        "region_count": 1,
+        "tasks_per_region": 2,
+        "channel_capacity": 1,
+        "semaphore_permits_per_task": 1,
+        "pool_slots_per_task": 1,
+        "obligations_per_task": 1,
+        "timer_ticks_per_task": 1,
+        "cancellation_tree_depth": 1,
+        "region_task_admission_limit": 1,
+        "region_over_limit_decision": "accept",
+        "max_steps": 10
+      }
+    }
+  ]
+}
