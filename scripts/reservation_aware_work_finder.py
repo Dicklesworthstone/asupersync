@@ -22,7 +22,7 @@ from typing import Any
 SCHEMA_VERSION = "reservation-aware-work-finder-v1"
 APPROVED_FALLBACK_LANES = {
     "testing-fuzzing",
-    "mock-code-finder",
+    "implementation-completeness",
     "deadlock-finder-and-fixer",
     "testing-golden-artifacts",
     "testing-conformance-harnesses",
@@ -69,9 +69,9 @@ DEFAULT_FALLBACK_CANDIDATES = [
         ],
     },
     {
-        "candidate_id": "mock-code-finder:proof-runner-contracts",
-        "lane": "mock-code-finder",
-        "title": "Audit proof runner contracts for placeholder behavior",
+        "candidate_id": "implementation-completeness:proof-runner-contracts",
+        "lane": "implementation-completeness",
+        "title": "Audit proof runner contracts for incomplete behavior",
         "priority": 3,
         "paths": [
             "scripts/proof_runner.py",

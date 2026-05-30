@@ -72,7 +72,7 @@
 //!       (cx/cx.rs:454-460).
 //!     - Cx::masked has a docstring describing the cancel-
 //:       protocol mask (cx/cx.rs:~2117).
-//!     - Cx::scope has a Phase-0 placeholder docstring
+//!     - Cx::scope has a Phase-0 handle-accessor docstring
 //!       (cx/cx.rs:2966-2970).
 //!     - Scope::region has a docstring noting the await-
 //:       quiescence + RegionCreateError contract (cx/scope.rs:
@@ -278,7 +278,7 @@ fn cx_scope_docstring_documents_phase_0_no_new_region() {
         source.contains("In Phase 0, this creates a scope bound to the current region.")
             || source.contains("creates a scope bound to the current region"),
         "REGRESSION: Cx::scope docstring no longer documents \
-         Phase-0 placeholder. Users may misread the API as \
+         Phase-0 handle-accessor contract. Users may misread the API as \
          creating a new region.",
     );
 }

@@ -22,8 +22,8 @@
 | Field | Value |
 | --- | --- |
 | category | `run-fallback-lane` |
-| candidate | `mock-code-finder:source-only-finder` |
-| lane | `mock-code-finder` |
+| candidate | `implementation-completeness:source-only-finder` |
+| lane | `implementation-completeness` |
 | validation | `source-only` |
 | reason | first unblocked candidate by kind and priority |
 | safety | no active peer reservation or dirty path blocks the candidate; no tracker mutation required |
@@ -48,7 +48,7 @@ Files to reserve:
 ## Safe Work
 | Candidate | Lane | Validation | Safety |
 | --- | --- | --- | --- |
-| `mock-code-finder:source-only-finder` | `mock-code-finder` | `source-only` | no active peer reservation or dirty path blocks the candidate; no tracker mutation required |
+| `implementation-completeness:source-only-finder` | `implementation-completeness` | `source-only` | no active peer reservation or dirty path blocks the candidate; no tracker mutation required |
 
 ## Blockers
 | Candidate | Kind | Owner | Path | Reason |

@@ -28,8 +28,8 @@
   },
   "fallback_lanes": [
     {
-      "candidate_id": "mock-code-finder:safe-script",
-      "lane": "mock-code-finder",
+      "candidate_id": "implementation-completeness:safe-script",
+      "lane": "implementation-completeness",
       "title": "Inspect reservation-aware finder without tracker mutation",
       "priority": 2,
       "no_build_validation": true,

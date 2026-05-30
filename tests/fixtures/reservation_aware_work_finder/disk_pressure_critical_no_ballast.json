@@ -31,9 +31,9 @@
       ]
     },
     {
-      "candidate_id": "mock-code-finder:source-only-scan",
-      "lane": "mock-code-finder",
-      "title": "Source-only mock wording scan",
+      "candidate_id": "implementation-completeness:source-only-scan",
+      "lane": "implementation-completeness",
+      "title": "Source-only incomplete-code wording scan",
       "priority": 2,
       "no_build_validation": true,
       "paths": [

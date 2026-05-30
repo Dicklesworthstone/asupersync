@@ -45,8 +45,8 @@
   },
   "fallback_lanes": [
     {
-      "candidate_id": "mock-code-finder:source-only-finder",
-      "lane": "mock-code-finder",
+      "candidate_id": "implementation-completeness:source-only-finder",
+      "lane": "implementation-completeness",
       "title": "Inspect reservation-aware finder without tracker mutation",
       "priority": 2,
       "no_build_validation": true,

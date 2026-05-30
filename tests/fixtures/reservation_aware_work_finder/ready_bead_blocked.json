@@ -29,9 +29,9 @@
   },
   "fallback_lanes": [
     {
-      "candidate_id": "mock-code-finder:src-http",
-      "lane": "mock-code-finder",
-      "title": "Scan src/http for placeholder code",
+      "candidate_id": "implementation-completeness:src-http",
+      "lane": "implementation-completeness",
+      "title": "Scan src/http for incomplete code",
       "priority": 2,
       "paths": [
         "src/http"

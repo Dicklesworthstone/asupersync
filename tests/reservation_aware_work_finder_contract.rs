@@ -116,12 +116,12 @@ fn ready_bead_blocked_by_reservation_falls_back_to_safe_lane() {
     );
     assert_eq!(
         receipt["recommendation"]["candidate_id"].as_str(),
-        Some("mock-code-finder:src-http")
+        Some("implementation-completeness:src-http")
     );
 }
 
 #[test]
-fn empty_queue_skips_peer_dirty_fuzz_target_and_recommends_mock_scan() {
+fn empty_queue_skips_peer_dirty_fuzz_target_and_recommends_completeness_scan() {
     let receipt = finder_json("empty_queue_peer_dirty_fuzz.json");
     let dirty_fuzz = candidate(&receipt, "testing-fuzzing:h2_rst_stream");
     let blockers = dirty_fuzz["blockers"].as_array().expect("blockers");
@@ -134,14 +134,14 @@ fn empty_queue_skips_peer_dirty_fuzz_target_and_recommends_mock_scan() {
     assert_eq!(dirty_blocker["holder"].as_str(), Some("GentleCitadel"));
     assert_eq!(
         receipt["recommendation"]["candidate_id"].as_str(),
-        Some("mock-code-finder:tests")
+        Some("implementation-completeness:tests")
     );
 }
 
 #[test]
 fn dirty_rename_target_blocks_candidate_surface() {
     let receipt = finder_json("rename_dirty_target.json");
-    let renamed = candidate(&receipt, "mock-code-finder:renamed-target");
+    let renamed = candidate(&receipt, "implementation-completeness:renamed-target");
     let blocker = &renamed["blockers"][0];
 
     assert_eq!(renamed["status"].as_str(), Some("blocked"));
@@ -152,7 +152,7 @@ fn dirty_rename_target_blocks_candidate_surface() {
     );
     assert_eq!(
         receipt["recommendation"]["candidate_id"].as_str(),
-        Some("mock-code-finder:safe-script")
+        Some("implementation-completeness:safe-script")
     );
 }
 
@@ -160,7 +160,7 @@ fn dirty_rename_target_blocks_candidate_surface() {
 fn dirty_tracker_blocks_tracker_mutating_ready_bead() {
     let receipt = finder_json("tracker_dirty_ready_bead.json");
     let tracker_claim = candidate(&receipt, "asupersync-ready-needs-dirty-tracker");
-    let source_only = candidate(&receipt, "mock-code-finder:safe-script");
+    let source_only = candidate(&receipt, "implementation-completeness:safe-script");
     let blockers = tracker_claim["blockers"].as_array().expect("blockers");
     let tracker_blocker = blockers
         .iter()
@@ -190,7 +190,7 @@ fn dirty_tracker_blocks_tracker_mutating_ready_bead() {
     );
     assert_eq!(
         receipt["recommendation"]["candidate_id"].as_str(),
-        Some("mock-code-finder:safe-script")
+        Some("implementation-completeness:safe-script")
     );
     assert!(
         receipt["recommendation"]["safety_reason"]
@@ -257,7 +257,7 @@ fn low_disk_surfaces_pressure_but_does_not_block_rch_work() {
 fn critical_disk_blocks_rch_heavy_and_prefers_no_build_fallback() {
     let receipt = finder_json("disk_pressure_critical_no_ballast.json");
     let rch_candidate = candidate(&receipt, "testing-fuzzing:critical-rch-proof");
-    let source_only = candidate(&receipt, "mock-code-finder:source-only-scan");
+    let source_only = candidate(&receipt, "implementation-completeness:source-only-scan");
 
     assert_eq!(receipt["disk_pressure"]["level"].as_str(), Some("critical"));
     assert_eq!(
@@ -275,11 +275,11 @@ fn critical_disk_blocks_rch_heavy_and_prefers_no_build_fallback() {
     assert_eq!(source_only["status"].as_str(), Some("ready-fallback"));
     assert_eq!(
         receipt["recommendation"]["candidate_id"].as_str(),
-        Some("mock-code-finder:source-only-scan")
+        Some("implementation-completeness:source-only-scan")
     );
     assert_eq!(
         receipt["disk_pressure"]["non_build_fallback_candidates"][0]["candidate_id"].as_str(),
-        Some("mock-code-finder:source-only-scan")
+        Some("implementation-completeness:source-only-scan")
     );
 }
 
@@ -492,7 +492,10 @@ fn recent_commit_subjects_block_completed_default_fallbacks() {
         "testing-conformance-harnesses:session-handoff-receipt",
     );
     let proof_receipt = candidate(&receipt, "testing-golden-artifacts:proof-receipt-inventory");
-    let proof_runner = candidate(&receipt, "mock-code-finder:proof-runner-contracts");
+    let proof_runner = candidate(
+        &receipt,
+        "implementation-completeness:proof-runner-contracts",
+    );
 
     assert_eq!(receipt["summary"]["ready_count"].as_u64(), Some(0));
     assert_eq!(handoff["status"].as_str(), Some("blocked"));
@@ -564,7 +567,7 @@ fn unapproved_fallback_lane_is_blocked_by_policy() {
 fn stale_in_progress_is_report_only_and_tracker_lock_blocks_claim() {
     let receipt = finder_json("stale_in_progress_tracker_lock.json");
     let tracker_claim = candidate(&receipt, "asupersync-ready-needs-tracker");
-    let source_only = candidate(&receipt, "mock-code-finder:source-only-finder");
+    let source_only = candidate(&receipt, "implementation-completeness:source-only-finder");
 
     assert_eq!(receipt["tracker_lock"]["active"].as_bool(), Some(true));
     assert_eq!(
@@ -603,7 +606,7 @@ fn stale_in_progress_is_report_only_and_tracker_lock_blocks_claim() {
 
     assert_eq!(
         receipt["recommendation"]["candidate_id"].as_str(),
-        Some("mock-code-finder:source-only-finder")
+        Some("implementation-completeness:source-only-finder")
     );
     assert_eq!(
         receipt["recommendation"]["validation_class"].as_str(),

@@ -34,9 +34,9 @@
       ]
     },
     {
-      "candidate_id": "mock-code-finder:tests",
-      "lane": "mock-code-finder",
-      "title": "Scan tests for placeholder assertions",
+      "candidate_id": "implementation-completeness:tests",
+      "lane": "implementation-completeness",
+      "title": "Scan tests for incomplete assertions",
       "priority": 2,
       "paths": [
         "tests"

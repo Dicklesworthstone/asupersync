@@ -38,7 +38,7 @@
 //!      and inherited budget.
 //!    - Does NOT increment mask_depth.
 //!    - Does NOT allocate a new region (Phase 0
-//!      placeholder; new-region allocation is via
+//!      handle-accessor contract; new-region allocation is via
 //!      `Scope::region(state, cx, policy, f).await`).
 //!    - Does NOT take a closure.
 //!
@@ -207,8 +207,8 @@ fn scope_does_not_increment_mask_depth() {
 #[test]
 fn scope_returns_handle_bound_to_current_region() {
     // Pin: scope reads the current region_id and budget,
-    // constructs a Scope::new with those. It does NOT
-    // allocate a new region.
+    // constructs a Scope with inherited capability budget.
+    // It does NOT allocate a new region.
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "pub fn scope(&self) -> crate::cx::Scope<'static> {";
@@ -217,11 +217,13 @@ fn scope_returns_handle_bound_to_current_region() {
     let body = &source[pos..pos + body_end];
 
     assert!(
-        body.contains("self.region_id()") && body.contains("crate::cx::Scope::new("),
+        body.contains("self.region_id()")
+            && body.contains("self.capability_budget()")
+            && body.contains("crate::cx::Scope::new_with_capability_budget("),
         "REGRESSION: scope no longer constructs Scope from \
-         the current region_id. It is either allocating a \
-         new region (conflation with Scope::region) or \
-         losing the region binding.",
+         the current region_id and capability budget. It is \
+         either allocating a new region (conflation with \
+         Scope::region) or losing inherited capabilities.",
     );
 
     let suspect_region_alloc = [
@@ -313,8 +315,8 @@ fn masked_documented_as_cancel_acknowledgment_defer() {
 
 #[test]
 fn scope_documented_as_phase_0_handle_accessor() {
-    // Pin: scope's docstring documents Phase-0 placeholder
-    // semantics. Without this, future readers may add a
+    // Pin: scope's docstring documents Phase-0
+    // handle-accessor semantics. Without this, future readers may add a
     // new-region allocator under the same name.
     let source = read("src/cx/cx.rs");
 
@@ -402,21 +404,21 @@ fn mask_depth_max_invariant_documented() {
 
 use std::sync::Mutex;
 
-/// Mock CxInner with mask_depth + cancel state.
-struct MockCxInner {
+/// Minimal CxInner behavior model with mask_depth + cancel state.
+struct ModelCxInner {
     mask_depth: u32,
     cancel_requested: bool,
 }
 
-struct MockCx {
-    inner: Mutex<MockCxInner>,
+struct ModelCx {
+    inner: Mutex<ModelCxInner>,
 }
 
-struct MockMaskGuard<'a> {
-    inner: &'a Mutex<MockCxInner>,
+struct ModelMaskGuard<'a> {
+    inner: &'a Mutex<ModelCxInner>,
 }
 
-impl Drop for MockMaskGuard<'_> {
+impl Drop for ModelMaskGuard<'_> {
     fn drop(&mut self) {
         let mut inner = self.inner.lock().unwrap();
         inner.mask_depth = inner.mask_depth.saturating_sub(1);
@@ -424,14 +426,14 @@ impl Drop for MockMaskGuard<'_> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct MockScope {
+struct ModelScope {
     region_id: u32,
 }
 
-impl MockCx {
+impl ModelCx {
     fn new() -> Self {
         Self {
-            inner: Mutex::new(MockCxInner {
+            inner: Mutex::new(ModelCxInner {
                 mask_depth: 0,
                 cancel_requested: false,
             }),
@@ -452,14 +454,14 @@ impl MockCx {
             let mut inner = self.inner.lock().unwrap();
             inner.mask_depth += 1;
         }
-        let _g = MockMaskGuard { inner: &self.inner };
+        let _g = ModelMaskGuard { inner: &self.inner };
         f()
     }
 
     /// Models cx.scope(): returns a Scope handle bound to
     /// current region. No mask_depth touch.
-    fn scope(&self) -> MockScope {
-        MockScope { region_id: 42 }
+    fn scope(&self) -> ModelScope {
+        ModelScope { region_id: 42 }
     }
 
     /// Models checkpoint: returns Err if cancel pending and
@@ -480,7 +482,7 @@ impl MockCx {
 
 #[test]
 fn behavioral_masked_increments_mask_depth_during_closure() {
-    let cx = MockCx::new();
+    let cx = ModelCx::new();
     assert_eq!(cx.mask_depth(), 0);
 
     let result = cx.masked(|| {
@@ -506,7 +508,7 @@ fn behavioral_masked_increments_mask_depth_during_closure() {
 
 #[test]
 fn behavioral_scope_does_not_change_mask_depth() {
-    let cx = MockCx::new();
+    let cx = ModelCx::new();
     assert_eq!(cx.mask_depth(), 0);
 
     let scope = cx.scope();
@@ -524,7 +526,7 @@ fn behavioral_scope_does_not_change_mask_depth() {
 
 #[test]
 fn behavioral_masked_defers_cancel_observation() {
-    let cx = MockCx::new();
+    let cx = ModelCx::new();
     cx.cancel();
 
     // Outside masked: checkpoint returns Err.
@@ -554,7 +556,7 @@ fn behavioral_masked_defers_cancel_observation() {
 fn behavioral_scope_returns_handle_without_acquiring_lock_for_mask() {
     // scope() reads region_id; no lock acquisition for
     // mask manipulation.
-    let cx = MockCx::new();
+    let cx = ModelCx::new();
 
     let s1 = cx.scope();
     let s2 = cx.scope();
@@ -569,14 +571,14 @@ fn behavioral_signatures_disjoint_compile_time_proof() {
     // The compile-time proof: cx.masked() takes a closure;
     // cx.scope() does not. We can't pass the same arg
     // shape to both.
-    let cx = MockCx::new();
+    let cx = ModelCx::new();
 
     // masked takes FnOnce -> R.
     let r: u32 = cx.masked(|| 100_u32);
     assert_eq!(r, 100);
 
     // scope takes no arg.
-    let s: MockScope = cx.scope();
+    let s: ModelScope = cx.scope();
     assert_eq!(s.region_id, 42);
 
     // The fact that this code compiles and uses different
@@ -585,7 +587,7 @@ fn behavioral_signatures_disjoint_compile_time_proof() {
 
 #[test]
 fn behavioral_nested_masked_increments_then_restores() {
-    let cx = MockCx::new();
+    let cx = ModelCx::new();
 
     cx.masked(|| {
         assert_eq!(cx.mask_depth(), 1);

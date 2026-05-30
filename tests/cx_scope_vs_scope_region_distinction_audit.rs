@@ -83,7 +83,7 @@
 //! accessor; Scope::region is the structured-concurrency
 //! region-allocator. No conflation. Documentation matches
 //! implementation (the docstring on Cx::scope explicitly
-//! notes the Phase-0 placeholder semantics).
+//! notes the Phase-0 handle-accessor semantics).
 //!
 //! No bead filed. The two APIs serve different purposes
 //: with clear separation.
@@ -119,8 +119,8 @@ fn read(rel: &str) -> String {
 fn cx_scope_is_synchronous_returns_scope_static() {
     // Pin (link 1): Cx::scope returns Scope<'static>
     // synchronously. NOT an async fn, NOT a future. The
-    // 'static lifetime is the Phase-0 placeholder
-    // contract.
+    // 'static lifetime is part of the Phase-0
+    // handle-accessor contract.
     let source = read("src/cx/cx.rs");
 
     assert!(
@@ -177,8 +177,8 @@ fn cx_scope_does_not_allocate_a_new_region() {
 #[test]
 fn cx_scope_documentation_marks_phase_0_no_new_region() {
     // Pin (link 1 documentation): the docstring on
-    // Cx::scope explicitly notes the Phase-0 placeholder
-    // semantics — "creates a scope bound to the current
+    // Cx::scope explicitly notes the Phase-0
+    // handle-accessor semantics — "creates a scope bound to the current
     // region. In later phases, the `scope!` macro will
     // create child regions". Without this docstring, users
     // misread the API as creating a new region.

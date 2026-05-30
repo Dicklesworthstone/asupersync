@@ -57,8 +57,8 @@
 //! `Cx::scope()` (cx/cx.rs:2972) is a Phase-0 HANDLE
 //! ACCESSOR — it returns a `Scope<'static>` bound to the
 //! task's CURRENT region without allocating a new one. It
-//! is documented as a Phase-0 placeholder for the future
-//! "spawn into current region" pattern.
+//! is documented as the Phase-0 handle-accessor contract
+//! for the future "spawn into current region" pattern.
 //!
 //! The Scope returned by Cx::scope() and the Scope returned
 //! by Scope::region() (the async region allocator) have
