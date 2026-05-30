@@ -173,7 +173,8 @@ fn swarm_contention_heatmap_healthy_report_passes_with_stable_text() {
             .any(|row| row.key == "runtime_state")
     );
     assert!(ledger.region_hotspots.iter().any(|row| {
-        row.kind == SwarmContentionHotspotKind::Region && row.owner_surface.contains("src/runtime")
+        row.kind == SwarmContentionHotspotKind::Region
+            && row.owner_surface.contains("src/lab/swarm_replay.rs")
     }));
     assert!(text.contains("verdict: Pass"));
     assert!(text.contains("top_hotspots:"));
