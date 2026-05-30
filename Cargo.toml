@@ -561,7 +561,7 @@ required-features = ["criterion-benches"]
 [[bench]]
 name = "next_task_hotpath"
 harness = false
-required-features = ["criterion-benches"]
+required-features = ["test-internals", "criterion-benches"]
 
 [[bench]]
 name = "otlp_queue_contention"
