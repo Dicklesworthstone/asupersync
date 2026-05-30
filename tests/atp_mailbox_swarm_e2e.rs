@@ -15,6 +15,7 @@ use asupersync::LabRuntime;
 use asupersync::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 // Test-specific types that mirror the ATP interfaces for e2e testing
 
@@ -67,17 +68,42 @@ impl TestPieceId {
 pub struct TestMailboxClient {
     peer_id: TestPeerId,
     quota_limit: u64,
+    used_quota: u64,
+    relay: Arc<Mutex<TestMailboxRelay>>,
+    events: Vec<TestMailboxEvent>,
+}
+
+#[derive(Debug, Default)]
+struct TestMailboxRelay {
     storage: HashMap<TestTransferId, Vec<u8>>,
-    inbox: Vec<TestTransferId>,
+    inboxes: HashMap<TestPeerId, Vec<TestTransferId>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestMailboxEvent {
+    pub event_type: &'static str,
+    pub peer_id: TestPeerId,
+    pub transfer_id: Option<TestTransferId>,
+    pub destination: Option<TestPeerId>,
+    pub bytes: u64,
+    pub success: bool,
 }
 
 impl TestMailboxClient {
     pub async fn new(config: TestMailboxConfig) -> Result<Self, String> {
+        Self::new_with_relay(config, Arc::new(Mutex::new(TestMailboxRelay::default()))).await
+    }
+
+    async fn new_with_relay(
+        config: TestMailboxConfig,
+        relay: Arc<Mutex<TestMailboxRelay>>,
+    ) -> Result<Self, String> {
         Ok(Self {
             peer_id: config.peer_id,
             quota_limit: config.quota_limit,
-            storage: HashMap::new(),
-            inbox: Vec::new(),
+            used_quota: 0,
+            relay,
+            events: Vec::new(),
         })
     }
 
@@ -87,21 +113,67 @@ impl TestMailboxClient {
         destination: TestPeerId,
         data: Vec<u8>,
     ) -> Result<TestTransferId, String> {
-        if data.len() as u64 > self.quota_limit {
+        let bytes = data.len() as u64;
+        if cx.is_cancel_requested() {
+            self.events.push(TestMailboxEvent {
+                event_type: "mailbox.send",
+                peer_id: self.peer_id.clone(),
+                transfer_id: None,
+                destination: Some(destination),
+                bytes,
+                success: false,
+            });
+            return Err("Capability context is cancelled".to_string());
+        }
+        if self.used_quota.saturating_add(bytes) > self.quota_limit {
+            self.events.push(TestMailboxEvent {
+                event_type: "mailbox.send",
+                peer_id: self.peer_id.clone(),
+                transfer_id: None,
+                destination: Some(destination),
+                bytes,
+                success: false,
+            });
             return Err("Data exceeds quota limit".to_string());
         }
 
         let transfer_id = TestTransferId::new();
-        self.storage.insert(transfer_id, data);
-
-        // Simulate adding to destination's inbox
-        // In real implementation, this would go through encrypted relay
+        let mut relay = self
+            .relay
+            .lock()
+            .map_err(|_| "Mailbox relay lock poisoned".to_string())?;
+        relay.storage.insert(transfer_id, data);
+        relay
+            .inboxes
+            .entry(destination.clone())
+            .or_default()
+            .push(transfer_id);
+        self.used_quota += bytes;
+        self.events.push(TestMailboxEvent {
+            event_type: "mailbox.send",
+            peer_id: self.peer_id.clone(),
+            transfer_id: Some(transfer_id),
+            destination: Some(destination),
+            bytes,
+            success: true,
+        });
 
         Ok(transfer_id)
     }
 
     pub async fn check_mailbox(&self, cx: &Cx) -> Result<Vec<TestTransferId>, String> {
-        Ok(self.inbox.clone())
+        if cx.is_cancel_requested() {
+            return Err("Capability context is cancelled".to_string());
+        }
+        let relay = self
+            .relay
+            .lock()
+            .map_err(|_| "Mailbox relay lock poisoned".to_string())?;
+        Ok(relay
+            .inboxes
+            .get(&self.peer_id)
+            .cloned()
+            .unwrap_or_default())
     }
 
     pub async fn receive_from_mailbox(
@@ -109,10 +181,22 @@ impl TestMailboxClient {
         cx: &Cx,
         transfer_id: TestTransferId,
     ) -> Result<Vec<u8>, String> {
-        self.storage
+        if cx.is_cancel_requested() {
+            return Err("Capability context is cancelled".to_string());
+        }
+        let relay = self
+            .relay
+            .lock()
+            .map_err(|_| "Mailbox relay lock poisoned".to_string())?;
+        relay
+            .storage
             .get(&transfer_id)
             .cloned()
             .ok_or_else(|| "Transfer not found".to_string())
+    }
+
+    pub fn events(&self) -> &[TestMailboxEvent] {
+        &self.events
     }
 }
 
@@ -397,20 +481,25 @@ impl TestPieceMap {
 /// Test fixture for ATP Data Movement Layer scenarios
 struct AtpDmlFixture {
     runtime: LabRuntime,
+    mailbox_relay: Arc<Mutex<TestMailboxRelay>>,
     mailbox_clients: HashMap<TestPeerId, TestMailboxClient>,
     swarm_coordinators: HashMap<TestPeerId, TestSwarmCoordinator>,
+    seed_grants: HashMap<TestPeerId, BTreeSet<TestPieceId>>,
     test_data: Vec<u8>,
 }
 
 impl AtpDmlFixture {
     async fn new() -> Self {
         let runtime = LabRuntime::new(LabConfig::default());
+        let mailbox_relay = Arc::new(Mutex::new(TestMailboxRelay::default()));
         let test_data = b"ATP test data for e2e validation scenarios".repeat(1000);
 
         Self {
             runtime,
+            mailbox_relay,
             mailbox_clients: HashMap::new(),
             swarm_coordinators: HashMap::new(),
+            seed_grants: HashMap::new(),
             test_data,
         }
     }
@@ -423,7 +512,10 @@ impl AtpDmlFixture {
             peer_id: pid.clone(),
             ..Default::default()
         };
-        let mailbox_client = TestMailboxClient::new(mailbox_config).await.unwrap();
+        let mailbox_client =
+            TestMailboxClient::new_with_relay(mailbox_config, Arc::clone(&self.mailbox_relay))
+                .await
+                .unwrap();
 
         // Create swarm coordinator for peer
         let swarm_coordinator = TestSwarmCoordinator::new(TestSwarmConfig::default());
@@ -431,12 +523,34 @@ impl AtpDmlFixture {
         self.mailbox_clients.insert(pid.clone(), mailbox_client);
         self.swarm_coordinators
             .insert(pid.clone(), swarm_coordinator);
+        self.seed_grants.entry(pid.clone()).or_default();
 
         pid
     }
 
     fn get_cx(&self) -> Cx {
         Cx::for_testing()
+    }
+
+    fn grant_seed_piece(&mut self, peer_id: &TestPeerId, piece_id: TestPieceId) {
+        self.seed_grants
+            .entry(peer_id.clone())
+            .or_default()
+            .insert(piece_id);
+    }
+
+    fn revoke_seed_piece(&mut self, peer_id: &TestPeerId, piece_id: &TestPieceId) -> bool {
+        self.seed_grants
+            .get_mut(peer_id)
+            .is_some_and(|pieces| pieces.remove(piece_id))
+    }
+
+    fn can_seed_piece(&self, cx: &Cx, peer_id: &TestPeerId, piece_id: &TestPieceId) -> bool {
+        !cx.is_cancel_requested()
+            && self
+                .seed_grants
+                .get(peer_id)
+                .is_some_and(|pieces| pieces.contains(piece_id))
     }
 }
 
@@ -468,12 +582,6 @@ fn create_test_swarm_peer(peer_id: &TestPeerId) -> TestSwarmPeer {
     }
 }
 
-fn can_seed_piece(cx: &Cx, peer_id: &TestPeerId, piece_id: &TestPieceId) -> bool {
-    // Placeholder capability check - would integrate with real Cx capability system
-    // For now, allow pieces 0-1, deny pieces 2+
-    piece_id.as_u64() < 2
-}
-
 // E2E Test Scenarios
 
 #[tokio::test]
@@ -501,10 +609,10 @@ async fn test_encrypted_offline_mailbox_upload_download() {
         .check_mailbox(&cx)
         .await
         .expect("Mailbox check should succeed");
-
-    // Should find the uploaded transfer (in real implementation)
-    // For test purposes, we simulate the inbox notification
-    receiver_client.inbox.push(transfer_id);
+    assert!(
+        transfers.contains(&transfer_id),
+        "Receiver inbox should contain uploaded transfer"
+    );
 
     let received_data = receiver_client
         .receive_from_mailbox(&cx, transfer_id)
@@ -535,7 +643,8 @@ async fn test_multi_source_swarm_transfer_with_verification() {
         .remove(&coordinator_peer)
         .unwrap();
 
-    // Mock piece availability - source1 has pieces 0-3, source2 has pieces 2-5, source3 has pieces 4-7
+    // Piece availability matrix: source1 has pieces 0-3, source2 has pieces 2-5,
+    // and source3 has pieces 4-7.
     let total_pieces = 8u64;
     let piece_map = create_test_piece_map(
         total_pieces,
@@ -559,7 +668,6 @@ async fn test_multi_source_swarm_transfer_with_verification() {
         .await
         .expect("Swarm transfer should start");
 
-    // Simulate piece assignments and downloads
     let assignments = coordinator
         .assign_pieces(&cx, &transfer_id)
         .await
@@ -622,7 +730,6 @@ async fn test_malicious_peer_detection_and_rejection() {
         .await
         .expect("Transfer should start");
 
-    // Simulate successful piece from good peer
     coordinator
         .mark_piece_received(
             &cx,
@@ -634,7 +741,6 @@ async fn test_malicious_peer_detection_and_rejection() {
         .await
         .expect("Good peer piece should be accepted");
 
-    // Simulate verification failure from malicious peer
     coordinator
         .handle_piece_verification_failed(
             &cx,
@@ -739,7 +845,6 @@ async fn test_peer_churn_and_recovery() {
             .unwrap();
     }
 
-    // Simulate peer leaving
     coordinator
         .remove_peer(&cx, &initial_peers[1], "Connection lost".to_string())
         .await
@@ -780,7 +885,7 @@ async fn test_relay_cache_handoff_workflow() {
     let relay_cache = fixture.create_peer("relay-cache").await;
     let cx = fixture.get_cx();
 
-    // Scenario: Sender uploads to relay, relay caches, receiver gets from cache
+    // Scenario: Sender uploads through the relay cache and receiver gets it later.
     let sender_client = fixture.mailbox_clients.get_mut(&sender).unwrap();
 
     let transfer_id = sender_client
@@ -788,20 +893,22 @@ async fn test_relay_cache_handoff_workflow() {
         .await
         .expect("Upload to relay should succeed");
 
-    // Simulate relay storing in cache (this would be automatic in real implementation)
-    let cache_client = fixture.mailbox_clients.get_mut(&relay_cache).unwrap();
+    assert!(
+        fixture.mailbox_clients.contains_key(&relay_cache),
+        "Relay cache peer should be registered in the fixture"
+    );
 
     // Receiver retrieves from cache via relay
     let receiver_client = fixture.mailbox_clients.get_mut(&receiver).unwrap();
-
-    // Simulate transfer appearing in receiver's inbox
-    receiver_client.inbox.push(transfer_id);
     let transfers = receiver_client
         .check_mailbox(&cx)
         .await
         .expect("Cache check should succeed");
 
-    assert!(!transfers.is_empty(), "Should find cached transfer");
+    assert!(
+        transfers.contains(&transfer_id),
+        "Should find cached transfer"
+    );
 
     let cached_data = receiver_client
         .receive_from_mailbox(&cx, transfer_id)
@@ -823,30 +930,43 @@ async fn test_capability_scoped_seeding_with_revocation() {
     let leecher = fixture.create_peer("leecher").await;
     let cx = fixture.get_cx();
 
-    // Test that seeding respects capability boundaries
-    // (This test structure demonstrates the testing pattern - actual capability
-    // implementation would require integration with Cx capability system)
-
-    // Seeder should only provide pieces it's authorized to share
     let authorized_pieces = vec![TestPieceId::new(0), TestPieceId::new(1)];
     let unauthorized_pieces = vec![TestPieceId::new(2), TestPieceId::new(3)];
-
-    // Simulate capability check (would integrate with real Cx capabilities)
     for piece_id in &authorized_pieces {
-        // Should allow seeding of authorized pieces
+        fixture.grant_seed_piece(&seeder, *piece_id);
+    }
+
+    for piece_id in &authorized_pieces {
         assert!(
-            can_seed_piece(&cx, &seeder, piece_id),
+            fixture.can_seed_piece(&cx, &seeder, piece_id),
             "Should allow seeding authorized pieces"
         );
     }
 
     for piece_id in &unauthorized_pieces {
-        // Should deny seeding of unauthorized pieces
         assert!(
-            !can_seed_piece(&cx, &seeder, piece_id),
+            !fixture.can_seed_piece(&cx, &seeder, piece_id),
             "Should deny seeding unauthorized pieces"
         );
     }
+
+    let revoked_piece = TestPieceId::new(1);
+    assert!(fixture.revoke_seed_piece(&seeder, &revoked_piece));
+    assert!(
+        !fixture.can_seed_piece(&cx, &seeder, &revoked_piece),
+        "Revoked seed grant must immediately deny the piece"
+    );
+    assert!(
+        !fixture.can_seed_piece(&cx, &leecher, &TestPieceId::new(0)),
+        "Seed grants are scoped to the authorized peer"
+    );
+
+    let cancelled = fixture.get_cx();
+    cancelled.set_cancel_requested(true);
+    assert!(
+        !fixture.can_seed_piece(&cancelled, &seeder, &TestPieceId::new(0)),
+        "Cancelled capability context must deny new seeding"
+    );
 
     println!("[E2E] ✓ Capability-scoped seeding with revocation: PASS");
 }
@@ -874,13 +994,22 @@ async fn test_structured_logging_and_observability() {
         "Transfer should succeed and be logged"
     );
 
-    // Verify log structure (would check actual log output in real implementation)
-    // For now, we just verify the operation completed successfully
+    let event = mailbox_client
+        .events()
+        .last()
+        .expect("successful transfer should record a mailbox event");
+    assert_eq!(event.event_type, "mailbox.send");
+    assert_eq!(event.peer_id, peer);
+    assert_eq!(event.destination, Some(peer.clone()));
+    assert_eq!(event.bytes, fixture.test_data.len() as u64);
+    assert!(event.transfer_id.is_some());
+    assert!(event.success);
+
     println!("[E2E] ✓ Structured logging and observability: PASS");
 }
 
-#[tokio::test]
-async fn test_end_to_end_integration_matrix() {
+#[test]
+fn test_end_to_end_integration_matrix() {
     println!("\n=== ATP Data Movement Layer E2E Test Matrix ===");
 
     // Run all scenarios in sequence to verify end-to-end workflows
