@@ -56,6 +56,7 @@ use crate::types::{CancelKind, RegionId, TaskId};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 use parking_lot::{Mutex, RwLock};
+use regex::Regex;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
@@ -124,6 +125,7 @@ pub struct PrivacyConfig {
     /// Whether to apply automatic PII detection for common patterns
     /// (emails, phone numbers, credit cards, SSNs, etc.).
     pub auto_pii_detection: bool,
+    compiled_pii_patterns: Vec<Regex>,
 }
 
 impl PrivacyConfig {
@@ -156,10 +158,31 @@ impl PrivacyConfig {
     }
 
     /// Add a custom PII redaction pattern (regex).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pattern` is not a valid regular expression. Use
+    /// [`try_with_pii_pattern`](Self::try_with_pii_pattern) to handle invalid
+    /// patterns without panicking.
     #[must_use]
-    pub fn with_pii_pattern(mut self, pattern: impl Into<String>) -> Self {
-        self.pii_patterns.push(pattern.into());
-        self
+    pub fn with_pii_pattern(self, pattern: impl Into<String>) -> Self {
+        self.try_with_pii_pattern(pattern)
+            .expect("invalid PrivacyConfig PII regex pattern")
+    }
+
+    /// Try to add a custom PII redaction regex pattern.
+    ///
+    /// The compiled regex is cached in the configuration so value redaction does
+    /// not recompile patterns on every exported attribute or metric label.
+    pub fn try_with_pii_pattern(
+        mut self,
+        pattern: impl Into<String>,
+    ) -> Result<Self, regex::Error> {
+        let pattern = pattern.into();
+        let compiled = Regex::new(&pattern)?;
+        self.pii_patterns.push(pattern);
+        self.compiled_pii_patterns.push(compiled);
+        Ok(self)
     }
 
     /// Enable automatic PII detection for common patterns.
@@ -170,97 +193,161 @@ impl PrivacyConfig {
     }
 
     /// Check if a field should be dropped based on privacy configuration.
-    #[cfg(any(test, feature = "tracing-integration"))]
-    fn should_drop_field(&self, field_name: &str) -> bool {
+    #[must_use]
+    pub fn should_drop_field(&self, field_name: &str) -> bool {
         // Check explicit drop lists
-        if self.drop_attributes.contains(&field_name.to_string())
-            || self.drop_labels.contains(&field_name.to_string())
+        if self
+            .drop_attributes
+            .iter()
+            .any(|attribute| attribute == field_name)
+            || self.drop_labels.iter().any(|label| label == field_name)
         {
             return true;
         }
 
         // Check allowlist (if specified, only allow matching fields)
         if !self.allowed_fields.is_empty() {
-            return !self.allowed_fields.iter().any(|pattern| {
-                // Simple pattern matching for now (exact match or starts_with for wildcard *)
-                if pattern.ends_with('*') {
-                    field_name.starts_with(&pattern[..pattern.len() - 1])
-                } else {
-                    field_name == pattern
-                }
-            });
+            return !self
+                .allowed_fields
+                .iter()
+                .any(|pattern| Self::field_pattern_matches(pattern, field_name));
         }
 
         false
     }
 
     /// Redact PII from field values.
-    #[cfg(any(test, feature = "tracing-integration"))]
-    fn redact_pii(&self, _field_name: &str, value: &str) -> String {
-        let mut redacted_value = value.to_string();
-
-        // Apply custom PII patterns
-        for pattern in &self.pii_patterns {
-            // For simplicity, replace any occurrence with [REDACTED]
-            // In production, this would use proper regex matching
-            if value.contains(pattern) {
-                redacted_value = "[REDACTED]".to_string();
-                break;
-            }
+    #[must_use]
+    pub fn redact_pii(&self, _field_name: &str, value: &str) -> String {
+        if self.matches_custom_pii_pattern(value) {
+            return "[REDACTED]".to_string();
         }
 
         // Apply automatic PII detection
         if self.auto_pii_detection {
-            redacted_value = self.apply_auto_pii_redaction(&redacted_value);
-        }
-
-        redacted_value
-    }
-
-    /// Apply automatic PII detection and redaction.
-    #[cfg(any(test, feature = "tracing-integration"))]
-    fn apply_auto_pii_redaction(&self, value: &str) -> String {
-        // Email pattern detection
-        if value.contains('@') && value.contains('.') && value.len() > 5 {
-            if value.chars().any(|c| c == '@') {
-                return "[EMAIL_REDACTED]".to_string();
-            }
-        }
-
-        // Phone number pattern detection (basic)
-        if value.chars().filter(|c| c.is_ascii_digit()).count() >= 10 {
-            let digit_count = value.chars().filter(|c| c.is_ascii_digit()).count();
-            let total_length = value.len();
-            // Likely a phone number if mostly digits
-            if digit_count as f32 / total_length as f32 > 0.7 {
-                return "[PHONE_REDACTED]".to_string();
-            }
-        }
-
-        // Credit card pattern detection (simplified)
-        let digits_only: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
-        if digits_only.len() >= 13 && digits_only.len() <= 19 {
-            return "[CARD_REDACTED]".to_string();
-        }
-
-        // SSN pattern detection (###-##-#### format)
-        if value.len() == 11
-            && value.chars().nth(3) == Some('-')
-            && value.chars().nth(6) == Some('-')
-        {
-            let parts: Vec<&str> = value.split('-').collect();
-            if parts.len() == 3 && parts[0].len() == 3 && parts[1].len() == 2 && parts[2].len() == 4
-            {
-                if parts
-                    .iter()
-                    .all(|part| part.chars().all(|c| c.is_ascii_digit()))
-                {
-                    return "[SSN_REDACTED]".to_string();
-                }
-            }
+            return self.apply_auto_pii_redaction(value);
         }
 
         value.to_string()
+    }
+
+    fn field_pattern_matches(pattern: &str, field_name: &str) -> bool {
+        let pattern = pattern.as_bytes();
+        let field_name = field_name.as_bytes();
+        let mut pattern_index = 0;
+        let mut field_index = 0;
+        let mut last_star = None;
+        let mut star_field_index = 0;
+
+        while field_index < field_name.len() {
+            if pattern_index < pattern.len() && pattern[pattern_index] == field_name[field_index] {
+                pattern_index += 1;
+                field_index += 1;
+            } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+                last_star = Some(pattern_index);
+                pattern_index += 1;
+                star_field_index = field_index;
+            } else if let Some(star_index) = last_star {
+                pattern_index = star_index + 1;
+                star_field_index += 1;
+                field_index = star_field_index;
+            } else {
+                return false;
+            }
+        }
+
+        pattern[pattern_index..].iter().all(|byte| *byte == b'*')
+    }
+
+    fn matches_custom_pii_pattern(&self, value: &str) -> bool {
+        if self.pii_patterns.len() == self.compiled_pii_patterns.len() {
+            let mut cache_is_current = true;
+            for (pattern, compiled) in self.pii_patterns.iter().zip(&self.compiled_pii_patterns) {
+                if pattern != compiled.as_str() {
+                    cache_is_current = false;
+                    break;
+                }
+                if compiled.is_match(value) {
+                    return true;
+                }
+            }
+            if cache_is_current {
+                return false;
+            }
+        }
+
+        self.pii_patterns
+            .iter()
+            .any(|pattern| Regex::new(pattern).is_ok_and(|compiled| compiled.is_match(value)))
+    }
+
+    /// Apply automatic PII detection and redaction.
+    fn apply_auto_pii_redaction(&self, value: &str) -> String {
+        use std::sync::OnceLock;
+
+        static EMAIL_RE: OnceLock<Regex> = OnceLock::new();
+        static PHONE_RE: OnceLock<Regex> = OnceLock::new();
+        static SSN_RE: OnceLock<Regex> = OnceLock::new();
+        static CARD_CANDIDATE_RE: OnceLock<Regex> = OnceLock::new();
+
+        let email_re = EMAIL_RE.get_or_init(|| {
+            Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+                .expect("built-in email regex must compile")
+        });
+        if email_re.is_match(value) {
+            return "[EMAIL_REDACTED]".to_string();
+        }
+
+        let ssn_re = SSN_RE.get_or_init(|| {
+            Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("built-in SSN regex must compile")
+        });
+        if ssn_re.is_match(value) {
+            return "[SSN_REDACTED]".to_string();
+        }
+
+        let card_candidate_re = CARD_CANDIDATE_RE.get_or_init(|| {
+            Regex::new(r"\b(?:\d[ -]?){13,19}\b").expect("built-in payment-card regex must compile")
+        });
+        if card_candidate_re
+            .find_iter(value)
+            .map(|matched| matched.as_str())
+            .any(Self::is_luhn_valid_card)
+        {
+            return "[CARD_REDACTED]".to_string();
+        }
+
+        let phone_re = PHONE_RE.get_or_init(|| {
+            Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+                .expect("built-in phone regex must compile")
+        });
+        if phone_re.is_match(value) {
+            return "[PHONE_REDACTED]".to_string();
+        }
+
+        value.to_string()
+    }
+
+    fn is_luhn_valid_card(candidate: &str) -> bool {
+        let digits: Vec<u32> = candidate.chars().filter_map(|ch| ch.to_digit(10)).collect();
+        if !(13..=19).contains(&digits.len()) {
+            return false;
+        }
+
+        let mut sum = 0;
+        let mut double = false;
+        for digit in digits.iter().rev() {
+            let mut value = *digit;
+            if double {
+                value *= 2;
+                if value > 9 {
+                    value -= 9;
+                }
+            }
+            sum += value;
+            double = !double;
+        }
+
+        sum % 10 == 0
     }
 }
 
@@ -3508,6 +3595,79 @@ mod tests {
         for name in expected {
             assert!(names.contains(*name), "missing metric: {name}");
         }
+    }
+
+    #[test]
+    fn privacy_config_compiles_and_applies_custom_regex_patterns() {
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(r"token-[A-F0-9]{8}")
+            .expect("regex pattern should compile");
+
+        assert_eq!(
+            config.redact_pii("auth.token", "bearer token-DEADBEEF"),
+            "[REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("auth.token", "bearer token-nothex"),
+            "bearer token-nothex"
+        );
+    }
+
+    #[test]
+    fn privacy_config_rejects_invalid_custom_regex_patterns() {
+        assert!(PrivacyConfig::new().try_with_pii_pattern("(").is_err());
+    }
+
+    #[test]
+    fn privacy_config_redacts_directly_mutated_public_pii_patterns() {
+        let mut config = PrivacyConfig::new();
+        config.pii_patterns.push(r"secret-\d{4}".to_string());
+
+        assert_eq!(
+            config.redact_pii("auth.secret", "secret-1234"),
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn privacy_config_allowed_fields_support_anchored_wildcards() {
+        let config = PrivacyConfig::new()
+            .with_allowed_field("http.*.duration")
+            .with_allowed_field("runtime.region.*")
+            .with_allowed_field("*.safe");
+
+        assert!(!config.should_drop_field("http.client.duration"));
+        assert!(!config.should_drop_field("runtime.region.close"));
+        assert!(!config.should_drop_field("trace.safe"));
+        assert!(!config.should_drop_field("trace.safe.safe"));
+        assert!(config.should_drop_field("http.client.bytes"));
+        assert!(config.should_drop_field("unsafe.trace"));
+    }
+
+    #[test]
+    fn privacy_config_auto_pii_detection_uses_specific_classifiers() {
+        let config = PrivacyConfig::new().with_auto_pii_detection();
+
+        assert_eq!(
+            config.redact_pii("user.email", "Contact Jane.Doe@example.com for access"),
+            "[EMAIL_REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("support.phone", "Call +1 (415) 555-2671"),
+            "[PHONE_REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("tax.ssn", "SSN 123-45-6789"),
+            "[SSN_REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("payment.card", "Visa 4111 1111 1111 1111"),
+            "[CARD_REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("correlation.id", "ticket 4111 1111 1111 1112"),
+            "ticket 4111 1111 1111 1112"
+        );
     }
 
     fn collect_grafana_queries(value: &serde_json::Value, output: &mut Vec<String>) {

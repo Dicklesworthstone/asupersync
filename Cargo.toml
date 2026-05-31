@@ -72,7 +72,7 @@ raptorq-roundtrip-e2e = []
 obligation-cleanup-e2e = []
 # OpenTelemetry metrics provider only. The normal dependency graph for this
 # feature stays Tokio-free; OTLP protobuf helpers remain fuzz/test-only.
-metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
+metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:regex"]
 # Enable tracing integration for structured logging and spans.
 # When disabled, tracing macros compile to no-ops for zero overhead.
 tracing-integration = ["dep:tracing"]
@@ -209,6 +209,7 @@ tracing-subscriber = { version = "0.3", optional = true }
 # Optional OpenTelemetry metrics provider
 opentelemetry = { version = "0.31", default-features = false, features = ["metrics", "trace"], optional = true }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "trace"], optional = true }
+regex = { version = "1.12", optional = true }
 # OTLP protobuf builders used by fuzz/test-only wire-format helpers. The
 # gen-tonic-messages feature pulls tonic/tokio transitively and is intentionally
 # not part of the metrics feature.

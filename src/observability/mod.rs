@@ -582,12 +582,10 @@ fn unix_seconds_from_utc(
     }
 
     let days = days_from_civil(year, month, day);
-    Some(
-        days.checked_mul(86_400)?
-            .checked_add(i64::from(hour) * 3_600)?
-            .checked_add(i64::from(minute) * 60)?
-            .checked_add(i64::from(second))?,
-    )
+    days.checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))
 }
 
 #[must_use]
@@ -611,7 +609,7 @@ fn is_leap_year(year: i32) -> bool {
 #[must_use]
 #[cfg(any(test, feature = "metrics"))]
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let year = i64::from(year) - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
     let month = i64::from(month);
