@@ -6150,3 +6150,19 @@ path = "fuzz_targets/grpc_codec_oracle_hardening.rs"
 test = false
 doc = false
 bench = false
+
+# Restored registration (br-asupersync-lr6n3n): this entry was added in 5e4f74206
+# and accidentally clobbered 7 minutes later by 36053e577 (concurrent Cargo.toml
+# edits). DNS lookup helper outcome fuzzer with OPT-length oracle.
+[[bin]]
+name = "dns_lookup_decoder"
+path = "fuzz_targets/dns_lookup_decoder.rs"
+test = false
+doc = false
+bench = false
+
+
+
+
+
+

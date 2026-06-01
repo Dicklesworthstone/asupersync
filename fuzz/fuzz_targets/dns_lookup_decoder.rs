@@ -5,6 +5,7 @@
 // `LookupIp`, `LookupMx`, `LookupSrv`, and `LookupTxt`, while mixing in valid
 // EDNS0 OPT records plus malformed owner compression and advertised-length
 // overruns.
+#![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::net::dns::{Resolver, ResolverConfig};
