@@ -22,58 +22,69 @@
 //!
 //! ## Benchmark Results (10K timers)
 //!
-//! Run: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_bench_docs cargo bench --features criterion-benches --bench timer_wheel -- comparison/`
+//! Run: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_bench_docs RUSTFLAGS='-C force-frame-pointers=yes' cargo bench --profile release-perf --features "test-internals criterion-benches" --bench timer_wheel -- comparison/`
+//!
+//! Measured 2026-06-01 on the `release-perf` profile (the canonical perf-gate
+//! profile: thin LTO, codegen-units=1), rch worker, 100 samples/bench.
+//! Numbers are point-in-time and host-dependent; re-run the command above to
+//! refresh. (br-asupersync-ianwli)
 //!
 //! ### Insert (10K elements)
 //! | Structure    | Time      | Throughput     | vs. Wheel |
 //! |-------------|-----------|----------------|-----------|
-//! | TimerWheel  | 1.28 ms   | 7.83 Melem/s   | 1.00x     |
-//! | BTreeMap    | 2.26 ms   | 4.43 Melem/s   | 1.76x slower |
-//! | BinaryHeap  | 1.18 ms   | 8.47 Melem/s   | 0.92x     |
-//! | Vec         | 0.48 ms   | 20.86 Melem/s  | 0.37x     |
+//! | TimerWheel  | 280 µs    | 35.7 Melem/s   | 1.00x     |
+//! | BTreeMap    | 2.23 ms   | 4.48 Melem/s   | 7.96x slower |
+//! | BinaryHeap  | 771 µs    | 13.0 Melem/s   | 2.75x slower |
+//! | Vec         | 56.2 µs   | 177.8 Melem/s  | 0.20x     |
 //!
 //! ### Cancel (10K elements)
 //! | Structure    | Time      | Throughput     | vs. Wheel |
 //! |-------------|-----------|----------------|-----------|
-//! | TimerWheel  | 0.52 ms   | 19.39 Melem/s  | 1.00x     |
-//! | BTreeMap    | 1.38 ms   | 7.26 Melem/s   | 2.67x slower |
-//! | BinaryHeap  | 0.58 ms   | 17.19 Melem/s  | 1.13x slower |
-//! | Vec         | 21.42 ms  | 0.47 Melem/s   | 41.2x slower |
+//! | TimerWheel  | 45.2 µs   | 221.3 Melem/s  | 1.00x     |
+//! | BTreeMap    | 1.22 ms   | 8.21 Melem/s   | 27.0x slower |
+//! | BinaryHeap  | 276 µs    | 36.3 Melem/s   | 6.10x slower |
+//! | Vec         | 27.7 ms   | 0.36 Melem/s   | 612.9x slower |
 //!
 //! ### Expire All (10K elements)
 //! | Structure    | Time      | Throughput     | vs. Wheel |
 //! |-------------|-----------|----------------|-----------|
-//! | TimerWheel  | 1.67 ms   | 5.98 Melem/s   | 1.00x     |
-//! | BTreeMap    | 0.24 ms   | 41.56 Melem/s  | 0.14x     |
-//! | BinaryHeap  | 0.89 ms   | 11.18 Melem/s  | 0.53x     |
-//! | Vec         | 0.13 ms   | 74.54 Melem/s  | 0.08x     |
+//! | TimerWheel  | 1.08 ms   | 9.23 Melem/s   | 1.00x     |
+//! | BTreeMap    | 294 µs    | 34.0 Melem/s   | 0.27x     |
+//! | BinaryHeap  | 984 µs    | 10.2 Melem/s   | 0.91x     |
+//! | Vec         | 58.6 µs   | 170.6 Melem/s  | 0.05x     |
 //!
 //! ### Mixed Workload (10K elements: insert + cancel 1/3 + expire in steps)
 //! | Structure    | Time      | Throughput     | vs. Wheel |
 //! |-------------|-----------|----------------|-----------|
-//! | TimerWheel  | 3.27 ms   | 3.06 Melem/s   | 1.00x     |
-//! | BTreeMap    | 3.05 ms   | 3.28 Melem/s   | 0.93x     |
-//! | BinaryHeap  | 2.25 ms   | 4.44 Melem/s   | 0.69x     |
-//! | Vec         | 13.20 ms  | 0.76 Melem/s   | 4.04x slower |
+//! | TimerWheel  | 1.40 ms   | 7.14 Melem/s   | 1.00x     |
+//! | BTreeMap    | 3.00 ms   | 3.33 Melem/s   | 2.15x slower |
+//! | BinaryHeap  | 2.01 ms   | 4.97 Melem/s   | 1.44x slower |
+//! | Vec         | 17.9 ms   | 0.56 Melem/s   | 12.8x slower |
 //!
 //! ### Analysis
 //!
-//! The timer wheel trades raw throughput for consistency:
-//! - **Cancel**: 2.67x faster than BTreeMap at 10K. This is the primary
+//! The timer wheel wins everywhere except bulk expiry:
+//! - **Cancel**: ~27x faster than BTreeMap at 10K. This is the primary
 //!   advantage — O(1) generation-based cancel vs. O(log n) tree removal.
-//! - **Insert**: 1.76x faster than BTreeMap. O(1) slot placement vs. O(log n)
+//! - **Insert**: ~8x faster than BTreeMap. O(1) slot placement vs. O(log n)
 //!   tree insertion.
-//! - **Expire**: BTreeMap wins at bulk expiry because `split_off` moves entire
-//!   subtrees in O(log n). The wheel must traverse slots. Vec wins because
-//!   `retain` is a single sequential scan.
-//! - **Mixed**: Roughly competitive with BTreeMap; cancel advantage offsets
-//!   expire overhead. Vec collapses due to O(n) cancel.
-//! - **Vec** is fastest for insert and expire (sequential memory) but O(n)
-//!   cancel makes it unusable at scale.
+//! - **Expire**: BTreeMap wins bulk expiry (3.7x) because `split_off` moves
+//!   entire subtrees in O(log n). The wheel must traverse slots. Vec wins
+//!   because `retain` is a single sequential scan.
+//! - **Mixed**: The wheel wins outright (2.15x faster than BTreeMap) — the
+//!   cancel advantage dominates the expire overhead. Vec collapses due to
+//!   O(n) cancel.
+//! - **Vec** is fastest for pure insert and expire (sequential memory) but
+//!   O(n) cancel makes it unusable at scale.
 //!
 //! The wheel's real advantage shows in the *cancel* path, which is critical
 //! for connection timeout management where most timers are cancelled before
 //! expiry (typical server pattern).
+//!
+//! History: an earlier table measured on the default `bench` profile recorded
+//! cancel at 2.67x and mixed as roughly competitive; wheel-side optimization
+//! work plus the LTO/codegen-units=1 release-perf profile moved every
+//! wheel-favored ratio substantially in the wheel's favor.
 
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
