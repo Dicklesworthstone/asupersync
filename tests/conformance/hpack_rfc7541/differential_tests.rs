@@ -445,7 +445,9 @@ mod tests {
     fn interop_source_no_longer_contains_shortcut_claims() {
         let source = include_str!("differential_tests.rs");
 
-        assert!(!source.contains("return temporary shortcut results"));
-        assert!(!source.contains("not ready for vendor comparison"));
+        // Sentinel phrases are split with `concat!` so this scan does not
+        // match its own assertion literals when scanning this file.
+        assert!(!source.contains(concat!("return temporary ", "shortcut results")));
+        assert!(!source.contains(concat!("not ready for ", "vendor comparison")));
     }
 }
