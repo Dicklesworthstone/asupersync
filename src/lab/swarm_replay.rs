@@ -53,6 +53,10 @@ pub const SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION: &str = "asupersync.swarm-proof-l
 /// Stable schema version for deterministic swarm failure minimizer reports.
 pub const SWARM_FAILURE_MINIMIZER_SCHEMA_VERSION: &str = "asupersync.swarm-failure-minimizer.v1";
 
+/// Stable schema version for operator cockpit swarm reports.
+pub const SWARM_OPERATOR_COCKPIT_REPORT_SCHEMA_VERSION: &str =
+    "asupersync.swarm-operator-cockpit-report.v1";
+
 const MAX_FIRST_SLICE_TASKS: usize = 10_000;
 
 /// Deterministic workload knobs for a swarm replay lab run.
@@ -1362,6 +1366,197 @@ pub struct SwarmContentionHeatmapLedger {
     pub top_hotspots: Vec<SwarmContentionHotSpot>,
     /// Stable routing hints for agents.
     pub routing_hints: Vec<String>,
+}
+
+/// Final fail-closed outcome for an operator cockpit report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmOperatorCockpitOutcome {
+    /// Required evidence is present and all reported verdicts are nominal.
+    Pass,
+    /// Required evidence is present, but one or more lanes need operator attention.
+    Degraded,
+    /// The modeled run exhausted the deterministic brownout policy.
+    NoWin,
+    /// Required live proof evidence is not available yet.
+    Blocked,
+    /// Evidence was captured against stale source state or stale baselines.
+    StaleEvidence,
+    /// Required report fields are missing or redaction is not preserved.
+    Malformed,
+    /// The requested report shape is outside the supported cockpit policy.
+    Unsupported,
+}
+
+/// Memory and brownout state copied into an operator cockpit report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmOperatorCockpitMemoryDecision {
+    /// No brownout was required.
+    Nominal,
+    /// Optional work was shed while the core invariant evidence remained valid.
+    BrownoutOptional,
+    /// The modeled run has no winning admission policy under current pressure.
+    NoWin,
+    /// The source evidence cannot support a cockpit memory decision.
+    Unsupported,
+}
+
+/// Obligation verdict projected into the cockpit report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmOperatorCockpitObligationVerdict {
+    /// Obligation fields were present and every obligation resolved.
+    Clean,
+    /// Obligation fields were present, but unresolved obligations remain.
+    LeakSuspect,
+    /// Obligation fields were absent from the source trace.
+    Missing,
+    /// The trace itself was incomplete, so the obligation verdict is not reliable.
+    Incomplete,
+}
+
+/// Compact proof-lane row embedded in an operator cockpit report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmOperatorCockpitProofLaneSummary {
+    /// Stable proof-lane id.
+    pub lane_id: String,
+    /// Planner decision copied from the proof lane.
+    pub decision: SwarmProofLaneDecision,
+    /// Whether remote RCH execution was mandatory for the lane.
+    pub remote_required: bool,
+    /// Whether remote RCH worker provenance was observed.
+    pub remote_observed: bool,
+    /// Whether expected and observed HEAD evidence disagreed.
+    pub stale_head: bool,
+    /// Exact command copied from the proof lane.
+    pub command: String,
+    /// Cargo target directory copied from the proof lane.
+    pub target_dir: String,
+}
+
+/// Input consumed by the deterministic operator cockpit report builder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmOperatorCockpitInput {
+    /// Stable report id.
+    pub report_id: String,
+    /// Scenario that produced the reported swarm run.
+    pub scenario: Option<SwarmReplayScenario>,
+    /// Trace summary carrying quiescence, cancellation, and obligation evidence.
+    pub trace_summary: Option<SwarmPressureTraceSummary>,
+    /// Remote-only proof lanes that validate the report.
+    pub proof_lanes: Vec<SwarmProofLanePlan>,
+    /// Contention ledger for lock, scheduler, region, and queue hotspots.
+    pub contention_ledger: Option<SwarmContentionHeatmapLedger>,
+    /// Optional minimized failure report for first-failure routing.
+    pub minimizer_report: Option<SwarmFailureMinimizerReport>,
+    /// Memory and brownout decision observed for the run.
+    pub memory_decision: SwarmOperatorCockpitMemoryDecision,
+    /// Operator-readable reason for the memory decision.
+    pub memory_decision_reason: Option<String>,
+    /// p50 latency in nanoseconds when known.
+    pub latency_p50_ns: Option<u64>,
+    /// p95 latency in nanoseconds when known.
+    pub latency_p95_ns: Option<u64>,
+    /// p99 latency in nanoseconds when known.
+    pub latency_p99_ns: Option<u64>,
+    /// Coefficient of variation in basis points when known.
+    pub latency_cv_bps: Option<u16>,
+    /// Source artifacts consumed by this report.
+    pub source_artifacts: Vec<String>,
+    /// Redaction policy applied before report publication.
+    pub redaction_policy_id: Option<String>,
+    /// Count of secret-like values that remain unredacted.
+    pub secret_like_value_count: usize,
+    /// Agent, harness, or release lane that generated the report.
+    pub generated_by: String,
+}
+
+/// Stable operator cockpit report suitable for Agent Mail and release evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmOperatorCockpitReport {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Stable report id.
+    pub report_id: String,
+    /// Scenario id copied from the scenario when present.
+    pub scenario_id: Option<String>,
+    /// Replay seed copied from the scenario when present.
+    pub seed: Option<u64>,
+    /// Worker count copied from the scenario when present.
+    pub worker_count: Option<usize>,
+    /// Region count copied from the scenario when present.
+    pub region_count: Option<usize>,
+    /// Modeled task count copied from the scenario when present.
+    pub task_count: Option<usize>,
+    /// Final cockpit outcome.
+    pub outcome: SwarmOperatorCockpitOutcome,
+    /// Whether every required evidence family was present.
+    pub required_fields_present: bool,
+    /// Required evidence fields that were absent or rejected.
+    pub missing_required_fields: Vec<String>,
+    /// Whether region close reached quiescence when known.
+    pub quiescent: Option<bool>,
+    /// Obligation verdict copied from the trace summary.
+    pub obligation_verdict: SwarmOperatorCockpitObligationVerdict,
+    /// Number of unresolved obligations when known.
+    pub unresolved_obligations: Option<usize>,
+    /// Trace verdict copied from the trace summary.
+    pub trace_verdict: Option<SwarmPressureTraceVerdict>,
+    /// Compact proof-lane rows.
+    pub proof_lanes: Vec<SwarmOperatorCockpitProofLaneSummary>,
+    /// Count of proof lanes attached to the report.
+    pub proof_lane_count: usize,
+    /// Count of proof lanes that are ready and fresh.
+    pub ready_proof_lane_count: usize,
+    /// Proof-lane ids with stale HEAD evidence.
+    pub stale_proof_lane_ids: Vec<String>,
+    /// Proof-lane ids that block publication.
+    pub blocked_proof_lane_ids: Vec<String>,
+    /// Whether every remote-required proof lane observed remote provenance.
+    pub rch_remote_provenance_observed: bool,
+    /// p50 latency in nanoseconds when known.
+    pub latency_p50_ns: Option<u64>,
+    /// p95 latency in nanoseconds when known.
+    pub latency_p95_ns: Option<u64>,
+    /// p99 latency in nanoseconds when known.
+    pub latency_p99_ns: Option<u64>,
+    /// Coefficient of variation in basis points when known.
+    pub latency_cv_bps: Option<u16>,
+    /// Memory and brownout decision observed for the run.
+    pub memory_decision: SwarmOperatorCockpitMemoryDecision,
+    /// Operator-readable reason for the memory decision.
+    pub memory_decision_reason: Option<String>,
+    /// Contention verdict copied from the heatmap ledger when present.
+    pub contention_verdict: Option<SwarmContentionHeatmapVerdict>,
+    /// Maximum contention severity copied from the heatmap ledger when present.
+    pub contention_max_severity: Option<SwarmContentionSeverity>,
+    /// Highest-ranked contention hotspots.
+    pub contention_hotspots: Vec<SwarmContentionHotSpot>,
+    /// Minimizer verdict copied from the failure minimizer when present.
+    pub minimizer_verdict: Option<SwarmFailureMinimizerVerdict>,
+    /// Minimizer stop reason copied from the failure minimizer when present.
+    pub minimizer_stop_reason: Option<SwarmFailureMinimizerStopReason>,
+    /// Minimized scenario id when a minimizer report is present.
+    pub minimized_scenario_id: Option<String>,
+    /// First invariant violation or first failure.
+    pub first_invariant_violation: Option<String>,
+    /// Suggested next owner bead.
+    pub next_owner_bead: String,
+    /// Stable routing hints for operators and agents.
+    pub routing_hints: Vec<String>,
+    /// Source artifacts consumed by this report.
+    pub source_artifacts: Vec<String>,
+    /// Redaction policy applied before report publication.
+    pub redaction_policy_id: Option<String>,
+    /// Whether redaction requirements were preserved.
+    pub redaction_preserved: bool,
+    /// Agent, harness, or release lane that generated the report.
+    pub generated_by: String,
+    /// Cockpit reports never request destructive cleanup.
+    pub destructive_cleanup_required: bool,
+    /// Cockpit reports never request branch or worktree creation.
+    pub branch_or_worktree_required: bool,
 }
 
 /// Failure family the deterministic minimizer preserves while shrinking.
@@ -4685,6 +4880,610 @@ pub fn render_swarm_failure_minimizer_text(report: &SwarmFailureMinimizerReport)
     }
 
     lines.join("\n")
+}
+
+/// Build a deterministic operator cockpit report from source-owned swarm evidence.
+#[must_use]
+pub fn build_swarm_operator_cockpit_report(
+    input: &SwarmOperatorCockpitInput,
+) -> SwarmOperatorCockpitReport {
+    let scenario = input.scenario.as_ref();
+    let trace = input.trace_summary.as_ref();
+    let contention = input.contention_ledger.as_ref();
+    let minimizer = input.minimizer_report.as_ref();
+    let mut missing_required_fields = cockpit_missing_required_fields(input);
+    let proof_lanes = cockpit_proof_lane_summaries(&input.proof_lanes);
+    let stale_proof_lane_ids = cockpit_stale_proof_lane_ids(&input.proof_lanes);
+    let blocked_proof_lane_ids = cockpit_blocked_proof_lane_ids(&input.proof_lanes);
+    let rch_remote_provenance_observed = !input.proof_lanes.is_empty()
+        && input
+            .proof_lanes
+            .iter()
+            .all(|lane| !lane.remote_required || lane.remote_provenance_observed);
+    let ready_proof_lane_count = input
+        .proof_lanes
+        .iter()
+        .filter(|lane| cockpit_proof_lane_is_ready(lane))
+        .count();
+    let quiescent = trace.map(cockpit_trace_quiescent);
+    let obligation_verdict = cockpit_obligation_verdict(trace);
+    let unresolved_obligations = trace.map(|summary| summary.obligations.unresolved_obligations);
+    let redaction_preserved = cockpit_redaction_preserved(input);
+    let contention_hotspots = contention.map_or_else(Vec::new, |ledger| {
+        ledger.top_hotspots.iter().take(5).cloned().collect()
+    });
+    let first_invariant_violation = trace
+        .and_then(|summary| summary.first_invariant_violation.clone())
+        .or_else(|| minimizer.map(|report| report.first_failure.clone()));
+    let next_owner_bead = cockpit_next_owner_bead(trace, contention, minimizer);
+    let source_artifacts = sorted_unique_owned(input.source_artifacts.clone());
+
+    if !redaction_preserved
+        && !missing_required_fields
+            .iter()
+            .any(|field| field.starts_with("redaction"))
+    {
+        missing_required_fields.push("redaction.policy".to_string());
+        missing_required_fields = sorted_unique_owned(missing_required_fields);
+    }
+
+    let required_fields_present = missing_required_fields.is_empty();
+    let outcome = cockpit_outcome(
+        required_fields_present,
+        &missing_required_fields,
+        !stale_proof_lane_ids.is_empty()
+            || contention.is_some_and(|ledger| {
+                ledger.verdict == SwarmContentionHeatmapVerdict::StaleEvidence
+            }),
+        !blocked_proof_lane_ids.is_empty(),
+        trace.map(|summary| summary.verdict),
+        obligation_verdict,
+        contention.map(|ledger| ledger.verdict),
+        minimizer.map(|report| report.verdict),
+        input.memory_decision,
+    );
+    let routing_hints = cockpit_routing_hints(
+        input,
+        &missing_required_fields,
+        &stale_proof_lane_ids,
+        &blocked_proof_lane_ids,
+        &next_owner_bead,
+    );
+
+    SwarmOperatorCockpitReport {
+        schema_version: SWARM_OPERATOR_COCKPIT_REPORT_SCHEMA_VERSION.to_string(),
+        report_id: input.report_id.clone(),
+        scenario_id: scenario.map(|scenario| scenario.scenario_id.clone()),
+        seed: scenario.map(|scenario| scenario.seed),
+        worker_count: scenario.map(|scenario| scenario.worker_count),
+        region_count: scenario.map(|scenario| scenario.region_count),
+        task_count: scenario.map(SwarmReplayScenario::task_count),
+        outcome,
+        required_fields_present,
+        missing_required_fields,
+        quiescent,
+        obligation_verdict,
+        unresolved_obligations,
+        trace_verdict: trace.map(|summary| summary.verdict),
+        proof_lanes,
+        proof_lane_count: input.proof_lanes.len(),
+        ready_proof_lane_count,
+        stale_proof_lane_ids,
+        blocked_proof_lane_ids,
+        rch_remote_provenance_observed,
+        latency_p50_ns: input.latency_p50_ns,
+        latency_p95_ns: input.latency_p95_ns,
+        latency_p99_ns: input.latency_p99_ns,
+        latency_cv_bps: input.latency_cv_bps,
+        memory_decision: input.memory_decision,
+        memory_decision_reason: input.memory_decision_reason.clone(),
+        contention_verdict: contention.map(|ledger| ledger.verdict),
+        contention_max_severity: contention.map(|ledger| ledger.max_severity),
+        contention_hotspots,
+        minimizer_verdict: minimizer.map(|report| report.verdict),
+        minimizer_stop_reason: minimizer.map(|report| report.stop_reason),
+        minimized_scenario_id: minimizer
+            .map(|report| report.minimized_scenario.scenario_id.clone()),
+        first_invariant_violation,
+        next_owner_bead,
+        routing_hints,
+        source_artifacts,
+        redaction_policy_id: input.redaction_policy_id.clone(),
+        redaction_preserved,
+        generated_by: input.generated_by.clone(),
+        destructive_cleanup_required: false,
+        branch_or_worktree_required: false,
+    }
+}
+
+/// Render a compact deterministic cockpit report for Agent Mail and release notes.
+#[must_use]
+pub fn render_swarm_operator_cockpit_text(report: &SwarmOperatorCockpitReport) -> String {
+    let mut lines = vec![
+        "Swarm Operator Cockpit Report".to_string(),
+        format!("schema_version: {}", report.schema_version),
+        format!(
+            "report_id: {} outcome={:?} generated_by={}",
+            report.report_id, report.outcome, report.generated_by
+        ),
+        format!(
+            "scenario: {} seed={} workers={} regions={} tasks={}",
+            report.scenario_id.as_deref().unwrap_or("missing"),
+            optional_u64_text(report.seed),
+            optional_usize_text(report.worker_count),
+            optional_usize_text(report.region_count),
+            optional_usize_text(report.task_count)
+        ),
+        format!(
+            "verdicts: quiescent={} obligation={:?} trace={} required_fields_present={} missing={}",
+            optional_bool_text(report.quiescent),
+            report.obligation_verdict,
+            optional_trace_verdict_text(report.trace_verdict),
+            report.required_fields_present,
+            if report.missing_required_fields.is_empty() {
+                "none".to_string()
+            } else {
+                report.missing_required_fields.join(",")
+            }
+        ),
+        format!(
+            "proof_lanes: ready={}/{} remote_observed={} stale={} blocked={}",
+            report.ready_proof_lane_count,
+            report.proof_lane_count,
+            report.rch_remote_provenance_observed,
+            cockpit_join_or_none(&report.stale_proof_lane_ids),
+            cockpit_join_or_none(&report.blocked_proof_lane_ids)
+        ),
+        format!(
+            "latency_ns: p50={} p95={} p99={} cv_bps={}",
+            optional_u64_text(report.latency_p50_ns),
+            optional_u64_text(report.latency_p95_ns),
+            optional_u64_text(report.latency_p99_ns),
+            report
+                .latency_cv_bps
+                .map_or_else(|| "n/a".to_string(), |value| value.to_string())
+        ),
+        format!(
+            "memory: {:?} reason={}",
+            report.memory_decision,
+            report.memory_decision_reason.as_deref().unwrap_or("none")
+        ),
+        format!(
+            "contention: verdict={} max_severity={} hotspots={}",
+            optional_contention_verdict_text(report.contention_verdict),
+            optional_contention_severity_text(report.contention_max_severity),
+            report.contention_hotspots.len()
+        ),
+        format!(
+            "minimizer: verdict={} stop={} minimized_scenario={}",
+            optional_minimizer_verdict_text(report.minimizer_verdict),
+            optional_minimizer_stop_text(report.minimizer_stop_reason),
+            report.minimized_scenario_id.as_deref().unwrap_or("none")
+        ),
+        format!(
+            "redaction: policy={} preserved={}",
+            report.redaction_policy_id.as_deref().unwrap_or("missing"),
+            report.redaction_preserved
+        ),
+        format!(
+            "provenance: artifacts={} destructive_cleanup_required={} branch_or_worktree_required={}",
+            cockpit_join_or_none(&report.source_artifacts),
+            report.destructive_cleanup_required,
+            report.branch_or_worktree_required
+        ),
+        format!(
+            "first_invariant_violation: {}",
+            report
+                .first_invariant_violation
+                .as_deref()
+                .unwrap_or("none")
+        ),
+        format!("next_owner_bead: {}", report.next_owner_bead),
+    ];
+
+    lines.push("top_hotspots:".to_string());
+    if report.contention_hotspots.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for hotspot in report.contention_hotspots.iter().take(3) {
+            lines.push(format!(
+                "- key={} kind={:?} severity={:?} score={} route={} bead={}",
+                hotspot.key,
+                hotspot.kind,
+                hotspot.severity,
+                hotspot.impact_score,
+                hotspot.owner_surface,
+                hotspot.owner_bead_hint
+            ));
+        }
+    }
+
+    lines.push("proof_lane_rows:".to_string());
+    if report.proof_lanes.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for lane in report.proof_lanes.iter().take(4) {
+            lines.push(format!(
+                "- id={} decision={:?} remote_required={} remote_observed={} stale_head={} target_dir={}",
+                lane.lane_id,
+                lane.decision,
+                lane.remote_required,
+                lane.remote_observed,
+                lane.stale_head,
+                lane.target_dir
+            ));
+        }
+    }
+
+    lines.push("routing_hints:".to_string());
+    if report.routing_hints.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for hint in report.routing_hints.iter().take(6) {
+            lines.push(format!("- {hint}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn cockpit_missing_required_fields(input: &SwarmOperatorCockpitInput) -> Vec<String> {
+    let mut missing = Vec::new();
+
+    if input.report_id.trim().is_empty() {
+        missing.push("report_id".to_string());
+    }
+    match &input.scenario {
+        Some(scenario) => {
+            if scenario.scenario_id.trim().is_empty() {
+                missing.push("scenario.scenario_id".to_string());
+            }
+            if scenario.validate().is_err() {
+                missing.push("scenario.valid".to_string());
+            }
+        }
+        None => missing.push("scenario".to_string()),
+    }
+
+    match &input.trace_summary {
+        Some(summary) => {
+            if let Some(scenario) = &input.scenario {
+                if !scenario.scenario_id.trim().is_empty()
+                    && summary.scenario_id != scenario.scenario_id
+                {
+                    missing.push("trace_summary.scenario_id".to_string());
+                }
+            }
+            if !summary.required_fields_present {
+                missing.extend(
+                    summary
+                        .missing_required_fields
+                        .iter()
+                        .map(|field| format!("trace_summary.{field}")),
+                );
+            }
+            if summary.verdict == SwarmPressureTraceVerdict::Incomplete {
+                missing.push("trace_summary.verdict".to_string());
+            }
+            if !summary.obligations.fields_present {
+                missing.push("trace_summary.obligation_verdict".to_string());
+            }
+            if summary
+                .missing_required_fields
+                .iter()
+                .any(|field| field == "quiescence_verdict")
+            {
+                missing.push("trace_summary.quiescence_verdict".to_string());
+            }
+        }
+        None => missing.push("trace_summary".to_string()),
+    }
+
+    if input.proof_lanes.is_empty() {
+        missing.push("proof_lanes".to_string());
+    }
+    if input
+        .proof_lanes
+        .iter()
+        .any(|lane| lane.remote_required && !lane.remote_provenance_observed)
+    {
+        missing.push("proof_lanes.remote_provenance".to_string());
+    }
+
+    match &input.contention_ledger {
+        Some(ledger) => {
+            if !ledger.required_fields_present {
+                missing.extend(
+                    ledger
+                        .missing_required_fields
+                        .iter()
+                        .map(|field| format!("contention_ledger.{field}")),
+                );
+            }
+            if ledger.verdict == SwarmContentionHeatmapVerdict::Incomplete {
+                missing.push("contention_ledger.verdict".to_string());
+            }
+        }
+        None => missing.push("contention_ledger".to_string()),
+    }
+
+    if input.source_artifacts.is_empty() {
+        missing.push("source_artifacts".to_string());
+    }
+    if input
+        .redaction_policy_id
+        .as_deref()
+        .is_none_or(|policy| policy.trim().is_empty())
+    {
+        missing.push("redaction_policy_id".to_string());
+    }
+    if input.secret_like_value_count > 0 {
+        missing.push("redaction.secret_like_values".to_string());
+    }
+    if input.generated_by.trim().is_empty() {
+        missing.push("generated_by".to_string());
+    }
+    if input
+        .minimizer_report
+        .as_ref()
+        .is_some_and(|report| !report.redaction_preserved)
+    {
+        missing.push("minimizer_report.redaction".to_string());
+    }
+
+    sorted_unique_owned(missing)
+}
+
+fn cockpit_redaction_preserved(input: &SwarmOperatorCockpitInput) -> bool {
+    input
+        .redaction_policy_id
+        .as_deref()
+        .is_some_and(|policy| !policy.trim().is_empty())
+        && input.secret_like_value_count == 0
+        && input
+            .minimizer_report
+            .as_ref()
+            .is_none_or(|report| report.redaction_preserved)
+}
+
+fn cockpit_proof_lane_summaries(
+    proof_lanes: &[SwarmProofLanePlan],
+) -> Vec<SwarmOperatorCockpitProofLaneSummary> {
+    let mut summaries = proof_lanes
+        .iter()
+        .map(|lane| SwarmOperatorCockpitProofLaneSummary {
+            lane_id: lane.lane_id.clone(),
+            decision: lane.decision,
+            remote_required: lane.remote_required,
+            remote_observed: lane.remote_provenance_observed,
+            stale_head: lane.stale_head,
+            command: lane.command.clone(),
+            target_dir: lane.target_dir.clone(),
+        })
+        .collect::<Vec<_>>();
+    summaries.sort_by(|left, right| left.lane_id.cmp(&right.lane_id));
+    summaries
+}
+
+fn cockpit_stale_proof_lane_ids(proof_lanes: &[SwarmProofLanePlan]) -> Vec<String> {
+    sorted_unique_owned(
+        proof_lanes
+            .iter()
+            .filter(|lane| lane.stale_head)
+            .map(|lane| lane.lane_id.clone())
+            .collect(),
+    )
+}
+
+fn cockpit_blocked_proof_lane_ids(proof_lanes: &[SwarmProofLanePlan]) -> Vec<String> {
+    sorted_unique_owned(
+        proof_lanes
+            .iter()
+            .filter(|lane| !cockpit_proof_lane_is_ready(lane) && !lane.stale_head)
+            .map(|lane| lane.lane_id.clone())
+            .collect(),
+    )
+}
+
+fn cockpit_proof_lane_is_ready(lane: &SwarmProofLanePlan) -> bool {
+    lane.decision == SwarmProofLaneDecision::Ready
+        && !lane.stale_head
+        && (!lane.remote_required || lane.remote_provenance_observed)
+}
+
+fn cockpit_trace_quiescent(summary: &SwarmPressureTraceSummary) -> bool {
+    summary.region_lifecycle.non_quiescent_regions == 0
+        && summary.task_lifecycle.non_terminal_tasks == 0
+        && summary.task_lifecycle.task_leaks == 0
+}
+
+fn cockpit_obligation_verdict(
+    trace: Option<&SwarmPressureTraceSummary>,
+) -> SwarmOperatorCockpitObligationVerdict {
+    match trace {
+        None => SwarmOperatorCockpitObligationVerdict::Missing,
+        Some(summary) if !summary.obligations.fields_present => {
+            SwarmOperatorCockpitObligationVerdict::Missing
+        }
+        Some(summary) if !summary.required_fields_present => {
+            SwarmOperatorCockpitObligationVerdict::Incomplete
+        }
+        Some(summary)
+            if summary.obligations.unresolved_obligations > 0
+                || !summary.obligation_leak_suspects.is_empty() =>
+        {
+            SwarmOperatorCockpitObligationVerdict::LeakSuspect
+        }
+        Some(_) => SwarmOperatorCockpitObligationVerdict::Clean,
+    }
+}
+
+fn cockpit_outcome(
+    required_fields_present: bool,
+    missing_required_fields: &[String],
+    stale_evidence: bool,
+    blocked_proofs: bool,
+    trace_verdict: Option<SwarmPressureTraceVerdict>,
+    obligation_verdict: SwarmOperatorCockpitObligationVerdict,
+    contention_verdict: Option<SwarmContentionHeatmapVerdict>,
+    minimizer_verdict: Option<SwarmFailureMinimizerVerdict>,
+    memory_decision: SwarmOperatorCockpitMemoryDecision,
+) -> SwarmOperatorCockpitOutcome {
+    if !required_fields_present {
+        return if cockpit_missing_fields_are_only_proof_blockers(missing_required_fields) {
+            SwarmOperatorCockpitOutcome::Blocked
+        } else {
+            SwarmOperatorCockpitOutcome::Malformed
+        };
+    }
+    if stale_evidence {
+        return SwarmOperatorCockpitOutcome::StaleEvidence;
+    }
+    if blocked_proofs {
+        return SwarmOperatorCockpitOutcome::Blocked;
+    }
+    match memory_decision {
+        SwarmOperatorCockpitMemoryDecision::Unsupported => {
+            return SwarmOperatorCockpitOutcome::Unsupported;
+        }
+        SwarmOperatorCockpitMemoryDecision::NoWin => return SwarmOperatorCockpitOutcome::NoWin,
+        SwarmOperatorCockpitMemoryDecision::Nominal
+        | SwarmOperatorCockpitMemoryDecision::BrownoutOptional => {}
+    }
+
+    let degraded = memory_decision == SwarmOperatorCockpitMemoryDecision::BrownoutOptional
+        || trace_verdict == Some(SwarmPressureTraceVerdict::Fail)
+        || obligation_verdict == SwarmOperatorCockpitObligationVerdict::LeakSuspect
+        || contention_verdict == Some(SwarmContentionHeatmapVerdict::Degraded)
+        || minimizer_verdict.is_some();
+
+    if degraded {
+        SwarmOperatorCockpitOutcome::Degraded
+    } else {
+        SwarmOperatorCockpitOutcome::Pass
+    }
+}
+
+fn cockpit_missing_fields_are_only_proof_blockers(fields: &[String]) -> bool {
+    !fields.is_empty()
+        && fields.iter().all(|field| {
+            matches!(
+                field.as_str(),
+                "proof_lanes" | "proof_lanes.remote_provenance"
+            )
+        })
+}
+
+fn cockpit_next_owner_bead(
+    trace: Option<&SwarmPressureTraceSummary>,
+    contention: Option<&SwarmContentionHeatmapLedger>,
+    minimizer: Option<&SwarmFailureMinimizerReport>,
+) -> String {
+    if let Some(report) = minimizer {
+        return report.owner_bead_hint.clone();
+    }
+    if let Some(hotspot) = contention.and_then(|ledger| {
+        ledger
+            .top_hotspots
+            .iter()
+            .find(|hotspot| hotspot.severity >= SwarmContentionSeverity::Warning)
+    }) {
+        return hotspot.owner_bead_hint.clone();
+    }
+    if let Some(summary) = trace {
+        if let Some(hint) = summary.routing_hints.first() {
+            return hint.clone();
+        }
+    }
+    "asupersync-vssefs.9.6".to_string()
+}
+
+fn cockpit_routing_hints(
+    input: &SwarmOperatorCockpitInput,
+    missing_required_fields: &[String],
+    stale_proof_lane_ids: &[String],
+    blocked_proof_lane_ids: &[String],
+    next_owner_bead: &str,
+) -> Vec<String> {
+    let mut hints = Vec::new();
+    if !missing_required_fields.is_empty() {
+        hints.push(format!(
+            "missing cockpit evidence: {}",
+            missing_required_fields.join(",")
+        ));
+    }
+    if !stale_proof_lane_ids.is_empty() {
+        hints.push(format!(
+            "refresh stale proof lanes: {}",
+            stale_proof_lane_ids.join(",")
+        ));
+    }
+    if !blocked_proof_lane_ids.is_empty() {
+        hints.push(format!(
+            "rerun blocked proof lanes through remote RCH: {}",
+            blocked_proof_lane_ids.join(",")
+        ));
+    }
+    if input.secret_like_value_count > 0 {
+        hints.push(format!(
+            "redact {} secret-like value(s) before Agent Mail handoff",
+            input.secret_like_value_count
+        ));
+    }
+    if let Some(summary) = &input.trace_summary {
+        hints.extend(summary.routing_hints.clone());
+        if let Some(invariant) = &summary.first_invariant_violation {
+            hints.push(format!("first invariant violation: {invariant}"));
+        }
+    }
+    if let Some(ledger) = &input.contention_ledger {
+        hints.extend(ledger.routing_hints.clone());
+    }
+    if let Some(report) = &input.minimizer_report {
+        hints.extend(report.routing_hints.clone());
+        hints.push(format!(
+            "minimizer {:?} routes to {}",
+            report.verdict, report.owner_bead_hint
+        ));
+    }
+    hints.push(format!("next owner bead: {next_owner_bead}"));
+    sorted_unique_owned(hints)
+}
+
+fn cockpit_join_or_none(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(",")
+    }
+}
+
+fn optional_usize_text(value: Option<usize>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+}
+
+fn optional_bool_text(value: Option<bool>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+}
+
+fn optional_trace_verdict_text(value: Option<SwarmPressureTraceVerdict>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("{value:?}"))
+}
+
+fn optional_contention_verdict_text(value: Option<SwarmContentionHeatmapVerdict>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("{value:?}"))
+}
+
+fn optional_contention_severity_text(value: Option<SwarmContentionSeverity>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("{value:?}"))
+}
+
+fn optional_minimizer_verdict_text(value: Option<SwarmFailureMinimizerVerdict>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("{value:?}"))
+}
+
+fn optional_minimizer_stop_text(value: Option<SwarmFailureMinimizerStopReason>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("{value:?}"))
 }
 
 fn ranked_lock_hotspots(metrics: &[SwarmContentionLockMetric]) -> Vec<SwarmContentionHotSpot> {
