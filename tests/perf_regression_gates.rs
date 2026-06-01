@@ -1727,3 +1727,174 @@ fn gate_report_json_roundtrip() {
     assert!(!parsed.passed);
     assert_eq!(parsed.regressions[0].benchmark, "arena/insert");
 }
+
+// =========================================================================
+// apply_perf_ratchet.py two-sided flake quarantine (br-asupersync-4j4h32)
+// =========================================================================
+
+/// Write a synthetic `asupersync.baseline.v2` JSON with the given
+/// (name, median_ns, cv_pct) rows.
+fn write_ratchet_fixture(path: &Path, rows: &[(&str, f64, f64)]) {
+    let benchmarks: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(name, median, cv)| {
+            serde_json::json!({
+                "name": name,
+                "mean_ns": median,
+                "median_ns": median,
+                "std_dev_ns": median * cv / 100.0,
+                "cv_pct": cv,
+                "p95_ns": median * 1.1,
+                "p99_ns": median * 1.2,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "schema_version": "asupersync.baseline.v2",
+        "generated_at": "2026-06-01T00:00:00Z",
+        "cv_pct_flake_threshold": 5.0,
+        "flaky_benches": [],
+        "benchmarks": benchmarks,
+    });
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&doc).expect("serialize ratchet fixture"),
+    )
+    .expect("write ratchet fixture");
+}
+
+/// Run apply_perf_ratchet.py against a candidate/baseline fixture pair and
+/// return (exit_code, parsed JSON report).
+fn run_perf_ratchet(candidate: &Path, baseline: &Path) -> (i32, serde_json::Value) {
+    let script = repo_root().join("scripts/apply_perf_ratchet.py");
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg("--candidate")
+        .arg(candidate)
+        .arg("--baseline")
+        .arg(baseline)
+        .arg("--json")
+        .output()
+        .expect("run apply_perf_ratchet.py");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "ratchet emitted invalid JSON: {e}\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    (output.status.code().unwrap_or(-1), report)
+}
+
+/// The core two-sided protection: a flaky committed baseline must be
+/// QUARANTINED, not scored, even when the candidate looks like a huge
+/// regression against it. Before br-asupersync-4j4h32 this produced a
+/// phantom Block.
+#[test]
+fn ratchet_quarantines_flaky_baseline_instead_of_phantom_blocking() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let baseline_path = temp.path().join("baseline.json");
+    let candidate_path = temp.path().join("candidate.json");
+
+    // Baseline captured under contention: a/noisy is flake (cv 24.5%).
+    write_ratchet_fixture(
+        &baseline_path,
+        &[("a/noisy", 100.0, 24.5), ("a/stable", 200.0, 1.0)],
+    );
+    // Candidate is clean but appears +50% regressed vs. the noisy baseline row.
+    write_ratchet_fixture(
+        &candidate_path,
+        &[("a/noisy", 150.0, 1.0), ("a/stable", 201.0, 1.0)],
+    );
+
+    let (code, report) = run_perf_ratchet(&candidate_path, &baseline_path);
+
+    assert_eq!(
+        report["verdict"], "Allow",
+        "flaky baseline must not phantom-block: {report}"
+    );
+    assert_eq!(code, 0);
+    assert_eq!(report["scored_count"], 1, "only the stable bench is scored");
+    let quarantined = report["quarantined"].as_array().expect("quarantined array");
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(quarantined[0]["name"], "a/noisy");
+    assert_eq!(
+        quarantined[0]["side"], "baseline",
+        "quarantine must attribute the flake to the baseline side"
+    );
+    assert!(
+        report["blocked"]
+            .as_array()
+            .expect("blocked array")
+            .is_empty()
+    );
+}
+
+/// Candidate-side flake quarantine still works (pre-existing behavior must
+/// not regress), and the record is attributed to the candidate side.
+#[test]
+fn ratchet_still_quarantines_flaky_candidate_side() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let baseline_path = temp.path().join("baseline.json");
+    let candidate_path = temp.path().join("candidate.json");
+
+    write_ratchet_fixture(&baseline_path, &[("b/x", 100.0, 1.0), ("b/y", 100.0, 1.0)]);
+    write_ratchet_fixture(&candidate_path, &[("b/x", 100.0, 9.9), ("b/y", 101.0, 1.0)]);
+
+    let (code, report) = run_perf_ratchet(&candidate_path, &baseline_path);
+
+    assert_eq!(report["verdict"], "Allow");
+    assert_eq!(code, 0);
+    let quarantined = report["quarantined"].as_array().expect("quarantined array");
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(quarantined[0]["name"], "b/x");
+    assert_eq!(quarantined[0]["side"], "candidate");
+}
+
+/// Real regressions on stable benches must still Block (the two-sided check
+/// must not weaken the gate).
+#[test]
+fn ratchet_still_blocks_real_regression_on_stable_benches() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let baseline_path = temp.path().join("baseline.json");
+    let candidate_path = temp.path().join("candidate.json");
+
+    write_ratchet_fixture(&baseline_path, &[("b/x", 100.0, 1.0), ("b/y", 100.0, 1.0)]);
+    write_ratchet_fixture(&candidate_path, &[("b/x", 100.0, 1.0), ("b/y", 150.0, 1.0)]);
+
+    let (code, report) = run_perf_ratchet(&candidate_path, &baseline_path);
+
+    assert_eq!(report["verdict"], "Block");
+    assert_eq!(code, 2);
+    let blocked = report["blocked"].as_array().expect("blocked array");
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0]["name"], "b/y");
+}
+
+/// When every bench is flaky on the baseline side, the verdict is
+/// Quarantine (exit 3), not Allow and not Block.
+#[test]
+fn ratchet_all_flaky_baseline_yields_quarantine_verdict() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let baseline_path = temp.path().join("baseline.json");
+    let candidate_path = temp.path().join("candidate.json");
+
+    write_ratchet_fixture(
+        &baseline_path,
+        &[("c/x", 100.0, 30.0), ("c/y", 100.0, 15.0)],
+    );
+    write_ratchet_fixture(&candidate_path, &[("c/x", 100.0, 1.0), ("c/y", 100.0, 1.0)]);
+
+    let (code, report) = run_perf_ratchet(&candidate_path, &baseline_path);
+
+    assert_eq!(report["verdict"], "Quarantine");
+    assert_eq!(code, 3);
+    assert_eq!(report["scored_count"], 0);
+    assert_eq!(
+        report["quarantined"]
+            .as_array()
+            .expect("quarantined array")
+            .len(),
+        2
+    );
+}
