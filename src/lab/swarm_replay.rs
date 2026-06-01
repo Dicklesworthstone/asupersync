@@ -50,6 +50,9 @@ pub const SWARM_HANDOFF_VERIFICATION_SCHEMA_VERSION: &str =
 /// Stable schema version for remote-only swarm proof-lane plans.
 pub const SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION: &str = "asupersync.swarm-proof-lane-plan.v1";
 
+/// Stable schema version for deterministic swarm failure minimizer reports.
+pub const SWARM_FAILURE_MINIMIZER_SCHEMA_VERSION: &str = "asupersync.swarm-failure-minimizer.v1";
+
 const MAX_FIRST_SLICE_TASKS: usize = 10_000;
 
 /// Deterministic workload knobs for a swarm replay lab run.
@@ -1359,6 +1362,178 @@ pub struct SwarmContentionHeatmapLedger {
     pub top_hotspots: Vec<SwarmContentionHotSpot>,
     /// Stable routing hints for agents.
     pub routing_hints: Vec<String>,
+}
+
+/// Failure family the deterministic minimizer preserves while shrinking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmFailureInvariantClass {
+    /// Cancellation request, loser drain, or cancellation storm failure.
+    CancellationStorm,
+    /// Scheduler deadlock or lost-wakeup suspect.
+    DeadlockOrLostWakeup,
+    /// Obligation commit/abort accounting leak suspect.
+    ObligationLeak,
+    /// Admission or shedding decision failure.
+    AdmissionFailure,
+    /// Queue pressure or region hotspot failure.
+    QueuePressure,
+    /// Generic runtime invariant violation.
+    InvariantViolation,
+}
+
+/// Final fail-closed verdict from the swarm failure minimizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmFailureMinimizerVerdict {
+    /// Evidence proves the invariant still reproduces after shrinking.
+    Minimized,
+    /// Evidence reproduces, but every modeled knob is already at its lower bound.
+    AlreadyMinimal,
+    /// The reported failure did not reproduce in the supplied trace verdict.
+    NonReproducible,
+    /// Required evidence, provenance, or redaction state is missing.
+    Incomplete,
+}
+
+/// Explicit reason the minimizer stopped shrinking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmFailureMinimizerStopReason {
+    /// The minimized scenario kept the supplied invariant reproduction proof.
+    InvariantPreserved,
+    /// The input scenario already matched the minimizer lower bounds.
+    AlreadyMinimal,
+    /// The supplied trace verdict did not reproduce the failure.
+    NonReproducible,
+    /// Required evidence or proof-lane provenance was missing.
+    MissingEvidence,
+    /// The bundle still contains secret-like payloads that must be redacted first.
+    RedactionRequired,
+    /// The original scenario was not replayable.
+    InvalidScenario,
+    /// The configured reduction pass limit prevented a complete minimization pass.
+    StepLimitReached,
+}
+
+/// Failure bundle consumed by the deterministic minimizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmFailureBundle {
+    /// Stable bundle id.
+    pub bundle_id: String,
+    /// Repository or artifact-store pointer to the original failing bundle.
+    pub original_artifact: String,
+    /// Failure family the minimizer must preserve.
+    pub invariant_class: SwarmFailureInvariantClass,
+    /// Whether the invariant was reproduced by the source replay evidence.
+    pub invariant_reproduced: bool,
+    /// First failure or invariant text from the source bundle.
+    pub first_failure: String,
+    /// Trace summary extracted from the source replay or pressure artifact.
+    pub trace_summary: Option<SwarmPressureTraceSummary>,
+    /// Proof-lane provenance for the command that captured the failure evidence.
+    pub proof_lane_plan: Option<SwarmProofLanePlan>,
+    /// Redaction policy that must be preserved in the minimized report.
+    pub redaction_policy_id: Option<String>,
+    /// Count of secret-like values still present in the bundle.
+    pub secret_like_value_count: usize,
+}
+
+/// Input for deterministic swarm failure minimization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmFailureMinimizerInput {
+    /// Stable minimizer run id.
+    pub minimizer_id: String,
+    /// Original replay scenario that produced the source failure bundle.
+    pub original_scenario: SwarmReplayScenario,
+    /// Failure bundle and provenance to preserve.
+    pub failure_bundle: SwarmFailureBundle,
+    /// Lowest region count the minimizer may emit.
+    pub minimum_regions: usize,
+    /// Lowest per-region task count the minimizer may emit.
+    pub minimum_tasks_per_region: usize,
+    /// Lowest replay step budget the minimizer may emit.
+    pub minimum_replay_steps: u64,
+    /// Maximum deterministic reduction steps allowed for this run.
+    pub max_reduction_passes: usize,
+    /// Stable trace or bundle ids consumed by this minimizer run.
+    pub source_trace_ids: Vec<String>,
+    /// Exact replay command to publish with the minimized scenario.
+    pub replay_command: Option<String>,
+}
+
+/// One deterministic reduction applied by the minimizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmFailureReductionStep {
+    /// Stable knob name.
+    pub knob: String,
+    /// Original knob value.
+    pub before: String,
+    /// Minimized knob value.
+    pub after: String,
+    /// Evidence-based reason for the reduction.
+    pub reason: String,
+    /// Whether the source invariant reproduction proof is still attached.
+    pub preserved_invariant: bool,
+}
+
+/// Deterministic minimizer report suitable for Agent Mail and artifact storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmFailureMinimizerReport {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Stable minimizer run id.
+    pub minimizer_id: String,
+    /// Original failure bundle id.
+    pub bundle_id: String,
+    /// Pointer to the original, unminimized artifact.
+    pub original_artifact: String,
+    /// Original scenario id.
+    pub original_scenario_id: String,
+    /// Minimized replay scenario.
+    pub minimized_scenario: SwarmReplayScenario,
+    /// Replay command for the minimized scenario.
+    pub replay_command: Option<String>,
+    /// Final minimizer verdict.
+    pub verdict: SwarmFailureMinimizerVerdict,
+    /// Failure family preserved by the report.
+    pub invariant_class: SwarmFailureInvariantClass,
+    /// First failure or invariant text from the source bundle.
+    pub first_failure: String,
+    /// Explicit stop reason.
+    pub stop_reason: SwarmFailureMinimizerStopReason,
+    /// Whether the report is allowed to claim invariant preservation.
+    pub preserved_invariant: bool,
+    /// Whether every required input field was present.
+    pub required_fields_present: bool,
+    /// Missing required input fields.
+    pub missing_required_fields: Vec<String>,
+    /// Proof-lane decision copied from provenance when present.
+    pub proof_lane_decision: Option<SwarmProofLaneDecision>,
+    /// Stable trace or bundle ids consumed by this minimizer run.
+    pub source_trace_ids: Vec<String>,
+    /// Redaction policy copied from the source bundle.
+    pub redaction_policy_id: Option<String>,
+    /// Whether the minimized report preserved redaction requirements.
+    pub redaction_preserved: bool,
+    /// Deterministic reduction steps.
+    pub reduction_steps: Vec<SwarmFailureReductionStep>,
+    /// Original modeled task count.
+    pub original_task_count: usize,
+    /// Minimized modeled task count.
+    pub minimized_task_count: usize,
+    /// Task-count reduction in basis points.
+    pub reduction_ratio_bps: u16,
+    /// Suggested owner module or surface.
+    pub owner_surface: String,
+    /// Suggested owner bead or follow-up thread.
+    pub owner_bead_hint: String,
+    /// Stable routing hints for operators and agents.
+    pub routing_hints: Vec<String>,
+    /// Minimization reports never request destructive cleanup.
+    pub destructive_cleanup_required: bool,
+    /// Minimization reports never request branch or worktree creation.
+    pub branch_or_worktree_required: bool,
 }
 
 /// Work class used by the deterministic swarm what-if planner.
@@ -4302,6 +4477,216 @@ pub fn render_swarm_contention_heatmap_text(ledger: &SwarmContentionHeatmapLedge
     lines.join("\n")
 }
 
+/// Minimize a failing swarm replay scenario without mutating live services.
+#[must_use]
+pub fn minimize_swarm_failure(input: &SwarmFailureMinimizerInput) -> SwarmFailureMinimizerReport {
+    let proof_lane_decision = input
+        .failure_bundle
+        .proof_lane_plan
+        .as_ref()
+        .map(|plan| plan.decision);
+    let replay_command = minimizer_replay_command(input);
+    let mut missing_required_fields =
+        minimizer_missing_required_fields(input, replay_command.as_deref());
+    let original_valid = input.original_scenario.validate().is_ok();
+    if !original_valid {
+        missing_required_fields.push("original_scenario.valid".to_string());
+    }
+    missing_required_fields = sorted_unique_owned(missing_required_fields);
+
+    let redaction_preserved = input
+        .failure_bundle
+        .redaction_policy_id
+        .as_deref()
+        .is_some_and(|policy| !policy.trim().is_empty())
+        && input.failure_bundle.secret_like_value_count == 0;
+    let required_fields_present = missing_required_fields.is_empty();
+    let (owner_surface, owner_bead_hint) =
+        minimizer_owner_hint(input.failure_bundle.invariant_class);
+    let mut routing_hints = minimizer_routing_hints(input, &owner_surface, &owner_bead_hint);
+    let source_trace_ids = sorted_unique_owned(input.source_trace_ids.clone());
+    let original_task_count = input.original_scenario.task_count();
+    let mut minimized_scenario = input.original_scenario.clone();
+    let mut reduction_steps = Vec::new();
+    let mut preserved_invariant = minimizer_invariant_reproduced(input);
+    let (verdict, stop_reason) = if !original_valid {
+        preserved_invariant = false;
+        (
+            SwarmFailureMinimizerVerdict::Incomplete,
+            SwarmFailureMinimizerStopReason::InvalidScenario,
+        )
+    } else if !required_fields_present {
+        preserved_invariant = false;
+        (
+            SwarmFailureMinimizerVerdict::Incomplete,
+            SwarmFailureMinimizerStopReason::MissingEvidence,
+        )
+    } else if !redaction_preserved {
+        preserved_invariant = false;
+        (
+            SwarmFailureMinimizerVerdict::Incomplete,
+            SwarmFailureMinimizerStopReason::RedactionRequired,
+        )
+    } else if !preserved_invariant {
+        (
+            SwarmFailureMinimizerVerdict::NonReproducible,
+            SwarmFailureMinimizerStopReason::NonReproducible,
+        )
+    } else {
+        let stop_reason =
+            reduce_swarm_failure_scenario(input, &mut minimized_scenario, &mut reduction_steps);
+        let verdict = match stop_reason {
+            SwarmFailureMinimizerStopReason::InvariantPreserved => {
+                SwarmFailureMinimizerVerdict::Minimized
+            }
+            SwarmFailureMinimizerStopReason::AlreadyMinimal => {
+                SwarmFailureMinimizerVerdict::AlreadyMinimal
+            }
+            SwarmFailureMinimizerStopReason::StepLimitReached => {
+                preserved_invariant = false;
+                SwarmFailureMinimizerVerdict::Incomplete
+            }
+            SwarmFailureMinimizerStopReason::InvalidScenario
+            | SwarmFailureMinimizerStopReason::MissingEvidence
+            | SwarmFailureMinimizerStopReason::RedactionRequired => {
+                preserved_invariant = false;
+                SwarmFailureMinimizerVerdict::Incomplete
+            }
+            SwarmFailureMinimizerStopReason::NonReproducible => {
+                preserved_invariant = false;
+                SwarmFailureMinimizerVerdict::NonReproducible
+            }
+        };
+        (verdict, stop_reason)
+    };
+
+    if !required_fields_present {
+        routing_hints.push(format!(
+            "missing minimizer evidence: {}",
+            missing_required_fields.join(",")
+        ));
+    }
+    if !redaction_preserved {
+        routing_hints.push(format!(
+            "redaction policy {} still has {} secret-like value(s)",
+            input
+                .failure_bundle
+                .redaction_policy_id
+                .as_deref()
+                .unwrap_or("missing"),
+            input.failure_bundle.secret_like_value_count
+        ));
+    }
+    if !preserved_invariant {
+        routing_hints.push("do not mark minimized until the invariant reproduces".to_string());
+    }
+    routing_hints = sorted_unique_owned(routing_hints);
+
+    let minimized_task_count = minimized_scenario.task_count();
+    let reduction_ratio_bps = reduction_ratio_bps(original_task_count, minimized_task_count);
+
+    SwarmFailureMinimizerReport {
+        schema_version: SWARM_FAILURE_MINIMIZER_SCHEMA_VERSION.to_string(),
+        minimizer_id: input.minimizer_id.clone(),
+        bundle_id: input.failure_bundle.bundle_id.clone(),
+        original_artifact: input.failure_bundle.original_artifact.clone(),
+        original_scenario_id: input.original_scenario.scenario_id.clone(),
+        minimized_scenario,
+        replay_command,
+        verdict,
+        invariant_class: input.failure_bundle.invariant_class,
+        first_failure: input.failure_bundle.first_failure.clone(),
+        stop_reason,
+        preserved_invariant,
+        required_fields_present,
+        missing_required_fields,
+        proof_lane_decision,
+        source_trace_ids,
+        redaction_policy_id: input.failure_bundle.redaction_policy_id.clone(),
+        redaction_preserved,
+        reduction_steps,
+        original_task_count,
+        minimized_task_count,
+        reduction_ratio_bps,
+        owner_surface,
+        owner_bead_hint,
+        routing_hints,
+        destructive_cleanup_required: false,
+        branch_or_worktree_required: false,
+    }
+}
+
+/// Render a compact deterministic minimizer report for Agent Mail handoff.
+#[must_use]
+pub fn render_swarm_failure_minimizer_text(report: &SwarmFailureMinimizerReport) -> String {
+    let mut lines = vec![
+        "Swarm Failure Minimizer".to_string(),
+        format!("schema_version: {}", report.schema_version),
+        format!(
+            "minimizer_id: {} bundle={} original_artifact={}",
+            report.minimizer_id, report.bundle_id, report.original_artifact
+        ),
+        format!(
+            "verdict: {:?} stop_reason={:?} invariant_class={:?} preserved_invariant={}",
+            report.verdict, report.stop_reason, report.invariant_class, report.preserved_invariant
+        ),
+        format!(
+            "scenario: original={} minimized={} tasks={}=>{} reduction_bps={}",
+            report.original_scenario_id,
+            report.minimized_scenario.scenario_id,
+            report.original_task_count,
+            report.minimized_task_count,
+            report.reduction_ratio_bps
+        ),
+        format!("first_failure: {}", report.first_failure),
+        format!(
+            "owner: {} ({})",
+            report.owner_surface, report.owner_bead_hint
+        ),
+        format!(
+            "required_fields_present={} missing={}",
+            report.required_fields_present,
+            if report.missing_required_fields.is_empty() {
+                "none".to_string()
+            } else {
+                report.missing_required_fields.join(",")
+            }
+        ),
+        format!(
+            "redaction_policy={} redaction_preserved={}",
+            report.redaction_policy_id.as_deref().unwrap_or("none"),
+            report.redaction_preserved
+        ),
+    ];
+
+    lines.push("reduction_steps:".to_string());
+    if report.reduction_steps.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for step in &report.reduction_steps {
+            lines.push(format!(
+                "- knob={} before={} after={} preserved={} reason={}",
+                step.knob, step.before, step.after, step.preserved_invariant, step.reason
+            ));
+        }
+    }
+
+    lines.push("routing_hints:".to_string());
+    if report.routing_hints.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for hint in &report.routing_hints {
+            lines.push(format!("- {hint}"));
+        }
+    }
+
+    if let Some(command) = &report.replay_command {
+        lines.push(format!("replay_command: {command}"));
+    }
+
+    lines.join("\n")
+}
+
 fn ranked_lock_hotspots(metrics: &[SwarmContentionLockMetric]) -> Vec<SwarmContentionHotSpot> {
     let mut hotspots = metrics
         .iter()
@@ -4527,6 +4912,399 @@ fn sorted_unique_owned(mut values: Vec<String>) -> Vec<String> {
     values.sort();
     values.dedup();
     values
+}
+
+fn minimizer_replay_command(input: &SwarmFailureMinimizerInput) -> Option<String> {
+    input
+        .replay_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            input
+                .failure_bundle
+                .proof_lane_plan
+                .as_ref()
+                .map(|plan| plan.command.trim())
+                .filter(|command| !command.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn minimizer_missing_required_fields(
+    input: &SwarmFailureMinimizerInput,
+    replay_command: Option<&str>,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if input.minimizer_id.trim().is_empty() {
+        missing.push("minimizer_id".to_string());
+    }
+    if input.failure_bundle.bundle_id.trim().is_empty() {
+        missing.push("failure_bundle.bundle_id".to_string());
+    }
+    if input.failure_bundle.original_artifact.trim().is_empty() {
+        missing.push("failure_bundle.original_artifact".to_string());
+    }
+    if input.failure_bundle.first_failure.trim().is_empty() {
+        missing.push("failure_bundle.first_failure".to_string());
+    }
+    if input
+        .failure_bundle
+        .redaction_policy_id
+        .as_deref()
+        .is_none_or(|policy| policy.trim().is_empty())
+    {
+        missing.push("failure_bundle.redaction_policy_id".to_string());
+    }
+    if input.minimum_regions == 0 {
+        missing.push("minimum_regions".to_string());
+    }
+    if input.minimum_tasks_per_region == 0 {
+        missing.push("minimum_tasks_per_region".to_string());
+    }
+    if input.minimum_replay_steps == 0 {
+        missing.push("minimum_replay_steps".to_string());
+    }
+    if input.max_reduction_passes == 0 {
+        missing.push("max_reduction_passes".to_string());
+    }
+    if input.source_trace_ids.is_empty() {
+        missing.push("source_trace_ids".to_string());
+    }
+    if replay_command.is_none() {
+        missing.push("replay_command".to_string());
+    }
+
+    match &input.failure_bundle.trace_summary {
+        Some(summary) => {
+            if !summary.required_fields_present {
+                missing.push("trace_summary.required_fields_present".to_string());
+                missing.extend(
+                    summary
+                        .missing_required_fields
+                        .iter()
+                        .map(|field| format!("trace_summary.{field}")),
+                );
+            }
+            if summary.verdict == SwarmPressureTraceVerdict::Incomplete {
+                missing.push("trace_summary.verdict".to_string());
+            }
+            if summary.scenario_id.trim().is_empty() {
+                missing.push("trace_summary.scenario_id".to_string());
+            }
+        }
+        None => missing.push("trace_summary".to_string()),
+    }
+
+    match &input.failure_bundle.proof_lane_plan {
+        Some(plan) => {
+            if plan.decision != SwarmProofLaneDecision::Ready {
+                missing.push("proof_lane_plan.ready".to_string());
+            }
+            if plan.remote_required && !plan.remote_provenance_observed {
+                missing.push("proof_lane_plan.remote_provenance".to_string());
+            }
+            if plan.command.trim().is_empty() {
+                missing.push("proof_lane_plan.command".to_string());
+            }
+        }
+        None => missing.push("proof_lane_plan".to_string()),
+    }
+
+    missing
+}
+
+fn minimizer_invariant_reproduced(input: &SwarmFailureMinimizerInput) -> bool {
+    input.failure_bundle.invariant_reproduced
+        && input
+            .failure_bundle
+            .trace_summary
+            .as_ref()
+            .is_some_and(|summary| summary.verdict == SwarmPressureTraceVerdict::Fail)
+}
+
+fn reduce_swarm_failure_scenario(
+    input: &SwarmFailureMinimizerInput,
+    scenario: &mut SwarmReplayScenario,
+    reduction_steps: &mut Vec<SwarmFailureReductionStep>,
+) -> SwarmFailureMinimizerStopReason {
+    let (target_regions, target_tasks_per_region, target_max_steps) = minimizer_target_knobs(input);
+    let reduction_count_before = reduction_steps.len();
+
+    if target_regions < scenario.region_count {
+        if !push_minimizer_reduction(
+            reduction_steps,
+            input.max_reduction_passes,
+            "region_count",
+            scenario.region_count,
+            target_regions,
+            "smallest region set carrying the failure class",
+        ) {
+            return SwarmFailureMinimizerStopReason::StepLimitReached;
+        }
+        scenario.region_count = target_regions;
+    }
+
+    if target_tasks_per_region < scenario.tasks_per_region {
+        if !push_minimizer_reduction(
+            reduction_steps,
+            input.max_reduction_passes,
+            "tasks_per_region",
+            scenario.tasks_per_region,
+            target_tasks_per_region,
+            "smallest per-region task budget carrying the failure class",
+        ) {
+            return SwarmFailureMinimizerStopReason::StepLimitReached;
+        }
+        scenario.tasks_per_region = target_tasks_per_region;
+    }
+
+    if target_max_steps < scenario.max_steps {
+        if !push_minimizer_reduction(
+            reduction_steps,
+            input.max_reduction_passes,
+            "max_steps",
+            scenario.max_steps,
+            target_max_steps,
+            "lowest replay budget that still covers the first failure window",
+        ) {
+            return SwarmFailureMinimizerStopReason::StepLimitReached;
+        }
+        scenario.max_steps = target_max_steps;
+    }
+
+    if reduction_steps.len() > reduction_count_before {
+        scenario.scenario_id = format!("{}-minimized", input.original_scenario.scenario_id);
+        SwarmFailureMinimizerStopReason::InvariantPreserved
+    } else {
+        SwarmFailureMinimizerStopReason::AlreadyMinimal
+    }
+}
+
+fn minimizer_target_knobs(input: &SwarmFailureMinimizerInput) -> (usize, usize, u64) {
+    let scenario = &input.original_scenario;
+    let summary = input
+        .failure_bundle
+        .trace_summary
+        .as_ref()
+        .expect("checked before minimizer targets are computed");
+    let min_regions = input.minimum_regions.max(1).min(scenario.region_count);
+    let min_tasks_per_region = input
+        .minimum_tasks_per_region
+        .max(1)
+        .min(scenario.tasks_per_region);
+    let mut target_regions = min_regions;
+    let mut target_tasks_per_region = min_tasks_per_region;
+
+    match input.failure_bundle.invariant_class {
+        SwarmFailureInvariantClass::CancellationStorm => {
+            let evidence_regions = summary
+                .region_lifecycle
+                .non_quiescent_regions
+                .max(summary.longest_drains.len())
+                .max(1);
+            target_regions = target_regions.max(evidence_regions);
+            target_tasks_per_region = target_tasks_per_region.max(ceil_div_usize(
+                summary.cancellation.cancelled_tasks.max(1),
+                target_regions,
+            ));
+        }
+        SwarmFailureInvariantClass::DeadlockOrLostWakeup => {
+            let evidence_regions = summary
+                .region_lifecycle
+                .non_quiescent_regions
+                .max(summary.longest_drains.len())
+                .max(1);
+            target_regions = target_regions.max(evidence_regions);
+            target_tasks_per_region = target_tasks_per_region.max(
+                ceil_div_usize(
+                    summary.task_lifecycle.non_terminal_tasks.max(2),
+                    target_regions,
+                )
+                .max(2),
+            );
+        }
+        SwarmFailureInvariantClass::ObligationLeak => {
+            let evidence_regions = summary.obligation_leak_suspects.len().max(1);
+            target_regions = target_regions.max(evidence_regions);
+            target_tasks_per_region = target_tasks_per_region.max(ceil_div_usize(
+                summary.obligations.unresolved_obligations.max(1),
+                target_regions,
+            ));
+        }
+        SwarmFailureInvariantClass::AdmissionFailure => {
+            let evidence_regions = summary
+                .admission
+                .combiner_or_admission_decisions
+                .max(summary.region_lifecycle.non_quiescent_regions)
+                .max(1);
+            target_regions = target_regions.max(evidence_regions);
+            if let Some(limit) = scenario.region_task_admission_limit {
+                target_tasks_per_region = target_tasks_per_region.max(limit.saturating_add(1));
+            }
+        }
+        SwarmFailureInvariantClass::QueuePressure => {
+            let evidence_regions = summary
+                .top_hot_regions
+                .len()
+                .max(summary.largest_queues.len())
+                .max(1);
+            target_regions = target_regions.max(evidence_regions);
+            let peak_queue = summary.queue_pressure.peak_queue_depth.max(1);
+            target_tasks_per_region =
+                target_tasks_per_region.max(ceil_div_usize(peak_queue, target_regions));
+        }
+        SwarmFailureInvariantClass::InvariantViolation => {
+            let evidence_regions = summary
+                .region_lifecycle
+                .non_quiescent_regions
+                .max(summary.top_hot_regions.len())
+                .max(1);
+            target_regions = target_regions.max(evidence_regions);
+            target_tasks_per_region = target_tasks_per_region.max(ceil_div_usize(
+                summary.task_lifecycle.non_terminal_tasks.max(1),
+                target_regions,
+            ));
+        }
+    }
+
+    target_regions = target_regions.min(scenario.region_count);
+    target_tasks_per_region = target_tasks_per_region.min(scenario.tasks_per_region);
+    let target_max_steps = minimizer_target_max_steps(input, summary);
+
+    (target_regions, target_tasks_per_region, target_max_steps)
+}
+
+fn minimizer_target_max_steps(
+    input: &SwarmFailureMinimizerInput,
+    summary: &SwarmPressureTraceSummary,
+) -> u64 {
+    let scenario = &input.original_scenario;
+    let cancel_window = scenario
+        .cancel_after_steps
+        .map_or(0, |step| step.saturating_add(1));
+    let failure_window = match input.failure_bundle.invariant_class {
+        SwarmFailureInvariantClass::CancellationStorm => cancel_window
+            .saturating_add(summary.cancellation.cancellation_drain_steps)
+            .saturating_add(16),
+        SwarmFailureInvariantClass::DeadlockOrLostWakeup => cancel_window
+            .saturating_add(summary.cancellation.cancellation_drain_steps)
+            .saturating_add(summary.task_lifecycle.non_terminal_tasks as u64)
+            .saturating_add(16),
+        SwarmFailureInvariantClass::ObligationLeak => cancel_window
+            .saturating_add(summary.obligations.unresolved_obligations as u64)
+            .saturating_add(16),
+        SwarmFailureInvariantClass::AdmissionFailure => cancel_window
+            .saturating_add(summary.admission.combiner_or_admission_decisions.max(1) as u64 + 8),
+        SwarmFailureInvariantClass::QueuePressure => cancel_window
+            .saturating_add(summary.queue_pressure.pressure_event_count as u64)
+            .saturating_add(16),
+        SwarmFailureInvariantClass::InvariantViolation => cancel_window.saturating_add(32),
+    };
+    let lower_bound = input
+        .minimum_replay_steps
+        .max(cancel_window)
+        .min(scenario.max_steps);
+    failure_window.max(lower_bound).min(scenario.max_steps)
+}
+
+fn push_minimizer_reduction<T: fmt::Display>(
+    reduction_steps: &mut Vec<SwarmFailureReductionStep>,
+    max_reduction_passes: usize,
+    knob: &str,
+    before: T,
+    after: T,
+    reason: &str,
+) -> bool {
+    if reduction_steps.len() >= max_reduction_passes {
+        return false;
+    }
+    reduction_steps.push(SwarmFailureReductionStep {
+        knob: knob.to_string(),
+        before: before.to_string(),
+        after: after.to_string(),
+        reason: reason.to_string(),
+        preserved_invariant: true,
+    });
+    true
+}
+
+fn minimizer_owner_hint(invariant_class: SwarmFailureInvariantClass) -> (String, String) {
+    match invariant_class {
+        SwarmFailureInvariantClass::CancellationStorm => (
+            "src/cancel/mod.rs".to_string(),
+            "asupersync-vssefs.9.5-follow-up:cancellation-drain".to_string(),
+        ),
+        SwarmFailureInvariantClass::DeadlockOrLostWakeup => (
+            "src/runtime/scheduler/three_lane.rs".to_string(),
+            "asupersync-vssefs.9.5-follow-up:scheduler-wakeup".to_string(),
+        ),
+        SwarmFailureInvariantClass::ObligationLeak => (
+            "src/obligation/mod.rs".to_string(),
+            "asupersync-vssefs.9.5-follow-up:obligation-leak".to_string(),
+        ),
+        SwarmFailureInvariantClass::AdmissionFailure => (
+            "src/lab/swarm_replay.rs".to_string(),
+            "asupersync-vssefs.9.5-follow-up:admission".to_string(),
+        ),
+        SwarmFailureInvariantClass::QueuePressure => (
+            "src/runtime/scheduler/three_lane.rs".to_string(),
+            "asupersync-vssefs.9.5-follow-up:queue-pressure".to_string(),
+        ),
+        SwarmFailureInvariantClass::InvariantViolation => (
+            "src/runtime/mod.rs".to_string(),
+            "asupersync-vssefs.9.5-follow-up:runtime-invariant".to_string(),
+        ),
+    }
+}
+
+fn minimizer_routing_hints(
+    input: &SwarmFailureMinimizerInput,
+    owner_surface: &str,
+    owner_bead_hint: &str,
+) -> Vec<String> {
+    let mut hints = vec![
+        format!(
+            "minimized {:?} routes to {owner_surface} ({owner_bead_hint})",
+            input.failure_bundle.invariant_class
+        ),
+        format!(
+            "keep original artifact pointer {}",
+            input.failure_bundle.original_artifact
+        ),
+        format!("first failure: {}", input.failure_bundle.first_failure),
+    ];
+    if let Some(summary) = &input.failure_bundle.trace_summary {
+        hints.extend(summary.routing_hints.clone());
+        if let Some(invariant) = &summary.first_invariant_violation {
+            hints.push(format!("first invariant violation: {invariant}"));
+        }
+    }
+    if let Some(plan) = &input.failure_bundle.proof_lane_plan {
+        hints.push(format!(
+            "proof lane {} decision {:?}",
+            plan.lane_id, plan.decision
+        ));
+    }
+    hints
+}
+
+const fn ceil_div_usize(numerator: usize, denominator: usize) -> usize {
+    if denominator == 0 {
+        0
+    } else {
+        numerator.saturating_add(denominator - 1) / denominator
+    }
+}
+
+fn reduction_ratio_bps(original: usize, minimized: usize) -> u16 {
+    if original == 0 || minimized >= original {
+        return 0;
+    }
+    let reduced = original - minimized;
+    let ratio = reduced.saturating_mul(10_000) / original;
+    ratio.min(10_000) as u16
 }
 
 fn optional_u64_text(value: Option<u64>) -> String {
