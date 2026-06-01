@@ -9,8 +9,13 @@ prints / saves) against it.
 
 Verdicts (mirrors FrankenSQLite `comprehensive-bench-ci-regression-gate.v2`):
 
-  * Quarantine — the candidate's cv_pct for a benchmark exceeds the flake
-    threshold, so its result is noise and is NOT scored (neither pass nor fail).
+  * Quarantine — the cv_pct for a benchmark exceeds the flake threshold on
+    EITHER side (candidate or committed baseline), so its comparison is noise
+    and is NOT scored (neither pass nor fail). The quarantine record's `side`
+    field says which side was flaky. Checking the baseline side matters: a
+    contention-noisy committed baseline would otherwise produce phantom
+    Block/Allow verdicts on every future comparison (gauntlet PERF-R3,
+    br-asupersync-4j4h32).
   * Block      — a scored benchmark regressed past its per-bench threshold, OR
     the geomean ratio regressed past the geomean threshold.
   * Allow      — every scored benchmark and the geomean are within thresholds.
@@ -168,11 +173,18 @@ def main() -> int:
     for name, cur in sorted(candidate.items()):
         cv_pct = cur.get("cv_pct")
         if is_number(cv_pct) and cv_pct > args.cv_pct_flake_threshold:
-            quarantined.append({"name": name, "cv_pct": cv_pct})
+            quarantined.append({"name": name, "cv_pct": cv_pct, "side": "candidate"})
             continue
         base = baseline.get(name)
         if base is None:
             missing_baseline.append(name)
+            continue
+        # Two-sided flake check (br-asupersync-4j4h32): a flaky committed
+        # baseline must not be scored either, or every future comparison
+        # against it yields phantom regressions/improvements.
+        base_cv = base.get("cv_pct")
+        if is_number(base_cv) and base_cv > args.cv_pct_flake_threshold:
+            quarantined.append({"name": name, "cv_pct": base_cv, "side": "baseline"})
             continue
         cur_val, base_val = cur.get(metric), base.get(metric)
         if not (is_number(cur_val) and is_number(base_val) and base_val > 0):
@@ -234,7 +246,8 @@ def main() -> int:
         if geomean_blocked:
             print(f"  BLOCK geomean: {geomean_delta_pct:+.2f}% > {args.geomean_max_regression_pct}%")
         for q in quarantined:
-            print(f"  QUARANTINE {q['name']}: cv_pct={q['cv_pct']:.2f} > {args.cv_pct_flake_threshold}")
+            side = q.get("side", "candidate")
+            print(f"  QUARANTINE {q['name']} ({side}): cv_pct={q['cv_pct']:.2f} > {args.cv_pct_flake_threshold}")
         if missing_baseline:
             print(f"  note: {len(missing_baseline)} benchmark(s) had no .bench-history baseline (new benches)")
         if eproc:
