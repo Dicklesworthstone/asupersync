@@ -14,6 +14,31 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 
 ## [Unreleased]
 
+## [v0.3.3] -- 2026-06-01
+
+> 1,991 commits since v0.3.2 (2026-05-20 -> 2026-06-01) | [compare](https://github.com/Dicklesworthstone/asupersync/compare/v0.3.2...v0.3.3)
+>
+> Patch release focused on completing the mock-code-finder cleanup push,
+> hardening Windows/no-default build surfaces, and repairing the release
+> publishing path so crates.io and Browser Edition package releases can run from
+> a coherent workspace version.
+
+### Release highlights
+
+- Replaced remaining placeholder/mock-coded test and runtime surfaces with
+  deterministic contract-backed behavior across conformance, messaging,
+  observability, runtime/lab, and protocol lanes.
+- Hardened Windows compilation paths, including no-default CLI binaries and
+  capability-safe detached contexts for command-line proof surfaces.
+- Synchronized publishable Rust workspace crates and Browser Edition package
+  manifests on version 0.3.3 for a coherent release train.
+- Repaired the GitHub publish workflow so release cargo jobs use `rch` when it
+  is available and fall back to the hosted runner when `rch` is absent, instead
+  of failing before crates.io dry-run/package validation.
+- Expanded crates.io dry-run coverage so root crates are checked up front and
+  every dependent crate is checked immediately before its ordered publish, after
+  newly bumped dependencies are visible on crates.io.
+
 ## [v0.3.2] -- 2026-05-20 (Release)
 
 > 3,657 commits since v0.3.1 (2026-04-22 → 2026-05-20) | [compare](https://github.com/Dicklesworthstone/asupersync/compare/v0.3.1...v0.3.2)
@@ -1367,7 +1392,11 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.3...HEAD
+[v0.3.3]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.2...v0.3.3
+[v0.3.2]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.1...v0.3.2
+[v0.3.1]: https://github.com/Dicklesworthstone/asupersync/compare/v0.3.0...v0.3.1
+[v0.3.0]: https://github.com/Dicklesworthstone/asupersync/compare/v0.2.9...v0.3.0
 [v0.2.9]: https://github.com/Dicklesworthstone/asupersync/compare/v0.2.8...v0.2.9
 [v0.2.8]: https://github.com/Dicklesworthstone/asupersync/compare/v0.2.7...v0.2.8
 [v0.2.7]: https://github.com/Dicklesworthstone/asupersync/compare/v0.2.6...v0.2.7

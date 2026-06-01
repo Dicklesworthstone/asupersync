@@ -1,7 +1,7 @@
 {
   "private": true,
   "name": "asupersync-monorepo",
-  "version": "0.2.7",
+  "version": "0.3.3",
   "description": "Asupersync Browser Edition workspace root",
   "scripts": {
     "build:wasm": "bash scripts/build_browser_core_artifacts.sh prod",

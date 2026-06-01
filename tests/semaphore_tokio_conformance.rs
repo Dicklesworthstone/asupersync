@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use asupersync::cx::Cx;
+use asupersync::cx::{AllCaps, Cx};
 use asupersync::sync::Semaphore as AsupersyncSemaphore;
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
@@ -78,7 +78,7 @@ impl ConformanceTestContext {
             let permits_to_acquire = self.config.permits_per_acquirer;
 
             let handle = tokio::spawn(async move {
-                let cx = Cx::new(
+                let cx = Cx::<AllCaps>::new(
                     RegionId::from_arena(ArenaIndex::new(0, acquirer_id as u32)),
                     TaskId::from_arena(ArenaIndex::new(0, acquirer_id as u32)),
                     Budget::INFINITE,
