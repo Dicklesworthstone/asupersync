@@ -104,7 +104,16 @@ tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
 tls-webpki-roots = ["tls", "dep:webpki-roots"]
 # Enable CLI tooling (trace inspection).
-cli = ["dep:clap", "dep:time", "trace-compression", "dep:serde_yaml", "dep:chrono", "dep:env_logger", "config-file"]
+cli = [
+    "dep:clap",
+    "dep:time",
+    "trace-compression",
+    "dep:serde_yaml",
+    "dep:chrono",
+    "dep:env_logger",
+    "config-file",
+    "tracing-integration",
+]
 # Enable SQLite async wrapper with blocking pool integration.
 sqlite = ["dep:rusqlite", "dep:sqlparser"]
 # Enable PostgreSQL async client with wire protocol.
@@ -158,7 +167,7 @@ benchmark-adapters = [
 criterion-benches = []
 # Gate the unpublished ATP daemon binary out of default release checks until
 # its daemon supervision/runtime contract is wired into the supported CLI.
-atpd-daemon = ["cli"]
+atpd-daemon = ["cli", "dep:tracing-subscriber"]
 # Enable fuzzing support with arbitrary derive macros and OTLP request helpers.
 # This intentionally enables opentelemetry-proto's tonic-generated messages and
 # is outside the production no-Tokio guarantee.

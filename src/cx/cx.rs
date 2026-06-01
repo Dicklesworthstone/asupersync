@@ -88,7 +88,7 @@ use crate::types::{
     Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetRefusal,
     CapabilityBudgetRequirements, CxInner, RegionId, SystemPressure, TaskId, Time,
 };
-use crate::util::{EntropySource, OsEntropy};
+use crate::util::{ArenaIndex, EntropySource, OsEntropy};
 use std::cell::RefCell;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -3173,6 +3173,28 @@ impl<Caps> Cx<Caps> {
             scope.budget(),
             effective,
         ))
+    }
+}
+
+impl Cx<cap::None> {
+    /// Creates a detached context that carries cancellation and budget state
+    /// but no runtime effect capabilities.
+    ///
+    /// This is for adapters and CLI diagnostics that need to exercise
+    /// cancellation-aware primitives outside a running task. It deliberately
+    /// returns `Cx<cap::None>` and installs an empty runtime capability mask, so
+    /// it cannot provide spawn, timer, random, I/O, or remote authority. The
+    /// synthetic IDs are non-root so an accidental immediate-completion path
+    /// cannot create a root-scoped obligation.
+    #[must_use]
+    pub fn detached_cancel_context() -> Self {
+        let mut cx = Self::new(
+            RegionId::from_arena(ArenaIndex::new(1, 1)),
+            TaskId::from_arena(ArenaIndex::new(1, 1)),
+            Budget::INFINITE,
+        );
+        cx.runtime_mask = cap::CapMask::none();
+        cx
     }
 }
 

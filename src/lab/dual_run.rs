@@ -46,7 +46,7 @@ fn derive_component_seed(root: u64, component: &str) -> u64 {
     fnv1a_mix(root, component.as_bytes())
 }
 
-fn derive_scenario_seed(root: u64, scenario: &str) -> u64 {
+pub fn derive_scenario_seed(root: u64, scenario: &str) -> u64 {
     let tag = format!("scenario:{scenario}");
     fnv1a_mix(root, tag.as_bytes())
 }

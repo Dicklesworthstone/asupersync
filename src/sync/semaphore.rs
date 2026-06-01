@@ -301,7 +301,11 @@ impl Semaphore {
 
     /// Acquires the given number of permits asynchronously.
     #[inline]
-    pub fn acquire<'a, 'b>(&'a self, cx: &'b Cx, count: usize) -> AcquireFuture<'a, 'b> {
+    pub fn acquire<'a, 'b, Caps>(
+        &'a self,
+        cx: &'b Cx<Caps>,
+        count: usize,
+    ) -> AcquireFuture<'a, 'b, Caps> {
         AcquireFuture {
             semaphore: self,
             cx,
@@ -406,15 +410,15 @@ impl Semaphore {
 }
 
 /// Future returned by `Semaphore::acquire`.
-pub struct AcquireFuture<'a, 'b> {
+pub struct AcquireFuture<'a, 'b, Caps = crate::cx::cap::All> {
     semaphore: &'a Semaphore,
-    cx: &'b Cx,
+    cx: &'b Cx<Caps>,
     count: usize,
     waiter: Option<WaiterHandle>,
     completed: bool,
 }
 
-impl Drop for AcquireFuture<'_, '_> {
+impl<Caps> Drop for AcquireFuture<'_, '_, Caps> {
     fn drop(&mut self) {
         if let Some(waiter) = self.waiter {
             let next_waker = {
@@ -430,7 +434,7 @@ impl Drop for AcquireFuture<'_, '_> {
     }
 }
 
-impl<'a> Future for AcquireFuture<'a, '_> {
+impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
     type Output = Result<SemaphorePermit<'a>, AcquireError>;
 
     #[inline]
@@ -972,7 +976,7 @@ mod tests {
     }
 
     fn test_cx() -> Cx<cap::All> {
-        Cx::new(
+        Cx::<cap::All>::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
@@ -1092,7 +1096,7 @@ mod tests {
     }
 
     fn waiter_cx(slot: u32) -> Cx {
-        Cx::new(
+        Cx::<cap::All>::new(
             RegionId::from_arena(ArenaIndex::new(0, slot)),
             TaskId::from_arena(ArenaIndex::new(0, slot)),
             Budget::INFINITE,
@@ -2336,7 +2340,7 @@ mod tests {
     #[test]
     fn semaphore_cancel_then_drop_does_not_leak() {
         init_test("semaphore_cancel_then_drop_does_not_leak");
-        let cancel_cx = Cx::new(
+        let cancel_cx = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 7)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 7)),
             crate::types::Budget::INFINITE,
@@ -2458,7 +2462,7 @@ mod tests {
         crate::assert_with_log!(still_zero == 0, "permits still zero", 0usize, still_zero);
 
         // Set up async acquire that will be cancelled
-        let cancel_cx = Cx::new(
+        let cancel_cx = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 8)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 8)),
             crate::types::Budget::INFINITE,
@@ -2522,12 +2526,12 @@ mod tests {
         );
 
         // Create multiple cancel contexts for concurrent cancellation test
-        let cancel_cx1 = Cx::new(
+        let cancel_cx1 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 9)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 9)),
             crate::types::Budget::INFINITE,
         );
-        let cancel_cx2 = Cx::new(
+        let cancel_cx2 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 10)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 10)),
             crate::types::Budget::INFINITE,
@@ -2590,7 +2594,7 @@ mod tests {
         );
 
         // Start more waiters and cancel them
-        let cancel_cx3 = Cx::new(
+        let cancel_cx3 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 11)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 11)),
             crate::types::Budget::INFINITE,
@@ -2700,22 +2704,22 @@ mod tests {
         let sem = Semaphore::new(0); // Start empty to force queueing
 
         // Create contexts for ordered waiters
-        let cx1 = Cx::new(
+        let cx1 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 12)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 12)),
             crate::types::Budget::INFINITE,
         );
-        let cx2 = Cx::new(
+        let cx2 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 13)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 13)),
             crate::types::Budget::INFINITE,
         );
-        let cx3 = Cx::new(
+        let cx3 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 14)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 14)),
             crate::types::Budget::INFINITE,
         );
-        let cx4 = Cx::new(
+        let cx4 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 15)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 15)),
             crate::types::Budget::INFINITE,
@@ -2774,32 +2778,32 @@ mod tests {
 
         // Create 6 contexts outside the loop to avoid lifetime issues
         let contexts = vec![
-            Cx::new(
+            Cx::<cap::All>::new(
                 crate::types::RegionId::from_arena(ArenaIndex::new(0, 16)),
                 crate::types::TaskId::from_arena(ArenaIndex::new(0, 16)),
                 crate::types::Budget::INFINITE,
             ),
-            Cx::new(
+            Cx::<cap::All>::new(
                 crate::types::RegionId::from_arena(ArenaIndex::new(0, 17)),
                 crate::types::TaskId::from_arena(ArenaIndex::new(0, 17)),
                 crate::types::Budget::INFINITE,
             ),
-            Cx::new(
+            Cx::<cap::All>::new(
                 crate::types::RegionId::from_arena(ArenaIndex::new(0, 18)),
                 crate::types::TaskId::from_arena(ArenaIndex::new(0, 18)),
                 crate::types::Budget::INFINITE,
             ),
-            Cx::new(
+            Cx::<cap::All>::new(
                 crate::types::RegionId::from_arena(ArenaIndex::new(0, 19)),
                 crate::types::TaskId::from_arena(ArenaIndex::new(0, 19)),
                 crate::types::Budget::INFINITE,
             ),
-            Cx::new(
+            Cx::<cap::All>::new(
                 crate::types::RegionId::from_arena(ArenaIndex::new(0, 20)),
                 crate::types::TaskId::from_arena(ArenaIndex::new(0, 20)),
                 crate::types::Budget::INFINITE,
             ),
-            Cx::new(
+            Cx::<cap::All>::new(
                 crate::types::RegionId::from_arena(ArenaIndex::new(0, 21)),
                 crate::types::TaskId::from_arena(ArenaIndex::new(0, 21)),
                 crate::types::Budget::INFINITE,
@@ -3005,7 +3009,7 @@ mod tests {
 
         // Transform: test try_acquire behavior during concurrent async operations
         let sem = Semaphore::new(1);
-        let cx = Cx::new(
+        let cx = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 17)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 17)),
             crate::types::Budget::INFINITE,
@@ -3095,12 +3099,12 @@ mod tests {
             partitioned_remaining
         );
 
-        let aggregate_cx = Cx::new(
+        let aggregate_cx = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 22)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 22)),
             crate::types::Budget::INFINITE,
         );
-        let partitioned_cx = Cx::new(
+        let partitioned_cx = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 23)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 23)),
             crate::types::Budget::INFINITE,
@@ -3200,12 +3204,12 @@ mod tests {
         let batched = Semaphore::new(0);
         let split = Semaphore::new(0);
 
-        let batched_cx = Cx::new(
+        let batched_cx = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 24)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 24)),
             crate::types::Budget::INFINITE,
         );
-        let split_cx = Cx::new(
+        let split_cx = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 25)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 25)),
             crate::types::Budget::INFINITE,
@@ -3289,17 +3293,17 @@ mod tests {
     ) -> (Vec<usize>, usize, usize) {
         let sem = Semaphore::new(0);
 
-        let cx1 = Cx::new(
+        let cx1 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 30 + seed_offset)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 30 + seed_offset)),
             crate::types::Budget::INFINITE,
         );
-        let cx2 = Cx::new(
+        let cx2 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 31 + seed_offset)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 31 + seed_offset)),
             crate::types::Budget::INFINITE,
         );
-        let cx3 = Cx::new(
+        let cx3 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 32 + seed_offset)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 32 + seed_offset)),
             crate::types::Budget::INFINITE,
@@ -3369,17 +3373,17 @@ mod tests {
     ) -> (Vec<usize>, usize, usize) {
         let sem = Semaphore::new(0);
 
-        let cx1 = Cx::new(
+        let cx1 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 40 + seed_offset)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 40 + seed_offset)),
             crate::types::Budget::INFINITE,
         );
-        let cx2 = Cx::new(
+        let cx2 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 41 + seed_offset)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 41 + seed_offset)),
             crate::types::Budget::INFINITE,
         );
-        let cx3 = Cx::new(
+        let cx3 = Cx::<cap::All>::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 42 + seed_offset)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 42 + seed_offset)),
             crate::types::Budget::INFINITE,

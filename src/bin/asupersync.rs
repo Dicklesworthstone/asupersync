@@ -61,8 +61,10 @@ use asupersync::conformance::{
     ScanWarning, SpecRequirement, TraceabilityMatrix, TraceabilityScanError,
     requirements_from_entries, scan_conformance_attributes,
 };
-use asupersync::cx::Cx;
-use asupersync::lab::dual_run::{FinalDivergenceClass, ReplayPolicy, RerunDecision, SeedPlan};
+use asupersync::cx::{Cx, NoCaps};
+use asupersync::lab::dual_run::{
+    FinalDivergenceClass, ReplayPolicy, RerunDecision, SeedPlan, derive_scenario_seed,
+};
 use asupersync::lab::replay::{
     DifferentialBundleArtifacts, DifferentialPolicyClass, DivergenceCorpusEntry,
 };
@@ -77,7 +79,6 @@ use asupersync::observability::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskSummaryWire,
 };
 use asupersync::sync::{AcquireError, Semaphore};
-use asupersync::test_logging::derive_scenario_seed;
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileConfig,
     TraceFileError, TraceReader, TraceWriter, VerificationOptions, verify_trace,
@@ -3855,8 +3856,7 @@ fn destination_relative_path_from_transfer_reference(transfer_reference: &str) -
     let source = Path::new(transfer_reference);
     source
         .file_name()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(transfer_reference))
+        .map_or_else(|| PathBuf::from(transfer_reference), PathBuf::from)
 }
 
 fn parse_destination_policy(args: &AtpGetArgs) -> Result<DestinationPolicy, CliError> {
@@ -10680,7 +10680,7 @@ impl SemaphoreCancelRecoveryObservation {
 fn live_semaphore_cancel_recovery_observation() -> SemaphoreCancelRecoveryObservation {
     let semaphore = Semaphore::new(1);
     let held = semaphore.try_acquire(1).expect("seeded semaphore permit");
-    let cancel_cx = Cx::for_testing();
+    let cancel_cx = Cx::<NoCaps>::detached_cancel_context();
     let mut waiter = semaphore.acquire(&cancel_cx, 1);
 
     let waiter_pending = poll_once(&mut waiter).is_pending();
@@ -10726,7 +10726,7 @@ fn lab_semaphore_cancel_recovery_observation(seed: u64) -> SemaphoreCancelRecove
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let semaphore = Arc::new(Semaphore::new(1));
     let held = semaphore.try_acquire(1).expect("seeded semaphore permit");
-    let cancel_cx = Cx::for_testing();
+    let cancel_cx = Cx::<NoCaps>::detached_cancel_context();
     let waiter_cx = cancel_cx.clone();
     let cancelled_waiters = Arc::new(AtomicUsize::new(0));
     let unexpected_cancel_acquisitions = Arc::new(AtomicUsize::new(0));
