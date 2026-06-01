@@ -1,0 +1,12 @@
+{
+  "cv_pct": 6.200005168526243,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 5365.549495329816,
+  "median_ns": 5329.586616954473,
+  "name": "runtime_state/create",
+  "p95_ns": 5793.080099774274,
+  "p99_ns": 6049.204378747796,
+  "profile": "release-perf",
+  "std_dev_ns": 332.6643460302823
+}

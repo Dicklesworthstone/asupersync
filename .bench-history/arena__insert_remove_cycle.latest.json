@@ -1,0 +1,12 @@
+{
+  "cv_pct": 13.680746049749223,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 4.265748508358045,
+  "median_ns": 4.286704512879037,
+  "name": "arena/insert_remove_cycle",
+  "p95_ns": 5.190472188401843,
+  "p99_ns": 5.4278800290241,
+  "profile": "release-perf",
+  "std_dev_ns": 0.5835862205494297
+}

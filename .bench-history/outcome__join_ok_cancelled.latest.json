@@ -1,0 +1,12 @@
+{
+  "cv_pct": 3.8643227338096517,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 13.790839318512903,
+  "median_ns": 13.605217511316024,
+  "name": "outcome/join_ok_cancelled",
+  "p95_ns": 14.945395336723932,
+  "p99_ns": 15.586632146409437,
+  "profile": "release-perf",
+  "std_dev_ns": 0.5329225389684542
+}

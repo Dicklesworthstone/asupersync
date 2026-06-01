@@ -1,0 +1,12 @@
+{
+  "cv_pct": 8.030580203168519,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 0.7004979074671399,
+  "median_ns": 0.6962197881621639,
+  "name": "combinator/timeout_config_new",
+  "p95_ns": 0.7999350361205684,
+  "p99_ns": 0.8522944440943877,
+  "profile": "release-perf",
+  "std_dev_ns": 0.05625404628066587
+}

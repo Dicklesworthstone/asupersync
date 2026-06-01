@@ -1,0 +1,12 @@
+{
+  "cv_pct": 15.895970877897033,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 0.39922598109004653,
+  "median_ns": 0.37894071543688057,
+  "name": "lab_runtime/steps",
+  "p95_ns": 0.47699874367098266,
+  "p99_ns": 0.47972987836145986,
+  "profile": "release-perf",
+  "std_dev_ns": 0.06346084569107252
+}

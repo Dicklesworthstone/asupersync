@@ -1,0 +1,12 @@
+{
+  "cv_pct": 5.085836621326715,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 16.75424289961988,
+  "median_ns": 16.540070162336384,
+  "name": "combinator/join2_outcomes_ok",
+  "p95_ns": 18.59225467187386,
+  "p99_ns": 19.101064407918397,
+  "profile": "release-perf",
+  "std_dev_ns": 0.8520934210148987
+}

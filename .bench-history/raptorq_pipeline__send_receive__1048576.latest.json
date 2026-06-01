@@ -1,0 +1,12 @@
+{
+  "cv_pct": 7.617249536407873,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 35693927765.24,
+  "median_ns": 34997084737.0,
+  "name": "raptorq_pipeline/send_receive/1048576",
+  "p95_ns": 40270635168.299995,
+  "p99_ns": 45135375889.23003,
+  "profile": "release-perf",
+  "std_dev_ns": 2718895547.223505
+}

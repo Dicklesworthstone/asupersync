@@ -1,0 +1,12 @@
+{
+  "cv_pct": 19.7563895375325,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 18443.592771047755,
+  "median_ns": 17991.377625391848,
+  "name": "lab_runtime/with_seed",
+  "p95_ns": 23078.851444478652,
+  "p99_ns": 34976.52843810068,
+  "profile": "release-perf",
+  "std_dev_ns": 3643.788032564379
+}

@@ -1,0 +1,12 @@
+{
+  "cv_pct": 3.491621869067268,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 6.171509485628624,
+  "median_ns": 6.092634908842502,
+  "name": "cancel_reason/create_user",
+  "p95_ns": 6.506842625805296,
+  "p99_ns": 6.797169732265893,
+  "profile": "release-perf",
+  "std_dev_ns": 0.21548577485176987
+}

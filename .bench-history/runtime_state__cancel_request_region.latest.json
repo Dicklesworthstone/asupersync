@@ -1,0 +1,12 @@
+{
+  "cv_pct": 10.169993235792502,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 1598.2937379200512,
+  "median_ns": 1598.3821371465338,
+  "name": "runtime_state/cancel_request_region",
+  "p95_ns": 1808.2657648546142,
+  "p99_ns": 2307.4445213193894,
+  "profile": "release-perf",
+  "std_dev_ns": 162.54636503456433
+}

@@ -1,0 +1,12 @@
+{
+  "cv_pct": 9.184015645734473,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 104.49871023176692,
+  "median_ns": 103.21803513071896,
+  "name": "runtime_state/insert_task_with_canonical_id",
+  "p95_ns": 118.04772215422277,
+  "p99_ns": 144.17881497725799,
+  "profile": "release-perf",
+  "std_dev_ns": 9.597177897276204
+}

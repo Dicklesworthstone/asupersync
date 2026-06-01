@@ -1,0 +1,12 @@
+{
+  "cv_pct": 5.787267303215339,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 106.3778541395112,
+  "median_ns": 105.45791252072297,
+  "name": "runtime_state/insert_task_placeholder_then_patch",
+  "p95_ns": 119.12312987066821,
+  "p99_ns": 120.98830743012955,
+  "profile": "release-perf",
+  "std_dev_ns": 6.156370770478037
+}
