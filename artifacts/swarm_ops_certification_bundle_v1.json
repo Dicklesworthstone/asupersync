@@ -1,0 +1,254 @@
+{
+  "contract_version": "swarm-ops-certification-bundle-v1",
+  "bundle_schema_version": "asupersync.swarm-ops-certification-bundle.v1",
+  "bead_id": "asupersync-vssefs.9.8",
+  "epic_bead_id": "asupersync-vssefs.9",
+  "description": "Final certification bundle for the swarm-ops (asupersync-vssefs.9) program. Aggregates every child bead's contract artifact, contract test, runtime source, proof-command pointer, and evidence class into one fail-closed certification surface so future agents and operators can verify the entire swarm-ops cockpit program without reading the original idea-wizard notes. The bundle certifies the children listed in child_certifications at the recorded HEAD; it does not certify wall-clock performance, multi-process distributed swarms, release gates, or any surface listed in does_not_cover.",
+  "contract_test": "tests/swarm_ops_certification_bundle_contract.rs",
+  "certified_at_head": "aba3d00ca2a2180432cc3f379d8244e846b4dec4",
+  "certified_at_head_policy": "certified_at_head records the main-branch commit at which all child evidence below was verified together. Consumers must treat a bundle whose certified_at_head is not an ancestor of their HEAD as invalid, and may treat any divergence between certified_at_head and their HEAD as stale_evidence requiring recertification via proof_command before relying on the bundle for release or operator claims.",
+  "scenario_corpus": "artifacts/swarm_workload_scenario_corpus_v1.json",
+  "scenario_corpus_contract_version": "swarm-workload-scenario-corpus-v1",
+  "beads_snapshot": ".beads/issues.jsonl",
+  "evidence_classes": {
+    "synthetic_fixture": "Schema, policy, and planner logic validated against in-test fixtures. No claim that a runtime scenario executed.",
+    "lab_runtime_deterministic": "Real lab-runtime execution (run_swarm_replay_scenario) under deterministic virtual time inside the contract test. No wall-clock, multi-process, or production-deployment claims.",
+    "no_mock_rch_backed": "Real lab-runtime execution dispatched through RCH_REQUIRE_REMOTE=1 rch exec with recorded remote worker provenance and a fail-closed runner script.",
+    "benchmark": "Criterion wall-clock evidence. NOT covered by this bundle; owned by the PERF gauntlet lanes.",
+    "release": "Release-gate certification evidence. NOT covered by this bundle; owned by the gauntlet program."
+  },
+  "child_certifications": [
+    {
+      "bead_id": "asupersync-vssefs.9.1",
+      "title": "[idea-wizard][swarm-ops][scenario-dsl] Define workload scenario schema and replay corpus",
+      "expected_status": "closed",
+      "artifact": "artifacts/swarm_workload_scenario_corpus_v1.json",
+      "artifact_contract_version": "swarm-workload-scenario-corpus-v1",
+      "contract_test": "tests/swarm_workload_scenario_corpus_contract.rs",
+      "runtime_source": "src/lab/swarm_replay.rs",
+      "proof_command_pointer": "runner_contract.proof_command",
+      "evidence_class": "lab_runtime_deterministic",
+      "covers": [
+        "scenario schema validation",
+        "replay corpus scenario ids and scale/pressure/failure knobs",
+        "run_in_contract scenarios execute through the real lab runtime"
+      ],
+      "does_not_cover": [
+        "wall-clock behavior of corpus scenarios",
+        "scenario execution outside the deterministic lab runtime"
+      ],
+      "verified_status": "closed",
+      "verified_closed_at": "2026-05-30T13:17:21.486119403Z",
+      "depends_on_within_program": [
+        "asupersync-vssefs.9"
+      ]
+    },
+    {
+      "bead_id": "asupersync-vssefs.9.2",
+      "title": "[idea-wizard][swarm-ops][rch] Build proof-lane planner with remote-only provenance",
+      "expected_status": "closed",
+      "artifact": "artifacts/swarm_proof_lane_planner_contract_v1.json",
+      "artifact_contract_version": "swarm-proof-lane-planner-v1",
+      "contract_test": "tests/swarm_proof_lane_planner_contract.rs",
+      "runtime_source": "src/lab/swarm_replay.rs",
+      "proof_command_pointer": "lanes[0].planner_request.command",
+      "evidence_class": "synthetic_fixture",
+      "covers": [
+        "proof-lane planner decision logic (Ready / RefreshStaleInputs / RefuseUntilRemoteProof)",
+        "remote-required command requirements (RCH_REQUIRE_REMOTE=1, rch exec, CARGO_TARGET_DIR, feature scope)",
+        "stale-head, missing-provenance, and local-fallback fail-closed findings"
+      ],
+      "does_not_cover": [
+        "execution of the planned proof lanes themselves",
+        "RCH infrastructure availability or worker health"
+      ],
+      "verified_status": "closed",
+      "verified_closed_at": "2026-05-30T14:07:43.225031351Z",
+      "depends_on_within_program": [
+        "asupersync-vssefs.9.1",
+        "asupersync-vssefs.9"
+      ]
+    },
+    {
+      "bead_id": "asupersync-vssefs.9.3",
+      "title": "[idea-wizard][swarm-ops][memory] Add memory residency and brownout policy model",
+      "expected_status": "closed",
+      "artifact": "artifacts/swarm_memory_residency_policy_contract_v1.json",
+      "artifact_contract_version": "swarm-memory-residency-policy-contract-v1",
+      "contract_test": "tests/scheduler_swarm_evidence_artifact.rs",
+      "runtime_source": "src/runtime/scheduler/swarm_evidence.rs",
+      "proof_command_pointer": "proof_lane.command",
+      "evidence_class": "synthetic_fixture",
+      "covers": [
+        "memory residency planning and brownout decision schema",
+        "nominal / brownout-optional / no-win / unsupported decision separation"
+      ],
+      "does_not_cover": [
+        "real memory pressure measurement on production hosts",
+        "OS-level memory accounting"
+      ],
+      "verified_status": "closed",
+      "verified_closed_at": "2026-05-30T14:31:23.494216343Z",
+      "depends_on_within_program": [
+        "asupersync-vssefs.9"
+      ]
+    },
+    {
+      "bead_id": "asupersync-vssefs.9.4",
+      "title": "[idea-wizard][swarm-ops][contention] Add lock and scheduler contention heatmap ledger",
+      "expected_status": "closed",
+      "artifact": "artifacts/swarm_contention_heatmap_ledger_contract_v1.json",
+      "artifact_contract_version": "swarm-contention-heatmap-ledger-contract-v1",
+      "contract_test": "tests/swarm_contention_heatmap_contract.rs",
+      "runtime_source": "src/lab/swarm_replay.rs",
+      "proof_command_pointer": "proof_lane.command",
+      "evidence_class": "lab_runtime_deterministic",
+      "covers": [
+        "contention heatmap ledger construction from real lab traces",
+        "lock / scheduler-lane / region / queue hotspot ranking and severity",
+        "stale-baseline and incomplete-evidence fail-closed verdicts"
+      ],
+      "does_not_cover": [
+        "wall-clock lock contention measurement (requires lock-metrics feature on live runtimes)",
+        "production scheduler telemetry"
+      ],
+      "verified_status": "closed",
+      "verified_closed_at": "2026-05-30T15:19:35.354880741Z",
+      "depends_on_within_program": [
+        "asupersync-vssefs.9.1",
+        "asupersync-vssefs.9",
+        "asupersync-vssefs.7"
+      ]
+    },
+    {
+      "bead_id": "asupersync-vssefs.9.5",
+      "title": "[idea-wizard][swarm-ops][minimizer] Add deterministic swarm failure minimizer",
+      "expected_status": "closed",
+      "artifact": "artifacts/swarm_failure_minimizer_contract_v1.json",
+      "artifact_contract_version": "swarm-failure-minimizer-contract-v1",
+      "contract_test": "tests/swarm_failure_minimizer_contract.rs",
+      "runtime_source": "src/lab/swarm_replay.rs",
+      "proof_command_pointer": "acceptance.focused_rch_validation",
+      "evidence_class": "lab_runtime_deterministic",
+      "covers": [
+        "deterministic reduction of failing swarm scenarios to minimal reproductions",
+        "invariant-preservation checks during reduction",
+        "owner routing for cancellation storms, deadlock/lost-wakeup suspects, obligation leaks"
+      ],
+      "does_not_cover": [
+        "minimization of failures that cannot be reproduced in the lab runtime",
+        "automatic root-cause identification"
+      ],
+      "verified_status": "closed",
+      "verified_closed_at": "2026-06-01T19:41:12.368628133Z",
+      "depends_on_within_program": [
+        "asupersync-vssefs.9.1",
+        "asupersync-vssefs.9",
+        "asupersync-vssefs.7"
+      ]
+    },
+    {
+      "bead_id": "asupersync-vssefs.9.6",
+      "title": "[idea-wizard][swarm-ops][cockpit] Add operator cockpit report contract",
+      "expected_status": "closed",
+      "artifact": "artifacts/swarm_operator_cockpit_report_contract_v1.json",
+      "artifact_contract_version": "swarm-operator-cockpit-report-contract-v1",
+      "contract_test": "tests/swarm_operator_cockpit_report_contract.rs",
+      "runtime_source": "src/lab/swarm_replay.rs",
+      "proof_command_pointer": "proof_lane.command",
+      "evidence_class": "lab_runtime_deterministic",
+      "covers": [
+        "operator cockpit report schema joining scenario, trace, contention, proof, minimizer, memory, and redaction evidence",
+        "pass / degraded / no-win / blocked / stale-evidence / malformed / unsupported outcome separation",
+        "fail-closed behavior on missing or unsafe evidence"
+      ],
+      "does_not_cover": [
+        "report transport or storage outside the repository",
+        "operator UI rendering beyond the compact text format"
+      ],
+      "verified_status": "closed",
+      "verified_closed_at": "2026-06-01T20:16:58.244089307Z",
+      "depends_on_within_program": [
+        "asupersync-vssefs.9.3",
+        "asupersync-vssefs.9.2",
+        "asupersync-vssefs.9",
+        "asupersync-vssefs.9.5",
+        "asupersync-vssefs.9.4"
+      ]
+    },
+    {
+      "bead_id": "asupersync-vssefs.9.7",
+      "title": "[idea-wizard][swarm-ops][e2e] Add no-mock cockpit proof runner",
+      "expected_status": "closed",
+      "artifact": "artifacts/swarm_cockpit_proof_runner_contract_v1.json",
+      "artifact_contract_version": "swarm-cockpit-proof-runner-v1",
+      "contract_test": "tests/swarm_cockpit_proof_runner_contract.rs",
+      "runner_script": "scripts/run_swarm_cockpit_proof_runner.sh",
+      "runtime_source": "src/lab/swarm_replay.rs",
+      "proof_command_pointer": "proof_command",
+      "evidence_class": "no_mock_rch_backed",
+      "covers": [
+        "end-to-end no-mock proof: scenario corpus -> real lab run -> trace summary -> contention ledger -> proof lane -> cockpit report bundle",
+        "RCH-only execute mode with recorded worker provenance",
+        "structural fail-closed behavior: missing provenance always yields Blocked, never Pass"
+      ],
+      "does_not_cover": [
+        "medium / large profile execution as a closeout requirement (runnable but optional and expensive)",
+        "wall-clock performance of the proof runner itself"
+      ],
+      "verified_status": "closed",
+      "verified_closed_at": "2026-06-01T21:42:45.515990236Z",
+      "depends_on_within_program": [
+        "asupersync-vssefs.9",
+        "asupersync-vssefs.6",
+        "asupersync-vssefs.9.6"
+      ]
+    }
+  ],
+  "deferred_items": [
+    {
+      "bead_id": "asupersync-vssefs.8",
+      "title": "[idea-wizard][swarm-scale][autopilot] Add scheduler feedback controller from pressure metrics",
+      "reason": "Child of the parent swarm-scale epic (asupersync-vssefs), not of the swarm-ops epic (asupersync-vssefs.9). Remains open with its own owner and is explicitly outside this bundle's certification scope.",
+      "owner_bead": "asupersync-vssefs.8"
+    }
+  ],
+  "covers": [
+    "swarm-ops cockpit program completeness: scenario DSL, proof-lane planner, memory policy, contention heatmap, failure minimizer, cockpit report, and no-mock proof runner are all source-backed, contract-tested, and closed",
+    "deterministic lab-runtime execution evidence for corpus, heatmap, minimizer, cockpit report, and proof runner surfaces",
+    "one RCH-backed no-mock closeout proof with remote worker provenance (asupersync-vssefs.9.7)"
+  ],
+  "does_not_cover": [
+    "wall_clock_performance_baselines (benchmark evidence class; owned by PERF gauntlet lanes such as asupersync-zb2a7h)",
+    "multi_process_or_multi_host_distributed_swarms (lab runtime models swarms in one process)",
+    "production_deployment_sizing_or_capacity_planning",
+    "release_gate_certification (owned by the gauntlet program)",
+    "scheduler_feedback_controller (deferred; see deferred_items)",
+    "live_lock_metrics_instrumentation (contention evidence is lab-trace-derived unless the lock-metrics feature is enabled on a live runtime)"
+  ],
+  "fail_closed_rules": [
+    "missing or unparsable child artifact file invalidates the certification",
+    "missing child contract test file invalidates the certification",
+    "child artifact bead_id or contract_version mismatch invalidates the certification",
+    "a child without embedded closure evidence (verified_status closed + verified_closed_at) invalidates the certification",
+    "a live beads snapshot that covers the certified subgraph and shows a certified child as not closed (and not explicitly deferred) invalidates the certification",
+    "missing or non-remote-required proof command at a child's proof_command_pointer invalidates the certification",
+    "an evidence class outside evidence_classes, or a bundle-level claim of benchmark/release evidence, invalidates the certification",
+    "a dependency cycle among the embedded depends_on_within_program edges invalidates the certification",
+    "certified_at_head that is empty, malformed, or not an ancestor of the consumer's HEAD invalidates the certification for that consumer"
+  ],
+  "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_ops_certification_bundle cargo test -p asupersync --test swarm_ops_certification_bundle_contract --features test-internals -- --nocapture",
+  "operator_handoff": {
+    "agent_mail_thread": "asupersync-vssefs.9.8",
+    "support_boundary_summary": "The swarm-ops program certifies deterministic lab-runtime swarm operation tooling with one RCH-backed no-mock proof lane. It does not certify wall-clock performance, distributed multi-host swarms, release gates, or live production telemetry. Operators needing those surfaces must consult the gauntlet program and the deferred scheduler feedback controller bead."
+  },
+  "beads_snapshot_policy": "Closure evidence (verified_status, verified_closed_at) and dependency edges (depends_on_within_program) are embedded per child as the certification snapshot, because RCH workers exclude .beads/ from sync. The live beads snapshot is cross-checked only when it covers the certified subgraph (real repository checkouts); a live snapshot that covers the subgraph and disagrees with the embedded evidence invalidates the certification.",
+  "graph_check": {
+    "tool": "bv --robot-insights",
+    "checked_at_head": "aba3d00ca2a2180432cc3f379d8244e846b4dec4",
+    "data_hash": "7614caad9c25f714",
+    "cycle_count": 0,
+    "advisory": "No cycles detected - dependency graph is a proper DAG (advanced_insights.cycle_break)",
+    "equivalent_check": "tests/swarm_ops_certification_bundle_contract.rs runs Kahn topological sort over the embedded depends_on_within_program edges on every execution"
+  }
+}
