@@ -772,6 +772,14 @@ the byte-level RFC harness alone.
 | `tls-native-roots` | OS trust store |
 | `tls-webpki-roots` | Mozilla's WebPKI bundle |
 
+The `tls` feature selects rustls' ring provider so TLS works out of the box
+instead of requiring each application to install a process-global
+`CryptoProvider`. Asupersync's own certificate-pin SHA-256 helpers use the
+existing pure-Rust `sha2` dependency, but ring remains the native crypto backend
+for rustls. Cross-compiling TLS to `x86_64-pc-windows-gnu` from a Unix worker
+therefore requires the MinGW C toolchain (`x86_64-w64-mingw32-gcc`) even though
+the asupersync source is Windows-gated.
+
 ### DNS and UDP
 
 `src/net/dns/` provides async DNS resolution with address-family selection. `src/net/udp.rs` provides async UDP sockets with send/receive and cancellation safety.
@@ -799,6 +807,11 @@ Asupersync includes async clients for three databases, each respecting structure
 | **MySQL** | `src/database/mysql.rs` | MySQL wire protocol | Native + caching_sha2 |
 
 All three support prepared statements, transactions, and connection reuse. SQLite operations run on the blocking thread pool (since `rusqlite` is synchronous) with cancel-safe wrappers that respect region deadlines. PostgreSQL and MySQL implement their wire protocols directly over `TcpStream`, avoiding external driver dependencies.
+
+The `sqlite` feature uses `rusqlite` with bundled SQLite for predictable local
+behavior. Native Windows builds work with the normal platform C toolchain;
+cross-compiling to `x86_64-pc-windows-gnu` also needs MinGW available because
+`libsqlite3-sys` compiles the bundled SQLite C source.
 
 ### Blocking Pool Safety Semantics
 

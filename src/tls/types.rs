@@ -482,12 +482,12 @@ impl CertificatePin {
     /// renewal as long as the key pair stays the same.
     #[cfg(feature = "tls")]
     pub fn compute_spki_sha256(cert: &Certificate) -> Result<Self, TlsError> {
-        use ring::digest::{SHA256, digest};
+        use sha2::{Digest, Sha256};
 
         let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_der())
             .map_err(|e| TlsError::Certificate(format!("failed to parse certificate DER: {e}")))?;
-        let hash = digest(&SHA256, parsed.public_key().raw);
-        Ok(Self::SpkiSha256(hash.as_ref().to_vec()))
+        let hash = Sha256::digest(parsed.public_key().raw);
+        Ok(Self::SpkiSha256(hash.to_vec()))
     }
 
     /// Compute the SPKI SHA-256 pin for a certificate (fallback when TLS is disabled).
@@ -499,9 +499,10 @@ impl CertificatePin {
     /// Compute the certificate SHA-256 pin for a certificate.
     #[cfg(feature = "tls")]
     pub fn compute_cert_sha256(cert: &Certificate) -> Result<Self, TlsError> {
-        use ring::digest::{SHA256, digest};
-        let hash = digest(&SHA256, cert.as_der());
-        Ok(Self::CertSha256(hash.as_ref().to_vec()))
+        use sha2::{Digest, Sha256};
+
+        let hash = Sha256::digest(cert.as_der());
+        Ok(Self::CertSha256(hash.to_vec()))
     }
 
     /// Compute the certificate SHA-256 pin for a certificate (fallback when TLS is disabled).

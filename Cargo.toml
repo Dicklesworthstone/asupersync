@@ -95,8 +95,10 @@ lock-metrics = []
 obligation-leak-detection = []
 # Enable io_uring reactor for Linux/Android modern async I/O (requires kernel 5.1+).
 io-uring = ["dep:io-uring"]
-# Enable TLS support via rustls
-tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:ring", "dep:rustls-pemfile", "dep:x509-parser"]
+# Enable TLS support via rustls. The rustls ring provider is selected here so
+# TLS remains fully functional out of the box; certificate pin hashing itself
+# uses the existing pure-Rust sha2 dependency and does not depend on ring.
+tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:rustls-pemfile", "dep:x509-parser"]
 # Enable native root certificates for TLS
 tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
@@ -350,7 +352,7 @@ web-sys = { version = "0.3", features = [
     "WritableStreamDefaultWriter",
 ] }
 
-# Native-only dependencies: platform I/O, sockets, signals, and crypto.
+# Native-only dependencies: platform I/O, sockets, signals, and ATP crypto.
 # These are excluded from wasm32 browser builds (umelq.3.3).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 polling = "3.11"
@@ -358,8 +360,6 @@ socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 nix = { version = "0.31", features = ["fs", "poll", "socket", "uio", "user"] }
 signal-hook = "0.4"
-# Rustls crypto provider - ring is the most widely used
-ring = { version = "0.17", optional = true }
 aes-gcm = "0.10.3"
 chacha20poly1305 = "0.10.1"
 

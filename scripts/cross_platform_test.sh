@@ -44,6 +44,26 @@ log_info() {
     echo -e "${BLUE}INFO:${NC} $1" | tee -a "$TEST_LOG"
 }
 
+cargo_target_dir() {
+    printf '%s' "${CARGO_TARGET_DIR:-${PROJECT_ROOT}/target/cross_platform_cargo}"
+}
+
+run_cargo_check() {
+    local label="$1"
+    shift
+
+    log_info "Running cargo check: $label"
+    if CARGO_TARGET_DIR="$(cargo_target_dir)" cargo check "$@" >> "$TEST_LOG" 2>&1; then
+        log_pass "$label compiles"
+    else
+        log_failure "$label compilation failed"
+    fi
+}
+
+tool_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
 # Detect current platform
 detect_platform() {
     local os="$(uname -s)"
@@ -75,7 +95,6 @@ test_filesystem_caps() {
     # Test sparse file support
     if command -v fallocate >/dev/null 2>&1; then
         if fallocate -l 1G "$test_dir/sparse_test" 2>/dev/null; then
-            rm -f "$test_dir/sparse_test"
             log_pass "Sparse file support available"
         else
             log_skip "Sparse file support not available"
@@ -86,7 +105,6 @@ test_filesystem_caps() {
 
     # Test symlink support
     if ln -s "target" "$test_dir/symlink_test" 2>/dev/null; then
-        rm -f "$test_dir/symlink_test"
         log_pass "Symlink support available"
     else
         log_skip "Symlink support not available"
@@ -96,17 +114,15 @@ test_filesystem_caps() {
     if command -v setfattr >/dev/null 2>&1; then
         touch "$test_dir/xattr_test"
         if setfattr -n user.test -v "value" "$test_dir/xattr_test" 2>/dev/null; then
-            rm -f "$test_dir/xattr_test"
             log_pass "Extended attributes support available"
         else
-            rm -f "$test_dir/xattr_test"
             log_skip "Extended attributes not available"
         fi
     else
         log_skip "Extended attributes tools not available"
     fi
 
-    rmdir "$test_dir" 2>/dev/null || true
+    log_info "Filesystem probe artifacts retained under $test_dir"
 }
 
 # Test network capabilities
@@ -121,7 +137,7 @@ test_network_caps() {
     fi
 
     # Test UDP socket binding
-    if command -v nc >/dev/null 2>&1; then
+    if tool_exists nc; then
         if nc -u -l 0 -p 0 </dev/null >/dev/null 2>&1 & then
             local nc_pid=$!
             sleep 0.1
@@ -148,54 +164,92 @@ test_atp_caps() {
 
     cd "$PROJECT_ROOT"
 
-    # Test ATP core compilation
-    if cargo check --package asupersync --lib --features "atp-native" >/dev/null 2>&1; then
-        log_pass "ATP core compiles successfully"
-    else
-        log_failure "ATP core compilation failed"
-    fi
+    run_cargo_check \
+        "ATP/native core" \
+        --package asupersync \
+        --lib \
+        --no-default-features \
+        --features "native-runtime"
 
-    # Test QUIC native implementation
-    if cargo check --package asupersync --lib --features "quic-native" >/dev/null 2>&1; then
-        log_pass "QUIC native implementation compiles"
-    else
-        log_failure "QUIC native implementation compilation failed"
-    fi
+    run_cargo_check \
+        "native QUIC/HTTP3 feature surface" \
+        --package asupersync \
+        --lib \
+        --no-default-features \
+        --features "native-runtime,quic,http3"
 
-    # Test crypto backends
-    local crypto_backends=("ring" "rustcrypto")
-    for backend in "${crypto_backends[@]}"; do
-        if cargo check --features "crypto-$backend" >/dev/null 2>&1; then
-            log_pass "Crypto backend '$backend' available"
-        else
-            log_skip "Crypto backend '$backend' not available"
-        fi
-    done
+    run_cargo_check \
+        "TLS feature surface" \
+        --package asupersync \
+        --lib \
+        --no-default-features \
+        --features "tls"
+
+    run_cargo_check \
+        "SQLite feature surface" \
+        --package asupersync \
+        --lib \
+        --no-default-features \
+        --features "sqlite"
+
+    test_windows_cross_compile_surface
 
     # Test platform-specific I/O
     case "$PLATFORM" in
         linux)
-            if cargo check --features "io-uring" >/dev/null 2>&1; then
-                log_pass "io_uring support available"
-            else
-                log_skip "io_uring not available"
-            fi
+            run_cargo_check \
+                "Linux io_uring feature surface" \
+                --package asupersync \
+                --lib \
+                --no-default-features \
+                --features "native-runtime,io-uring"
             ;;
         macos)
-            if cargo check --features "kqueue" >/dev/null 2>&1; then
-                log_pass "kqueue support available"
-            else
-                log_skip "kqueue not available"
-            fi
+            run_cargo_check \
+                "macOS native feature surface" \
+                --package asupersync \
+                --lib \
+                --no-default-features \
+                --features "native-runtime"
             ;;
         windows)
-            if cargo check --features "iocp" >/dev/null 2>&1; then
-                log_pass "IOCP support available"
-            else
-                log_skip "IOCP not available"
-            fi
+            run_cargo_check \
+                "Windows native feature surface" \
+                --package asupersync \
+                --lib \
+                --no-default-features \
+                --features "native-runtime"
             ;;
     esac
+}
+
+test_windows_cross_compile_surface() {
+    local windows_target="x86_64-pc-windows-gnu"
+
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$windows_target"; then
+        log_skip "Windows GNU Rust target not installed: $windows_target"
+        return
+    fi
+
+    run_cargo_check \
+        "Windows GNU pure-Rust/native source surface" \
+        --package asupersync \
+        --lib \
+        --target "$windows_target" \
+        --no-default-features \
+        --features "native-runtime,quic,http3,compression,tracing-integration"
+
+    if tool_exists x86_64-w64-mingw32-gcc; then
+        run_cargo_check \
+            "Windows GNU native-C feature surface (TLS + SQLite)" \
+            --package asupersync \
+            --lib \
+            --target "$windows_target" \
+            --no-default-features \
+            --features "tls,sqlite"
+    else
+        log_skip "Windows GNU native-C feature surface requires x86_64-w64-mingw32-gcc for ring/libsqlite3-sys"
+    fi
 }
 
 # Test performance characteristics
@@ -205,21 +259,21 @@ test_performance_caps() {
     cd "$PROJECT_ROOT"
 
     # Test if we can measure time precisely
-    if command -v time >/dev/null 2>&1; then
+    if tool_exists time; then
         log_pass "High-resolution timing available"
     else
         log_skip "High-resolution timing not available"
     fi
 
     # Test memory mapping
-    if command -v mmap >/dev/null 2>&1 || [[ "$PLATFORM" != "unknown" ]]; then
+    if tool_exists mmap || [[ "$PLATFORM" != "unknown" ]]; then
         log_pass "Memory mapping capabilities available"
     else
         log_skip "Memory mapping capabilities unknown"
     fi
 
     # Test CPU features (if available)
-    if command -v lscpu >/dev/null 2>&1; then
+    if tool_exists lscpu; then
         local cpu_features
         cpu_features=$(lscpu | grep "Flags" | head -1 || echo "")
         if [[ -n "$cpu_features" ]]; then
@@ -257,8 +311,12 @@ generate_capability_matrix() {
             "udp_sockets": "$(grep -q "UDP socket binding available" "$TEST_LOG" && echo "true" || echo "false")"
         },
         "atp": {
-            "core_compilation": "$(grep -q "ATP core compiles successfully" "$TEST_LOG" && echo "true" || echo "false")",
-            "quic_native": "$(grep -q "QUIC native implementation compiles" "$TEST_LOG" && echo "true" || echo "false")"
+            "core_compilation": "$(grep -q "ATP/native core compiles" "$TEST_LOG" && echo "true" || echo "false")",
+            "quic_native": "$(grep -q "native QUIC/HTTP3 feature surface compiles" "$TEST_LOG" && echo "true" || echo "false")",
+            "tls": "$(grep -q "TLS feature surface compiles" "$TEST_LOG" && echo "true" || echo "false")",
+            "sqlite": "$(grep -q "SQLite feature surface compiles" "$TEST_LOG" && echo "true" || echo "false")",
+            "windows_gnu_source": "$(grep -q "Windows GNU pure-Rust/native source surface compiles" "$TEST_LOG" && echo "true" || echo "false")",
+            "windows_gnu_native_c": "$(grep -q "Windows GNU native-C feature surface (TLS + SQLite) compiles" "$TEST_LOG" && echo "true" || echo "false")"
         },
         "performance": {
             "high_res_timing": "$(grep -q "High-resolution timing available" "$TEST_LOG" && echo "true" || echo "false")",

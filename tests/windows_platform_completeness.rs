@@ -223,3 +223,61 @@ fn track_i_resource_monitor_uses_real_windows_platform_probes() {
         );
     }
 }
+
+#[test]
+fn cross_platform_script_uses_real_feature_surfaces() {
+    let script = load_source("scripts/cross_platform_test.sh");
+
+    for stale_feature in [
+        "atp-native",
+        "quic-native",
+        "crypto-ring",
+        "crypto-rustcrypto",
+        "features \"kqueue\"",
+        "features \"iocp\"",
+    ] {
+        assert!(
+            !script.contains(stale_feature),
+            "cross-platform script must not probe stale/nonexistent feature: {stale_feature}"
+        );
+    }
+
+    for required_token in [
+        "--features \"native-runtime\"",
+        "--features \"native-runtime,quic,http3\"",
+        "--features \"tls\"",
+        "--features \"sqlite\"",
+        "x86_64-pc-windows-gnu",
+        "x86_64-w64-mingw32-gcc",
+        "Windows GNU pure-Rust/native source surface",
+        "Windows GNU native-C feature surface (TLS + SQLite)",
+    ] {
+        assert!(
+            script.contains(required_token),
+            "cross-platform script missing real Windows/source proof token: {required_token}"
+        );
+    }
+}
+
+#[test]
+fn tls_pin_hashing_does_not_add_direct_ring_dependency() {
+    let cargo_toml = load_source("Cargo.toml");
+    let tls_types = load_source("src/tls/types.rs");
+
+    assert!(
+        cargo_toml.contains("rustls/ring"),
+        "TLS must keep an explicit rustls provider so the tls feature is functional out of the box"
+    );
+    assert!(
+        !cargo_toml.contains("ring = { version = \"0.17\", optional = true }"),
+        "asupersync must not keep a direct ring dependency solely for certificate pin hashing"
+    );
+    assert!(
+        tls_types.contains("use sha2::{Digest, Sha256};"),
+        "certificate pin hashing should use the existing pure-Rust sha2 dependency"
+    );
+    assert!(
+        !tls_types.contains("ring::digest"),
+        "certificate pin hashing must not import ring directly"
+    );
+}
