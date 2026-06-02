@@ -48,6 +48,14 @@ pub const RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION: &str =
 pub const RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION: &str =
     "asupersync.runtime-pressure-lab-scenario-evidence.v1";
 
+/// Stable schema for opt-in pressure-aware admission policies.
+pub const RUNTIME_PRESSURE_ADMISSION_POLICY_SCHEMA_VERSION: &str =
+    "asupersync.runtime-pressure-admission-policy.v1";
+
+/// Stable schema for opt-in pressure-aware admission decisions.
+pub const RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION: &str =
+    "asupersync.runtime-pressure-admission-decision.v1";
+
 const RESOURCE_PROBE_WARNING_THROTTLE_EVERY: u64 = 8;
 
 /// Errors that can occur during resource monitoring.
@@ -573,6 +581,174 @@ impl RuntimePressureSnapshot {
             spectral_recommendations,
         }
     }
+}
+
+/// Work class for pressure-aware admission decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureAdmissionWorkClass {
+    Required,
+    Optional,
+}
+
+/// Admission action emitted by the opt-in pressure-aware admission hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureAdmissionAction {
+    Admit,
+    Defer,
+    Reject,
+}
+
+/// Stable reason codes for pressure-aware admission decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureAdmissionReason {
+    PolicyDisabled,
+    RequiredWorkBypass,
+    SnapshotHealthy,
+    SnapshotUnknown,
+    SnapshotDegraded,
+    SnapshotCritical,
+    UnknownSnapshotSchema,
+    MissingPressureSignals,
+}
+
+/// Disabled-by-default policy for converting pressure snapshots into admission decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureAdmissionPolicy {
+    pub schema_version: String,
+    pub enabled: bool,
+    pub unknown_optional_action: RuntimePressureAdmissionAction,
+    pub degraded_optional_action: RuntimePressureAdmissionAction,
+    pub critical_optional_action: RuntimePressureAdmissionAction,
+}
+
+impl Default for RuntimePressureAdmissionPolicy {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+impl RuntimePressureAdmissionPolicy {
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            schema_version: RUNTIME_PRESSURE_ADMISSION_POLICY_SCHEMA_VERSION.to_string(),
+            enabled: false,
+            unknown_optional_action: RuntimePressureAdmissionAction::Defer,
+            degraded_optional_action: RuntimePressureAdmissionAction::Defer,
+            critical_optional_action: RuntimePressureAdmissionAction::Reject,
+        }
+    }
+
+    #[must_use]
+    pub fn conservative_optional_backpressure() -> Self {
+        Self {
+            enabled: true,
+            ..Self::disabled()
+        }
+    }
+
+    #[must_use]
+    pub fn decide(
+        &self,
+        work_class: RuntimePressureAdmissionWorkClass,
+        snapshot: &RuntimePressureSnapshot,
+    ) -> RuntimePressureAdmissionDecision {
+        if !self.enabled {
+            return self.finish(
+                work_class,
+                snapshot,
+                RuntimePressureAdmissionAction::Admit,
+                vec![RuntimePressureAdmissionReason::PolicyDisabled],
+            );
+        }
+
+        if work_class == RuntimePressureAdmissionWorkClass::Required {
+            let mut reason_codes = vec![RuntimePressureAdmissionReason::RequiredWorkBypass];
+            if snapshot.schema_version != RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION {
+                reason_codes.push(RuntimePressureAdmissionReason::UnknownSnapshotSchema);
+            }
+            return self.finish(
+                work_class,
+                snapshot,
+                RuntimePressureAdmissionAction::Admit,
+                reason_codes,
+            );
+        }
+
+        if snapshot.schema_version != RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION {
+            return self.finish(
+                work_class,
+                snapshot,
+                RuntimePressureAdmissionAction::Reject,
+                vec![RuntimePressureAdmissionReason::UnknownSnapshotSchema],
+            );
+        }
+
+        let (action, mut reason_codes) = match snapshot.overall_verdict {
+            RuntimePressureVerdict::Healthy => (
+                RuntimePressureAdmissionAction::Admit,
+                vec![RuntimePressureAdmissionReason::SnapshotHealthy],
+            ),
+            RuntimePressureVerdict::Unknown => (
+                self.unknown_optional_action,
+                vec![RuntimePressureAdmissionReason::SnapshotUnknown],
+            ),
+            RuntimePressureVerdict::Degraded => (
+                self.degraded_optional_action,
+                vec![RuntimePressureAdmissionReason::SnapshotDegraded],
+            ),
+            RuntimePressureVerdict::Critical => (
+                self.critical_optional_action,
+                vec![RuntimePressureAdmissionReason::SnapshotCritical],
+            ),
+        };
+        if snapshot.missing_signal_count > 0 {
+            reason_codes.push(RuntimePressureAdmissionReason::MissingPressureSignals);
+        }
+
+        self.finish(work_class, snapshot, action, reason_codes)
+    }
+
+    fn finish(
+        &self,
+        work_class: RuntimePressureAdmissionWorkClass,
+        snapshot: &RuntimePressureSnapshot,
+        action: RuntimePressureAdmissionAction,
+        reason_codes: Vec<RuntimePressureAdmissionReason>,
+    ) -> RuntimePressureAdmissionDecision {
+        RuntimePressureAdmissionDecision {
+            schema_version: RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION.to_string(),
+            policy_schema_version: self.schema_version.clone(),
+            policy_enabled: self.enabled,
+            work_class,
+            action,
+            reason_codes,
+            snapshot_schema_version: snapshot.schema_version.clone(),
+            snapshot_verdict: snapshot.overall_verdict,
+            missing_signal_count: snapshot.missing_signal_count,
+            degraded_signal_count: snapshot.degraded_signal_count,
+            critical_signal_count: snapshot.critical_signal_count,
+        }
+    }
+}
+
+/// Deterministic ledger row for one pressure-aware admission decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureAdmissionDecision {
+    pub schema_version: String,
+    pub policy_schema_version: String,
+    pub policy_enabled: bool,
+    pub work_class: RuntimePressureAdmissionWorkClass,
+    pub action: RuntimePressureAdmissionAction,
+    pub reason_codes: Vec<RuntimePressureAdmissionReason>,
+    pub snapshot_schema_version: String,
+    pub snapshot_verdict: RuntimePressureVerdict,
+    pub missing_signal_count: u64,
+    pub degraded_signal_count: u64,
+    pub critical_signal_count: u64,
 }
 
 impl ResourcePlatformProbeReport {
@@ -4518,6 +4694,19 @@ impl ResourceMonitor {
             spectral.map(RuntimePressureSpectralSnapshot::from_report),
         )
     }
+
+    /// Evaluate an opt-in pressure-aware admission decision from the current snapshot.
+    #[must_use]
+    pub fn pressure_admission_decision(
+        &self,
+        policy: &RuntimePressureAdmissionPolicy,
+        work_class: RuntimePressureAdmissionWorkClass,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<&SpectralHealthReport>,
+    ) -> RuntimePressureAdmissionDecision {
+        let snapshot = self.runtime_pressure_snapshot(scheduler, spectral);
+        policy.decide(work_class, &snapshot)
+    }
 }
 
 /// Status report for resource monitoring system.
@@ -5892,6 +6081,149 @@ mod tests {
                 .expect("scheduler metrics")
                 .ready_backlog_p99,
             48
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_admission_policy_defaults_to_no_effect() {
+        let snapshot = cpu_lane_pressure_lab_evidence().snapshot;
+        let decision = RuntimePressureAdmissionPolicy::default()
+            .decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+
+        assert_eq!(decision.action, RuntimePressureAdmissionAction::Admit);
+        assert!(!decision.policy_enabled);
+        assert_eq!(
+            decision.reason_codes,
+            vec![RuntimePressureAdmissionReason::PolicyDisabled]
+        );
+        assert_eq!(decision.snapshot_verdict, RuntimePressureVerdict::Critical);
+    }
+
+    #[test]
+    fn runtime_pressure_admission_defers_optional_work_on_degraded_snapshot() {
+        let snapshot = resource_fallback_degraded_lab_evidence().snapshot;
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+        let decision = policy.decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+
+        assert_eq!(decision.action, RuntimePressureAdmissionAction::Defer);
+        assert!(decision.policy_enabled);
+        assert_eq!(
+            decision.reason_codes,
+            vec![RuntimePressureAdmissionReason::SnapshotDegraded]
+        );
+        assert_eq!(decision.degraded_signal_count, 2);
+    }
+
+    #[test]
+    fn runtime_pressure_admission_rejects_optional_work_on_critical_snapshot() {
+        let snapshot = structural_warning_lab_evidence().snapshot;
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+        let decision = policy.decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+
+        assert_eq!(decision.action, RuntimePressureAdmissionAction::Reject);
+        assert_eq!(
+            decision.reason_codes,
+            vec![RuntimePressureAdmissionReason::SnapshotCritical]
+        );
+        assert_eq!(decision.critical_signal_count, 1);
+    }
+
+    #[test]
+    fn runtime_pressure_admission_required_work_bypasses_critical_and_unknown_schema() {
+        let mut snapshot = cpu_lane_pressure_lab_evidence().snapshot;
+        snapshot.schema_version = "asupersync.runtime-pressure-snapshot.future".to_string();
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+        let decision = policy.decide(RuntimePressureAdmissionWorkClass::Required, &snapshot);
+
+        assert_eq!(decision.action, RuntimePressureAdmissionAction::Admit);
+        assert_eq!(
+            decision.reason_codes,
+            vec![
+                RuntimePressureAdmissionReason::RequiredWorkBypass,
+                RuntimePressureAdmissionReason::UnknownSnapshotSchema,
+            ]
+        );
+        assert_eq!(
+            decision.snapshot_schema_version,
+            "asupersync.runtime-pressure-snapshot.future"
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_admission_fails_closed_for_unknown_optional_schema() {
+        let mut snapshot = healthy_pressure_lab_evidence().snapshot;
+        snapshot.schema_version = "asupersync.runtime-pressure-snapshot.future".to_string();
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+        let decision = policy.decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+
+        assert_eq!(decision.action, RuntimePressureAdmissionAction::Reject);
+        assert_eq!(
+            decision.reason_codes,
+            vec![RuntimePressureAdmissionReason::UnknownSnapshotSchema]
+        );
+        assert_eq!(decision.snapshot_verdict, RuntimePressureVerdict::Healthy);
+    }
+
+    #[test]
+    fn runtime_pressure_admission_marks_missing_signals_without_accepting_unknown_snapshot() {
+        let snapshot = RuntimePressureSnapshot::from_parts(
+            &ResourcePressure::new(),
+            ResourcePlatformProbeReport::from_snapshots("test/noarch".to_string(), Vec::new()),
+            None,
+            None,
+        );
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+        let decision = policy.decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+
+        assert_eq!(decision.action, RuntimePressureAdmissionAction::Defer);
+        assert_eq!(
+            decision.reason_codes,
+            vec![
+                RuntimePressureAdmissionReason::SnapshotUnknown,
+                RuntimePressureAdmissionReason::MissingPressureSignals,
+            ]
+        );
+        assert_eq!(decision.missing_signal_count, 4);
+    }
+
+    #[test]
+    fn runtime_pressure_admission_is_deterministic_for_fixed_snapshots() {
+        let snapshot = structural_warning_lab_evidence().snapshot;
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+        let first = policy.decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+
+        for _ in 0..8 {
+            let next = policy.decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+            assert_eq!(first, next);
+        }
+
+        let json = serde_json::to_string_pretty(&first).expect("serialize decision");
+        let reparsed: RuntimePressureAdmissionDecision =
+            serde_json::from_str(&json).expect("deserialize decision");
+        assert_eq!(reparsed, first);
+    }
+
+    #[test]
+    fn runtime_pressure_admission_helper_uses_resource_monitor_snapshot() {
+        let monitor = ResourceMonitor::new(MonitorConfig::default());
+        monitor.pressure().update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(32, 80, 90, 100),
+        );
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+        let decision = monitor.pressure_admission_decision(
+            &policy,
+            RuntimePressureAdmissionWorkClass::Optional,
+            Some(healthy_scheduler_metrics()),
+            None,
+        );
+
+        assert_eq!(decision.action, RuntimePressureAdmissionAction::Defer);
+        assert_eq!(decision.snapshot_verdict, RuntimePressureVerdict::Unknown);
+        assert!(
+            decision
+                .reason_codes
+                .contains(&RuntimePressureAdmissionReason::MissingPressureSignals)
         );
     }
 
