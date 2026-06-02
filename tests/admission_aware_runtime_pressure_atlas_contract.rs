@@ -358,6 +358,11 @@ fn negative_cases_cover_required_fail_closed_behaviors() {
         "production_admission_implied_by_default",
         "remote_required_with_local_fallback_allowed",
         "stale_agent_mail_reservation_snapshot",
+        "active_exclusive_agent_mail_conflict",
+        "peer_owned_dirty_tree_overlap",
+        "expired_agent_mail_reservation",
+        "tracker_only_dirty_tree_change",
+        "unrelated_peer_work",
     ] {
         let row = cases
             .get(case)
@@ -385,6 +390,24 @@ fn negative_cases_cover_required_fail_closed_behaviors() {
         ),
         "production_admission_must_remain_opt_in"
     );
+    assert_eq!(
+        string(
+            cases
+                .get("peer_owned_dirty_tree_overlap")
+                .expect("peer overlap case"),
+            "expected_outcome"
+        ),
+        "handoff_required"
+    );
+    assert_eq!(
+        string(
+            cases
+                .get("expired_agent_mail_reservation")
+                .expect("expired reservation case"),
+            "expected_outcome"
+        ),
+        "proceed"
+    );
 }
 
 #[test]
@@ -409,6 +432,11 @@ fn referenced_sources_contain_the_expected_live_contract_tokens() {
         "AdmissionAwareTrappedCycleWitnessRow",
         "AdmissionAwareTrappedCycleWaitEdgeRow",
         "AdmissionAwareTrappedCycleWitnessProofStatus",
+        "AdmissionAwareCoordinationOverlapClass",
+        "AdmissionAwareCoordinationDecision",
+        "coordination_reason_codes",
+        "active_exclusive_agent_mail_conflict",
+        "peer_dirty_tree_overlap",
         "source_step_or_timestamp",
         "witness_freshness",
         "RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION",

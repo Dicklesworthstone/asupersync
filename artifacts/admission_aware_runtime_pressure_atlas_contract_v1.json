@@ -182,7 +182,10 @@
         "path",
         "dirty_classification",
         "holder",
+        "bead_id",
         "source",
+        "overlap_classification",
+        "coordination_decision",
         "blocks_admission",
         "handoff_required",
         "sample_freshness"
@@ -200,7 +203,9 @@
         "exclusive",
         "reason",
         "expires_ts",
+        "bead_id",
         "overlap_classification",
+        "coordination_decision",
         "sample_freshness"
       ],
       "claim_boundary": "read-only coordination input; planner must not send mail or change reservations"
@@ -218,6 +223,8 @@
         "ready",
         "assignee",
         "updated_at",
+        "overlap_classification",
+        "coordination_decision",
         "sample_freshness"
       ],
       "claim_boundary": "read-only planning input; planner must not mutate Beads"
@@ -296,6 +303,16 @@
       "field": "local_fallback_allowed",
       "owner_source": "runtime_pressure_control_evidence_contract_v1",
       "description": "Remote-required proof lanes must preserve local fallback refusal evidence."
+    },
+    {
+      "field": "overlap_classification",
+      "owner_source": "agent-mail-reservations+dirty-tree+br-tracker",
+      "description": "Caller-supplied read-only overlap class that distinguishes owned work, peer conflicts, expired reservations, tracker-only changes, unrelated peer work, and malformed coordination rows."
+    },
+    {
+      "field": "coordination_decision",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "Builder-derived conservative proceed, defer, handoff_required, or blocked decision for read-only coordination rows."
     }
   ],
   "freshness_policy": {
@@ -432,6 +449,53 @@
       },
       "expected_outcome": "stale_evidence",
       "required_reason_code": "reservation_snapshot_stale"
+    },
+    {
+      "case_id": "active_exclusive_agent_mail_conflict",
+      "input_pattern": {
+        "section": "agent_mail_reservations",
+        "exclusive": true,
+        "overlap_classification": "active_exclusive_conflict"
+      },
+      "expected_outcome": "defer",
+      "required_reason_code": "active_exclusive_agent_mail_conflict"
+    },
+    {
+      "case_id": "peer_owned_dirty_tree_overlap",
+      "input_pattern": {
+        "section": "dirty_tree_peer_ownership",
+        "overlap_classification": "peer_exact",
+        "handoff_required": true
+      },
+      "expected_outcome": "handoff_required",
+      "required_reason_code": "peer_dirty_tree_overlap"
+    },
+    {
+      "case_id": "expired_agent_mail_reservation",
+      "input_pattern": {
+        "section": "agent_mail_reservations",
+        "overlap_classification": "expired_reservation"
+      },
+      "expected_outcome": "proceed",
+      "required_reason_code": "expired_agent_mail_reservation"
+    },
+    {
+      "case_id": "tracker_only_dirty_tree_change",
+      "input_pattern": {
+        "section": "dirty_tree_peer_ownership",
+        "overlap_classification": "tracker_only"
+      },
+      "expected_outcome": "proceed",
+      "required_reason_code": "tracker_only_dirty_tree_change"
+    },
+    {
+      "case_id": "unrelated_peer_work",
+      "input_pattern": {
+        "section": "dirty_tree_peer_ownership",
+        "overlap_classification": "unrelated_peer_work"
+      },
+      "expected_outcome": "proceed",
+      "required_reason_code": "unrelated_peer_work"
     }
   ],
   "validation": {

@@ -852,6 +852,44 @@ pub enum AdmissionAwareAtlasFreshnessStatus {
     Malformed,
 }
 
+impl AdmissionAwareAtlasFreshnessStatus {
+    #[must_use]
+    pub fn is_stale_or_missing(self) -> bool {
+        matches!(self, Self::Stale | Self::Missing)
+    }
+
+    #[must_use]
+    pub fn blocks_validation(self) -> bool {
+        matches!(self, Self::Unsupported | Self::Malformed)
+    }
+}
+
+/// Read-only overlap classification for coordination evidence supplied to the atlas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareCoordinationOverlapClass {
+    NoOverlap,
+    OwnedExact,
+    OwnedGlob,
+    PeerExact,
+    PeerGlob,
+    ActiveExclusiveConflict,
+    ExpiredReservation,
+    TrackerOnly,
+    UnrelatedPeerWork,
+    Malformed,
+}
+
+/// Conservative coordination decision derived from externally supplied atlas rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareCoordinationDecision {
+    Proceed,
+    Defer,
+    HandoffRequired,
+    Blocked,
+}
+
 /// Stable labels for the evidence boundary an atlas snapshot may claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1003,7 +1041,10 @@ pub struct AdmissionAwareDirtyTreePeerOwnershipRow {
     pub path: String,
     pub dirty_classification: String,
     pub holder: Option<String>,
+    pub bead_id: Option<String>,
     pub source: String,
+    pub overlap_classification: AdmissionAwareCoordinationOverlapClass,
+    pub coordination_decision: AdmissionAwareCoordinationDecision,
     pub blocks_admission: bool,
     pub handoff_required: bool,
     pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
@@ -1017,7 +1058,9 @@ pub struct AdmissionAwareAgentMailReservationRow {
     pub exclusive: bool,
     pub reason: String,
     pub expires_ts: Option<String>,
-    pub overlap_classification: String,
+    pub bead_id: Option<String>,
+    pub overlap_classification: AdmissionAwareCoordinationOverlapClass,
+    pub coordination_decision: AdmissionAwareCoordinationDecision,
     pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
 }
 
@@ -1031,6 +1074,8 @@ pub struct AdmissionAwareBrTrackerStatusRow {
     pub ready: bool,
     pub assignee: Option<String>,
     pub updated_at: Option<String>,
+    pub overlap_classification: AdmissionAwareCoordinationOverlapClass,
+    pub coordination_decision: AdmissionAwareCoordinationDecision,
     pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
 }
 
@@ -1124,6 +1169,8 @@ pub struct AdmissionAwareRuntimePressureAtlasSnapshot {
     pub starts_rch: bool,
     pub deadlock_proven: bool,
     pub replay_backed: bool,
+    pub coordination_decision: AdmissionAwareCoordinationDecision,
+    pub coordination_reason_codes: Vec<String>,
     pub lock_contention: Vec<AdmissionAwareLockContentionAtlasRow>,
     pub scheduler_pressure: Vec<AdmissionAwareSchedulerPressureRow>,
     pub region_memory_budget_pressure: Vec<AdmissionAwareRegionMemoryBudgetPressureRow>,
@@ -1142,6 +1189,7 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
     pub fn from_source_snapshots(
         mut input: AdmissionAwareRuntimePressureAtlasBuilderInput,
     ) -> Self {
+        admission_aware_normalize_coordination_inputs(&mut input);
         sort_input_rows(&mut input);
 
         let lock_contention = admission_aware_lock_contention_rows(
@@ -1190,18 +1238,21 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
         missing_required_sections.sort();
         missing_required_sections.dedup();
 
+        let coordination_summary = admission_aware_coordination_summary(&input);
         let validation_blocked = (input.runtime_pressure.overall_verdict
             == RuntimePressureVerdict::Critical
             && !deadlock_proven)
             || input
                 .trapped_cycle_witnesses
                 .iter()
-                .any(AdmissionAwareTrappedCycleWitnessRow::is_malformed);
+                .any(AdmissionAwareTrappedCycleWitnessRow::is_malformed)
+            || coordination_summary.validation_blocked;
         let claim_state = AdmissionAwareAtlasClaimState {
             deadlock_proven,
             replay_backed: input.replay_backed,
             validation_blocked,
-            stale_evidence: !missing_required_sections.is_empty(),
+            stale_evidence: !missing_required_sections.is_empty()
+                || coordination_summary.stale_evidence,
         };
         let overall_label = admission_aware_overall_label(claim_state);
         let claim_boundary_labels =
@@ -1220,6 +1271,8 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
             starts_rch: false,
             deadlock_proven,
             replay_backed: input.replay_backed,
+            coordination_decision: coordination_summary.decision,
+            coordination_reason_codes: coordination_summary.reason_codes,
             lock_contention,
             scheduler_pressure,
             region_memory_budget_pressure,
@@ -1305,6 +1358,235 @@ fn sort_input_rows(input: &mut AdmissionAwareRuntimePressureAtlasBuilderInput) {
     input
         .trapped_cycle_witnesses
         .dedup_by(|left, right| left.witness_id == right.witness_id);
+}
+
+fn admission_aware_normalize_coordination_inputs(
+    input: &mut AdmissionAwareRuntimePressureAtlasBuilderInput,
+) {
+    for row in &mut input.dirty_tree_peer_ownership {
+        row.coordination_decision = admission_aware_dirty_tree_coordination_decision(row);
+    }
+    for row in &mut input.agent_mail_reservations {
+        row.coordination_decision = admission_aware_agent_mail_coordination_decision(row);
+    }
+    for row in &mut input.br_tracker_status {
+        row.coordination_decision = admission_aware_br_tracker_coordination_decision(row);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AdmissionAwareCoordinationSummary {
+    decision: AdmissionAwareCoordinationDecision,
+    reason_codes: Vec<String>,
+    stale_evidence: bool,
+    validation_blocked: bool,
+}
+
+fn admission_aware_coordination_summary(
+    input: &AdmissionAwareRuntimePressureAtlasBuilderInput,
+) -> AdmissionAwareCoordinationSummary {
+    let mut decision = AdmissionAwareCoordinationDecision::Proceed;
+    let mut reason_codes = Vec::new();
+    let mut stale_evidence = false;
+
+    for row in &input.dirty_tree_peer_ownership {
+        decision = admission_aware_max_coordination_decision(decision, row.coordination_decision);
+        admission_aware_collect_freshness_reason(
+            row.sample_freshness,
+            "dirty_tree_snapshot_stale",
+            &mut stale_evidence,
+            &mut reason_codes,
+        );
+        if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::Malformed {
+            reason_codes.push("malformed_coordination_snapshot".to_string());
+        }
+        if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::TrackerOnly {
+            reason_codes.push("tracker_only_dirty_tree_change".to_string());
+        }
+        if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::UnrelatedPeerWork {
+            reason_codes.push("unrelated_peer_work".to_string());
+        }
+        if row.handoff_required || admission_aware_overlap_is_peer(row.overlap_classification) {
+            reason_codes.push("peer_dirty_tree_overlap".to_string());
+        } else if row.blocks_admission {
+            reason_codes.push("dirty_tree_blocks_admission".to_string());
+        }
+    }
+
+    for row in &input.agent_mail_reservations {
+        decision = admission_aware_max_coordination_decision(decision, row.coordination_decision);
+        admission_aware_collect_freshness_reason(
+            row.sample_freshness,
+            "reservation_snapshot_stale",
+            &mut stale_evidence,
+            &mut reason_codes,
+        );
+        match row.overlap_classification {
+            AdmissionAwareCoordinationOverlapClass::ActiveExclusiveConflict => {
+                reason_codes.push("active_exclusive_agent_mail_conflict".to_string());
+            }
+            AdmissionAwareCoordinationOverlapClass::ExpiredReservation => {
+                reason_codes.push("expired_agent_mail_reservation".to_string());
+            }
+            AdmissionAwareCoordinationOverlapClass::Malformed => {
+                reason_codes.push("malformed_coordination_snapshot".to_string());
+            }
+            overlap if admission_aware_overlap_is_peer(overlap) => {
+                reason_codes.push("peer_agent_mail_overlap".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    for row in &input.br_tracker_status {
+        decision = admission_aware_max_coordination_decision(decision, row.coordination_decision);
+        admission_aware_collect_freshness_reason(
+            row.sample_freshness,
+            "tracker_snapshot_stale",
+            &mut stale_evidence,
+            &mut reason_codes,
+        );
+        if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::Malformed {
+            reason_codes.push("malformed_coordination_snapshot".to_string());
+        }
+        if admission_aware_overlap_is_peer(row.overlap_classification) {
+            reason_codes.push("peer_tracker_overlap".to_string());
+        }
+        if !row.blocked_by.is_empty() {
+            reason_codes.push("bead_blocked_by_dependencies".to_string());
+        }
+        if !row.ready {
+            reason_codes.push("bead_not_ready".to_string());
+        }
+    }
+
+    reason_codes.sort();
+    reason_codes.dedup();
+    AdmissionAwareCoordinationSummary {
+        decision,
+        reason_codes,
+        stale_evidence,
+        validation_blocked: decision != AdmissionAwareCoordinationDecision::Proceed,
+    }
+}
+
+fn admission_aware_collect_freshness_reason(
+    freshness: AdmissionAwareAtlasFreshnessStatus,
+    stale_reason: &str,
+    stale_evidence: &mut bool,
+    reason_codes: &mut Vec<String>,
+) {
+    if freshness.is_stale_or_missing() {
+        *stale_evidence = true;
+        reason_codes.push(stale_reason.to_string());
+    }
+    if freshness.blocks_validation() {
+        reason_codes.push("malformed_coordination_snapshot".to_string());
+    }
+}
+
+fn admission_aware_dirty_tree_coordination_decision(
+    row: &AdmissionAwareDirtyTreePeerOwnershipRow,
+) -> AdmissionAwareCoordinationDecision {
+    if let Some(decision) = admission_aware_freshness_coordination_decision(row.sample_freshness) {
+        return decision;
+    }
+    if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::Malformed {
+        return AdmissionAwareCoordinationDecision::Blocked;
+    }
+    if row.handoff_required || admission_aware_overlap_is_peer(row.overlap_classification) {
+        return AdmissionAwareCoordinationDecision::HandoffRequired;
+    }
+    if row.blocks_admission {
+        return AdmissionAwareCoordinationDecision::Defer;
+    }
+    AdmissionAwareCoordinationDecision::Proceed
+}
+
+fn admission_aware_agent_mail_coordination_decision(
+    row: &AdmissionAwareAgentMailReservationRow,
+) -> AdmissionAwareCoordinationDecision {
+    if let Some(decision) = admission_aware_freshness_coordination_decision(row.sample_freshness) {
+        return decision;
+    }
+    match row.overlap_classification {
+        AdmissionAwareCoordinationOverlapClass::Malformed => {
+            AdmissionAwareCoordinationDecision::Blocked
+        }
+        AdmissionAwareCoordinationOverlapClass::ActiveExclusiveConflict => {
+            AdmissionAwareCoordinationDecision::Defer
+        }
+        AdmissionAwareCoordinationOverlapClass::PeerExact
+        | AdmissionAwareCoordinationOverlapClass::PeerGlob => {
+            if row.exclusive {
+                AdmissionAwareCoordinationDecision::Defer
+            } else {
+                AdmissionAwareCoordinationDecision::HandoffRequired
+            }
+        }
+        _ => AdmissionAwareCoordinationDecision::Proceed,
+    }
+}
+
+fn admission_aware_br_tracker_coordination_decision(
+    row: &AdmissionAwareBrTrackerStatusRow,
+) -> AdmissionAwareCoordinationDecision {
+    if let Some(decision) = admission_aware_freshness_coordination_decision(row.sample_freshness) {
+        return decision;
+    }
+    if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::Malformed {
+        return AdmissionAwareCoordinationDecision::Blocked;
+    }
+    if admission_aware_overlap_is_peer(row.overlap_classification) {
+        return AdmissionAwareCoordinationDecision::HandoffRequired;
+    }
+    if !row.ready || !row.blocked_by.is_empty() {
+        return AdmissionAwareCoordinationDecision::Defer;
+    }
+    AdmissionAwareCoordinationDecision::Proceed
+}
+
+fn admission_aware_freshness_coordination_decision(
+    freshness: AdmissionAwareAtlasFreshnessStatus,
+) -> Option<AdmissionAwareCoordinationDecision> {
+    if freshness.blocks_validation() {
+        Some(AdmissionAwareCoordinationDecision::Blocked)
+    } else if freshness.is_stale_or_missing() {
+        Some(AdmissionAwareCoordinationDecision::Defer)
+    } else {
+        None
+    }
+}
+
+fn admission_aware_overlap_is_peer(overlap: AdmissionAwareCoordinationOverlapClass) -> bool {
+    matches!(
+        overlap,
+        AdmissionAwareCoordinationOverlapClass::PeerExact
+            | AdmissionAwareCoordinationOverlapClass::PeerGlob
+            | AdmissionAwareCoordinationOverlapClass::ActiveExclusiveConflict
+    )
+}
+
+fn admission_aware_max_coordination_decision(
+    left: AdmissionAwareCoordinationDecision,
+    right: AdmissionAwareCoordinationDecision,
+) -> AdmissionAwareCoordinationDecision {
+    if admission_aware_coordination_decision_rank(right)
+        > admission_aware_coordination_decision_rank(left)
+    {
+        right
+    } else {
+        left
+    }
+}
+
+fn admission_aware_coordination_decision_rank(decision: AdmissionAwareCoordinationDecision) -> u8 {
+    match decision {
+        AdmissionAwareCoordinationDecision::Proceed => 0,
+        AdmissionAwareCoordinationDecision::Defer => 1,
+        AdmissionAwareCoordinationDecision::HandoffRequired => 2,
+        AdmissionAwareCoordinationDecision::Blocked => 3,
+    }
 }
 
 fn admission_aware_lock_contention_rows(
@@ -1681,9 +1963,12 @@ fn admission_aware_claim_boundary_row(
             "DEADLOCK_PROVEN: explicit trapped-cycle witness confirmed".to_string(),
         ),
         AdmissionAwareAtlasClaimLabel::ValidationBlocked => (
-            vec!["critical_runtime_pressure".to_string()],
+            vec![
+                "critical_runtime_pressure_or_coordination_conflict".to_string(),
+                "blocker_code".to_string(),
+            ],
             vec!["validation_green".to_string()],
-            "VALIDATION_BLOCKED: critical pressure evidence present".to_string(),
+            "VALIDATION_BLOCKED: critical pressure or coordination blocker present".to_string(),
         ),
         AdmissionAwareAtlasClaimLabel::StaleEvidence => (
             vec!["all_required_source_sections".to_string()],
@@ -6730,7 +7015,10 @@ mod tests {
                 path: "src/runtime/resource_monitor.rs".to_string(),
                 dirty_classification: "owned".to_string(),
                 holder: Some("SageWolf".to_string()),
+                bead_id: Some("asupersync-bt63nr.7".to_string()),
                 source: "agent-mail-reservation".to_string(),
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::OwnedExact,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
                 blocks_admission: false,
                 handoff_required: false,
                 sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
@@ -6739,7 +7027,10 @@ mod tests {
                 path: ".beads/issues.jsonl".to_string(),
                 dirty_classification: "tracker-only".to_string(),
                 holder: Some("SageWolf".to_string()),
+                bead_id: Some("asupersync-bt63nr.7".to_string()),
                 source: "beads-claim".to_string(),
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::TrackerOnly,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
                 blocks_admission: false,
                 handoff_required: false,
                 sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
@@ -6751,7 +7042,9 @@ mod tests {
             exclusive: true,
             reason: "asupersync-bt63nr.3".to_string(),
             expires_ts: Some("2026-06-02T23:00:00Z".to_string()),
-            overlap_classification: "owned_exact".to_string(),
+            bead_id: Some("asupersync-bt63nr.7".to_string()),
+            overlap_classification: AdmissionAwareCoordinationOverlapClass::OwnedExact,
+            coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
             sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
         }];
         input.br_tracker_status = vec![AdmissionAwareBrTrackerStatusRow {
@@ -6762,6 +7055,8 @@ mod tests {
             ready: true,
             assignee: Some("SageWolf".to_string()),
             updated_at: Some("2026-06-02T21:02:56Z".to_string()),
+            overlap_classification: AdmissionAwareCoordinationOverlapClass::OwnedExact,
+            coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
             sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
         }];
         input.large_host_worker_warmth = vec![AdmissionAwareLargeHostWorkerWarmthRow {
@@ -7355,6 +7650,14 @@ mod tests {
         assert!(!atlas.mutates_beads);
         assert!(!atlas.mutates_filesystem);
         assert!(!atlas.starts_rch);
+        assert_eq!(
+            atlas.coordination_decision,
+            AdmissionAwareCoordinationDecision::Proceed
+        );
+        assert_eq!(
+            atlas.coordination_reason_codes,
+            vec!["tracker_only_dirty_tree_change"]
+        );
         assert_eq!(reparsed, atlas);
         assert_eq!(
             atlas
@@ -7380,6 +7683,7 @@ mod tests {
             "admission-aware-runtime-pressure-atlas-v1"
         );
         assert_eq!(value["overall_label"], "replay_backed");
+        assert_eq!(value["coordination_decision"], "proceed");
         assert_eq!(
             value["scheduler_pressure"][0]["scheduler_tail_pressure_label"],
             "nominal"
@@ -7393,6 +7697,129 @@ mod tests {
                 "worker_capacity_selected",
             ])
         );
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_correlates_read_only_coordination_inputs() {
+        let mut input = complete_atlas_builder_input(healthy_spectral_snapshot(), false);
+        input
+            .dirty_tree_peer_ownership
+            .push(AdmissionAwareDirtyTreePeerOwnershipRow {
+                path: "src/channel/mpsc.rs".to_string(),
+                dirty_classification: "peer-owned-source-overlap".to_string(),
+                holder: Some("PeerAgent".to_string()),
+                bead_id: Some("asupersync-peer.1".to_string()),
+                source: "agent-mail-reservation".to_string(),
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::PeerExact,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+                blocks_admission: true,
+                handoff_required: true,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            });
+        input
+            .agent_mail_reservations
+            .push(AdmissionAwareAgentMailReservationRow {
+                path_pattern: "src/channel/*.rs".to_string(),
+                holder: "PeerAgent".to_string(),
+                exclusive: true,
+                reason: "asupersync-peer.1".to_string(),
+                expires_ts: Some("2026-06-02T23:30:00Z".to_string()),
+                bead_id: Some("asupersync-peer.1".to_string()),
+                overlap_classification:
+                    AdmissionAwareCoordinationOverlapClass::ActiveExclusiveConflict,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            });
+        input
+            .agent_mail_reservations
+            .push(AdmissionAwareAgentMailReservationRow {
+                path_pattern: "docs/runtime_pressure_triage_runbook.md".to_string(),
+                holder: "PeerAgent".to_string(),
+                exclusive: true,
+                reason: "old-docs-reservation".to_string(),
+                expires_ts: Some("2026-06-02T19:00:00Z".to_string()),
+                bead_id: None,
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::ExpiredReservation,
+                coordination_decision: AdmissionAwareCoordinationDecision::Blocked,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            });
+        input
+            .br_tracker_status
+            .push(AdmissionAwareBrTrackerStatusRow {
+                bead_id: "asupersync-bt63nr.4".to_string(),
+                status: "open".to_string(),
+                priority: Some(1),
+                blocked_by: vec!["asupersync-bt63nr.7".to_string()],
+                ready: false,
+                assignee: None,
+                updated_at: Some("2026-06-02T22:44:00Z".to_string()),
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::TrackerOnly,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            });
+
+        let atlas = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(input);
+
+        assert_eq!(
+            atlas.overall_label,
+            AdmissionAwareAtlasClaimLabel::ValidationBlocked
+        );
+        assert_eq!(
+            atlas.coordination_decision,
+            AdmissionAwareCoordinationDecision::HandoffRequired
+        );
+        for reason in [
+            "active_exclusive_agent_mail_conflict",
+            "bead_blocked_by_dependencies",
+            "bead_not_ready",
+            "expired_agent_mail_reservation",
+            "peer_dirty_tree_overlap",
+            "tracker_only_dirty_tree_change",
+        ] {
+            assert!(
+                atlas
+                    .coordination_reason_codes
+                    .iter()
+                    .any(|code| code == reason),
+                "coordination reason missing {reason}"
+            );
+        }
+        assert_eq!(
+            atlas
+                .dirty_tree_peer_ownership
+                .iter()
+                .map(|row| (row.path.as_str(), row.coordination_decision))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    ".beads/issues.jsonl",
+                    AdmissionAwareCoordinationDecision::Proceed
+                ),
+                (
+                    "src/channel/mpsc.rs",
+                    AdmissionAwareCoordinationDecision::HandoffRequired
+                ),
+                (
+                    "src/runtime/resource_monitor.rs",
+                    AdmissionAwareCoordinationDecision::Proceed
+                ),
+            ]
+        );
+        let expired = atlas
+            .agent_mail_reservations
+            .iter()
+            .find(|row| {
+                row.overlap_classification
+                    == AdmissionAwareCoordinationOverlapClass::ExpiredReservation
+            })
+            .expect("expired reservation row");
+        assert_eq!(
+            expired.coordination_decision,
+            AdmissionAwareCoordinationDecision::Proceed,
+            "expired reservations are visible but should not block the lane"
+        );
+        assert!(!atlas.mutates_agent_mail);
+        assert!(!atlas.mutates_beads);
     }
 
     #[test]
