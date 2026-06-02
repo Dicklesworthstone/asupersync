@@ -22,6 +22,9 @@
 
 #![allow(missing_docs)]
 
+use crate::observability::spectral_health::{
+    EarlyWarningSeverity, HealthClassification, SpectralHealthReport,
+};
 use crate::runtime::scheduler::SchedulerEvidenceMetrics;
 use crate::types::RegionId;
 use crate::types::pressure::SystemPressure;
@@ -36,6 +39,10 @@ use thiserror::Error;
 /// Stable schema for operator-facing platform probe reports.
 pub const RESOURCE_MONITOR_PLATFORM_GAP_REPORT_SCHEMA_VERSION: &str =
     "asupersync.resource-monitor-platform-gaps.v1";
+
+/// Stable schema for unified operator-facing runtime pressure snapshots.
+pub const RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION: &str =
+    "asupersync.runtime-pressure-snapshot.v1";
 
 const RESOURCE_PROBE_WARNING_THROTTLE_EVERY: u64 = 8;
 
@@ -213,6 +220,245 @@ pub struct ResourcePlatformProbeReport {
     pub operator_verdict: ResourceProbeOperatorVerdict,
 }
 
+/// Top-level operator verdict for the unified runtime pressure snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureVerdict {
+    Healthy,
+    Unknown,
+    Degraded,
+    Critical,
+}
+
+/// First-party signal groups folded into a runtime pressure snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureSignal {
+    Resources,
+    Scheduler,
+    Spectral,
+    PlatformProbes,
+}
+
+/// Availability and quality state for one pressure signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureSignalStatus {
+    Present,
+    Missing,
+    Degraded,
+    Critical,
+}
+
+/// Deterministic status row for one pressure signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureSignalSnapshot {
+    pub signal: RuntimePressureSignal,
+    pub status: RuntimePressureSignalStatus,
+    pub reason: String,
+}
+
+/// Serializable resource pressure row with deterministic numeric fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureResourceSnapshot {
+    pub resource_type: ResourceType,
+    pub resource_label: String,
+    pub current: u64,
+    pub soft_limit: u64,
+    pub hard_limit: u64,
+    pub max_limit: u64,
+    /// Usage in basis points, where `10_000` represents 100%.
+    pub usage_bps: u16,
+    pub soft_limit_exceeded: bool,
+    pub hard_limit_exceeded: bool,
+    pub critical_limit_exceeded: bool,
+    pub degradation_level: DegradationLevel,
+}
+
+/// Compact spectral topology class used by the runtime pressure snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureSpectralClass {
+    Unknown,
+    Healthy,
+    Degraded,
+    Critical,
+    Fragmented,
+    Deadlocked,
+}
+
+/// Compact early-warning severity used by the runtime pressure snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureEarlyWarningSeverity {
+    Unknown,
+    None,
+    Watch,
+    Warning,
+    Critical,
+}
+
+impl From<EarlyWarningSeverity> for RuntimePressureEarlyWarningSeverity {
+    fn from(value: EarlyWarningSeverity) -> Self {
+        match value {
+            EarlyWarningSeverity::None => Self::None,
+            EarlyWarningSeverity::Watch => Self::Watch,
+            EarlyWarningSeverity::Warning => Self::Warning,
+            EarlyWarningSeverity::Critical => Self::Critical,
+        }
+    }
+}
+
+/// Serializable spectral health row with floating-point internals quantized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureSpectralSnapshot {
+    pub class: RuntimePressureSpectralClass,
+    pub fiedler_micro_units: Option<u64>,
+    pub spectral_gap_bps: Option<u16>,
+    pub spectral_radius_micro_units: Option<u64>,
+    pub bottleneck_count: usize,
+    pub components: Option<usize>,
+    pub approaching_disconnect: bool,
+    pub trapped_wait_cycle: bool,
+    pub early_warning_severity: RuntimePressureEarlyWarningSeverity,
+}
+
+impl RuntimePressureSpectralSnapshot {
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self {
+            class: RuntimePressureSpectralClass::Unknown,
+            fiedler_micro_units: None,
+            spectral_gap_bps: None,
+            spectral_radius_micro_units: None,
+            bottleneck_count: 0,
+            components: None,
+            approaching_disconnect: false,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub fn from_report(report: &SpectralHealthReport) -> Self {
+        let (class, components, approaching_disconnect, trapped_wait_cycle) =
+            match &report.classification {
+                HealthClassification::Deadlocked => {
+                    (RuntimePressureSpectralClass::Deadlocked, None, false, true)
+                }
+                HealthClassification::Healthy { .. } => {
+                    (RuntimePressureSpectralClass::Healthy, None, false, false)
+                }
+                HealthClassification::Degraded { .. } => {
+                    (RuntimePressureSpectralClass::Degraded, None, false, false)
+                }
+                HealthClassification::Critical {
+                    approaching_disconnect,
+                    ..
+                } => (
+                    RuntimePressureSpectralClass::Critical,
+                    None,
+                    *approaching_disconnect,
+                    false,
+                ),
+                HealthClassification::Fragmented { components } => (
+                    RuntimePressureSpectralClass::Fragmented,
+                    Some(*components),
+                    false,
+                    false,
+                ),
+            };
+
+        Self {
+            class,
+            fiedler_micro_units: finite_scaled_u64(report.decomposition.fiedler_value, 1_000_000.0),
+            spectral_gap_bps: finite_bps(report.decomposition.spectral_gap),
+            spectral_radius_micro_units: finite_scaled_u64(
+                report.decomposition.spectral_radius,
+                1_000_000.0,
+            ),
+            bottleneck_count: report.bottlenecks.len(),
+            components,
+            approaching_disconnect,
+            trapped_wait_cycle,
+            early_warning_severity: report
+                .bifurcation
+                .as_ref()
+                .map_or(RuntimePressureEarlyWarningSeverity::None, |warning| {
+                    warning.severity.into()
+                }),
+        }
+    }
+}
+
+/// Unified operator-facing runtime pressure report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureSnapshot {
+    pub schema_version: String,
+    pub overall_verdict: RuntimePressureVerdict,
+    pub missing_signal_count: u64,
+    pub degraded_signal_count: u64,
+    pub critical_signal_count: u64,
+    pub resource_composite_degradation: DegradationLevel,
+    pub platform_probe_operator_verdict: ResourceProbeOperatorVerdict,
+    pub signal_statuses: Vec<RuntimePressureSignalSnapshot>,
+    pub resources: Vec<RuntimePressureResourceSnapshot>,
+    pub scheduler: Option<SchedulerEvidenceMetrics>,
+    pub spectral: RuntimePressureSpectralSnapshot,
+}
+
+impl RuntimePressureSnapshot {
+    #[must_use]
+    pub fn from_parts(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<RuntimePressureSpectralSnapshot>,
+    ) -> Self {
+        let resources = runtime_pressure_resources(pressure);
+        let resource_composite_degradation = pressure.composite_degradation_level();
+        let spectral = spectral.unwrap_or_else(RuntimePressureSpectralSnapshot::unknown);
+
+        let mut signal_statuses = vec![
+            runtime_pressure_resource_signal_status(&resources, resource_composite_degradation),
+            runtime_pressure_scheduler_signal_status(scheduler.as_ref()),
+            runtime_pressure_spectral_signal_status(&spectral),
+            runtime_pressure_platform_probe_signal_status(&platform_probe_report),
+        ];
+        signal_statuses.sort_by_key(|row| row.signal);
+
+        let missing_signal_count =
+            count_signal_status(&signal_statuses, RuntimePressureSignalStatus::Missing);
+        let degraded_signal_count =
+            count_signal_status(&signal_statuses, RuntimePressureSignalStatus::Degraded);
+        let critical_signal_count =
+            count_signal_status(&signal_statuses, RuntimePressureSignalStatus::Critical);
+        let overall_verdict = if critical_signal_count > 0 {
+            RuntimePressureVerdict::Critical
+        } else if degraded_signal_count > 0 {
+            RuntimePressureVerdict::Degraded
+        } else if missing_signal_count > 0 {
+            RuntimePressureVerdict::Unknown
+        } else {
+            RuntimePressureVerdict::Healthy
+        };
+
+        Self {
+            schema_version: RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION.to_string(),
+            overall_verdict,
+            missing_signal_count,
+            degraded_signal_count,
+            critical_signal_count,
+            resource_composite_degradation,
+            platform_probe_operator_verdict: platform_probe_report.operator_verdict,
+            signal_statuses,
+            resources,
+            scheduler,
+            spectral,
+        }
+    }
+}
+
 impl ResourcePlatformProbeReport {
     fn from_snapshots(platform: String, mut probes: Vec<ResourceProbeSnapshot>) -> Self {
         probes.sort_by_key(|snapshot| snapshot.probe);
@@ -265,6 +511,266 @@ impl ResourcePlatformProbeReport {
             operator_verdict,
         }
     }
+}
+
+fn runtime_pressure_resources(pressure: &ResourcePressure) -> Vec<RuntimePressureResourceSnapshot> {
+    let measurements = pressure.measurements.read().clone();
+    let degradation_levels = pressure.degradation_levels.read().clone();
+    let mut resource_types = measurements
+        .keys()
+        .chain(degradation_levels.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    resource_types.sort_by_key(|resource_type| resource_type.to_string());
+    resource_types.dedup();
+
+    resource_types
+        .into_iter()
+        .map(|resource_type| {
+            let measurement = measurements.get(&resource_type);
+            let degradation_level = degradation_levels
+                .get(&resource_type)
+                .copied()
+                .unwrap_or(DegradationLevel::None);
+            let (
+                current,
+                soft_limit,
+                hard_limit,
+                max_limit,
+                usage_bps,
+                soft_limit_exceeded,
+                hard_limit_exceeded,
+                critical_limit_exceeded,
+            ) = measurement.map_or((0, 0, 0, 0, 0, false, false, false), |measurement| {
+                (
+                    measurement.current,
+                    measurement.soft_limit,
+                    measurement.hard_limit,
+                    measurement.max_limit,
+                    resource_usage_bps(measurement.current, measurement.max_limit),
+                    measurement.is_soft_exceeded(),
+                    measurement.is_hard_exceeded(),
+                    measurement.is_critical(),
+                )
+            });
+
+            RuntimePressureResourceSnapshot {
+                resource_label: resource_type.to_string(),
+                resource_type,
+                current,
+                soft_limit,
+                hard_limit,
+                max_limit,
+                usage_bps,
+                soft_limit_exceeded,
+                hard_limit_exceeded,
+                critical_limit_exceeded,
+                degradation_level,
+            }
+        })
+        .collect()
+}
+
+fn runtime_pressure_resource_signal_status(
+    resources: &[RuntimePressureResourceSnapshot],
+    composite_degradation: DegradationLevel,
+) -> RuntimePressureSignalSnapshot {
+    if resources.is_empty() {
+        return runtime_pressure_signal_row(
+            RuntimePressureSignal::Resources,
+            RuntimePressureSignalStatus::Missing,
+            "no_resource_measurements",
+        );
+    }
+
+    if composite_degradation >= DegradationLevel::Heavy
+        || resources
+            .iter()
+            .any(|resource| resource.hard_limit_exceeded || resource.critical_limit_exceeded)
+    {
+        return runtime_pressure_signal_row(
+            RuntimePressureSignal::Resources,
+            RuntimePressureSignalStatus::Critical,
+            "resource_hard_or_heavy_pressure",
+        );
+    }
+
+    if composite_degradation >= DegradationLevel::Light
+        || resources.iter().any(|resource| {
+            resource.soft_limit_exceeded || resource.degradation_level >= DegradationLevel::Light
+        })
+    {
+        return runtime_pressure_signal_row(
+            RuntimePressureSignal::Resources,
+            RuntimePressureSignalStatus::Degraded,
+            "resource_soft_or_degraded_pressure",
+        );
+    }
+
+    runtime_pressure_signal_row(
+        RuntimePressureSignal::Resources,
+        RuntimePressureSignalStatus::Present,
+        "resource_measurements_present",
+    )
+}
+
+fn runtime_pressure_scheduler_signal_status(
+    scheduler: Option<&SchedulerEvidenceMetrics>,
+) -> RuntimePressureSignalSnapshot {
+    let Some(metrics) = scheduler else {
+        return runtime_pressure_signal_row(
+            RuntimePressureSignal::Scheduler,
+            RuntimePressureSignalStatus::Missing,
+            "scheduler_metrics_absent",
+        );
+    };
+
+    let profile = TailRiskAdmissionProfile::default();
+    if metrics.wake_to_run_p99_ns >= profile.wake_to_run_p99_ns_limit.saturating_mul(2)
+        || metrics.queue_residency_p99_ns >= profile.queue_residency_p99_ns_limit.saturating_mul(2)
+        || metrics.ready_backlog_p99 >= profile.ready_backlog_p99_limit.saturating_mul(2)
+        || metrics.cancel_debt_p99 >= profile.cancel_debt_p99_limit.saturating_mul(2)
+    {
+        return runtime_pressure_signal_row(
+            RuntimePressureSignal::Scheduler,
+            RuntimePressureSignalStatus::Critical,
+            "scheduler_tail_pressure_critical",
+        );
+    }
+
+    if metrics.wake_to_run_p99_ns >= profile.wake_to_run_p99_ns_limit
+        || metrics.queue_residency_p99_ns >= profile.queue_residency_p99_ns_limit
+        || metrics.ready_backlog_p99 >= profile.ready_backlog_p99_limit
+        || metrics.cancel_debt_p99 >= profile.cancel_debt_p99_limit
+    {
+        return runtime_pressure_signal_row(
+            RuntimePressureSignal::Scheduler,
+            RuntimePressureSignalStatus::Degraded,
+            "scheduler_tail_pressure_degraded",
+        );
+    }
+
+    runtime_pressure_signal_row(
+        RuntimePressureSignal::Scheduler,
+        RuntimePressureSignalStatus::Present,
+        "scheduler_metrics_present",
+    )
+}
+
+fn runtime_pressure_spectral_signal_status(
+    spectral: &RuntimePressureSpectralSnapshot,
+) -> RuntimePressureSignalSnapshot {
+    match (spectral.class, spectral.early_warning_severity) {
+        (RuntimePressureSpectralClass::Unknown, _) => runtime_pressure_signal_row(
+            RuntimePressureSignal::Spectral,
+            RuntimePressureSignalStatus::Missing,
+            "spectral_health_absent",
+        ),
+        (
+            RuntimePressureSpectralClass::Deadlocked
+            | RuntimePressureSpectralClass::Fragmented
+            | RuntimePressureSpectralClass::Critical,
+            _,
+        )
+        | (_, RuntimePressureEarlyWarningSeverity::Critical) => runtime_pressure_signal_row(
+            RuntimePressureSignal::Spectral,
+            RuntimePressureSignalStatus::Critical,
+            "spectral_topology_critical",
+        ),
+        (RuntimePressureSpectralClass::Degraded, _)
+        | (_, RuntimePressureEarlyWarningSeverity::Warning) => runtime_pressure_signal_row(
+            RuntimePressureSignal::Spectral,
+            RuntimePressureSignalStatus::Degraded,
+            "spectral_topology_degraded",
+        ),
+        _ => runtime_pressure_signal_row(
+            RuntimePressureSignal::Spectral,
+            RuntimePressureSignalStatus::Present,
+            "spectral_health_present",
+        ),
+    }
+}
+
+fn runtime_pressure_platform_probe_signal_status(
+    report: &ResourcePlatformProbeReport,
+) -> RuntimePressureSignalSnapshot {
+    if report.probes.is_empty() || report.operator_verdict == ResourceProbeOperatorVerdict::Disabled
+    {
+        return runtime_pressure_signal_row(
+            RuntimePressureSignal::PlatformProbes,
+            RuntimePressureSignalStatus::Missing,
+            "platform_probe_inventory_absent",
+        );
+    }
+
+    match report.operator_verdict {
+        ResourceProbeOperatorVerdict::Complete => runtime_pressure_signal_row(
+            RuntimePressureSignal::PlatformProbes,
+            RuntimePressureSignalStatus::Present,
+            "platform_probes_complete",
+        ),
+        ResourceProbeOperatorVerdict::DegradedWithUnavailableProbes
+        | ResourceProbeOperatorVerdict::DegradedWithFallbacks => runtime_pressure_signal_row(
+            RuntimePressureSignal::PlatformProbes,
+            RuntimePressureSignalStatus::Degraded,
+            "platform_probes_degraded",
+        ),
+        ResourceProbeOperatorVerdict::Disabled => unreachable!("disabled handled above"),
+    }
+}
+
+fn runtime_pressure_signal_row(
+    signal: RuntimePressureSignal,
+    status: RuntimePressureSignalStatus,
+    reason: &'static str,
+) -> RuntimePressureSignalSnapshot {
+    RuntimePressureSignalSnapshot {
+        signal,
+        status,
+        reason: reason.to_string(),
+    }
+}
+
+fn count_signal_status(
+    signal_statuses: &[RuntimePressureSignalSnapshot],
+    status: RuntimePressureSignalStatus,
+) -> u64 {
+    signal_statuses
+        .iter()
+        .filter(|signal| signal.status == status)
+        .count() as u64
+}
+
+fn resource_usage_bps(current: u64, max_limit: u64) -> u16 {
+    if max_limit == 0 {
+        return 0;
+    }
+    let max_limit = u128::from(max_limit);
+    let current = u128::from(current).min(max_limit);
+    let rounded = (current * 10_000 + (max_limit / 2)) / max_limit;
+    u16::try_from(rounded.min(10_000)).expect("basis points are clamped to u16 range")
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn finite_scaled_u64(value: f64, scale: f64) -> Option<u64> {
+    if !value.is_finite() {
+        return None;
+    }
+    let scaled = value.max(0.0) * scale;
+    if scaled >= u64::MAX as f64 {
+        Some(u64::MAX)
+    } else {
+        Some(scaled.round() as u64)
+    }
+}
+
+fn finite_bps(value: f64) -> Option<u16> {
+    finite_scaled_u64(value.clamp(0.0, 1.0), 10_000.0)
+        .map(|scaled| u16::try_from(scaled.min(10_000)).expect("bps range is clamped"))
 }
 
 #[derive(Debug)]
@@ -3717,6 +4223,21 @@ impl ResourceMonitor {
             config: self.config.read().clone(),
         }
     }
+
+    /// Build the unified operator-facing runtime pressure snapshot.
+    #[must_use]
+    pub fn runtime_pressure_snapshot(
+        &self,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<&SpectralHealthReport>,
+    ) -> RuntimePressureSnapshot {
+        RuntimePressureSnapshot::from_parts(
+            &self.pressure,
+            self.collector.platform_probe_report(),
+            scheduler,
+            spectral.map(RuntimePressureSpectralSnapshot::from_report),
+        )
+    }
 }
 
 /// Status report for resource monitoring system.
@@ -4285,6 +4806,235 @@ mod tests {
             remote_steal_ratio_pct: Some(42),
             cross_cohort_wake_p99_ns: Some(180_000),
         }
+    }
+
+    fn healthy_scheduler_metrics() -> SchedulerEvidenceMetrics {
+        SchedulerEvidenceMetrics {
+            wake_to_run_p50_ns: 4_000,
+            wake_to_run_p95_ns: 40_000,
+            wake_to_run_p99_ns: 80_000,
+            queue_residency_p50_ns: 6_000,
+            queue_residency_p95_ns: 70_000,
+            queue_residency_p99_ns: 120_000,
+            ready_backlog_p95: 24,
+            ready_backlog_p99: 48,
+            cancel_debt_p95: 8,
+            cancel_debt_p99: 16,
+            remote_steal_ratio_pct: Some(12),
+            cross_cohort_wake_p99_ns: Some(60_000),
+        }
+    }
+
+    fn complete_platform_probe_report() -> ResourcePlatformProbeReport {
+        ResourcePlatformProbeReport::from_snapshots(
+            "test-linux/x86_64".to_string(),
+            vec![ResourceProbeSnapshot {
+                platform: "test-linux/x86_64".to_string(),
+                resource_type: ResourceType::Memory,
+                probe: ResourceProbe::ProcessRssBytes,
+                status: ResourceProbeStatus::Supported,
+                fallback: ResourceProbeFallback::None,
+                sampled_value: Some(16_384),
+                error_message: None,
+                warning_count: 0,
+                warning_suppressed_count: 0,
+            }],
+        )
+    }
+
+    fn healthy_spectral_snapshot() -> RuntimePressureSpectralSnapshot {
+        RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Healthy,
+            fiedler_micro_units: Some(250_000),
+            spectral_gap_bps: Some(7_500),
+            spectral_radius_micro_units: Some(1_500_000),
+            bottleneck_count: 0,
+            components: None,
+            approaching_disconnect: false,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::None,
+        }
+    }
+
+    #[test]
+    fn runtime_pressure_snapshot_marks_empty_inputs_unknown() {
+        let pressure = ResourcePressure::new();
+        let snapshot = RuntimePressureSnapshot::from_parts(
+            &pressure,
+            ResourcePlatformProbeReport::from_snapshots("test/noarch".to_string(), Vec::new()),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            snapshot.schema_version,
+            RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION
+        );
+        assert_eq!(snapshot.overall_verdict, RuntimePressureVerdict::Unknown);
+        assert_eq!(snapshot.missing_signal_count, 4);
+        assert_eq!(snapshot.degraded_signal_count, 0);
+        assert_eq!(snapshot.critical_signal_count, 0);
+        assert!(snapshot.resources.is_empty());
+        assert_eq!(
+            snapshot.spectral.class,
+            RuntimePressureSpectralClass::Unknown
+        );
+        assert_eq!(
+            snapshot
+                .signal_statuses
+                .iter()
+                .map(|status| (status.signal, status.status))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    RuntimePressureSignal::Resources,
+                    RuntimePressureSignalStatus::Missing,
+                ),
+                (
+                    RuntimePressureSignal::Scheduler,
+                    RuntimePressureSignalStatus::Missing,
+                ),
+                (
+                    RuntimePressureSignal::Spectral,
+                    RuntimePressureSignalStatus::Missing,
+                ),
+                (
+                    RuntimePressureSignal::PlatformProbes,
+                    RuntimePressureSignalStatus::Missing,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_snapshot_orders_resources_deterministically() {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Custom("zeta".to_string()),
+            ResourceMeasurement::new(20, 50, 90, 100),
+        );
+        pressure.update_degradation_level(
+            ResourceType::Custom("zeta".to_string()),
+            DegradationLevel::None,
+        );
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(64, 80, 95, 100),
+        );
+        pressure.update_measurement(
+            ResourceType::Custom("alpha".to_string()),
+            ResourceMeasurement::new(10, 50, 90, 100),
+        );
+
+        let snapshot = RuntimePressureSnapshot::from_parts(
+            &pressure,
+            complete_platform_probe_report(),
+            Some(healthy_scheduler_metrics()),
+            Some(healthy_spectral_snapshot()),
+        );
+        let labels = snapshot
+            .resources
+            .iter()
+            .map(|resource| resource.resource_label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, vec!["custom:alpha", "custom:zeta", "memory"]);
+        assert_eq!(snapshot.resources[0].usage_bps, 1_000);
+        assert_eq!(snapshot.resources[1].usage_bps, 2_000);
+        assert_eq!(snapshot.resources[2].usage_bps, 6_400);
+    }
+
+    #[test]
+    fn runtime_pressure_snapshot_serializes_stable_json_shape() {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(800, 700, 900, 1000),
+        );
+        pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::Moderate);
+
+        let snapshot = RuntimePressureSnapshot::from_parts(
+            &pressure,
+            complete_platform_probe_report(),
+            Some(sample_scheduler_metrics()),
+            Some(healthy_spectral_snapshot()),
+        );
+        let json = serde_json::to_string_pretty(&snapshot).expect("serialize snapshot");
+        let value: Value = serde_json::from_str(&json).expect("parse snapshot json");
+
+        assert_eq!(snapshot.overall_verdict, RuntimePressureVerdict::Degraded);
+        assert_eq!(snapshot.missing_signal_count, 0);
+        assert_eq!(snapshot.degraded_signal_count, 2);
+        assert_eq!(snapshot.critical_signal_count, 0);
+        assert_eq!(
+            value["schema_version"],
+            RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION
+        );
+        assert_eq!(value["overall_verdict"], "degraded");
+        assert_eq!(value["resource_composite_degradation"], "Moderate");
+        assert_eq!(value["resources"][0]["resource_label"], "memory");
+        assert_eq!(value["resources"][0]["usage_bps"], 8_000);
+        assert_eq!(value["scheduler"]["wake_to_run_p99_ns"], 220_000);
+        assert_eq!(value["spectral"]["class"], "healthy");
+        assert_eq!(
+            value["signal_statuses"][0]["signal"], "resources",
+            "signal rows stay sorted by enum order"
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_snapshot_escalates_critical_spectral_evidence() {
+        let pressure = ResourcePressure::new();
+        let spectral = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Critical,
+            fiedler_micro_units: Some(5_000),
+            spectral_gap_bps: Some(50),
+            spectral_radius_micro_units: Some(2_000_000),
+            bottleneck_count: 3,
+            components: None,
+            approaching_disconnect: true,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Critical,
+        };
+
+        let snapshot = RuntimePressureSnapshot::from_parts(
+            &pressure,
+            ResourcePlatformProbeReport::from_snapshots("test/noarch".to_string(), Vec::new()),
+            None,
+            Some(spectral),
+        );
+
+        assert_eq!(snapshot.overall_verdict, RuntimePressureVerdict::Critical);
+        assert_eq!(snapshot.critical_signal_count, 1);
+        assert_eq!(snapshot.missing_signal_count, 3);
+        assert_eq!(
+            snapshot.spectral.class,
+            RuntimePressureSpectralClass::Critical
+        );
+    }
+
+    #[test]
+    fn resource_monitor_builds_runtime_pressure_snapshot() {
+        let monitor = ResourceMonitor::new(MonitorConfig::default());
+        monitor.pressure().update_measurement(
+            ResourceType::Task,
+            ResourceMeasurement::new(20, 80, 95, 100),
+        );
+
+        let snapshot = monitor.runtime_pressure_snapshot(Some(healthy_scheduler_metrics()), None);
+
+        assert_eq!(
+            snapshot.schema_version,
+            RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION
+        );
+        assert_eq!(snapshot.resources[0].resource_label, "task");
+        assert_eq!(
+            snapshot
+                .scheduler
+                .expect("scheduler metrics")
+                .ready_backlog_p99,
+            48
+        );
     }
 
     #[test]
