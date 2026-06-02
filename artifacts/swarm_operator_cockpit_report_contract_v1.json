@@ -101,6 +101,10 @@
       "requirement": "Required fields, RCH provenance, fresh HEAD, redaction policy, quiescence, clean obligations, and nominal contention produce pass with stable JSON and compact deterministic text."
     },
     {
+      "name": "scenario_alignment",
+      "requirement": "Proof lanes, contention ledgers, and minimizer reports must belong to the same scenario_id as the cockpit report; mismatches yield malformed."
+    },
+    {
       "name": "degraded_brownout",
       "requirement": "A brownout_optional memory decision is explicit and publishable, but yields degraded rather than pass."
     },
@@ -131,6 +135,7 @@
     "fail_closed_obligations": "Missing obligation fields must set obligation_verdict to missing and outcome to malformed.",
     "fail_closed_rch": "Every remote-required proof lane must include observed RCH worker provenance before the report can pass.",
     "fail_closed_stale_head": "Any proof lane with stale HEAD evidence must set outcome to stale_evidence before degraded/pass classification.",
+    "scenario_alignment": "Trace summary, proof lanes, contention ledger, and minimizer original scenario evidence must all match scenario.scenario_id; mismatches yield malformed.",
     "redaction_policy": "A nonempty redaction_policy_id and zero secret_like_value_count are required for publication.",
     "compact_text": "The text renderer is deterministic and compact enough for Agent Mail handoff evidence.",
     "no_runtime_dependency": "The cockpit report is a deterministic report builder and does not introduce another executor, runtime, ambient telemetry source, branch, worktree, or deletion step."
@@ -146,6 +151,7 @@
     "report pass with missing obligation verdict",
     "report pass without remote RCH provenance",
     "report pass against stale HEAD evidence",
+    "report pass with proof, contention, or minimizer evidence from another scenario",
     "publish unredacted secret-like values",
     "drop minimizer status or next owner bead",
     "create branches or worktrees",

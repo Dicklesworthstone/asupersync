@@ -426,6 +426,59 @@ fn cockpit_missing_scenario_id_is_malformed() {
 }
 
 #[test]
+fn cockpit_rejects_proof_lane_from_different_scenario() {
+    let mut input = healthy_input("cockpit-proof-scenario-mismatch");
+    input.proof_lanes = vec![proof_plan(
+        "cockpit-other-proof",
+        "cccccccccccccccccccccccccccccccccccccccc",
+        "cccccccccccccccccccccccccccccccccccccccc",
+        true,
+    )];
+
+    let report = build_swarm_operator_cockpit_report(&input);
+
+    assert_eq!(report.outcome, SwarmOperatorCockpitOutcome::Malformed);
+    assert!(
+        report
+            .missing_required_fields
+            .contains(&"proof_lanes.scenario_id".to_string())
+    );
+}
+
+#[test]
+fn cockpit_rejects_contention_ledger_from_different_scenario() {
+    let mut input = healthy_input("cockpit-contention-scenario-mismatch");
+    let other_scenario = scenario("cockpit-other-contention");
+    input.contention_ledger = Some(contention_ledger(trace_for(&other_scenario)));
+
+    let report = build_swarm_operator_cockpit_report(&input);
+
+    assert_eq!(report.outcome, SwarmOperatorCockpitOutcome::Malformed);
+    assert!(
+        report
+            .missing_required_fields
+            .contains(&"contention_ledger.scenario_id".to_string())
+    );
+}
+
+#[test]
+fn cockpit_rejects_minimizer_report_from_different_scenario() {
+    let mut input = healthy_input("cockpit-minimizer-scenario-mismatch");
+    input.minimizer_report = Some(minimized_failure_report(scenario(
+        "cockpit-other-minimizer",
+    )));
+
+    let report = build_swarm_operator_cockpit_report(&input);
+
+    assert_eq!(report.outcome, SwarmOperatorCockpitOutcome::Malformed);
+    assert!(
+        report
+            .missing_required_fields
+            .contains(&"minimizer_report.original_scenario_id".to_string())
+    );
+}
+
+#[test]
 fn cockpit_minimized_failure_fixture_degrades_and_routes_owner() {
     let mut input = healthy_input("cockpit-minimized-failure");
     let minimizer_scenario = input.scenario.as_ref().expect("scenario").clone();

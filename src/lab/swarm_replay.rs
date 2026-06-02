@@ -5129,6 +5129,10 @@ pub fn render_swarm_operator_cockpit_text(report: &SwarmOperatorCockpitReport) -
 
 fn cockpit_missing_required_fields(input: &SwarmOperatorCockpitInput) -> Vec<String> {
     let mut missing = Vec::new();
+    let expected_scenario_id = input.scenario.as_ref().and_then(|scenario| {
+        let scenario_id = scenario.scenario_id.trim();
+        (!scenario_id.is_empty()).then_some(scenario_id)
+    });
 
     if input.report_id.trim().is_empty() {
         missing.push("report_id".to_string());
@@ -5147,10 +5151,8 @@ fn cockpit_missing_required_fields(input: &SwarmOperatorCockpitInput) -> Vec<Str
 
     match &input.trace_summary {
         Some(summary) => {
-            if let Some(scenario) = &input.scenario {
-                if !scenario.scenario_id.trim().is_empty()
-                    && summary.scenario_id != scenario.scenario_id
-                {
+            if let Some(expected_scenario_id) = expected_scenario_id {
+                if summary.scenario_id.trim() != expected_scenario_id {
                     missing.push("trace_summary.scenario_id".to_string());
                 }
             }
@@ -5189,9 +5191,24 @@ fn cockpit_missing_required_fields(input: &SwarmOperatorCockpitInput) -> Vec<Str
     {
         missing.push("proof_lanes.remote_provenance".to_string());
     }
+    if let Some(expected_scenario_id) = expected_scenario_id {
+        if input
+            .proof_lanes
+            .iter()
+            .any(|lane| lane.scenario_id.trim() != expected_scenario_id)
+        {
+            missing.push("proof_lanes.scenario_id".to_string());
+        }
+    }
 
     match &input.contention_ledger {
         Some(ledger) => {
+            if let Some(expected_scenario_id) = expected_scenario_id {
+                match ledger.scenario_id.as_deref().map(str::trim) {
+                    Some(ledger_scenario_id) if ledger_scenario_id == expected_scenario_id => {}
+                    _ => missing.push("contention_ledger.scenario_id".to_string()),
+                }
+            }
             if !ledger.required_fields_present {
                 missing.extend(
                     ledger
@@ -5229,6 +5246,13 @@ fn cockpit_missing_required_fields(input: &SwarmOperatorCockpitInput) -> Vec<Str
         .is_some_and(|report| !report.redaction_preserved)
     {
         missing.push("minimizer_report.redaction".to_string());
+    }
+    if let (Some(expected_scenario_id), Some(report)) =
+        (expected_scenario_id, input.minimizer_report.as_ref())
+    {
+        if report.original_scenario_id.trim() != expected_scenario_id {
+            missing.push("minimizer_report.original_scenario_id".to_string());
+        }
     }
 
     sorted_unique_owned(missing)
