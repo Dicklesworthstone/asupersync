@@ -2132,6 +2132,15 @@ impl ThreeLaneScheduler {
         }
     }
 
+    #[inline]
+    fn clear_task_wake_state(&self, task: TaskId) {
+        self.with_task_table_ref(|tt| {
+            if let Some(record) = tt.task(task) {
+                record.wake_state.clear();
+            }
+        });
+    }
+
     /// Injects a task into the cancel lane for cross-thread wakeup.
     ///
     /// Uses `wake_state.notify()` for centralized deduplication.
@@ -2176,6 +2185,7 @@ impl ThreeLaneScheduler {
             // SAFETY: Local (!Send) tasks must only be polled on their owner
             // worker. If we can't route to the correct worker, skipping cancel
             // injection may cause a hang but avoids UB from wrong-thread polling.
+            self.clear_task_wake_state(task);
             debug_assert!(
                 false,
                 "Attempted to inject_cancel local task {task:?} without owner worker"
@@ -2520,6 +2530,7 @@ impl ThreeLaneScheduler {
             //    text the original split functions emitted.
             let assert_msg = intent.local_route_failure_assert(task);
             let _error_msg = intent.local_route_failure_log();
+            self.clear_task_wake_state(task);
             debug_assert!(false, "{}", assert_msg);
             error!(?task, "{}", _error_msg);
             return;
@@ -12717,6 +12728,96 @@ mod tests {
         assert!(
             worker.local_ready.lock().is_empty(),
             "invalid local routing must not misroute onto the current worker queue"
+        );
+    }
+
+    fn invalid_pinned_local_task(
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        pinned_worker: usize,
+    ) -> TaskId {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let region = guard.create_root_region(Budget::INFINITE);
+        let (tid, _) = guard
+            .create_task(region, Budget::INFINITE, async { 1 })
+            .expect("create task");
+        let record = guard.task_mut(tid).expect("task record");
+        record.pin_to_worker(pinned_worker);
+        tid
+    }
+
+    #[test]
+    fn invalid_local_inject_cancel_route_clears_wake_state_for_retry() {
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let task_id = invalid_pinned_local_task(&state, 99);
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+
+        let route_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scheduler.inject_cancel(task_id, 100);
+        }));
+        if cfg!(debug_assertions) {
+            assert!(
+                route_result.is_err(),
+                "debug builds should assert invalid local cancel routing"
+            );
+        }
+
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = guard.task(task_id).expect("task record");
+        assert!(
+            record.wake_state.notify(),
+            "failed local cancel routing should clear wake_state so a later cancel can retry"
+        );
+        assert!(
+            scheduler.local_ready[0].lock().is_empty(),
+            "failed local cancel routing must not enqueue on the wrong local_ready queue"
+        );
+        assert!(
+            scheduler.global.pop_cancel().is_none(),
+            "failed local cancel routing must not fall back to a global cancel queue for local tasks"
+        );
+    }
+
+    #[test]
+    fn invalid_local_wake_route_clears_wake_state_for_retry() {
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let task_id = invalid_pinned_local_task(&state, 99);
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+
+        let route_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scheduler.wake(task_id, 50);
+        }));
+        if cfg!(debug_assertions) {
+            assert!(
+                route_result.is_err(),
+                "debug builds should assert invalid local wake routing"
+            );
+        }
+
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = guard.task(task_id).expect("task record");
+        assert!(
+            record.wake_state.notify(),
+            "failed local wake routing should clear wake_state so a later wake can retry"
+        );
+        assert!(
+            scheduler.local_ready[0].lock().is_empty(),
+            "failed local wake routing must not enqueue on the wrong local_ready queue"
+        );
+        assert!(
+            scheduler.global.pop_ready().is_none(),
+            "failed local wake routing must not fall back to a global ready queue for local tasks"
         );
     }
 
