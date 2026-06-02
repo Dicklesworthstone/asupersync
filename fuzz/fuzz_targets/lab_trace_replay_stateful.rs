@@ -2,9 +2,9 @@
 
 use arbitrary::Arbitrary;
 use asupersync::trace::replay::{
-    ReplayEvent, ReplayTrace, TraceMetadata, REPLAY_SCHEMA_VERSION,
+    CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace, TraceMetadata,
 };
-use asupersync::types::{RegionId, Severity, TaskId, Time};
+use asupersync::types::Severity;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
@@ -67,25 +67,79 @@ enum TraceOperation {
 /// Types of events that can be generated
 #[derive(Arbitrary, Debug, Clone)]
 enum EventType {
-    TaskScheduled { task_id: u16, at_tick: u32 },
-    TaskYielded { task_id: u16 },
-    TaskCompleted { task_id: u16, outcome: OutcomeSeverity },
-    TaskSpawned { task_id: u16, region_id: u16, at_tick: u32 },
-    TimeAdvanced { from_nanos: u32, to_nanos: u32 },
-    TimerCreated { timer_id: u32, deadline_nanos: u32 },
-    TimerFired { timer_id: u32 },
-    TimerCancelled { timer_id: u32 },
-    IoReady { token: u32, readiness_flags: u8 },
-    IoResult { token: u32, bytes: i16 },
-    IoError { token: u32, error_kind: ErrorKindValue },
-    RngSeed { seed: u64 },
-    RngValue { value: u64 },
-    ChaosInjection { kind: u8, task_id: Option<u16>, data: u32 },
-    RegionCreated { region_id: u16, parent_id: Option<u16>, at_tick: u32 },
-    RegionClosed { region_id: u16, outcome: OutcomeSeverity },
-    RegionCancelled { region_id: u16, cancel_kind: u8 },
-    Checkpoint { task_id: u16, checkpoint_id: u32 },
-    WakerBatchWake { waker_count: u16 },
+    TaskScheduled {
+        task_id: u16,
+        at_tick: u32,
+    },
+    TaskYielded {
+        task_id: u16,
+    },
+    TaskCompleted {
+        task_id: u16,
+        outcome: OutcomeSeverity,
+    },
+    TaskSpawned {
+        task_id: u16,
+        region_id: u16,
+        at_tick: u32,
+    },
+    TimeAdvanced {
+        from_nanos: u32,
+        to_nanos: u32,
+    },
+    TimerCreated {
+        timer_id: u32,
+        deadline_nanos: u32,
+    },
+    TimerFired {
+        timer_id: u32,
+    },
+    TimerCancelled {
+        timer_id: u32,
+    },
+    IoReady {
+        token: u32,
+        readiness_flags: u8,
+    },
+    IoResult {
+        token: u32,
+        bytes: i16,
+    },
+    IoError {
+        token: u32,
+        error_kind: ErrorKindValue,
+    },
+    RngSeed {
+        seed: u64,
+    },
+    RngValue {
+        value: u64,
+    },
+    ChaosInjection {
+        kind: u8,
+        task_id: Option<u16>,
+        data: u32,
+    },
+    RegionCreated {
+        region_id: u16,
+        parent_id: Option<u16>,
+        at_tick: u32,
+    },
+    RegionClosed {
+        region_id: u16,
+        outcome: OutcomeSeverity,
+    },
+    RegionCancelled {
+        region_id: u16,
+        cancel_kind: u8,
+    },
+    Checkpoint {
+        task_id: u16,
+        checkpoint_id: u32,
+    },
+    WakerBatchWake {
+        waker_count: u16,
+    },
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -151,6 +205,14 @@ impl ErrorKindValue {
     }
 }
 
+fn compact_task(id: impl Into<u64>) -> CompactTaskId {
+    CompactTaskId(id.into() % MAX_ID_VALUE)
+}
+
+fn compact_region(id: impl Into<u64>) -> CompactRegionId {
+    CompactRegionId(id.into() % MAX_ID_VALUE)
+}
+
 /// Shadow model for trace replay verification
 #[derive(Debug)]
 struct TraceReplayShadowModel {
@@ -192,8 +254,6 @@ struct TraceStats {
 enum EventConstraint {
     /// Task must be spawned before being scheduled
     TaskMustExistBeforeScheduled(u16),
-    /// Task must be scheduled before being completed
-    TaskMustBeScheduledBeforeCompletion(u16),
     /// Timer must be created before firing/cancelling
     TimerMustExistBeforeFiring(u32),
     /// Region must be created before being closed
@@ -224,9 +284,11 @@ impl TraceReplayShadowModel {
         match event {
             ReplayEvent::TaskScheduled { task, at_tick } => {
                 self.stats.task_events += 1;
-                let task_id = task.id as u16;
+                let _scheduled_at = *at_tick;
+                let task_id = task.0 as u16;
                 if !self.active_tasks.contains(&task_id) {
-                    self.event_sequence.push(EventConstraint::TaskMustExistBeforeScheduled(task_id));
+                    self.event_sequence
+                        .push(EventConstraint::TaskMustExistBeforeScheduled(task_id));
                     return false; // Task not spawned yet
                 }
                 true
@@ -234,7 +296,7 @@ impl TraceReplayShadowModel {
 
             ReplayEvent::TaskYielded { task } => {
                 self.stats.task_events += 1;
-                let task_id = task.id as u16;
+                let task_id = task.0 as u16;
                 if !self.active_tasks.contains(&task_id) {
                     return false; // Task doesn't exist
                 }
@@ -243,7 +305,7 @@ impl TraceReplayShadowModel {
 
             ReplayEvent::TaskCompleted { task, outcome: _ } => {
                 self.stats.task_events += 1;
-                let task_id = task.id as u16;
+                let task_id = task.0 as u16;
                 if self.active_tasks.remove(&task_id) {
                     true
                 } else {
@@ -251,10 +313,15 @@ impl TraceReplayShadowModel {
                 }
             }
 
-            ReplayEvent::TaskSpawned { task, region, at_tick } => {
+            ReplayEvent::TaskSpawned {
+                task,
+                region,
+                at_tick,
+            } => {
                 self.stats.task_events += 1;
-                let task_id = task.id as u16;
-                let region_id = region.id as u16;
+                let _spawned_at = *at_tick;
+                let task_id = task.0 as u16;
+                let region_id = region.0 as u16;
                 if !self.active_regions.contains(&region_id) {
                     return false; // Region doesn't exist
                 }
@@ -262,10 +329,14 @@ impl TraceReplayShadowModel {
                 true
             }
 
-            ReplayEvent::TimeAdvanced { from_nanos, to_nanos } => {
+            ReplayEvent::TimeAdvanced {
+                from_nanos,
+                to_nanos,
+            } => {
                 self.stats.time_events += 1;
                 if *to_nanos < *from_nanos {
-                    self.event_sequence.push(EventConstraint::TimeMonotonic(*from_nanos, *to_nanos));
+                    self.event_sequence
+                        .push(EventConstraint::TimeMonotonic(*from_nanos, *to_nanos));
                     return false; // Time going backwards
                 }
                 if *from_nanos != self.current_time_nanos {
@@ -275,7 +346,10 @@ impl TraceReplayShadowModel {
                 true
             }
 
-            ReplayEvent::TimerCreated { timer_id, deadline_nanos: _ } => {
+            ReplayEvent::TimerCreated {
+                timer_id,
+                deadline_nanos: _,
+            } => {
                 self.stats.time_events += 1;
                 let timer_id = *timer_id as u32;
                 if self.active_timers.contains(&timer_id) {
@@ -291,7 +365,8 @@ impl TraceReplayShadowModel {
                 if self.active_timers.remove(&timer_id) {
                     true
                 } else {
-                    self.event_sequence.push(EventConstraint::TimerMustExistBeforeFiring(timer_id));
+                    self.event_sequence
+                        .push(EventConstraint::TimerMustExistBeforeFiring(timer_id));
                     false // Timer doesn't exist
                 }
             }
@@ -306,7 +381,10 @@ impl TraceReplayShadowModel {
                 }
             }
 
-            ReplayEvent::IoReady { token, readiness: _ } => {
+            ReplayEvent::IoReady {
+                token,
+                readiness: _,
+            } => {
                 self.stats.io_events += 1;
                 let token = *token as u32;
                 self.active_io_tokens.insert(token);
@@ -336,26 +414,34 @@ impl TraceReplayShadowModel {
                 self.rng_seed_set // RNG should be seeded first
             }
 
-            ReplayEvent::ChaosInjection { kind: _, task, data: _ } => {
+            ReplayEvent::ChaosInjection {
+                kind: _,
+                task,
+                data: _,
+            } => {
                 self.stats.chaos_events += 1;
                 if let Some(task_id) = task.as_ref() {
-                    let task_id = task_id.id as u16;
+                    let task_id = task_id.0 as u16;
                     self.active_tasks.contains(&task_id)
                 } else {
                     true // Global chaos
                 }
             }
 
-            ReplayEvent::RegionCreated { region, parent, at_tick: _ } => {
+            ReplayEvent::RegionCreated {
+                region,
+                parent,
+                at_tick: _,
+            } => {
                 self.stats.region_events += 1;
-                let region_id = region.id as u16;
+                let region_id = region.0 as u16;
                 if self.active_regions.contains(&region_id) {
                     return false; // Region already exists
                 }
 
                 // Validate parent exists if specified
                 if let Some(parent_id) = parent.as_ref() {
-                    let parent_id = parent_id.id as u16;
+                    let parent_id = parent_id.0 as u16;
                     if !self.active_regions.contains(&parent_id) {
                         return false; // Parent doesn't exist
                     }
@@ -370,29 +456,34 @@ impl TraceReplayShadowModel {
 
             ReplayEvent::RegionClosed { region, outcome: _ } => {
                 self.stats.region_events += 1;
-                let region_id = region.id as u16;
+                let region_id = region.0 as u16;
                 if self.active_regions.remove(&region_id) {
                     self.region_hierarchy.remove(&region_id);
                     true
                 } else {
-                    self.event_sequence.push(EventConstraint::RegionMustExistBeforeClosing(region_id));
+                    self.event_sequence
+                        .push(EventConstraint::RegionMustExistBeforeClosing(region_id));
                     false // Region doesn't exist
                 }
             }
 
-            ReplayEvent::RegionCancelled { region, cancel_kind: _ } => {
+            ReplayEvent::RegionCancelled {
+                region,
+                cancel_kind: _,
+            } => {
                 self.stats.region_events += 1;
-                let region_id = region.id as u16;
+                let region_id = region.0 as u16;
                 self.active_regions.contains(&region_id)
             }
 
-            ReplayEvent::Checkpoint { task, checkpoint_id: _ } => {
-                self.stats.task_events += 1;
-                let task_id = task.id as u16;
+            ReplayEvent::Checkpoint { .. } => true,
+
+            ReplayEvent::WakerWake { task } => {
+                let task_id = task.0 as u16;
                 self.active_tasks.contains(&task_id)
             }
 
-            ReplayEvent::WakerBatchWake { waker_count: _ } => {
+            ReplayEvent::WakerBatchWake { count: _ } => {
                 // Waker events are generally valid
                 true
             }
@@ -411,9 +502,12 @@ impl TraceReplayShadowModel {
         }
 
         // Events should sum to total
-        let category_sum = self.stats.task_events + self.stats.time_events +
-                         self.stats.io_events + self.stats.rng_events +
-                         self.stats.chaos_events + self.stats.region_events;
+        let category_sum = self.stats.task_events
+            + self.stats.time_events
+            + self.stats.io_events
+            + self.stats.rng_events
+            + self.stats.chaos_events
+            + self.stats.region_events;
 
         // Allow for some events not being categorized yet
         category_sum <= self.stats.total_events
@@ -422,8 +516,8 @@ impl TraceReplayShadowModel {
 
 impl MetadataConfig {
     fn to_trace_metadata(&self) -> TraceMetadata {
-        let mut metadata = TraceMetadata::new(self.seed)
-            .with_config_hash(self.config_hash);
+        let _recorded_at = self.recorded_at;
+        let mut metadata = TraceMetadata::new(self.seed).with_config_hash(self.config_hash);
 
         if self.has_description {
             let desc = format!("fuzz_test_{}", self.description_suffix);
@@ -439,104 +533,100 @@ impl EventType {
         use ReplayEvent::*;
 
         match self {
-            Self::TaskScheduled { task_id, at_tick } => {
-                TaskScheduled {
-                    task: (*task_id as u32).into(),
-                    at_tick: *at_tick as u64,
-                }
-            }
-            Self::TaskYielded { task_id } => {
-                TaskYielded {
-                    task: (*task_id as u32).into(),
-                }
-            }
-            Self::TaskCompleted { task_id, outcome } => {
-                TaskCompleted {
-                    task: (*task_id as u32).into(),
-                    outcome: outcome.to_u8(),
-                }
-            }
-            Self::TaskSpawned { task_id, region_id, at_tick } => {
-                TaskSpawned {
-                    task: (*task_id as u32).into(),
-                    region: (*region_id as u32).into(),
-                    at_tick: *at_tick as u64,
-                }
-            }
-            Self::TimeAdvanced { from_nanos, to_nanos } => {
-                TimeAdvanced {
-                    from_nanos: *from_nanos as u64,
-                    to_nanos: *to_nanos as u64,
-                }
-            }
-            Self::TimerCreated { timer_id, deadline_nanos } => {
-                TimerCreated {
-                    timer_id: *timer_id as u64,
-                    deadline_nanos: *deadline_nanos as u64,
-                }
-            }
-            Self::TimerFired { timer_id } => {
-                TimerFired {
-                    timer_id: *timer_id as u64,
-                }
-            }
-            Self::TimerCancelled { timer_id } => {
-                TimerCancelled {
-                    timer_id: *timer_id as u64,
-                }
-            }
-            Self::IoReady { token, readiness_flags } => {
-                IoReady {
-                    token: *token as u64,
-                    readiness: *readiness_flags,
-                }
-            }
-            Self::IoResult { token, bytes } => {
-                IoResult {
-                    token: *token as u64,
-                    bytes: *bytes as i64,
-                }
-            }
+            Self::TaskScheduled { task_id, at_tick } => TaskScheduled {
+                task: compact_task(u64::from(*task_id)),
+                at_tick: *at_tick as u64,
+            },
+            Self::TaskYielded { task_id } => TaskYielded {
+                task: compact_task(u64::from(*task_id)),
+            },
+            Self::TaskCompleted { task_id, outcome } => TaskCompleted {
+                task: compact_task(u64::from(*task_id)),
+                outcome: outcome.to_u8(),
+            },
+            Self::TaskSpawned {
+                task_id,
+                region_id,
+                at_tick,
+            } => TaskSpawned {
+                task: compact_task(u64::from(*task_id)),
+                region: compact_region(u64::from(*region_id)),
+                at_tick: *at_tick as u64,
+            },
+            Self::TimeAdvanced {
+                from_nanos,
+                to_nanos,
+            } => TimeAdvanced {
+                from_nanos: *from_nanos as u64,
+                to_nanos: *to_nanos as u64,
+            },
+            Self::TimerCreated {
+                timer_id,
+                deadline_nanos,
+            } => TimerCreated {
+                timer_id: *timer_id as u64,
+                deadline_nanos: *deadline_nanos as u64,
+            },
+            Self::TimerFired { timer_id } => TimerFired {
+                timer_id: *timer_id as u64,
+            },
+            Self::TimerCancelled { timer_id } => TimerCancelled {
+                timer_id: *timer_id as u64,
+            },
+            Self::IoReady {
+                token,
+                readiness_flags,
+            } => IoReady {
+                token: *token as u64,
+                readiness: *readiness_flags,
+            },
+            Self::IoResult { token, bytes } => IoResult {
+                token: *token as u64,
+                bytes: *bytes as i64,
+            },
             Self::IoError { token, error_kind } => {
                 ReplayEvent::io_error(*token as u64, error_kind.to_error_kind())
             }
-            Self::RngSeed { seed } => {
-                RngSeed { seed: *seed }
-            }
-            Self::RngValue { value } => {
-                RngValue { value: *value }
-            }
-            Self::ChaosInjection { kind, task_id, data } => {
-                ChaosInjection {
-                    kind: *kind,
-                    task: task_id.map(|id| (id as u32).into()),
-                    data: *data as u64,
-                }
-            }
-            Self::RegionCreated { region_id, parent_id, at_tick } => {
-                ReplayEvent::region_created(
-                    *region_id as u32,
-                    parent_id.map(|id| id as u32),
-                    *at_tick as u64,
-                )
-            }
-            Self::RegionClosed { region_id, outcome } => {
-                ReplayEvent::region_closed(*region_id as u32, outcome.to_severity())
-            }
-            Self::RegionCancelled { region_id, cancel_kind } => {
-                ReplayEvent::region_cancelled(*region_id as u32, *cancel_kind)
-            }
-            Self::Checkpoint { task_id, checkpoint_id } => {
-                Checkpoint {
-                    task: (*task_id as u32).into(),
-                    checkpoint_id: *checkpoint_id as u64,
-                }
-            }
-            Self::WakerBatchWake { waker_count } => {
-                WakerBatchWake {
-                    waker_count: *waker_count as u32,
-                }
-            }
+            Self::RngSeed { seed } => RngSeed { seed: *seed },
+            Self::RngValue { value } => RngValue { value: *value },
+            Self::ChaosInjection {
+                kind,
+                task_id,
+                data,
+            } => ChaosInjection {
+                kind: *kind,
+                task: task_id.map(|id| compact_task(u64::from(id))),
+                data: *data as u64,
+            },
+            Self::RegionCreated {
+                region_id,
+                parent_id,
+                at_tick,
+            } => ReplayEvent::region_created(
+                compact_region(u64::from(*region_id)),
+                parent_id.map(|id| compact_region(u64::from(id))),
+                *at_tick as u64,
+            ),
+            Self::RegionClosed { region_id, outcome } => ReplayEvent::region_closed(
+                compact_region(u64::from(*region_id)),
+                outcome.to_severity(),
+            ),
+            Self::RegionCancelled {
+                region_id,
+                cancel_kind,
+            } => ReplayEvent::region_cancelled(compact_region(u64::from(*region_id)), *cancel_kind),
+            Self::Checkpoint {
+                task_id,
+                checkpoint_id,
+            } => Checkpoint {
+                sequence: *checkpoint_id as u64,
+                time_nanos: 0,
+                active_tasks: u32::from(*task_id),
+                active_regions: 0,
+            },
+            Self::WakerBatchWake { waker_count } => WakerBatchWake {
+                count: *waker_count as u32,
+            },
         }
     }
 }
@@ -563,13 +653,17 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
                 let event = event_type.to_replay_event();
 
                 // Verify event against shadow model
-                let is_valid = shadow.record_event(&event);
+                let _is_valid = shadow.record_event(&event);
 
                 // Add to real trace regardless to test robustness
                 trace.push(event.clone());
 
                 // Verify size consistency
-                assert_eq!(trace.len(), shadow.stats.total_events, "Event count mismatch");
+                assert_eq!(
+                    trace.len(),
+                    shadow.stats.total_events,
+                    "Event count mismatch"
+                );
             }
 
             TraceOperation::SerializeDeserialize => {
@@ -581,8 +675,14 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
                         // Verify serialized data is reasonable size
                         let expected_min_size = 8; // At least metadata
                         let expected_max_size = trace.len() * 64 + 1024; // Rough upper bound
-                        assert!(bytes.len() >= expected_min_size, "Serialized data too small");
-                        assert!(bytes.len() <= expected_max_size, "Serialized data too large");
+                        assert!(
+                            bytes.len() >= expected_min_size,
+                            "Serialized data too small"
+                        );
+                        assert!(
+                            bytes.len() <= expected_max_size,
+                            "Serialized data too large"
+                        );
 
                         // Test deserialization
                         match ReplayTrace::from_bytes(&bytes) {
@@ -590,15 +690,32 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
                                 shadow.stats.successful_deserializations += 1;
 
                                 // Verify metadata preservation
-                                assert_eq!(deserialized.metadata.seed, trace.metadata.seed, "Seed mismatch");
-                                assert_eq!(deserialized.metadata.version, REPLAY_SCHEMA_VERSION, "Version mismatch");
-                                assert_eq!(deserialized.metadata.config_hash, trace.metadata.config_hash, "Config hash mismatch");
+                                assert_eq!(
+                                    deserialized.metadata.seed, trace.metadata.seed,
+                                    "Seed mismatch"
+                                );
+                                assert_eq!(
+                                    deserialized.metadata.version, REPLAY_SCHEMA_VERSION,
+                                    "Version mismatch"
+                                );
+                                assert_eq!(
+                                    deserialized.metadata.config_hash, trace.metadata.config_hash,
+                                    "Config hash mismatch"
+                                );
 
                                 // Verify event count preservation
-                                assert_eq!(deserialized.events.len(), trace.events.len(), "Event count mismatch after serialization");
+                                assert_eq!(
+                                    deserialized.events.len(),
+                                    trace.events.len(),
+                                    "Event count mismatch after serialization"
+                                );
 
                                 // Verify cursor reset
-                                assert_eq!(deserialized.cursor, 0, "Cursor should reset after deserialization");
+                                assert_eq!(
+                                    deserialized.cursor, 0,
+                                    "Cursor should reset after deserialization"
+                                );
+                                shadow.stats.cursor_resets += 1;
                             }
                             Err(_) => {
                                 // Deserialization failure is acceptable for malformed data
@@ -623,17 +740,30 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
                     }
                 }
 
-                assert_eq!(trace.cursor, initial_cursor + consume_actual, "Cursor advancement mismatch");
-                assert!(trace.cursor <= trace.events.len(), "Cursor beyond events length");
+                assert_eq!(
+                    trace.cursor,
+                    initial_cursor + consume_actual,
+                    "Cursor advancement mismatch"
+                );
+                assert!(
+                    trace.cursor <= trace.events.len(),
+                    "Cursor beyond events length"
+                );
             }
 
             TraceOperation::ValidateTrace => {
                 // Verify trace internal consistency
                 assert!(trace.cursor <= trace.events.len(), "Cursor beyond events");
-                assert_eq!(trace.metadata.version, REPLAY_SCHEMA_VERSION, "Invalid schema version");
+                assert_eq!(
+                    trace.metadata.version, REPLAY_SCHEMA_VERSION,
+                    "Invalid schema version"
+                );
 
                 // Verify shadow model consistency
-                assert!(shadow.verify_constraints(), "Shadow model constraints violated");
+                assert!(
+                    shadow.verify_constraints(),
+                    "Shadow model constraints violated"
+                );
             }
 
             TraceOperation::CloneTrace => {
@@ -670,7 +800,11 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
             TraceOperation::SimulateTaskLifecycle { task_count } => {
                 // Create a root region first
                 let root_region_id = 0u16;
-                let region_event = ReplayEvent::region_created(root_region_id as u32, None, 0);
+                let region_event = ReplayEvent::region_created(
+                    compact_region(u64::from(root_region_id)),
+                    None::<CompactRegionId>,
+                    0,
+                );
                 shadow.record_event(&region_event);
                 trace.push(region_event);
 
@@ -681,8 +815,8 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
 
                     // Spawn task
                     let spawn_event = ReplayEvent::TaskSpawned {
-                        task: (task_id as u32).into(),
-                        region: (root_region_id as u32).into(),
+                        task: compact_task(u64::from(task_id)),
+                        region: compact_region(u64::from(root_region_id)),
                         at_tick: shadow.stats.total_events as u64,
                     };
 
@@ -691,7 +825,7 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
 
                         // Schedule task
                         let schedule_event = ReplayEvent::TaskScheduled {
-                            task: (task_id as u32).into(),
+                            task: compact_task(u64::from(task_id)),
                             at_tick: shadow.stats.total_events as u64,
                         };
 
@@ -700,7 +834,7 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
 
                             // Complete task
                             let complete_event = ReplayEvent::TaskCompleted {
-                                task: (task_id as u32).into(),
+                                task: compact_task(u64::from(task_id)),
                                 outcome: 0, // OK outcome
                             };
 
@@ -715,7 +849,10 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
                 }
 
                 // Close root region
-                let close_event = ReplayEvent::region_closed(root_region_id as u32, Severity::Ok);
+                let close_event = ReplayEvent::region_closed(
+                    compact_region(u64::from(root_region_id)),
+                    Severity::Ok,
+                );
                 shadow.record_event(&close_event);
                 trace.push(close_event);
             }
@@ -726,13 +863,20 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
                     let region_id = region_id as u16;
 
                     // Create region (with no parent for simplicity)
-                    let create_event = ReplayEvent::region_created(region_id as u32, None, 0);
+                    let create_event = ReplayEvent::region_created(
+                        compact_region(u64::from(region_id)),
+                        None::<CompactRegionId>,
+                        0,
+                    );
 
                     if shadow.record_event(&create_event) {
                         trace.push(create_event);
 
                         // Close region
-                        let close_event = ReplayEvent::region_closed(region_id as u32, Severity::Ok);
+                        let close_event = ReplayEvent::region_closed(
+                            compact_region(u64::from(region_id)),
+                            Severity::Ok,
+                        );
                         shadow.record_event(&close_event);
                         trace.push(close_event);
                     }
@@ -748,7 +892,7 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
                 for i in 0..chaos_count {
                     let event = ReplayEvent::ChaosInjection {
                         kind: (i % 5) as u8, // Different chaos kinds
-                        task: None, // Global chaos for simplicity
+                        task: None,          // Global chaos for simplicity
                         data: i as u64,
                     };
 
@@ -796,22 +940,28 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
 
                 for event in &trace.events {
                     match event {
-                        ReplayEvent::TimeAdvanced { from_nanos, to_nanos } => {
+                        ReplayEvent::TimeAdvanced {
+                            from_nanos,
+                            to_nanos,
+                        } => {
                             assert!(*to_nanos >= *from_nanos, "Time should not go backwards");
-                            assert!(*from_nanos <= seen_time_nanos + 1_000_000_000, "Time gap too large");
+                            assert!(
+                                *from_nanos <= seen_time_nanos + 1_000_000_000,
+                                "Time gap too large"
+                            );
                             seen_time_nanos = *to_nanos;
                         }
                         ReplayEvent::TaskSpawned { task, .. } => {
-                            active_task_set.insert(task.id);
+                            active_task_set.insert(task.0);
                         }
                         ReplayEvent::TaskCompleted { task, .. } => {
-                            active_task_set.remove(&task.id);
+                            active_task_set.remove(&task.0);
                         }
                         ReplayEvent::RegionCreated { region, .. } => {
-                            active_region_set.insert(region.id);
+                            active_region_set.insert(region.0);
                         }
                         ReplayEvent::RegionClosed { region, .. } => {
-                            active_region_set.remove(&region.id);
+                            active_region_set.remove(&region.0);
                         }
                         _ => {} // Other events don't have strict ordering requirements
                     }
@@ -820,9 +970,18 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
         }
 
         // Always verify basic invariants after each operation
-        assert!(trace.cursor <= trace.events.len(), "Cursor invariant violated");
-        assert!(trace.len() <= MAX_EVENTS_PER_TRACE, "Event count exceeded maximum");
-        assert!(shadow.verify_constraints(), "Shadow model constraints violated");
+        assert!(
+            trace.cursor <= trace.events.len(),
+            "Cursor invariant violated"
+        );
+        assert!(
+            trace.len() <= MAX_EVENTS_PER_TRACE,
+            "Event count exceeded maximum"
+        );
+        assert!(
+            shadow.verify_constraints(),
+            "Shadow model constraints violated"
+        );
 
         // Prevent unbounded growth
         if trace.len() >= MAX_EVENTS_PER_TRACE {
@@ -837,41 +996,81 @@ fuzz_target!(|input: TraceReplayFuzzInput| {
 /// Verify trace replay system invariants
 fn verify_trace_replay_invariants(trace: &ReplayTrace, shadow: &TraceReplayShadowModel) {
     // Basic invariants
-    assert_eq!(trace.metadata.version, REPLAY_SCHEMA_VERSION, "Schema version should be current");
-    assert!(trace.cursor <= trace.events.len(), "Cursor should not exceed event count");
-    assert_eq!(trace.len(), shadow.stats.total_events, "Event count should match shadow");
+    assert_eq!(
+        trace.metadata.version, REPLAY_SCHEMA_VERSION,
+        "Schema version should be current"
+    );
+    assert!(
+        trace.cursor <= trace.events.len(),
+        "Cursor should not exceed event count"
+    );
+    assert_eq!(
+        trace.len(),
+        shadow.stats.total_events,
+        "Event count should match shadow"
+    );
 
     // Metadata consistency
-    assert!(trace.metadata.is_compatible(), "Metadata should be compatible");
+    assert!(
+        trace.metadata.is_compatible(),
+        "Metadata should be compatible"
+    );
 
     // Shadow model constraints
-    assert!(shadow.verify_constraints(), "Shadow model should be consistent");
+    assert!(
+        shadow.verify_constraints(),
+        "Shadow model should be consistent"
+    );
 
     // Size bounds
-    assert!(trace.len() <= MAX_EVENTS_PER_TRACE, "Event count should be bounded");
+    assert!(
+        trace.len() <= MAX_EVENTS_PER_TRACE,
+        "Event count should be bounded"
+    );
 
     // Event size estimates (rough validation)
     if !trace.events.is_empty() {
         for event in &trace.events {
-            let size = event.size_hint();
+            let size = event.estimated_size();
             assert!(size > 0, "Event should have non-zero size");
             assert!(size <= 64, "Event size should be reasonable"); // Most events are < 64 bytes
         }
     }
 
     // Virtual time consistency
-    assert!(shadow.current_time_nanos <= MAX_VIRTUAL_TIME_NS, "Virtual time should be bounded");
+    assert!(
+        shadow.current_time_nanos <= MAX_VIRTUAL_TIME_NS,
+        "Virtual time should be bounded"
+    );
 
     // Statistics consistency
     if shadow.stats.serialization_attempts > 0 {
-        assert!(shadow.stats.successful_deserializations <= shadow.stats.serialization_attempts,
-               "Successful deserializations should not exceed attempts");
+        assert!(
+            shadow.stats.successful_deserializations <= shadow.stats.serialization_attempts,
+            "Successful deserializations should not exceed attempts"
+        );
     }
+    assert!(
+        shadow.stats.cursor_resets <= shadow.stats.serialization_attempts,
+        "Cursor resets should not exceed serialization attempts"
+    );
+
+    let _constraint_digest = shadow.event_sequence.iter().fold(0u64, |acc, constraint| {
+        acc.wrapping_add(match constraint {
+            EventConstraint::TaskMustExistBeforeScheduled(task) => u64::from(*task),
+            EventConstraint::TimerMustExistBeforeFiring(timer) => u64::from(*timer),
+            EventConstraint::RegionMustExistBeforeClosing(region) => u64::from(*region),
+            EventConstraint::TimeMonotonic(from, to) => from ^ to,
+        })
+    });
 
     // Verify no excessive violations in event sequence
     if shadow.event_sequence.len() > shadow.stats.total_events / 2 {
-        panic!("Too many event sequence violations: {} violations out of {} events",
-               shadow.event_sequence.len(), shadow.stats.total_events);
+        panic!(
+            "Too many event sequence violations: {} violations out of {} events",
+            shadow.event_sequence.len(),
+            shadow.stats.total_events
+        );
     }
 }
 
@@ -891,7 +1090,7 @@ mod tests {
             },
             operations: vec![
                 TraceOperation::AddEvent {
-                    event_type: EventType::RngSeed { seed: 42 }
+                    event_type: EventType::RngSeed { seed: 42 },
                 },
                 TraceOperation::SimulateTaskLifecycle { task_count: 3 },
                 TraceOperation::SerializeDeserialize,
@@ -914,8 +1113,12 @@ mod tests {
                 description_suffix: 0,
             },
             operations: vec![
-                TraceOperation::AdvanceTime { advance_nanos: 1000000 },
-                TraceOperation::AdvanceTime { advance_nanos: 2000000 },
+                TraceOperation::AdvanceTime {
+                    advance_nanos: 1000000,
+                },
+                TraceOperation::AdvanceTime {
+                    advance_nanos: 2000000,
+                },
                 TraceOperation::VerifyEventOrdering,
             ],
         };

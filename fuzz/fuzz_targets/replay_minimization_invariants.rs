@@ -23,14 +23,12 @@ use asupersync::{
     error::Result,
     lab::replay_minimization::{
         MinimizationConfig, MinimizationStrategy, ReplayValidator, TraceMinimizer,
-        MinimizationResult,
     },
-    trace::event::{TraceEvent, TraceEventKind, TraceData},
-    types::{TaskId, RegionId, ObligationId, Time, TraceId},
+    trace::event::{TraceData, TraceEvent, TraceEventKind},
+    types::{ObligationId, RegionId, TaskId, Time},
     util::ArenaIndex,
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 // Maximum operations to prevent timeouts
@@ -53,11 +51,11 @@ struct ReplayMinimizationFuzzInput {
 
 #[derive(Debug, Arbitrary)]
 struct FuzzMinimizationConfig {
-    max_iterations: u16,        // Reduced from real config for fuzzing
+    max_iterations: u16, // Reduced from real config for fuzzing
     min_chunk_size: u8,
     aggressive_pruning: bool,
     preserve_timing: bool,
-    target_reduction: f32,      // 0.0 to 1.0
+    target_reduction: f32, // 0.0 to 1.0
     replay_timeout_ms: u32,
 }
 
@@ -72,7 +70,7 @@ enum MinimizationStrategyFuzz {
 #[derive(Debug, Clone, Arbitrary)]
 struct TraceEventFuzz {
     seq: u32,
-    time_offset: u32,  // Offset from base time to ensure ordering
+    time_offset: u32, // Offset from base time to ensure ordering
     kind: TraceEventKindFuzz,
     data: TraceDataFuzz,
 }
@@ -99,10 +97,10 @@ enum TraceEventKindFuzz {
     ObligationReserve,
     ObligationCommit,
     ObligationAbort,
-    ObligationLeak,  // Target event
+    ObligationLeak, // Target event
 
     // Critical events for oracles
-    FuturelockDetected,  // Target event
+    FuturelockDetected, // Target event
 
     // Normal operational events
     Yield,
@@ -138,7 +136,7 @@ enum TraceDataFuzz {
 struct MockReplayValidator {
     target_indices: Vec<usize>,
     expected_results: Vec<bool>,
-    call_count: std::cell::RefCell<usize>,
+    call_count: std::sync::Mutex<usize>,
 }
 
 impl MockReplayValidator {
@@ -146,14 +144,17 @@ impl MockReplayValidator {
         Self {
             target_indices,
             expected_results,
-            call_count: std::cell::RefCell::new(0),
+            call_count: std::sync::Mutex::new(0),
         }
     }
 }
 
 impl ReplayValidator for MockReplayValidator {
     fn validate_replay(&self, events: &[TraceEvent]) -> Result<bool> {
-        let mut call_count = self.call_count.borrow_mut();
+        let mut call_count = self
+            .call_count
+            .lock()
+            .expect("mock validator mutex poisoned");
         let result = if *call_count < self.expected_results.len() {
             self.expected_results[*call_count]
         } else {
@@ -165,7 +166,10 @@ impl ReplayValidator for MockReplayValidator {
     }
 
     fn target_description(&self) -> String {
-        format!("Mock validator with {} target indices", self.target_indices.len())
+        format!(
+            "Mock validator with {} target indices",
+            self.target_indices.len()
+        )
     }
 }
 
@@ -194,76 +198,106 @@ impl From<FuzzMinimizationConfig> for MinimizationConfig {
 }
 
 fn convert_trace_events(fuzz_events: &[TraceEventFuzz]) -> Vec<TraceEvent> {
-    let base_time = Time::now();
-    let trace_id = TraceId::from(42u128); // Fixed for deterministic testing
+    let base_time = Time::ZERO;
 
-    fuzz_events.iter().enumerate().map(|(i, fuzz_event)| {
-        let seq = fuzz_event.seq as u64;
-        let time = base_time + std::time::Duration::from_millis(fuzz_event.time_offset as u64);
+    fuzz_events
+        .iter()
+        .enumerate()
+        .map(|(_i, fuzz_event)| {
+            let seq = fuzz_event.seq as u64;
+            let time = base_time + std::time::Duration::from_millis(fuzz_event.time_offset as u64);
 
-        let kind = match fuzz_event.kind {
-            TraceEventKindFuzz::Spawn => TraceEventKind::Spawn,
-            TraceEventKindFuzz::Schedule => TraceEventKind::Schedule,
-            TraceEventKindFuzz::Poll => TraceEventKind::Poll,
-            TraceEventKindFuzz::Complete => TraceEventKind::Complete,
-            TraceEventKindFuzz::CancelRequest => TraceEventKind::CancelRequest,
-            TraceEventKindFuzz::CancelAck => TraceEventKind::CancelAck,
-            TraceEventKindFuzz::RegionCreated => TraceEventKind::RegionCreated,
-            TraceEventKindFuzz::RegionCloseBegin => TraceEventKind::RegionCloseBegin,
-            TraceEventKindFuzz::RegionCloseComplete => TraceEventKind::RegionCloseComplete,
-            TraceEventKindFuzz::RegionCancelled => TraceEventKind::RegionCancelled,
-            TraceEventKindFuzz::ObligationReserve => TraceEventKind::ObligationReserve,
-            TraceEventKindFuzz::ObligationCommit => TraceEventKind::ObligationCommit,
-            TraceEventKindFuzz::ObligationAbort => TraceEventKind::ObligationAbort,
-            TraceEventKindFuzz::ObligationLeak => TraceEventKind::ObligationLeak,
-            TraceEventKindFuzz::FuturelockDetected => TraceEventKind::FuturelockDetected,
-            TraceEventKindFuzz::Yield => TraceEventKind::Yield,
-            TraceEventKindFuzz::Wake => TraceEventKind::Wake,
-            TraceEventKindFuzz::IoRequested => TraceEventKind::IoRequested,
-            TraceEventKindFuzz::IoReady => TraceEventKind::IoReady,
-        };
+            let kind = match fuzz_event.kind {
+                TraceEventKindFuzz::Spawn => TraceEventKind::Spawn,
+                TraceEventKindFuzz::Schedule => TraceEventKind::Schedule,
+                TraceEventKindFuzz::Poll => TraceEventKind::Poll,
+                TraceEventKindFuzz::Complete => TraceEventKind::Complete,
+                TraceEventKindFuzz::CancelRequest => TraceEventKind::CancelRequest,
+                TraceEventKindFuzz::CancelAck => TraceEventKind::CancelAck,
+                TraceEventKindFuzz::RegionCreated => TraceEventKind::RegionCreated,
+                TraceEventKindFuzz::RegionCloseBegin => TraceEventKind::RegionCloseBegin,
+                TraceEventKindFuzz::RegionCloseComplete => TraceEventKind::RegionCloseComplete,
+                TraceEventKindFuzz::RegionCancelled => TraceEventKind::RegionCancelled,
+                TraceEventKindFuzz::ObligationReserve => TraceEventKind::ObligationReserve,
+                TraceEventKindFuzz::ObligationCommit => TraceEventKind::ObligationCommit,
+                TraceEventKindFuzz::ObligationAbort => TraceEventKind::ObligationAbort,
+                TraceEventKindFuzz::ObligationLeak => TraceEventKind::ObligationLeak,
+                TraceEventKindFuzz::FuturelockDetected => TraceEventKind::FuturelockDetected,
+                TraceEventKindFuzz::Yield => TraceEventKind::Yield,
+                TraceEventKindFuzz::Wake => TraceEventKind::Wake,
+                TraceEventKindFuzz::IoRequested => TraceEventKind::IoRequested,
+                TraceEventKindFuzz::IoReady => TraceEventKind::IoReady,
+            };
 
-        let data = match &fuzz_event.data {
-            TraceDataFuzz::None => TraceData::None,
-            TraceDataFuzz::Task { task_index, region_index } => {
-                let task_id = TaskId::from_arena(ArenaIndex::from_parts(*task_index as u32, 0));
-                let region_id = RegionId::from_arena(ArenaIndex::from_parts(*region_index as u32, 0));
-                TraceData::Task { task: task_id, region: region_id }
-            }
-            TraceDataFuzz::Region { region_index, parent_index } => {
-                let region_id = RegionId::from_arena(ArenaIndex::from_parts(*region_index as u32, 0));
-                let parent = parent_index.map(|idx| RegionId::from_arena(ArenaIndex::from_parts(idx as u32, 0)));
-                TraceData::Region { region: region_id, parent }
-            }
-            TraceDataFuzz::Obligation { obligation_index, task_index, region_index, kind_index: _ } => {
-                let obligation_id = ObligationId::from_arena(ArenaIndex::from_parts(*obligation_index as u32, 0));
-                let task_id = TaskId::from_arena(ArenaIndex::from_parts(*task_index as u32, 0));
-                let region_id = RegionId::from_arena(ArenaIndex::from_parts(*region_index as u32, 0));
-
-                // Simplified obligation data for fuzzing
-                TraceData::Obligation {
-                    obligation: obligation_id,
-                    task: task_id,
-                    region: region_id,
-                    kind: asupersync::record::ObligationKind::SendPermit, // Fixed for simplicity
-                    state: asupersync::record::ObligationState::Reserved,
-                    duration_ns: None,
-                    abort_reason: None,
+            let data = match &fuzz_event.data {
+                TraceDataFuzz::None => TraceData::None,
+                TraceDataFuzz::Task {
+                    task_index,
+                    region_index,
+                } => {
+                    let task_id = TaskId::from_arena(ArenaIndex::new(*task_index as u32, 0));
+                    let region_id = RegionId::from_arena(ArenaIndex::new(*region_index as u32, 0));
+                    TraceData::Task {
+                        task: task_id,
+                        region: region_id,
+                    }
                 }
-            }
-            TraceDataFuzz::Cancel { task_index, region_index } => {
-                let task_id = TaskId::from_arena(ArenaIndex::from_parts(*task_index as u32, 0));
-                let region_id = RegionId::from_arena(ArenaIndex::from_parts(*region_index as u32, 0));
-                TraceData::Cancel {
-                    task: task_id,
-                    region: region_id,
-                    reason: asupersync::types::CancelReason::Timeout,
+                TraceDataFuzz::Region {
+                    region_index,
+                    parent_index,
+                } => {
+                    let region_id = RegionId::from_arena(ArenaIndex::new(*region_index as u32, 0));
+                    let parent = parent_index
+                        .map(|idx| RegionId::from_arena(ArenaIndex::new(idx as u32, 0)));
+                    TraceData::Region {
+                        region: region_id,
+                        parent,
+                    }
                 }
-            }
-        };
+                TraceDataFuzz::Obligation {
+                    obligation_index,
+                    task_index,
+                    region_index,
+                    kind_index,
+                } => {
+                    let obligation_id = ObligationId::new_for_test(*obligation_index as u32, 0);
+                    let task_id = TaskId::from_arena(ArenaIndex::new(*task_index as u32, 0));
+                    let region_id = RegionId::from_arena(ArenaIndex::new(*region_index as u32, 0));
+                    let kind = match *kind_index % 4 {
+                        0 => asupersync::record::ObligationKind::SendPermit,
+                        1 => asupersync::record::ObligationKind::Ack,
+                        2 => asupersync::record::ObligationKind::Lease,
+                        _ => asupersync::record::ObligationKind::SemaphorePermit,
+                    };
 
-        TraceEvent::new(seq, time, kind, data)
-    }).collect()
+                    // Simplified obligation data for fuzzing
+                    TraceData::Obligation {
+                        obligation: obligation_id,
+                        task: task_id,
+                        region: region_id,
+                        kind,
+                        state: asupersync::record::ObligationState::Reserved,
+                        duration_ns: None,
+                        abort_reason: None,
+                    }
+                }
+                TraceDataFuzz::Cancel {
+                    task_index,
+                    region_index,
+                } => {
+                    let task_id = TaskId::from_arena(ArenaIndex::new(*task_index as u32, 0));
+                    let region_id = RegionId::from_arena(ArenaIndex::new(*region_index as u32, 0));
+                    TraceData::Cancel {
+                        task: task_id,
+                        region: region_id,
+                        reason: asupersync::types::CancelReason::timeout(),
+                    }
+                }
+            };
+
+            TraceEvent::new(seq, time, kind, data)
+        })
+        .collect()
 }
 
 fuzz_target!(|input: ReplayMinimizationFuzzInput| {
@@ -279,7 +313,8 @@ fuzz_target!(|input: ReplayMinimizationFuzzInput| {
     }
 
     // Create target indices from fuzz input
-    let target_indices: Vec<usize> = input.target_event_indices
+    let target_indices: Vec<usize> = input
+        .target_event_indices
         .into_iter()
         .filter_map(|idx| {
             let idx = idx as usize;
@@ -288,7 +323,10 @@ fuzz_target!(|input: ReplayMinimizationFuzzInput| {
         .collect();
 
     // Create mock validator
-    let validator = Arc::new(MockReplayValidator::new(target_indices.clone(), input.expected_validations));
+    let validator = Arc::new(MockReplayValidator::new(
+        target_indices.clone(),
+        input.expected_validations,
+    ));
 
     // Create minimizer with fuzz config
     let config: MinimizationConfig = input.config.into();
@@ -296,32 +334,31 @@ fuzz_target!(|input: ReplayMinimizationFuzzInput| {
 
     let mut minimizer = TraceMinimizer::new(config.clone(), validator.clone(), strategy);
 
-    // Block on async minimization - use a simple runtime for fuzzing
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-
-    let result = rt.block_on(async {
-        minimizer.minimize(events.clone()).await
-    });
+    let result = futures_executor::block_on(async { minimizer.minimize(events.clone()).await });
 
     // Test core invariants regardless of whether minimization succeeded or failed
-    match result {
+    match &result {
         Ok(minimization_result) => {
             // **INVARIANT 1**: Reduction ratio must be between 0.0 and 1.0
             assert!(
-                minimization_result.reduction_ratio >= 0.0 && minimization_result.reduction_ratio <= 1.0,
-                "Reduction ratio {} out of bounds", minimization_result.reduction_ratio
+                minimization_result.reduction_ratio >= 0.0
+                    && minimization_result.reduction_ratio <= 1.0,
+                "Reduction ratio {} out of bounds",
+                minimization_result.reduction_ratio
             );
 
             // **INVARIANT 2**: Minimized size must be <= original size
             assert!(
                 minimization_result.minimized_size <= minimization_result.original_size,
                 "Minimized size {} > original size {}",
-                minimization_result.minimized_size, minimization_result.original_size
+                minimization_result.minimized_size,
+                minimization_result.original_size
             );
 
             // **INVARIANT 3**: Reduction ratio calculation must be consistent
             let expected_ratio = if minimization_result.original_size > 0 {
-                1.0 - (minimization_result.minimized_size as f64 / minimization_result.original_size as f64)
+                1.0 - (minimization_result.minimized_size as f64
+                    / minimization_result.original_size as f64)
             } else {
                 0.0
             };
@@ -329,17 +366,20 @@ fuzz_target!(|input: ReplayMinimizationFuzzInput| {
             assert!(
                 ratio_diff < 0.001, // Allow small floating point errors
                 "Reduction ratio calculation inconsistent: got {}, expected {}",
-                minimization_result.reduction_ratio, expected_ratio
+                minimization_result.reduction_ratio,
+                expected_ratio
             );
 
             // **INVARIANT 4**: Essential events + pruned events should account for original size
-            let accounted_events = minimization_result.essential_events.len() + minimization_result.pruned_events.len();
+            let accounted_events = minimization_result.essential_events.len()
+                + minimization_result.pruned_events.len();
             // Note: This invariant may not hold exactly due to implementation details,
             // but we check it's reasonably close to catch major bugs
             assert!(
                 accounted_events <= minimization_result.original_size * 2,
                 "Event accounting inconsistent: {} accounted vs {} original",
-                accounted_events, minimization_result.original_size
+                accounted_events,
+                minimization_result.original_size
             );
 
             // **INVARIANT 5**: No duplicate indices in essential or pruned events
@@ -347,7 +387,8 @@ fuzz_target!(|input: ReplayMinimizationFuzzInput| {
             for &idx in &minimization_result.essential_events {
                 assert!(
                     essential_set.insert(idx),
-                    "Duplicate essential event index: {}", idx
+                    "Duplicate essential event index: {}",
+                    idx
                 );
             }
 
@@ -355,7 +396,8 @@ fuzz_target!(|input: ReplayMinimizationFuzzInput| {
             for &idx in &minimization_result.pruned_events {
                 assert!(
                     pruned_set.insert(idx),
-                    "Duplicate pruned event index: {}", idx
+                    "Duplicate pruned event index: {}",
+                    idx
                 );
             }
 
@@ -363,7 +405,8 @@ fuzz_target!(|input: ReplayMinimizationFuzzInput| {
             // This is mainly a sanity check for time arithmetic
             assert!(
                 minimization_result.duration_ms < 1000000, // Less than 1000 seconds
-                "Duration suspiciously large: {} ms", minimization_result.duration_ms
+                "Duration suspiciously large: {} ms",
+                minimization_result.duration_ms
             );
         }
 
@@ -381,9 +424,7 @@ fuzz_target!(|input: ReplayMinimizationFuzzInput| {
         let mut minimizer2 = TraceMinimizer::new(config, validator, strategy);
 
         // This should be fast due to caching and should produce consistent results
-        let second_result = rt.block_on(async {
-            minimizer2.minimize(events).await
-        });
+        let second_result = futures_executor::block_on(async { minimizer2.minimize(events).await });
 
         if let Ok(second_result) = second_result {
             // **INVARIANT 7**: Minimization should be deterministic with same inputs

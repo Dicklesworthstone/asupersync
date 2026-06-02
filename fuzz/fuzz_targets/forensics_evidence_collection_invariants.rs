@@ -28,12 +28,12 @@
 use arbitrary::Arbitrary;
 use asupersync::{
     lab::forensics::{
-        ForensicsCollector, ForensicsConfig, EvidenceEntry, EvidenceCategory, EvidenceSeverity,
-        ExecutionContext, ExecutionPhase, EvidenceData, RootCause, RootCauseType,
-        PerformanceBaseline, PerformanceMeasurement, ConcurrencyBugType, MemoryAccessType,
+        ConcurrencyBugType, EvidenceCategory, EvidenceData, EvidenceSeverity, ExecutionContext,
+        ExecutionPhase, ForensicsCollector, ForensicsConfig, PerformanceBaseline,
+        PerformanceMeasurement, RootCause, RootCauseType,
     },
     trace::crashpack::{CrashPack, CrashPackConfig, FailureInfo, FailureOutcome},
-    types::{TaskId, RegionId, Time},
+    types::{CancelKind, RegionId, TaskId, Time},
     util::ArenaIndex,
 };
 use libfuzzer_sys::fuzz_target;
@@ -43,11 +43,8 @@ use std::time::{Duration, SystemTime};
 // Maximum values to prevent timeouts and maintain realistic bounds
 const MAX_EVIDENCE_ENTRIES: usize = 1000;
 const MAX_PERFORMANCE_MEASUREMENTS: usize = 100;
-const MAX_RESOURCE_SNAPSHOTS: usize = 50;
-const MAX_STACK_FRAMES: usize = 20;
 const MAX_MEMORY_MB: u64 = 10000; // 10GB max
 const MAX_DURATION_SECS: u64 = 86400; // 24 hours max
-const MAX_CONFIDENCE: f64 = 1.0;
 const MAX_THRESHOLD_PERCENT: f64 = 1000.0; // 1000% max regression threshold
 
 #[derive(Debug, Arbitrary)]
@@ -79,10 +76,7 @@ struct FuzzForensicsConfig {
 #[derive(Debug, Arbitrary)]
 enum ForensicsOperation {
     /// Start evidence collection
-    StartCollection {
-        lab_id: String,
-        scenario_id: String,
-    },
+    StartCollection { lab_id: String, scenario_id: String },
     /// Collect evidence entry
     CollectEvidence {
         category: u8, // Maps to EvidenceCategory
@@ -231,9 +225,12 @@ impl From<FuzzForensicsConfig> for ForensicsConfig {
             enable_determinism_checks: config.enable_determinism_checks,
             enable_resource_tracking: config.enable_resource_tracking,
             enable_concurrency_analysis: config.enable_concurrency_analysis,
-            max_evidence_entries: (config.max_evidence_entries_raw as usize).min(MAX_EVIDENCE_ENTRIES),
-            regression_threshold: (config.regression_threshold_raw.abs() as f64).min(MAX_THRESHOLD_PERCENT),
-            memory_leak_threshold: (config.memory_leak_threshold_raw as u64).min(MAX_MEMORY_MB * 1024 * 1024),
+            max_evidence_entries: (config.max_evidence_entries_raw as usize)
+                .min(MAX_EVIDENCE_ENTRIES),
+            regression_threshold: (config.regression_threshold_raw.abs() as f64)
+                .min(MAX_THRESHOLD_PERCENT),
+            memory_leak_threshold: (config.memory_leak_threshold_raw as u64)
+                .min(MAX_MEMORY_MB * 1024 * 1024),
         }
     }
 }
@@ -281,11 +278,11 @@ fn map_concurrency_bug_type(bug_type_raw: u8) -> ConcurrencyBugType {
 }
 
 fn create_task_id(index: u8) -> TaskId {
-    TaskId::from_arena(ArenaIndex::from_parts(index as u32, 0))
+    TaskId::from_arena(ArenaIndex::new(index as u32, 0))
 }
 
 fn create_region_id(index: u8) -> RegionId {
-    RegionId::from_arena(ArenaIndex::from_parts(index as u32, 0))
+    RegionId::from_arena(ArenaIndex::new(index as u32, 0))
 }
 
 fn convert_execution_context(
@@ -293,8 +290,16 @@ fn convert_execution_context(
     base_time: Time,
 ) -> ExecutionContext {
     ExecutionContext {
-        lab_id: if fuzz_context.lab_id.is_empty() { "test_lab".to_string() } else { fuzz_context.lab_id.clone() },
-        scenario_id: if fuzz_context.scenario_id.is_empty() { "test_scenario".to_string() } else { fuzz_context.scenario_id.clone() },
+        lab_id: if fuzz_context.lab_id.is_empty() {
+            "test_lab".to_string()
+        } else {
+            fuzz_context.lab_id.clone()
+        },
+        scenario_id: if fuzz_context.scenario_id.is_empty() {
+            "test_scenario".to_string()
+        } else {
+            fuzz_context.scenario_id.clone()
+        },
         task_id: fuzz_context.task_index.map(create_task_id),
         region_id: fuzz_context.region_index.map(create_region_id),
         virtual_time: base_time + Duration::from_millis(fuzz_context.virtual_time_offset_ms as u64),
@@ -305,30 +310,43 @@ fn convert_execution_context(
 
 fn convert_evidence_data(fuzz_data: &FuzzEvidenceData) -> EvidenceData {
     match fuzz_data {
-        FuzzEvidenceData::Performance { execution_time_ms, memory_usage_mb, cpu_cycles, cache_misses } => {
-            EvidenceData::PerformanceMetrics {
-                execution_time: Duration::from_millis((*execution_time_ms as u64).min(MAX_DURATION_SECS * 1000)),
-                memory_usage: (*memory_usage_mb as u64).min(MAX_MEMORY_MB) * 1024 * 1024,
-                cpu_cycles: *cpu_cycles,
-                cache_misses: *cache_misses,
-            }
-        }
-        FuzzEvidenceData::DeterminismViolation { expected_state, actual_state, divergence_point } => {
-            EvidenceData::DeterminismViolation {
-                expected_state: expected_state.clone(),
-                actual_state: actual_state.clone(),
-                divergence_point: divergence_point.clone(),
-            }
-        }
-        FuzzEvidenceData::ResourceLeak { resource_type, leaked_count, allocation_trace } => {
-            EvidenceData::ResourceLeak {
-                resource_type: resource_type.clone(),
-                leaked_count: *leaked_count as u64,
-                allocation_trace: allocation_trace.clone(),
-            }
-        }
-        FuzzEvidenceData::ConcurrencyBug { bug_type, involved_task_indices } => {
-            let involved_tasks: Vec<TaskId> = involved_task_indices.iter()
+        FuzzEvidenceData::Performance {
+            execution_time_ms,
+            memory_usage_mb,
+            cpu_cycles,
+            cache_misses,
+        } => EvidenceData::PerformanceMetrics {
+            execution_time: Duration::from_millis(
+                (*execution_time_ms as u64).min(MAX_DURATION_SECS * 1000),
+            ),
+            memory_usage: (*memory_usage_mb as u64).min(MAX_MEMORY_MB) * 1024 * 1024,
+            cpu_cycles: *cpu_cycles,
+            cache_misses: *cache_misses,
+        },
+        FuzzEvidenceData::DeterminismViolation {
+            expected_state,
+            actual_state,
+            divergence_point,
+        } => EvidenceData::DeterminismViolation {
+            expected_state: expected_state.clone(),
+            actual_state: actual_state.clone(),
+            divergence_point: divergence_point.clone(),
+        },
+        FuzzEvidenceData::ResourceLeak {
+            resource_type,
+            leaked_count,
+            allocation_trace,
+        } => EvidenceData::ResourceLeak {
+            resource_type: resource_type.clone(),
+            leaked_count: *leaked_count as u64,
+            allocation_trace: allocation_trace.clone(),
+        },
+        FuzzEvidenceData::ConcurrencyBug {
+            bug_type,
+            involved_task_indices,
+        } => {
+            let involved_tasks: Vec<TaskId> = involved_task_indices
+                .iter()
                 .take(10) // Limit task count
                 .map(|&idx| create_task_id(idx))
                 .collect();
@@ -339,8 +357,13 @@ fn convert_evidence_data(fuzz_data: &FuzzEvidenceData) -> EvidenceData {
                 race_condition: None, // Simplified for fuzzing
             }
         }
-        FuzzEvidenceData::ScheduleDependency { dependency_type, dependent_task_indices, causality_chain } => {
-            let dependent_tasks: Vec<TaskId> = dependent_task_indices.iter()
+        FuzzEvidenceData::ScheduleDependency {
+            dependency_type,
+            dependent_task_indices,
+            causality_chain,
+        } => {
+            let dependent_tasks: Vec<TaskId> = dependent_task_indices
+                .iter()
                 .take(10) // Limit task count
                 .map(|&idx| create_task_id(idx))
                 .collect();
@@ -351,13 +374,15 @@ fn convert_evidence_data(fuzz_data: &FuzzEvidenceData) -> EvidenceData {
                 causality_chain: causality_chain.clone(),
             }
         }
-        FuzzEvidenceData::OracleViolation { oracle_type, violation_details, expected_invariant } => {
-            EvidenceData::OracleViolation {
-                oracle_type: oracle_type.clone(),
-                violation_details: violation_details.clone(),
-                expected_invariant: expected_invariant.clone(),
-            }
-        }
+        FuzzEvidenceData::OracleViolation {
+            oracle_type,
+            violation_details,
+            expected_invariant,
+        } => EvidenceData::OracleViolation {
+            oracle_type: oracle_type.clone(),
+            violation_details: violation_details.clone(),
+            expected_invariant: expected_invariant.clone(),
+        },
     }
 }
 
@@ -371,16 +396,22 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
     let config: ForensicsConfig = input.config.into();
 
     // **INVARIANT 1**: Configuration values should be properly bounded
-    assert!(config.max_evidence_entries <= MAX_EVIDENCE_ENTRIES,
-           "Max evidence entries should be bounded");
-    assert!(config.regression_threshold >= 0.0 && config.regression_threshold <= MAX_THRESHOLD_PERCENT,
-           "Regression threshold should be in valid range");
-    assert!(config.memory_leak_threshold <= MAX_MEMORY_MB * 1024 * 1024,
-           "Memory leak threshold should be bounded");
+    assert!(
+        config.max_evidence_entries <= MAX_EVIDENCE_ENTRIES,
+        "Max evidence entries should be bounded"
+    );
+    assert!(
+        config.regression_threshold >= 0.0 && config.regression_threshold <= MAX_THRESHOLD_PERCENT,
+        "Regression threshold should be in valid range"
+    );
+    assert!(
+        config.memory_leak_threshold <= MAX_MEMORY_MB * 1024 * 1024,
+        "Memory leak threshold should be bounded"
+    );
 
     // Create forensics collector
     let mut collector = ForensicsCollector::new(config.clone());
-    let base_time = Time::now();
+    let base_time = Time::ZERO;
 
     // Track state for invariant checking
     let mut collected_evidence_count = 0;
@@ -394,9 +425,20 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
         }
 
         match operation {
-            ForensicsOperation::StartCollection { lab_id, scenario_id } => {
-                let safe_lab_id = if lab_id.is_empty() { "test_lab" } else { lab_id };
-                let safe_scenario_id = if scenario_id.is_empty() { "test_scenario" } else { scenario_id };
+            ForensicsOperation::StartCollection {
+                lab_id,
+                scenario_id,
+            } => {
+                let safe_lab_id = if lab_id.is_empty() {
+                    "test_lab"
+                } else {
+                    lab_id
+                };
+                let safe_scenario_id = if scenario_id.is_empty() {
+                    "test_scenario"
+                } else {
+                    scenario_id
+                };
 
                 collector.start_collection(safe_lab_id, safe_scenario_id);
                 started_collection = true;
@@ -404,13 +446,23 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
                 // **INVARIANT 2**: Start collection should not panic and should initialize properly
             }
 
-            ForensicsOperation::CollectEvidence { category, severity, description, context, data } => {
+            ForensicsOperation::CollectEvidence {
+                category,
+                severity,
+                description,
+                context,
+                data,
+            } => {
                 let evidence_category = map_evidence_category(*category);
                 let evidence_severity = map_evidence_severity(*severity);
                 let execution_context = convert_execution_context(context, base_time);
                 let evidence_data = convert_evidence_data(data);
 
-                let safe_description = if description.is_empty() { "Test evidence".to_string() } else { description.clone() };
+                let safe_description = if description.is_empty() {
+                    "Test evidence".to_string()
+                } else {
+                    description.clone()
+                };
 
                 collector.collect_evidence(
                     evidence_category,
@@ -424,24 +476,40 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
 
                 // **INVARIANT 3**: Evidence collection should not panic and should track count
                 if config.enable_detailed_collection {
-                    assert!(collected_evidence_count <= config.max_evidence_entries,
-                           "Evidence count should not exceed configured maximum");
+                    assert!(
+                        collected_evidence_count <= config.max_evidence_entries,
+                        "Evidence count should not exceed configured maximum"
+                    );
                 }
             }
 
-            ForensicsOperation::AddBaseline { test_name, execution_time_ms, memory_usage_mb, measurements } => {
+            ForensicsOperation::AddBaseline {
+                test_name,
+                execution_time_ms,
+                memory_usage_mb,
+                measurements,
+            } => {
                 if !test_name.is_empty() && config.enable_performance_tracking {
-                    let bounded_time = Duration::from_millis((*execution_time_ms as u64).min(MAX_DURATION_SECS * 1000));
+                    let bounded_time = Duration::from_millis(
+                        (*execution_time_ms as u64).min(MAX_DURATION_SECS * 1000),
+                    );
                     let bounded_memory = (*memory_usage_mb as u64).min(MAX_MEMORY_MB) * 1024 * 1024;
 
                     // Convert measurements
-                    let perf_measurements: Vec<PerformanceMeasurement> = measurements.iter()
+                    let perf_measurements: Vec<PerformanceMeasurement> = measurements
+                        .iter()
                         .take(MAX_PERFORMANCE_MEASUREMENTS)
                         .map(|m| PerformanceMeasurement {
                             timestamp: SystemTime::now(),
-                            execution_time: Duration::from_millis((m.execution_time_ms as u64).min(MAX_DURATION_SECS * 1000)),
-                            memory_usage: (m.memory_usage_mb as u64).min(MAX_MEMORY_MB) * 1024 * 1024,
-                            additional_metrics: m.additional_metrics.iter()
+                            execution_time: Duration::from_millis(
+                                (m.execution_time_ms as u64).min(MAX_DURATION_SECS * 1000),
+                            ),
+                            memory_usage: (m.memory_usage_mb as u64).min(MAX_MEMORY_MB)
+                                * 1024
+                                * 1024,
+                            additional_metrics: m
+                                .additional_metrics
+                                .iter()
                                 .take(10) // Limit metrics
                                 .map(|(k, v)| (k.clone(), *v as f64))
                                 .collect(),
@@ -461,27 +529,44 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
                     performance_baselines.insert(test_name.clone(), (bounded_time, bounded_memory));
 
                     // **INVARIANT 4**: Baseline values should be properly bounded
-                    assert!(baseline.baseline_time <= Duration::from_secs(MAX_DURATION_SECS),
-                           "Baseline time should be bounded");
-                    assert!(baseline.baseline_memory <= MAX_MEMORY_MB * 1024 * 1024,
-                           "Baseline memory should be bounded");
-                    assert!(baseline.confidence_interval.0 >= 0.0 && baseline.confidence_interval.1 <= 2.0,
-                           "Confidence interval should be reasonable");
+                    assert!(
+                        baseline.baseline_time <= Duration::from_secs(MAX_DURATION_SECS),
+                        "Baseline time should be bounded"
+                    );
+                    assert!(
+                        baseline.baseline_memory <= MAX_MEMORY_MB * 1024 * 1024,
+                        "Baseline memory should be bounded"
+                    );
+                    assert!(
+                        baseline.confidence_interval.0 >= 0.0
+                            && baseline.confidence_interval.1 <= 2.0,
+                        "Confidence interval should be reasonable"
+                    );
                 }
             }
 
-            ForensicsOperation::CheckRegression { test_name, current_time_ms, current_memory_mb } => {
-                if let Some((baseline_time, baseline_memory)) = performance_baselines.get(test_name) {
-                    let current_time = Duration::from_millis((*current_time_ms as u64).min(MAX_DURATION_SECS * 1000));
-                    let current_memory = (*current_memory_mb as u64).min(MAX_MEMORY_MB) * 1024 * 1024;
+            ForensicsOperation::CheckRegression {
+                test_name,
+                current_time_ms,
+                current_memory_mb,
+            } => {
+                if let Some((baseline_time, baseline_memory)) = performance_baselines.get(test_name)
+                {
+                    let current_time = Duration::from_millis(
+                        (*current_time_ms as u64).min(MAX_DURATION_SECS * 1000),
+                    );
+                    let current_memory =
+                        (*current_memory_mb as u64).min(MAX_MEMORY_MB) * 1024 * 1024;
 
                     // **INVARIANT 5**: Regression detection should handle edge cases gracefully
                     if baseline_time.as_millis() > 0 {
-                        let time_ratio = current_time.as_millis() as f64 / baseline_time.as_millis() as f64;
+                        let time_ratio =
+                            current_time.as_millis() as f64 / baseline_time.as_millis() as f64;
                         assert!(time_ratio >= 0.0, "Time ratio should not be negative");
 
                         // Check for regression based on configured threshold
-                        let regression_detected = time_ratio > (1.0 + config.regression_threshold / 100.0);
+                        let _regression_detected =
+                            time_ratio > (1.0 + config.regression_threshold / 100.0);
                         // We don't assert on regression detection as it's dependent on data
                     }
 
@@ -492,7 +577,11 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
                 }
             }
 
-            ForensicsOperation::TrackResource { resource_type, size_or_count, identifier } => {
+            ForensicsOperation::TrackResource {
+                resource_type,
+                size_or_count,
+                identifier,
+            } => {
                 if config.enable_resource_tracking && !identifier.is_empty() {
                     let bounded_size = (*size_or_count as u64).min(MAX_MEMORY_MB * 1024 * 1024);
 
@@ -500,22 +589,33 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
                     match resource_type % 3 {
                         0 => {
                             // Memory allocation tracking
-                            assert!(bounded_size <= MAX_MEMORY_MB * 1024 * 1024,
-                                   "Memory allocation size should be bounded");
+                            assert!(
+                                bounded_size <= MAX_MEMORY_MB * 1024 * 1024,
+                                "Memory allocation size should be bounded"
+                            );
                         }
                         1 => {
                             // File handle tracking
-                            assert!(*size_or_count <= 10000, "File handle count should be reasonable");
+                            assert!(
+                                *size_or_count <= 10000,
+                                "File handle count should be reasonable"
+                            );
                         }
                         _ => {
                             // Network connection tracking
-                            assert!(*size_or_count <= 1000, "Network connection count should be reasonable");
+                            assert!(
+                                *size_or_count <= 1000,
+                                "Network connection count should be reasonable"
+                            );
                         }
                     }
                 }
             }
 
-            ForensicsOperation::GenerateCrashPack { config: crash_config, failure } => {
+            ForensicsOperation::GenerateCrashPack {
+                config: crash_config,
+                failure,
+            } => {
                 // **INVARIANT 7**: Crash pack generation should not panic
                 let pack_config = CrashPackConfig {
                     seed: crash_config.seed,
@@ -530,17 +630,26 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
 
                 let failure_outcome = match failure.outcome_type % 3 {
                     0 => FailureOutcome::Panicked {
-                        message: if failure.message.is_empty() { "test panic".to_string() } else { failure.message.clone() }
+                        message: if failure.message.is_empty() {
+                            "test panic".to_string()
+                        } else {
+                            failure.message.clone()
+                        },
                     },
-                    1 => FailureOutcome::Cancelled,
-                    _ => FailureOutcome::TimedOut,
+                    1 => FailureOutcome::Cancelled {
+                        cancel_kind: CancelKind::User,
+                    },
+                    _ => FailureOutcome::Cancelled {
+                        cancel_kind: CancelKind::Timeout,
+                    },
                 };
 
                 let failure_info = FailureInfo {
                     task: task_id,
                     region: region_id,
                     outcome: failure_outcome,
-                    virtual_time: base_time + Duration::from_millis(failure.virtual_time_offset_ms as u64),
+                    virtual_time: base_time
+                        + Duration::from_millis(failure.virtual_time_offset_ms as u64),
                 };
 
                 // Create crash pack (simplified - we're not testing full crashpack creation here)
@@ -552,8 +661,10 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
                 match result {
                     Ok(pack) => {
                         // **INVARIANT 8**: Valid crash pack should have consistent schema version
-                        assert_eq!(pack.manifest.schema_version, 1,
-                                 "Crash pack should have expected schema version");
+                        assert_eq!(
+                            pack.manifest.schema_version, 1,
+                            "Crash pack should have expected schema version"
+                        );
                     }
                     Err(_) => {
                         // Crash pack creation can fail for invalid configurations
@@ -561,10 +672,16 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
                 }
             }
 
-            ForensicsOperation::AnalyzeRootCause { evidence_index, contributing_factors } => {
+            ForensicsOperation::AnalyzeRootCause {
+                evidence_index,
+                contributing_factors,
+            } => {
                 // **INVARIANT 9**: Root cause analysis should produce valid results
                 if collected_evidence_count > 0 && config.enable_detailed_collection {
-                    let bounded_factors: Vec<String> = contributing_factors.iter()
+                    let _evidence_selector =
+                        (*evidence_index as usize) % collected_evidence_count.max(1);
+                    let bounded_factors: Vec<String> = contributing_factors
+                        .iter()
                         .take(10) // Limit contributing factors
                         .cloned()
                         .collect();
@@ -578,11 +695,15 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
                     };
 
                     // **INVARIANT 10**: Root cause analysis should have valid confidence score
-                    assert!(root_cause.confidence_score >= 0.0 && root_cause.confidence_score <= 1.0,
-                           "Confidence score should be between 0.0 and 1.0");
+                    assert!(
+                        root_cause.confidence_score >= 0.0 && root_cause.confidence_score <= 1.0,
+                        "Confidence score should be between 0.0 and 1.0"
+                    );
 
-                    assert!(!root_cause.description.is_empty(),
-                           "Root cause description should not be empty");
+                    assert!(
+                        !root_cause.description.is_empty(),
+                        "Root cause description should not be empty"
+                    );
                 }
             }
         }
@@ -593,8 +714,10 @@ fuzz_target!(|input: ForensicsEvidenceFuzzInput| {
     // If collection was started, verify collector state is valid
     if started_collection {
         // Collection should have been properly initialized
-        assert!(collected_evidence_count <= config.max_evidence_entries,
-               "Evidence count should respect maximum");
+        assert!(
+            collected_evidence_count <= config.max_evidence_entries,
+            "Evidence count should respect maximum"
+        );
     }
 
     // **INVARIANT 12**: Test edge case scenarios

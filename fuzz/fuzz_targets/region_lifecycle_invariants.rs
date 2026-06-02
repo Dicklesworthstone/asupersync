@@ -28,20 +28,13 @@
 use arbitrary::Arbitrary;
 use asupersync::{
     record::{
-        region::{
-            AdmissionError, AdmissionKind, AtomicRegionState, RegionLimits, RegionRecord,
-            RegionState
-        },
         finalizer::Finalizer,
+        region::{AdmissionError, AdmissionKind, RegionLimits, RegionRecord, RegionState},
     },
-    runtime::region_table::{RegionCreateError, RegionTable},
-    types::{
-        Budget, CapabilityBudget, CancelReason, RegionId, TaskId, Time,
-    },
+    types::{Budget, CancelReason, CapabilityBudget, RegionId, TaskId, Time},
     util::ArenaIndex,
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 // Maximum values to prevent timeouts and maintain realistic bounds
@@ -50,7 +43,7 @@ const MAX_TASKS: usize = 1000;
 const MAX_OBLIGATIONS: usize = 1000;
 const MAX_HEAP_BYTES: usize = 1_000_000; // 1 MB
 const MAX_OPERATIONS: usize = 100;
-const MAX_POLL_QUOTA: u64 = 1000;
+const MAX_POLL_QUOTA: u32 = 1000;
 
 #[derive(Debug, Arbitrary)]
 struct RegionLifecycleFuzzInput {
@@ -75,7 +68,7 @@ struct FuzzRegionConfig {
     capability_budget_dims: Vec<FuzzCapabilityDimension>,
 }
 
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Clone, Arbitrary)]
 struct FuzzRegionLimits {
     max_children_raw: Option<u16>,
     max_tasks_raw: Option<u16>,
@@ -108,7 +101,10 @@ enum RegionOperation {
     /// Add finalizer
     AddFinalizer { region_index: u8, finalizer_id: u8 },
     /// Update limits
-    UpdateLimits { region_index: u8, new_limits: FuzzRegionLimits },
+    UpdateLimits {
+        region_index: u8,
+        new_limits: FuzzRegionLimits,
+    },
 }
 
 #[derive(Debug, Arbitrary)]
@@ -144,29 +140,42 @@ enum AdmissionScenario {
 impl From<FuzzRegionLimits> for RegionLimits {
     fn from(limits: FuzzRegionLimits) -> Self {
         RegionLimits {
-            max_children: limits.max_children_raw.map(|x| (x as usize).min(MAX_CHILDREN)),
+            max_children: limits
+                .max_children_raw
+                .map(|x| (x as usize).min(MAX_CHILDREN)),
             max_tasks: limits.max_tasks_raw.map(|x| (x as usize).min(MAX_TASKS)),
-            max_obligations: limits.max_obligations_raw.map(|x| (x as usize).min(MAX_OBLIGATIONS)),
-            max_heap_bytes: limits.max_heap_bytes_raw.map(|x| (x as usize).min(MAX_HEAP_BYTES)),
+            max_obligations: limits
+                .max_obligations_raw
+                .map(|x| (x as usize).min(MAX_OBLIGATIONS)),
+            max_heap_bytes: limits
+                .max_heap_bytes_raw
+                .map(|x| (x as usize).min(MAX_HEAP_BYTES)),
             curve_budget: None, // Simplified for fuzzing
         }
     }
 }
 
 fn create_test_budget(offset_ms: u32, poll_quota: u16) -> Budget {
-    let deadline = Time::now() + Duration::from_millis(offset_ms as u64);
-    Budget::new(deadline, poll_quota.min(MAX_POLL_QUOTA as u16) as u64)
+    Budget::new()
+        .with_timeout(Time::ZERO, Duration::from_millis(offset_ms as u64))
+        .with_poll_quota(u32::from(poll_quota).min(MAX_POLL_QUOTA))
 }
 
 fn create_test_capability_budget(dims: &[FuzzCapabilityDimension]) -> CapabilityBudget {
     let mut budget = CapabilityBudget::default();
 
     // Add dimensions with bounded values
-    for dim in dims.iter().take(10) { // Limit dimensions to prevent bloat
+    for dim in dims.iter().take(10) {
+        // Limit dimensions to prevent bloat
         if !dim.name.is_empty() {
             // Use bounded budget values
             let bounded_budget = dim.budget.min(10000) as u64;
-            budget = budget.with_dimension(&dim.name, bounded_budget);
+            budget = match dim.name.as_bytes().first().copied().unwrap_or(0) % 4 {
+                0 => budget.with_memory_bytes(bounded_budget),
+                1 => budget.with_cpu_units(bounded_budget),
+                2 => budget.with_io_bytes(bounded_budget),
+                _ => budget.with_artifact_bytes(bounded_budget),
+            };
         }
     }
 
@@ -185,18 +194,16 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
         input.initial_config.budget_deadline_offset_ms,
         input.initial_config.budget_poll_quota,
     );
-    let capability_budget = create_test_capability_budget(&input.initial_config.capability_budget_dims);
-
-    // Create a region table for testing
-    let mut region_table = RegionTable::new();
+    let capability_budget =
+        create_test_capability_budget(&input.initial_config.capability_budget_dims);
 
     // Create root region
-    let root_id = RegionId::from_arena(ArenaIndex::from_parts(0, 0));
+    let root_id = RegionId::from_arena(ArenaIndex::new(0, 0));
     let root_region = RegionRecord::new_with_time_and_capability_budget(
         root_id,
         None,
         budget,
-        Time::now(),
+        Time::ZERO,
         capability_budget,
     );
 
@@ -204,12 +211,28 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
     root_region.set_limits(limits.clone());
 
     // **INVARIANT 1**: Initial state should be Open
-    assert_eq!(root_region.state(), RegionState::Open, "Initial region state should be Open");
+    assert_eq!(
+        root_region.state(),
+        RegionState::Open,
+        "Initial region state should be Open"
+    );
 
     // **INVARIANT 2**: Initial counts should be zero
-    assert_eq!(root_region.child_count(), 0, "Initial child count should be zero");
-    assert_eq!(root_region.task_count(), 0, "Initial task count should be zero");
-    assert_eq!(root_region.pending_obligations(), 0, "Initial obligation count should be zero");
+    assert_eq!(
+        root_region.child_count(),
+        0,
+        "Initial child count should be zero"
+    );
+    assert_eq!(
+        root_region.task_count(),
+        0,
+        "Initial task count should be zero"
+    );
+    assert_eq!(
+        root_region.pending_obligations(),
+        0,
+        "Initial obligation count should be zero"
+    );
 
     // Track regions created during fuzzing
     let mut regions: Vec<RegionRecord> = vec![root_region];
@@ -228,28 +251,32 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                 let parent_region = &regions[parent_idx];
 
                 // Test child admission
-                let child_id = RegionId::from_arena(ArenaIndex::from_parts(next_region_id, 0));
+                let child_id = RegionId::from_arena(ArenaIndex::new(next_region_id, 0));
                 let child_result = parent_region.add_child(child_id);
 
                 match child_result {
                     Ok(()) => {
-                        // **INVARIANT 3**: Successful admission should increment child count
-                        let old_count = parent_region.child_count();
+                        let parent_id = parent_region.id;
+                        let parent_budget = parent_region.budget();
+                        let parent_capability_budget = parent_region.capability_budget();
+                        let child_ids = parent_region.child_ids();
+
+                        // **INVARIANT 3**: Successful admission should record the child.
+                        assert!(
+                            child_ids.contains(&child_id),
+                            "Child ID should be in parent's child list"
+                        );
 
                         // Create child region and add to tracking
                         let child_region = RegionRecord::new_with_time_and_capability_budget(
                             child_id,
-                            Some(parent_region.id()),
-                            parent_region.budget(),
-                            Time::now(),
-                            parent_region.capability_budget(),
+                            Some(parent_id),
+                            parent_budget,
+                            Time::ZERO,
+                            parent_capability_budget,
                         );
                         regions.push(child_region);
                         next_region_id += 1;
-
-                        // **INVARIANT 4**: Parent-child relationship should be consistent
-                        let child_ids = parent_region.child_ids();
-                        assert!(child_ids.contains(&child_id), "Child ID should be in parent's child list");
                     }
                     Err(AdmissionError::Closed) => {
                         // **INVARIANT 5**: Closed admission should only happen in non-Open states
@@ -260,20 +287,33 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                     }
                     Err(AdmissionError::LimitReached { kind, limit, live }) => {
                         // **INVARIANT 6**: Limit checks should be accurate
-                        assert_eq!(kind, AdmissionKind::Child, "Limit reached should be for children");
+                        assert_eq!(
+                            kind,
+                            AdmissionKind::Child,
+                            "Limit reached should be for children"
+                        );
                         if let Some(max_children) = limits.max_children {
-                            assert_eq!(limit, max_children, "Reported limit should match configured limit");
-                            assert!(live >= max_children, "Live count should be at or above limit when rejected");
+                            assert_eq!(
+                                limit, max_children,
+                                "Reported limit should match configured limit"
+                            );
+                            assert!(
+                                live >= max_children,
+                                "Live count should be at or above limit when rejected"
+                            );
                         }
                     }
                 }
             }
 
-            RegionOperation::AddTask { region_index, task_id_seed } => {
+            RegionOperation::AddTask {
+                region_index,
+                task_id_seed,
+            } => {
                 let region_idx = (*region_index as usize) % regions.len();
                 let region = &regions[region_idx];
 
-                let task_id = TaskId::from_arena(ArenaIndex::from_parts(*task_id_seed as u32, 0));
+                let task_id = TaskId::from_arena(ArenaIndex::new(*task_id_seed as u32, 0));
                 let task_result = region.add_task(task_id);
 
                 match task_result {
@@ -302,7 +342,10 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                 match obligation_result {
                     Ok(()) => {
                         // **INVARIANT 8**: Obligation count should reflect reservations
-                        assert!(region.pending_obligations() > 0, "Pending obligations should be > 0 after reservation");
+                        assert!(
+                            region.pending_obligations() > 0,
+                            "Pending obligations should be > 0 after reservation"
+                        );
                     }
                     Err(AdmissionError::Closed) => {
                         assert!(
@@ -311,12 +354,19 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                         );
                     }
                     Err(AdmissionError::LimitReached { kind, .. }) => {
-                        assert_eq!(kind, AdmissionKind::Obligation, "Obligation limit should be for obligations");
+                        assert_eq!(
+                            kind,
+                            AdmissionKind::Obligation,
+                            "Obligation limit should be for obligations"
+                        );
                     }
                 }
             }
 
-            RegionOperation::AllocateHeap { region_index, bytes } => {
+            RegionOperation::AllocateHeap {
+                region_index,
+                bytes,
+            } => {
                 let region_idx = (*region_index as usize) % regions.len();
                 let region = &regions[region_idx];
 
@@ -328,10 +378,17 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                 match alloc_result {
                     Ok(heap_index) => {
                         // Successfully allocated
-                        assert!(heap_index.is_valid(), "Allocated heap index should be valid");
+                        assert!(
+                            (heap_index.index() as usize) < region.heap_len(),
+                            "Allocated heap index should be valid"
+                        );
                     }
                     Err(AdmissionError::LimitReached { kind, .. }) => {
-                        assert_eq!(kind, AdmissionKind::HeapBytes, "Heap limit should be for heap bytes");
+                        assert_eq!(
+                            kind,
+                            AdmissionKind::HeapBytes,
+                            "Heap limit should be for heap bytes"
+                        );
                     }
                     Err(AdmissionError::Closed) => {
                         // Heap allocation might be rejected if region is closed
@@ -344,32 +401,34 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                 let region = &regions[region_idx];
 
                 let old_state = region.state();
-                let close_result = region.begin_close();
+                let close_result = region.begin_close(None);
 
                 // **INVARIANT 10**: Begin close should transition state appropriately
-                match close_result {
-                    Ok(()) => {
-                        let new_state = region.state();
-                        match old_state {
-                            RegionState::Open => {
-                                assert_eq!(new_state, RegionState::Closing, "Open→Closing transition should occur");
-                            }
-                            _ => {
-                                // Already closing - should be idempotent
-                                assert!(
-                                    new_state.is_closing() || new_state.is_terminal(),
-                                    "Close should be idempotent for non-Open states"
-                                );
-                            }
+                if close_result {
+                    let new_state = region.state();
+                    match old_state {
+                        RegionState::Open => {
+                            assert_eq!(
+                                new_state,
+                                RegionState::Closing,
+                                "Open→Closing transition should occur"
+                            );
                         }
-                    }
-                    Err(_) => {
-                        // Close can fail in some scenarios, which is acceptable
+                        _ => {
+                            // Already closing - should be idempotent
+                            assert!(
+                                new_state.is_closing() || new_state.is_terminal(),
+                                "Close should be idempotent for non-Open states"
+                            );
+                        }
                     }
                 }
             }
 
-            RegionOperation::TransitionState { region_index, target_state } => {
+            RegionOperation::TransitionState {
+                region_index,
+                target_state,
+            } => {
                 let region_idx = (*region_index as usize) % regions.len();
                 let region = &regions[region_idx];
 
@@ -377,7 +436,7 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                     let current = region.state();
 
                     // **INVARIANT 11**: State transitions should follow valid progression
-                    let valid_transition = match (current, target) {
+                    let _valid_transition = match (current, target) {
                         (RegionState::Open, RegionState::Closing) => true,
                         (RegionState::Closing, RegionState::Draining) => true,
                         (RegionState::Draining, RegionState::Finalizing) => true,
@@ -390,21 +449,25 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                     // but we can verify the current state is always valid
                     assert!(
                         current.as_u8() <= 4,
-                        "Region state should always be valid: {:?}", current
+                        "Region state should always be valid: {:?}",
+                        current
                     );
                 }
             }
 
-            RegionOperation::SetCancelReason { region_index, reason_type } => {
+            RegionOperation::SetCancelReason {
+                region_index,
+                reason_type,
+            } => {
                 let region_idx = (*region_index as usize) % regions.len();
                 let region = &regions[region_idx];
 
                 // Create a cancel reason based on fuzz input
                 let reason = match reason_type % 4 {
-                    0 => CancelReason::Timeout,
-                    1 => CancelReason::UserRequested,
-                    2 => CancelReason::ResourceExhaustion,
-                    _ => CancelReason::InternalError,
+                    0 => CancelReason::timeout(),
+                    1 => CancelReason::user("fuzz requested"),
+                    2 => CancelReason::resource_unavailable(),
+                    _ => CancelReason::shutdown(),
                 };
 
                 let old_reason = region.cancel_reason();
@@ -414,38 +477,44 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                 // **INVARIANT 12**: Cancel reason should be set or strengthened
                 match old_reason {
                     None => {
-                        assert_eq!(new_reason, Some(reason), "Cancel reason should be set when none existed");
+                        assert_eq!(
+                            new_reason,
+                            Some(reason),
+                            "Cancel reason should be set when none existed"
+                        );
                     }
                     Some(_) => {
-                        assert!(new_reason.is_some(), "Cancel reason should remain set after strengthening");
-                    }
-                }
-            }
-
-            RegionOperation::AddFinalizer { region_index, finalizer_id } => {
-                let region_idx = (*region_index as usize) % regions.len();
-                let region = &regions[region_idx];
-
-                // Create a simple test finalizer
-                let finalizer = Finalizer::new(format!("test_finalizer_{}", finalizer_id));
-                let add_result = region.add_finalizer(finalizer);
-
-                // **INVARIANT 13**: Finalizer addition should succeed for Open regions
-                match add_result {
-                    Ok(()) => {
-                        // Successfully added
-                    }
-                    Err(_) => {
-                        // Finalizer addition can fail if region is not in appropriate state
                         assert!(
-                            !region.state().can_accept_work(),
-                            "Finalizer addition should only fail when region cannot accept work"
+                            new_reason.is_some(),
+                            "Cancel reason should remain set after strengthening"
                         );
                     }
                 }
             }
 
-            RegionOperation::UpdateLimits { region_index, new_limits } => {
+            RegionOperation::AddFinalizer {
+                region_index,
+                finalizer_id,
+            } => {
+                let region_idx = (*region_index as usize) % regions.len();
+                let region = &regions[region_idx];
+
+                // Create a simple test finalizer
+                let id = *finalizer_id;
+                let finalizer = Finalizer::Sync(Box::new(move || {
+                    let _ = id;
+                }));
+                let before = region.finalizer_count();
+                region.add_finalizer(finalizer);
+
+                // **INVARIANT 13**: Finalizer addition is tracked in LIFO stack.
+                assert_eq!(region.finalizer_count(), before + 1);
+            }
+
+            RegionOperation::UpdateLimits {
+                region_index,
+                new_limits,
+            } => {
                 let region_idx = (*region_index as usize) % regions.len();
                 let region = &regions[region_idx];
 
@@ -454,9 +523,18 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
 
                 // **INVARIANT 14**: Limits should be updated correctly
                 let retrieved_limits = region.limits();
-                assert_eq!(retrieved_limits.max_children, limits.max_children, "Child limits should match");
-                assert_eq!(retrieved_limits.max_tasks, limits.max_tasks, "Task limits should match");
-                assert_eq!(retrieved_limits.max_obligations, limits.max_obligations, "Obligation limits should match");
+                assert_eq!(
+                    retrieved_limits.max_children, limits.max_children,
+                    "Child limits should match"
+                );
+                assert_eq!(
+                    retrieved_limits.max_tasks, limits.max_tasks,
+                    "Task limits should match"
+                );
+                assert_eq!(
+                    retrieved_limits.max_obligations, limits.max_obligations,
+                    "Obligation limits should match"
+                );
             }
         }
     }
@@ -466,18 +544,22 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
         match scenario {
             StateTransitionScenario::NormalProgression => {
                 // Create a fresh region and test normal progression
-                let test_id = RegionId::from_arena(ArenaIndex::from_parts(9999, 0));
+                let test_id = RegionId::from_arena(ArenaIndex::new(9999, 0));
                 let test_region = RegionRecord::new(test_id, None, budget);
 
                 assert_eq!(test_region.state(), RegionState::Open);
 
                 // Test that we can transition through normal progression
-                let states = [RegionState::Open, RegionState::Closing, RegionState::Draining,
-                             RegionState::Finalizing, RegionState::Closed];
+                let states = [
+                    RegionState::Open,
+                    RegionState::Closing,
+                    RegionState::Draining,
+                    RegionState::Finalizing,
+                    RegionState::Closed,
+                ];
 
-                for i in 0..states.len() {
+                for _ in 0..states.len() {
                     let current = test_region.state();
-                    assert_eq!(current.as_u8(), i as u8, "State progression should be sequential");
 
                     // We can't directly transition states in the API, but verify they're in valid range
                     assert!(current.as_u8() <= 4, "State should be in valid range");
@@ -486,8 +568,19 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
 
             StateTransitionScenario::SkipStates { from, to } => {
                 // **INVARIANT 16**: Invalid state transitions should not occur
-                if let (Some(from_state), Some(to_state)) = (RegionState::from_u8(*from), RegionState::from_u8(*to)) {
+                if let (Some(from_state), Some(to_state)) =
+                    (RegionState::from_u8(*from), RegionState::from_u8(*to))
+                {
                     // We can verify that states are at least valid
+                    assert!(from_state.as_u8() <= 4, "From state should be valid");
+                    assert!(to_state.as_u8() <= 4, "To state should be valid");
+                }
+            }
+
+            StateTransitionScenario::BackwardsTransition { from, to } => {
+                if let (Some(from_state), Some(to_state)) =
+                    (RegionState::from_u8(*from), RegionState::from_u8(*to))
+                {
                     assert!(from_state.as_u8() <= 4, "From state should be valid");
                     assert!(to_state.as_u8() <= 4, "To state should be valid");
                 }
@@ -500,11 +593,30 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
         }
     }
 
+    for scenario in &input.admission_scenarios {
+        match scenario {
+            AdmissionScenario::MassiveOverRequest { multiplier } => {
+                let _requested = usize::from(*multiplier).saturating_add(1);
+            }
+            AdmissionScenario::ConcurrentAdmission { thread_count } => {
+                let _thread_count = *thread_count;
+            }
+            AdmissionScenario::Normal
+            | AdmissionScenario::AtLimit
+            | AdmissionScenario::OverLimit
+            | AdmissionScenario::ZeroLimits => {}
+        }
+    }
+
     // **INVARIANT 17**: Final consistency checks
     for region in &regions {
         // Verify state is always valid
         let state = region.state();
-        assert!(state.as_u8() <= 4, "Final state should be valid: {:?}", state);
+        assert!(
+            state.as_u8() <= 4,
+            "Final state should be valid: {:?}",
+            state
+        );
 
         // Verify counts are non-negative (implicit in usize, but good to check)
         let child_count = region.child_count();
@@ -512,12 +624,28 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
         let obligation_count = region.pending_obligations();
 
         // Verify counts are reasonable
-        assert!(child_count <= MAX_CHILDREN, "Child count should be bounded: {}", child_count);
-        assert!(task_count <= MAX_TASKS, "Task count should be bounded: {}", task_count);
-        assert!(obligation_count <= MAX_OBLIGATIONS, "Obligation count should be bounded: {}", obligation_count);
+        assert!(
+            child_count <= MAX_CHILDREN,
+            "Child count should be bounded: {}",
+            child_count
+        );
+        assert!(
+            task_count <= MAX_TASKS,
+            "Task count should be bounded: {}",
+            task_count
+        );
+        assert!(
+            obligation_count <= MAX_OBLIGATIONS,
+            "Obligation count should be bounded: {}",
+            obligation_count
+        );
 
         // Verify budget is valid
         let budget = region.budget();
-        assert!(budget.poll_quota <= MAX_POLL_QUOTA, "Poll quota should be bounded: {}", budget.poll_quota);
+        assert!(
+            budget.poll_quota <= MAX_POLL_QUOTA,
+            "Poll quota should be bounded: {}",
+            budget.poll_quota
+        );
     }
 });

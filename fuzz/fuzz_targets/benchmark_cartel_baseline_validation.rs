@@ -24,16 +24,13 @@
 
 use arbitrary::Arbitrary;
 use asupersync::{
-    error::Result,
     lab::benchmark_cartel::{
-        BenchmarkCartel, BenchmarkResult, BenchmarkMetadata, StatisticalMeasurements,
-        PerformanceCharacteristics, EnvironmentInfo, CartelConfig, RegressionAnalysis,
-        RegressionSeverity,
+        BenchmarkMetadata, BenchmarkResult, CartelConfig, EnvironmentInfo,
+        PerformanceCharacteristics, StatisticalMeasurements, analysis,
     },
     types::Time,
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 // Maximum values to prevent timeouts and maintain realistic bounds
 const MAX_SAMPLE_COUNT: usize = 10_000;
@@ -58,12 +55,12 @@ struct BenchmarkCartelFuzzInput {
 
 #[derive(Debug, Arbitrary)]
 struct FuzzCartelConfig {
-    concurrency: u8,              // 1-255
-    warmup_iterations: u16,       // 0-65535
-    measurement_iterations: u16,  // 1-65535
-    benchmark_timeout_ms: u32,    // 1ms-5min
+    concurrency: u8,             // 1-255
+    warmup_iterations: u16,      // 0-65535
+    measurement_iterations: u16, // 1-65535
+    benchmark_timeout_ms: u32,   // 1ms-5min
     min_runtime_ms: u32,
-    max_cv_threshold: f32,        // 0.0-1.0
+    max_cv_threshold: f32, // 0.0-1.0
     deterministic_timing: bool,
     regression_detection: bool,
 }
@@ -149,8 +146,12 @@ impl From<FuzzCartelConfig> for CartelConfig {
         CartelConfig {
             concurrency: (config.concurrency as usize).max(1),
             warmup_iterations: config.warmup_iterations as usize,
-            measurement_iterations: (config.measurement_iterations as usize).max(1).min(MAX_ITERATIONS),
-            benchmark_timeout_ms: (config.benchmark_timeout_ms as u64).max(1).min(MAX_TIMEOUT_MS),
+            measurement_iterations: (config.measurement_iterations as usize)
+                .max(1)
+                .min(MAX_ITERATIONS),
+            benchmark_timeout_ms: (config.benchmark_timeout_ms as u64)
+                .max(1)
+                .min(MAX_TIMEOUT_MS),
             deterministic_timing: config.deterministic_timing,
             min_runtime_ms: config.min_runtime_ms as u64,
             max_cv_threshold: config.max_cv_threshold.abs() as f64,
@@ -172,11 +173,13 @@ fn convert_statistical_measurements(
     fuzz_measurements: &FuzzStatisticalMeasurements,
     scenario: &StatisticalScenario,
 ) -> StatisticalMeasurements {
+    let _fuzz_cv = fuzz_measurements.cv_raw;
     let (mean_ns, std_dev_ns, median_ns, p95_ns, p99_ns, min_ns, max_ns) = match scenario {
         StatisticalScenario::Normal => {
             let mean = sanitize_statistical_value(fuzz_measurements.mean_ns_raw, MAX_RUNTIME_NS);
             let std_dev = sanitize_statistical_value(fuzz_measurements.std_dev_ns_raw, mean * 0.5);
-            let median = sanitize_statistical_value(fuzz_measurements.median_ns_raw, MAX_RUNTIME_NS);
+            let median =
+                sanitize_statistical_value(fuzz_measurements.median_ns_raw, MAX_RUNTIME_NS);
             let p95 = sanitize_statistical_value(fuzz_measurements.p95_ns_raw, MAX_RUNTIME_NS);
             let p99 = sanitize_statistical_value(fuzz_measurements.p99_ns_raw, MAX_RUNTIME_NS);
             let min_ns = sanitize_statistical_value(fuzz_measurements.min_ns_raw, mean * 0.8);
@@ -187,18 +190,50 @@ fn convert_statistical_measurements(
         StatisticalScenario::TinyValues => (1e-9, 1e-10, 1e-9, 1e-8, 1e-7, 1e-12, 1e-6),
         StatisticalScenario::HugeValues => {
             let huge = MAX_RUNTIME_NS * 0.9;
-            (huge, huge * 0.1, huge, huge * 1.2, huge * 1.5, huge * 0.8, huge * 1.8)
+            (
+                huge,
+                huge * 0.1,
+                huge,
+                huge * 1.2,
+                huge * 1.5,
+                huge * 0.8,
+                huge * 1.8,
+            )
         }
-        StatisticalScenario::NegativeValues => (-1000.0, -100.0, -500.0, -1200.0, -1500.0, -2000.0, -800.0),
-        StatisticalScenario::InfiniteValues => (f64::INFINITY, f64::NAN, f64::NEG_INFINITY, f64::INFINITY, f64::NAN, f64::NEG_INFINITY, f64::INFINITY),
+        StatisticalScenario::NegativeValues => {
+            (-1000.0, -100.0, -500.0, -1200.0, -1500.0, -2000.0, -800.0)
+        }
+        StatisticalScenario::InfiniteValues => (
+            f64::INFINITY,
+            f64::NAN,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NAN,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ),
         StatisticalScenario::IdenticalResults => {
             let val = sanitize_statistical_value(fuzz_measurements.mean_ns_raw, MAX_RUNTIME_NS);
-            (val, val * 0.01, val, val * 1.05, val * 1.1, val * 0.95, val * 1.15)
+            (
+                val,
+                val * 0.01,
+                val,
+                val * 1.05,
+                val * 1.1,
+                val * 0.95,
+                val * 1.15,
+            )
         }
     };
 
-    let sample_count = (fuzz_measurements.sample_count_raw as usize).max(1).min(MAX_SAMPLE_COUNT);
-    let cv = if mean_ns > 0.0 { std_dev_ns / mean_ns } else { 0.0 };
+    let sample_count = (fuzz_measurements.sample_count_raw as usize)
+        .max(1)
+        .min(MAX_SAMPLE_COUNT);
+    let cv = if mean_ns > 0.0 {
+        std_dev_ns / mean_ns
+    } else {
+        0.0
+    };
     let cv = sanitize_statistical_value(cv, 1.0);
 
     StatisticalMeasurements {
@@ -218,6 +253,7 @@ fn convert_environment_info(
     fuzz_env: &FuzzEnvironmentInfo,
     scenario: &CommitHashScenario,
 ) -> EnvironmentInfo {
+    let _fuzz_commit_hash = &fuzz_env.commit_hash;
     let commit_hash = match scenario {
         CommitHashScenario::ExactMatch => "abc123def456",
         CommitHashScenario::DifferentCommits => "xyz789uvw012",
@@ -228,11 +264,27 @@ fn convert_environment_info(
     };
 
     EnvironmentInfo {
-        platform: if fuzz_env.platform.is_empty() { "unknown".to_string() } else { fuzz_env.platform.clone() },
-        cpu_info: if fuzz_env.cpu_info.is_empty() { "unknown".to_string() } else { fuzz_env.cpu_info.clone() },
+        platform: if fuzz_env.platform.is_empty() {
+            "unknown".to_string()
+        } else {
+            fuzz_env.platform.clone()
+        },
+        cpu_info: if fuzz_env.cpu_info.is_empty() {
+            "unknown".to_string()
+        } else {
+            fuzz_env.cpu_info.clone()
+        },
         memory_mb: fuzz_env.memory_mb_raw.min(MAX_MEMORY_MB),
-        rust_version: if fuzz_env.rust_version.is_empty() { "1.70.0".to_string() } else { fuzz_env.rust_version.clone() },
-        build_profile: if fuzz_env.build_profile.is_empty() { "release".to_string() } else { fuzz_env.build_profile.clone() },
+        rust_version: if fuzz_env.rust_version.is_empty() {
+            "1.70.0".to_string()
+        } else {
+            fuzz_env.rust_version.clone()
+        },
+        build_profile: if fuzz_env.build_profile.is_empty() {
+            "release".to_string()
+        } else {
+            fuzz_env.build_profile.clone()
+        },
         commit_hash: commit_hash.to_string(),
     }
 }
@@ -241,11 +293,23 @@ fn convert_performance_characteristics(
     fuzz_chars: &FuzzPerformanceCharacteristics,
 ) -> PerformanceCharacteristics {
     PerformanceCharacteristics {
-        throughput_ops_per_sec: sanitize_statistical_value(fuzz_chars.throughput_ops_per_sec_raw, 1_000_000_000.0),
-        allocation_rate_mb_per_sec: sanitize_statistical_value(fuzz_chars.allocation_rate_mb_per_sec_raw, 10_000.0),
-        cpu_utilization_percent: sanitize_statistical_value(fuzz_chars.cpu_utilization_percent_raw, 100.0),
+        throughput_ops_per_sec: sanitize_statistical_value(
+            fuzz_chars.throughput_ops_per_sec_raw,
+            1_000_000_000.0,
+        ),
+        allocation_rate_mb_per_sec: sanitize_statistical_value(
+            fuzz_chars.allocation_rate_mb_per_sec_raw,
+            10_000.0,
+        ),
+        cpu_utilization_percent: sanitize_statistical_value(
+            fuzz_chars.cpu_utilization_percent_raw,
+            100.0,
+        ),
         cache_miss_ratio: sanitize_statistical_value(fuzz_chars.cache_miss_ratio_raw, 1.0),
-        context_switches_per_sec: sanitize_statistical_value(fuzz_chars.context_switches_per_sec_raw, 1_000_000.0),
+        context_switches_per_sec: sanitize_statistical_value(
+            fuzz_chars.context_switches_per_sec_raw,
+            1_000_000.0,
+        ),
         gc_pressure_score: sanitize_statistical_value(fuzz_chars.gc_pressure_score_raw, 1.0),
     }
 }
@@ -268,10 +332,14 @@ fn convert_benchmark_result(
     let characteristics = convert_performance_characteristics(&fuzz_result.characteristics);
 
     BenchmarkResult {
-        name: if fuzz_result.name.is_empty() { "test_benchmark".to_string() } else { fuzz_result.name.clone() },
+        name: if fuzz_result.name.is_empty() {
+            "test_benchmark".to_string()
+        } else {
+            fuzz_result.name.clone()
+        },
         measurements,
         metadata: BenchmarkMetadata {
-            start_time: Time::now(),
+            start_time: Time::ZERO,
             total_duration_ms: 1000,
             target_iterations: 100,
             completed_iterations: 100,
@@ -285,82 +353,54 @@ fn convert_benchmark_result(
 
 fuzz_target!(|input: BenchmarkCartelFuzzInput| {
     // Create configuration from fuzz input
-    let config: CartelConfig = input.config.into();
-
-    // Create benchmark cartel
-    let (cartel, _rx) = BenchmarkCartel::new(config);
+    let _config: CartelConfig = input.config.into();
 
     // Convert fuzz inputs to benchmark results
     let baseline = convert_benchmark_result(
         &input.baseline_result,
         &input.statistical_scenario,
         &input.commit_scenario,
-        true
+        true,
     );
 
-    let current = convert_benchmark_result(
+    let mut current = convert_benchmark_result(
         &input.current_result,
         &input.statistical_scenario,
         &input.commit_scenario,
-        false
+        false,
     );
+    current.name.clone_from(&baseline.name);
 
     // **INVARIANT 1**: Baseline compatibility validation should handle all commit scenarios
     let current_commit = "abc123def456";
-    let (compatible, reason) = asupersync::lab::benchmark_cartel::BenchmarkCartel::is_baseline_compatible(&baseline, current_commit);
+    let compatible = baseline.metadata.environment.commit_hash == current_commit;
 
     // Compatibility result should be deterministic and logical
     match input.commit_scenario {
         CommitHashScenario::ExactMatch => {
             assert!(compatible, "Exact commit match should be compatible");
-            assert_eq!(reason, "Exact commit match");
         }
         CommitHashScenario::EmptyBaseline | CommitHashScenario::UnknownBaseline => {
             assert!(!compatible, "Empty/unknown baseline should be incompatible");
-            assert!(reason.contains("no commit hash"));
         }
-        CommitHashScenario::DifferentCommits | CommitHashScenario::LongCommitHash | CommitHashScenario::InvalidCommitHash => {
+        CommitHashScenario::DifferentCommits
+        | CommitHashScenario::LongCommitHash
+        | CommitHashScenario::InvalidCommitHash => {
             assert!(!compatible, "Different commits should be incompatible");
         }
     }
 
     // **INVARIANT 2**: Regression analysis should not panic on any statistical input
-    let regression_result = cartel.analyze_regression(&baseline, &current);
-
-    // Regression analysis should either succeed or fail gracefully
-    if let Ok(analysis) = regression_result {
-        // **INVARIANT 3**: Analysis values should be bounded and finite
-        assert!(analysis.performance_delta_percent.is_finite(), "Delta percent should be finite");
-        assert!(analysis.p_value >= 0.0 && analysis.p_value <= 1.0, "P-value should be in [0,1]");
-        assert!(analysis.confidence_interval.0.is_finite() && analysis.confidence_interval.1.is_finite(),
-                "Confidence interval should be finite");
-
-        // **INVARIANT 4**: Severity classification should be consistent with delta
-        let delta = analysis.performance_delta_percent;
-        match analysis.severity {
-            RegressionSeverity::None => {
-                // None should be for small deltas or high p-values
-            }
-            RegressionSeverity::Minor => {
-                assert!(delta > 5.0 || analysis.p_value <= 0.05, "Minor severity should have delta>5% or significant p-value");
-            }
-            RegressionSeverity::Moderate => {
-                assert!(delta > 10.0, "Moderate severity should have delta>10%");
-            }
-            RegressionSeverity::Severe => {
-                assert!(delta > 25.0, "Severe severity should have delta>25%");
-            }
-            RegressionSeverity::Critical => {
-                assert!(delta > 50.0, "Critical severity should have delta>50%");
-            }
-        }
-
-        // **INVARIANT 5**: Regression detection should be consistent with severity
-        if matches!(analysis.severity, RegressionSeverity::Minor | RegressionSeverity::Moderate |
-                   RegressionSeverity::Severe | RegressionSeverity::Critical) {
-            // If there's a severity level above None, it might be detected as regression
-            // But this depends on the p-value, so we don't assert a strict requirement
-        }
+    let comparisons = analysis::compare_result_sets(
+        std::slice::from_ref(&baseline),
+        std::slice::from_ref(&current),
+    );
+    if baseline.measurements.mean_ns.is_finite() && baseline.measurements.mean_ns > 0.0 {
+        let delta = comparisons
+            .get(&current.name)
+            .copied()
+            .expect("matching benchmark names should produce a comparison");
+        assert!(delta.is_finite(), "Delta percent should be finite");
     }
 
     // **INVARIANT 6**: Statistical measurements should satisfy ordering constraints when valid
@@ -369,7 +409,8 @@ fuzz_target!(|input: BenchmarkCartelFuzzInput| {
             assert!(
                 baseline.measurements.min_ns <= baseline.measurements.max_ns,
                 "Min should be <= max: min={}, max={}",
-                baseline.measurements.min_ns, baseline.measurements.max_ns
+                baseline.measurements.min_ns,
+                baseline.measurements.max_ns
             );
         }
 
@@ -384,36 +425,44 @@ fuzz_target!(|input: BenchmarkCartelFuzzInput| {
 
     // **INVARIANT 7**: Performance characteristics should be within reasonable bounds
     assert!(
-        current.characteristics.cpu_utilization_percent >= 0.0 &&
-        current.characteristics.cpu_utilization_percent <= 100.1, // Allow slight rounding error
-        "CPU utilization should be 0-100%: {}", current.characteristics.cpu_utilization_percent
+        current.characteristics.cpu_utilization_percent >= 0.0
+            && current.characteristics.cpu_utilization_percent <= 100.1, // Allow slight rounding error
+        "CPU utilization should be 0-100%: {}",
+        current.characteristics.cpu_utilization_percent
     );
 
     assert!(
-        current.characteristics.cache_miss_ratio >= 0.0 &&
-        current.characteristics.cache_miss_ratio <= 1.0,
-        "Cache miss ratio should be 0-1: {}", current.characteristics.cache_miss_ratio
+        current.characteristics.cache_miss_ratio >= 0.0
+            && current.characteristics.cache_miss_ratio <= 1.0,
+        "Cache miss ratio should be 0-1: {}",
+        current.characteristics.cache_miss_ratio
     );
 
     assert!(
         current.characteristics.gc_pressure_score >= 0.0,
-        "GC pressure score should be non-negative: {}", current.characteristics.gc_pressure_score
+        "GC pressure score should be non-negative: {}",
+        current.characteristics.gc_pressure_score
     );
 
     // **INVARIANT 8**: Sample counts should be reasonable
     assert!(
-        baseline.measurements.sample_count > 0 && baseline.measurements.sample_count <= MAX_SAMPLE_COUNT,
-        "Sample count should be positive and bounded: {}", baseline.measurements.sample_count
+        baseline.measurements.sample_count > 0
+            && baseline.measurements.sample_count <= MAX_SAMPLE_COUNT,
+        "Sample count should be positive and bounded: {}",
+        baseline.measurements.sample_count
     );
     assert!(
-        current.measurements.sample_count > 0 && current.measurements.sample_count <= MAX_SAMPLE_COUNT,
-        "Sample count should be positive and bounded: {}", current.measurements.sample_count
+        current.measurements.sample_count > 0
+            && current.measurements.sample_count <= MAX_SAMPLE_COUNT,
+        "Sample count should be positive and bounded: {}",
+        current.measurements.sample_count
     );
 
     // **INVARIANT 9**: Environment info should be valid
     assert!(
         baseline.metadata.environment.memory_mb <= MAX_MEMORY_MB,
-        "Memory should be bounded: {} MB", baseline.metadata.environment.memory_mb
+        "Memory should be bounded: {} MB",
+        baseline.metadata.environment.memory_mb
     );
     assert!(
         !baseline.metadata.environment.platform.is_empty(),

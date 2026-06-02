@@ -27,12 +27,9 @@
 
 use arbitrary::Arbitrary;
 use asupersync::{
-    lab::oracle::{
-        OracleViolation, OracleSuite, TaskLeakOracle, TaskLeakViolation,
-        ObligationLeakOracle, ObligationLeakViolation, QuiescenceOracle, QuiescenceViolation,
-    },
+    lab::oracle::{ObligationLeakOracle, OracleSuite, QuiescenceOracle, TaskLeakOracle},
     record::{ObligationKind, ObligationState},
-    types::{RegionId, TaskId, ObligationId, Time},
+    types::{ObligationId, RegionId, TaskId, Time},
     util::ArenaIndex,
 };
 use libfuzzer_sys::fuzz_target;
@@ -104,10 +101,7 @@ enum OracleEvent {
         time_offset_ms: u32,
     },
     /// Task complete event
-    TaskComplete {
-        task_index: u8,
-        time_offset_ms: u32,
-    },
+    TaskComplete { task_index: u8, time_offset_ms: u32 },
     /// Region close event
     RegionClose {
         region_index: u8,
@@ -130,9 +124,7 @@ enum OracleEvent {
     /// Oracle reset event
     OracleReset,
     /// Check for violations
-    CheckViolations {
-        time_offset_ms: u32,
-    },
+    CheckViolations { time_offset_ms: u32 },
 }
 
 #[derive(Debug, Arbitrary)]
@@ -170,25 +162,25 @@ enum TimingScenario {
 fn map_obligation_kind(kind_raw: u8) -> ObligationKind {
     match kind_raw % 4 {
         0 => ObligationKind::SendPermit,
-        1 => ObligationKind::SendAck,
-        2 => ObligationKind::IoLease,
-        _ => ObligationKind::Permit,
+        1 => ObligationKind::Ack,
+        2 => ObligationKind::Lease,
+        _ => ObligationKind::SemaphorePermit,
     }
 }
 
 fn create_region_id(index: u8) -> RegionId {
     let bounded_index = (index as u32) % (MAX_REGIONS as u32);
-    RegionId::from_arena(ArenaIndex::from_parts(bounded_index, 0))
+    RegionId::from_arena(ArenaIndex::new(bounded_index, 0))
 }
 
 fn create_task_id(index: u8) -> TaskId {
     let bounded_index = (index as u32) % (MAX_TASKS as u32);
-    TaskId::from_arena(ArenaIndex::from_parts(bounded_index, 0))
+    TaskId::from_arena(ArenaIndex::new(bounded_index, 0))
 }
 
 fn create_obligation_id(index: u8) -> ObligationId {
     let bounded_index = (index as u32) % (MAX_OBLIGATIONS as u32);
-    ObligationId::from_arena(ArenaIndex::from_parts(bounded_index, 0))
+    ObligationId::new_for_test(bounded_index, 0)
 }
 
 fn create_time_from_offset(base_time: Time, offset_ms: u32, scenario: &TimingScenario) -> Time {
@@ -203,12 +195,7 @@ fn create_time_from_offset(base_time: Time, offset_ms: u32, scenario: &TimingSce
         }
         TimingScenario::BackwardsTime => {
             // Subtract time to create backwards scenario
-            let offset = Duration::from_millis((offset_ms % 1000) as u64);
-            if base_time > offset {
-                base_time - offset
-            } else {
-                base_time
-            }
+            base_time.saturating_sub_nanos(u64::from(offset_ms % 1000) * 1_000_000)
         }
         TimingScenario::SameTimestamp => base_time + Duration::from_millis(1000), // Fixed offset
     }
@@ -220,8 +207,21 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
         return;
     }
 
+    let enabled_oracles = &input.initial_config.enabled_oracles;
+    let _oracle_config_fingerprint = (
+        enabled_oracles.task_leak,
+        enabled_oracles.obligation_leak,
+        enabled_oracles.quiescence,
+        enabled_oracles.loser_drain,
+        enabled_oracles.finalizer,
+        &input.initial_config.task_leak_config,
+        &input.initial_config.obligation_config,
+        &input.initial_config.quiescence_config,
+        input.test_scenarios.len(),
+    );
+
     // Create oracle suite
-    let mut oracle_suite = OracleSuite::new();
+    let _oracle_suite = OracleSuite::new();
 
     // Initialize individual oracles for direct testing
     let mut task_leak_oracle = TaskLeakOracle::new();
@@ -229,7 +229,7 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
     let mut quiescence_oracle = QuiescenceOracle::new();
 
     // Base time for event sequencing
-    let base_time = Time::now();
+    let base_time = Time::ZERO;
 
     // Track state for invariant checking
     let mut spawned_tasks: HashSet<TaskId> = HashSet::new();
@@ -245,14 +245,21 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
         }
 
         // Determine timing scenario for this event
-        let timing_scenario = input.timing_scenarios.get(event_idx % input.timing_scenarios.len())
+        let timing_scenario = input
+            .timing_scenarios
+            .get(event_idx % input.timing_scenarios.len())
             .unwrap_or(&TimingScenario::Normal);
 
         match event {
-            OracleEvent::TaskSpawn { task_index, region_index, time_offset_ms } => {
+            OracleEvent::TaskSpawn {
+                task_index,
+                region_index,
+                time_offset_ms,
+            } => {
                 let task_id = create_task_id(*task_index);
                 let region_id = create_region_id(*region_index);
-                let event_time = create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
+                let event_time =
+                    create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
 
                 // Record event in oracles
                 task_leak_oracle.on_spawn(task_id, region_id, event_time);
@@ -264,9 +271,13 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
                 // We can't directly inspect oracle internals, but we track state for later verification
             }
 
-            OracleEvent::TaskComplete { task_index, time_offset_ms } => {
+            OracleEvent::TaskComplete {
+                task_index,
+                time_offset_ms,
+            } => {
                 let task_id = create_task_id(*task_index);
-                let event_time = create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
+                let event_time =
+                    create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
 
                 // Record completion
                 task_leak_oracle.on_complete(task_id, event_time);
@@ -277,9 +288,13 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
                 // **INVARIANT 2**: Task completion should be properly recorded
             }
 
-            OracleEvent::RegionClose { region_index, time_offset_ms } => {
+            OracleEvent::RegionClose {
+                region_index,
+                time_offset_ms,
+            } => {
                 let region_id = create_region_id(*region_index);
-                let event_time = create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
+                let event_time =
+                    create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
 
                 // Record region close
                 task_leak_oracle.on_region_close(region_id, event_time);
@@ -291,11 +306,19 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
                 // **INVARIANT 3**: Region close should trigger appropriate checks
             }
 
-            OracleEvent::ObligationCreate { obligation_index, task_index, region_index, kind, time_offset_ms } => {
+            OracleEvent::ObligationCreate {
+                obligation_index,
+                task_index,
+                region_index,
+                kind,
+                time_offset_ms,
+            } => {
                 let obligation_id = create_obligation_id(*obligation_index);
                 let task_id = create_task_id(*task_index);
                 let region_id = create_region_id(*region_index);
                 let obligation_kind = map_obligation_kind(*kind);
+                let _event_time =
+                    create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
 
                 // Record obligation creation
                 obligation_oracle.on_create(obligation_id, obligation_kind, task_id, region_id);
@@ -306,14 +329,19 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
                 // **INVARIANT 4**: Obligation creation should be properly tracked
             }
 
-            OracleEvent::ObligationResolve { obligation_index, committed, time_offset_ms } => {
+            OracleEvent::ObligationResolve {
+                obligation_index,
+                committed,
+                time_offset_ms,
+            } => {
                 let obligation_id = create_obligation_id(*obligation_index);
-                let event_time = create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
+                let _event_time =
+                    create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
 
                 if *committed {
-                    obligation_oracle.on_commit(obligation_id, event_time);
+                    obligation_oracle.on_resolve(obligation_id, ObligationState::Committed);
                 } else {
-                    obligation_oracle.on_abort(obligation_id, event_time);
+                    obligation_oracle.on_resolve(obligation_id, ObligationState::Aborted);
                 }
 
                 // Track in state
@@ -339,7 +367,8 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
             }
 
             OracleEvent::CheckViolations { time_offset_ms } => {
-                let check_time = create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
+                let check_time =
+                    create_time_from_offset(base_time, *time_offset_ms, timing_scenario);
 
                 // Check for violations
                 let task_violations = task_leak_oracle.check(check_time);
@@ -347,36 +376,35 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
 
                 // **INVARIANT 7**: Violation checking should not panic
                 match task_violations {
-                    Ok(violations) => {
+                    Ok(()) => {}
+                    Err(violation) => {
                         // **INVARIANT 8**: Task leak violations should be logically consistent
-                        for violation in &violations {
-                            // Verify violation makes sense
-                            assert!(!violation.leaked_tasks.is_empty(),
-                                   "Task leak violation should have non-empty leaked tasks");
+                        assert!(
+                            !violation.leaked_tasks.is_empty(),
+                            "Task leak violation should have non-empty leaked tasks"
+                        );
 
-                            // Verify reported time is reasonable
-                            assert!(violation.region_close_time >= base_time,
-                                   "Violation time should not be before base time");
-                        }
-                    }
-                    Err(_) => {
-                        // Check failure is acceptable for malformed oracle state
+                        // Verify reported time is reasonable
+                        assert!(
+                            violation.region_close_time >= base_time,
+                            "Violation time should not be before base time"
+                        );
                     }
                 }
 
                 match obligation_violations {
-                    Ok(violations) => {
+                    Ok(()) => {}
+                    Err(violation) => {
                         // **INVARIANT 9**: Obligation leak violations should be consistent
-                        for violation in &violations {
-                            assert!(!violation.leaked.is_empty(),
-                                   "Obligation leak violation should have non-empty leaked obligations");
+                        assert!(
+                            !violation.leaked.is_empty(),
+                            "Obligation leak violation should have non-empty leaked obligations"
+                        );
 
-                            assert!(violation.region_close_time >= base_time,
-                                   "Violation time should not be before base time");
-                        }
-                    }
-                    Err(_) => {
-                        // Check failure is acceptable for malformed oracle state
+                        assert!(
+                            violation.region_close_time >= base_time,
+                            "Violation time should not be before base time"
+                        );
                     }
                 }
             }
@@ -389,41 +417,41 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
     let final_check_time = base_time + Duration::from_secs(3600); // 1 hour later
 
     // Task leak oracle final check
-    if let Ok(task_violations) = task_leak_oracle.check(final_check_time) {
+    if let Err(violation) = task_leak_oracle.check(final_check_time) {
         // **INVARIANT 11**: Task violations should correspond to actual leaks in our tracking
-        for violation in &task_violations {
-            // Verify each leaked task was actually spawned
-            for leaked_task in &violation.leaked_tasks {
-                assert!(
-                    spawned_tasks.contains(leaked_task),
-                    "Leaked task {:?} should have been spawned", leaked_task
-                );
-            }
-
-            // Verify the region was closed
+        // Verify each leaked task was actually spawned
+        for leaked_task in &violation.leaked_tasks {
             assert!(
-                closed_regions.contains(&violation.region),
-                "Violation region {:?} should have been closed", violation.region
+                spawned_tasks.contains(leaked_task),
+                "Leaked task {:?} should have been spawned",
+                leaked_task
             );
         }
+
+        // Verify the region was closed
+        assert!(
+            closed_regions.contains(&violation.region),
+            "Violation region {:?} should have been closed",
+            violation.region
+        );
     }
 
     // Obligation leak oracle final check
-    if let Ok(obligation_violations) = obligation_oracle.check(final_check_time) {
+    if let Err(violation) = obligation_oracle.check(final_check_time) {
         // **INVARIANT 12**: Obligation violations should correspond to actual leaks
-        for violation in &obligation_violations {
-            for leaked_obligation in &violation.leaked {
-                assert!(
-                    created_obligations.contains_key(&leaked_obligation.obligation),
-                    "Leaked obligation {:?} should have been created", leaked_obligation.obligation
-                );
+        for leaked_obligation in &violation.leaked {
+            assert!(
+                created_obligations.contains_key(&leaked_obligation.obligation),
+                "Leaked obligation {:?} should have been created",
+                leaked_obligation.obligation
+            );
 
-                // If it was resolved, it shouldn't be reported as leaked
-                assert!(
-                    !resolved_obligations.contains(&leaked_obligation.obligation),
-                    "Resolved obligation {:?} should not be reported as leaked", leaked_obligation.obligation
-                );
-            }
+            // If it was resolved, it shouldn't be reported as leaked
+            assert!(
+                !resolved_obligations.contains(&leaked_obligation.obligation),
+                "Resolved obligation {:?} should not be reported as leaked",
+                leaked_obligation.obligation
+            );
         }
     }
 
@@ -436,7 +464,7 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
         match scenario {
             TimingScenario::ZeroTime => {
                 // Operations with zero time should not panic
-                let zero_time = Time::now();
+                let zero_time = Time::ZERO;
                 let test_task = create_task_id(1);
                 let test_region = create_region_id(1);
 

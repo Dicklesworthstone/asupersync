@@ -12,7 +12,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "sqlite", "mysql", "postgres", "messaging-fabric"] }
+asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "sqlite", "mysql", "postgres", "messaging-fabric", "benchmark-adapters"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -6161,6 +6161,47 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "benchmark_cartel_baseline_validation"
+path = "fuzz_targets/benchmark_cartel_baseline_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "forensics_evidence_collection_invariants"
+path = "fuzz_targets/forensics_evidence_collection_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lab_trace_replay_stateful"
+path = "fuzz_targets/lab_trace_replay_stateful.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oracle_integration_invariants"
+path = "fuzz_targets/oracle_integration_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "region_lifecycle_invariants"
+path = "fuzz_targets/region_lifecycle_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay_minimization_invariants"
+path = "fuzz_targets/replay_minimization_invariants.rs"
+test = false
+doc = false
+bench = false
 
 
 
