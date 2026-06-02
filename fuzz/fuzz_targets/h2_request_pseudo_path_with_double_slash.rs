@@ -59,11 +59,11 @@ struct PathStats {
 
 #[derive(Clone, Debug)]
 enum ViolationType {
-    PathCollapsed,        // Double slash was incorrectly collapsed
-    PathNormalized,       // Path was modified unexpectedly
-    RoundTripFailure,     // Path changed during round-trip
-    InvalidPathSyntax,    // Malformed path syntax
-    HeaderMissing,        // Required :path header missing
+    PathCollapsed,     // Double slash was incorrectly collapsed
+    PathNormalized,    // Path was modified unexpectedly
+    RoundTripFailure,  // Path changed during round-trip
+    InvalidPathSyntax, // Malformed path syntax
+    HeaderMissing,     // Required :path header missing
 }
 
 impl MockPathDoubleSlashConnection {
@@ -77,7 +77,11 @@ impl MockPathDoubleSlashConnection {
     }
 
     /// Process a HEADERS frame with :path pseudo-header
-    fn handle_headers(&mut self, stream_id: u32, headers: HashMap<String, String>) -> Result<(), H2Error> {
+    fn handle_headers(
+        &mut self,
+        stream_id: u32,
+        headers: HashMap<String, String>,
+    ) -> Result<(), H2Error> {
         self.stats.frames_processed += 1;
 
         // Extract :path header
@@ -204,7 +208,9 @@ impl MockPathDoubleSlashConnection {
             Ok(parsed) => {
                 if parsed != original_path {
                     result.preserved = false;
-                    result.issues.push("Path modified during parsing".to_string());
+                    result
+                        .issues
+                        .push("Path modified during parsing".to_string());
 
                     // Check for specific issues
                     if self.path_was_collapsed(original_path, &parsed) {
@@ -216,7 +222,9 @@ impl MockPathDoubleSlashConnection {
                 let serialized = self.serialize_path(&parsed);
                 if serialized != original_path {
                     result.preserved = false;
-                    result.issues.push("Round-trip serialization failed".to_string());
+                    result
+                        .issues
+                        .push("Round-trip serialization failed".to_string());
                 }
             }
             Err(_) => {
@@ -417,8 +425,10 @@ fuzz_target!(|input: FuzzInput| {
     // Critical assertion: paths with double slashes MUST be preserved
     if path.contains("//") {
         if !validation.preserved {
-            panic!("Path with double slash was not preserved: '{}' -> issues: {:?}",
-                   path, validation.issues);
+            panic!(
+                "Path with double slash was not preserved: '{}' -> issues: {:?}",
+                path, validation.issues
+            );
         }
     }
 
@@ -432,7 +442,10 @@ fuzz_target!(|input: FuzzInput| {
             ViolationType::PathNormalized => {
                 // This might be acceptable in some cases, but not for double slashes
                 if path.contains("//") {
-                    panic!("CRITICAL: Path with double slash was normalized: '{}'", path);
+                    panic!(
+                        "CRITICAL: Path with double slash was normalized: '{}'",
+                        path
+                    );
                 }
             }
             ViolationType::RoundTripFailure => {
@@ -455,10 +468,12 @@ fuzz_target!(|input: FuzzInput| {
         // All patterns should preserve their double slashes
         if pattern_results.patterns_preserved < pattern_results.patterns_passed {
             let stats = connection.get_stats();
-            panic!("Pattern preservation failed: {} passed but only {} preserved. Collapsed: {}",
-                   pattern_results.patterns_passed,
-                   pattern_results.patterns_preserved,
-                   stats.paths_collapsed);
+            panic!(
+                "Pattern preservation failed: {} passed but only {} preserved. Collapsed: {}",
+                pattern_results.patterns_passed,
+                pattern_results.patterns_preserved,
+                stats.paths_collapsed
+            );
         }
     }
 
@@ -470,12 +485,18 @@ fuzz_target!(|input: FuzzInput| {
 
     // All processed paths should be preserved
     if stats.frames_processed > 0 {
-        assert!(stats.paths_preserved > 0, "At least one path should be preserved");
+        assert!(
+            stats.paths_preserved > 0,
+            "At least one path should be preserved"
+        );
     }
 
     // Round-trip should always succeed for valid paths
     if result.is_ok() {
-        assert_eq!(stats.round_trip_failures, 0, "No round-trip failures should occur");
+        assert_eq!(
+            stats.round_trip_failures, 0,
+            "No round-trip failures should occur"
+        );
     }
 
     // Test specific edge cases
@@ -504,8 +525,10 @@ fn test_edge_cases(connection: &mut MockPathDoubleSlashConnection) {
             // Verify the path was preserved exactly
             if let Some(frame) = connection.headers_received.last() {
                 if frame.path_original != path {
-                    panic!("Edge case '{}' ({}) was not preserved: got '{}'",
-                           path, description, frame.path_original);
+                    panic!(
+                        "Edge case '{}' ({}) was not preserved: got '{}'",
+                        path, description, frame.path_original
+                    );
                 }
             }
         }

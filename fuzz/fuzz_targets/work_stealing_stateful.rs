@@ -125,7 +125,8 @@ impl WorkStealingShadowModel {
     }
 
     fn steal_power_of_two(&mut self, rng: &mut DetRng) -> Option<TaskId> {
-        let non_empty_queues: Vec<_> = self.queues
+        let non_empty_queues: Vec<_> = self
+            .queues
             .iter()
             .enumerate()
             .filter(|(_, q)| !q.is_empty())
@@ -209,7 +210,10 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
     // Execute operations and compare with shadow model
     for operation in input.operations {
         match operation {
-            WorkStealingOperation::Push { queue_index, task_id } => {
+            WorkStealingOperation::Push {
+                queue_index,
+                task_id,
+            } => {
                 let queue_idx = queue_index as usize % queue_count;
                 let task = TaskId::new_for_test((task_id as u32) % (MAX_TASK_ID + 1), 0);
 
@@ -228,13 +232,23 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
                 // Verify consistency
                 if shadow_accepted {
                     assert_eq!(len_after, len_before + 1, "Push should increase queue size");
-                    assert_eq!(shadow_len_after, shadow_len_before + 1, "Shadow push should increase size");
+                    assert_eq!(
+                        shadow_len_after,
+                        shadow_len_before + 1,
+                        "Shadow push should increase size"
+                    );
                 } else {
                     // Duplicate task - queue might still accept it but shadow rejects
-                    assert_eq!(shadow_len_after, shadow_len_before, "Shadow should not change on duplicate");
+                    assert_eq!(
+                        shadow_len_after, shadow_len_before,
+                        "Shadow should not change on duplicate"
+                    );
                 }
 
-                assert_eq!(len_after, shadow_len_after, "Queue and shadow size mismatch after push");
+                assert_eq!(
+                    len_after, shadow_len_after,
+                    "Queue and shadow size mismatch after push"
+                );
             }
 
             WorkStealingOperation::Pop { queue_index } => {
@@ -253,8 +267,16 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
                 // Verify consistency
                 match (queue_result, shadow_result) {
                     (Some(_), Some(_)) => {
-                        assert_eq!(len_after, len_before.saturating_sub(1), "Pop should decrease size");
-                        assert_eq!(shadow_len_after, shadow_len_before - 1, "Shadow pop should decrease size");
+                        assert_eq!(
+                            len_after,
+                            len_before.saturating_sub(1),
+                            "Pop should decrease size"
+                        );
+                        assert_eq!(
+                            shadow_len_after,
+                            shadow_len_before - 1,
+                            "Shadow pop should decrease size"
+                        );
                     }
                     (None, None) => {
                         assert_eq!(len_before, 0, "Both empty should mean queue was empty");
@@ -266,7 +288,10 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
                     }
                 }
 
-                assert_eq!(len_after, shadow_len_after, "Queue and shadow size mismatch after pop");
+                assert_eq!(
+                    len_after, shadow_len_after,
+                    "Queue and shadow size mismatch after pop"
+                );
             }
 
             WorkStealingOperation::StealSingle { queue_index } => {
@@ -286,7 +311,11 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
                 // Verify consistency (allowing for local task filtering)
                 if shadow_result.is_some() && queue_result.is_some() {
                     assert!(len_after <= len_before, "Steal should not increase size");
-                    assert_eq!(shadow_len_after, shadow_len_before.saturating_sub(1), "Shadow steal should decrease size");
+                    assert_eq!(
+                        shadow_len_after,
+                        shadow_len_before.saturating_sub(1),
+                        "Shadow steal should decrease size"
+                    );
                 }
 
                 if shadow_len_before == 0 {
@@ -308,8 +337,15 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
 
                 // Verify global task conservation
                 if shadow_result.is_some() && queue_result.is_some() {
-                    assert!(total_len_after <= total_len_before, "Total tasks should not increase");
-                    assert_eq!(shadow_total_after, shadow_total_before.saturating_sub(1), "Shadow should decrease by 1");
+                    assert!(
+                        total_len_after <= total_len_before,
+                        "Total tasks should not increase"
+                    );
+                    assert_eq!(
+                        shadow_total_after,
+                        shadow_total_before.saturating_sub(1),
+                        "Shadow should decrease by 1"
+                    );
                 }
 
                 if shadow_total_before == 0 {
@@ -317,7 +353,10 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
                 }
             }
 
-            WorkStealingOperation::StealBatch { src_queue, dest_queue } => {
+            WorkStealingOperation::StealBatch {
+                src_queue,
+                dest_queue,
+            } => {
                 let src_idx = src_queue as usize % queue_count;
                 let dest_idx = dest_queue as usize % queue_count;
 
@@ -335,7 +374,10 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
                     let total_after = src_len_after + dest_len_after;
 
                     // Verify task conservation
-                    assert_eq!(total_after, total_before, "Batch steal should preserve total tasks");
+                    assert_eq!(
+                        total_after, total_before,
+                        "Batch steal should preserve total tasks"
+                    );
 
                     if success {
                         // Some tasks should have moved if operation succeeded
@@ -357,7 +399,10 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
 
                 // Verify basic properties
                 assert_eq!(is_empty, len == 0, "is_empty should match len == 0");
-                assert!(stealable_hint <= len, "Stealable hint should not exceed total length");
+                assert!(
+                    stealable_hint <= len,
+                    "Stealable hint should not exceed total length"
+                );
 
                 // Compare with shadow
                 let shadow_len = shadow.len(queue_idx);
@@ -373,10 +418,16 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
         // Always verify basic consistency after each operation
         let total_queue_tasks: usize = queues.iter().map(|q| q.len()).sum();
         let total_shadow_tasks = shadow.total_tasks();
-        assert_eq!(total_queue_tasks, total_shadow_tasks, "Total task count mismatch");
+        assert_eq!(
+            total_queue_tasks, total_shadow_tasks,
+            "Total task count mismatch"
+        );
 
         // Verify task uniqueness in shadow model
-        assert!(shadow.verify_task_uniqueness(), "Shadow model has duplicate tasks");
+        assert!(
+            shadow.verify_task_uniqueness(),
+            "Shadow model has duplicate tasks"
+        );
 
         // Enforce memory bounds
         if total_queue_tasks > MAX_QUEUES * MAX_TASKS_PER_QUEUE {
@@ -389,32 +440,48 @@ fuzz_target!(|input: WorkStealingFuzzInput| {
 });
 
 /// Verify work stealing system invariants
-fn verify_work_stealing_invariants(
-    queues: &[LocalQueue],
-    shadow: &WorkStealingShadowModel,
-) {
+fn verify_work_stealing_invariants(queues: &[LocalQueue], shadow: &WorkStealingShadowModel) {
     // Size consistency
     for (i, queue) in queues.iter().enumerate() {
         let stealer = queue.stealer();
         let queue_len = stealer.len();
         let shadow_len = shadow.len(i);
-        assert_eq!(queue_len, shadow_len, "Size consistency check failed for queue {}", i);
+        assert_eq!(
+            queue_len, shadow_len,
+            "Size consistency check failed for queue {}",
+            i
+        );
 
         // Stealable hint should be reasonable
         let stealable_hint = stealer.stealable_len_hint();
-        assert!(stealable_hint <= queue_len, "Stealable hint exceeds queue length for queue {}", i);
+        assert!(
+            stealable_hint <= queue_len,
+            "Stealable hint exceeds queue length for queue {}",
+            i
+        );
 
         // Empty check consistency
-        assert_eq!(stealer.is_empty(), queue_len == 0, "Empty check failed for queue {}", i);
+        assert_eq!(
+            stealer.is_empty(),
+            queue_len == 0,
+            "Empty check failed for queue {}",
+            i
+        );
     }
 
     // Global task conservation
     let total_queue_tasks: usize = queues.iter().map(|q| q.stealer().len()).sum();
     let total_shadow_tasks = shadow.total_tasks();
-    assert_eq!(total_queue_tasks, total_shadow_tasks, "Global task conservation failed");
+    assert_eq!(
+        total_queue_tasks, total_shadow_tasks,
+        "Global task conservation failed"
+    );
 
     // Verify no duplicate tasks in shadow model
-    assert!(shadow.verify_task_uniqueness(), "Task uniqueness invariant failed");
+    assert!(
+        shadow.verify_task_uniqueness(),
+        "Task uniqueness invariant failed"
+    );
 }
 
 #[cfg(test)]
@@ -427,9 +494,18 @@ mod tests {
             queue_count: 3,
             rng_seed: 42,
             operations: vec![
-                WorkStealingOperation::Push { queue_index: 0, task_id: 1 },
-                WorkStealingOperation::Push { queue_index: 1, task_id: 2 },
-                WorkStealingOperation::Push { queue_index: 2, task_id: 3 },
+                WorkStealingOperation::Push {
+                    queue_index: 0,
+                    task_id: 1,
+                },
+                WorkStealingOperation::Push {
+                    queue_index: 1,
+                    task_id: 2,
+                },
+                WorkStealingOperation::Push {
+                    queue_index: 2,
+                    task_id: 3,
+                },
                 WorkStealingOperation::StealMultiple,
                 WorkStealingOperation::VerifyInvariants,
             ],
@@ -461,9 +537,18 @@ mod tests {
             queue_count: 4,
             rng_seed: 999,
             operations: vec![
-                WorkStealingOperation::Push { queue_index: 0, task_id: 10 },
-                WorkStealingOperation::Push { queue_index: 0, task_id: 11 },
-                WorkStealingOperation::Push { queue_index: 2, task_id: 20 },
+                WorkStealingOperation::Push {
+                    queue_index: 0,
+                    task_id: 10,
+                },
+                WorkStealingOperation::Push {
+                    queue_index: 0,
+                    task_id: 11,
+                },
+                WorkStealingOperation::Push {
+                    queue_index: 2,
+                    task_id: 20,
+                },
                 WorkStealingOperation::StealMultiple,
                 WorkStealingOperation::StealMultiple,
                 WorkStealingOperation::VerifyInvariants,

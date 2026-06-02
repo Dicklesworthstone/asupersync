@@ -86,9 +86,7 @@ impl CqeOrderingTestHarness {
         let file_path = temp_dir.path().join("cqe_test_file");
 
         // Initialize file with known pattern
-        let initial_content: Vec<u8> = (0..file_size)
-            .map(|i| (i % 256) as u8)
-            .collect();
+        let initial_content: Vec<u8> = (0..file_size).map(|i| (i % 256) as u8).collect();
         std::fs::write(&file_path, &initial_content)?;
 
         let file = IoUringFile::open(&file_path)?;
@@ -127,9 +125,7 @@ impl CqeOrderingTestHarness {
             }
 
             let result = match operation.scenario {
-                VulnScenario::BufferAliasing => {
-                    self.test_buffer_aliasing(operation, op_idx)
-                }
+                VulnScenario::BufferAliasing => self.test_buffer_aliasing(operation, op_idx),
                 VulnScenario::SubmissionOverflow => {
                     self.test_submission_overflow(operation, op_idx)
                 }
@@ -142,8 +138,12 @@ impl CqeOrderingTestHarness {
                     let overflow_result = self.test_submission_overflow(operation, op_idx)?;
                     let region_result = self.test_file_region_aliasing(operation, op_idx)?;
 
-                    combined_result.buffer_violations.extend(overflow_result.buffer_violations);
-                    combined_result.ordering_violations.extend(region_result.ordering_violations);
+                    combined_result
+                        .buffer_violations
+                        .extend(overflow_result.buffer_violations);
+                    combined_result
+                        .ordering_violations
+                        .extend(region_result.ordering_violations);
                     combined_result
                 }
             }?;
@@ -160,12 +160,20 @@ impl CqeOrderingTestHarness {
 
         Ok(VulnTestResult {
             completed_operations: completed_ops,
-            buffer_violations: if buffer_contamination_detected { vec!["detected".to_string()] } else { vec![] },
+            buffer_violations: if buffer_contamination_detected {
+                vec!["detected".to_string()]
+            } else {
+                vec![]
+            },
             ordering_violations,
         })
     }
 
-    fn test_buffer_aliasing(&mut self, operation: &UringOperation, op_idx: usize) -> Result<OpResult, String> {
+    fn test_buffer_aliasing(
+        &mut self,
+        operation: &UringOperation,
+        op_idx: usize,
+    ) -> Result<OpResult, String> {
         let buf_idx = op_idx % self.buffer_pool.len();
         let size = (operation.size as usize).min(MAX_BUFFER_SIZE);
 
@@ -177,7 +185,8 @@ impl CqeOrderingTestHarness {
             UringOpType::Read | UringOpType::ReadAt => {
                 // Use overlapping read buffers to test for kernel buffer aliasing
                 let mut buffer1 = &mut self.buffer_pool[buf_idx][offset..offset + size];
-                let mut buffer2 = &mut self.buffer_pool[buf_idx][overlapping_offset..overlapping_offset + size.min(MAX_BUFFER_SIZE - overlapping_offset)];
+                let mut buffer2 = &mut self.buffer_pool[buf_idx][overlapping_offset
+                    ..overlapping_offset + size.min(MAX_BUFFER_SIZE - overlapping_offset)];
 
                 // Pattern poisoning to detect cross-contamination
                 buffer1.fill(0xAA);
@@ -205,7 +214,11 @@ impl CqeOrderingTestHarness {
         }
     }
 
-    fn test_submission_overflow(&mut self, operation: &UringOperation, op_idx: usize) -> Result<OpResult, String> {
+    fn test_submission_overflow(
+        &mut self,
+        operation: &UringOperation,
+        op_idx: usize,
+    ) -> Result<OpResult, String> {
         // VULNERABILITY TEST: Force submission queue pressure to trigger overflow handling
         let file_offset = operation.file_offset % (MAX_FILE_SIZE as u64);
         let size = (operation.size as usize).min(MAX_BUFFER_SIZE);
@@ -246,7 +259,11 @@ impl CqeOrderingTestHarness {
         }
     }
 
-    fn test_file_region_aliasing(&mut self, operation: &UringOperation, op_idx: usize) -> Result<OpResult, String> {
+    fn test_file_region_aliasing(
+        &mut self,
+        operation: &UringOperation,
+        op_idx: usize,
+    ) -> Result<OpResult, String> {
         // VULNERABILITY TEST: Operations on overlapping file regions
         let base_offset = (operation.file_offset % (MAX_FILE_SIZE as u64 / 2)) as usize;
         let size = (operation.size as usize).min(MAX_BUFFER_SIZE);
@@ -264,8 +281,10 @@ impl CqeOrderingTestHarness {
             // Detected overlapping regions - this is the test scenario
             Ok(OpResult {
                 buffer_violations: vec![],
-                ordering_violations: vec![format!("Overlapping regions: {}..{} vs {}..{}",
-                    region1_start, region1_end, region2_start, region2_end)],
+                ordering_violations: vec![format!(
+                    "Overlapping regions: {}..{} vs {}..{}",
+                    region1_start, region1_end, region2_start, region2_end
+                )],
             })
         } else {
             Ok(OpResult {
@@ -280,26 +299,41 @@ impl CqeOrderingTestHarness {
             // Check for poison byte corruption (buffer overflow/underflow)
             if buffer.len() >= 16 {
                 if buffer[0] != POISON_BYTE {
-                    return Err(format!("Buffer {} underflow: poison byte corrupted at start", buf_idx));
+                    return Err(format!(
+                        "Buffer {} underflow: poison byte corrupted at start",
+                        buf_idx
+                    ));
                 }
                 if buffer[buffer.len() - 1] != POISON_BYTE {
-                    return Err(format!("Buffer {} overflow: poison byte corrupted at end", buf_idx));
+                    return Err(format!(
+                        "Buffer {} overflow: poison byte corrupted at end",
+                        buf_idx
+                    ));
                 }
             }
 
             // Check for unexpected pattern corruption (cross-buffer contamination)
             let expected_pattern = (buf_idx % 256) as u8;
-            let corrupted_bytes = buffer.iter()
+            let corrupted_bytes = buffer
+                .iter()
                 .enumerate()
                 .filter(|(idx, &byte)| {
                     // Skip poison bytes
-                    *idx != 0 && *idx != buffer.len() - 1 &&
-                    byte != expected_pattern && byte != 0x00 && byte != 0xAA && byte != 0xBB
+                    *idx != 0
+                        && *idx != buffer.len() - 1
+                        && byte != expected_pattern
+                        && byte != 0x00
+                        && byte != 0xAA
+                        && byte != 0xBB
                 })
                 .count();
 
-            if corrupted_bytes > buffer.len() / 10 { // Allow some normal corruption
-                return Err(format!("Buffer {} contamination: {} unexpected bytes", buf_idx, corrupted_bytes));
+            if corrupted_bytes > buffer.len() / 10 {
+                // Allow some normal corruption
+                return Err(format!(
+                    "Buffer {} contamination: {} unexpected bytes",
+                    buf_idx, corrupted_bytes
+                ));
             }
         }
         Ok(())
@@ -345,12 +379,14 @@ fuzz_target!(|operations: Vec<UringOperation>| {
             }
 
             // INVARIANT: Critical ordering violations indicate potential corruption
-            let critical_violations: Vec<_> = test_result.ordering_violations
+            let critical_violations: Vec<_> = test_result
+                .ordering_violations
                 .iter()
                 .filter(|v| v.contains("Overlapping") && v.contains("regions"))
                 .collect();
 
-            if critical_violations.len() > 3 { // Allow some expected overlaps
+            if critical_violations.len() > 3 {
+                // Allow some expected overlaps
                 panic!(
                     "CQE ORDERING INVERSION: {} critical violations detected: {:?}",
                     critical_violations.len(),
@@ -415,7 +451,7 @@ impl CqeOrderingTestHarness {
 
     fn execute_vuln_scenario(
         &mut self,
-        operations: &[UringOperation]
+        operations: &[UringOperation],
     ) -> Result<VulnTestResult, String> {
         let mut completed_operations = 0;
         let mut buffer_violations = Vec::new();
@@ -424,7 +460,9 @@ impl CqeOrderingTestHarness {
 
         // Execute operations and track buffer states
         for (i, op) in operations.iter().enumerate() {
-            let operation_id = self.operation_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let operation_id = self
+                .operation_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
             match self.execute_single_operation(op, operation_id, &mut buffer_states) {
                 Ok(violations) => {
@@ -435,8 +473,10 @@ impl CqeOrderingTestHarness {
                 }
                 Err(err) => {
                     ordering_violations.push(format!(
-                        "Operation {}: {} - Error: {}", i,
-                        self.describe_operation(op), err
+                        "Operation {}: {} - Error: {}",
+                        i,
+                        self.describe_operation(op),
+                        err
                     ));
                 }
             }
@@ -462,7 +502,7 @@ impl CqeOrderingTestHarness {
         &mut self,
         op: &UringOperation,
         operation_id: u64,
-        buffer_states: &mut HashMap<usize, Vec<u8>>
+        buffer_states: &mut HashMap<usize, Vec<u8>>,
     ) -> Result<Vec<String>, String> {
         let mut violations = Vec::new();
 
@@ -472,7 +512,9 @@ impl CqeOrderingTestHarness {
                 let buffer_addr = self.allocate_tracked_buffer(op.buffer_size, operation_id)?;
 
                 // Check for existing buffer overlaps
-                if let Some(existing_addr) = self.find_overlapping_buffer(buffer_addr, op.buffer_size) {
+                if let Some(existing_addr) =
+                    self.find_overlapping_buffer(buffer_addr, op.buffer_size)
+                {
                     violations.push(format!(
                         "Buffer aliasing detected: new buffer at 0x{:x} overlaps existing at 0x{:x}",
                         buffer_addr, existing_addr
@@ -489,14 +531,14 @@ impl CqeOrderingTestHarness {
                 for batch_op in 0..MAX_CONCURRENT_OPS {
                     let batch_buffer_addr = self.allocate_tracked_buffer(
                         op.buffer_size / MAX_CONCURRENT_OPS,
-                        operation_id + batch_op as u64
+                        operation_id + batch_op as u64,
                     )?;
 
                     // Submit operation rapidly to stress ring
                     if let Err(overflow_err) = self.submit_rapid_operation(
                         batch_buffer_addr,
                         op.buffer_size / MAX_CONCURRENT_OPS,
-                        op.file_offset + batch_op * 512
+                        op.file_offset + batch_op * 512,
                     ) {
                         violations.push(format!("Ring overflow: {}", overflow_err));
                         break;
@@ -519,7 +561,11 @@ impl CqeOrderingTestHarness {
 
             VulnScenario::Combined => {
                 // Execute all vulnerability scenarios in combination
-                violations.extend(self.execute_combined_scenario(op, operation_id, buffer_states)?);
+                violations.extend(self.execute_combined_scenario(
+                    op,
+                    operation_id,
+                    buffer_states,
+                )?);
             }
         }
 
@@ -530,7 +576,7 @@ impl CqeOrderingTestHarness {
         &mut self,
         op: &UringOperation,
         operation_id: u64,
-        buffer_states: &mut HashMap<usize, Vec<u8>>
+        buffer_states: &mut HashMap<usize, Vec<u8>>,
     ) -> Result<Vec<String>, String> {
         let mut combined_violations = Vec::new();
 
@@ -548,7 +594,8 @@ impl CqeOrderingTestHarness {
             match self.execute_single_operation(&test_op, operation_id, buffer_states) {
                 Ok(violations) => combined_violations.extend(violations),
                 Err(err) => {
-                    combined_violations.push(format!("Combined scenario {:?} failed: {}", scenario, err));
+                    combined_violations
+                        .push(format!("Combined scenario {:?} failed: {}", scenario, err));
                 }
             }
         }
@@ -560,12 +607,15 @@ impl CqeOrderingTestHarness {
         // Simulate buffer allocation (in real fuzzing this would use actual memory)
         let address = operation_id as usize * 4096; // Simple address simulation
 
-        self.buffer_tracker.insert(address, BufferTracker {
+        self.buffer_tracker.insert(
             address,
-            size,
-            operation_id,
-            poisoned: false,
-        });
+            BufferTracker {
+                address,
+                size,
+                operation_id,
+                poisoned: false,
+            },
+        );
 
         Ok(address)
     }
@@ -593,7 +643,7 @@ impl CqeOrderingTestHarness {
         &self,
         _buffer_addr: usize,
         _size: usize,
-        _file_offset: usize
+        _file_offset: usize,
     ) -> Result<(), String> {
         // In real implementation, this would submit actual io_uring operations
         // For fuzzing, we simulate potential overflow conditions
@@ -613,7 +663,10 @@ impl CqeOrderingTestHarness {
         })
     }
 
-    fn check_ordering_invariants(&self, buffer_states: &HashMap<usize, Vec<u8>>) -> Result<(), String> {
+    fn check_ordering_invariants(
+        &self,
+        buffer_states: &HashMap<usize, Vec<u8>>,
+    ) -> Result<(), String> {
         // Check that buffer contents haven't been corrupted by ordering issues
         for (addr, expected_content) in buffer_states {
             if let Some(tracker) = self.buffer_tracker.get(addr) {
@@ -628,7 +681,10 @@ impl CqeOrderingTestHarness {
         Ok(())
     }
 
-    fn verify_final_buffer_state(&self, buffer_states: &HashMap<usize, Vec<u8>>) -> Result<(), String> {
+    fn verify_final_buffer_state(
+        &self,
+        buffer_states: &HashMap<usize, Vec<u8>>,
+    ) -> Result<(), String> {
         // Final integrity check after all operations complete
         for (addr, content) in buffer_states {
             if content.is_empty() {
@@ -637,8 +693,9 @@ impl CqeOrderingTestHarness {
 
             // Check for corruption patterns that indicate kernel buffer aliasing
             let corruption_patterns = [0xDE, 0xAD, 0xBE, 0xEF];
-            let has_corruption = corruption_patterns.iter()
-                .any(|&pattern| content.iter().filter(|&&b| b == pattern).count() > content.len() / 2);
+            let has_corruption = corruption_patterns.iter().any(|&pattern| {
+                content.iter().filter(|&&b| b == pattern).count() > content.len() / 2
+            });
 
             if has_corruption {
                 return Err(format!("Buffer corruption detected at 0x{:x}", addr));

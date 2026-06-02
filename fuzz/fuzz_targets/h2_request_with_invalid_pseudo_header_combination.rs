@@ -23,8 +23,8 @@
 //! - RFC 7540 §8.1.2: HTTP header fields (ordering requirements)
 //! - RFC 7541 §6.1: Indexed header field representation
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -110,11 +110,19 @@ impl MockPseudoHeaderConnection {
         let analysis = self.analyze_pseudo_headers(headers);
 
         // Track specific patterns
-        if analysis.has_path && analysis.has_authority && !analysis.has_method && !analysis.has_scheme {
+        if analysis.has_path
+            && analysis.has_authority
+            && !analysis.has_method
+            && !analysis.has_scheme
+        {
             *self.path_authority_only.lock().unwrap() += 1;
         }
 
-        if analysis.has_method && analysis.has_scheme && !analysis.has_path && !analysis.has_authority {
+        if analysis.has_method
+            && analysis.has_scheme
+            && !analysis.has_path
+            && !analysis.has_authority
+        {
             *self.method_scheme_only.lock().unwrap() += 1;
         }
 
@@ -138,7 +146,10 @@ impl MockPseudoHeaderConnection {
             !analysis.has_scheme,
             !analysis.has_path,
             !analysis.has_authority,
-        ].iter().filter(|&&x| x).count();
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
 
         if missing_count > 1 {
             *self.multiple_missing.lock().unwrap() += 1;
@@ -159,10 +170,14 @@ impl MockPseudoHeaderConnection {
         }
 
         // Determine response based on RFC 7540 requirements
-        let is_valid = analysis.has_method && analysis.has_scheme &&
-                      analysis.has_path && analysis.has_authority &&
-                      !analysis.has_duplicates && !analysis.has_wrong_order &&
-                      !analysis.has_empty_values && !analysis.has_invalid_names;
+        let is_valid = analysis.has_method
+            && analysis.has_scheme
+            && analysis.has_path
+            && analysis.has_authority
+            && !analysis.has_duplicates
+            && !analysis.has_wrong_order
+            && !analysis.has_empty_values
+            && !analysis.has_invalid_names;
 
         if is_valid {
             *self.valid_requests.lock().unwrap() += 1;
@@ -218,7 +233,8 @@ impl MockPseudoHeaderConnection {
                     ":authority" => analysis.has_authority = true,
                     _ => {
                         // Invalid pseudo-header name (not one of the standard four)
-                        if !header.name.starts_with(":status") { // :status is valid for responses
+                        if !header.name.starts_with(":status") {
+                            // :status is valid for responses
                             analysis.has_invalid_names = true;
                         }
                     }
@@ -358,22 +374,38 @@ impl PseudoHeaderInput {
                 // Primary test case: only :path and :authority
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: if self.path_value.is_empty() { "/api/test".to_string() } else { self.path_value.clone() }
+                    value: if self.path_value.is_empty() {
+                        "/api/test".to_string()
+                    } else {
+                        self.path_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":authority".to_string(),
-                    value: if self.authority_value.is_empty() { "example.com".to_string() } else { self.authority_value.clone() }
+                    value: if self.authority_value.is_empty() {
+                        "example.com".to_string()
+                    } else {
+                        self.authority_value.clone()
+                    },
                 });
             }
 
             PseudoHeaderScenario::MethodSchemeOnly => {
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: if self.method_value.is_empty() { "GET".to_string() } else { self.method_value.clone() }
+                    value: if self.method_value.is_empty() {
+                        "GET".to_string()
+                    } else {
+                        self.method_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":scheme".to_string(),
-                    value: if self.scheme_value.is_empty() { "https".to_string() } else { self.scheme_value.clone() }
+                    value: if self.scheme_value.is_empty() {
+                        "https".to_string()
+                    } else {
+                        self.scheme_value.clone()
+                    },
                 });
             }
 
@@ -381,15 +413,27 @@ impl PseudoHeaderInput {
                 // Include all except :method
                 headers.push(HttpHeader {
                     name: ":scheme".to_string(),
-                    value: if self.scheme_value.is_empty() { "https".to_string() } else { self.scheme_value.clone() }
+                    value: if self.scheme_value.is_empty() {
+                        "https".to_string()
+                    } else {
+                        self.scheme_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: if self.path_value.is_empty() { "/api/test".to_string() } else { self.path_value.clone() }
+                    value: if self.path_value.is_empty() {
+                        "/api/test".to_string()
+                    } else {
+                        self.path_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":authority".to_string(),
-                    value: if self.authority_value.is_empty() { "example.com".to_string() } else { self.authority_value.clone() }
+                    value: if self.authority_value.is_empty() {
+                        "example.com".to_string()
+                    } else {
+                        self.authority_value.clone()
+                    },
                 });
             }
 
@@ -397,15 +441,27 @@ impl PseudoHeaderInput {
                 // Include all except :scheme
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: if self.method_value.is_empty() { "GET".to_string() } else { self.method_value.clone() }
+                    value: if self.method_value.is_empty() {
+                        "GET".to_string()
+                    } else {
+                        self.method_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: if self.path_value.is_empty() { "/api/test".to_string() } else { self.path_value.clone() }
+                    value: if self.path_value.is_empty() {
+                        "/api/test".to_string()
+                    } else {
+                        self.path_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":authority".to_string(),
-                    value: if self.authority_value.is_empty() { "example.com".to_string() } else { self.authority_value.clone() }
+                    value: if self.authority_value.is_empty() {
+                        "example.com".to_string()
+                    } else {
+                        self.authority_value.clone()
+                    },
                 });
             }
 
@@ -413,15 +469,27 @@ impl PseudoHeaderInput {
                 // Include all except :path
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: if self.method_value.is_empty() { "GET".to_string() } else { self.method_value.clone() }
+                    value: if self.method_value.is_empty() {
+                        "GET".to_string()
+                    } else {
+                        self.method_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":scheme".to_string(),
-                    value: if self.scheme_value.is_empty() { "https".to_string() } else { self.scheme_value.clone() }
+                    value: if self.scheme_value.is_empty() {
+                        "https".to_string()
+                    } else {
+                        self.scheme_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":authority".to_string(),
-                    value: if self.authority_value.is_empty() { "example.com".to_string() } else { self.authority_value.clone() }
+                    value: if self.authority_value.is_empty() {
+                        "example.com".to_string()
+                    } else {
+                        self.authority_value.clone()
+                    },
                 });
             }
 
@@ -429,15 +497,27 @@ impl PseudoHeaderInput {
                 // Include all except :authority
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: if self.method_value.is_empty() { "GET".to_string() } else { self.method_value.clone() }
+                    value: if self.method_value.is_empty() {
+                        "GET".to_string()
+                    } else {
+                        self.method_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":scheme".to_string(),
-                    value: if self.scheme_value.is_empty() { "https".to_string() } else { self.scheme_value.clone() }
+                    value: if self.scheme_value.is_empty() {
+                        "https".to_string()
+                    } else {
+                        self.scheme_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: if self.path_value.is_empty() { "/api/test".to_string() } else { self.path_value.clone() }
+                    value: if self.path_value.is_empty() {
+                        "/api/test".to_string()
+                    } else {
+                        self.path_value.clone()
+                    },
                 });
             }
 
@@ -445,19 +525,35 @@ impl PseudoHeaderInput {
                 // Valid case: all four pseudo-headers
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: if self.method_value.is_empty() { "GET".to_string() } else { self.method_value.clone() }
+                    value: if self.method_value.is_empty() {
+                        "GET".to_string()
+                    } else {
+                        self.method_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":scheme".to_string(),
-                    value: if self.scheme_value.is_empty() { "https".to_string() } else { self.scheme_value.clone() }
+                    value: if self.scheme_value.is_empty() {
+                        "https".to_string()
+                    } else {
+                        self.scheme_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: if self.path_value.is_empty() { "/api/test".to_string() } else { self.path_value.clone() }
+                    value: if self.path_value.is_empty() {
+                        "/api/test".to_string()
+                    } else {
+                        self.path_value.clone()
+                    },
                 });
                 headers.push(HttpHeader {
                     name: ":authority".to_string(),
-                    value: if self.authority_value.is_empty() { "example.com".to_string() } else { self.authority_value.clone() }
+                    value: if self.authority_value.is_empty() {
+                        "example.com".to_string()
+                    } else {
+                        self.authority_value.clone()
+                    },
                 });
             }
 
@@ -465,24 +561,24 @@ impl PseudoHeaderInput {
                 // Add all four, then duplicate :method
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: "GET".to_string()
+                    value: "GET".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":scheme".to_string(),
-                    value: "https".to_string()
+                    value: "https".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: "/api/test".to_string()
+                    value: "/api/test".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":authority".to_string(),
-                    value: "example.com".to_string()
+                    value: "example.com".to_string(),
                 });
                 // Duplicate :method
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: "POST".to_string()
+                    value: "POST".to_string(),
                 });
             }
 
@@ -490,23 +586,23 @@ impl PseudoHeaderInput {
                 // Add regular header first, then pseudo-headers
                 headers.push(HttpHeader {
                     name: "user-agent".to_string(),
-                    value: "test-client".to_string()
+                    value: "test-client".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: "GET".to_string()
+                    value: "GET".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":scheme".to_string(),
-                    value: "https".to_string()
+                    value: "https".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: "/api/test".to_string()
+                    value: "/api/test".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":authority".to_string(),
-                    value: "example.com".to_string()
+                    value: "example.com".to_string(),
                 });
             }
 
@@ -514,19 +610,19 @@ impl PseudoHeaderInput {
                 // All four present but with empty values
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: "".to_string()
+                    value: "".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":scheme".to_string(),
-                    value: "".to_string()
+                    value: "".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: "".to_string()
+                    value: "".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":authority".to_string(),
-                    value: "".to_string()
+                    value: "".to_string(),
                 });
             }
 
@@ -534,20 +630,20 @@ impl PseudoHeaderInput {
                 // Add invalid pseudo-header names
                 headers.push(HttpHeader {
                     name: ":invalid".to_string(),
-                    value: "test".to_string()
+                    value: "test".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":custom".to_string(),
-                    value: "value".to_string()
+                    value: "value".to_string(),
                 });
                 // Add some valid ones too
                 headers.push(HttpHeader {
                     name: ":method".to_string(),
-                    value: "GET".to_string()
+                    value: "GET".to_string(),
                 });
                 headers.push(HttpHeader {
                     name: ":path".to_string(),
-                    value: "/test".to_string()
+                    value: "/test".to_string(),
                 });
             }
         }
@@ -610,7 +706,9 @@ fuzz_target!(|input: PseudoHeaderInput| {
                     // Correct: should be rejected
                 }
                 HeadersResult::Accepted => {
-                    panic!("RFC 7540 violation: :path + :authority only should be rejected with PROTOCOL_ERROR");
+                    panic!(
+                        "RFC 7540 violation: :path + :authority only should be rejected with PROTOCOL_ERROR"
+                    );
                 }
             }
         }

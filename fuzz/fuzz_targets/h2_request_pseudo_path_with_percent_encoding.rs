@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// RFC 9110 Section 4.1: The path component contains data, usually organized
@@ -57,20 +57,20 @@ pub struct PercentEncodedPathInput {
 
 #[derive(Debug, Clone, Copy)]
 pub enum EncodingStrategy {
-    None,           // No percent encoding
-    Minimal,        // Only encode what's required
-    Aggressive,     // Encode many allowed characters
-    Reserved,       // Focus on reserved characters (%2F, %3F, etc.)
-    Spaces,         // Focus on whitespace (%20, %09, %0A)
-    Unsafe,         // Unsafe characters (%00, %7F, control chars)
-    Random,         // Random mix of strategies
+    None,       // No percent encoding
+    Minimal,    // Only encode what's required
+    Aggressive, // Encode many allowed characters
+    Reserved,   // Focus on reserved characters (%2F, %3F, etc.)
+    Spaces,     // Focus on whitespace (%20, %09, %0A)
+    Unsafe,     // Unsafe characters (%00, %7F, control chars)
+    Random,     // Random mix of strategies
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum HexCase {
-    Lower,          // %2f, %3a
-    Upper,          // %2F, %3A
-    Mixed,          // %2F, %3a (mixed case)
+    Lower, // %2f, %3a
+    Upper, // %2F, %3A
+    Mixed, // %2F, %3a (mixed case)
 }
 
 impl<'a> Arbitrary<'a> for EncodingStrategy {
@@ -110,15 +110,15 @@ impl<'a> Arbitrary<'a> for PercentEncodedPathInput {
             let segment = match segment_choice % 15 {
                 0 => "index.html".to_string(),
                 1 => "api/v1/users".to_string(),
-                2 => "foo bar".to_string(),           // Contains space
+                2 => "foo bar".to_string(), // Contains space
                 3 => "file.txt".to_string(),
                 4 => "admin/delete".to_string(),
-                5 => "path?query".to_string(),        // Contains ?
-                6 => "path#fragment".to_string(),     // Contains #
-                7 => "path&param=value".to_string(),  // Contains &
-                8 => "path/with/slashes".to_string(), // Contains /
+                5 => "path?query".to_string(),           // Contains ?
+                6 => "path#fragment".to_string(),        // Contains #
+                7 => "path&param=value".to_string(),     // Contains &
+                8 => "path/with/slashes".to_string(),    // Contains /
                 9 => "file%already%encoded".to_string(), // Pre-encoded
-                10 => "unicode🦀test".to_string(),    // Unicode
+                10 => "unicode🦀test".to_string(),       // Unicode
                 11 => "UPPER_CASE".to_string(),
                 12 => "with-dashes_and_underscores".to_string(),
                 13 => "123456789".to_string(),
@@ -137,7 +137,7 @@ impl<'a> Arbitrary<'a> for PercentEncodedPathInput {
                         segment = "test".to_string();
                     }
                     segment
-                },
+                }
             };
             path_segments.push(segment);
         }
@@ -225,11 +225,31 @@ struct MockSettings {
 
 #[derive(Debug)]
 enum ProtocolError {
-    InvalidPathEncoding { stream_id: u32, path: String, reason: String },
-    PrematureDecoding { stream_id: u32, original: String, decoded: String },
-    InvalidPercentSequence { stream_id: u32, sequence: String, position: usize },
-    PathTooLong { stream_id: u32, length: usize, max_allowed: usize },
-    SecurityViolation { stream_id: u32, path: String, violation_type: String },
+    InvalidPathEncoding {
+        stream_id: u32,
+        path: String,
+        reason: String,
+    },
+    PrematureDecoding {
+        stream_id: u32,
+        original: String,
+        decoded: String,
+    },
+    InvalidPercentSequence {
+        stream_id: u32,
+        sequence: String,
+        position: usize,
+    },
+    PathTooLong {
+        stream_id: u32,
+        length: usize,
+        max_allowed: usize,
+    },
+    SecurityViolation {
+        stream_id: u32,
+        path: String,
+        violation_type: String,
+    },
 }
 
 #[derive(Debug)]
@@ -243,11 +263,11 @@ struct EncodingViolation {
 
 #[derive(Debug, Clone)]
 enum ViolationType {
-    PrematureDecoding,      // %2F decoded to / before route match
-    InconsistentDecoding,   // Some sequences decoded, others not
+    PrematureDecoding,       // %2F decoded to / before route match
+    InconsistentDecoding,    // Some sequences decoded, others not
     InvalidSequenceAccepted, // %GG accepted instead of rejected
-    DoubleDecodingBug,      // %%32F decoded twice
-    CaseInsensitiveHex,     // %2f vs %2F treated differently
+    DoubleDecodingBug,       // %%32F decoded twice
+    CaseInsensitiveHex,      // %2f vs %2F treated differently
 }
 
 #[derive(Debug, Clone)]
@@ -287,32 +307,42 @@ impl MockH2Connection {
         }
     }
 
-    fn process_headers_frame(&mut self, stream_id: u32, headers: Vec<(String, String)>) -> Result<(), String> {
+    fn process_headers_frame(
+        &mut self,
+        stream_id: u32,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), String> {
         // Initialize stream if needed
         if !self.stream_states.contains_key(&stream_id) {
-            self.stream_states.insert(stream_id, MockStreamState {
+            self.stream_states.insert(
                 stream_id,
-                state: StreamState::Open,
-                received_headers: Vec::new(),
-                pseudo_header_count: 0,
-                original_path: None,
-                processed_path: None,
-            });
+                MockStreamState {
+                    stream_id,
+                    state: StreamState::Open,
+                    received_headers: Vec::new(),
+                    pseudo_header_count: 0,
+                    original_path: None,
+                    processed_path: None,
+                },
+            );
         }
-
-        let stream_state = self.stream_states.get_mut(&stream_id).unwrap();
 
         // Process each header
         for (name, value) in headers {
+            let processed_path = if name == ":path" {
+                self.path_processing_stats.total_paths_processed += 1;
+                Some(self.validate_path_encoding(&value, stream_id)?)
+            } else {
+                None
+            };
+
+            let stream_state = self.stream_states.get_mut(&stream_id).unwrap();
+
             if name.starts_with(':') {
                 stream_state.pseudo_header_count += 1;
 
-                if name == ":path" {
-                    self.path_processing_stats.total_paths_processed += 1;
+                if let Some(processed_path) = processed_path {
                     stream_state.original_path = Some(value.clone());
-
-                    // Validate path encoding
-                    let processed_path = self.validate_path_encoding(&value, stream_id)?;
                     stream_state.processed_path = Some(processed_path);
                 }
             }
@@ -378,11 +408,15 @@ impl MockH2Connection {
                 if i + 2 >= bytes.len() {
                     // Incomplete sequence
                     self.path_processing_stats.invalid_sequences_rejected += 1;
-                    self.protocol_errors.push(ProtocolError::InvalidPercentSequence {
-                        stream_id,
-                        sequence: format!("%{}", std::str::from_utf8(&bytes[i+1..]).unwrap_or("")),
-                        position: i,
-                    });
+                    self.protocol_errors
+                        .push(ProtocolError::InvalidPercentSequence {
+                            stream_id,
+                            sequence: format!(
+                                "%{}",
+                                std::str::from_utf8(&bytes[i + 1..]).unwrap_or("")
+                            ),
+                            position: i,
+                        });
                     return Err("Incomplete percent sequence".to_string());
                 }
 
@@ -393,18 +427,19 @@ impl MockH2Connection {
                 if !is_hex_digit(hex1) || !is_hex_digit(hex2) {
                     self.path_processing_stats.invalid_sequences_rejected += 1;
                     let sequence = format!("%{}{}", hex1 as char, hex2 as char);
-                    self.protocol_errors.push(ProtocolError::InvalidPercentSequence {
-                        stream_id,
-                        sequence,
-                        position: i,
-                    });
+                    self.protocol_errors
+                        .push(ProtocolError::InvalidPercentSequence {
+                            stream_id,
+                            sequence,
+                            position: i,
+                        });
                     return Err("Invalid hex digits in percent sequence".to_string());
                 }
 
                 // Check for double encoding (e.g., %252F = %2F)
                 if hex1 == b'2' && (hex2 == b'5' || hex2 == b'5') {
                     let decoded_first = format!("%{}", (hex1 as char).to_ascii_lowercase());
-                    if path[i+3..].starts_with(&decoded_first) {
+                    if path[i + 3..].starts_with(&decoded_first) {
                         self.path_processing_stats.double_encoding_detected += 1;
                     }
                 }
@@ -436,7 +471,9 @@ impl MockH2Connection {
 
         // %2F (encoded slash) decoded to / is CRITICAL
         if original.contains("%2F") || original.contains("%2f") {
-            if processed.contains('/') && !original.replace("%2F", "").replace("%2f", "").contains('/') {
+            if processed.contains('/')
+                && !original.replace("%2F", "").replace("%2f", "").contains('/')
+            {
                 return SecurityRisk::Critical;
             }
         }
@@ -461,13 +498,15 @@ impl MockH2Connection {
         }
 
         // Query parameter separation chars
-        if original.contains("%3F") || original.contains("%3f") { // ?
+        if original.contains("%3F") || original.contains("%3f") {
+            // ?
             if processed.contains('?') {
                 return SecurityRisk::Medium;
             }
         }
 
-        if original.contains("%26") { // &
+        if original.contains("%26") {
+            // &
             if processed.contains('&') {
                 return SecurityRisk::Medium;
             }
@@ -518,7 +557,11 @@ impl MockH2Connection {
     fn get_processing_stats(&self) -> (u32, u32, f64, u32) {
         let total = self.path_processing_stats.total_paths_processed;
         let preserved = self.path_processing_stats.paths_preserved_verbatim;
-        let preservation_rate = if total > 0 { preserved as f64 / total as f64 } else { 0.0 };
+        let preservation_rate = if total > 0 {
+            preserved as f64 / total as f64
+        } else {
+            0.0
+        };
         let violations = self.path_processing_stats.paths_decoded_prematurely;
         (total, preserved, preservation_rate, violations)
     }
@@ -547,11 +590,14 @@ fn percent_encode_char(ch: char, strategy: EncodingStrategy, hex_case: HexCase) 
                 _ if ch.is_control() => {
                     let mut buf = [0; 4];
                     let bytes = ch.encode_utf8(&mut buf).as_bytes();
-                    bytes.iter().map(|&b| percent_encode_byte(b, hex_case)).collect()
-                },
+                    bytes
+                        .iter()
+                        .map(|&b| percent_encode_byte(b, hex_case))
+                        .collect()
+                }
                 _ => ch.to_string(),
             }
-        },
+        }
         EncodingStrategy::Aggressive => {
             // Encode many allowed characters
             if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
@@ -559,21 +605,24 @@ fn percent_encode_char(ch: char, strategy: EncodingStrategy, hex_case: HexCase) 
             } else {
                 let mut buf = [0; 4];
                 let bytes = ch.encode_utf8(&mut buf).as_bytes();
-                bytes.iter().map(|&b| percent_encode_byte(b, hex_case)).collect()
+                bytes
+                    .iter()
+                    .map(|&b| percent_encode_byte(b, hex_case))
+                    .collect()
             }
-        },
+        }
         EncodingStrategy::Reserved => {
             // Focus on reserved characters
             match ch {
-                '/' => percent_encode_byte(b'/', hex_case),  // Critical: %2F
-                '?' => percent_encode_byte(b'?', hex_case),  // %3F
-                '#' => percent_encode_byte(b'#', hex_case),  // %23
-                '&' => percent_encode_byte(b'&', hex_case),  // %26
-                '=' => percent_encode_byte(b'=', hex_case),  // %3D
-                '+' => percent_encode_byte(b'+', hex_case),  // %2B
+                '/' => percent_encode_byte(b'/', hex_case), // Critical: %2F
+                '?' => percent_encode_byte(b'?', hex_case), // %3F
+                '#' => percent_encode_byte(b'#', hex_case), // %23
+                '&' => percent_encode_byte(b'&', hex_case), // %26
+                '=' => percent_encode_byte(b'=', hex_case), // %3D
+                '+' => percent_encode_byte(b'+', hex_case), // %2B
                 _ => ch.to_string(),
             }
-        },
+        }
         EncodingStrategy::Spaces => {
             match ch {
                 ' ' => percent_encode_byte(b' ', hex_case),   // %20
@@ -582,29 +631,35 @@ fn percent_encode_char(ch: char, strategy: EncodingStrategy, hex_case: HexCase) 
                 '\r' => percent_encode_byte(b'\r', hex_case), // %0D
                 _ => ch.to_string(),
             }
-        },
+        }
         EncodingStrategy::Unsafe => {
             match ch {
-                '\0' => percent_encode_byte(0, hex_case),     // %00
+                '\0' => percent_encode_byte(0, hex_case),      // %00
                 '\x7F' => percent_encode_byte(0x7F, hex_case), // %7F
                 _ if ch.is_control() => {
                     let mut buf = [0; 4];
                     let bytes = ch.encode_utf8(&mut buf).as_bytes();
-                    bytes.iter().map(|&b| percent_encode_byte(b, hex_case)).collect()
-                },
+                    bytes
+                        .iter()
+                        .map(|&b| percent_encode_byte(b, hex_case))
+                        .collect()
+                }
                 _ => ch.to_string(),
             }
-        },
+        }
         EncodingStrategy::Random => {
             // Randomly encode some characters
             if ch as u32 % 3 == 0 && !ch.is_ascii_alphanumeric() {
                 let mut buf = [0; 4];
                 let bytes = ch.encode_utf8(&mut buf).as_bytes();
-                bytes.iter().map(|&b| percent_encode_byte(b, hex_case)).collect()
+                bytes
+                    .iter()
+                    .map(|&b| percent_encode_byte(b, hex_case))
+                    .collect()
             } else {
                 ch.to_string()
             }
-        },
+        }
     }
 }
 
@@ -618,7 +673,7 @@ fn percent_encode_byte(byte: u8, hex_case: HexCase) -> String {
             } else {
                 format!("%{:02x}", byte)
             }
-        },
+        }
     }
 }
 
@@ -639,11 +694,12 @@ fn build_percent_encoded_path(input: &PercentEncodedPathInput) -> String {
             // Insert invalid percent sequences
             let mut invalid = segment.clone();
             invalid.push_str("%GG"); // Invalid hex
-            invalid.push_str("%2");  // Incomplete
-            invalid.push_str("%");   // Incomplete
+            invalid.push_str("%2"); // Incomplete
+            invalid.push_str("%"); // Incomplete
             invalid
         } else {
-            segment.chars()
+            segment
+                .chars()
                 .map(|ch| percent_encode_char(ch, input.encoding_strategy, input.hex_case))
                 .collect()
         };
@@ -667,10 +723,12 @@ fn build_percent_encoded_path(input: &PercentEncodedPathInput) -> String {
             }
 
             // Encode query parameters
-            let encoded_key = key.chars()
+            let encoded_key = key
+                .chars()
                 .map(|ch| percent_encode_char(ch, input.encoding_strategy, input.hex_case))
                 .collect::<String>();
-            let encoded_value = value.chars()
+            let encoded_value = value
+                .chars()
                 .map(|ch| percent_encode_char(ch, input.encoding_strategy, input.hex_case))
                 .collect::<String>();
 
@@ -683,7 +741,8 @@ fn build_percent_encoded_path(input: &PercentEncodedPathInput) -> String {
     // Add fragment
     if let Some(ref fragment) = input.fragment {
         path.push('#');
-        let encoded_fragment = fragment.chars()
+        let encoded_fragment = fragment
+            .chars()
             .map(|ch| percent_encode_char(ch, input.encoding_strategy, input.hex_case))
             .collect::<String>();
         path.push_str(&encoded_fragment);
@@ -737,13 +796,16 @@ fuzz_target!(|data: &[u8]| {
     let headers = build_headers_with_encoded_path(&input);
 
     // Extract the path for analysis
-    let path = headers.iter()
+    let path = headers
+        .iter()
         .find(|(name, _)| name == ":path")
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
 
     // Skip if path is empty or too basic
-    if path.is_empty() || (!path.contains('%') && input.encoding_strategy as u8 != EncodingStrategy::None as u8) {
+    if path.is_empty()
+        || (!path.contains('%') && input.encoding_strategy as u8 != EncodingStrategy::None as u8)
+    {
         return;
     }
 
@@ -757,18 +819,26 @@ fuzz_target!(|data: &[u8]| {
             // Headers were accepted - verify path preservation
             let stream = connection.stream_states.get(&stream_id).unwrap();
 
-            if let (Some(original), Some(processed)) = (&stream.original_path, &stream.processed_path) {
+            if let (Some(original), Some(processed)) =
+                (&stream.original_path, &stream.processed_path)
+            {
                 // CRITICAL: Path should be preserved exactly
                 if original != processed {
                     // This is a bug - percent encoding was not preserved
-                    panic!("Path encoding not preserved! Original: '{}', Processed: '{}'",
-                        original, processed);
+                    panic!(
+                        "Path encoding not preserved! Original: '{}', Processed: '{}'",
+                        original, processed
+                    );
                 }
 
                 // Check for premature decoding of critical sequences
                 if original.contains("%2F") || original.contains("%2f") {
-                    if processed.contains('/') && !original.replace("%2F", "").replace("%2f", "").contains('/') {
-                        panic!("SECURITY: %2F was decoded to / prematurely! This could bypass path-based access controls.");
+                    if processed.contains('/')
+                        && !original.replace("%2F", "").replace("%2f", "").contains('/')
+                    {
+                        panic!(
+                            "SECURITY: %2F was decoded to / prematurely! This could bypass path-based access controls."
+                        );
                     }
                 }
 
@@ -779,7 +849,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
             }
-        },
+        }
         Err(error) => {
             // Headers were rejected - check if rejection was appropriate
             if input.use_invalid_sequences {
@@ -795,22 +865,34 @@ fuzz_target!(|data: &[u8]| {
     // Verify protocol error handling
     for error in &connection.protocol_errors {
         match error {
-            ProtocolError::PrematureDecoding { stream_id, original, decoded } => {
+            ProtocolError::PrematureDecoding {
+                stream_id,
+                original,
+                decoded,
+            } => {
                 assert_eq!(*stream_id, 1);
                 assert_ne!(original, decoded);
                 // This should never happen in a correct implementation
-            },
-            ProtocolError::InvalidPercentSequence { stream_id, sequence, position } => {
+            }
+            ProtocolError::InvalidPercentSequence {
+                stream_id,
+                sequence,
+                position,
+            } => {
                 assert_eq!(*stream_id, 1);
                 assert!(!sequence.is_empty());
                 assert!(*position < path.len());
-            },
-            ProtocolError::SecurityViolation { stream_id, path, violation_type } => {
+            }
+            ProtocolError::SecurityViolation {
+                stream_id,
+                path,
+                violation_type,
+            } => {
                 assert_eq!(*stream_id, 1);
                 assert!(!path.is_empty());
                 assert!(!violation_type.is_empty());
-            },
-            _ => {}, // Other error types
+            }
+            _ => {} // Other error types
         }
     }
 
@@ -823,15 +905,19 @@ fuzz_target!(|data: &[u8]| {
         match violation.security_risk {
             SecurityRisk::Critical => {
                 // Should involve %2F decoding or similar
-                assert!(violation.original_path.contains("%2F") ||
-                       violation.original_path.contains("%2f"));
-            },
+                assert!(
+                    violation.original_path.contains("%2F")
+                        || violation.original_path.contains("%2f")
+                );
+            }
             SecurityRisk::High => {
                 // Should involve directory traversal or null bytes
-                assert!(violation.original_path.contains("%00") ||
-                       violation.original_path.contains("%2E%2E"));
-            },
-            _ => {}, // Lower risk levels
+                assert!(
+                    violation.original_path.contains("%00")
+                        || violation.original_path.contains("%2E%2E")
+                );
+            }
+            _ => {} // Lower risk levels
         }
     }
 
@@ -847,7 +933,9 @@ fuzz_target!(|data: &[u8]| {
 
     // Test that preservation rate is high for valid inputs
     if !input.use_invalid_sequences && preservation_rate < 0.9 {
-        panic!("Low preservation rate ({:.2}) for valid input suggests premature decoding",
-               preservation_rate);
+        panic!(
+            "Low preservation rate ({:.2}) for valid input suggests premature decoding",
+            preservation_rate
+        );
     }
 });

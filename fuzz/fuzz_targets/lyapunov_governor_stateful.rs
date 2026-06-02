@@ -6,7 +6,6 @@ use asupersync::obligation::lyapunov::{
 };
 use asupersync::types::Time;
 use libfuzzer_sys::fuzz_target;
-use std::collections::BTreeMap;
 
 /// Maximum operations per fuzz run to prevent timeout
 const MAX_OPERATIONS: usize = 500;
@@ -39,11 +38,11 @@ struct WeightsConfig {
 #[derive(Arbitrary, Debug, Clone)]
 enum WeightValue {
     Zero,
-    Small,      // 0.1
-    Default,    // 1.0
-    Medium,     // 5.0
-    Large,      // 10.0
-    VeryLarge,  // 100.0
+    Small,     // 0.1
+    Default,   // 1.0
+    Medium,    // 5.0
+    Large,     // 10.0
+    VeryLarge, // 100.0
 }
 
 impl WeightValue {
@@ -98,7 +97,7 @@ enum GovernorOperation {
 struct StateConfig {
     pub live_tasks: u16,
     pub pending_obligations: u16,
-    pub obligation_age_factor: u8,   // Multiplier for age calculation
+    pub obligation_age_factor: u8, // Multiplier for age calculation
     pub draining_regions: u8,
     pub deadline_pressure_factor: u8,
     pub pending_send_permits: u16,
@@ -152,7 +151,12 @@ impl GovernorShadowModel {
         }
     }
 
-    fn record_computation(&mut self, potential: f64, suggestion: SchedulingSuggestion, snapshot: StateSnapshot) {
+    fn record_computation(
+        &mut self,
+        potential: f64,
+        suggestion: SchedulingSuggestion,
+        snapshot: StateSnapshot,
+    ) {
         // Update potential history
         if let Some(&last_potential) = self.potential_history.last() {
             if potential > last_potential {
@@ -183,7 +187,9 @@ impl GovernorShadowModel {
         }
 
         match suggestion {
-            SchedulingSuggestion::DrainObligations => self.properties.drain_obligation_suggestions += 1,
+            SchedulingSuggestion::DrainObligations => {
+                self.properties.drain_obligation_suggestions += 1
+            }
             SchedulingSuggestion::DrainRegions => self.properties.drain_region_suggestions += 1,
             SchedulingSuggestion::MeetDeadlines => self.properties.meet_deadline_suggestions += 1,
             SchedulingSuggestion::NoPreference => self.properties.no_preference_suggestions += 1,
@@ -199,9 +205,8 @@ impl GovernorShadowModel {
     }
 
     fn advance_time(&mut self, advance_ns: u64) {
-        self.current_time = Time::from_nanos(
-            self.current_time.as_nanos().saturating_add(advance_ns)
-        );
+        self.current_time =
+            Time::from_nanos(self.current_time.as_nanos().saturating_add(advance_ns));
     }
 
     fn verify_lyapunov_properties(&self) -> bool {
@@ -249,7 +254,8 @@ impl GovernorShadowModel {
             }
         }
 
-        let final_quiescent = self.snapshot_history
+        let final_quiescent = self
+            .snapshot_history
             .last()
             .map_or(false, |s| s.is_quiescent());
 
@@ -282,7 +288,8 @@ impl StateConfig {
             time: current_time,
             live_tasks: self.live_tasks.min(10000) as u32,
             pending_obligations: self.pending_obligations.min(10000) as u32,
-            obligation_age_sum_ns: (self.obligation_age_factor as u64).saturating_mul(1_000_000) // Convert to reasonable ns values
+            obligation_age_sum_ns: (self.obligation_age_factor as u64)
+                .saturating_mul(1_000_000) // Convert to reasonable ns values
                 .saturating_mul(self.pending_obligations.min(1000) as u64),
             draining_regions: self.draining_regions.min(100) as u32,
             deadline_pressure: (self.deadline_pressure_factor as f64) * 0.1, // Scale to reasonable range
@@ -295,22 +302,6 @@ impl StateConfig {
             finalizing_tasks: self.finalizing_tasks.min(10000) as u32,
             ready_queue_depth: self.ready_queue_depth.min(10000) as u32,
         }
-    }
-}
-
-impl StateSnapshot {
-    fn is_quiescent(&self) -> bool {
-        self.live_tasks == 0
-            && self.pending_obligations == 0
-            && self.draining_regions == 0
-            && self.pending_send_permits == 0
-            && self.pending_acks == 0
-            && self.pending_leases == 0
-            && self.pending_io_ops == 0
-            && self.cancel_requested_tasks == 0
-            && self.cancelling_tasks == 0
-            && self.finalizing_tasks == 0
-            && self.ready_queue_depth == 0
     }
 }
 
@@ -342,12 +333,22 @@ fuzz_target!(|input: LyapunovGovernorFuzzInput| {
                 // Verify basic constraints
                 assert!(potential >= 0.0, "Potential must be non-negative");
                 assert!(potential.is_finite(), "Potential must be finite");
-                assert!(potential <= MAX_POTENTIAL_VALUE, "Potential exceeded maximum");
+                assert!(
+                    potential <= MAX_POTENTIAL_VALUE,
+                    "Potential exceeded maximum"
+                );
 
                 // Verify suggestion logic
                 if snapshot.is_quiescent() {
-                    assert_eq!(suggestion, SchedulingSuggestion::NoPreference, "Quiescent state should suggest NoPreference");
-                    assert!(potential <= 1e-6, "Quiescent state should have ~zero potential");
+                    assert_eq!(
+                        suggestion,
+                        SchedulingSuggestion::NoPreference,
+                        "Quiescent state should suggest NoPreference"
+                    );
+                    assert!(
+                        potential <= 1e-6,
+                        "Quiescent state should have ~zero potential"
+                    );
                 }
 
                 // Record in shadow model
@@ -359,18 +360,38 @@ fuzz_target!(|input: LyapunovGovernorFuzzInput| {
 
                 // Test compute_record (doesn't modify history)
                 let record = governor.compute_record(&snapshot);
-                assert!(record.total >= 0.0, "Potential record total must be non-negative");
-                assert!(record.total.is_finite(), "Potential record total must be finite");
+                assert!(
+                    record.total >= 0.0,
+                    "Potential record total must be non-negative"
+                );
+                assert!(
+                    record.total.is_finite(),
+                    "Potential record total must be finite"
+                );
 
                 // Verify component breakdown
-                assert!(record.task_component >= 0.0, "Task component must be non-negative");
-                assert!(record.obligation_component >= 0.0, "Obligation component must be non-negative");
-                assert!(record.region_component >= 0.0, "Region component must be non-negative");
-                assert!(record.deadline_component >= 0.0, "Deadline component must be non-negative");
+                assert!(
+                    record.task_component >= 0.0,
+                    "Task component must be non-negative"
+                );
+                assert!(
+                    record.obligation_component >= 0.0,
+                    "Obligation component must be non-negative"
+                );
+                assert!(
+                    record.region_component >= 0.0,
+                    "Region component must be non-negative"
+                );
+                assert!(
+                    record.deadline_component >= 0.0,
+                    "Deadline component must be non-negative"
+                );
 
                 // Verify total is sum of components (approximately)
-                let component_sum = record.task_component + record.obligation_component
-                    + record.region_component + record.deadline_component;
+                let component_sum = record.task_component
+                    + record.obligation_component
+                    + record.region_component
+                    + record.deadline_component;
                 let diff = (record.total - component_sum).abs();
                 assert!(diff < 1e-9, "Total should equal sum of components");
             }
@@ -401,18 +422,29 @@ fuzz_target!(|input: LyapunovGovernorFuzzInput| {
                 let potential = governor.compute_potential(&quiescent_snapshot);
                 let suggestion = governor.suggest(&quiescent_snapshot);
 
-                assert!(potential <= 1e-6, "Quiescent state should have near-zero potential");
-                assert_eq!(suggestion, SchedulingSuggestion::NoPreference, "Quiescent should suggest NoPreference");
+                assert!(
+                    potential <= 1e-6,
+                    "Quiescent state should have near-zero potential"
+                );
+                assert_eq!(
+                    suggestion,
+                    SchedulingSuggestion::NoPreference,
+                    "Quiescent should suggest NoPreference"
+                );
 
                 shadow.record_computation(potential, suggestion, quiescent_snapshot);
             }
 
-            GovernorOperation::SimulateObligationPressure { count, age_multiplier } => {
+            GovernorOperation::SimulateObligationPressure {
+                count,
+                age_multiplier,
+            } => {
                 let snapshot = StateSnapshot {
                     time: shadow.current_time,
                     live_tasks: (count as u32).min(1000),
                     pending_obligations: (count as u32).min(1000),
-                    obligation_age_sum_ns: (age_multiplier as u64).saturating_mul(1_000_000_000)
+                    obligation_age_sum_ns: (age_multiplier as u64)
+                        .saturating_mul(1_000_000_000)
                         .saturating_mul(count as u64),
                     draining_regions: 0,
                     deadline_pressure: 0.0,
@@ -431,7 +463,10 @@ fuzz_target!(|input: LyapunovGovernorFuzzInput| {
 
                 // High obligation pressure should tend toward DrainObligations
                 if count > 0 && weights.w_obligation_age > 0.0 {
-                    assert!(potential > 0.0, "Non-zero obligations should yield positive potential");
+                    assert!(
+                        potential > 0.0,
+                        "Non-zero obligations should yield positive potential"
+                    );
                 }
 
                 shadow.record_computation(potential, suggestion, snapshot);
@@ -488,8 +523,25 @@ fuzz_target!(|input: LyapunovGovernorFuzzInput| {
             GovernorOperation::AnalyzeConvergence => {
                 if let Some(analysis) = shadow.analyze_convergence() {
                     // Verify convergence properties
-                    assert_eq!(analysis.steps, shadow.potential_history.len(), "Step count should match history length");
-                    assert!(analysis.v_max >= analysis.v_final, "Max potential should be >= final potential");
+                    assert_eq!(
+                        analysis.steps,
+                        shadow.potential_history.len(),
+                        "Step count should match history length"
+                    );
+                    assert!(
+                        analysis.v_max >= analysis.v_final,
+                        "Max potential should be >= final potential"
+                    );
+                    assert!(
+                        analysis.max_increase <= analysis.v_max,
+                        "Max increase should be bounded by max potential"
+                    );
+                    if analysis.reached_quiescence {
+                        assert!(
+                            analysis.v_final <= 1e-6,
+                            "Quiescent final state should have near-zero potential"
+                        );
+                    }
 
                     if analysis.increase_count == 0 {
                         assert!(analysis.monotone, "No increases should mean monotone");
@@ -499,7 +551,10 @@ fuzz_target!(|input: LyapunovGovernorFuzzInput| {
 
             GovernorOperation::VerifyInvariants => {
                 // Verify shadow model Lyapunov properties
-                assert!(shadow.verify_lyapunov_properties(), "Lyapunov properties violated");
+                assert!(
+                    shadow.verify_lyapunov_properties(),
+                    "Lyapunov properties violated"
+                );
 
                 // Verify governor internal state
                 // Note: We can't directly access governor internals, but we can verify
@@ -507,17 +562,26 @@ fuzz_target!(|input: LyapunovGovernorFuzzInput| {
                 if let Some(last_snapshot) = shadow.snapshot_history.last() {
                     let potential1 = governor.compute_record(last_snapshot);
                     let potential2 = governor.compute_record(last_snapshot);
-                    assert_eq!(potential1.total, potential2.total, "Determinism check failed");
+                    assert_eq!(
+                        potential1.total, potential2.total,
+                        "Determinism check failed"
+                    );
 
                     let suggestion1 = governor.suggest(last_snapshot);
                     let suggestion2 = governor.suggest(last_snapshot);
-                    assert_eq!(suggestion1, suggestion2, "Suggestion determinism check failed");
+                    assert_eq!(
+                        suggestion1, suggestion2,
+                        "Suggestion determinism check failed"
+                    );
                 }
             }
         }
 
         // Always verify basic invariants after each operation
-        assert!(shadow.verify_lyapunov_properties(), "Basic Lyapunov properties violated");
+        assert!(
+            shadow.verify_lyapunov_properties(),
+            "Basic Lyapunov properties violated"
+        );
 
         // Prevent unbounded growth
         if shadow.properties.total_computations > MAX_OPERATIONS {
@@ -530,12 +594,12 @@ fuzz_target!(|input: LyapunovGovernorFuzzInput| {
 });
 
 /// Verify Lyapunov governor system invariants
-fn verify_lyapunov_governor_invariants(
-    _governor: &LyapunovGovernor,
-    shadow: &GovernorShadowModel,
-) {
+fn verify_lyapunov_governor_invariants(_governor: &LyapunovGovernor, shadow: &GovernorShadowModel) {
     // Verify shadow model consistency
-    assert!(shadow.verify_lyapunov_properties(), "Final Lyapunov properties verification failed");
+    assert!(
+        shadow.verify_lyapunov_properties(),
+        "Final Lyapunov properties verification failed"
+    );
 
     // Verify history consistency
     assert_eq!(
@@ -555,15 +619,14 @@ fn verify_lyapunov_governor_invariants(
         + shadow.properties.meet_deadline_suggestions
         + shadow.properties.no_preference_suggestions;
     assert_eq!(
-        total_suggestions,
-        shadow.properties.total_computations,
+        total_suggestions, shadow.properties.total_computations,
         "Total suggestions should equal total computations"
     );
 
     // Verify convergence trends (if we have enough data)
     if shadow.potential_history.len() >= 10 {
         let first_potential = shadow.potential_history[0];
-        let last_potential = shadow.potential_history.last().copied().unwrap();
+        let _last_potential = shadow.potential_history.last().copied().unwrap();
 
         // General trend should be toward lower potential (though not strictly monotonic)
         if first_potential > 0.0 && shadow.properties.potential_decreases > 0 {
@@ -577,7 +640,8 @@ fn verify_lyapunov_governor_invariants(
 
     // Verify no excessive violations
     if shadow.potential_history.len() >= 5 {
-        let violation_rate = shadow.properties.monotone_violations as f64 / shadow.potential_history.len() as f64;
+        let violation_rate =
+            shadow.properties.monotone_violations as f64 / shadow.potential_history.len() as f64;
         assert!(
             violation_rate < 0.5,
             "Monotone violation rate should be < 50%"
@@ -599,7 +663,10 @@ mod tests {
                 w_deadline_pressure: WeightValue::Large,
             },
             operations: vec![
-                GovernorOperation::SimulateObligationPressure { count: 10, age_multiplier: 5 },
+                GovernorOperation::SimulateObligationPressure {
+                    count: 10,
+                    age_multiplier: 5,
+                },
                 GovernorOperation::SimulateQuiescence,
                 GovernorOperation::SimulateDeadlinePressure { pressure: 50 },
                 GovernorOperation::VerifyInvariants,
@@ -638,10 +705,22 @@ mod tests {
                 w_deadline_pressure: WeightValue::Default,
             },
             operations: vec![
-                GovernorOperation::SimulateObligationPressure { count: 20, age_multiplier: 10 },
-                GovernorOperation::SimulateObligationPressure { count: 15, age_multiplier: 8 },
-                GovernorOperation::SimulateObligationPressure { count: 10, age_multiplier: 5 },
-                GovernorOperation::SimulateObligationPressure { count: 5, age_multiplier: 3 },
+                GovernorOperation::SimulateObligationPressure {
+                    count: 20,
+                    age_multiplier: 10,
+                },
+                GovernorOperation::SimulateObligationPressure {
+                    count: 15,
+                    age_multiplier: 8,
+                },
+                GovernorOperation::SimulateObligationPressure {
+                    count: 10,
+                    age_multiplier: 5,
+                },
+                GovernorOperation::SimulateObligationPressure {
+                    count: 5,
+                    age_multiplier: 3,
+                },
                 GovernorOperation::SimulateQuiescence,
                 GovernorOperation::AnalyzeConvergence,
                 GovernorOperation::VerifyInvariants,

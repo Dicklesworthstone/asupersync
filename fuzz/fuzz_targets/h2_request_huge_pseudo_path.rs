@@ -76,7 +76,7 @@ enum PathPattern {
     MixedComponents {
         path_segments: u32,
         query_params: u32,
-        fragment_length: u32
+        fragment_length: u32,
     },
 
     /// Deeply nested path: "/a/b/c/d/e/f/..." (many levels)
@@ -232,11 +232,11 @@ struct PathParsingResult {
 
 #[derive(Debug, Clone)]
 enum PathErrorType {
-    PathTooLong(usize),           // Actual length that was too long
-    MemoryLimitExceeded(usize),   // Memory usage that exceeded limit
-    ParseTimeExceeded(u32),       // Parse time that exceeded limit
-    InvalidCharacters,            // Invalid characters found
-    MalformedPath,               // Path structure is malformed
+    PathTooLong(usize),         // Actual length that was too long
+    MemoryLimitExceeded(usize), // Memory usage that exceeded limit
+    ParseTimeExceeded(u32),     // Parse time that exceeded limit
+    InvalidCharacters,          // Invalid characters found
+    MalformedPath,              // Path structure is malformed
 }
 
 #[derive(Debug, Clone, Default)]
@@ -278,7 +278,7 @@ impl MockHugePathConnection {
         // Stream ID validation
         if stream_id == 0 || stream_id % 2 == 0 {
             self.connection_error = Some(ConnectionError::ProtocolError(
-                "Invalid stream ID for client-initiated request".to_string()
+                "Invalid stream ID for client-initiated request".to_string(),
             ));
             return ProcessingResult::ConnectionError;
         }
@@ -302,7 +302,14 @@ impl MockHugePathConnection {
                     self.update_path_length_stats(path_length);
 
                     let error = PathErrorType::PathTooLong(path_length);
-                    self.record_parsing_result(stream_id, path_length, false, Some(error.clone()), 0, estimated_memory);
+                    self.record_parsing_result(
+                        stream_id,
+                        path_length,
+                        false,
+                        Some(error.clone()),
+                        0,
+                        estimated_memory,
+                    );
 
                     return ProcessingResult::PathTooLarge(format!(
                         "Path length {} exceeds maximum allowed {} bytes",
@@ -319,7 +326,14 @@ impl MockHugePathConnection {
             self.stats.total_paths_rejected += 1;
 
             let error = PathErrorType::ParseTimeExceeded(parsing_time);
-            self.record_parsing_result(stream_id, path_length, false, Some(error.clone()), parsing_time, estimated_memory);
+            self.record_parsing_result(
+                stream_id,
+                path_length,
+                false,
+                Some(error.clone()),
+                parsing_time,
+                estimated_memory,
+            );
 
             return ProcessingResult::ParseTimeExceeded(format!(
                 "Path parsing time {}ms exceeds maximum allowed {}ms",
@@ -330,7 +344,14 @@ impl MockHugePathConnection {
         // Validate path structure
         if let Err(error_type) = self.validate_path_structure(path) {
             self.stats.total_paths_rejected += 1;
-            self.record_parsing_result(stream_id, path_length, false, Some(error_type), parsing_time, estimated_memory);
+            self.record_parsing_result(
+                stream_id,
+                path_length,
+                false,
+                Some(error_type),
+                parsing_time,
+                estimated_memory,
+            );
             return ProcessingResult::ValidationError;
         }
 
@@ -362,7 +383,14 @@ impl MockHugePathConnection {
         self.resource_usage.large_paths_processed += 1;
 
         // Record successful parsing
-        self.record_parsing_result(stream_id, path_length, true, None, parsing_time, estimated_memory);
+        self.record_parsing_result(
+            stream_id,
+            path_length,
+            true,
+            None,
+            parsing_time,
+            estimated_memory,
+        );
 
         ProcessingResult::Success
     }
@@ -418,8 +446,15 @@ impl MockHugePathConnection {
     }
 
     /// Record parsing result for analysis
-    fn record_parsing_result(&mut self, stream_id: u32, path_length: usize, accepted: bool,
-                           error_type: Option<PathErrorType>, parsing_time: u32, memory_used: usize) {
+    fn record_parsing_result(
+        &mut self,
+        stream_id: u32,
+        path_length: usize,
+        accepted: bool,
+        error_type: Option<PathErrorType>,
+        parsing_time: u32,
+        memory_used: usize,
+    ) {
         let result = PathParsingResult {
             stream_id,
             path_length,
@@ -497,7 +532,10 @@ fn generate_path_of_length(length: usize, pattern: &PathPattern) -> String {
             path
         }
 
-        PathPattern::LongQueryString { base_path, param_count } => {
+        PathPattern::LongQueryString {
+            base_path,
+            param_count,
+        } => {
             let mut path = base_path.clone();
             if !path.starts_with('/') {
                 path = format!("/{}", path);
@@ -569,8 +607,7 @@ fn generate_path_of_length(length: usize, pattern: &PathPattern) -> String {
 fn generate_test_sizes() -> Vec<usize> {
     vec![
         // Small sizes
-        1, 10, 100, 512,
-        // Common boundaries
+        1, 10, 100, 512,     // Common boundaries
         1024,    // 1KB
         2048,    // 2KB
         4096,    // 4KB
@@ -583,8 +620,7 @@ fn generate_test_sizes() -> Vec<usize> {
         524288,  // 512KB
         1048576, // 1MB
         // Just above common limits
-        8193, 16385, 32769, 65537,
-        // Just below common limits
+        8193, 16385, 32769, 65537, // Just below common limits
         8191, 16383, 32767, 65535,
     ]
 }
@@ -600,30 +636,45 @@ fuzz_target!(|input: HugePathInput| {
 
     // Test standard boundary sizes
     let test_sizes = generate_test_sizes();
-    for (idx, &size) in test_sizes.iter().enumerate().take(15) { // Limit for performance
+    for (idx, &size) in test_sizes.iter().enumerate().take(15) {
+        // Limit for performance
         let stream_id = (idx as u32 * 2) + 1; // Ensure odd stream IDs
 
-        let path = generate_path_of_length(size, &PathPattern::RepeatedSegments {
-            segment: "segment".to_string(),
-            count: 100,
-        });
+        let path = generate_path_of_length(
+            size,
+            &PathPattern::RepeatedSegments {
+                segment: "segment".to_string(),
+                count: 100,
+            },
+        );
 
         let result = connection.process_headers_frame(stream_id, &path);
 
         // Verify behavior is consistent with configuration
         if let Some(max_length) = connection.config.expected_max_length {
             if size > max_length as usize && connection.config.error_on_oversized {
-                assert!(matches!(result, ProcessingResult::PathTooLarge(_)),
-                    "Path of size {} should be rejected when limit is {}", size, max_length);
+                assert!(
+                    matches!(result, ProcessingResult::PathTooLarge(_)),
+                    "Path of size {} should be rejected when limit is {}",
+                    size,
+                    max_length
+                );
             } else if size <= max_length as usize {
-                assert!(matches!(result, ProcessingResult::Success),
-                    "Path of size {} should be accepted when limit is {}", size, max_length);
+                assert!(
+                    matches!(result, ProcessingResult::Success),
+                    "Path of size {} should be accepted when limit is {}",
+                    size,
+                    max_length
+                );
             }
         }
 
         // Ensure no crashes or panics occurred
-        assert!(!matches!(result, ProcessingResult::ConnectionError),
-            "Connection should not error for size {}", size);
+        assert!(
+            !matches!(result, ProcessingResult::ConnectionError),
+            "Connection should not error for size {}",
+            size
+        );
     }
 
     // Test fuzzed input cases
@@ -634,10 +685,8 @@ fuzz_target!(|input: HugePathInput| {
             test_case.stream_id
         };
 
-        let path = generate_path_of_length(
-            test_case.target_length as usize,
-            &test_case.path_pattern
-        );
+        let path =
+            generate_path_of_length(test_case.target_length as usize, &test_case.path_pattern);
 
         let result = connection.process_headers_frame(stream_id, &path);
 
@@ -646,25 +695,35 @@ fuzz_target!(|input: HugePathInput| {
             ExpectedBehavior::Accept => {
                 if let Some(max_length) = connection.config.expected_max_length {
                     if test_case.target_length <= max_length {
-                        assert_eq!(result, ProcessingResult::Success,
-                            "Expected path of length {} to be accepted", test_case.target_length);
+                        assert_eq!(
+                            result,
+                            ProcessingResult::Success,
+                            "Expected path of length {} to be accepted",
+                            test_case.target_length
+                        );
                     }
                 }
             }
 
             ExpectedBehavior::Reject => {
                 if let Some(max_length) = connection.config.expected_max_length {
-                    if test_case.target_length > max_length && connection.config.error_on_oversized {
-                        assert!(matches!(result, ProcessingResult::PathTooLarge(_)),
-                            "Expected path of length {} to be rejected", test_case.target_length);
+                    if test_case.target_length > max_length && connection.config.error_on_oversized
+                    {
+                        assert!(
+                            matches!(result, ProcessingResult::PathTooLarge(_)),
+                            "Expected path of length {} to be rejected",
+                            test_case.target_length
+                        );
                     }
                 }
             }
 
             ExpectedBehavior::ImplementationDefined => {
                 // Either accept or reject is fine - just ensure no crash
-                assert!(!matches!(result, ProcessingResult::ConnectionError),
-                    "Should not cause connection error");
+                assert!(
+                    !matches!(result, ProcessingResult::ConnectionError),
+                    "Should not cause connection error"
+                );
             }
         }
     }
@@ -673,33 +732,46 @@ fuzz_target!(|input: HugePathInput| {
     for boundary_test in &input.boundary_tests {
         match boundary_test {
             BoundaryTest::CommonLimits { base_sizes } => {
-                for &size in base_sizes.iter().take(5) { // Limit for performance
-                    let path = generate_path_of_length(size as usize, &PathPattern::SingleLongSegment {
-                        base: "test".to_string(),
-                    });
+                for &size in base_sizes.iter().take(5) {
+                    // Limit for performance
+                    let path = generate_path_of_length(
+                        size as usize,
+                        &PathPattern::SingleLongSegment {
+                            base: "test".to_string(),
+                        },
+                    );
 
                     let result = connection.process_headers_frame(201, &path);
 
                     // Verify consistent behavior around limits
                     if let Some(max_length) = connection.config.expected_max_length {
                         if size > max_length && connection.config.error_on_oversized {
-                            assert!(matches!(result, ProcessingResult::PathTooLarge(_)),
-                                "Size {} should be rejected at limit {}", size, max_length);
+                            assert!(
+                                matches!(result, ProcessingResult::PathTooLarge(_)),
+                                "Size {} should be rejected at limit {}",
+                                size,
+                                max_length
+                            );
                         }
                     }
                 }
             }
 
             BoundaryTest::PowerOfTwo { max_power } => {
-                for power in 10..=(*max_power).min(20) { // 1KB to 1MB max
+                for power in 10..=(*max_power).min(20) {
+                    // 1KB to 1MB max
                     let size = 1usize << power;
-                    let path = generate_path_of_length(size, &PathPattern::DeeplyNested { depth: 100 });
+                    let path =
+                        generate_path_of_length(size, &PathPattern::DeeplyNested { depth: 100 });
 
                     let result = connection.process_headers_frame(301 + power as u32, &path);
 
                     // Ensure graceful handling of power-of-2 sizes
-                    assert!(!matches!(result, ProcessingResult::ConnectionError),
-                        "Power-of-2 size {} should not cause connection error", size);
+                    assert!(
+                        !matches!(result, ProcessingResult::ConnectionError),
+                        "Power-of-2 size {} should not cause connection error",
+                        size
+                    );
                 }
             }
 
@@ -710,12 +782,16 @@ fuzz_target!(|input: HugePathInput| {
     }
 
     // Test security scenarios
-    for security_test in &input.security_tests.iter().take(3) { // Limit for performance
+    for security_test in input.security_tests.iter().take(3) {
+        // Limit for performance
         match security_test {
             SecurityTest::MemoryExhaustion { size } => {
-                let large_path = generate_path_of_length(*size as usize, &PathPattern::SingleLongSegment {
-                    base: "memory-test".to_string(),
-                });
+                let large_path = generate_path_of_length(
+                    *size as usize,
+                    &PathPattern::SingleLongSegment {
+                        base: "memory-test".to_string(),
+                    },
+                );
 
                 let result = connection.process_headers_frame(401, &large_path);
 
@@ -723,26 +799,33 @@ fuzz_target!(|input: HugePathInput| {
                 match result {
                     ProcessingResult::Success => {
                         // Memory usage should be tracked and bounded
-                        assert!(connection.resource_usage.peak_memory_bytes < 10_000_000, // 10MB limit
-                            "Memory usage should be bounded");
+                        assert!(
+                            connection.resource_usage.peak_memory_bytes < 10_000_000, // 10MB limit
+                            "Memory usage should be bounded"
+                        );
                     }
                     ProcessingResult::PathTooLarge(_) => {
                         // Clean rejection is acceptable
                     }
                     _ => {
                         // Other results should not indicate resource exhaustion
-                        assert!(!matches!(result, ProcessingResult::ConnectionError),
-                            "Should not cause connection error due to memory");
+                        assert!(
+                            !matches!(result, ProcessingResult::ConnectionError),
+                            "Should not cause connection error due to memory"
+                        );
                     }
                 }
             }
 
             SecurityTest::ParseTimeAttack { complexity: _ } => {
                 // Test path with high parsing complexity
-                let complex_path = generate_path_of_length(10000, &PathPattern::LongQueryString {
-                    base_path: "/complex".to_string(),
-                    param_count: 1000,
-                });
+                let complex_path = generate_path_of_length(
+                    10000,
+                    &PathPattern::LongQueryString {
+                        base_path: "/complex".to_string(),
+                        param_count: 1000,
+                    },
+                );
 
                 let result = connection.process_headers_frame(501, &complex_path);
 
@@ -754,8 +837,10 @@ fuzz_target!(|input: HugePathInput| {
                     ProcessingResult::Success => {
                         // Should have completed quickly
                         if let Some(stream) = connection.streams.get(&501) {
-                            assert!(stream.parsing_time_ms < 5000, // 5 second max
-                                "Parse time should be bounded");
+                            assert!(
+                                stream.parsing_time_ms < 5000, // 5 second max
+                                "Parse time should be bounded"
+                            );
                         }
                     }
                     _ => {
@@ -780,37 +865,58 @@ fuzz_target!(|input: HugePathInput| {
     );
 
     // Verify resource usage bounds
-    assert!(status.resource_usage.peak_memory_bytes < 100_000_000, // 100MB absolute max
-        "Memory usage should stay within reasonable bounds");
+    assert!(
+        status.resource_usage.peak_memory_bytes < 100_000_000, // 100MB absolute max
+        "Memory usage should stay within reasonable bounds"
+    );
 
-    assert!(status.resource_usage.total_parsing_time_ms < 60000, // 1 minute total
-        "Total parsing time should be bounded");
+    assert!(
+        status.resource_usage.total_parsing_time_ms < 60000, // 1 minute total
+        "Total parsing time should be bounded"
+    );
 
     // Test that normal small paths still work
     let small_path = "/normal/path";
     let result = connection.process_headers_frame(9001, small_path);
-    assert_eq!(result, ProcessingResult::Success,
-        "Normal small paths should always work");
+    assert_eq!(
+        result,
+        ProcessingResult::Success,
+        "Normal small paths should always work"
+    );
 
     // Test exact boundary if configured
     if let Some(max_length) = connection.config.expected_max_length {
         // Test exactly at limit
-        let boundary_path = generate_path_of_length(max_length as usize, &PathPattern::SingleLongSegment {
-            base: "boundary".to_string(),
-        });
+        let boundary_path = generate_path_of_length(
+            max_length as usize,
+            &PathPattern::SingleLongSegment {
+                base: "boundary".to_string(),
+            },
+        );
         let result = connection.process_headers_frame(9003, &boundary_path);
-        assert_eq!(result, ProcessingResult::Success,
-            "Path exactly at limit {} should be accepted", max_length);
+        assert_eq!(
+            result,
+            ProcessingResult::Success,
+            "Path exactly at limit {} should be accepted",
+            max_length
+        );
 
         // Test just over limit
-        if max_length < 1_000_000 { // Only if limit is reasonable
-            let over_limit_path = generate_path_of_length(max_length as usize + 1, &PathPattern::SingleLongSegment {
-                base: "over-limit".to_string(),
-            });
+        if max_length < 1_000_000 {
+            // Only if limit is reasonable
+            let over_limit_path = generate_path_of_length(
+                max_length as usize + 1,
+                &PathPattern::SingleLongSegment {
+                    base: "over-limit".to_string(),
+                },
+            );
             let result = connection.process_headers_frame(9005, &over_limit_path);
             if connection.config.error_on_oversized {
-                assert!(matches!(result, ProcessingResult::PathTooLarge(_)),
-                    "Path over limit {} should be rejected", max_length);
+                assert!(
+                    matches!(result, ProcessingResult::PathTooLarge(_)),
+                    "Path over limit {} should be rejected",
+                    max_length
+                );
             }
         }
     }

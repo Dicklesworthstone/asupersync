@@ -27,8 +27,8 @@
 //! - RFC 7540 §8.1.2.4: Response pseudo-header fields
 //! - RFC 7541 §6.1: Indexed header field representation
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -325,10 +325,17 @@ impl MockExcessivePseudoHeadersConnection {
     }
 
     /// Check if two results match (for consistency validation)
-    fn results_match(&self, result1: &ExcessiveHeadersResult, result2: &ExcessiveHeadersResult) -> bool {
+    fn results_match(
+        &self,
+        result1: &ExcessiveHeadersResult,
+        result2: &ExcessiveHeadersResult,
+    ) -> bool {
         match (result1, result2) {
             (ExcessiveHeadersResult::Accepted, ExcessiveHeadersResult::Accepted) => true,
-            (ExcessiveHeadersResult::ProtocolError(_), ExcessiveHeadersResult::ProtocolError(_)) => true,
+            (
+                ExcessiveHeadersResult::ProtocolError(_),
+                ExcessiveHeadersResult::ProtocolError(_),
+            ) => true,
             _ => false,
         }
     }
@@ -453,110 +460,297 @@ impl ExcessivePseudoHeadersInput {
         let mut headers = Vec::new();
 
         // Start with standard 4 pseudo-headers
-        let method = if self.method.is_empty() { "GET".to_string() } else { self.method.clone() };
-        let scheme = if self.scheme.is_empty() { "https".to_string() } else { self.scheme.clone() };
-        let path = if self.path.is_empty() { "/api/test".to_string() } else { self.path.clone() };
-        let authority = if self.authority.is_empty() { "example.com".to_string() } else { self.authority.clone() };
+        let method = if self.method.is_empty() {
+            "GET".to_string()
+        } else {
+            self.method.clone()
+        };
+        let scheme = if self.scheme.is_empty() {
+            "https".to_string()
+        } else {
+            self.scheme.clone()
+        };
+        let path = if self.path.is_empty() {
+            "/api/test".to_string()
+        } else {
+            self.path.clone()
+        };
+        let authority = if self.authority.is_empty() {
+            "example.com".to_string()
+        } else {
+            self.authority.clone()
+        };
 
         match &self.scenario {
             ExcessivePseudoHeadersScenario::DuplicateMethod => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method.clone() });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
                 // Add duplicate :method
-                headers.push(PseudoHeader { name: ":method".to_string(), value: "POST".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: "POST".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::DuplicateScheme => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme.clone() });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method,
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
                 // Add duplicate :scheme
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: "http".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: "http".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::DuplicatePath => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path.clone() });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method,
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
                 // Add duplicate :path
-                headers.push(PseudoHeader { name: ":path".to_string(), value: "/different".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: "/different".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::DuplicateAuthority => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority.clone() });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method,
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority.clone(),
+                });
                 // Add duplicate :authority
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: "other.com".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: "other.com".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::InvalidPseudoName => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method,
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
                 // Add invalid pseudo-header name
-                headers.push(PseudoHeader { name: ":custom".to_string(), value: "invalid".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":custom".to_string(),
+                    value: "invalid".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::StatusInRequest => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method,
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
                 // Add :status (invalid in request)
-                headers.push(PseudoHeader { name: ":status".to_string(), value: "200".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":status".to_string(),
+                    value: "200".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::MultipleDuplicates => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method.clone() });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme.clone() });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path.clone() });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority.clone() });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority.clone(),
+                });
                 // Add multiple duplicates
-                headers.push(PseudoHeader { name: ":method".to_string(), value: "POST".to_string() });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: "http".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: "POST".to_string(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: "http".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::LongPseudoNames => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method,
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
                 // Add very long pseudo-header name
-                let long_name = format!(":verylongcustompseudoheadernamethatexceedsnormallimits{}", "x".repeat(100));
-                headers.push(PseudoHeader { name: long_name, value: "value".to_string() });
+                let long_name = format!(
+                    ":verylongcustompseudoheadernamethatexceedsnormallimits{}",
+                    "x".repeat(100)
+                );
+                headers.push(PseudoHeader {
+                    name: long_name,
+                    value: "value".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::MixedViolations => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method.clone() });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
                 // Add both duplicate and invalid name
-                headers.push(PseudoHeader { name: ":method".to_string(), value: "POST".to_string() });
-                headers.push(PseudoHeader { name: ":custom".to_string(), value: "invalid".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: "POST".to_string(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":custom".to_string(),
+                    value: "invalid".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::ConflictingDuplicates => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method.clone() });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
                 // Add conflicting duplicate with different value
-                headers.push(PseudoHeader { name: ":method".to_string(), value: "PATCH".to_string() });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: "PATCH".to_string(),
+                });
             }
 
             ExcessivePseudoHeadersScenario::ExtremeCount => {
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method.clone() });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme.clone() });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path.clone() });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority.clone() });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path.clone(),
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority.clone(),
+                });
 
                 // Add many more pseudo-headers
                 let count = (self.count_multiplier as usize % 10) + 6;
@@ -570,10 +764,22 @@ impl ExcessivePseudoHeadersInput {
 
             ExcessivePseudoHeadersScenario::ValidStandard => {
                 // Valid case: exactly 4 standard pseudo-headers
-                headers.push(PseudoHeader { name: ":method".to_string(), value: method });
-                headers.push(PseudoHeader { name: ":scheme".to_string(), value: scheme });
-                headers.push(PseudoHeader { name: ":path".to_string(), value: path });
-                headers.push(PseudoHeader { name: ":authority".to_string(), value: authority });
+                headers.push(PseudoHeader {
+                    name: ":method".to_string(),
+                    value: method,
+                });
+                headers.push(PseudoHeader {
+                    name: ":scheme".to_string(),
+                    value: scheme,
+                });
+                headers.push(PseudoHeader {
+                    name: ":path".to_string(),
+                    value: path,
+                });
+                headers.push(PseudoHeader {
+                    name: ":authority".to_string(),
+                    value: authority,
+                });
             }
         }
 
@@ -611,7 +817,10 @@ fuzz_target!(|input: ExcessivePseudoHeadersInput| {
         ExcessiveHeadersResult::Accepted => {
             // Should only be accepted if exactly 4 unique standard pseudo-headers
             if pseudo_count > 4 {
-                panic!("RFC 7540 violation: {} pseudo-headers should be rejected (max 4)", pseudo_count);
+                panic!(
+                    "RFC 7540 violation: {} pseudo-headers should be rejected (max 4)",
+                    pseudo_count
+                );
             }
         }
         ExcessiveHeadersResult::ProtocolError(_reason) => {
@@ -622,28 +831,33 @@ fuzz_target!(|input: ExcessivePseudoHeadersInput| {
     // Test consistency: same input should yield same result
     let result2 = connection.handle_excessive_headers_request(&headers);
     if !connection.results_match(&result, &result2) {
-        panic!("Inconsistent excessive headers validation: {:?} != {:?}",
-               result, result2);
+        panic!(
+            "Inconsistent excessive headers validation: {:?} != {:?}",
+            result, result2
+        );
     }
 
     // Generate statistics for analysis
     let _stats = connection.generate_statistics();
 
     // Verify no consistency violations were detected internally
-    assert_eq!(*connection.consistency_violations.lock().unwrap(), 0,
-               "Internal consistency violations detected");
+    assert_eq!(
+        *connection.consistency_violations.lock().unwrap(),
+        0,
+        "Internal consistency violations detected"
+    );
 
     // For excessive pseudo-header scenarios, verify rejection
     match input.scenario {
-        ExcessivePseudoHeadersScenario::DuplicateMethod |
-        ExcessivePseudoHeadersScenario::DuplicateScheme |
-        ExcessivePseudoHeadersScenario::DuplicatePath |
-        ExcessivePseudoHeadersScenario::DuplicateAuthority |
-        ExcessivePseudoHeadersScenario::InvalidPseudoName |
-        ExcessivePseudoHeadersScenario::StatusInRequest |
-        ExcessivePseudoHeadersScenario::MultipleDuplicates |
-        ExcessivePseudoHeadersScenario::MixedViolations |
-        ExcessivePseudoHeadersScenario::ExtremeCount => {
+        ExcessivePseudoHeadersScenario::DuplicateMethod
+        | ExcessivePseudoHeadersScenario::DuplicateScheme
+        | ExcessivePseudoHeadersScenario::DuplicatePath
+        | ExcessivePseudoHeadersScenario::DuplicateAuthority
+        | ExcessivePseudoHeadersScenario::InvalidPseudoName
+        | ExcessivePseudoHeadersScenario::StatusInRequest
+        | ExcessivePseudoHeadersScenario::MultipleDuplicates
+        | ExcessivePseudoHeadersScenario::MixedViolations
+        | ExcessivePseudoHeadersScenario::ExtremeCount => {
             match result {
                 ExcessiveHeadersResult::ProtocolError(_) => {
                     // Correct: excessive pseudo-headers should be rejected

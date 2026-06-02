@@ -25,8 +25,8 @@
 //! - RFC 7540 §8.1.2.3: :authority pseudo-header requirements
 //! - RFC 6874: IPv6 Zone ID representation
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -444,14 +444,26 @@ impl InvalidAuthorityInput {
         match &self.scenario {
             InvalidAuthorityScenario::AtHostnamePort => {
                 // Primary test case: @hostname:port
-                let host = if self.hostname.is_empty() { "example.com" } else { &self.hostname };
-                let port = if self.port.is_empty() { "8080" } else { &self.port };
+                let host = if self.hostname.is_empty() {
+                    "example.com"
+                } else {
+                    &self.hostname
+                };
+                let port = if self.port.is_empty() {
+                    "8080"
+                } else {
+                    &self.port
+                };
                 format!("@{}:{}", host, port)
             }
 
             InvalidAuthorityScenario::AtHostnameOnly => {
                 // @hostname without port
-                let host = if self.hostname.is_empty() { "example.com" } else { &self.hostname };
+                let host = if self.hostname.is_empty() {
+                    "example.com"
+                } else {
+                    &self.hostname
+                };
                 format!("@{}", host)
             }
 
@@ -462,19 +474,31 @@ impl InvalidAuthorityInput {
 
             InvalidAuthorityScenario::AtPortOnly => {
                 // @:port (missing hostname)
-                let port = if self.port.is_empty() { "8080" } else { &self.port };
+                let port = if self.port.is_empty() {
+                    "8080"
+                } else {
+                    &self.port
+                };
                 format!("@:{}", port)
             }
 
             InvalidAuthorityScenario::AtHostnameNoPort => {
                 // @hostname: (missing port number)
-                let host = if self.hostname.is_empty() { "example.com" } else { &self.hostname };
+                let host = if self.hostname.is_empty() {
+                    "example.com"
+                } else {
+                    &self.hostname
+                };
                 format!("@{}:", host)
             }
 
             InvalidAuthorityScenario::MultipleAtSymbols => {
                 // Multiple @ symbols (various patterns)
-                let host = if self.hostname.is_empty() { "example.com" } else { &self.hostname };
+                let host = if self.hostname.is_empty() {
+                    "example.com"
+                } else {
+                    &self.hostname
+                };
                 format!("@@{}", host)
             }
 
@@ -485,7 +509,11 @@ impl InvalidAuthorityInput {
 
             InvalidAuthorityScenario::EncodedAtPattern => {
                 // Percent-encoded patterns
-                let host = if self.hostname.is_empty() { "example.com" } else { &self.hostname };
+                let host = if self.hostname.is_empty() {
+                    "example.com"
+                } else {
+                    &self.hostname
+                };
                 format!("@{}%2E{}", host, self.extra_chars)
             }
 
@@ -508,7 +536,11 @@ impl InvalidAuthorityInput {
 
             InvalidAuthorityScenario::ValidAuthority => {
                 // Valid authority for comparison (no @ prefix)
-                let host = if self.hostname.is_empty() { "example.com" } else { &self.hostname };
+                let host = if self.hostname.is_empty() {
+                    "example.com"
+                } else {
+                    &self.hostname
+                };
                 if self.port.is_empty() {
                     host.to_string()
                 } else {
@@ -518,7 +550,11 @@ impl InvalidAuthorityInput {
 
             InvalidAuthorityScenario::MalformedAuthority => {
                 // Malformed authority with invalid encoding
-                let host = if self.hostname.is_empty() { "example.com" } else { &self.hostname };
+                let host = if self.hostname.is_empty() {
+                    "example.com"
+                } else {
+                    &self.hostname
+                };
                 format!("@{}%GG:{}", host, self.port)
             }
         }
@@ -553,7 +589,10 @@ fuzz_target!(|input: InvalidAuthorityInput| {
         AuthorityResult::Accepted => {
             // Should only be accepted if authority doesn't start with @
             if authority.starts_with('@') {
-                panic!("RFC 3986 violation: authority starting with '@' should be rejected: '{}'", authority);
+                panic!(
+                    "RFC 3986 violation: authority starting with '@' should be rejected: '{}'",
+                    authority
+                );
             }
         }
         AuthorityResult::BadRequest(_reason) => {
@@ -567,24 +606,29 @@ fuzz_target!(|input: InvalidAuthorityInput| {
     // Test consistency: same input should yield same result
     let result2 = connection.handle_authority_request(&authority);
     if !connection.results_match(&result, &result2) {
-        panic!("Inconsistent authority validation: {:?} != {:?} for authority: '{}'",
-               result, result2, authority);
+        panic!(
+            "Inconsistent authority validation: {:?} != {:?} for authority: '{}'",
+            result, result2, authority
+        );
     }
 
     // Generate statistics for analysis
     let _stats = connection.generate_statistics();
 
     // Verify no consistency violations were detected internally
-    assert_eq!(*connection.consistency_violations.lock().unwrap(), 0,
-               "Internal consistency violations detected");
+    assert_eq!(
+        *connection.consistency_violations.lock().unwrap(),
+        0,
+        "Internal consistency violations detected"
+    );
 
     // For the primary test cases (@ prefix), verify rejection
     match input.scenario {
-        InvalidAuthorityScenario::AtHostnamePort |
-        InvalidAuthorityScenario::AtHostnameOnly |
-        InvalidAuthorityScenario::JustAtSymbol |
-        InvalidAuthorityScenario::AtPortOnly |
-        InvalidAuthorityScenario::AtHostnameNoPort => {
+        InvalidAuthorityScenario::AtHostnamePort
+        | InvalidAuthorityScenario::AtHostnameOnly
+        | InvalidAuthorityScenario::JustAtSymbol
+        | InvalidAuthorityScenario::AtPortOnly
+        | InvalidAuthorityScenario::AtHostnameNoPort => {
             if authority.starts_with('@') {
                 match result {
                     AuthorityResult::BadRequest(_) => {
@@ -594,7 +638,10 @@ fuzz_target!(|input: InvalidAuthorityInput| {
                         // Also correct if treated as protocol error
                     }
                     AuthorityResult::Accepted => {
-                        panic!("RFC 3986 violation: authority starting with '@' should be rejected: '{}'", authority);
+                        panic!(
+                            "RFC 3986 violation: authority starting with '@' should be rejected: '{}'",
+                            authority
+                        );
                     }
                 }
             }

@@ -27,8 +27,8 @@
 //! - RFC 5952: IPv6 address representation recommendations
 //! - RFC 7540 §8.1.2.3: :authority pseudo-header requirements
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -252,15 +252,13 @@ impl MockMalformedIPv6Connection {
 
         // Check for incomplete compression patterns
         analysis.has_incomplete_compression =
-            ipv6_addr.contains(":::") ||
-            ipv6_addr.starts_with(":::")  ||
-            ipv6_addr.ends_with(":::");
+            ipv6_addr.contains(":::") || ipv6_addr.starts_with(":::") || ipv6_addr.ends_with(":::");
 
         // Check for colon placement errors
-        analysis.has_colon_placement_errors =
-            ipv6_addr.starts_with(":") && !ipv6_addr.starts_with("::") ||
-            ipv6_addr.ends_with(":") && !ipv6_addr.ends_with("::") ||
-            ipv6_addr.contains(":::");
+        analysis.has_colon_placement_errors = ipv6_addr.starts_with(":")
+            && !ipv6_addr.starts_with("::")
+            || ipv6_addr.ends_with(":") && !ipv6_addr.ends_with("::")
+            || ipv6_addr.contains(":::");
 
         // Handle zone ID if present
         let (clean_addr, zone_part) = if let Some(percent_pos) = ipv6_addr.find('%') {
@@ -268,10 +266,10 @@ impl MockMalformedIPv6Connection {
             let zone_part = &ipv6_addr[percent_pos + 1..];
 
             // Basic zone ID validation
-            analysis.has_zone_id_errors = zone_part.is_empty() ||
-                                         zone_part.contains(':') ||
-                                         zone_part.contains('[') ||
-                                         zone_part.contains(']');
+            analysis.has_zone_id_errors = zone_part.is_empty()
+                || zone_part.contains(':')
+                || zone_part.contains('[')
+                || zone_part.contains(']');
 
             (addr_part, Some(zone_part))
         } else {
@@ -289,8 +287,16 @@ impl MockMalformedIPv6Connection {
             // Handle compressed form
             let parts: Vec<&str> = clean_addr.split("::").collect();
             if parts.len() == 2 {
-                let left_groups = if parts[0].is_empty() { Vec::new() } else { parts[0].split(':').collect() };
-                let right_groups = if parts[1].is_empty() { Vec::new() } else { parts[1].split(':').collect() };
+                let left_groups = if parts[0].is_empty() {
+                    Vec::new()
+                } else {
+                    parts[0].split(':').collect()
+                };
+                let right_groups = if parts[1].is_empty() {
+                    Vec::new()
+                } else {
+                    parts[1].split(':').collect()
+                };
 
                 let total_explicit_groups = left_groups.len() + right_groups.len();
 
@@ -319,17 +325,16 @@ impl MockMalformedIPv6Connection {
         }
 
         // Overall malformation flag
-        analysis.is_malformed =
-            analysis.has_double_compression ||
-            analysis.has_too_many_groups ||
-            analysis.has_invalid_hex_digits ||
-            analysis.has_invalid_group_lengths ||
-            analysis.has_invalid_characters ||
-            analysis.has_incomplete_compression ||
-            analysis.has_colon_placement_errors ||
-            analysis.has_malformed_ipv4_mapped ||
-            analysis.has_empty_group_errors ||
-            analysis.has_zone_id_errors;
+        analysis.is_malformed = analysis.has_double_compression
+            || analysis.has_too_many_groups
+            || analysis.has_invalid_hex_digits
+            || analysis.has_invalid_group_lengths
+            || analysis.has_invalid_characters
+            || analysis.has_incomplete_compression
+            || analysis.has_colon_placement_errors
+            || analysis.has_malformed_ipv4_mapped
+            || analysis.has_empty_group_errors
+            || analysis.has_zone_id_errors;
     }
 
     /// Validate individual IPv6 group
@@ -505,7 +510,7 @@ impl MalformedIPv6Input {
                     "[::1::]",
                     "[:::]",
                     "[2001::db8::1]",
-                    "[::ffff::1]"
+                    "[::ffff::1]",
                 ];
                 let index = (self.variation as usize) % patterns.len();
                 let base = patterns[index];
@@ -522,7 +527,7 @@ impl MalformedIPv6Input {
                 let malformed_addresses = [
                     "[1:2:3:4:5:6:7:8:9]",
                     "[2001:db8:85a3:0000:0000:8a2e:0370:7334:extra]",
-                    "[1:2:3:4:5:6:7:8:9:a:b:c]"
+                    "[1:2:3:4:5:6:7:8:9:a:b:c]",
                 ];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 malformed_addresses[index].to_string()
@@ -534,7 +539,7 @@ impl MalformedIPv6Input {
                     "[2001:gggg::1]",
                     "[2001:db8::xyz]",
                     "[abcde::1z]",
-                    "[2001:ghij::]"
+                    "[2001:ghij::]",
                 ];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 malformed_addresses[index].to_string()
@@ -546,7 +551,7 @@ impl MalformedIPv6Input {
                     "[2001:12345::1]",
                     "[abcdef::1]",
                     "[1:22222::]",
-                    "[123456::]"
+                    "[123456::]",
                 ];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 malformed_addresses[index].to_string()
@@ -558,7 +563,7 @@ impl MalformedIPv6Input {
                     "[2001:db8::1@]",
                     "[2001:db8::1!]",
                     "[2001:db8::1#]",
-                    "[2001:db8::1$]"
+                    "[2001:db8::1$]",
                 ];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 malformed_addresses[index].to_string()
@@ -566,24 +571,14 @@ impl MalformedIPv6Input {
 
             MalformedIPv6Scenario::IncompleteCompression => {
                 // Incomplete compression patterns
-                let malformed_addresses = [
-                    "[2001:db8:::1]",
-                    "[2001:::]",
-                    "[:::1]",
-                    "[:::]"
-                ];
+                let malformed_addresses = ["[2001:db8:::1]", "[2001:::]", "[:::1]", "[:::]"];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 malformed_addresses[index].to_string()
             }
 
             MalformedIPv6Scenario::ColonPlacementErrors => {
                 // Colon placement errors
-                let malformed_addresses = [
-                    "[2001:db8::]:",
-                    ":[::1]",
-                    "[::1]:",
-                    "[:2001:db8::]"
-                ];
+                let malformed_addresses = ["[2001:db8::]:", ":[::1]", "[::1]:", "[:2001:db8::]"];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 malformed_addresses[index].to_string()
             }
@@ -594,7 +589,7 @@ impl MalformedIPv6Input {
                     "[::ffff:999.999.999.999]",
                     "[::ffff:192.0.2]",
                     "[::ffff:192.0.2.1.1]",
-                    "[::ffff:300.0.0.1]"
+                    "[::ffff:300.0.0.1]",
                 ];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 malformed_addresses[index].to_string()
@@ -602,12 +597,7 @@ impl MalformedIPv6Input {
 
             MalformedIPv6Scenario::EmptyGroupErrors => {
                 // Empty groups in wrong places
-                let malformed_addresses = [
-                    "[:1::]",
-                    "[2001:::]",
-                    "[::1:]",
-                    "[1::]"
-                ];
+                let malformed_addresses = ["[:1::]", "[2001:::]", "[::1:]", "[1::]"];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 malformed_addresses[index].to_string()
             }
@@ -618,7 +608,7 @@ impl MalformedIPv6Input {
                     "[2001:db8::1%:]",
                     "[2001:db8::1%eth0:]",
                     "[fe80::1%]",
-                    "[fe80::1%eth[0]]"
+                    "[fe80::1%eth[0]]",
                 ];
                 let index = (self.variation as usize) % malformed_addresses.len();
                 let base = malformed_addresses[index];
@@ -636,7 +626,7 @@ impl MalformedIPv6Input {
                     "[::1]",
                     "[2001:db8::1]",
                     "[fe80::1%eth0]",
-                    "[::ffff:192.0.2.1]"
+                    "[::ffff:192.0.2.1]",
                 ];
                 let index = (self.variation as usize) % valid_addresses.len();
                 let base = valid_addresses[index];
@@ -687,29 +677,34 @@ fuzz_target!(|input: MalformedIPv6Input| {
     // Test consistency: same input should yield same result
     let result2 = connection.handle_malformed_ipv6_request(&authority);
     if !connection.results_match(&result, &result2) {
-        panic!("Inconsistent malformed IPv6 validation: {:?} != {:?} for authority: '{}'",
-               result, result2, authority);
+        panic!(
+            "Inconsistent malformed IPv6 validation: {:?} != {:?} for authority: '{}'",
+            result, result2, authority
+        );
     }
 
     // Generate statistics for analysis
     let _stats = connection.generate_statistics();
 
     // Verify no consistency violations were detected internally
-    assert_eq!(*connection.consistency_violations.lock().unwrap(), 0,
-               "Internal consistency violations detected");
+    assert_eq!(
+        *connection.consistency_violations.lock().unwrap(),
+        0,
+        "Internal consistency violations detected"
+    );
 
     // For malformed IPv6 scenarios, verify rejection
     match input.scenario {
-        MalformedIPv6Scenario::DoubleCompression |
-        MalformedIPv6Scenario::TooManyGroups |
-        MalformedIPv6Scenario::InvalidHexDigits |
-        MalformedIPv6Scenario::InvalidGroupLength |
-        MalformedIPv6Scenario::InvalidCharacters |
-        MalformedIPv6Scenario::IncompleteCompression |
-        MalformedIPv6Scenario::ColonPlacementErrors |
-        MalformedIPv6Scenario::MalformedIPv4Mapped |
-        MalformedIPv6Scenario::EmptyGroupErrors |
-        MalformedIPv6Scenario::ZoneIDErrors => {
+        MalformedIPv6Scenario::DoubleCompression
+        | MalformedIPv6Scenario::TooManyGroups
+        | MalformedIPv6Scenario::InvalidHexDigits
+        | MalformedIPv6Scenario::InvalidGroupLength
+        | MalformedIPv6Scenario::InvalidCharacters
+        | MalformedIPv6Scenario::IncompleteCompression
+        | MalformedIPv6Scenario::ColonPlacementErrors
+        | MalformedIPv6Scenario::MalformedIPv4Mapped
+        | MalformedIPv6Scenario::EmptyGroupErrors
+        | MalformedIPv6Scenario::ZoneIDErrors => {
             match result {
                 MalformedIPv6Result::BadRequest(_) => {
                     // Correct: malformed IPv6 should be rejected
@@ -718,13 +713,22 @@ fuzz_target!(|input: MalformedIPv6Input| {
                     // Only acceptable if the generated authority is actually valid
                     // Check for common malformation patterns
                     if authority.contains("::") && authority.matches("::").count() > 1 {
-                        panic!("RFC 4291 violation: double :: compression '{}' should be rejected", authority);
+                        panic!(
+                            "RFC 4291 violation: double :: compression '{}' should be rejected",
+                            authority
+                        );
                     }
                     if authority.contains(":::") {
-                        panic!("RFC 4291 violation: incomplete compression '{}' should be rejected", authority);
+                        panic!(
+                            "RFC 4291 violation: incomplete compression '{}' should be rejected",
+                            authority
+                        );
                     }
                     if authority.matches(':').count() > 8 {
-                        panic!("RFC 4291 violation: too many colons '{}' should be rejected", authority);
+                        panic!(
+                            "RFC 4291 violation: too many colons '{}' should be rejected",
+                            authority
+                        );
                     }
                 }
             }

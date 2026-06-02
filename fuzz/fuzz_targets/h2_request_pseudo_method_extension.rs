@@ -26,8 +26,8 @@
 //! - RFC 4918: WebDAV extension methods
 //! - RFC 7540 §8.1.2.3: :method pseudo-header requirements
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -231,25 +231,39 @@ impl MockExtensionMethodConnection {
         // Check for special characters (not valid in HTTP tokens)
         analysis.has_special_chars = method.chars().any(|c| {
             match c {
-                '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' |
-                '^' | '_' | '`' | '|' | '~' => false, // Valid token characters
-                _ if c.is_alphanumeric() => false,     // Alphanumeric is valid
-                _ => true,                             // Everything else is special/invalid
+                '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`'
+                | '|' | '~' => false, // Valid token characters
+                _ if c.is_alphanumeric() => false, // Alphanumeric is valid
+                _ => true,                         // Everything else is special/invalid
             }
         });
 
         // Check for standard HTTP methods
-        analysis.is_standard_method = matches!(method,
-            "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" |
-            "TRACE" | "CONNECT" | "PATCH"
+        analysis.is_standard_method = matches!(
+            method,
+            "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "TRACE" | "CONNECT" | "PATCH"
         );
 
         // Check for well-known extension methods
-        analysis.is_webdav_method = matches!(method,
-            "PROPFIND" | "PROPPATCH" | "MKCOL" | "COPY" | "MOVE" |
-            "LOCK" | "UNLOCK" | "REPORT" | "CHECKOUT" | "CHECKIN" |
-            "UNCHECKOUT" | "MKWORKSPACE" | "UPDATE" | "LABEL" |
-            "MERGE" | "BASELINE-CONTROL" | "MKACTIVITY"
+        analysis.is_webdav_method = matches!(
+            method,
+            "PROPFIND"
+                | "PROPPATCH"
+                | "MKCOL"
+                | "COPY"
+                | "MOVE"
+                | "LOCK"
+                | "UNLOCK"
+                | "REPORT"
+                | "CHECKOUT"
+                | "CHECKIN"
+                | "UNCHECKOUT"
+                | "MKWORKSPACE"
+                | "UPDATE"
+                | "LABEL"
+                | "MERGE"
+                | "BASELINE-CONTROL"
+                | "MKACTIVITY"
         );
 
         // Check for custom application methods
@@ -263,12 +277,28 @@ impl MockExtensionMethodConnection {
     /// Check if method is a well-formed custom method
     fn is_well_formed_custom_method(&self, method: &str) -> bool {
         // Must be all uppercase letters/numbers and valid token characters
-        !method.is_empty() &&
-        method.chars().all(|c| {
-            c.is_ascii_uppercase() || c.is_ascii_digit() ||
-            matches!(c, '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' |
-                       '-' | '.' | '^' | '_' | '`' | '|' | '~')
-        })
+        !method.is_empty()
+            && method.chars().all(|c| {
+                c.is_ascii_uppercase()
+                    || c.is_ascii_digit()
+                    || matches!(
+                        c,
+                        '!' | '#'
+                            | '$'
+                            | '%'
+                            | '&'
+                            | '\''
+                            | '*'
+                            | '+'
+                            | '-'
+                            | '.'
+                            | '^'
+                            | '_'
+                            | '`'
+                            | '|'
+                            | '~'
+                    )
+            })
     }
 
     /// Validate method format per RFC 9110 requirements
@@ -310,15 +340,35 @@ impl MockExtensionMethodConnection {
 
     /// Check if string is a valid HTTP token
     fn is_valid_token(&self, s: &str) -> bool {
-        !s.is_empty() && s.chars().all(|c| {
-            c.is_ascii_alphanumeric() ||
-            matches!(c, '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' |
-                       '-' | '.' | '^' | '_' | '`' | '|' | '~')
-        })
+        !s.is_empty()
+            && s.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(
+                        c,
+                        '!' | '#'
+                            | '$'
+                            | '%'
+                            | '&'
+                            | '\''
+                            | '*'
+                            | '+'
+                            | '-'
+                            | '.'
+                            | '^'
+                            | '_'
+                            | '`'
+                            | '|'
+                            | '~'
+                    )
+            })
     }
 
     /// Check if two results match (for consistency validation)
-    fn results_match(&self, result1: &ExtensionMethodResult, result2: &ExtensionMethodResult) -> bool {
+    fn results_match(
+        &self,
+        result1: &ExtensionMethodResult,
+        result2: &ExtensionMethodResult,
+    ) -> bool {
         match (result1, result2) {
             (ExtensionMethodResult::Accepted, ExtensionMethodResult::Accepted) => true,
             (ExtensionMethodResult::BadRequest(_), ExtensionMethodResult::BadRequest(_)) => true,
@@ -434,10 +484,23 @@ impl ExtensionMethodInput {
             ExtensionMethodScenario::WebDavMethod => {
                 // Well-known WebDAV extension methods
                 let webdav_methods = [
-                    "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE",
-                    "LOCK", "UNLOCK", "REPORT", "CHECKOUT", "CHECKIN",
-                    "UNCHECKOUT", "MKWORKSPACE", "UPDATE", "LABEL",
-                    "MERGE", "BASELINE-CONTROL", "MKACTIVITY"
+                    "PROPFIND",
+                    "PROPPATCH",
+                    "MKCOL",
+                    "COPY",
+                    "MOVE",
+                    "LOCK",
+                    "UNLOCK",
+                    "REPORT",
+                    "CHECKOUT",
+                    "CHECKIN",
+                    "UNCHECKOUT",
+                    "MKWORKSPACE",
+                    "UPDATE",
+                    "LABEL",
+                    "MERGE",
+                    "BASELINE-CONTROL",
+                    "MKACTIVITY",
                 ];
                 let index = (self.length_multiplier as usize) % webdav_methods.len();
                 webdav_methods[index].to_string()
@@ -449,9 +512,18 @@ impl ExtensionMethodInput {
                     self.base_method.to_uppercase()
                 } else {
                     let custom_methods = [
-                        "BREW", "COFFEE", "TEAPOT", "HELLO", "PING",
-                        "SUBSCRIBE", "UNSUBSCRIBE", "NOTIFY", "PUBLISH",
-                        "DISCOVER", "REGISTER", "UNREGISTER"
+                        "BREW",
+                        "COFFEE",
+                        "TEAPOT",
+                        "HELLO",
+                        "PING",
+                        "SUBSCRIBE",
+                        "UNSUBSCRIBE",
+                        "NOTIFY",
+                        "PUBLISH",
+                        "DISCOVER",
+                        "REGISTER",
+                        "UNREGISTER",
                     ];
                     let index = (self.length_multiplier as usize) % custom_methods.len();
                     custom_methods[index].to_string()
@@ -461,7 +533,11 @@ impl ExtensionMethodInput {
             ExtensionMethodScenario::NumericMethod => {
                 // Methods with numbers
                 if !self.base_method.is_empty() {
-                    format!("{}{}", self.base_method.to_uppercase(), self.length_multiplier)
+                    format!(
+                        "{}{}",
+                        self.base_method.to_uppercase(),
+                        self.length_multiplier
+                    )
                 } else {
                     format!("HTTP{}", self.length_multiplier % 10)
                 }
@@ -536,8 +612,7 @@ impl ExtensionMethodInput {
             ExtensionMethodScenario::StandardMethod => {
                 // Standard HTTP methods (for comparison)
                 let standard_methods = [
-                    "GET", "POST", "PUT", "DELETE", "HEAD",
-                    "OPTIONS", "TRACE", "CONNECT", "PATCH"
+                    "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT", "PATCH",
                 ];
                 let index = (self.length_multiplier as usize) % standard_methods.len();
                 standard_methods[index].to_string()
@@ -546,9 +621,9 @@ impl ExtensionMethodInput {
             ExtensionMethodScenario::BoundaryMethod => {
                 // Boundary testing
                 match self.length_multiplier % 4 {
-                    0 => "A".to_string(),                    // Minimal valid
-                    1 => "Z".repeat(255),                    // Maximum length
-                    2 => "METHOD-WITH-HYPHENS".to_string(),  // Hyphens (valid token char)
+                    0 => "A".to_string(),                       // Minimal valid
+                    1 => "Z".repeat(255),                       // Maximum length
+                    2 => "METHOD-WITH-HYPHENS".to_string(),     // Hyphens (valid token char)
                     _ => "METHOD_WITH_UNDERSCORES".to_string(), // Underscores (valid)
                 }
             }
@@ -587,10 +662,16 @@ fuzz_target!(|input: ExtensionMethodInput| {
                 panic!("Empty method should not be accepted");
             }
             if method.contains(' ') || method.contains('\t') {
-                panic!("Method with whitespace should not be accepted: '{}'", method);
+                panic!(
+                    "Method with whitespace should not be accepted: '{}'",
+                    method
+                );
             }
             if method.chars().any(|c| c.is_control()) {
-                panic!("Method with control characters should not be accepted: '{}'", method);
+                panic!(
+                    "Method with control characters should not be accepted: '{}'",
+                    method
+                );
             }
         }
         ExtensionMethodResult::BadRequest(_reason) => {
@@ -601,22 +682,27 @@ fuzz_target!(|input: ExtensionMethodInput| {
     // Test consistency: same input should yield same result
     let result2 = connection.handle_extension_method_request(&method);
     if !connection.results_match(&result, &result2) {
-        panic!("Inconsistent extension method validation: {:?} != {:?} for method: '{}'",
-               result, result2, method);
+        panic!(
+            "Inconsistent extension method validation: {:?} != {:?} for method: '{}'",
+            result, result2, method
+        );
     }
 
     // Generate statistics for analysis
     let _stats = connection.generate_statistics();
 
     // Verify no consistency violations were detected internally
-    assert_eq!(*connection.consistency_violations.lock().unwrap(), 0,
-               "Internal consistency violations detected");
+    assert_eq!(
+        *connection.consistency_violations.lock().unwrap(),
+        0,
+        "Internal consistency violations detected"
+    );
 
     // For valid extension method scenarios, verify acceptance
     match input.scenario {
-        ExtensionMethodScenario::WebDavMethod |
-        ExtensionMethodScenario::CustomMethod |
-        ExtensionMethodScenario::StandardMethod => {
+        ExtensionMethodScenario::WebDavMethod
+        | ExtensionMethodScenario::CustomMethod
+        | ExtensionMethodScenario::StandardMethod => {
             if connection.is_valid_token(&method) && !method.is_empty() {
                 match result {
                     ExtensionMethodResult::Accepted => {
@@ -624,18 +710,22 @@ fuzz_target!(|input: ExtensionMethodInput| {
                     }
                     ExtensionMethodResult::BadRequest(_) => {
                         // Only acceptable if method has invalid characters
-                        if !method.chars().any(|c| c.is_whitespace() || c.is_control()) &&
-                           connection.is_valid_token(&method) {
-                            panic!("Valid extension method '{}' should be accepted per RFC 9110 §9.1", method);
+                        if !method.chars().any(|c| c.is_whitespace() || c.is_control())
+                            && connection.is_valid_token(&method)
+                        {
+                            panic!(
+                                "Valid extension method '{}' should be accepted per RFC 9110 §9.1",
+                                method
+                            );
                         }
                     }
                 }
             }
         }
-        ExtensionMethodScenario::WhitespaceMethod |
-        ExtensionMethodScenario::ControlCharMethod |
-        ExtensionMethodScenario::SpecialCharMethod |
-        ExtensionMethodScenario::EmptyMethod => {
+        ExtensionMethodScenario::WhitespaceMethod
+        | ExtensionMethodScenario::ControlCharMethod
+        | ExtensionMethodScenario::SpecialCharMethod
+        | ExtensionMethodScenario::EmptyMethod => {
             // Invalid methods should be rejected
             match result {
                 ExtensionMethodResult::BadRequest(_) => {
@@ -643,8 +733,10 @@ fuzz_target!(|input: ExtensionMethodInput| {
                 }
                 ExtensionMethodResult::Accepted => {
                     // Only acceptable if the generated method is actually valid
-                    if method.is_empty() || method.chars().any(|c| c.is_whitespace() || c.is_control()) ||
-                       !connection.is_valid_token(&method) {
+                    if method.is_empty()
+                        || method.chars().any(|c| c.is_whitespace() || c.is_control())
+                        || !connection.is_valid_token(&method)
+                    {
                         panic!("Invalid method '{}' should be rejected", method);
                     }
                 }

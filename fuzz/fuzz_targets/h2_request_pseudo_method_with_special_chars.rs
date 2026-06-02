@@ -205,13 +205,13 @@ struct MethodViolation {
 
 #[derive(Debug, Clone, PartialEq)]
 enum ViolationType {
-    ControlCharacter(char),   // Specific control character found
-    WhitespaceInside(char),   // Space/tab inside method
-    CRLFSequence,             // \r\n sequence
-    EmptyMethod,              // Empty string
-    OnlyWhitespace,           // Only whitespace characters
-    InvalidCharacter(char),   // Other invalid characters
-    MethodTooLong,            // Exceeds length limit
+    ControlCharacter(char), // Specific control character found
+    WhitespaceInside(char), // Space/tab inside method
+    CRLFSequence,           // \r\n sequence
+    EmptyMethod,            // Empty string
+    OnlyWhitespace,         // Only whitespace characters
+    InvalidCharacter(char), // Other invalid characters
+    MethodTooLong,          // Exceeds length limit
 }
 
 #[derive(Debug, Clone, Default)]
@@ -238,12 +238,16 @@ impl MockMethodSpecialCharsConnection {
     }
 
     /// Process HEADERS frame with :method validation
-    fn process_headers_frame(&mut self, stream_id: u32, method: &str,
-                           other_headers: &[(String, String)]) -> ProcessingResult {
+    fn process_headers_frame(
+        &mut self,
+        stream_id: u32,
+        method: &str,
+        other_headers: &[(String, String)],
+    ) -> ProcessingResult {
         // Stream ID validation
         if stream_id == 0 || stream_id % 2 == 0 {
             self.connection_error = Some(ConnectionError::ProtocolError(
-                "Invalid stream ID for client-initiated request".to_string()
+                "Invalid stream ID for client-initiated request".to_string(),
             ));
             return ProcessingResult::ConnectionError;
         }
@@ -270,7 +274,11 @@ impl MockMethodSpecialCharsConnection {
                 ProcessingResult::Success
             }
 
-            MethodValidationResult { valid: false, violation_type: Some(ref vtype), .. } => {
+            MethodValidationResult {
+                valid: false,
+                violation_type: Some(ref vtype),
+                ..
+            } => {
                 stream_state.violation_detected = true;
                 self.stats.invalid_methods += 1;
 
@@ -305,9 +313,7 @@ impl MockMethodSpecialCharsConnection {
                 }
             }
 
-            _ => {
-                ProcessingResult::ValidationError
-            }
+            _ => ProcessingResult::ValidationError,
         }
     }
 
@@ -369,8 +375,11 @@ impl MockMethodSpecialCharsConnection {
                 method: method.to_string(),
                 valid: false,
                 violation_type: Some(ViolationType::MethodTooLong),
-                error_details: Some(format!("Method too long: {} > {}",
-                    method.len(), self.config.max_method_length)),
+                error_details: Some(format!(
+                    "Method too long: {} > {}",
+                    method.len(),
+                    self.config.max_method_length
+                )),
             };
         }
 
@@ -439,9 +448,11 @@ impl MockMethodSpecialCharsConnection {
                 method: method.to_string(),
                 valid: false,
                 violation_type: Some(primary_violation.violation_type),
-                error_details: Some(format!("Invalid character '{}' at position {:?}",
+                error_details: Some(format!(
+                    "Invalid character '{}' at position {:?}",
                     primary_violation.detected_chars.get(0).unwrap_or(&'?'),
-                    primary_violation.position)),
+                    primary_violation.position
+                )),
             }
         }
     }
@@ -454,8 +465,8 @@ impl MockMethodSpecialCharsConnection {
 
         match ch {
             'A'..='Z' | 'a'..='z' | '0'..='9' => true,
-            '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' |
-            '^' | '_' | '`' | '|' | '~' => true,
+            '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|'
+            | '~' => true,
             _ => false,
         }
     }
@@ -498,31 +509,26 @@ fn generate_test_methods() -> Vec<(&'static str, ExpectedViolation)> {
         ("DELETE\x00", ExpectedViolation::ControlCharacters),
         ("HEAD\x1F", ExpectedViolation::ControlCharacters),
         ("OPTIONS\x7F", ExpectedViolation::ControlCharacters),
-
         // Whitespace violations
         ("GE T", ExpectedViolation::Whitespace),
         ("POST ", ExpectedViolation::Whitespace),
         (" GET", ExpectedViolation::Whitespace),
         ("P UT", ExpectedViolation::Whitespace),
         ("DE\tLETE", ExpectedViolation::Whitespace),
-
         // CRLF sequences
         ("GET\r\n", ExpectedViolation::CRLF),
         ("POST\r\nBAD", ExpectedViolation::CRLF),
         ("\r\nGET", ExpectedViolation::CRLF),
-
         // Empty and whitespace-only
         ("", ExpectedViolation::EmptyMethod),
         (" ", ExpectedViolation::OnlyWhitespace),
         ("  ", ExpectedViolation::OnlyWhitespace),
         ("\t", ExpectedViolation::OnlyWhitespace),
         (" \t ", ExpectedViolation::OnlyWhitespace),
-
         // Mixed violations
         ("GET\r\n ", ExpectedViolation::Mixed),
         (" POST\t", ExpectedViolation::Mixed),
         ("PU\x00T ", ExpectedViolation::Mixed),
-
         // Valid methods (should pass)
         ("GET", ExpectedViolation::None),
         ("POST", ExpectedViolation::None),
@@ -552,38 +558,72 @@ fuzz_target!(|input: SpecialCharsMethodInput| {
         let result = connection.process_headers_frame(
             1, // Use stream ID 1 for basic tests
             method,
-            &[] // No additional headers for basic tests
+            &[], // No additional headers for basic tests
         );
 
         match expected_violation {
             ExpectedViolation::None => {
-                assert_eq!(result, ProcessingResult::Success,
-                    "Valid method '{}' should be accepted", method);
+                assert_eq!(
+                    result,
+                    ProcessingResult::Success,
+                    "Valid method '{}' should be accepted",
+                    method
+                );
             }
 
             ExpectedViolation::ControlCharacters => {
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Method with control characters '{}' should be rejected", method);
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Method with control characters '{}' should be rejected",
+                    method
+                );
             }
 
             ExpectedViolation::Whitespace => {
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Method with whitespace '{}' should be rejected", method);
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Method with whitespace '{}' should be rejected",
+                    method
+                );
             }
 
             ExpectedViolation::CRLF => {
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Method with CRLF '{}' should be rejected", method);
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Method with CRLF '{}' should be rejected",
+                    method
+                );
             }
 
             ExpectedViolation::EmptyMethod | ExpectedViolation::OnlyWhitespace => {
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Empty/whitespace-only method '{}' should be rejected", method);
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Empty/whitespace-only method '{}' should be rejected",
+                    method
+                );
             }
 
             ExpectedViolation::Mixed => {
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Method with mixed violations '{}' should be rejected", method);
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Method with mixed violations '{}' should be rejected",
+                    method
+                );
             }
         }
     }
@@ -599,22 +639,32 @@ fuzz_target!(|input: SpecialCharsMethodInput| {
         let result = connection.process_headers_frame(
             stream_id,
             &test_case.method_value,
-            &test_case.regular_headers
+            &test_case.regular_headers,
         );
 
         // Verify result matches expectation
         match test_case.expected_violation {
             ExpectedViolation::None => {
                 if connection.is_valid_method(&test_case.method_value) {
-                    assert_eq!(result, ProcessingResult::Success,
-                        "Expected valid method to be accepted: '{}'", test_case.method_value);
+                    assert_eq!(
+                        result,
+                        ProcessingResult::Success,
+                        "Expected valid method to be accepted: '{}'",
+                        test_case.method_value
+                    );
                 }
             }
 
             _ => {
                 if !connection.is_valid_method(&test_case.method_value) {
-                    assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                        "Expected invalid method to be rejected: '{}'", test_case.method_value);
+                    assert!(
+                        matches!(
+                            result,
+                            ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                        ),
+                        "Expected invalid method to be rejected: '{}'",
+                        test_case.method_value
+                    );
                 }
             }
         }
@@ -625,34 +675,59 @@ fuzz_target!(|input: SpecialCharsMethodInput| {
         match edge_case {
             EdgeCaseTest::NullByteMethod => {
                 let result = connection.process_headers_frame(101, "GET\0", &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Method with null byte should be rejected");
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Method with null byte should be rejected"
+                );
             }
 
             EdgeCaseTest::HighAsciiMethod => {
                 let result = connection.process_headers_frame(103, "GET\u{80}", &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Method with high ASCII should be rejected");
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Method with high ASCII should be rejected"
+                );
             }
 
             EdgeCaseTest::UnicodeMethod => {
                 let result = connection.process_headers_frame(105, "GÉT", &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Method with Unicode should be rejected");
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Method with Unicode should be rejected"
+                );
             }
 
             EdgeCaseTest::LongMethodWithSpecialChars => {
                 let long_method = format!("GET{}", " ".repeat(100));
                 let result = connection.process_headers_frame(107, &long_method, &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Long method with special chars should be rejected");
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Long method with special chars should be rejected"
+                );
             }
 
             EdgeCaseTest::HiddenCharMethod => {
                 // Test methods that look valid but have hidden control characters
                 let result = connection.process_headers_frame(109, "GET\u{200B}", &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Method with hidden characters should be rejected");
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Method with hidden characters should be rejected"
+                );
             }
 
             _ => {
@@ -671,31 +746,39 @@ fuzz_target!(|input: SpecialCharsMethodInput| {
         );
 
         // Verify violation categorization is consistent
-        let total_violations = status.stats.control_char_violations +
-                             status.stats.whitespace_violations +
-                             status.stats.crlf_violations +
-                             status.stats.empty_method_violations +
-                             status.stats.mixed_violations;
+        let total_violations = status.stats.control_char_violations
+            + status.stats.whitespace_violations
+            + status.stats.crlf_violations
+            + status.stats.empty_method_violations
+            + status.stats.mixed_violations;
 
-        assert!(total_violations <= status.stats.invalid_methods,
-            "Violation categories should not exceed total invalid methods");
+        assert!(
+            total_violations <= status.stats.invalid_methods,
+            "Violation categories should not exceed total invalid methods"
+        );
     }
 
     // Test that valid common methods are always accepted
     for valid_method in &["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"] {
         let result = connection.process_headers_frame(201, valid_method, &[]);
-        assert_eq!(result, ProcessingResult::Success,
-            "Standard HTTP method '{}' should always be accepted", valid_method);
+        assert_eq!(
+            result,
+            ProcessingResult::Success,
+            "Standard HTTP method '{}' should always be accepted",
+            valid_method
+        );
     }
 });
 
 impl MockMethodSpecialCharsConnection {
     /// Helper to check if a method is valid according to RFC 9110
     fn is_valid_method(&self, method: &str) -> bool {
-        !method.is_empty() &&
-        !method.trim().is_empty() &&
-        method.len() <= self.config.max_method_length as usize &&
-        !method.contains("\r\n") &&
-        method.chars().all(|c| !c.is_control() && c != ' ' && c != '\t' && self.is_valid_method_char(c))
+        !method.is_empty()
+            && !method.trim().is_empty()
+            && method.len() <= self.config.max_method_length as usize
+            && !method.contains("\r\n")
+            && method
+                .chars()
+                .all(|c| !c.is_control() && c != ' ' && c != '\t' && self.is_valid_method_char(c))
     }
 }

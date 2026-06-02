@@ -200,19 +200,19 @@ struct CaseViolation {
 
 #[derive(Debug, Clone, PartialEq)]
 enum CaseViolationType {
-    AllUppercase,                    // "HTTPS", "HTTP"
-    MixedCase,                       // "Https", "Http"
-    RandomCase,                      // "hTTp", "hTTPs"
-    LeadingCapital,                  // "Https", "Http"
-    NonStandardCasing,               // Any other case pattern
+    AllUppercase,      // "HTTPS", "HTTP"
+    MixedCase,         // "Https", "Http"
+    RandomCase,        // "hTTp", "hTTPs"
+    LeadingCapital,    // "Https", "Http"
+    NonStandardCasing, // Any other case pattern
 }
 
 #[derive(Debug, Clone, Default)]
 struct CaseValidationStats {
-    lowercase_schemes: u32,          // "http", "https"
-    uppercase_schemes: u32,          // "HTTP", "HTTPS"
-    mixed_case_schemes: u32,         // "Http", "Https"
-    random_case_schemes: u32,        // "hTTp", "HTtp"
+    lowercase_schemes: u32,   // "http", "https"
+    uppercase_schemes: u32,   // "HTTP", "HTTPS"
+    mixed_case_schemes: u32,  // "Http", "Https"
+    random_case_schemes: u32, // "hTTp", "HTtp"
     case_violations_detected: u32,
     case_violations_rejected: u32,
     case_normalization_applied: u32,
@@ -235,13 +235,16 @@ impl MockSchemeUppercaseConnection {
         // Stream ID validation
         if stream_id == 0 || stream_id % 2 == 0 {
             self.connection_error = Some(ConnectionError::ProtocolError(
-                "Invalid stream ID for client-initiated request".to_string()
+                "Invalid stream ID for client-initiated request".to_string(),
             ));
             return ProcessingResult::ConnectionError;
         }
 
         // Validate the :scheme case sensitivity
         let validation_result = self.validate_scheme_case(stream_id, scheme);
+
+        // Update statistics based on scheme case before borrowing stream state.
+        self.update_case_statistics(scheme);
 
         // Update stream state
         let stream_state = self.streams.entry(stream_id).or_insert(StreamState {
@@ -254,9 +257,6 @@ impl MockSchemeUppercaseConnection {
 
         stream_state.headers_received = true;
         stream_state.scheme_value = Some(scheme.to_string());
-
-        // Update statistics based on scheme case
-        self.update_case_statistics(scheme);
 
         match validation_result {
             CaseValidationResult { valid: true, .. } => {
@@ -279,12 +279,14 @@ impl MockSchemeUppercaseConnection {
                     self.stats.case_violations_rejected += 1;
 
                     // Connection-level error for case violations
-                    self.connection_error = Some(ConnectionError::HeaderCaseViolation(
-                        format!("Uppercase characters in :scheme '{}' violate RFC 7540 §8.1.2.3", scheme)
-                    ));
+                    self.connection_error = Some(ConnectionError::HeaderCaseViolation(format!(
+                        "Uppercase characters in :scheme '{}' violate RFC 7540 §8.1.2.3",
+                        scheme
+                    )));
 
                     ProcessingResult::ProtocolError(format!(
-                        "PROTOCOL_ERROR: :scheme '{}' contains uppercase characters", scheme
+                        "PROTOCOL_ERROR: :scheme '{}' contains uppercase characters",
+                        scheme
                     ))
                 } else if self.config.allow_case_normalization {
                     // Normalize instead of rejecting (non-compliant but sometimes used)
@@ -366,10 +368,10 @@ impl MockSchemeUppercaseConnection {
     /// Check for common mixed case patterns
     fn has_mixed_case_pattern(&self, scheme: &str) -> bool {
         // Common patterns: "Http", "Https", "Http", etc.
-        matches!(scheme, "Http" | "Https" | "HTTP" | "HTTPS") ||
-        (scheme.len() > 1 &&
-         scheme.chars().next().unwrap().is_uppercase() &&
-         scheme.chars().skip(1).all(|c| c.is_lowercase()))
+        matches!(scheme, "Http" | "Https" | "HTTP" | "HTTPS")
+            || (scheme.len() > 1
+                && scheme.chars().next().unwrap().is_uppercase()
+                && scheme.chars().skip(1).all(|c| c.is_lowercase()))
     }
 
     /// Find positions of uppercase characters
@@ -437,15 +439,12 @@ fn generate_case_test_schemes() -> Vec<(&'static str, CaseExpectation)> {
         // Correct lowercase (should be accepted)
         ("http", CaseExpectation::Accept),
         ("https", CaseExpectation::Accept),
-
         // All uppercase (MUST be rejected per RFC 7540)
         ("HTTP", CaseExpectation::Reject),
         ("HTTPS", CaseExpectation::Reject),
-
         // Leading capital (MUST be rejected)
         ("Http", CaseExpectation::Reject),
         ("Https", CaseExpectation::Reject),
-
         // Mixed case variations (all MUST be rejected)
         ("hTTP", CaseExpectation::Reject),
         ("hTTPs", CaseExpectation::Reject),
@@ -453,25 +452,22 @@ fn generate_case_test_schemes() -> Vec<(&'static str, CaseExpectation)> {
         ("HtTpS", CaseExpectation::Reject),
         ("HTtp", CaseExpectation::Reject),
         ("HTTPs", CaseExpectation::Reject),
-
         // Single character case variations
         ("htTp", CaseExpectation::Reject),
         ("httP", CaseExpectation::Reject),
         ("httpS", CaseExpectation::Reject),
         ("hTtps", CaseExpectation::Reject),
         ("httPs", CaseExpectation::Reject),
-
         // Random case patterns
         ("hTtP", CaseExpectation::Reject),
         ("HtTpS", CaseExpectation::Reject),
         ("hTtPs", CaseExpectation::Reject),
         ("HTtP", CaseExpectation::Reject),
         ("HTtPs", CaseExpectation::Reject),
-
         // Edge cases with case sensitivity
-        ("HTTP ", CaseExpectation::Reject),        // Uppercase with space
-        (" HTTPS", CaseExpectation::Reject),       // Leading space + uppercase
-        ("Http\n", CaseExpectation::Reject),       // Mixed case with control char
+        ("HTTP ", CaseExpectation::Reject), // Uppercase with space
+        (" HTTPS", CaseExpectation::Reject), // Leading space + uppercase
+        ("Http\n", CaseExpectation::Reject), // Mixed case with control char
     ]
 }
 
@@ -513,14 +509,21 @@ fuzz_target!(|input: UppercaseSchemeInput| {
 
         match expected_result {
             CaseExpectation::Accept => {
-                assert_eq!(result, ProcessingResult::Success,
-                    "Lowercase scheme '{}' should be accepted", scheme);
+                assert_eq!(
+                    result,
+                    ProcessingResult::Success,
+                    "Lowercase scheme '{}' should be accepted",
+                    scheme
+                );
             }
 
             CaseExpectation::Reject => {
                 if connection.config.strict_case_compliance {
-                    assert!(matches!(result, ProcessingResult::ProtocolError(_)),
-                        "Uppercase/mixed-case scheme '{}' should be rejected with PROTOCOL_ERROR", scheme);
+                    assert!(
+                        matches!(result, ProcessingResult::ProtocolError(_)),
+                        "Uppercase/mixed-case scheme '{}' should be rejected with PROTOCOL_ERROR",
+                        scheme
+                    );
                 }
             }
 
@@ -538,12 +541,18 @@ fuzz_target!(|input: UppercaseSchemeInput| {
 
         if scheme == "http" {
             // Only lowercase should be accepted
-            assert_eq!(result, ProcessingResult::Success,
-                "Lowercase 'http' should be accepted");
+            assert_eq!(
+                result,
+                ProcessingResult::Success,
+                "Lowercase 'http' should be accepted"
+            );
         } else if connection.config.strict_case_compliance {
             // All other combinations should be rejected
-            assert!(matches!(result, ProcessingResult::ProtocolError(_)),
-                "Non-lowercase 'http' variant '{}' should be rejected", scheme);
+            assert!(
+                matches!(result, ProcessingResult::ProtocolError(_)),
+                "Non-lowercase 'http' variant '{}' should be rejected",
+                scheme
+            );
         }
     }
 
@@ -555,12 +564,18 @@ fuzz_target!(|input: UppercaseSchemeInput| {
 
         if scheme == "https" {
             // Only lowercase should be accepted
-            assert_eq!(result, ProcessingResult::Success,
-                "Lowercase 'https' should be accepted");
+            assert_eq!(
+                result,
+                ProcessingResult::Success,
+                "Lowercase 'https' should be accepted"
+            );
         } else if connection.config.strict_case_compliance {
             // All other combinations should be rejected
-            assert!(matches!(result, ProcessingResult::ProtocolError(_)),
-                "Non-lowercase 'https' variant '{}' should be rejected", scheme);
+            assert!(
+                matches!(result, ProcessingResult::ProtocolError(_)),
+                "Non-lowercase 'https' variant '{}' should be rejected",
+                scheme
+            );
         }
     }
 
@@ -580,15 +595,22 @@ fuzz_target!(|input: UppercaseSchemeInput| {
         match test_case.expected_result {
             CaseExpectation::Accept => {
                 if is_lowercase && matches!(test_case.scheme_value.as_str(), "http" | "https") {
-                    assert_eq!(result, ProcessingResult::Success,
-                        "Expected lowercase scheme to be accepted: '{}'", test_case.scheme_value);
+                    assert_eq!(
+                        result,
+                        ProcessingResult::Success,
+                        "Expected lowercase scheme to be accepted: '{}'",
+                        test_case.scheme_value
+                    );
                 }
             }
 
             CaseExpectation::Reject => {
                 if !is_lowercase && connection.config.strict_case_compliance {
-                    assert!(matches!(result, ProcessingResult::ProtocolError(_)),
-                        "Expected non-lowercase scheme to be rejected: '{}'", test_case.scheme_value);
+                    assert!(
+                        matches!(result, ProcessingResult::ProtocolError(_)),
+                        "Expected non-lowercase scheme to be rejected: '{}'",
+                        test_case.scheme_value
+                    );
                 }
             }
 
@@ -613,8 +635,14 @@ fuzz_target!(|input: UppercaseSchemeInput| {
                 if !scheme.is_ascii() {
                     let result = connection.process_headers_frame(401, scheme);
                     // Unicode schemes should be rejected regardless of case
-                    assert!(matches!(result, ProcessingResult::ProtocolError(_) | ProcessingResult::ValidationError),
-                        "Unicode scheme '{}' should be rejected", scheme);
+                    assert!(
+                        matches!(
+                            result,
+                            ProcessingResult::ProtocolError(_) | ProcessingResult::ValidationError
+                        ),
+                        "Unicode scheme '{}' should be rejected",
+                        scheme
+                    );
                 }
             }
 
@@ -622,8 +650,13 @@ fuzz_target!(|input: UppercaseSchemeInput| {
                 let mixed_case_scheme = format!("H{}", "t".repeat(*length as usize - 1));
                 let result = connection.process_headers_frame(403, &mixed_case_scheme);
                 if connection.config.strict_case_compliance {
-                    assert!(matches!(result, ProcessingResult::ProtocolError(_) | ProcessingResult::ValidationError),
-                        "Long mixed-case scheme should be rejected");
+                    assert!(
+                        matches!(
+                            result,
+                            ProcessingResult::ProtocolError(_) | ProcessingResult::ValidationError
+                        ),
+                        "Long mixed-case scheme should be rejected"
+                    );
                 }
             }
 
@@ -635,17 +668,19 @@ fuzz_target!(|input: UppercaseSchemeInput| {
 
     // Verify statistics consistency
     let status = connection.get_status();
-    let total_schemes = status.stats.lowercase_schemes +
-                       status.stats.uppercase_schemes +
-                       status.stats.mixed_case_schemes +
-                       status.stats.random_case_schemes;
+    let total_schemes = status.stats.lowercase_schemes
+        + status.stats.uppercase_schemes
+        + status.stats.mixed_case_schemes
+        + status.stats.random_case_schemes;
 
     assert!(total_schemes > 0, "Should have processed some schemes");
 
     if connection.config.strict_case_compliance {
         assert_eq!(
             status.stats.case_violations_detected,
-            status.stats.uppercase_schemes + status.stats.mixed_case_schemes + status.stats.random_case_schemes,
+            status.stats.uppercase_schemes
+                + status.stats.mixed_case_schemes
+                + status.stats.random_case_schemes,
             "Case violations detected should match non-lowercase schemes"
         );
     }
@@ -655,8 +690,11 @@ fuzz_target!(|input: UppercaseSchemeInput| {
         // Test specific RFC violation examples
         for &scheme in &["HTTP", "HTTPS", "Http", "Https"] {
             let result = connection.process_headers_frame(501, scheme);
-            assert!(matches!(result, ProcessingResult::ProtocolError(_)),
-                "RFC 7540 violation: '{}' should generate PROTOCOL_ERROR", scheme);
+            assert!(
+                matches!(result, ProcessingResult::ProtocolError(_)),
+                "RFC 7540 violation: '{}' should generate PROTOCOL_ERROR",
+                scheme
+            );
         }
     }
 });

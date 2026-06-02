@@ -1,10 +1,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::messaging::subject::{NamespaceComponent, NamespaceKernel, NamespaceKernelError};
 use asupersync::messaging::{RegistryFamily, Subject};
-use asupersync::messaging::subject::{
-    NamespaceComponent, NamespaceKernel, NamespaceKernelError,
-};
 use libfuzzer_sys::fuzz_target;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

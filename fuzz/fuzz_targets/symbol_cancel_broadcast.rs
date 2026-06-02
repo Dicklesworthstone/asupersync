@@ -9,8 +9,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::cancel::{
-    CancelBroadcastMetrics, CancelBroadcaster, CancelMessage, CancelSink, PeerId,
-    SymbolCancelToken,
+    CancelBroadcastMetrics, CancelBroadcaster, CancelMessage, CancelSink, PeerId, SymbolCancelToken,
 };
 use asupersync::types::symbol::ObjectId;
 use asupersync::types::{CancelKind, CancelReason, Time};

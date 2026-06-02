@@ -53,13 +53,19 @@ enum BroadcastOp {
     /// Clone sender
     CloneSender { sender_id: u8, new_sender_id: u8 },
     /// Clone receiver
-    CloneReceiver { receiver_id: u8, new_receiver_id: u8 },
+    CloneReceiver {
+        receiver_id: u8,
+        new_receiver_id: u8,
+    },
     /// Check channel state invariants
     CheckInvariants,
     /// Yield to allow concurrency simulation
     Yield,
     /// Concurrent send burst (multiple senders at capacity)
-    ConcurrentSendBurst { sender_ids: Vec<u8>, messages: Vec<u32> },
+    ConcurrentSendBurst {
+        sender_ids: Vec<u8>,
+        messages: Vec<u32>,
+    },
     /// Lag-inducing send spam (overwhelm slow receiver)
     LagSpam { sender_id: u8, count: u8 },
 }
@@ -109,20 +115,26 @@ impl FuzzState {
         let (sender, receiver) = broadcast::channel(capacity);
 
         let mut senders = HashMap::new();
-        senders.insert(0, SenderState {
-            sender,
-            messages_sent: 0,
-            is_dropped: false,
-        });
+        senders.insert(
+            0,
+            SenderState {
+                sender,
+                messages_sent: 0,
+                is_dropped: false,
+            },
+        );
 
         let mut receivers = HashMap::new();
-        receivers.insert(0, ReceiverState {
-            receiver,
-            messages_seen: Vec::new(),
-            lag_count: 0,
-            is_dropped: false,
-            last_index_seen: 0,
-        });
+        receivers.insert(
+            0,
+            ReceiverState {
+                receiver,
+                messages_seen: Vec::new(),
+                lag_count: 0,
+                is_dropped: false,
+                last_index_seen: 0,
+            },
+        );
 
         Self {
             senders,
@@ -284,7 +296,8 @@ fuzz_target!(|sequence: BroadcastOpsSequence| {
     let mut state = FuzzState::new(capacity);
     let cx = create_cx();
 
-    for operation in sequence.operations.into_iter().take(200) { // Limit ops to prevent timeout
+    for operation in sequence.operations.into_iter().take(200) {
+        // Limit ops to prevent timeout
         match operation {
             BroadcastOp::Send { sender_id, message } => {
                 if let Some(sender_state) = state.senders.get_mut(&sender_id) {
@@ -305,17 +318,23 @@ fuzz_target!(|sequence: BroadcastOpsSequence| {
                 state.simulate_async_recv(receiver_id, &cx);
             }
 
-            BroadcastOp::Subscribe { sender_id, new_receiver_id } => {
+            BroadcastOp::Subscribe {
+                sender_id,
+                new_receiver_id,
+            } => {
                 if let Some(sender_state) = state.senders.get(&sender_id) {
                     if !sender_state.is_dropped && !state.receivers.contains_key(&new_receiver_id) {
                         let new_receiver = sender_state.sender.subscribe();
-                        state.receivers.insert(new_receiver_id, ReceiverState {
-                            receiver: new_receiver,
-                            messages_seen: Vec::new(),
-                            lag_count: 0,
-                            is_dropped: false,
-                            last_index_seen: 0,
-                        });
+                        state.receivers.insert(
+                            new_receiver_id,
+                            ReceiverState {
+                                receiver: new_receiver,
+                                messages_seen: Vec::new(),
+                                lag_count: 0,
+                                is_dropped: false,
+                                last_index_seen: 0,
+                            },
+                        );
                     }
                 }
             }
@@ -334,36 +353,52 @@ fuzz_target!(|sequence: BroadcastOpsSequence| {
                 state.receivers.remove(&receiver_id);
             }
 
-            BroadcastOp::CloneSender { sender_id, new_sender_id } => {
+            BroadcastOp::CloneSender {
+                sender_id,
+                new_sender_id,
+            } => {
                 if let Some(sender_state) = state.senders.get(&sender_id) {
                     if !sender_state.is_dropped && !state.senders.contains_key(&new_sender_id) {
                         let cloned_sender = sender_state.sender.clone();
-                        state.senders.insert(new_sender_id, SenderState {
-                            sender: cloned_sender,
-                            messages_sent: 0,
-                            is_dropped: false,
-                        });
+                        state.senders.insert(
+                            new_sender_id,
+                            SenderState {
+                                sender: cloned_sender,
+                                messages_sent: 0,
+                                is_dropped: false,
+                            },
+                        );
                     }
                 }
             }
 
-            BroadcastOp::CloneReceiver { receiver_id, new_receiver_id } => {
+            BroadcastOp::CloneReceiver {
+                receiver_id,
+                new_receiver_id,
+            } => {
                 if let Some(receiver_state) = state.receivers.get(&receiver_id) {
-                    if !receiver_state.is_dropped && !state.receivers.contains_key(&new_receiver_id) {
+                    if !receiver_state.is_dropped && !state.receivers.contains_key(&new_receiver_id)
+                    {
                         let cloned_receiver = receiver_state.receiver.clone();
-                        state.receivers.insert(new_receiver_id, ReceiverState {
-                            receiver: cloned_receiver,
-                            messages_seen: Vec::new(),
-                            lag_count: 0,
-                            is_dropped: false,
-                            last_index_seen: receiver_state.last_index_seen,
-                        });
+                        state.receivers.insert(
+                            new_receiver_id,
+                            ReceiverState {
+                                receiver: cloned_receiver,
+                                messages_seen: Vec::new(),
+                                lag_count: 0,
+                                is_dropped: false,
+                                last_index_seen: receiver_state.last_index_seen,
+                            },
+                        );
                     }
                 }
             }
 
             BroadcastOp::CheckInvariants => {
-                assert!(state.check_invariants(), "Broadcast channel invariants violated");
+                assert!(
+                    state.check_invariants(),
+                    "Broadcast channel invariants violated"
+                );
             }
 
             BroadcastOp::Yield => {
@@ -371,7 +406,10 @@ fuzz_target!(|sequence: BroadcastOpsSequence| {
                 // In a real async environment, this would allow tasks to be scheduled
             }
 
-            BroadcastOp::ConcurrentSendBurst { sender_ids, messages } => {
+            BroadcastOp::ConcurrentSendBurst {
+                sender_ids,
+                messages,
+            } => {
                 let ids: Vec<u8> = sender_ids.into_iter().take(8).collect(); // Limit concurrent senders
                 let msgs: Vec<u32> = messages.into_iter().take(ids.len()).collect();
                 state.simulate_concurrent_sends(&ids, &msgs, &cx);

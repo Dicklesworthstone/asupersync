@@ -18,8 +18,8 @@
 //! - RFC 7541 §5.2: HPACK string literal encoding
 //! - RFC 7540 §8.1.2.3: :path pseudo-header requirements
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -117,7 +117,7 @@ impl MockUnicodePathConnection {
                     let code = c as u32;
                     (code >= 0x4E00 && code <= 0x9FFF) || // CJK Unified
                     (code >= 0x3400 && code <= 0x4DBF) || // CJK Extension A
-                    (code >= 0x20000 && code <= 0x2A6DF)  // CJK Extension B
+                    (code >= 0x20000 && code <= 0x2A6DF) // CJK Extension B
                 }) {
                     *self.cjk_paths.lock().unwrap() += 1;
                 }
@@ -137,7 +137,8 @@ impl MockUnicodePathConnection {
         }
 
         // Simulate parser decision (consistent accept/reject policy)
-        let should_accept = self.evaluate_unicode_path_policy(path_bytes, contains_unicode, is_valid_utf8);
+        let should_accept =
+            self.evaluate_unicode_path_policy(path_bytes, contains_unicode, is_valid_utf8);
 
         // Check consistency with previous decisions for same input
         let mut cache = self.decision_cache.lock().unwrap();
@@ -214,7 +215,12 @@ impl MockUnicodePathConnection {
 
     /// Evaluate Unicode path policy (lenient vs strict)
     /// Returns true if path should be accepted
-    fn evaluate_unicode_path_policy(&self, path_bytes: &[u8], contains_unicode: bool, is_valid_utf8: bool) -> bool {
+    fn evaluate_unicode_path_policy(
+        &self,
+        path_bytes: &[u8],
+        contains_unicode: bool,
+        is_valid_utf8: bool,
+    ) -> bool {
         // Strategy 1: Strict ASCII-only policy
         if !self.config.include_valid_unicode && contains_unicode {
             return false;
@@ -458,14 +464,17 @@ fuzz_target!(|input: UnicodePathInput| {
     // Test consistency: same input should yield same result
     let result2 = connection.handle_unicode_path_request(&path_bytes);
     match (&result, &result2) {
-        (RequestResult::Accepted, RequestResult::Accepted) => {},
-        (RequestResult::BadRequest(_), RequestResult::BadRequest(_)) => {},
-        (RequestResult::ProtocolError(_), RequestResult::ProtocolError(_)) => {},
+        (RequestResult::Accepted, RequestResult::Accepted) => {}
+        (RequestResult::BadRequest(_), RequestResult::BadRequest(_)) => {}
+        (RequestResult::ProtocolError(_), RequestResult::ProtocolError(_)) => {}
         _ => {
             // Consistency violation detected
-            panic!("Inconsistent Unicode path handling: {:?} != {:?} for path: {:?}",
-                   result, result2,
-                   String::from_utf8_lossy(&path_bytes));
+            panic!(
+                "Inconsistent Unicode path handling: {:?} != {:?} for path: {:?}",
+                result,
+                result2,
+                String::from_utf8_lossy(&path_bytes)
+            );
         }
     }
 
@@ -473,6 +482,9 @@ fuzz_target!(|input: UnicodePathInput| {
     let _stats = connection.generate_statistics();
 
     // Verify no consistency violations were detected internally
-    assert_eq!(*connection.consistency_violations.lock().unwrap(), 0,
-               "Internal consistency violations detected");
+    assert_eq!(
+        *connection.consistency_violations.lock().unwrap(),
+        0,
+        "Internal consistency violations detected"
+    );
 });

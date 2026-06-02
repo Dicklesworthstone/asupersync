@@ -27,8 +27,8 @@
 //! - RFC 6874: IPv6 zone identifier representation
 //! - RFC 7540 §8.1.2.3: :authority pseudo-header requirements
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -226,16 +226,17 @@ impl MockIPv6AuthorityConnection {
 
         // Basic bracket detection
         analysis.has_brackets = authority.contains('[') && authority.contains(']');
-        analysis.has_empty_brackets = authority == "[]" || authority.starts_with("[]:") || authority == "[]:";
+        analysis.has_empty_brackets =
+            authority == "[]" || authority.starts_with("[]:") || authority == "[]:";
 
         // Check for malformed brackets
         let open_brackets = authority.matches('[').count();
         let close_brackets = authority.matches(']').count();
-        analysis.has_malformed_brackets = open_brackets != close_brackets ||
-                                         (authority.contains('[') && !authority.contains(']')) ||
-                                         (authority.contains(']') && !authority.contains('[')) ||
-                                         authority.starts_with(']') ||
-                                         authority.ends_with('[');
+        analysis.has_malformed_brackets = open_brackets != close_brackets
+            || (authority.contains('[') && !authority.contains(']'))
+            || (authority.contains(']') && !authority.contains('['))
+            || authority.starts_with(']')
+            || authority.ends_with('[');
 
         // Check for port
         if let Some(close_bracket_pos) = authority.rfind(']') {
@@ -244,8 +245,8 @@ impl MockIPv6AuthorityConnection {
                 analysis.has_port = true;
                 // Extract port
                 let port_str = &after_bracket[1..];
-                analysis.valid_port = port_str.chars().all(|c| c.is_ascii_digit()) &&
-                                     port_str.parse::<u16>().is_ok();
+                analysis.valid_port =
+                    port_str.chars().all(|c| c.is_ascii_digit()) && port_str.parse::<u16>().is_ok();
             }
         }
 
@@ -299,9 +300,10 @@ impl MockIPv6AuthorityConnection {
 
         if !clean_addr.contains("::") {
             let groups: Vec<&str> = clean_addr.split(':').collect();
-            analysis.is_full_ipv6 = groups.len() == 8 &&
-                                   groups.iter().all(|g| !g.is_empty() && g.len() <= 4 &&
-                                                    g.chars().all(|c| c.is_ascii_hexdigit()));
+            analysis.is_full_ipv6 = groups.len() == 8
+                && groups.iter().all(|g| {
+                    !g.is_empty() && g.len() <= 4 && g.chars().all(|c| c.is_ascii_hexdigit())
+                });
         }
 
         // Basic IPv6 validation
@@ -331,8 +333,11 @@ impl MockIPv6AuthorityConnection {
         };
 
         // Very basic IPv6 validation
-        if clean_addr == "::1" || clean_addr.starts_with("fe80::") ||
-           clean_addr.starts_with("2001:") || clean_addr.starts_with("::ffff:") {
+        if clean_addr == "::1"
+            || clean_addr.starts_with("fe80::")
+            || clean_addr.starts_with("2001:")
+            || clean_addr.starts_with("::ffff:")
+        {
             return true;
         }
 
@@ -342,19 +347,22 @@ impl MockIPv6AuthorityConnection {
             if parts.len() == 2 {
                 // Valid compressed form
                 return parts.iter().all(|part| {
-                    part.is_empty() || part.split(':').all(|group| {
-                        !group.is_empty() && group.len() <= 4 &&
-                        group.chars().all(|c| c.is_ascii_hexdigit())
-                    })
+                    part.is_empty()
+                        || part.split(':').all(|group| {
+                            !group.is_empty()
+                                && group.len() <= 4
+                                && group.chars().all(|c| c.is_ascii_hexdigit())
+                        })
                 });
             }
         }
 
         // Check full form
         let groups: Vec<&str> = clean_addr.split(':').collect();
-        groups.len() <= 8 && groups.iter().all(|g| {
-            !g.is_empty() && g.len() <= 4 && g.chars().all(|c| c.is_ascii_hexdigit())
-        })
+        groups.len() <= 8
+            && groups
+                .iter()
+                .all(|g| !g.is_empty() && g.len() <= 4 && g.chars().all(|c| c.is_ascii_hexdigit()))
     }
 
     /// Validate IPv6 authority format per RFC 3986
@@ -522,14 +530,10 @@ impl IPv6AuthorityInput {
                 format!("[::1]:{}", if self.port == 0 { 443 } else { self.port })
             }
 
-            IPv6AuthorityScenario::IPv6WithoutPort => {
-                "[::1]".to_string()
-            }
+            IPv6AuthorityScenario::IPv6WithoutPort => "[::1]".to_string(),
 
             IPv6AuthorityScenario::CompressedIPv6 => {
-                let addresses = [
-                    "[::1]", "[2001:db8::]", "[::ffff:0:0]", "[2001:db8:85a3::]"
-                ];
+                let addresses = ["[::1]", "[2001:db8::]", "[::ffff:0:0]", "[2001:db8:85a3::]"];
                 let index = (self.variation as usize) % addresses.len();
                 let addr = addresses[index];
                 if self.port > 0 && self.port != 80 {
@@ -540,28 +544,50 @@ impl IPv6AuthorityInput {
             }
 
             IPv6AuthorityScenario::FullIPv6 => {
-                format!("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:{}",
-                       if self.port == 0 { 8080 } else { self.port })
+                format!(
+                    "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:{}",
+                    if self.port == 0 { 8080 } else { self.port }
+                )
             }
 
             IPv6AuthorityScenario::IPv6WithZoneID => {
-                let zone = if self.zone_id.is_empty() { "eth0" } else { &self.zone_id };
-                let port_part = if self.port > 0 { format!(":{}", self.port) } else { String::new() };
+                let zone = if self.zone_id.is_empty() {
+                    "eth0"
+                } else {
+                    &self.zone_id
+                };
+                let port_part = if self.port > 0 {
+                    format!(":{}", self.port)
+                } else {
+                    String::new()
+                };
                 format!("[fe80::1%{}]{}", zone, port_part)
             }
 
             IPv6AuthorityScenario::LoopbackIPv6 => {
-                let port_part = if self.port > 0 { format!(":{}", self.port) } else { String::new() };
+                let port_part = if self.port > 0 {
+                    format!(":{}", self.port)
+                } else {
+                    String::new()
+                };
                 format!("[::1]{}", port_part)
             }
 
             IPv6AuthorityScenario::LinkLocalIPv6 => {
-                let port_part = if self.port > 0 { format!(":{}", self.port) } else { String::new() };
+                let port_part = if self.port > 0 {
+                    format!(":{}", self.port)
+                } else {
+                    String::new()
+                };
                 format!("[fe80::1]{}", port_part)
             }
 
             IPv6AuthorityScenario::IPv4MappedIPv6 => {
-                let port_part = if self.port > 0 { format!(":{}", self.port) } else { String::new() };
+                let port_part = if self.port > 0 {
+                    format!(":{}", self.port)
+                } else {
+                    String::new()
+                };
                 format!("[::ffff:192.0.2.1]{}", port_part)
             }
 
@@ -577,20 +603,20 @@ impl IPv6AuthorityInput {
             IPv6AuthorityScenario::MalformedBrackets => {
                 // Invalid: malformed brackets
                 match self.variation % 4 {
-                    0 => "[::1".to_string(),           // Missing closing bracket
-                    1 => "::1]".to_string(),           // Missing opening bracket
-                    2 => "][::1][".to_string(),        // Wrong order
-                    _ => "[[::1]]".to_string(),        // Double brackets
+                    0 => "[::1".to_string(),    // Missing closing bracket
+                    1 => "::1]".to_string(),    // Missing opening bracket
+                    2 => "][::1][".to_string(), // Wrong order
+                    _ => "[[::1]]".to_string(), // Double brackets
                 }
             }
 
             IPv6AuthorityScenario::MalformedIPv6 => {
                 // Invalid: malformed IPv6
                 match self.variation % 4 {
-                    0 => "[:::1]:443".to_string(),     // Too many colons
+                    0 => "[:::1]:443".to_string(),       // Too many colons
                     1 => "[2001:db8::g]:80".to_string(), // Invalid hex digit
                     2 => "[2001:db8:85a3:0000:0000:8a2e:0370:7334:extra]:80".to_string(), // Too many groups
-                    _ => "[]:80".to_string(),          // Empty IPv6
+                    _ => "[]:80".to_string(), // Empty IPv6
                 }
             }
 
@@ -642,27 +668,32 @@ fuzz_target!(|input: IPv6AuthorityInput| {
     // Test consistency: same input should yield same result
     let result2 = connection.handle_ipv6_authority_request(&authority);
     if !connection.results_match(&result, &result2) {
-        panic!("Inconsistent IPv6 authority validation: {:?} != {:?} for authority: '{}'",
-               result, result2, authority);
+        panic!(
+            "Inconsistent IPv6 authority validation: {:?} != {:?} for authority: '{}'",
+            result, result2, authority
+        );
     }
 
     // Generate statistics for analysis
     let _stats = connection.generate_statistics();
 
     // Verify no consistency violations were detected internally
-    assert_eq!(*connection.consistency_violations.lock().unwrap(), 0,
-               "Internal consistency violations detected");
+    assert_eq!(
+        *connection.consistency_violations.lock().unwrap(),
+        0,
+        "Internal consistency violations detected"
+    );
 
     // For valid IPv6 scenarios, verify acceptance
     match input.scenario {
-        IPv6AuthorityScenario::StandardIPv6WithPort |
-        IPv6AuthorityScenario::IPv6WithoutPort |
-        IPv6AuthorityScenario::CompressedIPv6 |
-        IPv6AuthorityScenario::FullIPv6 |
-        IPv6AuthorityScenario::IPv6WithZoneID |
-        IPv6AuthorityScenario::LoopbackIPv6 |
-        IPv6AuthorityScenario::LinkLocalIPv6 |
-        IPv6AuthorityScenario::IPv4MappedIPv6 => {
+        IPv6AuthorityScenario::StandardIPv6WithPort
+        | IPv6AuthorityScenario::IPv6WithoutPort
+        | IPv6AuthorityScenario::CompressedIPv6
+        | IPv6AuthorityScenario::FullIPv6
+        | IPv6AuthorityScenario::IPv6WithZoneID
+        | IPv6AuthorityScenario::LoopbackIPv6
+        | IPv6AuthorityScenario::LinkLocalIPv6
+        | IPv6AuthorityScenario::IPv4MappedIPv6 => {
             // Valid IPv6 in brackets should be accepted
             if authority.starts_with('[') && authority.contains(']') {
                 match result {
@@ -672,16 +703,19 @@ fuzz_target!(|input: IPv6AuthorityInput| {
                     IPv6AuthorityResult::BadRequest(_) => {
                         // Only acceptable if the IPv6 itself is malformed
                         if !authority.contains(":::") && !authority.contains('[') {
-                            panic!("Valid bracketed IPv6 '{}' should be accepted per RFC 3986 §3.2.2", authority);
+                            panic!(
+                                "Valid bracketed IPv6 '{}' should be accepted per RFC 3986 §3.2.2",
+                                authority
+                            );
                         }
                     }
                 }
             }
         }
-        IPv6AuthorityScenario::UnbrackketedIPv6 |
-        IPv6AuthorityScenario::MalformedBrackets |
-        IPv6AuthorityScenario::MalformedIPv6 |
-        IPv6AuthorityScenario::EmptyBrackets => {
+        IPv6AuthorityScenario::UnbrackketedIPv6
+        | IPv6AuthorityScenario::MalformedBrackets
+        | IPv6AuthorityScenario::MalformedIPv6
+        | IPv6AuthorityScenario::EmptyBrackets => {
             // Invalid formats should be rejected
             match result {
                 IPv6AuthorityResult::BadRequest(_) => {
@@ -689,8 +723,11 @@ fuzz_target!(|input: IPv6AuthorityInput| {
                 }
                 IPv6AuthorityResult::Accepted => {
                     // Only acceptable if the generated authority is actually valid
-                    if !authority.starts_with('[') || authority == "[]" ||
-                       authority.contains(":::") || !authority.contains(']') {
+                    if !authority.starts_with('[')
+                        || authority == "[]"
+                        || authority.contains(":::")
+                        || !authority.contains(']')
+                    {
                         panic!("Invalid IPv6 authority '{}' should be rejected", authority);
                     }
                 }

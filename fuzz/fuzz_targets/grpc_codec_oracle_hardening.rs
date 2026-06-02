@@ -136,8 +136,7 @@ impl ReferenceGrpcCodec {
             return Err("Message too large".to_string());
         }
 
-        let length = u32::try_from(message.data.len())
-            .map_err(|_| "Message length overflow")?;
+        let length = u32::try_from(message.data.len()).map_err(|_| "Message length overflow")?;
 
         let mut result = Vec::new();
         result.push(if message.compressed { 1 } else { 0 });
@@ -168,10 +167,22 @@ fuzz_target!(|input: OracleInput| {
             Operation::Differential { raw_bytes } => {
                 test_differential_oracle(&mut codec, &reference, &raw_bytes);
             }
-            Operation::MalformedInput { compressed_flag, declared_length, actual_payload } => {
-                test_malformed_input_oracle(&mut codec, compressed_flag, declared_length, &actual_payload);
+            Operation::MalformedInput {
+                compressed_flag,
+                declared_length,
+                actual_payload,
+            } => {
+                test_malformed_input_oracle(
+                    &mut codec,
+                    compressed_flag,
+                    declared_length,
+                    &actual_payload,
+                );
             }
-            Operation::BoundaryTest { target_size, size_delta } => {
+            Operation::BoundaryTest {
+                target_size,
+                size_delta,
+            } => {
                 test_boundary_oracle(&mut codec, target_size, size_delta, max_encode, max_decode);
             }
             Operation::StateConsistency { operations } => {
@@ -206,8 +217,7 @@ fn test_round_trip_oracle(codec: &mut GrpcCodec, test_msg: &TestMessage, max_enc
                 Ok(Some(decoded_message)) => {
                     // Round-trip oracle: decoded must match original
                     assert_eq!(
-                        decoded_message.compressed,
-                        original_message.compressed,
+                        decoded_message.compressed, original_message.compressed,
                         "Round-trip oracle violation: compression flag mismatch"
                     );
 
@@ -218,23 +228,26 @@ fn test_round_trip_oracle(codec: &mut GrpcCodec, test_msg: &TestMessage, max_enc
                     );
 
                     assert_eq!(
-                        decoded_message.data,
-                        original_message.data,
+                        decoded_message.data, original_message.data,
                         "Round-trip oracle violation: payload content mismatch"
                     );
 
                     // Invariant: decode should consume exactly the encoded bytes
                     assert!(
-                        decode_buffer.is_empty() ||
-                        decode_buffer.len() < MESSAGE_HEADER_SIZE, // partial frame remaining is ok
+                        decode_buffer.is_empty() || decode_buffer.len() < MESSAGE_HEADER_SIZE, // partial frame remaining is ok
                         "Round-trip oracle violation: decoder left unexpected bytes"
                     );
                 }
                 Ok(None) => {
-                    panic!("Round-trip oracle violation: encode succeeded but decode returned None");
+                    panic!(
+                        "Round-trip oracle violation: encode succeeded but decode returned None"
+                    );
                 }
                 Err(decode_error) => {
-                    panic!("Round-trip oracle violation: encode succeeded but decode failed: {:?}", decode_error);
+                    panic!(
+                        "Round-trip oracle violation: encode succeeded but decode failed: {:?}",
+                        decode_error
+                    );
                 }
             }
         }
@@ -249,7 +262,11 @@ fn test_round_trip_oracle(codec: &mut GrpcCodec, test_msg: &TestMessage, max_enc
 }
 
 /// Oracle 2: Differential oracle - compare main codec against reference implementation
-fn test_differential_oracle(codec: &mut GrpcCodec, reference: &ReferenceGrpcCodec, raw_bytes: &[u8]) {
+fn test_differential_oracle(
+    codec: &mut GrpcCodec,
+    reference: &ReferenceGrpcCodec,
+    raw_bytes: &[u8],
+) {
     if raw_bytes.len() > MAX_INPUT_SIZE {
         return;
     }
@@ -293,7 +310,9 @@ fn test_differential_oracle(codec: &mut GrpcCodec, reference: &ReferenceGrpcCode
             // Could indicate main codec is too permissive
             // Only flag clear violations (like accepting invalid flags)
             if raw_bytes.len() >= MESSAGE_HEADER_SIZE && raw_bytes[0] > 1 {
-                panic!("Differential oracle violation: main codec accepted invalid compression flag");
+                panic!(
+                    "Differential oracle violation: main codec accepted invalid compression flag"
+                );
             }
         }
         (Err(_), Ok(_)) => {
@@ -309,7 +328,7 @@ fn test_malformed_input_oracle(
     codec: &mut GrpcCodec,
     compressed_flag: u8,
     declared_length: u32,
-    actual_payload: &[u8]
+    actual_payload: &[u8],
 ) {
     if actual_payload.len() > MAX_INPUT_SIZE {
         return;
@@ -357,7 +376,7 @@ fn test_boundary_oracle(
     target_size: u32,
     size_delta: i8,
     max_encode: usize,
-    max_decode: usize
+    max_decode: usize,
 ) {
     let base_size = (target_size % (MAX_INPUT_SIZE as u32)) as usize;
     let test_size = base_size.saturating_add_signed(size_delta as isize);
@@ -380,13 +399,15 @@ fn test_boundary_oracle(
         assert!(
             encode_result.is_ok(),
             "Boundary oracle violation: encode failed for size {} <= limit {}",
-            test_size, max_encode
+            test_size,
+            max_encode
         );
     } else {
         assert!(
             encode_result.is_err(),
             "Boundary oracle violation: encode succeeded for size {} > limit {}",
-            test_size, max_encode
+            test_size,
+            max_encode
         );
     }
 
@@ -451,7 +472,8 @@ fn test_state_consistency_oracle(codec: &mut GrpcCodec, operations: &[TestMessag
                         );
 
                         assert_eq!(
-                            decoded.data.len(), message.data.len(),
+                            decoded.data.len(),
+                            message.data.len(),
                             "State consistency violation at operation {}: payload length changed",
                             i
                         );
@@ -466,7 +488,9 @@ fn test_state_consistency_oracle(codec: &mut GrpcCodec, operations: &[TestMessag
                         previous_buffer_len = Some(buffer_len_before);
                     }
                     Ok(None) => {
-                        panic!("State consistency violation: encode succeeded but decode returned None");
+                        panic!(
+                            "State consistency violation: encode succeeded but decode returned None"
+                        );
                     }
                     Err(_) => {
                         error_count += 1;

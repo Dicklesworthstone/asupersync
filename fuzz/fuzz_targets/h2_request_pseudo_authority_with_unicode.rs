@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// RFC 7540 Section 8.1.2.3: The :authority pseudo-header field includes the
@@ -48,10 +48,10 @@ pub struct UnicodeAuthorityInput {
 #[derive(Debug, Clone, Copy)]
 pub enum UnicodeNormalization {
     None,
-    NFC,   // Canonical Decomposition followed by Canonical Composition
-    NFD,   // Canonical Decomposition
-    NFKC,  // Compatibility Decomposition followed by Canonical Composition
-    NFKD,  // Compatibility Decomposition
+    NFC,  // Canonical Decomposition followed by Canonical Composition
+    NFD,  // Canonical Decomposition
+    NFKC, // Compatibility Decomposition followed by Canonical Composition
+    NFKD, // Compatibility Decomposition
 }
 
 impl<'a> Arbitrary<'a> for UnicodeNormalization {
@@ -72,23 +72,23 @@ impl<'a> Arbitrary<'a> for UnicodeAuthorityInput {
         // Generate various Unicode domain patterns
         let domain_choice: u8 = u.arbitrary()?;
         let domain = match domain_choice % 20 {
-            0 => "münchen.de".to_string(),           // German umlaut
-            1 => "токио.рф".to_string(),             // Cyrillic
-            2 => "测试.中国".to_string(),               // Chinese
-            3 => "العربية.مصر".to_string(),           // Arabic
-            4 => "भारत.भारत".to_string(),             // Devanagari
-            5 => "日本.jp".to_string(),               // Japanese
-            6 => "한국.kr".to_string(),               // Korean
-            7 => "ελληνικά.gr".to_string(),          // Greek
-            8 => "עברית.il".to_string(),             // Hebrew
-            9 => "ไทย.th".to_string(),               // Thai
-            10 => "việt.vn".to_string(),            // Vietnamese
-            11 => "español.es".to_string(),         // Spanish with accent
-            12 => "français.fr".to_string(),        // French with cedilla
-            13 => "português.pt".to_string(),       // Portuguese
-            14 => "русский.рф".to_string(),         // Russian
-            15 => "türkçe.tr".to_string(),          // Turkish
-            16 => "example.com".to_string(),        // ASCII baseline
+            0 => "münchen.de".to_string(),    // German umlaut
+            1 => "токио.рф".to_string(),      // Cyrillic
+            2 => "测试.中国".to_string(),     // Chinese
+            3 => "العربية.مصر".to_string(),   // Arabic
+            4 => "भारत.भारत".to_string(),     // Devanagari
+            5 => "日本.jp".to_string(),       // Japanese
+            6 => "한국.kr".to_string(),       // Korean
+            7 => "ελληνικά.gr".to_string(),   // Greek
+            8 => "עברית.il".to_string(),      // Hebrew
+            9 => "ไทย.th".to_string(),        // Thai
+            10 => "việt.vn".to_string(),      // Vietnamese
+            11 => "español.es".to_string(),   // Spanish with accent
+            12 => "français.fr".to_string(),  // French with cedilla
+            13 => "português.pt".to_string(), // Portuguese
+            14 => "русский.рф".to_string(),   // Russian
+            15 => "türkçe.tr".to_string(),    // Turkish
+            16 => "example.com".to_string(),  // ASCII baseline
             17 => format!("test{}.org", u.arbitrary::<char>().unwrap_or('a')), // Random Unicode
             18 => {
                 // Generate completely arbitrary Unicode string
@@ -103,29 +103,33 @@ impl<'a> Arbitrary<'a> for UnicodeAuthorityInput {
                     domain = "test.com".to_string();
                 }
                 domain
-            },
+            }
             _ => {
                 // Mixed ASCII/Unicode
-                format!("sub{}.example{}.com",
+                format!(
+                    "sub{}.example{}.com",
                     u.arbitrary::<char>().unwrap_or('a'),
-                    u.arbitrary::<char>().unwrap_or('b'))
-            },
+                    u.arbitrary::<char>().unwrap_or('b')
+                )
+            }
         };
 
         // Generate Unicode port numbers
         let port = if u.arbitrary::<bool>()? {
             let port_choice: u8 = u.arbitrary()?;
             Some(match port_choice % 8 {
-                0 => "80".to_string(),              // Normal ASCII
-                1 => "８０".to_string(),             // Full-width digits (Unicode)
-                2 => "𝟖𝟎".to_string(),              // Mathematical bold digits
-                3 => "۸۰".to_string(),               // Extended Arabic-Indic digits
-                4 => "৮০".to_string(),               // Bengali digits
-                5 => "໘໐".to_string(),               // Lao digits
-                6 => "８８８８".to_string(),          // Full-width port
-                _ => format!("{}{}",
+                0 => "80".to_string(),       // Normal ASCII
+                1 => "８０".to_string(),     // Full-width digits (Unicode)
+                2 => "𝟖𝟎".to_string(),       // Mathematical bold digits
+                3 => "۸۰".to_string(),       // Extended Arabic-Indic digits
+                4 => "৮০".to_string(),       // Bengali digits
+                5 => "໘໐".to_string(),       // Lao digits
+                6 => "８８８８".to_string(), // Full-width port
+                _ => format!(
+                    "{}{}",
                     u.arbitrary::<char>().unwrap_or('8'),
-                    u.arbitrary::<char>().unwrap_or('0')),
+                    u.arbitrary::<char>().unwrap_or('0')
+                ),
             })
         } else {
             None
@@ -135,11 +139,11 @@ impl<'a> Arbitrary<'a> for UnicodeAuthorityInput {
         let userinfo = if u.arbitrary::<bool>()? {
             let user_choice: u8 = u.arbitrary()?;
             Some(match user_choice % 6 {
-                0 => "user".to_string(),            // Normal ASCII
-                1 => "用户".to_string(),              // Chinese
-                2 => "пользователь".to_string(),     // Russian
-                3 => "utilisateur".to_string(),     // French
-                4 => "משתמש".to_string(),            // Hebrew
+                0 => "user".to_string(),         // Normal ASCII
+                1 => "用户".to_string(),         // Chinese
+                2 => "пользователь".to_string(), // Russian
+                3 => "utilisateur".to_string(),  // French
+                4 => "משתמש".to_string(),        // Hebrew
                 _ => format!("user{}", u.arbitrary::<char>().unwrap_or('1')),
             })
         } else {
@@ -197,12 +201,33 @@ struct MockSettings {
 
 #[derive(Debug)]
 enum ProtocolError {
-    InvalidUnicodeAuthority { stream_id: u32, authority: String, reason: String },
-    MalformedPunycodeAuthority { stream_id: u32, authority: String },
-    InvalidNormalization { stream_id: u32, original: String, normalized: String },
-    OverlongUtf8Sequence { stream_id: u32, bytes: Vec<u8> },
-    InvalidUtf8InAuthority { stream_id: u32, bytes: Vec<u8> },
-    UnsupportedUnicodeForm { stream_id: u32, authority: String, form: String },
+    InvalidUnicodeAuthority {
+        stream_id: u32,
+        authority: String,
+        reason: String,
+    },
+    MalformedPunycodeAuthority {
+        stream_id: u32,
+        authority: String,
+    },
+    InvalidNormalization {
+        stream_id: u32,
+        original: String,
+        normalized: String,
+    },
+    OverlongUtf8Sequence {
+        stream_id: u32,
+        bytes: Vec<u8>,
+    },
+    InvalidUtf8InAuthority {
+        stream_id: u32,
+        bytes: Vec<u8>,
+    },
+    UnsupportedUnicodeForm {
+        stream_id: u32,
+        authority: String,
+        form: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -233,32 +258,41 @@ impl MockH2Connection {
         }
     }
 
-    fn process_headers_frame(&mut self, stream_id: u32, headers: Vec<(String, String)>) -> Result<(), String> {
+    fn process_headers_frame(
+        &mut self,
+        stream_id: u32,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), String> {
         // Initialize stream if needed
         if !self.stream_states.contains_key(&stream_id) {
-            self.stream_states.insert(stream_id, MockStreamState {
+            self.stream_states.insert(
                 stream_id,
-                state: StreamState::Open,
-                received_headers: Vec::new(),
-                pseudo_header_count: 0,
-                has_unicode_authority: false,
-            });
+                MockStreamState {
+                    stream_id,
+                    state: StreamState::Open,
+                    received_headers: Vec::new(),
+                    pseudo_header_count: 0,
+                    has_unicode_authority: false,
+                },
+            );
         }
-
-        let stream_state = self.stream_states.get_mut(&stream_id).unwrap();
 
         // Process each header
         for (name, value) in headers {
+            let has_unicode_authority = if name == ":authority" {
+                self.authority_validation_stats.total_authorities_processed += 1;
+                Some(self.validate_authority(&value, stream_id)?)
+            } else {
+                None
+            };
+
+            let stream_state = self.stream_states.get_mut(&stream_id).unwrap();
+
             if name.starts_with(':') {
                 stream_state.pseudo_header_count += 1;
 
-                if name == ":authority" {
-                    self.authority_validation_stats.total_authorities_processed += 1;
-
-                    // Check for Unicode content in authority
-                    if self.validate_authority(&value, stream_id)? {
-                        stream_state.has_unicode_authority = true;
-                    }
+                if has_unicode_authority == Some(true) {
+                    stream_state.has_unicode_authority = true;
                 }
             }
 
@@ -283,18 +317,19 @@ impl MockH2Connection {
         let (host, port) = if let Some(bracket_start) = authority.find('[') {
             // IPv6 literal case - check for Unicode in brackets
             if let Some(bracket_end) = authority.find(']') {
-                let ipv6_part = &authority[bracket_start+1..bracket_end];
+                let ipv6_part = &authority[bracket_start + 1..bracket_end];
                 if ipv6_part.chars().any(|c| !c.is_ascii()) {
-                    self.protocol_errors.push(ProtocolError::InvalidUnicodeAuthority {
-                        stream_id,
-                        authority: authority.to_string(),
-                        reason: "IPv6 literals must be ASCII".to_string(),
-                    });
+                    self.protocol_errors
+                        .push(ProtocolError::InvalidUnicodeAuthority {
+                            stream_id,
+                            authority: authority.to_string(),
+                            reason: "IPv6 literals must be ASCII".to_string(),
+                        });
                     self.authority_validation_stats.unicode_authorities_rejected += 1;
                     return Err("IPv6 literals must be ASCII".to_string());
                 }
 
-                let port_part = &authority[bracket_end+1..];
+                let port_part = &authority[bracket_end + 1..];
                 if port_part.starts_with(':') {
                     let port_str = &port_part[1..];
                     self.validate_port_component(port_str, stream_id)?;
@@ -311,14 +346,16 @@ impl MockH2Connection {
             match (parts.next(), parts.next()) {
                 (Some(port_str), Some(host_str)) => {
                     // Validate that port looks like a port (digits)
-                    if port_str.chars().all(|c| c.is_ascii_digit()) || port_str.chars().any(|c| !c.is_ascii()) {
+                    if port_str.chars().all(|c| c.is_ascii_digit())
+                        || port_str.chars().any(|c| !c.is_ascii())
+                    {
                         self.validate_port_component(port_str, stream_id)?;
                         (host_str, Some(port_str))
                     } else {
                         // Not a port, treat whole thing as host
                         (authority, None)
                     }
-                },
+                }
                 (Some(_), None) => (authority, None),
                 _ => (authority, None),
             }
@@ -328,11 +365,12 @@ impl MockH2Connection {
         if let Some(at_pos) = host.find('@') {
             let userinfo = &host[..at_pos];
             if userinfo.chars().any(|c| !c.is_ascii()) {
-                self.protocol_errors.push(ProtocolError::InvalidUnicodeAuthority {
-                    stream_id,
-                    authority: authority.to_string(),
-                    reason: "Unicode userinfo not allowed".to_string(),
-                });
+                self.protocol_errors
+                    .push(ProtocolError::InvalidUnicodeAuthority {
+                        stream_id,
+                        authority: authority.to_string(),
+                        reason: "Unicode userinfo not allowed".to_string(),
+                    });
                 self.authority_validation_stats.unicode_userinfo_rejections += 1;
                 return Err("Unicode userinfo not allowed".to_string());
             }
@@ -347,7 +385,8 @@ impl MockH2Connection {
         } else {
             // ASCII host - check if it's proper punycode
             if host.contains("xn--") {
-                self.authority_validation_stats.punycode_authorities_accepted += 1;
+                self.authority_validation_stats
+                    .punycode_authorities_accepted += 1;
             } else {
                 self.authority_validation_stats.ascii_authorities_accepted += 1;
             }
@@ -359,11 +398,12 @@ impl MockH2Connection {
     fn validate_port_component(&mut self, port: &str, stream_id: u32) -> Result<(), String> {
         // Check for Unicode digits or characters in port
         if port.chars().any(|c| !c.is_ascii()) {
-            self.protocol_errors.push(ProtocolError::InvalidUnicodeAuthority {
-                stream_id,
-                authority: format!("port:{}", port),
-                reason: "Port numbers must be ASCII digits".to_string(),
-            });
+            self.protocol_errors
+                .push(ProtocolError::InvalidUnicodeAuthority {
+                    stream_id,
+                    authority: format!("port:{}", port),
+                    reason: "Port numbers must be ASCII digits".to_string(),
+                });
             self.authority_validation_stats.unicode_port_rejections += 1;
             return Err("Port numbers must be ASCII digits".to_string());
         }
@@ -401,11 +441,12 @@ impl MockH2Connection {
             }
 
             // Raw Unicode domain - this should be rejected
-            self.protocol_errors.push(ProtocolError::InvalidUnicodeAuthority {
-                stream_id,
-                authority: host.to_string(),
-                reason: "Raw Unicode domains must be punycode-encoded".to_string(),
-            });
+            self.protocol_errors
+                .push(ProtocolError::InvalidUnicodeAuthority {
+                    stream_id,
+                    authority: host.to_string(),
+                    reason: "Raw Unicode domains must be punycode-encoded".to_string(),
+                });
             self.authority_validation_stats.unicode_authorities_rejected += 1;
             self.unicode_violation_count += 1;
 
@@ -422,41 +463,51 @@ impl MockH2Connection {
             UnicodeNormalization::NFC => {
                 // Simulate NFC normalization (composition)
                 input.chars().collect::<String>()
-            },
+            }
             UnicodeNormalization::NFD => {
                 // Simulate NFD normalization (decomposition)
-                input.chars().flat_map(|c| {
-                    // Very simplified - in reality would use Unicode normalization tables
-                    match c {
-                        'é' => vec!['e', '\u{0301}'], // e + combining acute accent
-                        'ñ' => vec!['n', '\u{0303}'], // n + combining tilde
-                        _ => vec![c],
-                    }
-                }).collect()
-            },
+                input
+                    .chars()
+                    .flat_map(|c| {
+                        // Very simplified - in reality would use Unicode normalization tables
+                        match c {
+                            'é' => vec!['e', '\u{0301}'], // e + combining acute accent
+                            'ñ' => vec!['n', '\u{0303}'], // n + combining tilde
+                            _ => vec![c],
+                        }
+                    })
+                    .collect()
+            }
             UnicodeNormalization::NFKC => {
                 // Simulate NFKC (compatibility composition)
-                input.chars().map(|c| {
-                    match c {
-                        '８' => '8',  // Full-width to ASCII
-                        '０' => '0',
-                        '．' => '.',
-                        _ => c,
-                    }
-                }).collect()
-            },
+                input
+                    .chars()
+                    .map(|c| {
+                        match c {
+                            '８' => '8', // Full-width to ASCII
+                            '０' => '0',
+                            '．' => '.',
+                            _ => c,
+                        }
+                    })
+                    .collect()
+            }
             UnicodeNormalization::NFKD => {
                 // Simulate NFKD (compatibility decomposition)
                 let nfkc = self.apply_unicode_normalization(input, UnicodeNormalization::NFKC);
                 self.apply_unicode_normalization(&nfkc, UnicodeNormalization::NFD)
-            },
+            }
         }
     }
 
     fn get_violation_stats(&self) -> (u32, u32, f64) {
         let total = self.authority_validation_stats.total_authorities_processed;
         let violations = self.authority_validation_stats.unicode_authorities_rejected;
-        let ratio = if total > 0 { violations as f64 / total as f64 } else { 0.0 };
+        let ratio = if total > 0 {
+            violations as f64 / total as f64
+        } else {
+            0.0
+        };
         (total, violations, ratio)
     }
 }
@@ -516,19 +567,19 @@ fn apply_normalization(input: &str, form: UnicodeNormalization) -> String {
         UnicodeNormalization::NFC => input.to_string(), // Simplified
         UnicodeNormalization::NFD => {
             // Very basic decomposition simulation
-            input.replace("é", "e\u{0301}")
-                 .replace("ñ", "n\u{0303}")
-        },
+            input.replace("é", "e\u{0301}").replace("ñ", "n\u{0303}")
+        }
         UnicodeNormalization::NFKC => {
             // Convert full-width to ASCII
-            input.replace("８", "8")
-                 .replace("０", "0")
-                 .replace("．", ".")
-        },
+            input
+                .replace("８", "8")
+                .replace("０", "0")
+                .replace("．", ".")
+        }
         UnicodeNormalization::NFKD => {
             let nfkc = apply_normalization(input, UnicodeNormalization::NFKC);
             apply_normalization(&nfkc, UnicodeNormalization::NFD)
-        },
+        }
     }
 }
 
@@ -577,7 +628,8 @@ fuzz_target!(|data: &[u8]| {
     let headers = build_unicode_authority_headers(&input);
 
     // Simulate frame size limits
-    let headers_size: usize = headers.iter()
+    let headers_size: usize = headers
+        .iter()
         .map(|(k, v)| k.len() + v.len() + 32) // Include overhead
         .sum();
 
@@ -597,14 +649,21 @@ fuzz_target!(|data: &[u8]| {
 
             if stream.has_unicode_authority && !input.use_punycode {
                 // This is a violation - raw Unicode should be rejected
-                panic!("Raw Unicode authority was incorrectly accepted: domain={}", input.domain);
+                panic!(
+                    "Raw Unicode authority was incorrectly accepted: domain={}",
+                    input.domain
+                );
             }
-        },
+        }
         Err(error) => {
             // Headers were rejected - this is usually correct for Unicode
             if contains_non_ascii(&input.domain) && !input.use_punycode {
                 // Expected rejection of raw Unicode
-                assert!(error.contains("Unicode") || error.contains("punycode") || error.contains("ASCII"));
+                assert!(
+                    error.contains("Unicode")
+                        || error.contains("punycode")
+                        || error.contains("ASCII")
+                );
             }
         }
     }
@@ -621,20 +680,27 @@ fuzz_target!(|data: &[u8]| {
     // Check that Unicode violations are properly categorized
     for error in &connection.protocol_errors {
         match error {
-            ProtocolError::InvalidUnicodeAuthority { stream_id, authority, reason } => {
+            ProtocolError::InvalidUnicodeAuthority {
+                stream_id,
+                authority,
+                reason,
+            } => {
                 assert_eq!(*stream_id, 1);
                 assert!(!authority.is_empty());
                 assert!(!reason.is_empty());
-            },
-            ProtocolError::MalformedPunycodeAuthority { stream_id, authority } => {
+            }
+            ProtocolError::MalformedPunycodeAuthority {
+                stream_id,
+                authority,
+            } => {
                 assert_eq!(*stream_id, 1);
                 assert!(authority.contains("xn--"));
-            },
+            }
             ProtocolError::InvalidUtf8InAuthority { stream_id, bytes } => {
                 assert_eq!(*stream_id, 1);
                 assert!(!bytes.is_empty());
-            },
-            _ => {}, // Other error types
+            }
+            _ => {} // Other error types
         }
     }
 
@@ -642,9 +708,9 @@ fuzz_target!(|data: &[u8]| {
     let stats = &connection.authority_validation_stats;
     assert_eq!(
         stats.total_authorities_processed,
-        stats.unicode_authorities_rejected +
-        stats.punycode_authorities_accepted +
-        stats.ascii_authorities_accepted
+        stats.unicode_authorities_rejected
+            + stats.punycode_authorities_accepted
+            + stats.ascii_authorities_accepted
     );
 
     // Test normalization consistency
@@ -654,8 +720,10 @@ fuzz_target!(|data: &[u8]| {
 
         // Normalization should be idempotent
         let double_normalized = apply_normalization(&normalized, input.normalization);
-        assert_eq!(normalized, double_normalized,
+        assert_eq!(
+            normalized, double_normalized,
             "Normalization not idempotent: {} -> {} -> {}",
-            original, normalized, double_normalized);
+            original, normalized, double_normalized
+        );
     }
 });

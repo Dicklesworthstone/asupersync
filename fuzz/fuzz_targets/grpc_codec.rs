@@ -97,11 +97,7 @@ fuzz_target!(|input: FuzzInput| {
     }
 });
 
-fn observe_grpc_encode_result(
-    result: Result<(), GrpcError>,
-    out: &BytesMut,
-    payload_len: usize,
-) {
+fn observe_grpc_encode_result(result: Result<(), GrpcError>, out: &BytesMut, payload_len: usize) {
     match result {
         Ok(()) => {
             assert_eq!(

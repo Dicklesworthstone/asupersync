@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::record::task::{TaskRecord, TaskState};
+use asupersync::record::task::TaskRecord;
 use asupersync::runtime::scheduler::intrusive_heap::IntrusivePriorityHeap;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::arena::Arena;
@@ -62,7 +62,8 @@ impl HeapShadowModel {
 
     fn push(&mut self, task: TaskId, priority: u8) -> bool {
         if !self.expected_tasks.contains_key(&task) {
-            self.expected_tasks.insert(task, (priority, self.next_generation));
+            self.expected_tasks
+                .insert(task, (priority, self.next_generation));
             self.next_generation = self.next_generation.wrapping_add(1);
             true
         } else {
@@ -76,12 +77,12 @@ impl HeapShadowModel {
         }
 
         // Find highest priority task (max priority, then min generation for tie-breaking)
-        let (&task_id, _) = self
-            .expected_tasks
-            .iter()
-            .max_by(|(_, (prio_a, gen_a)), (_, (prio_b, gen_b))| {
-                prio_a.cmp(prio_b).then(gen_b.cmp(gen_a)) // Note: gen_b.cmp(gen_a) for FIFO
-            })?;
+        let (&task_id, _) =
+            self.expected_tasks
+                .iter()
+                .max_by(|(_, (prio_a, gen_a)), (_, (prio_b, gen_b))| {
+                    prio_a.cmp(prio_b).then(gen_b.cmp(gen_a)) // Note: gen_b.cmp(gen_a) for FIFO
+                })?;
 
         self.expected_tasks.remove(&task_id);
         Some(task_id)
@@ -113,12 +114,12 @@ impl HeapShadowModel {
         }
 
         // Find highest priority task (same logic as pop but don't remove)
-        let (&task_id, _) = self
-            .expected_tasks
-            .iter()
-            .max_by(|(_, (prio_a, gen_a)), (_, (prio_b, gen_b))| {
-                prio_a.cmp(prio_b).then(gen_b.cmp(gen_a))
-            })?;
+        let (&task_id, _) =
+            self.expected_tasks
+                .iter()
+                .max_by(|(_, (prio_a, gen_a)), (_, (prio_b, gen_b))| {
+                    prio_a.cmp(prio_b).then(gen_b.cmp(gen_a))
+                })?;
 
         Some(task_id)
     }
@@ -139,19 +140,22 @@ fuzz_target!(|input: HeapFuzzInput| {
     // Pre-create task pool to avoid allocation patterns affecting the fuzz
     let mut task_pool = Vec::new();
     for i in 0..MAX_TASKS.min(256) {
-        let task_id = TaskId::new_for_test(i);
-        let region_id = RegionId::new_for_test(0);
-        let budget = Budget::infinite(); // Use infinite budget for simplicity
+        let task_id = TaskId::new_for_test(i as u32, 0);
+        let region_id = RegionId::new_for_test(0, 0);
+        let budget = Budget::unlimited(); // Use unlimited budget for simplicity
         let record = TaskRecord::new_with_time(task_id, region_id, budget, Time::ZERO);
         let arena_index = arena.insert(record);
-        assert_eq!(arena_index, i); // Ensure predictable indexing
+        assert_eq!(arena_index, task_id.arena_index()); // Ensure predictable indexing
         task_pool.push(task_id);
     }
 
     // Execute operations and compare with shadow model
     for operation in input.operations {
         match operation {
-            HeapOperation::Push { task_index, priority } => {
+            HeapOperation::Push {
+                task_index,
+                priority,
+            } => {
                 if task_index as usize >= task_pool.len() {
                     continue;
                 }
@@ -171,12 +175,27 @@ fuzz_target!(|input: HeapFuzzInput| {
                 if shadow_added {
                     assert_eq!(len_after, len_before + 1, "Push should increase heap size");
                 } else {
-                    assert_eq!(len_after, len_before, "Duplicate push should not change size");
+                    assert_eq!(
+                        len_after, len_before,
+                        "Duplicate push should not change size"
+                    );
                 }
 
-                assert_eq!(heap.len(), shadow.len(), "Heap and shadow size mismatch after push");
-                assert_eq!(heap.is_empty(), shadow.is_empty(), "Empty state mismatch after push");
-                assert_eq!(heap.contains(task, &arena), shadow.contains(task), "Contains mismatch after push");
+                assert_eq!(
+                    heap.len(),
+                    shadow.len(),
+                    "Heap and shadow size mismatch after push"
+                );
+                assert_eq!(
+                    heap.is_empty(),
+                    shadow.is_empty(),
+                    "Empty state mismatch after push"
+                );
+                assert_eq!(
+                    heap.contains(task, &arena),
+                    shadow.contains(task),
+                    "Contains mismatch after push"
+                );
             }
 
             HeapOperation::Pop => {
@@ -189,12 +208,23 @@ fuzz_target!(|input: HeapFuzzInput| {
                     heap_result, shadow_result
                 );
 
-                assert_eq!(heap.len(), shadow.len(), "Heap and shadow size mismatch after pop");
-                assert_eq!(heap.is_empty(), shadow.is_empty(), "Empty state mismatch after pop");
+                assert_eq!(
+                    heap.len(),
+                    shadow.len(),
+                    "Heap and shadow size mismatch after pop"
+                );
+                assert_eq!(
+                    heap.is_empty(),
+                    shadow.is_empty(),
+                    "Empty state mismatch after pop"
+                );
 
                 // Verify that popped task is no longer in heap
                 if let Some(popped_task) = heap_result {
-                    assert!(!heap.contains(popped_task, &arena), "Popped task still in heap");
+                    assert!(
+                        !heap.contains(popped_task, &arena),
+                        "Popped task still in heap"
+                    );
                     assert!(!shadow.contains(popped_task), "Popped task still in shadow");
                 }
             }
@@ -215,9 +245,21 @@ fuzz_target!(|input: HeapFuzzInput| {
                     task, heap_removed, shadow_removed
                 );
 
-                assert_eq!(heap.len(), shadow.len(), "Heap and shadow size mismatch after remove");
-                assert_eq!(heap.is_empty(), shadow.is_empty(), "Empty state mismatch after remove");
-                assert_eq!(heap.contains(task, &arena), shadow.contains(task), "Contains mismatch after remove");
+                assert_eq!(
+                    heap.len(),
+                    shadow.len(),
+                    "Heap and shadow size mismatch after remove"
+                );
+                assert_eq!(
+                    heap.is_empty(),
+                    shadow.is_empty(),
+                    "Empty state mismatch after remove"
+                );
+                assert_eq!(
+                    heap.contains(task, &arena),
+                    shadow.contains(task),
+                    "Contains mismatch after remove"
+                );
             }
 
             HeapOperation::Peek => {
@@ -259,8 +301,14 @@ fuzz_target!(|input: HeapFuzzInput| {
 
                 // Verify all tasks report as not contained
                 for &task in &task_pool {
-                    assert!(!heap.contains(task, &arena), "No task should be contained after clear");
-                    assert!(!shadow.contains(task), "No task should be in shadow after clear");
+                    assert!(
+                        !heap.contains(task, &arena),
+                        "No task should be contained after clear"
+                    );
+                    assert!(
+                        !shadow.contains(task),
+                        "No task should be in shadow after clear"
+                    );
                 }
             }
 
@@ -271,7 +319,11 @@ fuzz_target!(|input: HeapFuzzInput| {
 
         // Always verify basic consistency after each operation
         assert_eq!(heap.len(), shadow.len(), "Size consistency check failed");
-        assert_eq!(heap.is_empty(), shadow.is_empty(), "Empty state consistency check failed");
+        assert_eq!(
+            heap.is_empty(),
+            shadow.is_empty(),
+            "Empty state consistency check failed"
+        );
 
         // Verify peek consistency
         let heap_peek = heap.peek();
@@ -295,8 +347,16 @@ fn verify_heap_invariants(
     shadow: &HeapShadowModel,
 ) {
     // Size consistency
-    assert_eq!(heap.len(), shadow.len(), "Final size consistency check failed");
-    assert_eq!(heap.is_empty(), shadow.is_empty(), "Final empty state consistency check failed");
+    assert_eq!(
+        heap.len(),
+        shadow.len(),
+        "Final size consistency check failed"
+    );
+    assert_eq!(
+        heap.is_empty(),
+        shadow.is_empty(),
+        "Final empty state consistency check failed"
+    );
 
     // If heap is empty, peek should return None
     if heap.is_empty() {
@@ -311,28 +371,23 @@ fn verify_heap_invariants(
     // The heap's internal invariants are maintained by its implementation.
 
     // Verify contains is consistent between heap and shadow
-    for i in 0..256.min(arena.capacity()) {
-        if let Some(task_id) = TaskId::try_from_arena_index(i) {
-            if let Some(record) = arena.get(i) {
-                let heap_contains = heap.contains(task_id, arena);
-                let shadow_contains = shadow.contains(task_id);
-                assert_eq!(
-                    heap_contains, shadow_contains,
-                    "Contains consistency check failed for task {:?}: heap={}, shadow={}",
-                    task_id, heap_contains, shadow_contains
-                );
+    for (_arena_index, record) in arena.iter().take(256) {
+        let task_id = record.id;
+        let heap_contains = heap.contains(task_id, arena);
+        let shadow_contains = shadow.contains(task_id);
+        assert_eq!(
+            heap_contains, shadow_contains,
+            "Contains consistency check failed for task {:?}: heap={}, shadow={}",
+            task_id, heap_contains, shadow_contains
+        );
 
-                // If task is in heap, verify heap_index is set
-                if heap_contains {
-                    assert!(
-                        record.heap_index.is_some(),
-                        "Task {:?} in heap should have heap_index set",
-                        task_id
-                    );
-                } else {
-                    // Note: heap_index might still be set during operations, so we don't check it's None
-                }
-            }
+        // If task is in heap, verify heap_index is set.
+        if heap_contains {
+            assert!(
+                record.heap_index.is_some(),
+                "Task {:?} in heap should have heap_index set",
+                task_id
+            );
         }
     }
 }

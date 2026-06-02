@@ -179,8 +179,8 @@ impl Default for ValidationConfig {
         Self {
             strict_rfc_compliance: true,
             allow_non_standard_schemes: false, // Only http/https by default
-            case_sensitive: false, // Schemes are case-insensitive per RFC
-            max_scheme_length: 32, // Reasonable limit
+            case_sensitive: false,             // Schemes are case-insensitive per RFC
+            max_scheme_length: 32,             // Reasonable limit
             validate_scheme_format: true,
         }
     }
@@ -241,17 +241,17 @@ struct SchemeViolation {
 
 #[derive(Debug, Clone, PartialEq)]
 enum SchemeViolationType {
-    EmptyScheme,                    // Empty string
-    InvalidScheme(String),          // Non-http/https scheme
-    MalformedScheme(String),        // Contains invalid characters
-    SchemeWithColon,                // "http:" instead of "http"
-    SchemeWithAuthority,            // "http://example.com"
-    CaseMismatch(String),           // "HTTP" instead of "http"
-    SchemeTooLong,                  // Exceeds length limit
-    InvalidCharacters(Vec<char>),   // Contains non-allowed characters
-    NullBytes,                      // Contains null bytes
-    UnicodeCharacters,              // Contains Unicode
-    MultipleSchemes,                // Multiple :scheme headers
+    EmptyScheme,                  // Empty string
+    InvalidScheme(String),        // Non-http/https scheme
+    MalformedScheme(String),      // Contains invalid characters
+    SchemeWithColon,              // "http:" instead of "http"
+    SchemeWithAuthority,          // "http://example.com"
+    CaseMismatch(String),         // "HTTP" instead of "http"
+    SchemeTooLong,                // Exceeds length limit
+    InvalidCharacters(Vec<char>), // Contains non-allowed characters
+    NullBytes,                    // Contains null bytes
+    UnicodeCharacters,            // Contains Unicode
+    MultipleSchemes,              // Multiple :scheme headers
 }
 
 #[derive(Debug, Clone, Default)]
@@ -280,12 +280,16 @@ impl MockSchemeValidationConnection {
     }
 
     /// Process HEADERS frame with :scheme validation
-    fn process_headers_frame(&mut self, stream_id: u32, scheme: &str,
-                           other_headers: &[(String, String)]) -> ProcessingResult {
+    fn process_headers_frame(
+        &mut self,
+        stream_id: u32,
+        scheme: &str,
+        other_headers: &[(String, String)],
+    ) -> ProcessingResult {
         // Stream ID validation
         if stream_id == 0 || stream_id % 2 == 0 {
             self.connection_error = Some(ConnectionError::ProtocolError(
-                "Invalid stream ID for client-initiated request".to_string()
+                "Invalid stream ID for client-initiated request".to_string(),
             ));
             return ProcessingResult::ConnectionError;
         }
@@ -320,7 +324,11 @@ impl MockSchemeValidationConnection {
                 ProcessingResult::Success
             }
 
-            SchemeValidationResult { valid: false, violation_type: Some(ref vtype), .. } => {
+            SchemeValidationResult {
+                valid: false,
+                violation_type: Some(ref vtype),
+                ..
+            } => {
                 stream_state.violation_detected = true;
                 self.stats.invalid_schemes += 1;
 
@@ -354,8 +362,6 @@ impl MockSchemeValidationConnection {
 
     /// Validate :scheme pseudo-header per RFC 7540 and RFC 3986
     fn validate_scheme(&mut self, stream_id: u32, scheme: &str) -> SchemeValidationResult {
-        let mut violations = Vec::new();
-
         // Empty scheme check
         if scheme.is_empty() {
             let violation = SchemeViolation {
@@ -516,7 +522,9 @@ impl MockSchemeValidationConnection {
                     stream_id,
                     scheme: scheme.to_string(),
                     valid: false,
-                    violation_type: Some(SchemeViolationType::CaseMismatch(normalized_scheme.clone())),
+                    violation_type: Some(SchemeViolationType::CaseMismatch(
+                        normalized_scheme.clone(),
+                    )),
                     normalized_scheme: Some(normalized_scheme),
                 };
             }
@@ -538,7 +546,9 @@ impl MockSchemeValidationConnection {
                 stream_id,
                 scheme: scheme.to_string(),
                 valid: false,
-                violation_type: Some(SchemeViolationType::InvalidScheme(normalized_scheme.clone())),
+                violation_type: Some(SchemeViolationType::InvalidScheme(
+                    normalized_scheme.clone(),
+                )),
                 normalized_scheme: Some(normalized_scheme),
             };
         }
@@ -557,9 +567,9 @@ impl MockSchemeValidationConnection {
     fn is_valid_scheme_char(&self, ch: char) -> bool {
         // RFC 3986 §3.1: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
         match ch {
-            'A'..='Z' | 'a'..='z' => true,      // ALPHA
-            '0'..='9' => true,                   // DIGIT
-            '+' | '-' | '.' => true,             // Special allowed chars
+            'A'..='Z' | 'a'..='z' => true, // ALPHA
+            '0'..='9' => true,             // DIGIT
+            '+' | '-' | '.' => true,       // Special allowed chars
             _ => false,
         }
     }
@@ -602,7 +612,6 @@ fn generate_test_schemes() -> Vec<(&'static str, ExpectedSchemeResult)> {
         ("HTTPS", ExpectedSchemeResult::Accept),
         ("Http", ExpectedSchemeResult::Accept),
         ("Https", ExpectedSchemeResult::Accept),
-
         // Invalid non-standard schemes
         ("ws", ExpectedSchemeResult::Reject),
         ("wss", ExpectedSchemeResult::Reject),
@@ -613,40 +622,38 @@ fn generate_test_schemes() -> Vec<(&'static str, ExpectedSchemeResult)> {
         ("data", ExpectedSchemeResult::Reject),
         ("javascript", ExpectedSchemeResult::Reject),
         ("custom", ExpectedSchemeResult::Reject),
-
         // Malformed schemes
-        ("http:", ExpectedSchemeResult::Reject),      // With colon
+        ("http:", ExpectedSchemeResult::Reject), // With colon
         ("https:", ExpectedSchemeResult::Reject),
-        ("http://", ExpectedSchemeResult::Reject),    // With authority
+        ("http://", ExpectedSchemeResult::Reject), // With authority
         ("https://", ExpectedSchemeResult::Reject),
         ("http://example.com", ExpectedSchemeResult::Reject),
         ("https://example.com", ExpectedSchemeResult::Reject),
-
         // Empty and edge cases
-        ("", ExpectedSchemeResult::Reject),           // Empty
-        (" http", ExpectedSchemeResult::Reject),      // Leading space
-        ("http ", ExpectedSchemeResult::Reject),      // Trailing space
-        ("ht tp", ExpectedSchemeResult::Reject),      // Space inside
-        ("http\n", ExpectedSchemeResult::Reject),     // Control character
-        ("http\0", ExpectedSchemeResult::Reject),     // Null byte
-
+        ("", ExpectedSchemeResult::Reject),       // Empty
+        (" http", ExpectedSchemeResult::Reject),  // Leading space
+        ("http ", ExpectedSchemeResult::Reject),  // Trailing space
+        ("ht tp", ExpectedSchemeResult::Reject),  // Space inside
+        ("http\n", ExpectedSchemeResult::Reject), // Control character
+        ("http\0", ExpectedSchemeResult::Reject), // Null byte
         // Invalid characters
-        ("http$", ExpectedSchemeResult::Reject),      // Invalid character
+        ("http$", ExpectedSchemeResult::Reject), // Invalid character
         ("http@", ExpectedSchemeResult::Reject),
         ("http%", ExpectedSchemeResult::Reject),
         ("http&", ExpectedSchemeResult::Reject),
         ("http*", ExpectedSchemeResult::Reject),
         ("http(", ExpectedSchemeResult::Reject),
         ("http)", ExpectedSchemeResult::Reject),
-
         // Unicode and encoding
-        ("hттр", ExpectedSchemeResult::Reject),       // Cyrillic chars
-        ("ｈttp", ExpectedSchemeResult::Reject),       // Fullwidth chars
+        ("hттр", ExpectedSchemeResult::Reject), // Cyrillic chars
+        ("ｈttp", ExpectedSchemeResult::Reject), // Fullwidth chars
         ("http\u{200B}", ExpectedSchemeResult::Reject), // Zero-width space
-        ("http%20", ExpectedSchemeResult::Reject),    // URL-encoded space
-
+        ("http%20", ExpectedSchemeResult::Reject), // URL-encoded space
         // Very long schemes
-        ("httpverylongschemenamethatexceedslimits", ExpectedSchemeResult::Reject),
+        (
+            "httpverylongschemenamethatexceedslimits",
+            ExpectedSchemeResult::Reject,
+        ),
     ]
 }
 
@@ -665,18 +672,27 @@ fuzz_target!(|input: SchemeValidationInput| {
         let result = connection.process_headers_frame(
             1, // Use stream ID 1 for basic tests
             scheme,
-            &[] // No additional headers for basic tests
+            &[], // No additional headers for basic tests
         );
 
         match expected_result {
             ExpectedSchemeResult::Accept => {
-                assert!(matches!(result, ProcessingResult::Success),
-                    "Valid scheme '{}' should be accepted", scheme);
+                assert!(
+                    matches!(result, ProcessingResult::Success),
+                    "Valid scheme '{}' should be accepted",
+                    scheme
+                );
             }
 
             ExpectedSchemeResult::Reject => {
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Invalid scheme '{}' should be rejected", scheme);
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Invalid scheme '{}' should be rejected",
+                    scheme
+                );
             }
 
             ExpectedSchemeResult::ImplementationDefined => {
@@ -696,22 +712,32 @@ fuzz_target!(|input: SchemeValidationInput| {
         let result = connection.process_headers_frame(
             stream_id,
             &test_case.scheme_value,
-            &test_case.regular_headers
+            &test_case.regular_headers,
         );
 
         // Verify result matches expectation
         match test_case.expected_result {
             ExpectedSchemeResult::Accept => {
                 if is_valid_scheme(&test_case.scheme_value) {
-                    assert_eq!(result, ProcessingResult::Success,
-                        "Expected valid scheme to be accepted: '{}'", test_case.scheme_value);
+                    assert_eq!(
+                        result,
+                        ProcessingResult::Success,
+                        "Expected valid scheme to be accepted: '{}'",
+                        test_case.scheme_value
+                    );
                 }
             }
 
             ExpectedSchemeResult::Reject => {
                 if !is_valid_scheme(&test_case.scheme_value) {
-                    assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                        "Expected invalid scheme to be rejected: '{}'", test_case.scheme_value);
+                    assert!(
+                        matches!(
+                            result,
+                            ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                        ),
+                        "Expected invalid scheme to be rejected: '{}'",
+                        test_case.scheme_value
+                    );
                 }
             }
 
@@ -726,44 +752,77 @@ fuzz_target!(|input: SchemeValidationInput| {
         match edge_case {
             EdgeCaseTest::EmptyScheme => {
                 let result = connection.process_headers_frame(101, "", &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Empty scheme should be rejected");
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Empty scheme should be rejected"
+                );
             }
 
             EdgeCaseTest::SchemeWithColon { scheme } => {
                 let scheme_with_colon = format!("{}:", scheme);
                 let result = connection.process_headers_frame(103, &scheme_with_colon, &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Scheme with colon '{}' should be rejected", scheme_with_colon);
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Scheme with colon '{}' should be rejected",
+                    scheme_with_colon
+                );
             }
 
             EdgeCaseTest::SchemeWithAuthority { scheme } => {
                 let scheme_with_auth = format!("{}://example.com", scheme);
                 let result = connection.process_headers_frame(105, &scheme_with_auth, &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Scheme with authority '{}' should be rejected", scheme_with_auth);
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Scheme with authority '{}' should be rejected",
+                    scheme_with_auth
+                );
             }
 
             EdgeCaseTest::VeryLongScheme { length } => {
                 let long_scheme = "x".repeat(*length as usize);
                 let result = connection.process_headers_frame(107, &long_scheme, &[]);
                 if *length > connection.config.max_scheme_length {
-                    assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                        "Long scheme should be rejected");
+                    assert!(
+                        matches!(
+                            result,
+                            ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                        ),
+                        "Long scheme should be rejected"
+                    );
                 }
             }
 
             EdgeCaseTest::SchemeWithNullBytes => {
                 let result = connection.process_headers_frame(109, "http\0", &[]);
-                assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                    "Scheme with null bytes should be rejected");
+                assert!(
+                    matches!(
+                        result,
+                        ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                    ),
+                    "Scheme with null bytes should be rejected"
+                );
             }
 
             EdgeCaseTest::UnicodeScheme { scheme } => {
                 let result = connection.process_headers_frame(111, scheme, &[]);
                 if !scheme.is_ascii() {
-                    assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                        "Unicode scheme '{}' should be rejected", scheme);
+                    assert!(
+                        matches!(
+                            result,
+                            ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                        ),
+                        "Unicode scheme '{}' should be rejected",
+                        scheme
+                    );
                 }
             }
 
@@ -784,27 +843,39 @@ fuzz_target!(|input: SchemeValidationInput| {
     // Test that standard schemes are always accepted
     for standard_scheme in &["http", "https"] {
         let result = connection.process_headers_frame(301, standard_scheme, &[]);
-        assert_eq!(result, ProcessingResult::Success,
-            "Standard scheme '{}' should always be accepted", standard_scheme);
+        assert_eq!(
+            result,
+            ProcessingResult::Success,
+            "Standard scheme '{}' should always be accepted",
+            standard_scheme
+        );
     }
 
     // Test that clearly invalid schemes are always rejected
     for invalid_scheme in &["javascript", "data", "file", "ftp"] {
         if !connection.config.allow_non_standard_schemes {
             let result = connection.process_headers_frame(401, invalid_scheme, &[]);
-            assert!(matches!(result, ProcessingResult::StreamError(_) | ProcessingResult::ValidationError),
-                "Invalid scheme '{}' should be rejected", invalid_scheme);
+            assert!(
+                matches!(
+                    result,
+                    ProcessingResult::StreamError(_) | ProcessingResult::ValidationError
+                ),
+                "Invalid scheme '{}' should be rejected",
+                invalid_scheme
+            );
         }
     }
 });
 
 /// Helper to check if a scheme is valid for HTTP/2
 fn is_valid_scheme(scheme: &str) -> bool {
-    matches!(scheme.to_lowercase().as_str(), "http" | "https") &&
-    !scheme.is_empty() &&
-    scheme.is_ascii() &&
-    !scheme.contains('\0') &&
-    !scheme.contains("://") &&
-    !scheme.ends_with(':') &&
-    scheme.chars().all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '+' | '-' | '.'))
+    matches!(scheme.to_lowercase().as_str(), "http" | "https")
+        && !scheme.is_empty()
+        && scheme.is_ascii()
+        && !scheme.contains('\0')
+        && !scheme.contains("://")
+        && !scheme.ends_with(':')
+        && scheme
+            .chars()
+            .all(|c| matches!(c, 'A'..='Z' | 'a'..='z' | '0'..='9' | '+' | '-' | '.'))
 }

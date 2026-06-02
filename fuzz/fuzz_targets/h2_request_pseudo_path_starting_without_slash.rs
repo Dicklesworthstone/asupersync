@@ -24,8 +24,8 @@
 //! - RFC 7540 §8.1.2.3: :path pseudo-header requirements
 //! - RFC 3986 §3.3: Path component syntax
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -194,7 +194,8 @@ impl MockInvalidPathConnection {
         analysis.is_absolute_uri = path.starts_with("http://") || path.starts_with("https://");
 
         // Length checks
-        analysis.is_long_relative = path.len() > 1024 && !analysis.starts_with_slash && !analysis.is_absolute_uri;
+        analysis.is_long_relative =
+            path.len() > 1024 && !analysis.starts_with_slash && !analysis.is_absolute_uri;
 
         // Single character checks
         analysis.is_single_char_non_slash = path.len() == 1 && !analysis.starts_with_slash;
@@ -416,26 +417,42 @@ impl InvalidPathInput {
             }
 
             InvalidPathScenario::ComplexRelative => {
-                format!("../admin/{}/../../etc/{}",
-                       self.base_path.trim_start_matches('/'),
-                       self.path_segments.get(0).unwrap_or(&"passwd".to_string()))
+                format!(
+                    "../admin/{}/../../etc/{}",
+                    self.base_path.trim_start_matches('/'),
+                    self.path_segments.get(0).unwrap_or(&"passwd".to_string())
+                )
             }
 
             InvalidPathScenario::QueryWithoutSlash => {
-                let base = if self.base_path.is_empty() { "api" } else { &self.base_path };
-                let query = if self.query_string.is_empty() { "param=value" } else { &self.query_string };
+                let base = if self.base_path.is_empty() {
+                    "api"
+                } else {
+                    &self.base_path
+                };
+                let query = if self.query_string.is_empty() {
+                    "param=value"
+                } else {
+                    &self.query_string
+                };
                 format!("{}?{}", base.trim_start_matches('/'), query)
             }
 
             InvalidPathScenario::FragmentWithoutSlash => {
-                let base = if self.base_path.is_empty() { "api" } else { &self.base_path };
-                let fragment = if self.fragment.is_empty() { "section" } else { &self.fragment };
+                let base = if self.base_path.is_empty() {
+                    "api"
+                } else {
+                    &self.base_path
+                };
+                let fragment = if self.fragment.is_empty() {
+                    "section"
+                } else {
+                    &self.fragment
+                };
                 format!("{}#{}", base.trim_start_matches('/'), fragment)
             }
 
-            InvalidPathScenario::EmptyPath => {
-                String::new()
-            }
+            InvalidPathScenario::EmptyPath => String::new(),
 
             InvalidPathScenario::SingleCharacter => {
                 let chars = ["a", ".", "..", "?", "#", "%", "~"];
@@ -454,11 +471,13 @@ impl InvalidPathInput {
             }
 
             InvalidPathScenario::EncodedRelative => {
-                format!("{}%2F{}%3F{}%23{}",
-                       self.base_path.trim_start_matches('/'),
-                       self.path_segments.get(0).unwrap_or(&"encoded".to_string()),
-                       self.query_string,
-                       self.fragment)
+                format!(
+                    "{}%2F{}%3F{}%23{}",
+                    self.base_path.trim_start_matches('/'),
+                    self.path_segments.get(0).unwrap_or(&"encoded".to_string()),
+                    self.query_string,
+                    self.fragment
+                )
             }
 
             InvalidPathScenario::LongRelative => {
@@ -495,8 +514,13 @@ impl InvalidPathInput {
 
             InvalidPathScenario::MalformedPath => {
                 // Malformed percent encoding
-                format!("{}%GG{}", self.base_path.trim_start_matches('/'),
-                       self.path_segments.get(0).unwrap_or(&"malformed".to_string()))
+                format!(
+                    "{}%GG{}",
+                    self.base_path.trim_start_matches('/'),
+                    self.path_segments
+                        .get(0)
+                        .unwrap_or(&"malformed".to_string())
+                )
             }
         }
     }
@@ -529,8 +553,14 @@ fuzz_target!(|input: InvalidPathInput| {
     match result {
         PathResult::Accepted => {
             // Should only be accepted if path starts with "/" or is absolute URI
-            if !path.starts_with('/') && !path.starts_with("http://") && !path.starts_with("https://") {
-                panic!("RFC 9110 violation: relative path '{}' should be rejected", path);
+            if !path.starts_with('/')
+                && !path.starts_with("http://")
+                && !path.starts_with("https://")
+            {
+                panic!(
+                    "RFC 9110 violation: relative path '{}' should be rejected",
+                    path
+                );
             }
         }
         PathResult::BadRequest(_reason) => {
@@ -544,16 +574,21 @@ fuzz_target!(|input: InvalidPathInput| {
     // Test consistency: same input should yield same result
     let result2 = connection.handle_path_request(&path);
     if !connection.results_match(&result, &result2) {
-        panic!("Inconsistent path validation: {:?} != {:?} for path: '{}'",
-               result, result2, path);
+        panic!(
+            "Inconsistent path validation: {:?} != {:?} for path: '{}'",
+            result, result2, path
+        );
     }
 
     // Generate statistics for analysis
     let _stats = connection.generate_statistics();
 
     // Verify no consistency violations were detected internally
-    assert_eq!(*connection.consistency_violations.lock().unwrap(), 0,
-               "Internal consistency violations detected");
+    assert_eq!(
+        *connection.consistency_violations.lock().unwrap(),
+        0,
+        "Internal consistency violations detected"
+    );
 
     // For the primary test case (simple relative), verify rejection
     match input.scenario {
@@ -567,7 +602,10 @@ fuzz_target!(|input: InvalidPathInput| {
                         // Also correct if treated as protocol error
                     }
                     PathResult::Accepted => {
-                        panic!("RFC 9110 violation: simple relative path '{}' should be rejected", path);
+                        panic!(
+                            "RFC 9110 violation: simple relative path '{}' should be rejected",
+                            path
+                        );
                     }
                 }
             }

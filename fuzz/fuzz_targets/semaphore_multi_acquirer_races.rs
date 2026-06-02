@@ -128,17 +128,27 @@ fuzz_target!(|sequence: SemaphoreOpsSequence| {
     let initial_permits = sequence.initial_permits.max(1) as usize; // At least 1
     let mut state = FuzzState::new(initial_permits);
 
-    for operation in sequence.operations.into_iter().take(100) { // Limit ops to prevent timeout
+    for operation in sequence.operations.into_iter().take(100) {
+        // Limit ops to prevent timeout
         match operation {
-            SemaphoreOp::Acquire { acquirer_id, permit_count } => {
-                if permit_count == 0 { continue; } // Skip invalid
+            SemaphoreOp::Acquire {
+                acquirer_id,
+                permit_count,
+            } => {
+                if permit_count == 0 {
+                    continue;
+                } // Skip invalid
 
-                let acquirer = state.acquirers.entry(acquirer_id).or_insert_with(|| AcquirerState {
-                    is_waiting: false,
-                    permits_held: 0,
-                    cancelled: false,
-                    requested_count: 0,
-                });
+                let acquirer =
+                    state
+                        .acquirers
+                        .entry(acquirer_id)
+                        .or_insert_with(|| AcquirerState {
+                            is_waiting: false,
+                            permits_held: 0,
+                            cancelled: false,
+                            requested_count: 0,
+                        });
 
                 if !acquirer.is_waiting && acquirer.permits_held == 0 {
                     let count = permit_count as usize;
@@ -150,43 +160,56 @@ fuzz_target!(|sequence: SemaphoreOpsSequence| {
                     match state.semaphore.try_acquire(count) {
                         Ok(permit) => {
                             let actual_count = permit.count();
-                            state.total_permits_granted.fetch_add(actual_count, Ordering::SeqCst);
+                            state
+                                .total_permits_granted
+                                .fetch_add(actual_count, Ordering::SeqCst);
                             acquirer.permits_held = actual_count;
                             acquirer.is_waiting = false;
                             // Permit drops here, simulating normal async completion
-                        },
+                        }
                         Err(TryAcquireError) => {
                             // Would need to wait, keep is_waiting = true
                         }
                     }
                 }
-            },
+            }
 
-            SemaphoreOp::TryAcquire { acquirer_id, permit_count } => {
-                if permit_count == 0 { continue; }
+            SemaphoreOp::TryAcquire {
+                acquirer_id,
+                permit_count,
+            } => {
+                if permit_count == 0 {
+                    continue;
+                }
 
-                let acquirer = state.acquirers.entry(acquirer_id).or_insert_with(|| AcquirerState {
-                    is_waiting: false,
-                    permits_held: 0,
-                    cancelled: false,
-                    requested_count: 0,
-                });
+                let acquirer =
+                    state
+                        .acquirers
+                        .entry(acquirer_id)
+                        .or_insert_with(|| AcquirerState {
+                            is_waiting: false,
+                            permits_held: 0,
+                            cancelled: false,
+                            requested_count: 0,
+                        });
 
                 if acquirer.permits_held == 0 {
                     let count = permit_count as usize;
                     match state.semaphore.try_acquire(count) {
                         Ok(permit) => {
                             let actual_count = permit.count();
-                            state.total_permits_granted.fetch_add(actual_count, Ordering::SeqCst);
+                            state
+                                .total_permits_granted
+                                .fetch_add(actual_count, Ordering::SeqCst);
                             acquirer.permits_held = actual_count;
                             // Permit drops here
-                        },
+                        }
                         Err(TryAcquireError) => {
                             // Expected when no permits available
                         }
                     }
                 }
-            },
+            }
 
             SemaphoreOp::CancelAcquire { acquirer_id } => {
                 if let Some(acquirer) = state.acquirers.get_mut(&acquirer_id) {
@@ -196,44 +219,48 @@ fuzz_target!(|sequence: SemaphoreOpsSequence| {
                         acquirer.requested_count = 0;
                     }
                 }
-            },
+            }
 
             SemaphoreOp::ReleasePermanual { acquirer_id } => {
                 if let Some(acquirer) = state.acquirers.get_mut(&acquirer_id) {
                     if acquirer.permits_held > 0 {
                         let count = acquirer.permits_held;
                         acquirer.permits_held = 0;
-                        state.total_permits_granted.fetch_sub(count, Ordering::SeqCst);
+                        state
+                            .total_permits_granted
+                            .fetch_sub(count, Ordering::SeqCst);
                         // Simulate permit release back to semaphore
                         state.semaphore.add_permits(count);
                     }
                 }
-            },
+            }
 
             SemaphoreOp::ForgetPermit { acquirer_id } => {
                 if let Some(acquirer) = state.acquirers.get_mut(&acquirer_id) {
                     if acquirer.permits_held > 0 {
                         let count = acquirer.permits_held;
                         acquirer.permits_held = 0;
-                        state.total_permits_granted.fetch_sub(count, Ordering::SeqCst);
+                        state
+                            .total_permits_granted
+                            .fetch_sub(count, Ordering::SeqCst);
                         // Forgotten permits don't return to semaphore (intentional leak)
                     }
                 }
-            },
+            }
 
             SemaphoreOp::AddPermits { count } => {
                 if count > 0 {
                     state.semaphore.add_permits(count as usize);
                 }
-            },
+            }
 
             SemaphoreOp::CloseSemaphore => {
                 state.semaphore.close();
-            },
+            }
 
             SemaphoreOp::CheckInvariants => {
                 assert!(state.check_invariants(), "Semaphore invariants violated");
-            },
+            }
 
             SemaphoreOp::Yield => {
                 // Simulate async progress - waiters might acquire permits if available
@@ -243,19 +270,21 @@ fuzz_target!(|sequence: SemaphoreOpsSequence| {
                         match state.semaphore.try_acquire(count) {
                             Ok(permit) => {
                                 let actual_count = permit.count();
-                                state.total_permits_granted.fetch_add(actual_count, Ordering::SeqCst);
+                                state
+                                    .total_permits_granted
+                                    .fetch_add(actual_count, Ordering::SeqCst);
                                 acquirer.permits_held = actual_count;
                                 acquirer.is_waiting = false;
                                 acquirer.requested_count = 0;
                                 // Permit drops here
-                            },
+                            }
                             Err(TryAcquireError) => {
                                 // Still waiting
                             }
                         }
                     }
                 }
-            },
+            }
 
             SemaphoreOp::AttemptDoubleRelease { acquirer_id } => {
                 // Test double-release protection - should be safe no-op
@@ -267,10 +296,13 @@ fuzz_target!(|sequence: SemaphoreOpsSequence| {
                         // In a real impl, this would be prevented by obligation system
                         // Here we just verify no state corruption occurs
                         let after_permits = state.semaphore.available_permits();
-                        assert_eq!(before_permits, after_permits, "Double release corrupted state");
+                        assert_eq!(
+                            before_permits, after_permits,
+                            "Double release corrupted state"
+                        );
                     }
                 }
-            },
+            }
         }
 
         state.operations_completed.fetch_add(1, Ordering::SeqCst);
