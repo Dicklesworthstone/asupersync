@@ -2,7 +2,7 @@
   "contract_version": "runtime-pressure-control-evidence-contract-v1",
   "bead_id": "asupersync-bwcdfl.4",
   "created_date": "2026-06-02",
-  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, region memory-budget pressure rows, RCH proof-lane pressure rows, scheduler pressure flamegraph attribution, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
+  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, region memory-budget pressure rows, RCH proof-lane pressure rows, no-local-RCH fallback evidence, scheduler pressure flamegraph attribution, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
   "source_of_truth": {
     "contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
     "verifier": "tests/runtime_pressure_control_evidence_contract.rs",
@@ -59,6 +59,46 @@
     "does_not_support": [
       "The flamegraph attribution does not prove a performance improvement, real-host throughput, absence of scheduler regressions, or autonomous scheduler rewrites.",
       "The attribution is not required for docs-only pressure-control changes that do not touch a Phase 6 hot-path trigger."
+    ]
+  },
+  "no_local_rch_fallback_evidence": {
+    "evidence_id": "pressure-proof-no-local-rch-fallback",
+    "bead_id": "asupersync-bwcdfl.10",
+    "applies_to_lanes": [
+      "runtime-pressure-control-evidence-contract"
+    ],
+    "remote_execution_command_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "required_command_markers": [
+      "RCH_REQUIRE_REMOTE=1",
+      "rch exec -- env",
+      "CARGO_TARGET_DIR=",
+      "cargo test -p asupersync --test runtime_pressure_control_evidence_contract"
+    ],
+    "remote_transcript_success_markers": [
+      "Selected worker:",
+      "Executing command remotely:",
+      "Remote command finished: exit=0",
+      "[RCH] remote"
+    ],
+    "forbidden_transcript_markers": [
+      "[RCH] local",
+      "Executing command locally",
+      "local fallback accepted"
+    ],
+    "receipt_source": "src/runtime/rch_health/mod.rs",
+    "receipt_required_fields": {
+      "remote_required": true,
+      "local_fallback_allowed": false,
+      "refusal_code": "local_fallback_refused",
+      "reason_codes": [
+        "remote_required",
+        "local_fallback_refused"
+      ]
+    },
+    "closeout_rule": "A pressure-control proof lane may cite a green RCH Cargo proof only when the command starts with the remote-required prefix, uses an isolated CARGO_TARGET_DIR, and the saved transcript or admission receipt rules out local Cargo fallback.",
+    "does_not_prove": [
+      "No-local-RCH fallback evidence does not prove the RCH fleet is generally healthy or available.",
+      "No-local-RCH fallback evidence does not prove real-host throughput, production admission control, or scheduler performance."
     ]
   },
   "evidence_claims": [
@@ -134,6 +174,22 @@
         "live RCH fleet health claims",
         "production throughput claims",
         "automatic proof-lane scheduling"
+      ]
+    },
+    {
+      "claim_id": "rch-no-local-fallback-evidence",
+      "proves": [
+        "Pressure-control proof lanes name the remote-required command prefix and transcript markers needed before citing a green RCH Cargo proof.",
+        "Remote-required proof-lane refusals preserve receipt fields that make local Cargo fallback explicit and fail closed."
+      ],
+      "does_not_prove": [
+        "No-local-RCH fallback evidence does not prove RCH fleet availability, real-host throughput, production admission control, or scheduler performance."
+      ],
+      "requires_additional_proof_for": [
+        "live RCH fleet health claims",
+        "production throughput claims",
+        "automatic proof-lane scheduling",
+        "scheduler performance claims"
       ]
     },
     {

@@ -13,13 +13,13 @@ Canonical contract:
 - Manifest lane: `runtime-pressure-control-evidence-contract`
 - Manifest file: `artifacts/proof_lane_manifest_v1.json`
 - Phase 6 gate contract: `artifacts/phase6_methodology_gate_enforcement_contract_v1.json`
-- Source surface: `src/runtime/resource_monitor.rs`
+- Source surfaces: `src/runtime/resource_monitor.rs` and `src/runtime/rch_health/mod.rs`
 
 The pressure-control lane proves contract alignment for schema versions,
-deterministic lab scenario families, documentation markers, and operator scope
-limits. It does not prove real-host throughput, production-on-by-default
-admission/backpressure, scheduler rewrites, or a deadlock without explicit
-trapped-cycle proof.
+deterministic lab scenario families, no-local-RCH fallback evidence,
+documentation markers, and operator scope limits. It does not prove real-host
+throughput, production-on-by-default admission/backpressure, scheduler rewrites,
+RCH fleet availability, or a deadlock without explicit trapped-cycle proof.
 
 ## First Classify the Symptom
 
@@ -29,7 +29,7 @@ trapped-cycle proof.
 | Scheduler tail pressure appears in pressure evidence | `scheduler_tail_pressure` labels plus the Phase 6 flamegraph gate | If the direct-main change touched a hot-path trigger, attach `artifacts/flamegraphs/main-<bead-or-short-sha>.svg` as attribution for `methodology_baselines` scheduler-adjacent rows. Do not call it a throughput or regression-closure proof. |
 | Optional work should stop entering a saturated runtime | `RuntimePressureAdmissionDecision` with `policy_enabled=true` | Use only the opt-in admission policy. Required cleanup and quiescence work must remain admitted. |
 | A region exceeds its declared memory envelope | `RuntimePressureRegionMemoryBudgetSnapshot` rows plus the `region_memory_budgets` signal | Treat as advisory region-budget pressure. Optional work may be rejected through the opt-in policy, but required cleanup and quiescence work remain admitted. |
-| Remote proof lanes are refused or missing workers | `RuntimePressureRchProofLaneSnapshot` rows plus the `rch_proof_lanes` signal | Treat as advisory RCH pressure. A remote-required lane with local Cargo fallback refused is critical evidence for the proof lane, not a throughput claim about the fleet. |
+| Remote proof lanes are refused or missing workers | `RuntimePressureRchProofLaneSnapshot` rows plus the `rch_proof_lanes` signal | Treat as advisory RCH pressure. A remote-required lane with local Cargo fallback refused is critical evidence for the proof lane, not a throughput claim about the fleet. Closeout must cite either `[RCH] remote` transcript evidence or the `local_fallback_refused` admission receipt fields. |
 | Resource readings look incomplete or platform-specific | `platform_probe_operator_verdict` and `platform_probes` signal row | Prefer degraded/fallback interpretation. Do not turn probe absence into throughput claims. |
 | Structural wait graph looks fragmented or critical | `spectral` row plus `spectral_recommendations` | Run trapped-cycle detection before making a deadlock claim. Fragmentation alone is not proof. |
 | A lab scenario disagrees with its expected pressure verdict | `RuntimePressureLabScenarioEvidence.classification_matches_expected=false` | Reproduce under the deterministic lab fixture before touching live policy. |
@@ -54,6 +54,13 @@ Start from the stable fields:
 - `rch_proof_lanes`: optional `RuntimePressureRchProofLaneSnapshot` rows built
   from externally captured RCH admission receipts. The runtime does not probe
   RCH directly.
+- No-local-RCH fallback evidence: pressure-control proof lanes must start with
+  `RCH_REQUIRE_REMOTE=1 rch exec -- `, isolate `CARGO_TARGET_DIR=`, and cite a
+  saved transcript containing `Selected worker:`, `Executing command remotely:`,
+  `Remote command finished: exit=0`, and `[RCH] remote`, or an admission receipt
+  with `remote_required=true`, `local_fallback_allowed=false`,
+  `refusal_code=local_fallback_refused`, and `reason_codes` containing both
+  `remote_required` and `local_fallback_refused`.
 - Scheduler pressure flamegraph attribution: when a pressure-control change
   cites `scheduler_tail_pressure` and also triggers the Phase 6 flamegraph gate,
   the artifact path is `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`.
@@ -111,6 +118,30 @@ If live behavior and lab behavior disagree, treat the live claim as unproven
 until there is a replay artifact or a narrower contract test that explains the
 gap.
 
+## No Local RCH Fallback Evidence
+
+Remote-required pressure-control validation is not a green proof if it silently
+ran local Cargo. A closeout can cite the RCH proof only after one of these
+bounded evidence paths is present:
+
+1. Transcript evidence from the actual proof run:
+   - command starts with `RCH_REQUIRE_REMOTE=1 rch exec -- `
+   - command contains `rch exec -- env` and `CARGO_TARGET_DIR=`
+   - transcript contains `Selected worker:`, `Executing command remotely:`,
+     `Remote command finished: exit=0`, and `[RCH] remote`
+   - transcript does not contain `[RCH] local`, `Executing command locally`, or
+     `local fallback accepted`
+2. Admission-receipt evidence from `src/runtime/rch_health/mod.rs`:
+   - `remote_required=true`
+   - `local_fallback_allowed=false`
+   - `refusal_code=local_fallback_refused`
+   - `reason_codes` includes `remote_required` and `local_fallback_refused`
+
+This evidence proves only that the cited proof lane did not substitute local
+Cargo for remote-required RCH execution. It does not prove RCH fleet
+availability, real-host throughput, production admission control, or scheduler
+performance.
+
 ## Scoped Proof Command
 
 Run the pressure-control evidence contract when changing pressure snapshots,
@@ -145,3 +176,6 @@ Before closing a pressure-control bead:
 6. If the change touches a Phase 6 hot-path trigger and cites scheduler pressure,
    commit the matching flamegraph artifact or explicitly record why the
    pressure-control change was docs/contract-only and did not trigger the gate.
+7. For remote-required Cargo validation, cite either `[RCH] remote` transcript
+   evidence or the `local_fallback_refused` receipt fields before claiming a
+   green pressure-control proof.

@@ -122,6 +122,34 @@ affected files, and `green_proof_claimed`. Closeout text may only claim a green
 proof when `green_proof_claimed=true` and the cited lane's own verdict supports
 the claim.
 
+## Pressure-Control RCH Fallback Evidence
+
+The pressure-control evidence contract
+(`artifacts/runtime_pressure_control_evidence_contract_v1.json`, verified by
+`tests/runtime_pressure_control_evidence_contract.rs`) treats local Cargo
+fallback as a fail-closed validation issue for remote-required proof lanes. A
+pressure-control closeout may cite a green RCH Cargo proof only when the saved
+command and transcript prove remote execution:
+
+- command starts with `RCH_REQUIRE_REMOTE=1 rch exec -- `
+- command contains `rch exec -- env` and `CARGO_TARGET_DIR=`
+- transcript contains `Selected worker:`, `Executing command remotely:`,
+  `Remote command finished: exit=0`, and `[RCH] remote`
+- transcript does not contain `[RCH] local`, `Executing command locally`, or
+  `local fallback accepted`
+
+When the proof runner is classifying admission receipts rather than a transcript,
+the equivalent no-local-RCH fallback evidence is:
+
+- `remote_required=true`
+- `local_fallback_allowed=false`
+- `refusal_code=local_fallback_refused`
+- `reason_codes` contains both `remote_required` and `local_fallback_refused`
+
+These markers prove only that the cited proof did not silently substitute local
+Cargo for a remote-required pressure-control lane. They do not prove RCH fleet
+availability, real-host throughput, production admission control, or scheduler performance.
+
 Saved RCH transcript classification also emits a deterministic
 `closeout_summary` object for Beads and Agent Mail. Pass `--bead-id` (alias
 `--likely-bead`) and `--likely-owner` when the transcript belongs to a known

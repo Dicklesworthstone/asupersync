@@ -17,6 +17,7 @@ const README_PATH: &str = "README.md";
 const RUNBOOK_PATH: &str = "docs/proof_runner_usage.md";
 const OPERATOR_RUNBOOK_PATH: &str = "docs/runtime_pressure_triage_runbook.md";
 const VERIFIER_PATH: &str = "tests/runtime_pressure_control_evidence_contract.rs";
+const RCH_HEALTH_PATH: &str = "src/runtime/rch_health/mod.rs";
 const PHASE6_CONTRACT_PATH: &str = "artifacts/phase6_methodology_gate_enforcement_contract_v1.json";
 const PHASE6_VERIFIER_PATH: &str = "tests/phase6_methodology_gate_contract.rs";
 
@@ -109,6 +110,7 @@ fn contract_declares_schema_versions_sources_and_scope_policy() {
     assert_eq!(source["contract"].as_str(), Some(CONTRACT_PATH));
     assert_eq!(source["verifier"].as_str(), Some(VERIFIER_PATH));
     assert_eq!(source["proof_lane_manifest"].as_str(), Some(MANIFEST_PATH));
+    assert_eq!(source["rch_health_source"].as_str(), Some(RCH_HEALTH_PATH));
     assert_eq!(source["readme"].as_str(), Some(README_PATH));
     assert_eq!(source["runbook"].as_str(), Some(RUNBOOK_PATH));
     assert_eq!(
@@ -171,6 +173,114 @@ fn contract_declares_schema_versions_sources_and_scope_policy() {
         policy,
         "deadlock_claims_require_explicit_trapped_cycle_proof"
     ));
+}
+
+#[test]
+fn contract_declares_no_local_rch_fallback_evidence() {
+    let contract = json(CONTRACT_PATH);
+    let evidence = contract
+        .get("no_local_rch_fallback_evidence")
+        .expect("no_local_rch_fallback_evidence object");
+
+    assert_eq!(
+        string(evidence, "evidence_id"),
+        "pressure-proof-no-local-rch-fallback"
+    );
+    assert_eq!(string(evidence, "bead_id"), "asupersync-bwcdfl.10");
+    assert_eq!(
+        string_set(evidence, "applies_to_lanes"),
+        BTreeSet::from(["runtime-pressure-control-evidence-contract".to_string()])
+    );
+    assert_eq!(
+        string(evidence, "remote_execution_command_prefix"),
+        "RCH_REQUIRE_REMOTE=1 rch exec -- "
+    );
+    assert_eq!(
+        string_set(evidence, "required_command_markers"),
+        BTreeSet::from([
+            "RCH_REQUIRE_REMOTE=1".to_string(),
+            "rch exec -- env".to_string(),
+            "CARGO_TARGET_DIR=".to_string(),
+            "cargo test -p asupersync --test runtime_pressure_control_evidence_contract"
+                .to_string(),
+        ])
+    );
+    assert_eq!(
+        string_set(evidence, "remote_transcript_success_markers"),
+        BTreeSet::from([
+            "Selected worker:".to_string(),
+            "Executing command remotely:".to_string(),
+            "Remote command finished: exit=0".to_string(),
+            "[RCH] remote".to_string(),
+        ])
+    );
+    assert_eq!(
+        string_set(evidence, "forbidden_transcript_markers"),
+        BTreeSet::from([
+            "[RCH] local".to_string(),
+            "Executing command locally".to_string(),
+            "local fallback accepted".to_string(),
+        ])
+    );
+    assert_eq!(string(evidence, "receipt_source"), RCH_HEALTH_PATH);
+
+    let fields = evidence
+        .get("receipt_required_fields")
+        .expect("receipt_required_fields object");
+    assert!(bool_field(fields, "remote_required"));
+    assert!(!bool_field(fields, "local_fallback_allowed"));
+    assert_eq!(string(fields, "refusal_code"), "local_fallback_refused");
+    assert_eq!(
+        string_set(fields, "reason_codes"),
+        BTreeSet::from([
+            "remote_required".to_string(),
+            "local_fallback_refused".to_string(),
+        ])
+    );
+
+    let closeout_rule = string(evidence, "closeout_rule");
+    for required in [
+        "remote-required prefix",
+        "CARGO_TARGET_DIR",
+        "saved transcript",
+        "admission receipt",
+        "local Cargo fallback",
+    ] {
+        assert!(
+            closeout_rule.contains(required),
+            "closeout rule must contain {required:?}"
+        );
+    }
+
+    let non_claims = string_vec(evidence, "does_not_prove")
+        .join("\n")
+        .to_ascii_lowercase();
+    for required in [
+        "rch fleet",
+        "real-host throughput",
+        "production admission control",
+        "scheduler performance",
+    ] {
+        assert!(
+            non_claims.contains(required),
+            "fallback evidence must preserve non-claim phrase {required:?}"
+        );
+    }
+
+    let rch_health = read_repo_file(RCH_HEALTH_PATH);
+    for required in [
+        "LocalFallbackRefused",
+        "local_fallback_refused",
+        "local_fallback_allowed",
+        "remote_required",
+        "remote-required proof refused local Cargo fallback",
+        "RchWorkerAdmissionScheduleRow",
+    ] {
+        assert!(
+            rch_health.contains(required),
+            "{RCH_HEALTH_PATH} must contain {required:?}"
+        );
+    }
 }
 
 #[test]
@@ -324,6 +434,7 @@ fn contract_claims_do_not_overstate_pressure_control_evidence() {
             "opt-in-pressure-admission-policy".to_string(),
             "operator-pressure-snapshot-schema".to_string(),
             "rch-proof-lane-pressure-signal".to_string(),
+            "rch-no-local-fallback-evidence".to_string(),
             "region-memory-budget-pressure-signal".to_string(),
             "scheduler-pressure-flamegraph-attribution".to_string(),
             "spectral-deadlock-scope-limit".to_string(),
@@ -394,8 +505,8 @@ fn proof_lane_manifest_maps_pressure_contract_lane() {
             PHASE6_CONTRACT_PATH.to_string(),
             PHASE6_VERIFIER_PATH.to_string(),
             README_PATH.to_string(),
+            RCH_HEALTH_PATH.to_string(),
             RUNBOOK_PATH.to_string(),
-            "src/runtime/rch_health/mod.rs".to_string(),
             "src/runtime/resource_monitor.rs".to_string(),
             VERIFIER_PATH.to_string(),
         ])
@@ -403,6 +514,14 @@ fn proof_lane_manifest_maps_pressure_contract_lane() {
     assert!(
         string(lane, "explicit_not_covered").contains("real-host throughput"),
         "{lane_id}: manifest lane must preserve throughput non-claim"
+    );
+    assert!(
+        string(lane, "covers").contains("no-local-RCH fallback evidence"),
+        "{lane_id}: manifest lane must name no-local-RCH fallback evidence"
+    );
+    assert!(
+        string(lane, "explicit_not_covered").contains("RCH fleet availability"),
+        "{lane_id}: manifest lane must preserve RCH fleet non-claim"
     );
     assert!(
         command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
@@ -454,6 +573,15 @@ fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
         "RuntimePressureLabScenarioEvidence",
         "RuntimePressureRegionMemoryBudgetSnapshot",
         "RuntimePressureRchProofLaneSnapshot",
+        "no-local-RCH fallback evidence",
+        "Selected worker:",
+        "Executing command remotely:",
+        "Remote command finished: exit=0",
+        "[RCH] remote",
+        "[RCH] local",
+        "local_fallback_refused",
+        "remote_required=true",
+        "local_fallback_allowed=false",
         "scheduler_tail_pressure",
         "artifacts/flamegraphs/main-<bead-or-short-sha>.svg",
         "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
@@ -484,6 +612,37 @@ fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
         assert!(
             text.contains(scenario),
             "{OPERATOR_RUNBOOK_PATH} must name scenario {scenario:?}"
+        );
+    }
+}
+
+#[test]
+fn proof_runner_docs_preserve_no_local_rch_fallback_markers() {
+    let text = read_repo_file(RUNBOOK_PATH);
+    for required in [
+        CONTRACT_PATH,
+        VERIFIER_PATH,
+        "Pressure-Control RCH Fallback Evidence",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+        "rch exec -- env",
+        "CARGO_TARGET_DIR=",
+        "Selected worker:",
+        "Executing command remotely:",
+        "Remote command finished: exit=0",
+        "[RCH] remote",
+        "[RCH] local",
+        "Executing command locally",
+        "local fallback accepted",
+        "remote_required=true",
+        "local_fallback_allowed=false",
+        "refusal_code=local_fallback_refused",
+        "reason_codes",
+        "real-host throughput",
+        "scheduler performance",
+    ] {
+        assert!(
+            text.contains(required),
+            "{RUNBOOK_PATH} must contain {required:?}"
         );
     }
 }
