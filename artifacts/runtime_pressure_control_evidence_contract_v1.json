@@ -2,18 +2,21 @@
   "contract_version": "runtime-pressure-control-evidence-contract-v1",
   "bead_id": "asupersync-bwcdfl.4",
   "created_date": "2026-06-02",
-  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot and deterministic lab scenario evidence prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
+  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
   "source_of_truth": {
     "contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
     "verifier": "tests/runtime_pressure_control_evidence_contract.rs",
     "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
     "runtime_source": "src/runtime/resource_monitor.rs",
     "readme": "README.md",
-    "runbook": "docs/proof_runner_usage.md"
+    "runbook": "docs/proof_runner_usage.md",
+    "operator_runbook": "docs/runtime_pressure_triage_runbook.md"
   },
   "schema_versions": {
     "runtime_pressure_snapshot": "asupersync.runtime-pressure-snapshot.v1",
-    "runtime_pressure_lab_scenario_evidence": "asupersync.runtime-pressure-lab-scenario-evidence.v1"
+    "runtime_pressure_lab_scenario_evidence": "asupersync.runtime-pressure-lab-scenario-evidence.v1",
+    "runtime_pressure_admission_policy": "asupersync.runtime-pressure-admission-policy.v1",
+    "runtime_pressure_admission_decision": "asupersync.runtime-pressure-admission-decision.v1"
   },
   "proof_lanes": [
     {
@@ -58,6 +61,22 @@
         "large-host throughput claims",
         "production admission tuning",
         "end-to-end swarm responsiveness"
+      ]
+    },
+    {
+      "claim_id": "opt-in-pressure-admission-policy",
+      "proves": [
+        "RuntimePressureAdmissionPolicy is disabled by default and emits deterministic RuntimePressureAdmissionDecision rows when explicitly enabled.",
+        "Required work remains admitted so cleanup, cancellation, finalizers, and region quiescence are not blocked by optional admission control.",
+        "Optional work fails closed for unknown pressure snapshot schemas."
+      ],
+      "does_not_prove": [
+        "The opt-in admission policy does not prove production throughput, autonomous scheduler rewrites, or production-on-by-default admission control."
+      ],
+      "requires_additional_proof_for": [
+        "production admission tuning",
+        "automatic policy rollout",
+        "large-host throughput claims"
       ]
     },
     {
@@ -111,7 +130,8 @@
   "documentation_contract": {
     "docs_must_reference_contract": [
       "README.md",
-      "docs/proof_runner_usage.md"
+      "docs/proof_runner_usage.md",
+      "docs/runtime_pressure_triage_runbook.md"
     ],
     "required_marker": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
     "verifier_marker": "tests/runtime_pressure_control_evidence_contract.rs"

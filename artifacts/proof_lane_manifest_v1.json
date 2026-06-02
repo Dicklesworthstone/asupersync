@@ -366,7 +366,8 @@
         "tests/runtime_pressure_control_evidence_contract.rs",
         "src/runtime/resource_monitor.rs",
         "README.md",
-        "docs/proof_runner_usage.md"
+        "docs/proof_runner_usage.md",
+        "docs/runtime_pressure_triage_runbook.md"
       ],
       "common_unrelated_blockers": [
         "runtime pressure schema version drift",

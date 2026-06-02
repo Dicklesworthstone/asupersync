@@ -405,6 +405,10 @@ lane `runtime-pressure-control-evidence-contract` when changes touch runtime
 pressure snapshots, deterministic pressure lab evidence, or pressure-control
 operator docs.
 
+The dedicated operator runbook is `docs/runtime_pressure_triage_runbook.md`. It
+maps symptoms to snapshot fields, admission decisions, lab replay evidence, and
+the exact RCH verifier commands without widening the contract's claims.
+
 That lane proves only contract alignment: source schema versions, documented
 scenario families, docs markers, and the exact RCH command. It does not prove
 real-host throughput, autonomous scheduler rewrites, production-on-by-default

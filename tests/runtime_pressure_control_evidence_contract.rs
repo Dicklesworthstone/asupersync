@@ -1,7 +1,10 @@
 #![allow(missing_docs)]
 
 use asupersync::runtime::resource_monitor::{
-    RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION, RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION,
+    RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION,
+    RUNTIME_PRESSURE_ADMISSION_POLICY_SCHEMA_VERSION,
+    RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
+    RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +14,7 @@ const CONTRACT_PATH: &str = "artifacts/runtime_pressure_control_evidence_contrac
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const README_PATH: &str = "README.md";
 const RUNBOOK_PATH: &str = "docs/proof_runner_usage.md";
+const OPERATOR_RUNBOOK_PATH: &str = "docs/runtime_pressure_triage_runbook.md";
 const VERIFIER_PATH: &str = "tests/runtime_pressure_control_evidence_contract.rs";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -104,6 +108,10 @@ fn contract_declares_schema_versions_sources_and_scope_policy() {
     assert_eq!(source["proof_lane_manifest"].as_str(), Some(MANIFEST_PATH));
     assert_eq!(source["readme"].as_str(), Some(README_PATH));
     assert_eq!(source["runbook"].as_str(), Some(RUNBOOK_PATH));
+    assert_eq!(
+        source["operator_runbook"].as_str(),
+        Some(OPERATOR_RUNBOOK_PATH)
+    );
 
     let schemas = contract
         .get("schema_versions")
@@ -115,6 +123,14 @@ fn contract_declares_schema_versions_sources_and_scope_policy() {
     assert_eq!(
         schemas["runtime_pressure_lab_scenario_evidence"].as_str(),
         Some(RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        schemas["runtime_pressure_admission_policy"].as_str(),
+        Some(RUNTIME_PRESSURE_ADMISSION_POLICY_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        schemas["runtime_pressure_admission_decision"].as_str(),
+        Some(RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION)
     );
 
     let policy = contract
@@ -201,6 +217,7 @@ fn contract_claims_do_not_overstate_pressure_control_evidence() {
         claim_ids,
         BTreeSet::from([
             "deterministic-lab-scenario-classification".to_string(),
+            "opt-in-pressure-admission-policy".to_string(),
             "operator-pressure-snapshot-schema".to_string(),
             "spectral-deadlock-scope-limit".to_string(),
         ])
@@ -266,6 +283,7 @@ fn proof_lane_manifest_maps_pressure_contract_lane() {
         string_set(lane, "source_paths"),
         BTreeSet::from([
             CONTRACT_PATH.to_string(),
+            OPERATOR_RUNBOOK_PATH.to_string(),
             README_PATH.to_string(),
             RUNBOOK_PATH.to_string(),
             "src/runtime/resource_monitor.rs".to_string(),
@@ -311,5 +329,40 @@ fn docs_reference_pressure_contract_and_verifier_markers() {
         let text = read_repo_file(&path);
         assert!(text.contains(marker), "{path} must reference {marker}");
         assert!(text.contains(verifier), "{path} must reference {verifier}");
+    }
+}
+
+#[test]
+fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
+    let text = read_repo_file(OPERATOR_RUNBOOK_PATH);
+    for required in [
+        CONTRACT_PATH,
+        VERIFIER_PATH,
+        "runtime-pressure-control-evidence-contract",
+        "RuntimePressureSnapshot.overall_verdict",
+        "RuntimePressureAdmissionDecision",
+        "RuntimePressureLabScenarioEvidence",
+        "trapped-cycle proof",
+        "RCH_REQUIRE_REMOTE=1 rch exec --",
+        "cargo test -p asupersync --test runtime_pressure_control_evidence_contract",
+        "cargo test -p asupersync --test proof_lane_manifest_contract",
+        "Optional work fails closed for unknown pressure snapshot schemas",
+    ] {
+        assert!(
+            text.contains(required),
+            "{OPERATOR_RUNBOOK_PATH} must contain {required:?}"
+        );
+    }
+
+    for scenario in [
+        "healthy",
+        "cpu_lane_pressure",
+        "resource_fallback_degraded",
+        "structural_warning",
+    ] {
+        assert!(
+            text.contains(scenario),
+            "{OPERATOR_RUNBOOK_PATH} must name scenario {scenario:?}"
+        );
     }
 }
