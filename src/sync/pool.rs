@@ -896,6 +896,7 @@ where
     pool: &'a GenericPool<R, F>,
     waiter_id: &'b mut Option<u64>,
     cx: &'a Cx,
+    completed: bool,
 }
 
 impl<R, F> Future for WaitForNotification<'_, '_, R, F>
@@ -907,6 +908,7 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.cx.checkpoint().is_err() {
+            self.completed = true;
             return Poll::Ready(());
         }
 
@@ -915,6 +917,7 @@ where
         let mut state = self.pool.state.lock();
 
         if state.closed {
+            self.completed = true;
             return Poll::Ready(());
         }
 
@@ -959,6 +962,7 @@ where
         drop(state);
 
         if pos < available {
+            self.completed = true;
             return Poll::Ready(());
         }
 
@@ -988,7 +992,9 @@ where
     F: AsyncResourceFactory<Resource = R>,
 {
     fn drop(&mut self) {
-        if let Some(id) = *self.waiter_id {
+        if !self.completed
+            && let Some(id) = *self.waiter_id
+        {
             // Remove from main waiters queue
             let mut state = self.pool.state.lock();
             if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
@@ -1936,6 +1942,7 @@ where
                     pool: self,
                     waiter_id: &mut cleanup.waiter_id,
                     cx,
+                    completed: false,
                 };
                 if crate::time::timeout(now, remaining, wait_fut)
                     .await
