@@ -1898,3 +1898,90 @@ fn ratchet_all_flaky_baseline_yields_quarantine_verdict() {
         2
     );
 }
+
+/// E-process flake filtering (gauntlet PERF-R5): noisy history pairs must be
+/// skipped (no phantom alarm), while a real persistent regression on STABLE
+/// benches must still alarm.
+#[test]
+fn ratchet_eprocess_filters_flaky_history_but_still_detects_real_regressions() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let hist_dir = temp.path().join("hist");
+    fs::create_dir_all(&hist_dir).expect("create hist dir");
+
+    // Synthetic runs.jsonl: a stable bench that persistently regresses 15% per
+    // record (must alarm) interleaved with a flaky bench whose +/-50% noise
+    // must be ignored.
+    let mut runs = String::new();
+    for i in 0..30u32 {
+        let regressing = serde_json::json!({
+            "name": "x/regressing",
+            "median_ns": 100.0_f64 * 1.15_f64.powi(i as i32),
+            "cv_pct": 1.0,
+            "generated_at": format!("2026-06-01T{i:02}:00:00Z"),
+            "profile": "release-perf",
+            "git_sha": "abc",
+        });
+        let noisy = serde_json::json!({
+            "name": "y/noisy",
+            "median_ns": if i % 2 == 1 { 150.0 } else { 100.0 },
+            "cv_pct": 20.0,
+            "generated_at": format!("2026-06-01T{i:02}:00:00Z"),
+            "profile": "release-perf",
+            "git_sha": "abc",
+        });
+        runs.push_str(&serde_json::to_string(&regressing).expect("serialize"));
+        runs.push('\n');
+        runs.push_str(&serde_json::to_string(&noisy).expect("serialize"));
+        runs.push('\n');
+    }
+    fs::write(hist_dir.join("runs.jsonl"), runs).expect("write runs.jsonl");
+
+    // Minimal committed-baseline entry + candidate so the main scoring path runs.
+    let bench = serde_json::json!({
+        "name": "x/regressing", "median_ns": 100.0, "mean_ns": 100.0, "cv_pct": 1.0,
+        "generated_at": "t", "profile": "release-perf", "git_sha": "abc",
+    });
+    fs::write(
+        hist_dir.join("x__regressing.latest.json"),
+        serde_json::to_vec(&bench).expect("serialize"),
+    )
+    .expect("write latest.json");
+    let candidate_path = temp.path().join("candidate.json");
+    fs::write(
+        &candidate_path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": "asupersync.baseline.v2",
+            "benchmarks": [bench],
+        }))
+        .expect("serialize"),
+    )
+    .expect("write candidate");
+
+    let script = repo_root().join("scripts/apply_perf_ratchet.py");
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg("--candidate")
+        .arg(&candidate_path)
+        .arg("--history-dir")
+        .arg(&hist_dir)
+        .arg("--eprocess")
+        .arg("--json")
+        .output()
+        .expect("run apply_perf_ratchet.py");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("ratchet emits valid JSON");
+
+    let ep = &report["eprocess"];
+    assert_eq!(
+        ep["alarm"], true,
+        "persistent real regression on stable benches must still alarm: {ep}"
+    );
+    assert_eq!(
+        ep["regressions"], 29,
+        "29 consecutive stable-pair regressions"
+    );
+    assert_eq!(
+        ep["skipped_flaky_pairs"], 29,
+        "all 29 flaky-bench pairs must be skipped, not scored as regressions"
+    );
+}
