@@ -34,6 +34,14 @@ fn bench_temp_dir(prefix: &str) -> TempDir {
         .expect("create ATP J5 workflow benchmark scratch directory")
 }
 
+fn bench_temp_suffix(temp_dir: &TempDir) -> &str {
+    temp_dir
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("ATP J5 workflow benchmark temp directory name is valid UTF-8")
+}
+
 /// Benchmark CI artifact caching with different file sizes.
 fn bench_ci_artifact_cache(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
@@ -190,8 +198,12 @@ fn bench_fuzz_corpus_sync(c: &mut Criterion) {
                             let fuzz_args = AtpFuzzArgs {
                                 action: AtpFuzzAction::Sync(AtpFuzzSyncArgs {
                                     corpus_path,
-                                    target: format!("bench-fuzzer-{}", name),
-                                    strategy: "bidirectional".to_string(),
+                                    target: format!(
+                                        "bench-fuzzer-{}-{}",
+                                        name,
+                                        bench_temp_suffix(&temp_dir)
+                                    ),
+                                    strategy: "push".to_string(),
                                     exclude: Vec::new(),
                                     watch: false,
                                 }),
