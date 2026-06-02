@@ -923,6 +923,64 @@ pub struct AdmissionAwareSpectralWaitGraphRow {
     pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
 }
 
+/// Proof status for a trapped-cycle witness row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareTrappedCycleWitnessProofStatus {
+    Validated,
+    ReplayPending,
+    Failed,
+    Stale,
+    Malformed,
+}
+
+/// Directed wait edge inside an explicit trapped-cycle witness.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AdmissionAwareTrappedCycleWaitEdgeRow {
+    pub waiting_participant: String,
+    pub held_by_participant: String,
+    pub resource: String,
+}
+
+/// Explicit trapped-cycle witness required before deadlock-style claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareTrappedCycleWitnessRow {
+    pub witness_id: String,
+    pub participants: Vec<String>,
+    pub held_resources: Vec<String>,
+    pub wait_edges: Vec<AdmissionAwareTrappedCycleWaitEdgeRow>,
+    pub source_step_or_timestamp: String,
+    pub replay_command: String,
+    pub proof_status: AdmissionAwareTrappedCycleWitnessProofStatus,
+    pub witness_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+impl AdmissionAwareTrappedCycleWitnessRow {
+    #[must_use]
+    pub fn is_validated(&self) -> bool {
+        self.proof_status == AdmissionAwareTrappedCycleWitnessProofStatus::Validated
+            && self.witness_freshness == AdmissionAwareAtlasFreshnessStatus::Fresh
+            && !self.witness_id.trim().is_empty()
+            && !self.participants.is_empty()
+            && !self.held_resources.is_empty()
+            && !self.wait_edges.is_empty()
+            && !self.source_step_or_timestamp.trim().is_empty()
+            && !self.replay_command.trim().is_empty()
+    }
+
+    #[must_use]
+    pub fn is_malformed(&self) -> bool {
+        self.proof_status == AdmissionAwareTrappedCycleWitnessProofStatus::Malformed
+            || self.witness_freshness == AdmissionAwareAtlasFreshnessStatus::Malformed
+            || self.witness_id.trim().is_empty()
+            || self.participants.is_empty()
+            || self.held_resources.is_empty()
+            || self.wait_edges.is_empty()
+            || self.source_step_or_timestamp.trim().is_empty()
+            || self.replay_command.trim().is_empty()
+    }
+}
+
 /// Serializable proof-lane admission row projected from runtime pressure evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionAwareRchProofLaneAdmissionRow {
@@ -1027,7 +1085,7 @@ pub struct AdmissionAwareRuntimePressureAtlasBuilderInput {
     pub large_host_worker_warmth: Vec<AdmissionAwareLargeHostWorkerWarmthRow>,
     pub operator_closeout_receipts: Vec<AdmissionAwareOperatorCloseoutReceiptRow>,
     pub replay_backed: bool,
-    pub trapped_cycle_witness_present: bool,
+    pub trapped_cycle_witnesses: Vec<AdmissionAwareTrappedCycleWitnessRow>,
 }
 
 impl AdmissionAwareRuntimePressureAtlasBuilderInput {
@@ -1046,7 +1104,7 @@ impl AdmissionAwareRuntimePressureAtlasBuilderInput {
             large_host_worker_warmth: Vec::new(),
             operator_closeout_receipts: Vec::new(),
             replay_backed: false,
-            trapped_cycle_witness_present: false,
+            trapped_cycle_witnesses: Vec::new(),
         }
     }
 }
@@ -1070,6 +1128,7 @@ pub struct AdmissionAwareRuntimePressureAtlasSnapshot {
     pub scheduler_pressure: Vec<AdmissionAwareSchedulerPressureRow>,
     pub region_memory_budget_pressure: Vec<AdmissionAwareRegionMemoryBudgetPressureRow>,
     pub spectral_wait_graph: Vec<AdmissionAwareSpectralWaitGraphRow>,
+    pub trapped_cycle_witness: Vec<AdmissionAwareTrappedCycleWitnessRow>,
     pub rch_proof_lane_admission: Vec<AdmissionAwareRchProofLaneAdmissionRow>,
     pub dirty_tree_peer_ownership: Vec<AdmissionAwareDirtyTreePeerOwnershipRow>,
     pub agent_mail_reservations: Vec<AdmissionAwareAgentMailReservationRow>,
@@ -1103,9 +1162,13 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
             .iter()
             .map(admission_aware_region_memory_budget_pressure_row)
             .collect::<Vec<_>>();
+        let validated_trapped_cycle_witness_present = input
+            .trapped_cycle_witnesses
+            .iter()
+            .any(AdmissionAwareTrappedCycleWitnessRow::is_validated);
         let spectral_wait_graph = admission_aware_spectral_wait_graph_rows(
             &input.runtime_pressure,
-            input.trapped_cycle_witness_present,
+            validated_trapped_cycle_witness_present,
         );
         let rch_proof_lane_admission = input
             .runtime_pressure
@@ -1114,7 +1177,7 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
             .map(admission_aware_rch_proof_lane_admission_row)
             .collect::<Vec<_>>();
 
-        let deadlock_proven = input.trapped_cycle_witness_present
+        let deadlock_proven = validated_trapped_cycle_witness_present
             && input.runtime_pressure.spectral.trapped_wait_cycle
             && input.runtime_pressure.spectral.class == RuntimePressureSpectralClass::Deadlocked;
         let mut missing_required_sections = admission_aware_missing_sections(
@@ -1127,9 +1190,13 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
         missing_required_sections.sort();
         missing_required_sections.dedup();
 
-        let validation_blocked = input.runtime_pressure.overall_verdict
+        let validation_blocked = (input.runtime_pressure.overall_verdict
             == RuntimePressureVerdict::Critical
-            && !deadlock_proven;
+            && !deadlock_proven)
+            || input
+                .trapped_cycle_witnesses
+                .iter()
+                .any(AdmissionAwareTrappedCycleWitnessRow::is_malformed);
         let claim_state = AdmissionAwareAtlasClaimState {
             deadlock_proven,
             replay_backed: input.replay_backed,
@@ -1157,6 +1224,7 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
             scheduler_pressure,
             region_memory_budget_pressure,
             spectral_wait_graph,
+            trapped_cycle_witness: input.trapped_cycle_witnesses,
             rch_proof_lane_admission,
             dirty_tree_peer_ownership: input.dirty_tree_peer_ownership,
             agent_mail_reservations: input.agent_mail_reservations,
@@ -1223,6 +1291,20 @@ fn sort_input_rows(input: &mut AdmissionAwareRuntimePressureAtlasBuilderInput) {
     input
         .operator_closeout_receipts
         .dedup_by(|left, right| left.bead_id == right.bead_id);
+    for witness in &mut input.trapped_cycle_witnesses {
+        witness.participants.sort();
+        witness.participants.dedup();
+        witness.held_resources.sort();
+        witness.held_resources.dedup();
+        witness.wait_edges.sort();
+        witness.wait_edges.dedup();
+    }
+    input
+        .trapped_cycle_witnesses
+        .sort_by(|left, right| left.witness_id.cmp(&right.witness_id));
+    input
+        .trapped_cycle_witnesses
+        .dedup_by(|left, right| left.witness_id == right.witness_id);
 }
 
 fn admission_aware_lock_contention_rows(
@@ -1492,7 +1574,10 @@ fn admission_aware_missing_sections(
         row.requires_trapped_cycle_detection
             || row.health_classification == RuntimePressureSpectralClass::Deadlocked
             || row.health_classification == RuntimePressureSpectralClass::Fragmented
-    }) && !input.trapped_cycle_witness_present
+    }) && !input
+        .trapped_cycle_witnesses
+        .iter()
+        .any(AdmissionAwareTrappedCycleWitnessRow::is_validated)
     {
         missing.push("trapped_cycle_witness".to_string());
     }
@@ -6575,9 +6660,39 @@ mod tests {
         }
     }
 
+    fn sample_trapped_cycle_witness() -> AdmissionAwareTrappedCycleWitnessRow {
+        AdmissionAwareTrappedCycleWitnessRow {
+            witness_id: "atlas-witness-001".to_string(),
+            participants: vec![
+                "task:00000001-00000000".to_string(),
+                "task:00000002-00000000".to_string(),
+            ],
+            held_resources: vec![
+                "lock:regions".to_string(),
+                "obligation:send-permit:00000004-00000000".to_string(),
+            ],
+            wait_edges: vec![
+                AdmissionAwareTrappedCycleWaitEdgeRow {
+                    waiting_participant: "task:00000002-00000000".to_string(),
+                    held_by_participant: "task:00000001-00000000".to_string(),
+                    resource: "lock:regions".to_string(),
+                },
+                AdmissionAwareTrappedCycleWaitEdgeRow {
+                    waiting_participant: "task:00000001-00000000".to_string(),
+                    held_by_participant: "task:00000002-00000000".to_string(),
+                    resource: "obligation:send-permit:00000004-00000000".to_string(),
+                },
+            ],
+            source_step_or_timestamp: "lab-step:4242".to_string(),
+            replay_command: "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_trapped_cycle_witness\" cargo test -p asupersync --test runtime_wait_cause_remediation_contract actionable_report -- --nocapture".to_string(),
+            proof_status: AdmissionAwareTrappedCycleWitnessProofStatus::Validated,
+            witness_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+        }
+    }
+
     fn complete_atlas_builder_input(
         spectral: RuntimePressureSpectralSnapshot,
-        trapped_cycle_witness_present: bool,
+        include_trapped_cycle_witness: bool,
     ) -> AdmissionAwareRuntimePressureAtlasBuilderInput {
         let pressure = ResourcePressure::new();
         pressure.update_measurement(
@@ -6674,7 +6789,9 @@ mod tests {
             pushed_master_mirror: false,
             sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
         }];
-        input.trapped_cycle_witness_present = trapped_cycle_witness_present;
+        if include_trapped_cycle_witness {
+            input.trapped_cycle_witnesses = vec![sample_trapped_cycle_witness()];
+        }
         input
     }
 
@@ -7267,6 +7384,7 @@ mod tests {
             value["scheduler_pressure"][0]["scheduler_tail_pressure_label"],
             "nominal"
         );
+        assert_eq!(value["trapped_cycle_witness"], json!([]));
         assert_eq!(
             value["rch_proof_lane_admission"][0]["cover_claims"],
             json!([
@@ -7369,12 +7487,59 @@ mod tests {
         );
         assert!(proven.missing_required_sections.is_empty());
         assert!(proven.spectral_wait_graph[0].deadlock_proven);
+        assert_eq!(proven.trapped_cycle_witness.len(), 1);
+        assert_eq!(
+            proven.trapped_cycle_witness[0].proof_status,
+            AdmissionAwareTrappedCycleWitnessProofStatus::Validated
+        );
+        assert_eq!(
+            proven.trapped_cycle_witness[0].wait_edges[0].waiting_participant,
+            "task:00000001-00000000",
+            "witness wait edges should be canonically sorted"
+        );
         assert!(
             proven
                 .claim_boundary_labels
                 .iter()
                 .any(|row| row.label == AdmissionAwareAtlasClaimLabel::DeadlockProven)
         );
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_rejects_unvalidated_trapped_cycle_witness() {
+        let deadlocked = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Deadlocked,
+            fiedler_micro_units: Some(0),
+            spectral_gap_bps: Some(0),
+            spectral_radius_micro_units: Some(2_400_000),
+            bottleneck_count: 0,
+            components: Some(2),
+            approaching_disconnect: false,
+            trapped_wait_cycle: true,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Critical,
+        };
+        let mut input = complete_atlas_builder_input(deadlocked, false);
+        let mut witness = sample_trapped_cycle_witness();
+        witness.proof_status = AdmissionAwareTrappedCycleWitnessProofStatus::ReplayPending;
+        input.trapped_cycle_witnesses = vec![witness];
+
+        let atlas = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(input);
+
+        assert!(!atlas.deadlock_proven);
+        assert_eq!(
+            atlas.overall_label,
+            AdmissionAwareAtlasClaimLabel::StaleEvidence
+        );
+        assert!(
+            atlas
+                .missing_required_sections
+                .contains(&"trapped_cycle_witness".to_string())
+        );
+        assert_eq!(
+            atlas.trapped_cycle_witness[0].proof_status,
+            AdmissionAwareTrappedCycleWitnessProofStatus::ReplayPending
+        );
+        assert!(!atlas.spectral_wait_graph[0].deadlock_proven);
     }
 
     #[test]

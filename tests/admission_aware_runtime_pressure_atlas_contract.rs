@@ -406,6 +406,11 @@ fn referenced_sources_contain_the_expected_live_contract_tokens() {
 
     let runtime_pressure = read_repo_file(object_string(source, "runtime_pressure_source"));
     for token in [
+        "AdmissionAwareTrappedCycleWitnessRow",
+        "AdmissionAwareTrappedCycleWaitEdgeRow",
+        "AdmissionAwareTrappedCycleWitnessProofStatus",
+        "source_step_or_timestamp",
+        "witness_freshness",
         "RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION",
         "RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION",
         "RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION",
