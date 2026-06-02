@@ -44,6 +44,10 @@ pub const RESOURCE_MONITOR_PLATFORM_GAP_REPORT_SCHEMA_VERSION: &str =
 pub const RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION: &str =
     "asupersync.runtime-pressure-snapshot.v1";
 
+/// Stable schema for deterministic runtime pressure lab scenario evidence.
+pub const RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION: &str =
+    "asupersync.runtime-pressure-lab-scenario-evidence.v1";
+
 const RESOURCE_PROBE_WARNING_THROTTLE_EVERY: u64 = 8;
 
 /// Errors that can occur during resource monitoring.
@@ -349,6 +353,62 @@ pub struct RuntimePressureSpectralRecommendation {
     pub evidence_scope: RuntimePressureRecommendationEvidenceScope,
     pub deadlock_proven: bool,
     pub requires_trapped_cycle_proof: bool,
+}
+
+/// Deterministic synthetic pressure scenario family for lab evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureLabScenarioKind {
+    Healthy,
+    CpuLanePressure,
+    ResourceFallbackDegraded,
+    StructuralWarning,
+}
+
+/// Stable evidence row for a deterministic runtime pressure lab scenario.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureLabScenarioEvidence {
+    pub schema_version: String,
+    pub scenario_id: String,
+    pub seed: u64,
+    pub scenario_kind: RuntimePressureLabScenarioKind,
+    pub expected_verdict: RuntimePressureVerdict,
+    pub observed_verdict: RuntimePressureVerdict,
+    pub classification_matches_expected: bool,
+    pub diagnostic_labels: Vec<String>,
+    pub snapshot: RuntimePressureSnapshot,
+}
+
+impl RuntimePressureLabScenarioEvidence {
+    #[must_use]
+    pub fn from_snapshot(
+        scenario_id: impl Into<String>,
+        seed: u64,
+        scenario_kind: RuntimePressureLabScenarioKind,
+        expected_verdict: RuntimePressureVerdict,
+        snapshot: RuntimePressureSnapshot,
+        mut diagnostic_labels: Vec<String>,
+    ) -> Self {
+        diagnostic_labels.sort();
+        diagnostic_labels.dedup();
+        let observed_verdict = snapshot.overall_verdict;
+
+        Self {
+            schema_version: RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION.to_string(),
+            scenario_id: scenario_id.into(),
+            seed,
+            scenario_kind,
+            expected_verdict,
+            observed_verdict,
+            classification_matches_expected: observed_verdict == expected_verdict,
+            diagnostic_labels,
+            snapshot,
+        }
+    }
+
+    pub fn stable_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 impl From<EarlyWarningSeverity> for RuntimePressureEarlyWarningSeverity {
@@ -5062,6 +5122,23 @@ mod tests {
         )
     }
 
+    fn degraded_platform_probe_report() -> ResourcePlatformProbeReport {
+        ResourcePlatformProbeReport::from_snapshots(
+            "test-linux/x86_64".to_string(),
+            vec![ResourceProbeSnapshot {
+                platform: "test-linux/x86_64".to_string(),
+                resource_type: ResourceType::Memory,
+                probe: ResourceProbe::MemoryMaxBytes,
+                status: ResourceProbeStatus::Fallback,
+                fallback: ResourceProbeFallback::ConservativeDefault,
+                sampled_value: None,
+                error_message: Some("synthetic lab fallback".to_string()),
+                warning_count: 1,
+                warning_suppressed_count: 0,
+            }],
+        )
+    }
+
     fn healthy_spectral_snapshot() -> RuntimePressureSpectralSnapshot {
         RuntimePressureSpectralSnapshot {
             class: RuntimePressureSpectralClass::Healthy,
@@ -5076,6 +5153,20 @@ mod tests {
         }
     }
 
+    fn structural_warning_spectral_snapshot() -> RuntimePressureSpectralSnapshot {
+        RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Fragmented,
+            fiedler_micro_units: Some(0),
+            spectral_gap_bps: Some(0),
+            spectral_radius_micro_units: Some(2_100_000),
+            bottleneck_count: 2,
+            components: Some(2),
+            approaching_disconnect: false,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Warning,
+        }
+    }
+
     fn snapshot_with_spectral(
         spectral: RuntimePressureSpectralSnapshot,
     ) -> RuntimePressureSnapshot {
@@ -5084,6 +5175,138 @@ mod tests {
             complete_platform_probe_report(),
             Some(healthy_scheduler_metrics()),
             Some(spectral),
+        )
+    }
+
+    fn pressure_snapshot_from_parts(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: SchedulerEvidenceMetrics,
+        spectral: RuntimePressureSpectralSnapshot,
+    ) -> RuntimePressureSnapshot {
+        RuntimePressureSnapshot::from_parts(
+            pressure,
+            platform_probe_report,
+            Some(scheduler),
+            Some(spectral),
+        )
+    }
+
+    fn runtime_pressure_lab_scenario_evidence(
+        scenario_id: &'static str,
+        seed: u64,
+        scenario_kind: RuntimePressureLabScenarioKind,
+        expected_verdict: RuntimePressureVerdict,
+        snapshot: RuntimePressureSnapshot,
+        diagnostic_labels: &[&str],
+    ) -> RuntimePressureLabScenarioEvidence {
+        RuntimePressureLabScenarioEvidence::from_snapshot(
+            scenario_id,
+            seed,
+            scenario_kind,
+            expected_verdict,
+            snapshot,
+            diagnostic_labels
+                .iter()
+                .map(|label| (*label).to_string())
+                .collect(),
+        )
+    }
+
+    fn healthy_pressure_lab_evidence() -> RuntimePressureLabScenarioEvidence {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(32, 80, 90, 100),
+        );
+
+        runtime_pressure_lab_scenario_evidence(
+            "runtime-pressure-lab-healthy",
+            0x57A9_0001,
+            RuntimePressureLabScenarioKind::Healthy,
+            RuntimePressureVerdict::Healthy,
+            pressure_snapshot_from_parts(
+                &pressure,
+                complete_platform_probe_report(),
+                healthy_scheduler_metrics(),
+                healthy_spectral_snapshot(),
+            ),
+            &["all_signals_present"],
+        )
+    }
+
+    fn cpu_lane_pressure_lab_evidence() -> RuntimePressureLabScenarioEvidence {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::CpuLoad,
+            ResourceMeasurement::new(96, 70, 85, 100),
+        );
+        pressure.update_degradation_level(ResourceType::CpuLoad, DegradationLevel::Heavy);
+
+        runtime_pressure_lab_scenario_evidence(
+            "runtime-pressure-lab-cpu-lane-pressure",
+            0x57A9_C011,
+            RuntimePressureLabScenarioKind::CpuLanePressure,
+            RuntimePressureVerdict::Critical,
+            pressure_snapshot_from_parts(
+                &pressure,
+                complete_platform_probe_report(),
+                sample_scheduler_metrics(),
+                healthy_spectral_snapshot(),
+            ),
+            &[
+                "cpu_load_hard_limit",
+                "resource_heavy_degradation",
+                "scheduler_tail_pressure",
+            ],
+        )
+    }
+
+    fn resource_fallback_degraded_lab_evidence() -> RuntimePressureLabScenarioEvidence {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(82, 70, 95, 100),
+        );
+        pressure.update_degradation_level(ResourceType::Memory, DegradationLevel::Moderate);
+
+        runtime_pressure_lab_scenario_evidence(
+            "runtime-pressure-lab-resource-fallback-degraded",
+            0x57A9_FA11,
+            RuntimePressureLabScenarioKind::ResourceFallbackDegraded,
+            RuntimePressureVerdict::Degraded,
+            pressure_snapshot_from_parts(
+                &pressure,
+                degraded_platform_probe_report(),
+                healthy_scheduler_metrics(),
+                healthy_spectral_snapshot(),
+            ),
+            &["memory_soft_pressure", "platform_probe_fallback"],
+        )
+    }
+
+    fn structural_warning_lab_evidence() -> RuntimePressureLabScenarioEvidence {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Task,
+            ResourceMeasurement::new(24, 80, 95, 100),
+        );
+
+        runtime_pressure_lab_scenario_evidence(
+            "runtime-pressure-lab-structural-warning",
+            0x57A9_57AC,
+            RuntimePressureLabScenarioKind::StructuralWarning,
+            RuntimePressureVerdict::Critical,
+            pressure_snapshot_from_parts(
+                &pressure,
+                complete_platform_probe_report(),
+                healthy_scheduler_metrics(),
+                structural_warning_spectral_snapshot(),
+            ),
+            &[
+                "spectral_fragmented_topology",
+                "trapped_cycle_detection_required",
+            ],
         )
     }
 
@@ -5482,6 +5705,169 @@ mod tests {
         assert_eq!(
             value["spectral_recommendations"][3]["evidence_scope"],
             json!("spectral_trend")
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_lab_evidence_covers_required_scenarios() {
+        let scenarios = vec![
+            healthy_pressure_lab_evidence(),
+            cpu_lane_pressure_lab_evidence(),
+            resource_fallback_degraded_lab_evidence(),
+            structural_warning_lab_evidence(),
+        ];
+
+        assert_eq!(
+            scenarios
+                .iter()
+                .map(|evidence| evidence.scenario_kind)
+                .collect::<Vec<_>>(),
+            vec![
+                RuntimePressureLabScenarioKind::Healthy,
+                RuntimePressureLabScenarioKind::CpuLanePressure,
+                RuntimePressureLabScenarioKind::ResourceFallbackDegraded,
+                RuntimePressureLabScenarioKind::StructuralWarning,
+            ]
+        );
+        assert!(
+            scenarios
+                .iter()
+                .all(|evidence| evidence.classification_matches_expected)
+        );
+        assert_eq!(
+            scenarios
+                .iter()
+                .map(|evidence| evidence.observed_verdict)
+                .collect::<Vec<_>>(),
+            vec![
+                RuntimePressureVerdict::Healthy,
+                RuntimePressureVerdict::Critical,
+                RuntimePressureVerdict::Degraded,
+                RuntimePressureVerdict::Critical,
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_lab_evidence_serializes_stable_projection() {
+        let evidence = vec![
+            healthy_pressure_lab_evidence(),
+            cpu_lane_pressure_lab_evidence(),
+            resource_fallback_degraded_lab_evidence(),
+            structural_warning_lab_evidence(),
+        ];
+        let value = serde_json::to_value(&evidence).expect("serialize lab evidence");
+        let projection = value
+            .as_array()
+            .expect("evidence serializes as array")
+            .iter()
+            .map(|row| {
+                json!({
+                    "schema_version": row["schema_version"],
+                    "scenario_id": row["scenario_id"],
+                    "seed": row["seed"],
+                    "scenario_kind": row["scenario_kind"],
+                    "observed_verdict": row["observed_verdict"],
+                    "classification_matches_expected": row["classification_matches_expected"],
+                    "diagnostic_labels": row["diagnostic_labels"],
+                    "resources": row["snapshot"]["resources"].as_array().map_or(0, Vec::len),
+                    "critical_signal_count": row["snapshot"]["critical_signal_count"],
+                    "degraded_signal_count": row["snapshot"]["degraded_signal_count"],
+                    "spectral_class": row["snapshot"]["spectral"]["class"],
+                })
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            projection,
+            vec![
+                json!({
+                    "schema_version": RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
+                    "scenario_id": "runtime-pressure-lab-healthy",
+                    "seed": 1470693377u64,
+                    "scenario_kind": "healthy",
+                    "observed_verdict": "healthy",
+                    "classification_matches_expected": true,
+                    "diagnostic_labels": ["all_signals_present"],
+                    "resources": 1,
+                    "critical_signal_count": 0,
+                    "degraded_signal_count": 0,
+                    "spectral_class": "healthy",
+                }),
+                json!({
+                    "schema_version": RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
+                    "scenario_id": "runtime-pressure-lab-cpu-lane-pressure",
+                    "seed": 1470742545u64,
+                    "scenario_kind": "cpu_lane_pressure",
+                    "observed_verdict": "critical",
+                    "classification_matches_expected": true,
+                    "diagnostic_labels": [
+                        "cpu_load_hard_limit",
+                        "resource_heavy_degradation",
+                        "scheduler_tail_pressure",
+                    ],
+                    "resources": 1,
+                    "critical_signal_count": 1,
+                    "degraded_signal_count": 1,
+                    "spectral_class": "healthy",
+                }),
+                json!({
+                    "schema_version": RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
+                    "scenario_id": "runtime-pressure-lab-resource-fallback-degraded",
+                    "seed": 1470757393u64,
+                    "scenario_kind": "resource_fallback_degraded",
+                    "observed_verdict": "degraded",
+                    "classification_matches_expected": true,
+                    "diagnostic_labels": [
+                        "memory_soft_pressure",
+                        "platform_probe_fallback",
+                    ],
+                    "resources": 1,
+                    "critical_signal_count": 0,
+                    "degraded_signal_count": 2,
+                    "spectral_class": "healthy",
+                }),
+                json!({
+                    "schema_version": RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
+                    "scenario_id": "runtime-pressure-lab-structural-warning",
+                    "seed": 1470715820u64,
+                    "scenario_kind": "structural_warning",
+                    "observed_verdict": "critical",
+                    "classification_matches_expected": true,
+                    "diagnostic_labels": [
+                        "spectral_fragmented_topology",
+                        "trapped_cycle_detection_required",
+                    ],
+                    "resources": 1,
+                    "critical_signal_count": 1,
+                    "degraded_signal_count": 0,
+                    "spectral_class": "fragmented",
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_lab_evidence_is_reproducible_for_fixed_inputs() {
+        let first = structural_warning_lab_evidence();
+        let second = structural_warning_lab_evidence();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.stable_json().expect("first json"),
+            second.stable_json().expect("second json")
+        );
+        assert!(
+            first
+                .snapshot
+                .spectral_recommendations
+                .iter()
+                .any(|recommendation| {
+                    recommendation.action
+                        == RuntimePressureRecommendationAction::RunTrappedCycleDetection
+                        && recommendation.requires_trapped_cycle_proof
+                        && !recommendation.deadlock_proven
+                })
         );
     }
 
