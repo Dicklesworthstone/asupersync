@@ -15,14 +15,57 @@ use crate::sync::Mutex;
 use crate::sync::OwnedMutexGuard;
 use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
-use crate::types::{RegionId, Time};
-use parking_lot::RwLock;
+use crate::types::{RegionId, TaskId, Time};
+use parking_lot::{Mutex as ParkingMutex, RwLock};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
+type EndpointSinkMap = HashMap<EndpointId, Arc<EndpointSinkSlot>>;
+
+struct EndpointSinkSlot {
+    sink: Arc<Mutex<Box<dyn SymbolSink>>>,
+    active_sender: ParkingMutex<Option<TaskId>>,
+}
+
+impl EndpointSinkSlot {
+    fn new(sink: Box<dyn SymbolSink>) -> Self {
+        Self {
+            sink: Arc::new(Mutex::new(sink)),
+            active_sender: ParkingMutex::new(None),
+        }
+    }
+
+    fn is_active_for(&self, task: TaskId) -> bool {
+        self.active_sender
+            .lock()
+            .is_some_and(|active| active == task)
+    }
+
+    fn mark_active(&self, task: TaskId) -> EndpointSinkActiveGuard<'_> {
+        let previous = self.active_sender.lock().replace(task);
+        debug_assert!(
+            previous.is_none(),
+            "endpoint sink owner should be empty once the sink mutex is acquired"
+        );
+        EndpointSinkActiveGuard { slot: self, task }
+    }
+}
+
+struct EndpointSinkActiveGuard<'a> {
+    slot: &'a EndpointSinkSlot,
+    task: TaskId,
+}
+
+impl Drop for EndpointSinkActiveGuard<'_> {
+    fn drop(&mut self) {
+        let mut active = self.slot.active_sender.lock();
+        if active.is_some_and(|task| task == self.task) {
+            *active = None;
+        }
+    }
+}
 
 // ============================================================================
 // Endpoint Types
@@ -2337,7 +2380,7 @@ impl SymbolDispatcher {
     pub fn add_sink(&self, endpoint: EndpointId, sink: Box<dyn SymbolSink>) {
         self.sinks
             .write()
-            .insert(endpoint, Arc::new(Mutex::new(sink)));
+            .insert(endpoint, Arc::new(EndpointSinkSlot::new(sink)));
     }
 
     fn send_failed(endpoint: EndpointId) -> DispatchError {
@@ -2347,18 +2390,25 @@ impl SymbolDispatcher {
         }
     }
 
+    fn reentrant_send_failed(endpoint: EndpointId) -> DispatchError {
+        DispatchError::SendFailed {
+            endpoint,
+            reason: "reentrant dispatch to endpoint from the same task would deadlock".into(),
+        }
+    }
+
     async fn send_to_endpoint(
         &self,
         cx: &Cx,
         endpoint: EndpointId,
         symbol: AuthenticatedSymbol,
     ) -> Result<(), DispatchError> {
-        let sink = {
+        let slot = {
             let sinks = self.sinks.read();
             sinks.get(&endpoint).cloned()
         };
 
-        let Some(sink) = sink else {
+        let Some(slot) = slot else {
             // Simulation mode when no concrete sink is registered.
             return Ok(());
         };
@@ -2367,8 +2417,14 @@ impl SymbolDispatcher {
             return Err(DispatchError::Cancelled);
         }
 
-        match OwnedMutexGuard::lock(sink, cx).await {
+        let task = cx.task_id();
+        if slot.is_active_for(task) {
+            return Err(Self::reentrant_send_failed(endpoint));
+        }
+
+        match OwnedMutexGuard::lock(Arc::clone(&slot.sink), cx).await {
             Ok(mut guard) => {
+                let _active = slot.mark_active(task);
                 let guard: &mut Box<dyn SymbolSink> = &mut guard;
                 match guard.send(symbol).await {
                     Ok(()) => Ok(()),
@@ -2874,6 +2930,7 @@ mod tests {
     use std::collections::HashSet;
     use std::io;
     use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
     use std::task::{Context, Poll};
 
     fn test_endpoint(id: u64) -> Endpoint {
@@ -3023,6 +3080,51 @@ mod tests {
             Poll::Ready(Err(SinkError::Io {
                 source: io::Error::new(io::ErrorKind::Interrupted, "cancelled"),
             }))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct ReentrantDispatchSink {
+        dispatcher: Arc<SymbolDispatcher>,
+        cx: Cx,
+        reentrant_failed_fast: Arc<AtomicBool>,
+    }
+
+    impl SymbolSink for ReentrantDispatchSink {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _symbol: AuthenticatedSymbol,
+        ) -> Poll<Result<(), SinkError>> {
+            let this = self.get_mut();
+            let nested = future::block_on(this.dispatcher.dispatch_with_strategy(
+                &this.cx,
+                test_authenticated_symbol(7001),
+                DispatchStrategy::Unicast,
+            ));
+
+            match nested {
+                Err(DispatchError::SendFailed { reason, .. })
+                    if reason.contains("reentrant dispatch") =>
+                {
+                    this.reentrant_failed_fast.store(true, Ordering::Release);
+                    Poll::Ready(Ok(()))
+                }
+                other => Poll::Ready(Err(SinkError::SendFailed {
+                    reason: format!("nested same-endpoint dispatch did not fail fast: {other:?}"),
+                })),
+            }
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
@@ -4742,6 +4844,45 @@ mod tests {
         assert!(matches!(result, Err(DispatchError::Cancelled)));
         assert_eq!(endpoint.failures.load(Ordering::Relaxed), 0);
         assert!(cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn test_symbol_dispatcher_reentrant_same_endpoint_dispatch_fails_fast() {
+        let table = Arc::new(RoutingTable::new());
+        let endpoint = table.register_endpoint(test_endpoint(61));
+        table.add_route(
+            RouteKey::Default,
+            RoutingEntry::new(vec![endpoint.clone()], Time::ZERO),
+        );
+
+        let router = Arc::new(SymbolRouter::new(table));
+        let dispatcher = Arc::new(SymbolDispatcher::new(router, DispatchConfig::default()));
+        let cx: Cx = Cx::for_testing();
+        let reentrant_failed_fast = Arc::new(AtomicBool::new(false));
+
+        dispatcher.add_sink(
+            endpoint.id,
+            Box::new(ReentrantDispatchSink {
+                dispatcher: Arc::clone(&dispatcher),
+                cx: cx.clone(),
+                reentrant_failed_fast: Arc::clone(&reentrant_failed_fast),
+            }),
+        );
+
+        let result = future::block_on(dispatcher.dispatch_with_strategy(
+            &cx,
+            test_authenticated_symbol(61),
+            DispatchStrategy::Unicast,
+        ));
+
+        assert!(
+            result.is_ok(),
+            "outer dispatch should complete after nested reentry is rejected: {result:?}"
+        );
+        assert!(
+            reentrant_failed_fast.load(Ordering::Acquire),
+            "nested same-task dispatch must fail before waiting on the endpoint sink mutex"
+        );
     }
 
     // Test 14: RoutingError display
