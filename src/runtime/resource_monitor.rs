@@ -25,6 +25,7 @@
 use crate::observability::spectral_health::{
     EarlyWarningSeverity, HealthClassification, SpectralHealthReport,
 };
+use crate::runtime::rch_health::{RchAdmissionDecision, RchWorkerAdmissionReceipt};
 use crate::runtime::scheduler::SchedulerEvidenceMetrics;
 use crate::types::RegionId;
 use crate::types::pressure::SystemPressure;
@@ -55,6 +56,10 @@ pub const RUNTIME_PRESSURE_ADMISSION_POLICY_SCHEMA_VERSION: &str =
 /// Stable schema for opt-in pressure-aware admission decisions.
 pub const RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION: &str =
     "asupersync.runtime-pressure-admission-decision.v1";
+
+/// Stable schema for RCH proof-lane pressure rows folded into runtime snapshots.
+pub const RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION: &str =
+    "asupersync.runtime-pressure-rch-proof-lane.v1";
 
 const RESOURCE_PROBE_WARNING_THROTTLE_EVERY: u64 = 8;
 
@@ -250,6 +255,7 @@ pub enum RuntimePressureSignal {
     Scheduler,
     Spectral,
     PlatformProbes,
+    RchProofLanes,
 }
 
 /// Availability and quality state for one pressure signal.
@@ -371,6 +377,7 @@ pub enum RuntimePressureLabScenarioKind {
     CpuLanePressure,
     ResourceFallbackDegraded,
     StructuralWarning,
+    RchProofLaneRemoteRefusal,
 }
 
 /// Stable evidence row for a deterministic runtime pressure lab scenario.
@@ -512,6 +519,55 @@ impl RuntimePressureSpectralSnapshot {
     }
 }
 
+/// Deterministic RCH proof-lane pressure row folded into runtime pressure snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureRchProofLaneSnapshot {
+    pub schema_version: String,
+    pub lane_id: String,
+    pub decision_code: String,
+    pub remote_required: bool,
+    pub selected_worker: Option<String>,
+    pub refusal_code: Option<String>,
+    pub local_fallback_allowed: bool,
+    pub candidate_count: usize,
+    pub admissible_worker_count: usize,
+    pub blocked_worker_count: usize,
+    pub cache_warm_admissible_worker_count: usize,
+    pub reason_codes: Vec<String>,
+}
+
+impl RuntimePressureRchProofLaneSnapshot {
+    #[must_use]
+    pub fn from_receipt(receipt: &RchWorkerAdmissionReceipt) -> Self {
+        let row = receipt.schedule_row();
+        let mut reason_codes = row
+            .reason_codes
+            .iter()
+            .map(|code| (*code).to_string())
+            .collect::<Vec<_>>();
+        reason_codes.sort();
+        reason_codes.dedup();
+
+        Self {
+            schema_version: RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION.to_string(),
+            lane_id: row.lane_id,
+            decision_code: row.decision_code.to_string(),
+            remote_required: row.remote_required,
+            selected_worker: row
+                .selected_worker
+                .as_ref()
+                .map(|worker| worker.as_str().to_string()),
+            refusal_code: row.refusal_code.map(str::to_string),
+            local_fallback_allowed: row.local_fallback_allowed,
+            candidate_count: row.candidate_count,
+            admissible_worker_count: row.admissible_worker_count,
+            blocked_worker_count: row.blocked_worker_count,
+            cache_warm_admissible_worker_count: row.cache_warm_admissible_worker_count,
+            reason_codes,
+        }
+    }
+}
+
 /// Unified operator-facing runtime pressure report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePressureSnapshot {
@@ -527,6 +583,7 @@ pub struct RuntimePressureSnapshot {
     pub scheduler: Option<SchedulerEvidenceMetrics>,
     pub spectral: RuntimePressureSpectralSnapshot,
     pub spectral_recommendations: Vec<RuntimePressureSpectralRecommendation>,
+    pub rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
 }
 
 impl RuntimePressureSnapshot {
@@ -537,10 +594,38 @@ impl RuntimePressureSnapshot {
         scheduler: Option<SchedulerEvidenceMetrics>,
         spectral: Option<RuntimePressureSpectralSnapshot>,
     ) -> Self {
+        Self::from_parts_with_rch_proof_lanes(
+            pressure,
+            platform_probe_report,
+            scheduler,
+            spectral,
+            Vec::new(),
+        )
+    }
+
+    #[must_use]
+    pub fn from_parts_with_rch_proof_lanes(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<RuntimePressureSpectralSnapshot>,
+        mut rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
+    ) -> Self {
         let resources = runtime_pressure_resources(pressure);
         let resource_composite_degradation = pressure.composite_degradation_level();
         let spectral = spectral.unwrap_or_else(RuntimePressureSpectralSnapshot::unknown);
         let spectral_recommendations = runtime_pressure_spectral_recommendations(&spectral);
+        rch_proof_lanes.sort_by(|left, right| {
+            left.lane_id
+                .cmp(&right.lane_id)
+                .then_with(|| left.decision_code.cmp(&right.decision_code))
+                .then_with(|| left.refusal_code.cmp(&right.refusal_code))
+        });
+        rch_proof_lanes.dedup_by(|left, right| {
+            left.lane_id == right.lane_id
+                && left.decision_code == right.decision_code
+                && left.refusal_code == right.refusal_code
+        });
 
         let mut signal_statuses = vec![
             runtime_pressure_resource_signal_status(&resources, resource_composite_degradation),
@@ -548,6 +633,9 @@ impl RuntimePressureSnapshot {
             runtime_pressure_spectral_signal_status(&spectral),
             runtime_pressure_platform_probe_signal_status(&platform_probe_report),
         ];
+        if let Some(row) = runtime_pressure_rch_proof_lane_signal_status(&rch_proof_lanes) {
+            signal_statuses.push(row);
+        }
         signal_statuses.sort_by_key(|row| row.signal);
 
         let missing_signal_count =
@@ -579,6 +667,7 @@ impl RuntimePressureSnapshot {
             scheduler,
             spectral,
             spectral_recommendations,
+            rch_proof_lanes,
         }
     }
 }
@@ -1173,6 +1262,43 @@ fn runtime_pressure_platform_probe_signal_status(
         ),
         ResourceProbeOperatorVerdict::Disabled => unreachable!("disabled handled above"),
     }
+}
+
+fn runtime_pressure_rch_proof_lane_signal_status(
+    rows: &[RuntimePressureRchProofLaneSnapshot],
+) -> Option<RuntimePressureSignalSnapshot> {
+    if rows.is_empty() {
+        return None;
+    }
+
+    if rows.iter().any(|row| {
+        row.decision_code == RchAdmissionDecision::Refuse.code()
+            || (row.remote_required && !row.local_fallback_allowed && row.selected_worker.is_none())
+    }) {
+        return Some(runtime_pressure_signal_row(
+            RuntimePressureSignal::RchProofLanes,
+            RuntimePressureSignalStatus::Critical,
+            "rch_remote_required_proof_lane_refused",
+        ));
+    }
+
+    if rows.iter().any(|row| {
+        row.decision_code == RchAdmissionDecision::Defer.code()
+            || row.blocked_worker_count > 0
+            || row.cache_warm_admissible_worker_count == 0
+    }) {
+        return Some(runtime_pressure_signal_row(
+            RuntimePressureSignal::RchProofLanes,
+            RuntimePressureSignalStatus::Degraded,
+            "rch_proof_lane_capacity_degraded",
+        ));
+    }
+
+    Some(runtime_pressure_signal_row(
+        RuntimePressureSignal::RchProofLanes,
+        RuntimePressureSignalStatus::Present,
+        "rch_proof_lane_capacity_present",
+    ))
 }
 
 fn runtime_pressure_signal_row(
@@ -4695,6 +4821,30 @@ impl ResourceMonitor {
         )
     }
 
+    /// Build a runtime pressure snapshot with externally captured RCH proof-lane receipts.
+    ///
+    /// The runtime does not probe RCH directly. Callers must provide receipts
+    /// captured through an explicit operator/tooling capability.
+    #[must_use]
+    pub fn runtime_pressure_snapshot_with_rch_receipts(
+        &self,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<&SpectralHealthReport>,
+        rch_receipts: &[RchWorkerAdmissionReceipt],
+    ) -> RuntimePressureSnapshot {
+        let rch_proof_lanes = rch_receipts
+            .iter()
+            .map(RuntimePressureRchProofLaneSnapshot::from_receipt)
+            .collect();
+        RuntimePressureSnapshot::from_parts_with_rch_proof_lanes(
+            &self.pressure,
+            self.collector.platform_probe_report(),
+            scheduler,
+            spectral.map(RuntimePressureSpectralSnapshot::from_report),
+            rch_proof_lanes,
+        )
+    }
+
     /// Evaluate an opt-in pressure-aware admission decision from the current snapshot.
     #[must_use]
     pub fn pressure_admission_decision(
@@ -4732,6 +4882,11 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::runtime::rch_health::{
+        RchArtifactRetrievalReliability, RchCacheWarmthHint, RchProofLaneRequest,
+        RchProofPriority, RchQueueState, RchTargetDirClass, RchWorkerAdmissionPolicy,
+        RchWorkerDiskPressure, RchWorkerSnapshot, admit_rch_worker,
+    };
     use serde_json::{Value, json};
     use std::collections::hash_map::DefaultHasher;
     use std::fs;
@@ -5356,6 +5511,40 @@ mod tests {
         }
     }
 
+    fn rch_request(lane_id: &str, priority: RchProofPriority) -> RchProofLaneRequest {
+        RchProofLaneRequest::new(lane_id, RchTargetDirClass::Warm, true, priority)
+    }
+
+    fn healthy_rch_worker(raw_worker_id: &str, lane_id: &str) -> RchWorkerSnapshot {
+        RchWorkerSnapshot::new(
+            raw_worker_id,
+            true,
+            RchQueueState::Open,
+            false,
+            vec![RchCacheWarmthHint::new(
+                Some(lane_id),
+                RchTargetDirClass::Warm,
+                90,
+            )],
+            RchWorkerDiskPressure::new(100.0, 120.0, 0.1, 0.2),
+            RchArtifactRetrievalReliability::new(4, 0, 0),
+            30,
+            95,
+            0,
+        )
+    }
+
+    fn admitted_rch_receipt(lane_id: &str) -> RchWorkerAdmissionReceipt {
+        let request = rch_request(lane_id, RchProofPriority::Foreground);
+        let worker = healthy_rch_worker("vmi-rch-proof-lane-a.internal", lane_id);
+        admit_rch_worker(&request, &[worker], &RchWorkerAdmissionPolicy::default())
+    }
+
+    fn refused_remote_required_rch_receipt(lane_id: &str) -> RchWorkerAdmissionReceipt {
+        let request = rch_request(lane_id, RchProofPriority::Critical);
+        admit_rch_worker(&request, &[], &RchWorkerAdmissionPolicy::default())
+    }
+
     fn snapshot_with_spectral(
         spectral: RuntimePressureSpectralSnapshot,
     ) -> RuntimePressureSnapshot {
@@ -5499,6 +5688,32 @@ mod tests {
         )
     }
 
+    fn rch_proof_lane_remote_refusal_lab_evidence() -> RuntimePressureLabScenarioEvidence {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(40, 80, 95, 100),
+        );
+        let rch_row = RuntimePressureRchProofLaneSnapshot::from_receipt(
+            &refused_remote_required_rch_receipt("cargo-clippy-admission"),
+        );
+
+        runtime_pressure_lab_scenario_evidence(
+            "runtime-pressure-lab-rch-proof-lane-remote-refusal",
+            0x57A9_7C17,
+            RuntimePressureLabScenarioKind::RchProofLaneRemoteRefusal,
+            RuntimePressureVerdict::Critical,
+            RuntimePressureSnapshot::from_parts_with_rch_proof_lanes(
+                &pressure,
+                complete_platform_probe_report(),
+                Some(healthy_scheduler_metrics()),
+                Some(healthy_spectral_snapshot()),
+                vec![rch_row],
+            ),
+            &["local_fallback_refused", "rch_remote_required_refused"],
+        )
+    }
+
     #[test]
     fn runtime_pressure_snapshot_marks_empty_inputs_unknown() {
         let pressure = ResourcePressure::new();
@@ -5620,8 +5835,87 @@ mod tests {
         assert_eq!(value["scheduler"]["wake_to_run_p99_ns"], 220_000);
         assert_eq!(value["spectral"]["class"], "healthy");
         assert_eq!(
+            value["rch_proof_lanes"]
+                .as_array()
+                .expect("rch proof lanes array")
+                .len(),
+            0
+        );
+        assert_eq!(
             value["signal_statuses"][0]["signal"], "resources",
             "signal rows stay sorted by enum order"
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_snapshot_folds_rch_proof_lane_receipts() {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(24, 80, 95, 100),
+        );
+
+        let admitted = RuntimePressureRchProofLaneSnapshot::from_receipt(
+            &admitted_rch_receipt("cargo-test-admission"),
+        );
+        let refused = RuntimePressureRchProofLaneSnapshot::from_receipt(
+            &refused_remote_required_rch_receipt("cargo-clippy-admission"),
+        );
+        let snapshot = RuntimePressureSnapshot::from_parts_with_rch_proof_lanes(
+            &pressure,
+            complete_platform_probe_report(),
+            Some(healthy_scheduler_metrics()),
+            Some(healthy_spectral_snapshot()),
+            vec![admitted, refused],
+        );
+
+        assert_eq!(snapshot.overall_verdict, RuntimePressureVerdict::Critical);
+        assert_eq!(snapshot.missing_signal_count, 0);
+        assert_eq!(snapshot.degraded_signal_count, 0);
+        assert_eq!(snapshot.critical_signal_count, 1);
+        assert_eq!(
+            snapshot
+                .rch_proof_lanes
+                .iter()
+                .map(|row| row.lane_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cargo-clippy-admission", "cargo-test-admission"]
+        );
+        assert_eq!(
+            snapshot.rch_proof_lanes[0].refusal_code.as_deref(),
+            Some("no_workers")
+        );
+        assert!(
+            snapshot.rch_proof_lanes[0]
+                .reason_codes
+                .contains(&"local_fallback_refused".to_string())
+        );
+        assert!(
+            snapshot.rch_proof_lanes[1]
+                .selected_worker
+                .as_ref()
+                .is_some_and(|worker| worker.starts_with("rchw-") && !worker.contains("vmi-"))
+        );
+        assert_eq!(
+            snapshot
+                .signal_statuses
+                .iter()
+                .find(|row| row.signal == RuntimePressureSignal::RchProofLanes)
+                .map(|row| (row.status, row.reason.as_str())),
+            Some((
+                RuntimePressureSignalStatus::Critical,
+                "rch_remote_required_proof_lane_refused",
+            ))
+        );
+
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(
+            value["rch_proof_lanes"][0]["schema_version"],
+            RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            value["signal_statuses"][4]["signal"],
+            json!("rch_proof_lanes")
         );
     }
 
@@ -5904,6 +6198,7 @@ mod tests {
             cpu_lane_pressure_lab_evidence(),
             resource_fallback_degraded_lab_evidence(),
             structural_warning_lab_evidence(),
+            rch_proof_lane_remote_refusal_lab_evidence(),
         ];
 
         assert_eq!(
@@ -5916,6 +6211,7 @@ mod tests {
                 RuntimePressureLabScenarioKind::CpuLanePressure,
                 RuntimePressureLabScenarioKind::ResourceFallbackDegraded,
                 RuntimePressureLabScenarioKind::StructuralWarning,
+                RuntimePressureLabScenarioKind::RchProofLaneRemoteRefusal,
             ]
         );
         assert!(
@@ -5933,6 +6229,7 @@ mod tests {
                 RuntimePressureVerdict::Critical,
                 RuntimePressureVerdict::Degraded,
                 RuntimePressureVerdict::Critical,
+                RuntimePressureVerdict::Critical,
             ]
         );
     }
@@ -5944,6 +6241,7 @@ mod tests {
             cpu_lane_pressure_lab_evidence(),
             resource_fallback_degraded_lab_evidence(),
             structural_warning_lab_evidence(),
+            rch_proof_lane_remote_refusal_lab_evidence(),
         ];
         let value = serde_json::to_value(&evidence).expect("serialize lab evidence");
         let projection = value
@@ -5960,6 +6258,7 @@ mod tests {
                     "classification_matches_expected": row["classification_matches_expected"],
                     "diagnostic_labels": row["diagnostic_labels"],
                     "resources": row["snapshot"]["resources"].as_array().map_or(0, Vec::len),
+                    "rch_proof_lanes": row["snapshot"]["rch_proof_lanes"].as_array().map_or(0, Vec::len),
                     "critical_signal_count": row["snapshot"]["critical_signal_count"],
                     "degraded_signal_count": row["snapshot"]["degraded_signal_count"],
                     "spectral_class": row["snapshot"]["spectral"]["class"],
@@ -5979,6 +6278,7 @@ mod tests {
                     "classification_matches_expected": true,
                     "diagnostic_labels": ["all_signals_present"],
                     "resources": 1,
+                    "rch_proof_lanes": 0,
                     "critical_signal_count": 0,
                     "degraded_signal_count": 0,
                     "spectral_class": "healthy",
@@ -5996,6 +6296,7 @@ mod tests {
                         "scheduler_tail_pressure",
                     ],
                     "resources": 1,
+                    "rch_proof_lanes": 0,
                     "critical_signal_count": 1,
                     "degraded_signal_count": 1,
                     "spectral_class": "healthy",
@@ -6012,6 +6313,7 @@ mod tests {
                         "platform_probe_fallback",
                     ],
                     "resources": 1,
+                    "rch_proof_lanes": 0,
                     "critical_signal_count": 0,
                     "degraded_signal_count": 2,
                     "spectral_class": "healthy",
@@ -6028,9 +6330,27 @@ mod tests {
                         "trapped_cycle_detection_required",
                     ],
                     "resources": 1,
+                    "rch_proof_lanes": 0,
                     "critical_signal_count": 1,
                     "degraded_signal_count": 0,
                     "spectral_class": "fragmented",
+                }),
+                json!({
+                    "schema_version": RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
+                    "scenario_id": "runtime-pressure-lab-rch-proof-lane-remote-refusal",
+                    "seed": 1470725143u64,
+                    "scenario_kind": "rch_proof_lane_remote_refusal",
+                    "observed_verdict": "critical",
+                    "classification_matches_expected": true,
+                    "diagnostic_labels": [
+                        "local_fallback_refused",
+                        "rch_remote_required_refused",
+                    ],
+                    "resources": 1,
+                    "rch_proof_lanes": 1,
+                    "critical_signal_count": 1,
+                    "degraded_signal_count": 0,
+                    "spectral_class": "healthy",
                 }),
             ]
         );
@@ -6081,6 +6401,41 @@ mod tests {
                 .expect("scheduler metrics")
                 .ready_backlog_p99,
             48
+        );
+    }
+
+    #[test]
+    fn resource_monitor_folds_externally_captured_rch_receipts() {
+        let monitor = ResourceMonitor::new(MonitorConfig::default());
+        monitor.pressure().update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(40, 80, 95, 100),
+        );
+        let receipt = admitted_rch_receipt("cargo-test-admission");
+
+        let snapshot = monitor.runtime_pressure_snapshot_with_rch_receipts(
+            Some(healthy_scheduler_metrics()),
+            None,
+            &[receipt],
+        );
+
+        assert_eq!(snapshot.rch_proof_lanes.len(), 1);
+        assert_eq!(
+            snapshot.rch_proof_lanes[0].schema_version,
+            RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            snapshot
+                .signal_statuses
+                .iter()
+                .find(|row| row.signal == RuntimePressureSignal::RchProofLanes)
+                .map(|row| row.status),
+            Some(RuntimePressureSignalStatus::Present)
+        );
+        assert!(
+            snapshot.rch_proof_lanes[0]
+                .reason_codes
+                .contains(&"cache_warm_capacity_present".to_string())
         );
     }
 
