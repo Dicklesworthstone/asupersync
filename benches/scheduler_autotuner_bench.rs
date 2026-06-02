@@ -8,7 +8,12 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::time::{Duration, Instant};
 
-use asupersync::runtime::scheduler::{AutotunerConfig, HotPathObservation, SchedulerAutotuner};
+use asupersync::runtime::config::BlockingPoolAffinityProfile;
+use asupersync::runtime::scheduler::{
+    AutotunerConfig, HotPathObservation, SchedulerAdmissionControlThresholds, SchedulerAutotuner,
+    SchedulerFeedbackCurrentKnobs, SchedulerFeedbackMetrics, SchedulerFeedbackPolicy,
+    SchedulerPlacementMode, recommend_scheduler_feedback,
+};
 
 /// Workload patterns for autotuner benchmarking.
 #[derive(Debug, Clone)]
@@ -273,10 +278,127 @@ fn bench_autotuner_exploration(c: &mut Criterion) {
     group.finish();
 }
 
+fn high_contention_metrics(iteration: usize) -> SchedulerFeedbackMetrics {
+    let wave = (iteration % 16) as f64 / 16.0;
+    SchedulerFeedbackMetrics {
+        runnable_queue_pressure: Some(0.84 + wave.mul_add(0.10, 0.0)),
+        ready_queue_pressure: Some(0.82 + wave.mul_add(0.08, 0.0)),
+        blocking_pool_pressure: Some(0.58 + wave.mul_add(0.06, 0.0)),
+        channel_backlog_pressure: Some(0.78 + wave.mul_add(0.12, 0.0)),
+        cancellation_pressure: Some(0.20 + wave.mul_add(0.08, 0.0)),
+        cleanup_debt_pressure: Some(0.18 + wave.mul_add(0.06, 0.0)),
+        memory_budget_pressure: Some(0.54 + wave.mul_add(0.05, 0.0)),
+        p95_dispatch_latency_us: Some(1_800 + (iteration % 128) as u64),
+        p99_dispatch_latency_us: Some(3_200 + (iteration % 256) as u64),
+    }
+}
+
+fn high_contention_current_knobs() -> SchedulerFeedbackCurrentKnobs {
+    SchedulerFeedbackCurrentKnobs {
+        worker_threads: 64,
+        cohort_count: 8,
+        steal_batch_size: 16,
+        global_queue_limit: 65_536,
+        placement_mode: SchedulerPlacementMode::LocalityFirst,
+        blocking_pool_affinity: BlockingPoolAffinityProfile::Disabled,
+        admission_thresholds: SchedulerAdmissionControlThresholds::default(),
+        ..SchedulerFeedbackCurrentKnobs::default()
+    }
+}
+
+fn synthetic_high_contention_cost(knobs: &SchedulerFeedbackCurrentKnobs) -> usize {
+    let batch_penalty = 48usize.saturating_sub(knobs.steal_batch_size.min(48));
+    let queue_penalty = 131_072usize.saturating_sub(knobs.global_queue_limit.min(131_072)) / 4_096;
+    let placement_penalty = match knobs.placement_mode {
+        SchedulerPlacementMode::ThroughputFirst => 0,
+        SchedulerPlacementMode::LatencyFirst => 12,
+        SchedulerPlacementMode::LocalityFirst => 18,
+    };
+    let affinity_penalty = match knobs.blocking_pool_affinity {
+        BlockingPoolAffinityProfile::CohortBiased { .. } => 0,
+        BlockingPoolAffinityProfile::Disabled => 10,
+    };
+    batch_penalty
+        .saturating_add(queue_penalty)
+        .saturating_add(placement_penalty)
+        .saturating_add(affinity_penalty)
+        .max(1)
+}
+
+fn simulate_feedback_controller_high_contention(
+    iterations: usize,
+    enable_feedback: bool,
+) -> (Duration, usize) {
+    let mut current = high_contention_current_knobs();
+    let policy = SchedulerFeedbackPolicy::default();
+    let start = Instant::now();
+    let mut accumulated_cost = 0usize;
+
+    for iteration in 0..iterations {
+        if enable_feedback && iteration % 128 == 0 {
+            let recommendation = recommend_scheduler_feedback(
+                high_contention_metrics(iteration),
+                current,
+                policy.clone(),
+            );
+            if let Some(steal_batch_size) = recommendation.steal_batch_size {
+                current.steal_batch_size = steal_batch_size;
+            }
+            if let Some(global_queue_limit) = recommendation.global_queue_limit {
+                current.global_queue_limit = global_queue_limit;
+            }
+            if let Some(placement_mode) = recommendation.placement_mode {
+                current.placement_mode = placement_mode;
+            }
+            if let Some(blocking_pool_affinity) = recommendation.blocking_pool_affinity {
+                current.blocking_pool_affinity = blocking_pool_affinity;
+            }
+            std::hint::black_box(recommendation.evidence);
+        }
+
+        let cost = synthetic_high_contention_cost(&current);
+        accumulated_cost = accumulated_cost.saturating_add(cost);
+        for _ in 0..cost {
+            std::hint::black_box(iteration);
+        }
+    }
+
+    (start.elapsed(), accumulated_cost)
+}
+
+/// Compare fixed knobs against feedback-selected knobs on a high-contention profile.
+fn bench_scheduler_feedback_high_contention(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler_feedback_high_contention");
+    group.throughput(Throughput::Elements(10_000));
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(10));
+
+    group.bench_function("fixed_knobs", |b| {
+        b.iter_custom(|iters| {
+            let (duration, cost) =
+                simulate_feedback_controller_high_contention((iters * 1000) as usize, false);
+            std::hint::black_box(cost);
+            duration
+        });
+    });
+
+    group.bench_function("feedback_selected_knobs", |b| {
+        b.iter_custom(|iters| {
+            let (duration, cost) =
+                simulate_feedback_controller_high_contention((iters * 1000) as usize, true);
+            std::hint::black_box(cost);
+            duration
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_autotuner_decisions,
     bench_autotuner_vs_baseline,
-    bench_autotuner_exploration
+    bench_autotuner_exploration,
+    bench_scheduler_feedback_high_contention
 );
 criterion_main!(benches);

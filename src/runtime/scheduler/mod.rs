@@ -49,8 +49,13 @@ pub mod worker;
 
 pub use crate::runtime::config::SchedulerPlacementMode;
 pub use autotuner::{
-    AutotunerConfig, AutotunerRecommendation, HotPathObservation, SchedulerAutotuner,
-    extract_observation,
+    AutotunerConfig, AutotunerRecommendation, HotPathObservation,
+    SchedulerAdmissionControlThresholds, SchedulerAutotuner, SchedulerFeedbackClamp,
+    SchedulerFeedbackClampReason, SchedulerFeedbackCurrentKnobs, SchedulerFeedbackEvidence,
+    SchedulerFeedbackKnob, SchedulerFeedbackKnobSet, SchedulerFeedbackMetrics,
+    SchedulerFeedbackPolicy, SchedulerFeedbackProtectedInvariants, SchedulerFeedbackReason,
+    SchedulerFeedbackRecommendation, SchedulerFeedbackSignal, SchedulerFeedbackWorkloadClass,
+    extract_observation, recommend_scheduler_feedback,
 };
 pub use content::{
     ContentId, ContentItem, ContentScheduler, PressureSnapshot, PriorityClass, ScheduleEvidence,
