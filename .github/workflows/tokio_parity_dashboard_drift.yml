@@ -29,6 +29,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: nightly-2026-02-05
+  RCH_BIN: ./scripts/rch_ci_fallback.sh
 
 jobs:
   parity-dashboard-drift:
@@ -120,7 +121,7 @@ jobs:
 
       - name: Contract test
         run: |
-          rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs cargo test --test tokio_parity_dashboard -- --nocapture
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs" cargo test --test tokio_parity_dashboard -- --nocapture
 
       - name: Upload parity dashboard artifacts
         if: always()

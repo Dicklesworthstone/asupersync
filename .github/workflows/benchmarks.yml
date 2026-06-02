@@ -16,6 +16,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: nightly-2026-02-05
+  RCH_BIN: ./scripts/rch_ci_fallback.sh
   # Reduce benchmark noise
   CARGO_INCREMENTAL: 0
   BENCH_CARGO_PROFILE: release-perf
@@ -52,11 +53,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
-      - name: Require rch
+      - name: Resolve cargo executor
         run: |
-          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
           if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for benchmark jobs" >&2
+            echo "cargo executor is not executable: $RCH_BIN" >&2
             exit 1
           fi
           echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"
@@ -100,11 +100,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
-      - name: Require rch
+      - name: Resolve cargo executor
         run: |
-          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
           if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for benchmark regression jobs" >&2
+            echo "cargo executor is not executable: $RCH_BIN" >&2
             exit 1
           fi
           echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"

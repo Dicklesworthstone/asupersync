@@ -70,6 +70,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RCH_BIN: ./scripts/rch_ci_fallback.sh
   # Limit memory for fuzzing
   ASAN_OPTIONS: malloc_context_size=64:quarantine_size_mb=256
   # Use thin LTO for faster builds
@@ -141,11 +142,10 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      - name: Require rch
+      - name: Resolve cargo executor
         run: |
-          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
           if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for fuzz jobs" >&2
+            echo "cargo executor is not executable: $RCH_BIN" >&2
             exit 1
           fi
           echo "RCH_BIN=$RCH_BIN" >> "$GITHUB_ENV"

@@ -20,6 +20,11 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 
+if [[ "${DRY_RUN}" -eq 0 ]] && ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "FATAL: rch executable not found: ${RCH_BIN}" >&2
+    exit 127
+fi
+
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="${OUTPUT_DIR}/proptest_${TIMESTAMP}.log"
 

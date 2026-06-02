@@ -23,6 +23,7 @@ env:
   RUST_BACKTRACE: 1
   RUST_LOG: info
   RUST_TOOLCHAIN: nightly-2026-02-05
+  RCH_BIN: ${{ github.workspace }}/scripts/rch_ci_fallback.sh
 
 jobs:
   conformance:

@@ -13,6 +13,11 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_TOOLCHAIN: nightly-2026-02-05
+  RCH_BIN: ./scripts/rch_ci_fallback.sh
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   check:
@@ -152,13 +157,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts/wasm/release
-          RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for WASM size-budget artifact builds" >&2
-            exit 1
-          fi
-          "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-wasm-size-gate cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod
-          cp target/wasm32-unknown-unknown/release/asupersync.wasm artifacts/wasm/release/asupersync.release.wasm
+          target_dir=/tmp/rch-wasm-size-gate
+          "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$target_dir" cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod
+          cp "$target_dir/wasm32-unknown-unknown/release/asupersync.wasm" artifacts/wasm/release/asupersync.release.wasm
           python3 - <<'PY'
           import gzip
           import json
@@ -361,11 +362,6 @@ jobs:
             --scenario worker \
             --dry-run \
             --out-dir artifacts/onboarding_vnext
-          RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for WASM browser vNext surface certification" >&2
-            exit 1
-          fi
           : > artifacts/wasm_browser_vnext_surface_test.log
 
           run_vnext_certification_test() {
@@ -449,11 +445,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for WASM bundler compatibility certification" >&2
-            exit 1
-          fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_bundler_compatibility" cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
           python3 - <<'PY'
           import json
@@ -489,11 +480,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for WASM rollback and incident playbook certification" >&2
-            exit 1
-          fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_incident_playbook" cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
           python3 - <<'PY'
           import json
@@ -536,11 +522,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for WASM GA readiness review board certification" >&2
-            exit 1
-          fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_ga_readiness_review_board_checklist" cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
           python3 - <<'PY'
           import json
@@ -585,11 +566,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          RCH_BIN="${HOME}/.local/bin/rch"
-          if [[ ! -x "$RCH_BIN" ]]; then
-            echo "rch is required for WASM launch rollout and support stabilization certification" >&2
-            exit 1
-          fi
           "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_launch_rollout_support_stabilization" cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
           python3 - <<'PY'
           import json
@@ -1667,6 +1643,8 @@ jobs:
   conformance:
     name: Conformance Tests
     runs-on: ubuntu-latest
+    env:
+      RCH_BIN: ${{ github.workspace }}/scripts/rch_ci_fallback.sh
     steps:
       - uses: actions/checkout@v4
 
