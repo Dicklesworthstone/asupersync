@@ -79,7 +79,6 @@ jobs:
     name: "Smoke: ${{ matrix.lane.name }} (${{ matrix.platform }})"
     runs-on: ${{ matrix.platform }}
     needs: setup
-    if: contains(fromJson(needs.setup.outputs.matrix).smoke, matrix.lane.id)
     strategy:
       fail-fast: false
       matrix:
@@ -122,8 +121,7 @@ jobs:
     needs: [setup, smoke-lanes]
     if: |
       always() &&
-      (needs.setup.outputs.proof-mode == 'full' || needs.setup.outputs.proof-mode == 'release') &&
-      contains(fromJson(needs.setup.outputs.matrix).full, matrix.lane.id)
+      (needs.setup.outputs.proof-mode == 'full' || needs.setup.outputs.proof-mode == 'release')
     strategy:
       fail-fast: false
       matrix:
@@ -180,8 +178,7 @@ jobs:
     needs: [setup, full-lanes]
     if: |
       always() &&
-      needs.setup.outputs.proof-mode == 'release' &&
-      contains(fromJson(needs.setup.outputs.matrix).release, matrix.lane.id)
+      needs.setup.outputs.proof-mode == 'release'
     strategy:
       fail-fast: false
       matrix:
