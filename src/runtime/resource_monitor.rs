@@ -74,6 +74,12 @@ pub const ADMISSION_AWARE_RUNTIME_PRESSURE_ATLAS_SCHEMA_VERSION: &str =
 const RESOURCE_PROBE_WARNING_THROTTLE_EVERY: u64 = 8;
 const REGION_MEMORY_BUDGET_SOFT_LIMIT_BPS: u16 = 8_000;
 const REGION_MEMORY_BUDGET_HARD_LIMIT_BPS: u16 = 10_000;
+const ADMISSION_AWARE_LARGE_HOST_CPU_CORES: u16 = 64;
+const ADMISSION_AWARE_LARGE_HOST_MEMORY_BYTES: u64 = 256 * 1024 * 1024 * 1024;
+const ADMISSION_AWARE_LARGE_HOST_MIN_NUMA_NODES: u16 = 2;
+const ADMISSION_AWARE_LARGE_HOST_BATCH_CORE_FLOOR: u16 = 8;
+const ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const ADMISSION_AWARE_LARGE_HOST_DISK_HEADROOM_FLOOR_BYTES: u64 = 128 * 1024 * 1024 * 1024;
 
 /// Errors that can occur during resource monitoring.
 #[derive(Debug, Error)]
@@ -902,6 +908,29 @@ pub enum AdmissionAwareAtlasClaimLabel {
     StaleEvidence,
 }
 
+/// Advisory worker saturation class for the 64-core/256GiB swarm host profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareLargeHostWorkerSaturation {
+    Available,
+    LowMemory,
+    WorkerSaturated,
+    DiskConstrained,
+    NonLargeHost,
+}
+
+/// Advisory batching decision for a large RCH swarm host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareLargeHostBatchingDecision {
+    PreferWarmWorker,
+    AdmitBatch,
+    QueueLowMemory,
+    DeferWorkerSaturated,
+    QueueDiskHeadroom,
+    DeferNonLargeHost,
+}
+
 /// Serializable lock contention row projected from existing lock metrics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionAwareLockContentionAtlasRow {
@@ -1091,8 +1120,15 @@ pub struct AdmissionAwareLargeHostWorkerWarmthRow {
     pub worker_available_cores: u16,
     pub worker_available_memory_bytes: u64,
     pub cache_warmth: String,
+    pub target_dir_isolated: bool,
     pub active_project_excluded: bool,
     pub proof_lane_cost_estimate: Option<String>,
+    pub worker_saturation: AdmissionAwareLargeHostWorkerSaturation,
+    pub advisory_batching_decision: AdmissionAwareLargeHostBatchingDecision,
+    pub advisory_batching_reason_codes: Vec<String>,
+    pub advisory_batch_size_hint: Option<u16>,
+    pub advisory_non_claims: Vec<String>,
+    pub advisory_only: bool,
     pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
 }
 
@@ -1190,6 +1226,7 @@ impl AdmissionAwareRuntimePressureAtlasSnapshot {
         mut input: AdmissionAwareRuntimePressureAtlasBuilderInput,
     ) -> Self {
         admission_aware_normalize_coordination_inputs(&mut input);
+        admission_aware_normalize_large_host_rows(&mut input);
         sort_input_rows(&mut input);
 
         let lock_contention = admission_aware_lock_contention_rows(
@@ -1372,6 +1409,170 @@ fn admission_aware_normalize_coordination_inputs(
     for row in &mut input.br_tracker_status {
         row.coordination_decision = admission_aware_br_tracker_coordination_decision(row);
     }
+}
+
+fn admission_aware_normalize_large_host_rows(
+    input: &mut AdmissionAwareRuntimePressureAtlasBuilderInput,
+) {
+    for row in &mut input.large_host_worker_warmth {
+        let profile = admission_aware_large_host_advisory_profile(row);
+        row.worker_saturation = profile.saturation;
+        row.advisory_batching_decision = profile.decision;
+        row.advisory_batching_reason_codes = profile.reason_codes;
+        row.advisory_batch_size_hint = profile.batch_size_hint;
+        row.advisory_non_claims = admission_aware_large_host_advisory_non_claims();
+        row.advisory_only = true;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AdmissionAwareLargeHostAdvisoryProfile {
+    saturation: AdmissionAwareLargeHostWorkerSaturation,
+    decision: AdmissionAwareLargeHostBatchingDecision,
+    reason_codes: Vec<String>,
+    batch_size_hint: Option<u16>,
+}
+
+fn admission_aware_large_host_advisory_profile(
+    row: &AdmissionAwareLargeHostWorkerWarmthRow,
+) -> AdmissionAwareLargeHostAdvisoryProfile {
+    let queue_state = row.worker_queue_state.to_ascii_lowercase();
+    let cache_warmth = row.cache_warmth.to_ascii_lowercase();
+    let mut reason_codes = Vec::new();
+
+    let large_host_shape = row.cpu_cores >= ADMISSION_AWARE_LARGE_HOST_CPU_CORES
+        && row.memory_bytes >= ADMISSION_AWARE_LARGE_HOST_MEMORY_BYTES
+        && row.numa_nodes >= ADMISSION_AWARE_LARGE_HOST_MIN_NUMA_NODES;
+    if large_host_shape {
+        reason_codes.push("large_host_shape_64_core_256_gib".to_string());
+    } else {
+        reason_codes.push("large_host_shape_missing".to_string());
+    }
+
+    if row.numa_nodes >= ADMISSION_AWARE_LARGE_HOST_MIN_NUMA_NODES {
+        reason_codes.push("numa_nodes_present".to_string());
+    } else {
+        reason_codes.push("numa_nodes_missing".to_string());
+    }
+
+    if row.disk_headroom_bytes >= ADMISSION_AWARE_LARGE_HOST_DISK_HEADROOM_FLOOR_BYTES {
+        reason_codes.push("disk_headroom_available".to_string());
+    } else {
+        reason_codes.push("disk_headroom_low".to_string());
+    }
+
+    if queue_state.contains("saturated") || queue_state.contains("closed") {
+        reason_codes.push("worker_queue_saturated".to_string());
+    } else {
+        reason_codes.push("worker_queue_open".to_string());
+    }
+
+    if row.worker_available_cores >= ADMISSION_AWARE_LARGE_HOST_BATCH_CORE_FLOOR {
+        reason_codes.push("worker_core_headroom_available".to_string());
+    } else {
+        reason_codes.push("worker_core_saturation".to_string());
+    }
+
+    if row.worker_available_memory_bytes >= ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES {
+        reason_codes.push("worker_memory_headroom_available".to_string());
+    } else {
+        reason_codes.push("worker_memory_low".to_string());
+    }
+
+    if cache_warmth.contains("warm") {
+        reason_codes.push("worker_cache_warm".to_string());
+    } else {
+        reason_codes.push("worker_cache_cold".to_string());
+    }
+
+    if row.target_dir_isolated {
+        reason_codes.push("target_dir_isolated".to_string());
+    } else {
+        reason_codes.push("target_dir_shared".to_string());
+    }
+
+    if row.active_project_excluded {
+        reason_codes.push("active_project_excluded".to_string());
+    } else {
+        reason_codes.push("active_project_not_excluded".to_string());
+    }
+
+    if row.proof_lane_cost_estimate.is_some() {
+        reason_codes.push("proof_lane_cost_estimate_present".to_string());
+    } else {
+        reason_codes.push("proof_lane_cost_estimate_missing".to_string());
+    }
+    reason_codes.push("advisory_batching_only".to_string());
+
+    let (saturation, decision, batch_size_hint) = if !large_host_shape {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::NonLargeHost,
+            AdmissionAwareLargeHostBatchingDecision::DeferNonLargeHost,
+            None,
+        )
+    } else if row.disk_headroom_bytes < ADMISSION_AWARE_LARGE_HOST_DISK_HEADROOM_FLOOR_BYTES {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::DiskConstrained,
+            AdmissionAwareLargeHostBatchingDecision::QueueDiskHeadroom,
+            None,
+        )
+    } else if queue_state.contains("saturated")
+        || queue_state.contains("closed")
+        || row.worker_available_cores < ADMISSION_AWARE_LARGE_HOST_BATCH_CORE_FLOOR
+    {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::WorkerSaturated,
+            AdmissionAwareLargeHostBatchingDecision::DeferWorkerSaturated,
+            None,
+        )
+    } else if row.worker_available_memory_bytes
+        < ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES
+    {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::LowMemory,
+            AdmissionAwareLargeHostBatchingDecision::QueueLowMemory,
+            None,
+        )
+    } else if cache_warmth.contains("warm") {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::Available,
+            AdmissionAwareLargeHostBatchingDecision::PreferWarmWorker,
+            admission_aware_large_host_batch_size_hint(row),
+        )
+    } else {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::Available,
+            AdmissionAwareLargeHostBatchingDecision::AdmitBatch,
+            admission_aware_large_host_batch_size_hint(row),
+        )
+    };
+
+    reason_codes.sort();
+    reason_codes.dedup();
+    AdmissionAwareLargeHostAdvisoryProfile {
+        saturation,
+        decision,
+        reason_codes,
+        batch_size_hint,
+    }
+}
+
+fn admission_aware_large_host_batch_size_hint(
+    row: &AdmissionAwareLargeHostWorkerWarmthRow,
+) -> Option<u16> {
+    let core_slots = row.worker_available_cores / ADMISSION_AWARE_LARGE_HOST_BATCH_CORE_FLOOR;
+    let memory_slots =
+        row.worker_available_memory_bytes / ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES;
+    let batch_slots = u64::from(core_slots).min(memory_slots).min(8);
+    u16::try_from(batch_slots).ok().filter(|slots| *slots > 0)
+}
+
+fn admission_aware_large_host_advisory_non_claims() -> Vec<String> {
+    vec![
+        "allocator_enforcement".to_string(),
+        "production_admission_default".to_string(),
+        "throughput_improvement".to_string(),
+    ]
 }
 
 #[derive(Debug, Clone)]
@@ -7069,8 +7270,15 @@ mod tests {
             worker_available_cores: 48,
             worker_available_memory_bytes: 192 * 1024 * 1024 * 1024,
             cache_warmth: "warm".to_string(),
+            target_dir_isolated: true,
             active_project_excluded: true,
             proof_lane_cost_estimate: Some("cargo-test-focused".to_string()),
+            worker_saturation: AdmissionAwareLargeHostWorkerSaturation::Available,
+            advisory_batching_decision: AdmissionAwareLargeHostBatchingDecision::AdmitBatch,
+            advisory_batching_reason_codes: Vec::new(),
+            advisory_batch_size_hint: None,
+            advisory_non_claims: Vec::new(),
+            advisory_only: false,
             sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
         }];
         input.operator_closeout_receipts = vec![AdmissionAwareOperatorCloseoutReceiptRow {
@@ -7697,6 +7905,165 @@ mod tests {
                 "worker_capacity_selected",
             ])
         );
+        assert_eq!(
+            value["large_host_worker_warmth"][0]["worker_saturation"],
+            "available"
+        );
+        assert_eq!(
+            value["large_host_worker_warmth"][0]["advisory_batching_decision"],
+            "prefer_warm_worker"
+        );
+        assert_eq!(
+            value["large_host_worker_warmth"][0]["advisory_batch_size_hint"],
+            json!(3)
+        );
+        assert_eq!(
+            value["large_host_worker_warmth"][0]["advisory_only"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_classifies_large_host_advisory_batching_profile() {
+        let mut input = complete_atlas_builder_input(healthy_spectral_snapshot(), false);
+        let healthy = input.large_host_worker_warmth[0].clone();
+        let mut low_memory = healthy.clone();
+        low_memory.worker_id = "rchw-large-low-memory".to_string();
+        low_memory.worker_available_cores = 32;
+        low_memory.worker_available_memory_bytes = 32 * 1024 * 1024 * 1024;
+
+        let mut saturated = healthy.clone();
+        saturated.worker_id = "rchw-large-saturated".to_string();
+        saturated.worker_queue_state = "saturated".to_string();
+        saturated.worker_available_cores = 4;
+        saturated.worker_available_memory_bytes = 192 * 1024 * 1024 * 1024;
+
+        let mut cold = healthy.clone();
+        cold.worker_id = "rchw-large-cold".to_string();
+        cold.cache_warmth = "cold".to_string();
+        cold.worker_available_cores = 16;
+        cold.worker_available_memory_bytes = 128 * 1024 * 1024 * 1024;
+
+        input.large_host_worker_warmth = vec![saturated, low_memory, cold, healthy];
+
+        let atlas = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(input);
+        let rows = atlas
+            .large_host_worker_warmth
+            .iter()
+            .map(|row| (row.worker_id.as_str(), row))
+            .collect::<BTreeMap<_, _>>();
+        let healthy = rows.get("rchw-large-1").expect("healthy worker");
+        let low_memory = rows
+            .get("rchw-large-low-memory")
+            .expect("low-memory worker");
+        let saturated = rows.get("rchw-large-saturated").expect("saturated worker");
+        let cold = rows.get("rchw-large-cold").expect("cold worker");
+
+        assert_eq!(healthy.cpu_cores, ADMISSION_AWARE_LARGE_HOST_CPU_CORES);
+        assert_eq!(
+            healthy.memory_bytes,
+            ADMISSION_AWARE_LARGE_HOST_MEMORY_BYTES
+        );
+        assert_eq!(
+            healthy.numa_nodes,
+            ADMISSION_AWARE_LARGE_HOST_MIN_NUMA_NODES
+        );
+        assert_eq!(healthy.cache_warmth, "warm");
+        assert!(healthy.target_dir_isolated);
+        assert!(healthy.active_project_excluded);
+        assert_eq!(
+            healthy.worker_saturation,
+            AdmissionAwareLargeHostWorkerSaturation::Available
+        );
+        assert_eq!(
+            healthy.advisory_batching_decision,
+            AdmissionAwareLargeHostBatchingDecision::PreferWarmWorker
+        );
+        assert_eq!(healthy.advisory_batch_size_hint, Some(3));
+        for required in [
+            "active_project_excluded",
+            "advisory_batching_only",
+            "large_host_shape_64_core_256_gib",
+            "proof_lane_cost_estimate_present",
+            "target_dir_isolated",
+            "worker_cache_warm",
+        ] {
+            assert!(
+                healthy
+                    .advisory_batching_reason_codes
+                    .iter()
+                    .any(|code| code == required),
+                "healthy worker reason missing {required}"
+            );
+        }
+
+        assert_eq!(
+            low_memory.worker_saturation,
+            AdmissionAwareLargeHostWorkerSaturation::LowMemory
+        );
+        assert_eq!(
+            low_memory.advisory_batching_decision,
+            AdmissionAwareLargeHostBatchingDecision::QueueLowMemory
+        );
+        assert_eq!(low_memory.advisory_batch_size_hint, None);
+        assert!(
+            low_memory
+                .advisory_batching_reason_codes
+                .iter()
+                .any(|code| code == "worker_memory_low")
+        );
+
+        assert_eq!(
+            saturated.worker_saturation,
+            AdmissionAwareLargeHostWorkerSaturation::WorkerSaturated
+        );
+        assert_eq!(
+            saturated.advisory_batching_decision,
+            AdmissionAwareLargeHostBatchingDecision::DeferWorkerSaturated
+        );
+        assert_eq!(saturated.advisory_batch_size_hint, None);
+        assert!(
+            saturated
+                .advisory_batching_reason_codes
+                .iter()
+                .any(|code| code == "worker_queue_saturated")
+        );
+
+        assert_eq!(
+            cold.worker_saturation,
+            AdmissionAwareLargeHostWorkerSaturation::Available
+        );
+        assert_eq!(
+            cold.advisory_batching_decision,
+            AdmissionAwareLargeHostBatchingDecision::AdmitBatch
+        );
+        assert_eq!(cold.advisory_batch_size_hint, Some(2));
+        assert!(
+            cold.advisory_batching_reason_codes
+                .iter()
+                .any(|code| code == "worker_cache_cold")
+        );
+
+        for row in atlas.large_host_worker_warmth {
+            assert!(row.advisory_only);
+            for forbidden in [
+                "allocator_enforcement",
+                "production_admission_default",
+                "throughput_improvement",
+            ] {
+                assert!(
+                    row.advisory_non_claims
+                        .iter()
+                        .any(|claim| claim == forbidden),
+                    "large-host row must keep {forbidden} as a non-claim"
+                );
+            }
+        }
+        assert!(!atlas.production_admission_default_enabled);
+        assert!(!atlas.mutates_agent_mail);
+        assert!(!atlas.mutates_beads);
+        assert!(!atlas.mutates_filesystem);
+        assert!(!atlas.starts_rch);
     }
 
     #[test]

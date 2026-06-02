@@ -254,6 +254,9 @@ fn schema_sections_are_complete_source_backed_and_field_owned() {
         "deadlock_proven",
         "production_admission_default_enabled",
         "local_fallback_allowed",
+        "worker_saturation",
+        "advisory_batching_decision",
+        "advisory_non_claims",
     ] {
         let row = field_ownership
             .get(field)
@@ -349,6 +352,109 @@ fn claim_labels_prevent_deadlock_and_validation_overclaims() {
 }
 
 #[test]
+fn large_host_profile_is_advisory_batched_and_overclaim_guarded() {
+    let contract = contract();
+    let section_rows = rows_by_id(&contract, "sections", "section_id");
+    let section = section_rows
+        .get("large_host_worker_warmth")
+        .expect("large host section");
+    let fields = string_set(section, "required_fields");
+    for required in [
+        "worker_id",
+        "cpu_cores",
+        "memory_bytes",
+        "numa_nodes",
+        "disk_headroom_bytes",
+        "worker_queue_state",
+        "worker_available_cores",
+        "worker_available_memory_bytes",
+        "cache_warmth",
+        "target_dir_isolated",
+        "active_project_excluded",
+        "proof_lane_cost_estimate",
+        "worker_saturation",
+        "advisory_batching_decision",
+        "advisory_batching_reason_codes",
+        "advisory_batch_size_hint",
+        "advisory_non_claims",
+        "advisory_only",
+        "sample_freshness",
+    ] {
+        assert!(
+            fields.contains(required),
+            "large host section missing {required}"
+        );
+    }
+    assert!(
+        string(section, "claim_boundary").contains("advisory"),
+        "large host claim boundary must stay advisory"
+    );
+
+    let profile = object(&contract, "large_host_advisory_profile");
+    assert_eq!(
+        profile.get("target_cpu_cores").and_then(Value::as_u64),
+        Some(64)
+    );
+    assert_eq!(
+        profile.get("target_memory_gib").and_then(Value::as_u64),
+        Some(256)
+    );
+    assert_eq!(
+        profile.get("minimum_numa_nodes").and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        profile.get("batch_core_floor").and_then(Value::as_u64),
+        Some(8)
+    );
+    assert_eq!(
+        profile
+            .get("batch_memory_floor_gib")
+            .and_then(Value::as_u64),
+        Some(64)
+    );
+    assert_eq!(
+        profile
+            .get("disk_headroom_floor_gib")
+            .and_then(Value::as_u64),
+        Some(128)
+    );
+    assert_eq!(
+        object_string(profile, "planner_boundary"),
+        "advisory_batching_only"
+    );
+
+    let profile_value = Value::Object(profile.clone());
+    let non_claims = string_set(&profile_value, "non_claims");
+    assert_eq!(
+        non_claims,
+        BTreeSet::from([
+            "allocator_enforcement".to_string(),
+            "production_admission_default".to_string(),
+            "throughput_improvement".to_string(),
+        ])
+    );
+
+    let fixture_cases = rows_by_id(&profile_value, "deterministic_fixture_cases", "case_id");
+    for (case_id, expected_decision) in [
+        ("large_host_admission", "prefer_warm_worker"),
+        ("large_host_low_memory_queueing", "queue_low_memory"),
+        ("large_host_worker_saturation", "defer_worker_saturated"),
+        ("large_host_cold_cache_batching", "admit_batch"),
+    ] {
+        let row = fixture_cases
+            .get(case_id)
+            .unwrap_or_else(|| panic!("missing large-host fixture case {case_id}"));
+        assert_eq!(string(row, "expected_decision"), expected_decision);
+        let reason_codes = string_set(row, "required_reason_codes");
+        assert!(
+            reason_codes.contains("advisory_batching_only"),
+            "{case_id} must remain advisory"
+        );
+    }
+}
+
+#[test]
 fn negative_cases_cover_required_fail_closed_behaviors() {
     let contract = contract();
     let cases = rows_by_id(&contract, "negative_cases", "case_id");
@@ -363,6 +469,10 @@ fn negative_cases_cover_required_fail_closed_behaviors() {
         "expired_agent_mail_reservation",
         "tracker_only_dirty_tree_change",
         "unrelated_peer_work",
+        "large_host_low_memory_queueing",
+        "large_host_worker_saturation_defer",
+        "large_host_warm_worker_preference",
+        "large_host_advisory_overclaim_guard",
     ] {
         let row = cases
             .get(case)
@@ -434,7 +544,11 @@ fn referenced_sources_contain_the_expected_live_contract_tokens() {
         "AdmissionAwareTrappedCycleWitnessProofStatus",
         "AdmissionAwareCoordinationOverlapClass",
         "AdmissionAwareCoordinationDecision",
+        "AdmissionAwareLargeHostWorkerSaturation",
+        "AdmissionAwareLargeHostBatchingDecision",
         "coordination_reason_codes",
+        "advisory_batching_decision",
+        "advisory_non_claims",
         "active_exclusive_agent_mail_conflict",
         "peer_dirty_tree_overlap",
         "source_step_or_timestamp",

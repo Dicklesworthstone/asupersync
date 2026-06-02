@@ -231,10 +231,11 @@
     },
     {
       "section_id": "large_host_worker_warmth",
-      "description": "64-core/256GiB host profile, RCH worker capacity, NUMA, disk, and cache-warmth hints.",
+      "description": "64-core/256GiB host profile, RCH worker capacity, NUMA, disk, cache-warmth, active-project exclusion, and advisory batching hints.",
       "owner_source": "artifacts/proof_lane_admission_input_schema_v1.json",
-      "implementation_source": "src/runtime/rch_health/mod.rs",
+      "implementation_source": "src/runtime/resource_monitor.rs",
       "required_fields": [
+        "worker_id",
         "cpu_cores",
         "memory_bytes",
         "numa_nodes",
@@ -243,8 +244,15 @@
         "worker_available_cores",
         "worker_available_memory_bytes",
         "cache_warmth",
+        "target_dir_isolated",
         "active_project_excluded",
         "proof_lane_cost_estimate",
+        "worker_saturation",
+        "advisory_batching_decision",
+        "advisory_batching_reason_codes",
+        "advisory_batch_size_hint",
+        "advisory_non_claims",
+        "advisory_only",
         "sample_freshness"
       ],
       "claim_boundary": "advisory placement and batching hint only"
@@ -313,8 +321,80 @@
       "field": "coordination_decision",
       "owner_source": "admission-aware-runtime-pressure-atlas-v1",
       "description": "Builder-derived conservative proceed, defer, handoff_required, or blocked decision for read-only coordination rows."
+    },
+    {
+      "field": "worker_saturation",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "Builder-derived large-host saturation class from queue state, available cores, available memory, disk headroom, and host shape."
+    },
+    {
+      "field": "advisory_batching_decision",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "Builder-derived advisory-only batching decision; never allocator enforcement, throughput proof, or production admission policy."
+    },
+    {
+      "field": "advisory_non_claims",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "Explicit row-level non-claims that must include allocator_enforcement, throughput_improvement, and production_admission_default."
     }
   ],
+  "large_host_advisory_profile": {
+    "target_cpu_cores": 64,
+    "target_memory_gib": 256,
+    "minimum_numa_nodes": 2,
+    "batch_core_floor": 8,
+    "batch_memory_floor_gib": 64,
+    "disk_headroom_floor_gib": 128,
+    "planner_boundary": "advisory_batching_only",
+    "non_claims": [
+      "allocator_enforcement",
+      "production_admission_default",
+      "throughput_improvement"
+    ],
+    "deterministic_fixture_cases": [
+      {
+        "case_id": "large_host_admission",
+        "worker_saturation": "available",
+        "expected_decision": "prefer_warm_worker",
+        "required_reason_codes": [
+          "large_host_shape_64_core_256_gib",
+          "target_dir_isolated",
+          "active_project_excluded",
+          "proof_lane_cost_estimate_present",
+          "worker_cache_warm",
+          "advisory_batching_only"
+        ]
+      },
+      {
+        "case_id": "large_host_low_memory_queueing",
+        "worker_saturation": "low_memory",
+        "expected_decision": "queue_low_memory",
+        "required_reason_codes": [
+          "worker_memory_low",
+          "advisory_batching_only"
+        ]
+      },
+      {
+        "case_id": "large_host_worker_saturation",
+        "worker_saturation": "worker_saturated",
+        "expected_decision": "defer_worker_saturated",
+        "required_reason_codes": [
+          "worker_queue_saturated",
+          "worker_core_saturation",
+          "advisory_batching_only"
+        ]
+      },
+      {
+        "case_id": "large_host_cold_cache_batching",
+        "worker_saturation": "available",
+        "expected_decision": "admit_batch",
+        "required_reason_codes": [
+          "worker_cache_cold",
+          "advisory_batching_only"
+        ]
+      }
+    ]
+  },
   "freshness_policy": {
     "required_for_all_external_rows": true,
     "freshness_statuses": [
@@ -487,6 +567,48 @@
       },
       "expected_outcome": "proceed",
       "required_reason_code": "tracker_only_dirty_tree_change"
+    },
+    {
+      "case_id": "large_host_low_memory_queueing",
+      "input_pattern": {
+        "section": "large_host_worker_warmth",
+        "worker_saturation": "low_memory"
+      },
+      "expected_outcome": "queue_low_memory",
+      "required_reason_code": "worker_memory_low"
+    },
+    {
+      "case_id": "large_host_worker_saturation_defer",
+      "input_pattern": {
+        "section": "large_host_worker_warmth",
+        "worker_saturation": "worker_saturated"
+      },
+      "expected_outcome": "defer_worker_saturated",
+      "required_reason_code": "worker_queue_saturated"
+    },
+    {
+      "case_id": "large_host_warm_worker_preference",
+      "input_pattern": {
+        "section": "large_host_worker_warmth",
+        "cache_warmth": "warm",
+        "active_project_excluded": true
+      },
+      "expected_outcome": "prefer_warm_worker",
+      "required_reason_code": "worker_cache_warm"
+    },
+    {
+      "case_id": "large_host_advisory_overclaim_guard",
+      "input_pattern": {
+        "section": "large_host_worker_warmth",
+        "advisory_only": true,
+        "advisory_non_claims": [
+          "allocator_enforcement",
+          "production_admission_default",
+          "throughput_improvement"
+        ]
+      },
+      "expected_outcome": "advisory",
+      "required_reason_code": "advisory_batching_only"
     },
     {
       "case_id": "unrelated_peer_work",
