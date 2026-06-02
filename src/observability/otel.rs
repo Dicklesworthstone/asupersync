@@ -927,18 +927,18 @@ impl OtlpLogRecord {
     ) -> Self {
         let key_str = key.into();
 
-        // Privacy filtering: drop sensitive attributes before OTLP export
-        if config.drop_attributes.contains(&key_str) {
-            // Increment dropped count but don't add the attribute
+        if config.should_drop_field(&key_str) {
             self.dropped_attributes_count = self.dropped_attributes_count.saturating_add(1);
             return self;
         }
 
+        let value_str = value.into();
+        let value_str = config.redact_pii(&key_str, &value_str);
         insert_log_attribute_bounded(
             &mut self.attributes,
             &mut self.dropped_attributes_count,
             key_str,
-            value.into(),
+            value_str,
         );
         self
     }
@@ -9377,5 +9377,43 @@ mod otlp_wire_format_tests {
         println!("  - Sensitive attributes filtered: ✓");
         println!("  - Safe attributes preserved: ✓");
         println!("  - Dropped count accurate: ✓");
+    }
+
+    #[test]
+    fn otlp_log_privacy_filtering_uses_full_privacy_policy() {
+        use crate::observability::entry::LogEntry;
+        use crate::observability::level::LogLevel;
+
+        let privacy_config = PrivacyConfig::new()
+            .with_allowed_field("action")
+            .with_allowed_field("user.*")
+            .with_allowed_field("session_id")
+            .with_drop_label("session_id")
+            .with_auto_pii_detection();
+
+        let log_entry = LogEntry::new(LogLevel::Info, "user profile updated")
+            .with_field("action", "profile-update")
+            .with_field("user.email", "jane.doe@example.com")
+            .with_field("session_id", "session-abc123")
+            .with_field("auth.token", "bearer secret-token")
+            .with_field("request.path", "/private/profile");
+
+        let filtered_record =
+            OtlpLogRecord::from_log_entry_with_privacy(&log_entry, 1_000, &privacy_config);
+        let attributes: std::collections::HashMap<_, _> =
+            filtered_record.attributes.iter().cloned().collect();
+
+        assert_eq!(
+            attributes.get("action").map(String::as_str),
+            Some("profile-update")
+        );
+        assert_eq!(
+            attributes.get("user.email").map(String::as_str),
+            Some("[EMAIL_REDACTED]")
+        );
+        assert!(!attributes.contains_key("session_id"));
+        assert!(!attributes.contains_key("auth.token"));
+        assert!(!attributes.contains_key("request.path"));
+        assert_eq!(filtered_record.dropped_attributes_count, 3);
     }
 }
