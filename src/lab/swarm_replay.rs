@@ -9,6 +9,7 @@
 use super::config::LabConfig;
 use super::runtime::{LabRunReport, LabRuntime};
 use crate::cx::Cx;
+use crate::runtime::scheduler::SchedulerFeedbackMetrics;
 use crate::types::{
     Budget, CancelReason, CapabilityBudget, CapabilityBudgetDimension,
     CapabilityBudgetRequirements, RegionId, TaskId,
@@ -4108,6 +4109,103 @@ pub fn summarize_swarm_replay_trace(summary: &SwarmReplaySummary) -> SwarmPressu
         largest_queues,
         obligation_leak_suspects,
         routing_hints,
+    }
+}
+
+/// Derive scheduler feedback metrics from a real replay-lab swarm run.
+///
+/// The conversion intentionally uses only fields emitted by
+/// [`run_swarm_replay_scenario`]. It gives feedback dry-runs an evidence source
+/// rooted in deterministic LabRuntime pressure instead of benchmark-local
+/// synthetic cost functions.
+#[must_use]
+pub fn scheduler_feedback_metrics_from_swarm_replay(
+    scenario: &SwarmReplayScenario,
+    summary: &SwarmReplaySummary,
+) -> SchedulerFeedbackMetrics {
+    let worker_region_slots = scenario
+        .worker_count
+        .max(1)
+        .saturating_mul(scenario.region_count.max(1));
+    let ready_slots = scenario
+        .worker_count
+        .max(1)
+        .saturating_mul(scenario.tasks_per_region.max(1));
+    let reservation_capacity = scenario
+        .region_count
+        .max(1)
+        .saturating_mul(scenario.channel_capacity.max(1));
+    let blocking_capacity = summary
+        .scheduled_task_count
+        .max(1)
+        .saturating_mul(scenario.pool_slots_per_task.max(1))
+        .saturating_mul(2);
+    let requested_memory = (summary.admitted_task_count as u64)
+        .saturating_mul(scenario.region_memory_bytes_per_task.max(1));
+    let modeled_memory_budget = (summary.task_count.max(1) as u64)
+        .saturating_mul(scenario.region_memory_bytes_per_task.max(1))
+        .saturating_mul(2);
+    let scheduled_tasks = summary.scheduled_task_count.max(1);
+    let dispatch_latency_base = summary
+        .steps_delta
+        .saturating_mul(1_000)
+        .saturating_div(scheduled_tasks as u64);
+    let queue_latency = (summary.channel_backlog_peak as u64).saturating_mul(100);
+
+    SchedulerFeedbackMetrics {
+        runnable_queue_pressure: Some(pressure_ratio_usize(
+            summary.scheduled_task_count,
+            worker_region_slots,
+        )),
+        ready_queue_pressure: Some(pressure_ratio_usize(
+            summary
+                .terminal_task_count
+                .saturating_add(summary.non_terminal_task_count),
+            ready_slots,
+        )),
+        blocking_pool_pressure: Some(pressure_ratio_usize(
+            summary.pool_checkouts,
+            blocking_capacity,
+        )),
+        channel_backlog_pressure: Some(pressure_ratio_usize(
+            summary
+                .channel_backlog_peak
+                .max(summary.channel_reservations / scenario.region_count.max(1)),
+            reservation_capacity,
+        )),
+        cancellation_pressure: Some(pressure_ratio_usize(
+            summary
+                .cancellation_requests
+                .saturating_add(summary.admission_cancelled_task_count),
+            scheduled_tasks,
+        )),
+        cleanup_debt_pressure: Some(pressure_ratio_u64(
+            summary.cancellation_drain_steps,
+            summary.steps_delta.max(1),
+        )),
+        memory_budget_pressure: Some(pressure_ratio_u64(requested_memory, modeled_memory_budget)),
+        p95_dispatch_latency_us: Some(dispatch_latency_base.saturating_add(queue_latency)),
+        p99_dispatch_latency_us: Some(
+            dispatch_latency_base
+                .saturating_add(queue_latency.saturating_mul(2))
+                .saturating_add(summary.cancellation_drain_steps.saturating_mul(100)),
+        ),
+    }
+}
+
+fn pressure_ratio_usize(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn pressure_ratio_u64(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
     }
 }
 

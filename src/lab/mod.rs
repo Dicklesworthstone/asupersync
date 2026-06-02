@@ -249,7 +249,8 @@ pub use swarm_replay::{
     render_swarm_failure_minimizer_text, render_swarm_operator_cockpit_text,
     render_swarm_pressure_trace_text, render_swarm_proof_lane_agent_mail_summary,
     run_swarm_agent_run_scenario, run_swarm_pressure_scenario, run_swarm_replay_scenario,
-    summarize_swarm_agent_run_trace, summarize_swarm_pressure_trace, summarize_swarm_replay_trace,
+    scheduler_feedback_metrics_from_swarm_replay, summarize_swarm_agent_run_trace,
+    summarize_swarm_pressure_trace, summarize_swarm_replay_trace,
     summarize_swarm_trace_artifact_json, verify_swarm_handoff_capsule,
 };
 pub use util::{

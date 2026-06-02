@@ -3,7 +3,12 @@
 use asupersync::lab::{
     SWARM_REPLAY_SCHEMA_VERSION, SwarmDiskPressureLevel, SwarmDiskPressureTransition,
     SwarmPressureTraceVerdict, SwarmReplayAdmissionDecision, SwarmReplayScenario,
-    run_swarm_replay_scenario, summarize_swarm_replay_trace, summarize_swarm_trace_artifact_json,
+    run_swarm_replay_scenario, scheduler_feedback_metrics_from_swarm_replay,
+    summarize_swarm_replay_trace, summarize_swarm_trace_artifact_json,
+};
+use asupersync::runtime::scheduler::{
+    SchedulerFeedbackCurrentKnobs, SchedulerFeedbackPolicy, SchedulerFeedbackWorkloadClass,
+    SchedulerPlacementMode, recommend_scheduler_feedback,
 };
 use serde_json::{Value, json};
 
@@ -74,6 +79,35 @@ fn admission_rejection_scenario() -> SwarmReplayScenario {
         region_task_admission_limit: Some(2),
         region_over_limit_decision: SwarmReplayAdmissionDecision::Shed,
         ..healthy_replay_scenario()
+    }
+}
+
+fn scheduler_feedback_replay_scenario() -> SwarmReplayScenario {
+    SwarmReplayScenario {
+        scenario_id: "trace-summary-scheduler-feedback".to_string(),
+        seed: 0x57A9_5C4E_DFEE_D001,
+        worker_count: 4,
+        cohort_count: 2,
+        region_count: 4,
+        tasks_per_region: 8,
+        yields_per_task: 5,
+        yield_jitter: 2,
+        channel_capacity: 6,
+        messages_per_task: 4,
+        semaphore_permits_per_task: 1,
+        pool_slots_per_task: 1,
+        obligations_per_task: 2,
+        timer_ticks_per_task: 1,
+        cancellation_tree_depth: 2,
+        artifact_bytes_per_task: 128,
+        region_task_admission_limit: None,
+        region_over_limit_decision: SwarmReplayAdmissionDecision::Shed,
+        region_memory_bytes_per_task: 1024,
+        region_queue_depth_units_per_task: 2,
+        region_blocking_pool_units_per_task: 1,
+        region_cleanup_poll_quota_per_task: 1,
+        cancel_after_steps: None,
+        max_steps: 20_000,
     }
 }
 
@@ -168,6 +202,45 @@ fn admission_rejection_trace_summary_routes_budget_followup() {
             .any(|hint| { hint.contains("first admission blocker") && hint.contains("rejected") })
     );
     assert!(text.contains("admission: accepted=0 deferred=0 shed=2"));
+}
+
+#[test]
+fn replay_trace_metrics_drive_scheduler_feedback_without_synthetic_cost_model() {
+    let scenario = scheduler_feedback_replay_scenario();
+    let replay = run_swarm_replay_scenario(&scenario).expect("scheduler feedback replay");
+    let summary = summarize_swarm_replay_trace(&replay);
+    let metrics = scheduler_feedback_metrics_from_swarm_replay(&scenario, &replay);
+    let current = SchedulerFeedbackCurrentKnobs {
+        worker_threads: scenario.worker_count,
+        cohort_count: scenario.cohort_count,
+        steal_batch_size: 16,
+        global_queue_limit: 65_536,
+        placement_mode: SchedulerPlacementMode::LocalityFirst,
+        ..SchedulerFeedbackCurrentKnobs::default()
+    };
+    let recommendation =
+        recommend_scheduler_feedback(metrics, current, SchedulerFeedbackPolicy::default());
+
+    eprintln!(
+        "scenario_id={} queue_peak={} scheduled={} steps_delta={} metrics={metrics:?} recommendation={recommendation:?}",
+        scenario.scenario_id,
+        replay.channel_backlog_peak,
+        replay.scheduled_task_count,
+        replay.steps_delta
+    );
+
+    assert_eq!(summary.verdict, SwarmPressureTraceVerdict::Pass);
+    assert!(summary.required_fields_present);
+    assert_eq!(
+        recommendation.evidence.workload_class,
+        SchedulerFeedbackWorkloadClass::Burst
+    );
+    assert!(recommendation.has_knob_changes());
+    assert_eq!(
+        recommendation.placement_mode,
+        Some(SchedulerPlacementMode::ThroughputFirst)
+    );
+    assert!(recommendation.evidence.invalid_signals.is_empty());
 }
 
 #[test]

@@ -6,14 +6,23 @@
 #![cfg(feature = "test-internals")]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use asupersync::lab::{
+    SwarmReplayAdmissionDecision, SwarmReplayScenario, SwarmReplaySummary,
+    run_swarm_replay_scenario, scheduler_feedback_metrics_from_swarm_replay,
+};
+use asupersync::record::task::TaskRecord;
+use asupersync::runtime::RuntimeState;
 use asupersync::runtime::config::BlockingPoolAffinityProfile;
 use asupersync::runtime::scheduler::{
     AutotunerConfig, HotPathObservation, SchedulerAdmissionControlThresholds, SchedulerAutotuner,
-    SchedulerFeedbackCurrentKnobs, SchedulerFeedbackMetrics, SchedulerFeedbackPolicy,
-    SchedulerPlacementMode, recommend_scheduler_feedback,
+    SchedulerFeedbackCurrentKnobs, SchedulerFeedbackPolicy, SchedulerPlacementMode,
+    ThreeLaneScheduler, recommend_scheduler_feedback,
 };
+use asupersync::sync::ContendedMutex;
+use asupersync::types::{Budget, RegionId, TaskId};
 
 /// Workload patterns for autotuner benchmarking.
 #[derive(Debug, Clone)]
@@ -278,25 +287,10 @@ fn bench_autotuner_exploration(c: &mut Criterion) {
     group.finish();
 }
 
-fn high_contention_metrics(iteration: usize) -> SchedulerFeedbackMetrics {
-    let wave = (iteration % 16) as f64 / 16.0;
-    SchedulerFeedbackMetrics {
-        runnable_queue_pressure: Some(0.84 + wave.mul_add(0.10, 0.0)),
-        ready_queue_pressure: Some(0.82 + wave.mul_add(0.08, 0.0)),
-        blocking_pool_pressure: Some(0.58 + wave.mul_add(0.06, 0.0)),
-        channel_backlog_pressure: Some(0.78 + wave.mul_add(0.12, 0.0)),
-        cancellation_pressure: Some(0.20 + wave.mul_add(0.08, 0.0)),
-        cleanup_debt_pressure: Some(0.18 + wave.mul_add(0.06, 0.0)),
-        memory_budget_pressure: Some(0.54 + wave.mul_add(0.05, 0.0)),
-        p95_dispatch_latency_us: Some(1_800 + (iteration % 128) as u64),
-        p99_dispatch_latency_us: Some(3_200 + (iteration % 256) as u64),
-    }
-}
-
 fn high_contention_current_knobs() -> SchedulerFeedbackCurrentKnobs {
     SchedulerFeedbackCurrentKnobs {
-        worker_threads: 64,
-        cohort_count: 8,
+        worker_threads: 4,
+        cohort_count: 2,
         steal_batch_size: 16,
         global_queue_limit: 65_536,
         placement_mode: SchedulerPlacementMode::LocalityFirst,
@@ -306,87 +300,174 @@ fn high_contention_current_knobs() -> SchedulerFeedbackCurrentKnobs {
     }
 }
 
-fn synthetic_high_contention_cost(knobs: &SchedulerFeedbackCurrentKnobs) -> usize {
-    let batch_penalty = 48usize.saturating_sub(knobs.steal_batch_size.min(48));
-    let queue_penalty = 131_072usize.saturating_sub(knobs.global_queue_limit.min(131_072)) / 4_096;
-    let placement_penalty = match knobs.placement_mode {
-        SchedulerPlacementMode::ThroughputFirst => 0,
-        SchedulerPlacementMode::LatencyFirst => 12,
-        SchedulerPlacementMode::LocalityFirst => 18,
-    };
-    let affinity_penalty = match knobs.blocking_pool_affinity {
-        BlockingPoolAffinityProfile::CohortBiased { .. } => 0,
-        BlockingPoolAffinityProfile::Disabled => 10,
-    };
-    batch_penalty
-        .saturating_add(queue_penalty)
-        .saturating_add(placement_penalty)
-        .saturating_add(affinity_penalty)
-        .max(1)
+fn scheduler_feedback_replay_scenario(iteration: usize) -> SwarmReplayScenario {
+    SwarmReplayScenario {
+        scenario_id: "scheduler-feedback-high-contention".to_string(),
+        seed: 0x57A9_5C4E_DFEE_D001 ^ iteration as u64,
+        worker_count: 4,
+        cohort_count: 2,
+        region_count: 4,
+        tasks_per_region: 8,
+        yields_per_task: 5,
+        yield_jitter: 2,
+        channel_capacity: 6,
+        messages_per_task: 4,
+        semaphore_permits_per_task: 1,
+        pool_slots_per_task: 1,
+        obligations_per_task: 2,
+        timer_ticks_per_task: 1,
+        cancellation_tree_depth: 2,
+        artifact_bytes_per_task: 128,
+        region_task_admission_limit: None,
+        region_over_limit_decision: SwarmReplayAdmissionDecision::Shed,
+        region_memory_bytes_per_task: 1024,
+        region_queue_depth_units_per_task: 2,
+        region_blocking_pool_units_per_task: 1,
+        region_cleanup_poll_quota_per_task: 1,
+        cancel_after_steps: None,
+        max_steps: 20_000,
+    }
 }
 
-fn simulate_feedback_controller_high_contention(
+fn bench_task(id: u32) -> TaskId {
+    TaskId::new_for_test(id, 0)
+}
+
+fn bench_region() -> RegionId {
+    RegionId::testing_default()
+}
+
+fn replay_scheduler_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
+    let mut state = RuntimeState::new();
+    for id in 0..=max_task_id {
+        let task_id = bench_task(id);
+        let record = TaskRecord::new(task_id, bench_region(), Budget::INFINITE);
+        let index = state.tasks.insert(record);
+        assert_eq!(index.index(), id);
+    }
+    Arc::new(ContendedMutex::new("bench_scheduler_feedback_state", state))
+}
+
+fn apply_feedback_recommendation(
+    mut current: SchedulerFeedbackCurrentKnobs,
+    recommendation: &asupersync::runtime::scheduler::SchedulerFeedbackRecommendation,
+) -> SchedulerFeedbackCurrentKnobs {
+    if let Some(steal_batch_size) = recommendation.steal_batch_size {
+        current.steal_batch_size = steal_batch_size;
+    }
+    if let Some(ready_batch_profile) = recommendation.ready_batch_profile {
+        current.ready_batch_profile = ready_batch_profile;
+    }
+    if let Some(global_queue_limit) = recommendation.global_queue_limit {
+        current.global_queue_limit = global_queue_limit;
+    }
+    if let Some(placement_mode) = recommendation.placement_mode {
+        current.placement_mode = placement_mode;
+    }
+    if let Some(blocking_pool_affinity) = recommendation.blocking_pool_affinity {
+        current.blocking_pool_affinity = blocking_pool_affinity;
+    }
+    if let Some(admission_thresholds) = recommendation.admission_thresholds {
+        current.admission_thresholds = admission_thresholds;
+    }
+    current
+}
+
+fn run_replay_backed_scheduler_dispatch(
+    knobs: SchedulerFeedbackCurrentKnobs,
+    replay: &SwarmReplaySummary,
+) -> (usize, u64, u64) {
+    let dispatch_tasks = replay
+        .scheduled_task_count
+        .max(1)
+        .saturating_add(replay.channel_backlog_peak)
+        .min(10_000);
+    let max_task_id = u32::try_from(dispatch_tasks).unwrap_or(u32::MAX - 1);
+    let state = replay_scheduler_state(max_task_id);
+    let worker_count = replay.worker_count.clamp(1, 8);
+    let mut scheduler = ThreeLaneScheduler::new(worker_count, &state);
+    scheduler.set_steal_batch_size(knobs.steal_batch_size.max(1));
+    scheduler.set_global_queue_limit(knobs.global_queue_limit);
+    scheduler.set_scheduler_placement_mode(knobs.placement_mode);
+    scheduler.set_adaptive_batch_profile_for_test(Some(knobs.ready_batch_profile));
+
+    for id in 0..dispatch_tasks {
+        let task_id = u32::try_from(id).map_or(max_task_id, |value| value);
+        scheduler.inject_ready(bench_task(task_id), 50);
+    }
+
+    let mut dispatched = 0usize;
+    let mut global_ready_batch_drains = 0u64;
+    let mut global_ready_batch_tasks = 0u64;
+    let mut workers = scheduler.take_workers();
+    for worker in &mut workers {
+        while let Some(task_id) = worker.next_task() {
+            std::hint::black_box(task_id);
+            dispatched = dispatched.saturating_add(1);
+        }
+        let metrics = worker.preemption_metrics();
+        global_ready_batch_drains =
+            global_ready_batch_drains.saturating_add(metrics.global_ready_batch_drains);
+        global_ready_batch_tasks =
+            global_ready_batch_tasks.saturating_add(metrics.global_ready_batch_tasks);
+    }
+
+    (
+        dispatched,
+        global_ready_batch_drains,
+        global_ready_batch_tasks,
+    )
+}
+
+fn simulate_replay_backed_feedback_controller_high_contention(
     iterations: usize,
     enable_feedback: bool,
 ) -> (Duration, usize) {
     let mut current = high_contention_current_knobs();
     let policy = SchedulerFeedbackPolicy::default();
     let start = Instant::now();
-    let mut accumulated_cost = 0usize;
+    let mut accumulated_dispatches = 0usize;
 
     for iteration in 0..iterations {
-        if enable_feedback && iteration % 128 == 0 {
-            let recommendation = recommend_scheduler_feedback(
-                high_contention_metrics(iteration),
-                current,
-                policy.clone(),
-            );
-            if let Some(steal_batch_size) = recommendation.steal_batch_size {
-                current.steal_batch_size = steal_batch_size;
-            }
-            if let Some(global_queue_limit) = recommendation.global_queue_limit {
-                current.global_queue_limit = global_queue_limit;
-            }
-            if let Some(placement_mode) = recommendation.placement_mode {
-                current.placement_mode = placement_mode;
-            }
-            if let Some(blocking_pool_affinity) = recommendation.blocking_pool_affinity {
-                current.blocking_pool_affinity = blocking_pool_affinity;
-            }
+        let scenario = scheduler_feedback_replay_scenario(iteration);
+        let replay = run_swarm_replay_scenario(&scenario).expect("replay-backed scheduler bench");
+        let metrics = scheduler_feedback_metrics_from_swarm_replay(&scenario, &replay);
+
+        if enable_feedback {
+            let recommendation = recommend_scheduler_feedback(metrics, current, policy.clone());
+            current = apply_feedback_recommendation(current, &recommendation);
             std::hint::black_box(recommendation.evidence);
         }
 
-        let cost = synthetic_high_contention_cost(&current);
-        accumulated_cost = accumulated_cost.saturating_add(cost);
-        for _ in 0..cost {
-            std::hint::black_box(iteration);
-        }
+        let dispatch = run_replay_backed_scheduler_dispatch(current, &replay);
+        accumulated_dispatches = accumulated_dispatches.saturating_add(dispatch.0);
+        std::hint::black_box((metrics, replay.trace_fingerprint, dispatch));
     }
 
-    (start.elapsed(), accumulated_cost)
+    (start.elapsed(), accumulated_dispatches)
 }
 
 /// Compare fixed knobs against feedback-selected knobs on a high-contention profile.
 fn bench_scheduler_feedback_high_contention(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler_feedback_high_contention");
-    group.throughput(Throughput::Elements(10_000));
-    group.sample_size(20);
+    group.throughput(Throughput::Elements(100));
+    group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
 
-    group.bench_function("fixed_knobs", |b| {
+    group.bench_function("fixed_knobs_replay_lab", |b| {
         b.iter_custom(|iters| {
-            let (duration, cost) =
-                simulate_feedback_controller_high_contention((iters * 1000) as usize, false);
-            std::hint::black_box(cost);
+            let (duration, dispatches) =
+                simulate_replay_backed_feedback_controller_high_contention(iters as usize, false);
+            std::hint::black_box(dispatches);
             duration
         });
     });
 
-    group.bench_function("feedback_selected_knobs", |b| {
+    group.bench_function("feedback_selected_knobs_replay_lab", |b| {
         b.iter_custom(|iters| {
-            let (duration, cost) =
-                simulate_feedback_controller_high_contention((iters * 1000) as usize, true);
-            std::hint::black_box(cost);
+            let (duration, dispatches) =
+                simulate_replay_backed_feedback_controller_high_contention(iters as usize, true);
+            std::hint::black_box(dispatches);
             duration
         });
     });
