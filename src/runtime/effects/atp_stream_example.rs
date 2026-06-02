@@ -98,7 +98,7 @@ impl TwoPhasedAtpStream {
 
         // Check available capacity (including reserved slots)
         let mut send = self.send.lock();
-        let total_pending = send.send_queue.len() + send.reserved_sends;
+        let total_pending = send.send_queue.len().saturating_add(send.reserved_sends);
         if total_pending >= send.send_queue_high_water {
             return Err(AtpStreamError::QueueFull);
         }
@@ -109,16 +109,6 @@ impl TwoPhasedAtpStream {
             self.stream_id,
             Arc::clone(&self.send),
         ))
-    }
-
-    /// Commit data for a reserved send slot (called by the permit).
-    pub fn commit_send(&mut self, data: &[u8]) -> Result<(), AtpStreamError> {
-        commit_reserved_send(self.stream_id, &self.send, data)
-    }
-
-    /// Abort a reserved send slot (called by the permit on drop).
-    pub fn abort_send(&mut self) {
-        abort_reserved_send(&self.send);
     }
 
     /// Get the next chunk of data to send.
@@ -144,9 +134,17 @@ impl TwoPhasedAtpStream {
     /// Receive data into the stream's buffer.
     pub fn receive(&mut self, data: &[u8]) -> Result<(), AtpStreamError> {
         let max_buffer_size = self.send.lock().max_buffer_size;
-        if data.len() + self.recv_buffer.len() > max_buffer_size {
+        let buffered_size =
+            self.recv_buffer
+                .len()
+                .checked_add(data.len())
+                .ok_or(AtpStreamError::DataTooLarge {
+                    size: usize::MAX,
+                    max: max_buffer_size,
+                })?;
+        if buffered_size > max_buffer_size {
             return Err(AtpStreamError::DataTooLarge {
-                size: data.len() + self.recv_buffer.len(),
+                size: buffered_size,
                 max: max_buffer_size,
             });
         }
@@ -262,77 +260,139 @@ pub struct StreamStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future;
 
-    #[tokio::test]
-    async fn test_two_phase_send_success() {
-        let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
+    #[test]
+    fn test_two_phase_send_success() {
+        future::block_on(async {
+            let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
 
-        // Reserve
-        let permit = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
-        assert_eq!(stream.reserved_sends(), 1);
-        assert_eq!(stream.send_queue_len(), 0);
+            // Reserve
+            let permit = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+            assert_eq!(stream.reserved_sends(), 1);
+            assert_eq!(stream.send_queue_len(), 0);
 
-        permit.commit(b"test data").unwrap(); // ubs:ignore - test oracle
-        assert_eq!(stream.reserved_sends(), 0);
-        assert_eq!(stream.send_queue_len(), 1);
+            permit.commit(b"test data").unwrap(); // ubs:ignore - test oracle
+            assert_eq!(stream.reserved_sends(), 0);
+            assert_eq!(stream.send_queue_len(), 1);
 
-        // Verify data can be retrieved
-        let data = stream.next_send_data().unwrap(); // ubs:ignore - test oracle
-        assert_eq!(data, b"test data");
+            // Verify data can be retrieved
+            let data = stream.next_send_data().unwrap(); // ubs:ignore - test oracle
+            assert_eq!(data, b"test data");
+        });
     }
 
-    #[tokio::test]
-    async fn test_two_phase_send_abort() {
-        let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
+    #[test]
+    fn test_two_phase_send_abort() {
+        future::block_on(async {
+            let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
 
-        // Reserve
-        let permit = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
-        assert_eq!(stream.reserved_sends(), 1);
+            // Reserve
+            let permit = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+            assert_eq!(stream.reserved_sends(), 1);
 
-        permit.abort();
-        assert_eq!(stream.reserved_sends(), 0);
-        assert_eq!(stream.send_queue_len(), 0);
+            permit.abort();
+            assert_eq!(stream.reserved_sends(), 0);
+            assert_eq!(stream.send_queue_len(), 0);
+        });
     }
 
-    #[tokio::test]
-    async fn test_queue_full_prevents_reservation() {
+    #[test]
+    fn test_dropped_permit_releases_reservation() {
+        future::block_on(async {
+            let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
+
+            let permit = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+            assert_eq!(stream.reserved_sends(), 1);
+
+            drop(permit);
+            assert_eq!(stream.reserved_sends(), 0);
+            assert_eq!(stream.send_queue_len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_queue_full_prevents_reservation() {
+        future::block_on(async {
+            let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
+            stream.send.lock().send_queue_high_water = 2;
+
+            // Fill queue to high water mark
+            let permit1 = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+            let permit2 = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+
+            // Third reservation should fail
+            assert!(matches!(
+                stream.reserve_send().await,
+                Err(AtpStreamError::QueueFull)
+            ));
+
+            // Clean up by aborting reservations
+            permit1.abort();
+            permit2.abort();
+        });
+    }
+
+    #[test]
+    fn test_data_too_large() {
+        future::block_on(async {
+            let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
+            stream.send.lock().max_buffer_size = 10;
+
+            let permit = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+
+            let result = permit.commit(b"this is too long");
+            assert!(matches!(result, Err(AtpStreamError::DataTooLarge { .. })));
+            assert_eq!(stream.reserved_sends(), 0); // Reservation cleaned up
+        });
+    }
+
+    #[test]
+    fn test_reservations_are_independent() {
+        future::block_on(async {
+            let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
+
+            let first = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+            let second = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+            assert_eq!(stream.reserved_sends(), 2);
+
+            first.abort();
+            assert_eq!(stream.reserved_sends(), 1);
+
+            second.commit(b"still reserved").unwrap(); // ubs:ignore - test oracle
+            assert_eq!(stream.reserved_sends(), 0);
+            assert_eq!(stream.next_send_data().unwrap(), b"still reserved");
+        });
+    }
+
+    #[test]
+    fn test_receive_rejects_over_limit_without_mutating_buffer() {
         let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
-        stream.send.lock().send_queue_high_water = 2;
+        stream.send.lock().max_buffer_size = 5;
 
-        // Fill queue to high water mark
-        let permit1 = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
-        let permit2 = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
+        stream.receive(b"abc").unwrap(); // ubs:ignore - test oracle
 
-        // Third reservation should fail
+        let result = stream.receive(b"def");
         assert!(matches!(
-            stream.reserve_send().await,
-            Err(AtpStreamError::QueueFull)
+            result,
+            Err(AtpStreamError::DataTooLarge { size: 6, max: 5 })
         ));
+        assert_eq!(stream.stats().recv_buffer_len, 3);
 
-        // Clean up by aborting reservations
-        permit1.abort();
-        permit2.abort();
+        let mut buffer = [0; 5];
+        assert_eq!(stream.read_data(&mut buffer), 3);
+        assert_eq!(&buffer[..3], b"abc");
     }
 
-    #[tokio::test]
-    async fn test_data_too_large() {
-        let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Bidirectional);
-        stream.send.lock().max_buffer_size = 10;
+    #[test]
+    fn test_cannot_send_on_inbound_stream() {
+        future::block_on(async {
+            let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Inbound);
 
-        let permit = stream.reserve_send().await.unwrap(); // ubs:ignore - test oracle
-
-        let result = permit.commit(b"this is too long");
-        assert!(matches!(result, Err(AtpStreamError::DataTooLarge { .. })));
-        assert_eq!(stream.reserved_sends(), 0); // Reservation cleaned up
-    }
-
-    #[tokio::test]
-    async fn test_cannot_send_on_inbound_stream() {
-        let mut stream = TwoPhasedAtpStream::new(42, StreamDirection::Inbound);
-
-        assert!(matches!(
-            stream.reserve_send().await,
-            Err(AtpStreamError::InvalidState(_))
-        ));
+            assert!(matches!(
+                stream.reserve_send().await,
+                Err(AtpStreamError::InvalidState(_))
+            ));
+        });
     }
 }
