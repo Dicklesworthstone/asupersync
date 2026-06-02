@@ -27,17 +27,17 @@ PASSED=0
 
 log_failure() {
     echo -e "${RED}FAIL:${NC} $1" | tee -a "$TEST_LOG"
-    ((FAILURES++))
+    ((FAILURES += 1))
 }
 
 log_skip() {
     echo -e "${YELLOW}SKIP:${NC} $1" | tee -a "$TEST_LOG"
-    ((SKIPPED++))
+    ((SKIPPED += 1))
 }
 
 log_pass() {
     echo -e "${GREEN}PASS:${NC} $1" | tee -a "$TEST_LOG"
-    ((PASSED++))
+    ((PASSED += 1))
 }
 
 log_info() {

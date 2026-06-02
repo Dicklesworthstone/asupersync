@@ -260,6 +260,30 @@ fn cross_platform_script_uses_real_feature_surfaces() {
 }
 
 #[test]
+fn cross_platform_script_result_counters_are_errexit_safe() {
+    let script = load_source("scripts/cross_platform_test.sh");
+
+    assert!(
+        script.contains("set -euo pipefail"),
+        "cross-platform script must keep strict shell failure handling"
+    );
+
+    for stale_increment in ["((FAILURES++))", "((SKIPPED++))", "((PASSED++))"] {
+        assert!(
+            !script.contains(stale_increment),
+            "post-increment arithmetic returns status 1 from zero under set -e: {stale_increment}"
+        );
+    }
+
+    for required_increment in ["((FAILURES += 1))", "((SKIPPED += 1))", "((PASSED += 1))"] {
+        assert!(
+            script.contains(required_increment),
+            "counter increment must be nonzero-safe under set -e: {required_increment}"
+        );
+    }
+}
+
+#[test]
 fn tls_pin_hashing_does_not_add_direct_ring_dependency() {
     let cargo_toml = load_source("Cargo.toml");
     let tls_types = load_source("src/tls/types.rs");
