@@ -26,6 +26,7 @@ trapped-cycle proof.
 | --- | --- | --- |
 | Runtime feels slow but work drains | `RuntimePressureSnapshot.overall_verdict` plus `signal_statuses` | Treat as advisory. Confirm which signal is degraded before changing policy. |
 | Optional work should stop entering a saturated runtime | `RuntimePressureAdmissionDecision` with `policy_enabled=true` | Use only the opt-in admission policy. Required cleanup and quiescence work must remain admitted. |
+| Remote proof lanes are refused or missing workers | `RuntimePressureRchProofLaneSnapshot` rows plus the `rch_proof_lanes` signal | Treat as advisory RCH pressure. A remote-required lane with local Cargo fallback refused is critical evidence for the proof lane, not a throughput claim about the fleet. |
 | Resource readings look incomplete or platform-specific | `platform_probe_operator_verdict` and `platform_probes` signal row | Prefer degraded/fallback interpretation. Do not turn probe absence into throughput claims. |
 | Structural wait graph looks fragmented or critical | `spectral` row plus `spectral_recommendations` | Run trapped-cycle detection before making a deadlock claim. Fragmentation alone is not proof. |
 | A lab scenario disagrees with its expected pressure verdict | `RuntimePressureLabScenarioEvidence.classification_matches_expected=false` | Reproduce under the deterministic lab fixture before touching live policy. |
@@ -39,9 +40,12 @@ Start from the stable fields:
 - `missing_signal_count`, `degraded_signal_count`,
   `critical_signal_count`: aggregate evidence quality.
 - `signal_statuses`: ordered status rows for resources, scheduler, spectral
-  health, and platform probes.
+  health, platform probes, and optional RCH proof-lane pressure evidence.
 - `spectral_recommendations`: advisory next actions, not deadlock proof unless
   `deadlock_proven=true`.
+- `rch_proof_lanes`: optional `RuntimePressureRchProofLaneSnapshot` rows built
+  from externally captured RCH admission receipts. The runtime does not probe
+  RCH directly.
 
 Interpretation rules:
 
@@ -83,6 +87,7 @@ Use deterministic lab evidence before promoting a policy change:
 | `cpu_lane_pressure` | `critical` | `cpu_load_hard_limit`, `resource_heavy_degradation`, `scheduler_tail_pressure` |
 | `resource_fallback_degraded` | `degraded` | `memory_soft_pressure`, `platform_probe_fallback` |
 | `structural_warning` | `critical` | `spectral_fragmented_topology`, `trapped_cycle_detection_required` |
+| `rch_proof_lane_remote_refusal` | `critical` | `local_fallback_refused`, `rch_remote_required_refused` |
 
 If live behavior and lab behavior disagree, treat the live claim as unproven
 until there is a replay artifact or a narrower contract test that explains the

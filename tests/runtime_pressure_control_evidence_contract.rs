@@ -4,7 +4,7 @@ use asupersync::runtime::resource_monitor::{
     RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION,
     RUNTIME_PRESSURE_ADMISSION_POLICY_SCHEMA_VERSION,
     RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
-    RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION,
+    RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION, RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -132,6 +132,10 @@ fn contract_declares_schema_versions_sources_and_scope_policy() {
         schemas["runtime_pressure_admission_decision"].as_str(),
         Some(RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION)
     );
+    assert_eq!(
+        schemas["runtime_pressure_rch_proof_lane"].as_str(),
+        Some(RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION)
+    );
 
     let policy = contract
         .get("operator_policy")
@@ -200,6 +204,14 @@ fn contract_scenario_families_match_runtime_lab_evidence_surface() {
                 "trapped_cycle_detection_required".to_string(),
             ]),
         ),
+        (
+            "rch_proof_lane_remote_refusal".to_string(),
+            "critical".to_string(),
+            BTreeSet::from([
+                "local_fallback_refused".to_string(),
+                "rch_remote_required_refused".to_string(),
+            ]),
+        ),
     ];
 
     assert_eq!(actual, expected);
@@ -219,6 +231,7 @@ fn contract_claims_do_not_overstate_pressure_control_evidence() {
             "deterministic-lab-scenario-classification".to_string(),
             "opt-in-pressure-admission-policy".to_string(),
             "operator-pressure-snapshot-schema".to_string(),
+            "rch-proof-lane-pressure-signal".to_string(),
             "spectral-deadlock-scope-limit".to_string(),
         ])
     );
@@ -286,6 +299,7 @@ fn proof_lane_manifest_maps_pressure_contract_lane() {
             OPERATOR_RUNBOOK_PATH.to_string(),
             README_PATH.to_string(),
             RUNBOOK_PATH.to_string(),
+            "src/runtime/rch_health/mod.rs".to_string(),
             "src/runtime/resource_monitor.rs".to_string(),
             VERIFIER_PATH.to_string(),
         ])
@@ -342,7 +356,9 @@ fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
         "RuntimePressureSnapshot.overall_verdict",
         "RuntimePressureAdmissionDecision",
         "RuntimePressureLabScenarioEvidence",
+        "RuntimePressureRchProofLaneSnapshot",
         "trapped-cycle proof",
+        "local Cargo fallback",
         "RCH_REQUIRE_REMOTE=1 rch exec --",
         "cargo test -p asupersync --test runtime_pressure_control_evidence_contract",
         "cargo test -p asupersync --test proof_lane_manifest_contract",
@@ -358,6 +374,7 @@ fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
         "healthy",
         "cpu_lane_pressure",
         "resource_fallback_degraded",
+        "rch_proof_lane_remote_refusal",
         "structural_warning",
     ] {
         assert!(

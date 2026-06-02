@@ -4883,9 +4883,9 @@ mod tests {
     )]
     use super::*;
     use crate::runtime::rch_health::{
-        RchArtifactRetrievalReliability, RchCacheWarmthHint, RchProofLaneRequest,
-        RchProofPriority, RchQueueState, RchTargetDirClass, RchWorkerAdmissionPolicy,
-        RchWorkerDiskPressure, RchWorkerSnapshot, admit_rch_worker,
+        RchArtifactRetrievalReliability, RchCacheWarmthHint, RchProofLaneRequest, RchProofPriority,
+        RchQueueState, RchTargetDirClass, RchWorkerAdmissionPolicy, RchWorkerDiskPressure,
+        RchWorkerSnapshot, admit_rch_worker,
     };
     use serde_json::{Value, json};
     use std::collections::hash_map::DefaultHasher;
@@ -5855,9 +5855,9 @@ mod tests {
             ResourceMeasurement::new(24, 80, 95, 100),
         );
 
-        let admitted = RuntimePressureRchProofLaneSnapshot::from_receipt(
-            &admitted_rch_receipt("cargo-test-admission"),
-        );
+        let admitted = RuntimePressureRchProofLaneSnapshot::from_receipt(&admitted_rch_receipt(
+            "cargo-test-admission",
+        ));
         let refused = RuntimePressureRchProofLaneSnapshot::from_receipt(
             &refused_remote_required_rch_receipt("cargo-clippy-admission"),
         );

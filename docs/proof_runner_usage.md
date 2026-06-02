@@ -402,20 +402,21 @@ The pressure-control evidence lane is recorded in
 `artifacts/runtime_pressure_control_evidence_contract_v1.json` and verified by
 `tests/runtime_pressure_control_evidence_contract.rs`. Use the canonical manifest
 lane `runtime-pressure-control-evidence-contract` when changes touch runtime
-pressure snapshots, deterministic pressure lab evidence, or pressure-control
-operator docs.
+pressure snapshots, RCH proof-lane pressure rows, deterministic pressure lab
+evidence, or pressure-control operator docs.
 
 The dedicated operator runbook is `docs/runtime_pressure_triage_runbook.md`. It
 maps symptoms to snapshot fields, admission decisions, lab replay evidence, and
 the exact RCH verifier commands without widening the contract's claims.
 
 That lane proves only contract alignment: source schema versions, documented
-scenario families, docs markers, and the exact RCH command. It does not prove
-real-host throughput, autonomous scheduler rewrites, production-on-by-default
-admission/backpressure, or a deadlock without explicit trapped-cycle proof.
-Treat live production pressure signals as advisory unless they are paired with
-lab/replay evidence or trapped-cycle proof. Adaptive controls remain opt-in until
-stronger evidence supports a broader policy.
+RCH proof-lane pressure row semantics, scenario families, docs markers, and the
+exact RCH command. It does not prove real-host throughput, autonomous scheduler
+rewrites, production-on-by-default admission/backpressure, RCH fleet
+availability, or a deadlock without explicit trapped-cycle proof. Treat live
+production pressure signals as advisory unless they are paired with lab/replay
+evidence or trapped-cycle proof. Adaptive controls remain opt-in until stronger
+evidence supports a broader policy.
 
 Run the scoped verifier:
 

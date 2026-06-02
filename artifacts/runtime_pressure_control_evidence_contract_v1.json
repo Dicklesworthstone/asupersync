@@ -2,11 +2,12 @@
   "contract_version": "runtime-pressure-control-evidence-contract-v1",
   "bead_id": "asupersync-bwcdfl.4",
   "created_date": "2026-06-02",
-  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
+  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, RCH proof-lane pressure rows, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
   "source_of_truth": {
     "contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
     "verifier": "tests/runtime_pressure_control_evidence_contract.rs",
     "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "rch_health_source": "src/runtime/rch_health/mod.rs",
     "runtime_source": "src/runtime/resource_monitor.rs",
     "readme": "README.md",
     "runbook": "docs/proof_runner_usage.md",
@@ -16,7 +17,8 @@
     "runtime_pressure_snapshot": "asupersync.runtime-pressure-snapshot.v1",
     "runtime_pressure_lab_scenario_evidence": "asupersync.runtime-pressure-lab-scenario-evidence.v1",
     "runtime_pressure_admission_policy": "asupersync.runtime-pressure-admission-policy.v1",
-    "runtime_pressure_admission_decision": "asupersync.runtime-pressure-admission-decision.v1"
+    "runtime_pressure_admission_decision": "asupersync.runtime-pressure-admission-decision.v1",
+    "runtime_pressure_rch_proof_lane": "asupersync.runtime-pressure-rch-proof-lane.v1"
   },
   "proof_lanes": [
     {
@@ -91,6 +93,21 @@
         "deadlock declarations",
         "operator escalations that cite proven trapped cycles"
       ]
+    },
+    {
+      "claim_id": "rch-proof-lane-pressure-signal",
+      "proves": [
+        "RuntimePressureRchProofLaneSnapshot folds externally captured RCH worker admission receipts into redacted deterministic pressure rows.",
+        "Remote-required proof-lane refusals preserve local-fallback refusal as critical advisory pressure without probing RCH from the core runtime."
+      ],
+      "does_not_prove": [
+        "RCH proof-lane pressure rows do not prove real-host throughput, worker fleet availability, production admission control, or automatic proof-lane scheduling."
+      ],
+      "requires_additional_proof_for": [
+        "live RCH fleet health claims",
+        "production throughput claims",
+        "automatic proof-lane scheduling"
+      ]
     }
   ],
   "scenario_families": [
@@ -124,6 +141,14 @@
       "diagnostic_labels": [
         "spectral_fragmented_topology",
         "trapped_cycle_detection_required"
+      ]
+    },
+    {
+      "scenario_kind": "rch_proof_lane_remote_refusal",
+      "expected_verdict": "critical",
+      "diagnostic_labels": [
+        "local_fallback_refused",
+        "rch_remote_required_refused"
       ]
     }
   ],
