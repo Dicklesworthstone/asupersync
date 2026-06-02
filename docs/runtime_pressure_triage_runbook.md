@@ -26,6 +26,7 @@ trapped-cycle proof.
 | --- | --- | --- |
 | Runtime feels slow but work drains | `RuntimePressureSnapshot.overall_verdict` plus `signal_statuses` | Treat as advisory. Confirm which signal is degraded before changing policy. |
 | Optional work should stop entering a saturated runtime | `RuntimePressureAdmissionDecision` with `policy_enabled=true` | Use only the opt-in admission policy. Required cleanup and quiescence work must remain admitted. |
+| A region exceeds its declared memory envelope | `RuntimePressureRegionMemoryBudgetSnapshot` rows plus the `region_memory_budgets` signal | Treat as advisory region-budget pressure. Optional work may be rejected through the opt-in policy, but required cleanup and quiescence work remain admitted. |
 | Remote proof lanes are refused or missing workers | `RuntimePressureRchProofLaneSnapshot` rows plus the `rch_proof_lanes` signal | Treat as advisory RCH pressure. A remote-required lane with local Cargo fallback refused is critical evidence for the proof lane, not a throughput claim about the fleet. |
 | Resource readings look incomplete or platform-specific | `platform_probe_operator_verdict` and `platform_probes` signal row | Prefer degraded/fallback interpretation. Do not turn probe absence into throughput claims. |
 | Structural wait graph looks fragmented or critical | `spectral` row plus `spectral_recommendations` | Run trapped-cycle detection before making a deadlock claim. Fragmentation alone is not proof. |
@@ -40,9 +41,14 @@ Start from the stable fields:
 - `missing_signal_count`, `degraded_signal_count`,
   `critical_signal_count`: aggregate evidence quality.
 - `signal_statuses`: ordered status rows for resources, scheduler, spectral
-  health, platform probes, and optional RCH proof-lane pressure evidence.
+  health, platform probes, optional region memory-budget pressure evidence, and
+  optional RCH proof-lane pressure evidence.
 - `spectral_recommendations`: advisory next actions, not deadlock proof unless
   `deadlock_proven=true`.
+- `region_memory_budgets`: optional `RuntimePressureRegionMemoryBudgetSnapshot`
+  rows built from declared region memory envelopes plus externally supplied or
+  runtime-local observed usage. These rows are advisory and do not prove
+  allocator enforcement by themselves.
 - `rch_proof_lanes`: optional `RuntimePressureRchProofLaneSnapshot` rows built
   from externally captured RCH admission receipts. The runtime does not probe
   RCH directly.
@@ -86,6 +92,7 @@ Use deterministic lab evidence before promoting a policy change:
 | `healthy` | `healthy` | `all_signals_present` |
 | `cpu_lane_pressure` | `critical` | `cpu_load_hard_limit`, `resource_heavy_degradation`, `scheduler_tail_pressure` |
 | `resource_fallback_degraded` | `degraded` | `memory_soft_pressure`, `platform_probe_fallback` |
+| `region_memory_budget_overrun` | `critical` | `region_memory_budget_advisory`, `region_memory_budget_exhausted` |
 | `structural_warning` | `critical` | `spectral_fragmented_topology`, `trapped_cycle_detection_required` |
 | `rch_proof_lane_remote_refusal` | `critical` | `local_fallback_refused`, `rch_remote_required_refused` |
 

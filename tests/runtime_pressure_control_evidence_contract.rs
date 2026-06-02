@@ -4,7 +4,8 @@ use asupersync::runtime::resource_monitor::{
     RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION,
     RUNTIME_PRESSURE_ADMISSION_POLICY_SCHEMA_VERSION,
     RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
-    RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION, RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION,
+    RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION,
+    RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION, RUNTIME_PRESSURE_SNAPSHOT_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -133,6 +134,10 @@ fn contract_declares_schema_versions_sources_and_scope_policy() {
         Some(RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION)
     );
     assert_eq!(
+        schemas["runtime_pressure_region_memory_budget"].as_str(),
+        Some(RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION)
+    );
+    assert_eq!(
         schemas["runtime_pressure_rch_proof_lane"].as_str(),
         Some(RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION)
     );
@@ -197,6 +202,14 @@ fn contract_scenario_families_match_runtime_lab_evidence_surface() {
             ]),
         ),
         (
+            "region_memory_budget_overrun".to_string(),
+            "critical".to_string(),
+            BTreeSet::from([
+                "region_memory_budget_advisory".to_string(),
+                "region_memory_budget_exhausted".to_string(),
+            ]),
+        ),
+        (
             "structural_warning".to_string(),
             "critical".to_string(),
             BTreeSet::from([
@@ -232,6 +245,7 @@ fn contract_claims_do_not_overstate_pressure_control_evidence() {
             "opt-in-pressure-admission-policy".to_string(),
             "operator-pressure-snapshot-schema".to_string(),
             "rch-proof-lane-pressure-signal".to_string(),
+            "region-memory-budget-pressure-signal".to_string(),
             "spectral-deadlock-scope-limit".to_string(),
         ])
     );
@@ -356,7 +370,9 @@ fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
         "RuntimePressureSnapshot.overall_verdict",
         "RuntimePressureAdmissionDecision",
         "RuntimePressureLabScenarioEvidence",
+        "RuntimePressureRegionMemoryBudgetSnapshot",
         "RuntimePressureRchProofLaneSnapshot",
+        "region_memory_budgets",
         "trapped-cycle proof",
         "local Cargo fallback",
         "RCH_REQUIRE_REMOTE=1 rch exec --",
@@ -374,6 +390,7 @@ fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
         "healthy",
         "cpu_lane_pressure",
         "resource_fallback_degraded",
+        "region_memory_budget_overrun",
         "rch_proof_lane_remote_refusal",
         "structural_warning",
     ] {

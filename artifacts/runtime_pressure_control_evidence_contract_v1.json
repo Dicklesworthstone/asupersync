@@ -2,7 +2,7 @@
   "contract_version": "runtime-pressure-control-evidence-contract-v1",
   "bead_id": "asupersync-bwcdfl.4",
   "created_date": "2026-06-02",
-  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, RCH proof-lane pressure rows, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
+  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, region memory-budget pressure rows, RCH proof-lane pressure rows, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
   "source_of_truth": {
     "contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
     "verifier": "tests/runtime_pressure_control_evidence_contract.rs",
@@ -18,6 +18,7 @@
     "runtime_pressure_lab_scenario_evidence": "asupersync.runtime-pressure-lab-scenario-evidence.v1",
     "runtime_pressure_admission_policy": "asupersync.runtime-pressure-admission-policy.v1",
     "runtime_pressure_admission_decision": "asupersync.runtime-pressure-admission-decision.v1",
+    "runtime_pressure_region_memory_budget": "asupersync.runtime-pressure-region-memory-budget.v1",
     "runtime_pressure_rch_proof_lane": "asupersync.runtime-pressure-rch-proof-lane.v1"
   },
   "proof_lanes": [
@@ -108,6 +109,21 @@
         "production throughput claims",
         "automatic proof-lane scheduling"
       ]
+    },
+    {
+      "claim_id": "region-memory-budget-pressure-signal",
+      "proves": [
+        "RuntimePressureRegionMemoryBudgetSnapshot folds explicitly declared region memory envelopes into deterministic advisory pressure rows.",
+        "Region memory-budget overrun evidence can make optional work rejectable through the opt-in admission policy while required cleanup, cancellation, finalizers, and quiescence work remain admitted."
+      ],
+      "does_not_prove": [
+        "Region memory-budget pressure rows do not prove per-region allocator accounting, automatic allocation throttling, production throughput, or production-on-by-default admission control."
+      ],
+      "requires_additional_proof_for": [
+        "per-region allocator enforcement",
+        "automatic memory throttling",
+        "large-host throughput claims"
+      ]
     }
   ],
   "scenario_families": [
@@ -133,6 +149,14 @@
       "diagnostic_labels": [
         "memory_soft_pressure",
         "platform_probe_fallback"
+      ]
+    },
+    {
+      "scenario_kind": "region_memory_budget_overrun",
+      "expected_verdict": "critical",
+      "diagnostic_labels": [
+        "region_memory_budget_advisory",
+        "region_memory_budget_exhausted"
       ]
     },
     {

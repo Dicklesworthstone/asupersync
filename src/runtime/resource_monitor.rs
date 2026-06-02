@@ -27,8 +27,8 @@ use crate::observability::spectral_health::{
 };
 use crate::runtime::rch_health::{RchAdmissionDecision, RchWorkerAdmissionReceipt};
 use crate::runtime::scheduler::SchedulerEvidenceMetrics;
-use crate::types::RegionId;
 use crate::types::pressure::SystemPressure;
+use crate::types::{CapabilityBudget, RegionId};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -61,7 +61,13 @@ pub const RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION: &str =
 pub const RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION: &str =
     "asupersync.runtime-pressure-rch-proof-lane.v1";
 
+/// Stable schema for region memory-budget pressure rows folded into runtime snapshots.
+pub const RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION: &str =
+    "asupersync.runtime-pressure-region-memory-budget.v1";
+
 const RESOURCE_PROBE_WARNING_THROTTLE_EVERY: u64 = 8;
+const REGION_MEMORY_BUDGET_SOFT_LIMIT_BPS: u16 = 8_000;
+const REGION_MEMORY_BUDGET_HARD_LIMIT_BPS: u16 = 10_000;
 
 /// Errors that can occur during resource monitoring.
 #[derive(Debug, Error)]
@@ -252,6 +258,7 @@ pub enum RuntimePressureVerdict {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimePressureSignal {
     Resources,
+    RegionMemoryBudgets,
     Scheduler,
     Spectral,
     PlatformProbes,
@@ -376,6 +383,7 @@ pub enum RuntimePressureLabScenarioKind {
     Healthy,
     CpuLanePressure,
     ResourceFallbackDegraded,
+    RegionMemoryBudgetOverrun,
     StructuralWarning,
     RchProofLaneRemoteRefusal,
 }
@@ -568,6 +576,92 @@ impl RuntimePressureRchProofLaneSnapshot {
     }
 }
 
+/// Deterministic region memory-budget pressure row folded into runtime pressure snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureRegionMemoryBudgetSnapshot {
+    pub schema_version: String,
+    pub region_id: RegionId,
+    pub region_label: String,
+    pub declared_memory_budget_bytes: u64,
+    pub observed_memory_bytes: u64,
+    pub over_budget_bytes: u64,
+    /// Usage in basis points, where `10_000` represents the declared budget.
+    pub usage_bps: u16,
+    pub soft_limit_bps: u16,
+    pub hard_limit_bps: u16,
+    pub soft_limit_exceeded: bool,
+    pub hard_limit_exceeded: bool,
+    pub budget_exhausted: bool,
+    pub advisory_only: bool,
+}
+
+impl RuntimePressureRegionMemoryBudgetSnapshot {
+    #[must_use]
+    pub fn new(
+        region_id: RegionId,
+        declared_memory_budget_bytes: u64,
+        observed_memory_bytes: u64,
+    ) -> Self {
+        Self::with_label(
+            region_id,
+            region_id.to_string(),
+            declared_memory_budget_bytes,
+            observed_memory_bytes,
+        )
+    }
+
+    #[must_use]
+    pub fn with_label(
+        region_id: RegionId,
+        region_label: impl Into<String>,
+        declared_memory_budget_bytes: u64,
+        observed_memory_bytes: u64,
+    ) -> Self {
+        let usage_bps =
+            region_memory_budget_usage_bps(observed_memory_bytes, declared_memory_budget_bytes);
+        let over_budget_bytes = observed_memory_bytes.saturating_sub(declared_memory_budget_bytes);
+        let soft_limit_exceeded = usage_bps >= REGION_MEMORY_BUDGET_SOFT_LIMIT_BPS
+            || (declared_memory_budget_bytes == 0 && observed_memory_bytes > 0);
+        let hard_limit_exceeded = usage_bps >= REGION_MEMORY_BUDGET_HARD_LIMIT_BPS
+            || (declared_memory_budget_bytes == 0 && observed_memory_bytes > 0);
+        let budget_exhausted = declared_memory_budget_bytes == 0
+            || observed_memory_bytes >= declared_memory_budget_bytes;
+
+        Self {
+            schema_version: RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION.to_string(),
+            region_id,
+            region_label: region_label.into(),
+            declared_memory_budget_bytes,
+            observed_memory_bytes,
+            over_budget_bytes,
+            usage_bps,
+            soft_limit_bps: REGION_MEMORY_BUDGET_SOFT_LIMIT_BPS,
+            hard_limit_bps: REGION_MEMORY_BUDGET_HARD_LIMIT_BPS,
+            soft_limit_exceeded,
+            hard_limit_exceeded,
+            budget_exhausted,
+            advisory_only: true,
+        }
+    }
+
+    #[must_use]
+    pub fn from_capability_budget(
+        region_id: RegionId,
+        capability_budget: CapabilityBudget,
+        observed_memory_bytes: u64,
+    ) -> Option<Self> {
+        capability_budget
+            .memory_bytes
+            .map(|declared_memory_budget_bytes| {
+                Self::new(
+                    region_id,
+                    declared_memory_budget_bytes,
+                    observed_memory_bytes,
+                )
+            })
+    }
+}
+
 /// Unified operator-facing runtime pressure report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePressureSnapshot {
@@ -583,6 +677,7 @@ pub struct RuntimePressureSnapshot {
     pub scheduler: Option<SchedulerEvidenceMetrics>,
     pub spectral: RuntimePressureSpectralSnapshot,
     pub spectral_recommendations: Vec<RuntimePressureSpectralRecommendation>,
+    pub region_memory_budgets: Vec<RuntimePressureRegionMemoryBudgetSnapshot>,
     pub rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
 }
 
@@ -594,11 +689,12 @@ impl RuntimePressureSnapshot {
         scheduler: Option<SchedulerEvidenceMetrics>,
         spectral: Option<RuntimePressureSpectralSnapshot>,
     ) -> Self {
-        Self::from_parts_with_rch_proof_lanes(
+        Self::from_parts_with_extended_pressure_evidence(
             pressure,
             platform_probe_report,
             scheduler,
             spectral,
+            Vec::new(),
             Vec::new(),
         )
     }
@@ -609,12 +705,73 @@ impl RuntimePressureSnapshot {
         platform_probe_report: ResourcePlatformProbeReport,
         scheduler: Option<SchedulerEvidenceMetrics>,
         spectral: Option<RuntimePressureSpectralSnapshot>,
+        rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
+    ) -> Self {
+        Self::from_parts_with_extended_pressure_evidence(
+            pressure,
+            platform_probe_report,
+            scheduler,
+            spectral,
+            Vec::new(),
+            rch_proof_lanes,
+        )
+    }
+
+    #[must_use]
+    pub fn from_parts_with_region_memory_budgets(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<RuntimePressureSpectralSnapshot>,
+        region_memory_budgets: Vec<RuntimePressureRegionMemoryBudgetSnapshot>,
+    ) -> Self {
+        Self::from_parts_with_extended_pressure_evidence(
+            pressure,
+            platform_probe_report,
+            scheduler,
+            spectral,
+            region_memory_budgets,
+            Vec::new(),
+        )
+    }
+
+    #[must_use]
+    pub fn from_parts_with_region_memory_budgets_and_rch_proof_lanes(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<RuntimePressureSpectralSnapshot>,
+        region_memory_budgets: Vec<RuntimePressureRegionMemoryBudgetSnapshot>,
+        rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
+    ) -> Self {
+        Self::from_parts_with_extended_pressure_evidence(
+            pressure,
+            platform_probe_report,
+            scheduler,
+            spectral,
+            region_memory_budgets,
+            rch_proof_lanes,
+        )
+    }
+
+    fn from_parts_with_extended_pressure_evidence(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<RuntimePressureSpectralSnapshot>,
+        mut region_memory_budgets: Vec<RuntimePressureRegionMemoryBudgetSnapshot>,
         mut rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
     ) -> Self {
         let resources = runtime_pressure_resources(pressure);
         let resource_composite_degradation = pressure.composite_degradation_level();
         let spectral = spectral.unwrap_or_else(RuntimePressureSpectralSnapshot::unknown);
         let spectral_recommendations = runtime_pressure_spectral_recommendations(&spectral);
+        region_memory_budgets.sort_by(|left, right| {
+            left.region_label
+                .cmp(&right.region_label)
+                .then_with(|| left.region_id.as_u64().cmp(&right.region_id.as_u64()))
+        });
+        region_memory_budgets.dedup_by(|left, right| left.region_id == right.region_id);
         rch_proof_lanes.sort_by(|left, right| {
             left.lane_id
                 .cmp(&right.lane_id)
@@ -633,6 +790,11 @@ impl RuntimePressureSnapshot {
             runtime_pressure_spectral_signal_status(&spectral),
             runtime_pressure_platform_probe_signal_status(&platform_probe_report),
         ];
+        if let Some(row) =
+            runtime_pressure_region_memory_budget_signal_status(&region_memory_budgets)
+        {
+            signal_statuses.push(row);
+        }
         if let Some(row) = runtime_pressure_rch_proof_lane_signal_status(&rch_proof_lanes) {
             signal_statuses.push(row);
         }
@@ -667,6 +829,7 @@ impl RuntimePressureSnapshot {
             scheduler,
             spectral,
             spectral_recommendations,
+            region_memory_budgets,
             rch_proof_lanes,
         }
     }
@@ -1301,6 +1464,39 @@ fn runtime_pressure_rch_proof_lane_signal_status(
     ))
 }
 
+fn runtime_pressure_region_memory_budget_signal_status(
+    rows: &[RuntimePressureRegionMemoryBudgetSnapshot],
+) -> Option<RuntimePressureSignalSnapshot> {
+    if rows.is_empty() {
+        return None;
+    }
+
+    if rows
+        .iter()
+        .any(|row| row.budget_exhausted || row.hard_limit_exceeded)
+    {
+        return Some(runtime_pressure_signal_row(
+            RuntimePressureSignal::RegionMemoryBudgets,
+            RuntimePressureSignalStatus::Critical,
+            "region_memory_budget_hard_pressure",
+        ));
+    }
+
+    if rows.iter().any(|row| row.soft_limit_exceeded) {
+        return Some(runtime_pressure_signal_row(
+            RuntimePressureSignal::RegionMemoryBudgets,
+            RuntimePressureSignalStatus::Degraded,
+            "region_memory_budget_soft_pressure",
+        ));
+    }
+
+    Some(runtime_pressure_signal_row(
+        RuntimePressureSignal::RegionMemoryBudgets,
+        RuntimePressureSignalStatus::Present,
+        "region_memory_budget_envelopes_present",
+    ))
+}
+
 fn runtime_pressure_signal_row(
     signal: RuntimePressureSignal,
     status: RuntimePressureSignalStatus,
@@ -1331,6 +1527,13 @@ fn resource_usage_bps(current: u64, max_limit: u64) -> u16 {
     let current = u128::from(current).min(max_limit);
     let rounded = (current * 10_000 + (max_limit / 2)) / max_limit;
     u16::try_from(rounded.min(10_000)).expect("basis points are clamped to u16 range")
+}
+
+fn region_memory_budget_usage_bps(current: u64, declared_budget: u64) -> u16 {
+    if declared_budget == 0 {
+        return if current == 0 { 0 } else { 10_000 };
+    }
+    resource_usage_bps(current, declared_budget)
 }
 
 #[allow(
@@ -5663,6 +5866,38 @@ mod tests {
         )
     }
 
+    fn region_memory_budget_overrun_lab_evidence() -> RuntimePressureLabScenarioEvidence {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(45, 80, 95, 100),
+        );
+        let region_memory_budget = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "pressure-lab-region",
+            1_000,
+            1_125,
+        );
+
+        runtime_pressure_lab_scenario_evidence(
+            "runtime-pressure-lab-region-memory-budget-overrun",
+            0x57A9_BAD9,
+            RuntimePressureLabScenarioKind::RegionMemoryBudgetOverrun,
+            RuntimePressureVerdict::Critical,
+            RuntimePressureSnapshot::from_parts_with_region_memory_budgets(
+                &pressure,
+                complete_platform_probe_report(),
+                Some(healthy_scheduler_metrics()),
+                Some(healthy_spectral_snapshot()),
+                vec![region_memory_budget],
+            ),
+            &[
+                "region_memory_budget_advisory",
+                "region_memory_budget_exhausted",
+            ],
+        )
+    }
+
     fn structural_warning_lab_evidence() -> RuntimePressureLabScenarioEvidence {
         let pressure = ResourcePressure::new();
         pressure.update_measurement(
@@ -5842,8 +6077,135 @@ mod tests {
             0
         );
         assert_eq!(
+            value["region_memory_budgets"]
+                .as_array()
+                .expect("region memory budgets array")
+                .len(),
+            0
+        );
+        assert_eq!(
             value["signal_statuses"][0]["signal"], "resources",
             "signal rows stay sorted by enum order"
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_region_memory_budget_rows_use_capability_envelopes() {
+        let region_id = RegionId::new_ephemeral();
+
+        assert!(
+            RuntimePressureRegionMemoryBudgetSnapshot::from_capability_budget(
+                region_id,
+                CapabilityBudget::UNSPECIFIED,
+                512,
+            )
+            .is_none(),
+            "regions without explicit memory envelopes should not invent budget evidence"
+        );
+
+        let row = RuntimePressureRegionMemoryBudgetSnapshot::from_capability_budget(
+            region_id,
+            CapabilityBudget::new().with_memory_bytes(4_096),
+            2_048,
+        )
+        .expect("memory envelope should project to a row");
+
+        assert_eq!(
+            row.schema_version,
+            RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION
+        );
+        assert_eq!(row.region_id, region_id);
+        assert_eq!(row.region_label, region_id.to_string());
+        assert_eq!(row.declared_memory_budget_bytes, 4_096);
+        assert_eq!(row.observed_memory_bytes, 2_048);
+        assert_eq!(row.usage_bps, 5_000);
+        assert_eq!(row.over_budget_bytes, 0);
+        assert!(!row.soft_limit_exceeded);
+        assert!(!row.hard_limit_exceeded);
+        assert!(!row.budget_exhausted);
+        assert!(row.advisory_only);
+    }
+
+    #[test]
+    fn runtime_pressure_snapshot_folds_region_memory_budget_pressure() {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(32, 80, 95, 100),
+        );
+
+        let under_budget = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "under-budget",
+            1_000,
+            512,
+        );
+        let soft_pressure = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "soft-pressure",
+            1_000,
+            850,
+        );
+        let over_budget = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "over-budget",
+            1_000,
+            1_250,
+        );
+
+        let snapshot = RuntimePressureSnapshot::from_parts_with_region_memory_budgets(
+            &pressure,
+            complete_platform_probe_report(),
+            Some(healthy_scheduler_metrics()),
+            Some(healthy_spectral_snapshot()),
+            vec![
+                soft_pressure.clone(),
+                over_budget.clone(),
+                under_budget.clone(),
+            ],
+        );
+
+        assert_eq!(snapshot.overall_verdict, RuntimePressureVerdict::Critical);
+        assert_eq!(snapshot.missing_signal_count, 0);
+        assert_eq!(snapshot.degraded_signal_count, 0);
+        assert_eq!(snapshot.critical_signal_count, 1);
+        assert_eq!(
+            snapshot
+                .region_memory_budgets
+                .iter()
+                .map(|row| row.region_label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["over-budget", "soft-pressure", "under-budget"]
+        );
+        assert_eq!(snapshot.region_memory_budgets[0].usage_bps, 10_000);
+        assert_eq!(snapshot.region_memory_budgets[0].over_budget_bytes, 250);
+        assert!(snapshot.region_memory_budgets[0].hard_limit_exceeded);
+        assert!(snapshot.region_memory_budgets[0].budget_exhausted);
+        assert_eq!(snapshot.region_memory_budgets[1].usage_bps, 8_500);
+        assert!(snapshot.region_memory_budgets[1].soft_limit_exceeded);
+        assert!(!snapshot.region_memory_budgets[1].hard_limit_exceeded);
+        assert_eq!(snapshot.region_memory_budgets[2].usage_bps, 5_120);
+        assert!(!snapshot.region_memory_budgets[2].soft_limit_exceeded);
+        assert_eq!(
+            snapshot
+                .signal_statuses
+                .iter()
+                .find(|row| row.signal == RuntimePressureSignal::RegionMemoryBudgets)
+                .map(|row| (row.status, row.reason.as_str())),
+            Some((
+                RuntimePressureSignalStatus::Critical,
+                "region_memory_budget_hard_pressure",
+            ))
+        );
+
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(
+            value["region_memory_budgets"][0]["schema_version"],
+            RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION
+        );
+        assert_eq!(
+            value["region_memory_budgets"][0]["advisory_only"],
+            json!(true)
         );
     }
 
@@ -6197,6 +6559,7 @@ mod tests {
             healthy_pressure_lab_evidence(),
             cpu_lane_pressure_lab_evidence(),
             resource_fallback_degraded_lab_evidence(),
+            region_memory_budget_overrun_lab_evidence(),
             structural_warning_lab_evidence(),
             rch_proof_lane_remote_refusal_lab_evidence(),
         ];
@@ -6210,6 +6573,7 @@ mod tests {
                 RuntimePressureLabScenarioKind::Healthy,
                 RuntimePressureLabScenarioKind::CpuLanePressure,
                 RuntimePressureLabScenarioKind::ResourceFallbackDegraded,
+                RuntimePressureLabScenarioKind::RegionMemoryBudgetOverrun,
                 RuntimePressureLabScenarioKind::StructuralWarning,
                 RuntimePressureLabScenarioKind::RchProofLaneRemoteRefusal,
             ]
@@ -6230,6 +6594,7 @@ mod tests {
                 RuntimePressureVerdict::Degraded,
                 RuntimePressureVerdict::Critical,
                 RuntimePressureVerdict::Critical,
+                RuntimePressureVerdict::Critical,
             ]
         );
     }
@@ -6240,6 +6605,7 @@ mod tests {
             healthy_pressure_lab_evidence(),
             cpu_lane_pressure_lab_evidence(),
             resource_fallback_degraded_lab_evidence(),
+            region_memory_budget_overrun_lab_evidence(),
             structural_warning_lab_evidence(),
             rch_proof_lane_remote_refusal_lab_evidence(),
         ];
@@ -6258,6 +6624,7 @@ mod tests {
                     "classification_matches_expected": row["classification_matches_expected"],
                     "diagnostic_labels": row["diagnostic_labels"],
                     "resources": row["snapshot"]["resources"].as_array().map_or(0, Vec::len),
+                    "region_memory_budgets": row["snapshot"]["region_memory_budgets"].as_array().map_or(0, Vec::len),
                     "rch_proof_lanes": row["snapshot"]["rch_proof_lanes"].as_array().map_or(0, Vec::len),
                     "critical_signal_count": row["snapshot"]["critical_signal_count"],
                     "degraded_signal_count": row["snapshot"]["degraded_signal_count"],
@@ -6278,6 +6645,7 @@ mod tests {
                     "classification_matches_expected": true,
                     "diagnostic_labels": ["all_signals_present"],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 0,
                     "critical_signal_count": 0,
                     "degraded_signal_count": 0,
@@ -6296,6 +6664,7 @@ mod tests {
                         "scheduler_tail_pressure",
                     ],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 0,
                     "critical_signal_count": 1,
                     "degraded_signal_count": 1,
@@ -6313,9 +6682,28 @@ mod tests {
                         "platform_probe_fallback",
                     ],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 0,
                     "critical_signal_count": 0,
                     "degraded_signal_count": 2,
+                    "spectral_class": "healthy",
+                }),
+                json!({
+                    "schema_version": RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
+                    "scenario_id": "runtime-pressure-lab-region-memory-budget-overrun",
+                    "seed": 1470741209u64,
+                    "scenario_kind": "region_memory_budget_overrun",
+                    "observed_verdict": "critical",
+                    "classification_matches_expected": true,
+                    "diagnostic_labels": [
+                        "region_memory_budget_advisory",
+                        "region_memory_budget_exhausted",
+                    ],
+                    "resources": 1,
+                    "region_memory_budgets": 1,
+                    "rch_proof_lanes": 0,
+                    "critical_signal_count": 1,
+                    "degraded_signal_count": 0,
                     "spectral_class": "healthy",
                 }),
                 json!({
@@ -6330,6 +6718,7 @@ mod tests {
                         "trapped_cycle_detection_required",
                     ],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 0,
                     "critical_signal_count": 1,
                     "degraded_signal_count": 0,
@@ -6347,6 +6736,7 @@ mod tests {
                         "rch_remote_required_refused",
                     ],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 1,
                     "critical_signal_count": 1,
                     "degraded_signal_count": 0,
@@ -6481,6 +6871,43 @@ mod tests {
             vec![RuntimePressureAdmissionReason::SnapshotCritical]
         );
         assert_eq!(decision.critical_signal_count, 1);
+    }
+
+    #[test]
+    fn runtime_pressure_admission_keeps_required_work_on_memory_budget_pressure() {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(32, 80, 95, 100),
+        );
+        let snapshot = RuntimePressureSnapshot::from_parts_with_region_memory_budgets(
+            &pressure,
+            complete_platform_probe_report(),
+            Some(healthy_scheduler_metrics()),
+            Some(healthy_spectral_snapshot()),
+            vec![RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+                RegionId::new_ephemeral(),
+                "cleanup-region",
+                1_000,
+                1_100,
+            )],
+        );
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+
+        let optional = policy.decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+        assert_eq!(optional.action, RuntimePressureAdmissionAction::Reject);
+        assert_eq!(
+            optional.reason_codes,
+            vec![RuntimePressureAdmissionReason::SnapshotCritical]
+        );
+
+        let required = policy.decide(RuntimePressureAdmissionWorkClass::Required, &snapshot);
+        assert_eq!(required.action, RuntimePressureAdmissionAction::Admit);
+        assert_eq!(
+            required.reason_codes,
+            vec![RuntimePressureAdmissionReason::RequiredWorkBypass]
+        );
+        assert_eq!(required.critical_signal_count, 1);
     }
 
     #[test]
