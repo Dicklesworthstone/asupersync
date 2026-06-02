@@ -1,0 +1,119 @@
+{
+  "contract_version": "runtime-pressure-control-evidence-contract-v1",
+  "bead_id": "asupersync-bwcdfl.4",
+  "created_date": "2026-06-02",
+  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot and deterministic lab scenario evidence prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
+  "source_of_truth": {
+    "contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+    "verifier": "tests/runtime_pressure_control_evidence_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "runtime_source": "src/runtime/resource_monitor.rs",
+    "readme": "README.md",
+    "runbook": "docs/proof_runner_usage.md"
+  },
+  "schema_versions": {
+    "runtime_pressure_snapshot": "asupersync.runtime-pressure-snapshot.v1",
+    "runtime_pressure_lab_scenario_evidence": "asupersync.runtime-pressure-lab-scenario-evidence.v1"
+  },
+  "proof_lanes": [
+    {
+      "lane_id": "runtime-pressure-control-evidence-contract",
+      "manifest_guarantee_id": "runtime-pressure-control-evidence-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture",
+      "expected_signal": "runtime_pressure_control_evidence_contract tests pass"
+    }
+  ],
+  "operator_policy": {
+    "production_signals_are_advisory_without_lab_or_replay_evidence": true,
+    "adaptive_controls_remain_opt_in_until_stronger_evidence": true,
+    "lab_scenarios_are_real_host_throughput_proof": false,
+    "deadlock_claims_require_explicit_trapped_cycle_proof": true
+  },
+  "evidence_claims": [
+    {
+      "claim_id": "operator-pressure-snapshot-schema",
+      "proves": [
+        "RuntimePressureSnapshot exposes a stable operator-facing schema version and deterministic aggregate classification fields.",
+        "Resource, scheduler, spectral, and platform probe signals are folded through the documented snapshot status model."
+      ],
+      "does_not_prove": [
+        "A pressure snapshot alone does not prove real-host throughput, optimal scheduling, deadlock, or safe autonomous admission control."
+      ],
+      "requires_additional_proof_for": [
+        "production rollout decisions",
+        "real-host throughput claims",
+        "automatic backpressure/admission behavior"
+      ]
+    },
+    {
+      "claim_id": "deterministic-lab-scenario-classification",
+      "proves": [
+        "RuntimePressureLabScenarioEvidence covers deterministic classification behavior for the required scenario families under fixed seeds.",
+        "Stable JSON projection and fixed-input reproducibility are checked by unit tests in the runtime resource monitor module."
+      ],
+      "does_not_prove": [
+        "Lab scenarios do not prove live host capacity, external service performance, or scheduler behavior outside their synthetic inputs."
+      ],
+      "requires_additional_proof_for": [
+        "large-host throughput claims",
+        "production admission tuning",
+        "end-to-end swarm responsiveness"
+      ]
+    },
+    {
+      "claim_id": "spectral-deadlock-scope-limit",
+      "proves": [
+        "Fragmented or critical spectral topology can require trapped-cycle investigation before escalation claims are made."
+      ],
+      "does_not_prove": [
+        "Spectral fragmentation without explicit trapped-cycle proof is not a deadlock proof."
+      ],
+      "requires_additional_proof_for": [
+        "deadlock declarations",
+        "operator escalations that cite proven trapped cycles"
+      ]
+    }
+  ],
+  "scenario_families": [
+    {
+      "scenario_kind": "healthy",
+      "expected_verdict": "healthy",
+      "diagnostic_labels": [
+        "all_signals_present"
+      ]
+    },
+    {
+      "scenario_kind": "cpu_lane_pressure",
+      "expected_verdict": "critical",
+      "diagnostic_labels": [
+        "cpu_load_hard_limit",
+        "resource_heavy_degradation",
+        "scheduler_tail_pressure"
+      ]
+    },
+    {
+      "scenario_kind": "resource_fallback_degraded",
+      "expected_verdict": "degraded",
+      "diagnostic_labels": [
+        "memory_soft_pressure",
+        "platform_probe_fallback"
+      ]
+    },
+    {
+      "scenario_kind": "structural_warning",
+      "expected_verdict": "critical",
+      "diagnostic_labels": [
+        "spectral_fragmented_topology",
+        "trapped_cycle_detection_required"
+      ]
+    }
+  ],
+  "documentation_contract": {
+    "docs_must_reference_contract": [
+      "README.md",
+      "docs/proof_runner_usage.md"
+    ],
+    "required_marker": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+    "verifier_marker": "tests/runtime_pressure_control_evidence_contract.rs"
+  }
+}

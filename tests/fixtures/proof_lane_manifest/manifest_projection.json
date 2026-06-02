@@ -39,6 +39,7 @@
     "rustfmt-frontier",
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
+    "runtime-pressure-control-evidence-contract",
     "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
@@ -268,6 +269,24 @@
       ]
     },
     {
+      "lane_id": "runtime-pressure-control-evidence-contract",
+      "kind": "artifact_contract",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture",
+      "guarantee_ids": [
+        "runtime-pressure-control-evidence-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "runtime_pressure_control_evidence_contract tests pass",
+      "source_paths": [
+        "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+        "tests/runtime_pressure_control_evidence_contract.rs",
+        "src/runtime/resource_monitor.rs",
+        "README.md",
+        "docs/proof_runner_usage.md"
+      ]
+    },
+    {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "kind": "artifact_contract",
       "package": "asupersync",
@@ -402,6 +421,12 @@
       "guarantee_id": "formal-lean-core-invariants",
       "lane_ids": [
         "formal-lean-build"
+      ]
+    },
+    {
+      "guarantee_id": "runtime-pressure-control-evidence-contract",
+      "lane_ids": [
+        "runtime-pressure-control-evidence-contract"
       ]
     },
     {

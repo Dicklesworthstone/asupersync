@@ -32,6 +32,7 @@
     "rustfmt-frontier",
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
+    "runtime-pressure-control-evidence-contract",
     "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
@@ -349,6 +350,32 @@
       "escalation_notes": "Keep this command direct; do not shell-wrap through bash or cd."
     },
     {
+      "lane_id": "runtime-pressure-control-evidence-contract",
+      "kind": "artifact_contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "runtime-pressure-control-evidence-contract"
+      ],
+      "covers": "Pressure-control evidence artifact, docs, source schema versions, deterministic lab scenario families, and operator scope limits remain aligned.",
+      "explicit_not_covered": "Does not prove real-host throughput, autonomous admission/backpressure behavior, scheduler rewrites, production-on-by-default controls, or a deadlock without trapped-cycle proof.",
+      "expected_signal": "runtime_pressure_control_evidence_contract tests pass",
+      "source_paths": [
+        "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+        "tests/runtime_pressure_control_evidence_contract.rs",
+        "src/runtime/resource_monitor.rs",
+        "README.md",
+        "docs/proof_runner_usage.md"
+      ],
+      "common_unrelated_blockers": [
+        "runtime pressure schema version drift",
+        "documentation marker drift",
+        "proof lane command drift"
+      ],
+      "escalation_notes": "If this fails, update the artifact, docs, manifest lane, and verifier together before citing pressure-control evidence."
+    },
+    {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "kind": "artifact_contract",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dirty_tree_ownership_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test dirty_tree_ownership_receipt_contract -- --nocapture",
@@ -520,6 +547,13 @@
       "description": "Lean core-invariant proof build has a canonical direct rch command.",
       "lane_ids": [
         "formal-lean-build"
+      ]
+    },
+    {
+      "guarantee_id": "runtime-pressure-control-evidence-contract",
+      "description": "Pressure-control evidence claims, schema versions, docs, and scoped proof command stay aligned.",
+      "lane_ids": [
+        "runtime-pressure-control-evidence-contract"
       ]
     },
     {

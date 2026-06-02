@@ -283,6 +283,7 @@ The proof runner reads from `artifacts/proof_lane_manifest_v1.json`. Common lane
 | `lib-tests` | Unit tests | Library code changes |
 | `default-production-tokio-tree` | Dependency audit | Cargo.toml changes |
 | `rustdoc-api` | Documentation | Public API changes |
+| `runtime-pressure-control-evidence-contract` | Pressure-control evidence scope | Pressure snapshot/lab evidence/docs changes |
 | `dirty-tree-ownership-receipt-contract` | Shared-main commit guard | ASW-7 guard or docs changes |
 
 ## Integration with Beads Workflow
@@ -396,6 +397,27 @@ at the current proof-claim dashboard, `artifacts/proof_status_snapshot_v1.json`,
 and its verifier, `tests/proof_status_snapshot_contract.rs`. Do not add a proof
 claim here unless the lane exists in the manifest or the status snapshot names
 the exact blocked frontier row.
+
+The pressure-control evidence lane is recorded in
+`artifacts/runtime_pressure_control_evidence_contract_v1.json` and verified by
+`tests/runtime_pressure_control_evidence_contract.rs`. Use the canonical manifest
+lane `runtime-pressure-control-evidence-contract` when changes touch runtime
+pressure snapshots, deterministic pressure lab evidence, or pressure-control
+operator docs.
+
+That lane proves only contract alignment: source schema versions, documented
+scenario families, docs markers, and the exact RCH command. It does not prove
+real-host throughput, autonomous scheduler rewrites, production-on-by-default
+admission/backpressure, or a deadlock without explicit trapped-cycle proof.
+Treat live production pressure signals as advisory unless they are paired with
+lab/replay evidence or trapped-cycle proof. Adaptive controls remain opt-in until
+stronger evidence supports a broader policy.
+
+Run the scoped verifier:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture
+```
 
 Generate the manifest-backed status dashboard before changing proof claims:
 
