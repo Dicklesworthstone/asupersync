@@ -17,6 +17,8 @@ const README_PATH: &str = "README.md";
 const RUNBOOK_PATH: &str = "docs/proof_runner_usage.md";
 const OPERATOR_RUNBOOK_PATH: &str = "docs/runtime_pressure_triage_runbook.md";
 const VERIFIER_PATH: &str = "tests/runtime_pressure_control_evidence_contract.rs";
+const PHASE6_CONTRACT_PATH: &str = "artifacts/phase6_methodology_gate_enforcement_contract_v1.json";
+const PHASE6_VERIFIER_PATH: &str = "tests/phase6_methodology_gate_contract.rs";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -113,6 +115,14 @@ fn contract_declares_schema_versions_sources_and_scope_policy() {
         source["operator_runbook"].as_str(),
         Some(OPERATOR_RUNBOOK_PATH)
     );
+    assert_eq!(
+        source["phase6_gate_contract"].as_str(),
+        Some(PHASE6_CONTRACT_PATH)
+    );
+    assert_eq!(
+        source["phase6_gate_verifier"].as_str(),
+        Some(PHASE6_VERIFIER_PATH)
+    );
 
     let schemas = contract
         .get("schema_versions")
@@ -161,6 +171,75 @@ fn contract_declares_schema_versions_sources_and_scope_policy() {
         policy,
         "deadlock_claims_require_explicit_trapped_cycle_proof"
     ));
+}
+
+#[test]
+fn contract_declares_scheduler_pressure_flamegraph_attribution() {
+    let contract = json(CONTRACT_PATH);
+    let attribution = contract
+        .get("scheduler_pressure_flamegraph_attribution")
+        .expect("scheduler_pressure_flamegraph_attribution object");
+
+    assert_eq!(string(attribution, "phase6_gate_id"), "flamegraph");
+    assert_eq!(string(attribution, "phase6_contract"), PHASE6_CONTRACT_PATH);
+    assert_eq!(string(attribution, "phase6_verifier"), PHASE6_VERIFIER_PATH);
+    assert_eq!(
+        string(attribution, "scheduler_pressure_signal"),
+        "scheduler_tail_pressure"
+    );
+    assert_eq!(
+        string(attribution, "lab_scenario_family"),
+        "cpu_lane_pressure"
+    );
+    assert_eq!(
+        string(attribution, "artifact_path_pattern"),
+        "artifacts/flamegraphs/main-<bead-or-short-sha>.svg"
+    );
+    assert_eq!(
+        string(attribution, "benchmark_surface"),
+        "methodology_baselines"
+    );
+    assert_eq!(
+        string_set(attribution, "benchmark_rows"),
+        BTreeSet::from([
+            "methodology/task_spawn/inject_ready_global_queue".to_string(),
+            "methodology/task_spawn/local_queue_push".to_string(),
+            "methodology/task_spawn/local_queue_spawn_batch/1000".to_string(),
+        ])
+    );
+
+    let combined_non_claims = string_vec(attribution, "does_not_support")
+        .join("\n")
+        .to_ascii_lowercase();
+    for required in [
+        "does not prove",
+        "performance improvement",
+        "real-host throughput",
+        "scheduler regressions",
+    ] {
+        assert!(
+            combined_non_claims.contains(required),
+            "attribution must preserve non-claim phrase {required:?}"
+        );
+    }
+
+    let phase6 = json(PHASE6_CONTRACT_PATH);
+    let flamegraph_gate = array(&phase6, "direct_main_local_gates")
+        .iter()
+        .find(|gate| gate["gate_id"].as_str() == Some("flamegraph"))
+        .expect("phase6 flamegraph gate");
+    let pressure_attribution = flamegraph_gate
+        .get("pressure_control_attribution")
+        .expect("pressure_control_attribution object");
+    assert_eq!(string(pressure_attribution, "contract"), CONTRACT_PATH);
+    assert_eq!(
+        string(pressure_attribution, "signal"),
+        "scheduler_tail_pressure"
+    );
+    assert_eq!(
+        string(pressure_attribution, "operator_runbook"),
+        OPERATOR_RUNBOOK_PATH
+    );
 }
 
 #[test]
@@ -246,6 +325,7 @@ fn contract_claims_do_not_overstate_pressure_control_evidence() {
             "operator-pressure-snapshot-schema".to_string(),
             "rch-proof-lane-pressure-signal".to_string(),
             "region-memory-budget-pressure-signal".to_string(),
+            "scheduler-pressure-flamegraph-attribution".to_string(),
             "spectral-deadlock-scope-limit".to_string(),
         ])
     );
@@ -311,6 +391,8 @@ fn proof_lane_manifest_maps_pressure_contract_lane() {
         BTreeSet::from([
             CONTRACT_PATH.to_string(),
             OPERATOR_RUNBOOK_PATH.to_string(),
+            PHASE6_CONTRACT_PATH.to_string(),
+            PHASE6_VERIFIER_PATH.to_string(),
             README_PATH.to_string(),
             RUNBOOK_PATH.to_string(),
             "src/runtime/rch_health/mod.rs".to_string(),
@@ -372,6 +454,11 @@ fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
         "RuntimePressureLabScenarioEvidence",
         "RuntimePressureRegionMemoryBudgetSnapshot",
         "RuntimePressureRchProofLaneSnapshot",
+        "scheduler_tail_pressure",
+        "artifacts/flamegraphs/main-<bead-or-short-sha>.svg",
+        "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+        "methodology/task_spawn/inject_ready_global_queue",
+        "methodology/task_spawn/local_queue_push",
         "region_memory_budgets",
         "trapped-cycle proof",
         "local Cargo fallback",

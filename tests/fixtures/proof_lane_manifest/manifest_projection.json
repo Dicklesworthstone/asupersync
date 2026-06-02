@@ -281,6 +281,8 @@
       "source_paths": [
         "artifacts/runtime_pressure_control_evidence_contract_v1.json",
         "tests/runtime_pressure_control_evidence_contract.rs",
+        "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+        "tests/phase6_methodology_gate_contract.rs",
         "src/runtime/rch_health/mod.rs",
         "src/runtime/resource_monitor.rs",
         "README.md",

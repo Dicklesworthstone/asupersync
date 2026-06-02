@@ -358,12 +358,14 @@
       "guarantee_ids": [
         "runtime-pressure-control-evidence-contract"
       ],
-      "covers": "Pressure-control evidence artifact, docs, source schema versions, region memory-budget pressure rows, RCH proof-lane pressure rows, deterministic lab scenario families, and operator scope limits remain aligned.",
-      "explicit_not_covered": "Does not prove real-host throughput, autonomous admission/backpressure behavior, scheduler rewrites, production-on-by-default controls, or a deadlock without trapped-cycle proof.",
+      "covers": "Pressure-control evidence artifact, docs, source schema versions, region memory-budget pressure rows, RCH proof-lane pressure rows, scheduler pressure flamegraph attribution, deterministic lab scenario families, and operator scope limits remain aligned.",
+      "explicit_not_covered": "Does not prove real-host throughput, performance improvement, scheduler regression closure, autonomous admission/backpressure behavior, scheduler rewrites, production-on-by-default controls, or a deadlock without trapped-cycle proof.",
       "expected_signal": "runtime_pressure_control_evidence_contract tests pass",
       "source_paths": [
         "artifacts/runtime_pressure_control_evidence_contract_v1.json",
         "tests/runtime_pressure_control_evidence_contract.rs",
+        "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+        "tests/phase6_methodology_gate_contract.rs",
         "src/runtime/rch_health/mod.rs",
         "src/runtime/resource_monitor.rs",
         "README.md",

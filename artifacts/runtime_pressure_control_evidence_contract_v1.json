@@ -2,13 +2,15 @@
   "contract_version": "runtime-pressure-control-evidence-contract-v1",
   "bead_id": "asupersync-bwcdfl.4",
   "created_date": "2026-06-02",
-  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, region memory-budget pressure rows, RCH proof-lane pressure rows, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
+  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, region memory-budget pressure rows, RCH proof-lane pressure rows, scheduler pressure flamegraph attribution, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
   "source_of_truth": {
     "contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
     "verifier": "tests/runtime_pressure_control_evidence_contract.rs",
     "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
     "rch_health_source": "src/runtime/rch_health/mod.rs",
     "runtime_source": "src/runtime/resource_monitor.rs",
+    "phase6_gate_contract": "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+    "phase6_gate_verifier": "tests/phase6_methodology_gate_contract.rs",
     "readme": "README.md",
     "runbook": "docs/proof_runner_usage.md",
     "operator_runbook": "docs/runtime_pressure_triage_runbook.md"
@@ -34,6 +36,30 @@
     "adaptive_controls_remain_opt_in_until_stronger_evidence": true,
     "lab_scenarios_are_real_host_throughput_proof": false,
     "deadlock_claims_require_explicit_trapped_cycle_proof": true
+  },
+  "scheduler_pressure_flamegraph_attribution": {
+    "phase6_gate_id": "flamegraph",
+    "phase6_contract": "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+    "phase6_verifier": "tests/phase6_methodology_gate_contract.rs",
+    "scheduler_pressure_signal": "scheduler_tail_pressure",
+    "pressure_snapshot_field": "RuntimePressureSnapshot.signal_statuses[signal=scheduler]",
+    "lab_scenario_family": "cpu_lane_pressure",
+    "direct_main_trigger": "Direct-main changes under src/runtime/scheduler/ or scheduler-pressure changes that cite scheduler_tail_pressure must attach the Phase 6 flamegraph artifact when the flamegraph gate is triggered.",
+    "artifact_path_pattern": "artifacts/flamegraphs/main-<bead-or-short-sha>.svg",
+    "benchmark_surface": "methodology_baselines",
+    "benchmark_rows": [
+      "methodology/task_spawn/inject_ready_global_queue",
+      "methodology/task_spawn/local_queue_push",
+      "methodology/task_spawn/local_queue_spawn_batch/1000"
+    ],
+    "supports": [
+      "The pressure-control lane can point operators from scheduler_tail_pressure evidence to the exact direct-main flamegraph artifact required by the Phase 6 gate.",
+      "The attribution names the benchmark surface and scheduler-adjacent baseline rows that the artifact is allowed to support."
+    ],
+    "does_not_support": [
+      "The flamegraph attribution does not prove a performance improvement, real-host throughput, absence of scheduler regressions, or autonomous scheduler rewrites.",
+      "The attribution is not required for docs-only pressure-control changes that do not touch a Phase 6 hot-path trigger."
+    ]
   },
   "evidence_claims": [
     {
@@ -123,6 +149,22 @@
         "per-region allocator enforcement",
         "automatic memory throttling",
         "large-host throughput claims"
+      ]
+    },
+    {
+      "claim_id": "scheduler-pressure-flamegraph-attribution",
+      "proves": [
+        "Scheduler tail-pressure evidence is tied to the Phase 6 flamegraph gate by an explicit artifact path pattern, benchmark surface, and scheduler-adjacent baseline rows.",
+        "Operators can distinguish advisory scheduler pressure attribution from performance-improvement or throughput claims."
+      ],
+      "does_not_prove": [
+        "Scheduler pressure flamegraph attribution does not prove real-host throughput, absence of scheduler regressions, a performance improvement, autonomous scheduler rewrites, or deadlock absence."
+      ],
+      "requires_additional_proof_for": [
+        "performance improvement claims",
+        "large-host throughput claims",
+        "scheduler regression closure",
+        "deadlock declarations"
       ]
     }
   ],

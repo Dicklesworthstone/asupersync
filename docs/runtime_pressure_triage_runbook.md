@@ -12,6 +12,7 @@ Canonical contract:
 - Contract verifier: `tests/runtime_pressure_control_evidence_contract.rs`
 - Manifest lane: `runtime-pressure-control-evidence-contract`
 - Manifest file: `artifacts/proof_lane_manifest_v1.json`
+- Phase 6 gate contract: `artifacts/phase6_methodology_gate_enforcement_contract_v1.json`
 - Source surface: `src/runtime/resource_monitor.rs`
 
 The pressure-control lane proves contract alignment for schema versions,
@@ -25,6 +26,7 @@ trapped-cycle proof.
 | Symptom | First evidence | Expected operator path |
 | --- | --- | --- |
 | Runtime feels slow but work drains | `RuntimePressureSnapshot.overall_verdict` plus `signal_statuses` | Treat as advisory. Confirm which signal is degraded before changing policy. |
+| Scheduler tail pressure appears in pressure evidence | `scheduler_tail_pressure` labels plus the Phase 6 flamegraph gate | If the direct-main change touched a hot-path trigger, attach `artifacts/flamegraphs/main-<bead-or-short-sha>.svg` as attribution for `methodology_baselines` scheduler-adjacent rows. Do not call it a throughput or regression-closure proof. |
 | Optional work should stop entering a saturated runtime | `RuntimePressureAdmissionDecision` with `policy_enabled=true` | Use only the opt-in admission policy. Required cleanup and quiescence work must remain admitted. |
 | A region exceeds its declared memory envelope | `RuntimePressureRegionMemoryBudgetSnapshot` rows plus the `region_memory_budgets` signal | Treat as advisory region-budget pressure. Optional work may be rejected through the opt-in policy, but required cleanup and quiescence work remain admitted. |
 | Remote proof lanes are refused or missing workers | `RuntimePressureRchProofLaneSnapshot` rows plus the `rch_proof_lanes` signal | Treat as advisory RCH pressure. A remote-required lane with local Cargo fallback refused is critical evidence for the proof lane, not a throughput claim about the fleet. |
@@ -52,6 +54,15 @@ Start from the stable fields:
 - `rch_proof_lanes`: optional `RuntimePressureRchProofLaneSnapshot` rows built
   from externally captured RCH admission receipts. The runtime does not probe
   RCH directly.
+- Scheduler pressure flamegraph attribution: when a pressure-control change
+  cites `scheduler_tail_pressure` and also triggers the Phase 6 flamegraph gate,
+  the artifact path is `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`.
+  The allowed benchmark surface is `methodology_baselines`, with
+  `methodology/task_spawn/inject_ready_global_queue`,
+  `methodology/task_spawn/local_queue_push`, and
+  `methodology/task_spawn/local_queue_spawn_batch/1000` as the current
+  scheduler-adjacent rows. This attribution is not a performance-improvement
+  claim.
 
 Interpretation rules:
 
@@ -131,3 +142,6 @@ Before closing a pressure-control bead:
    policy bead explicitly proves otherwise.
 5. If broad validation was skipped, record the narrower RCH proof and why it is
    sufficient for the touched surface.
+6. If the change touches a Phase 6 hot-path trigger and cites scheduler pressure,
+   commit the matching flamegraph artifact or explicitly record why the
+   pressure-control change was docs/contract-only and did not trigger the gate.

@@ -31,6 +31,20 @@ fn nonempty_string<'a>(value: &'a JsonValue, key: &str) -> &'a str {
     item
 }
 
+fn string_array(value: &JsonValue, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(JsonValue::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+                .to_string()
+        })
+        .collect()
+}
+
 #[test]
 fn phase6_contract_records_main_only_enforcement_split() {
     let contract = contract();
@@ -135,6 +149,62 @@ fn local_gate_commands_are_rch_backed_and_scoped() {
                     || path.starts_with("target/")
                     || path.starts_with("tests/"))),
             "{gate_id}: artifact locations must stay in repo artifact/test surfaces"
+        );
+    }
+}
+
+#[test]
+fn flamegraph_gate_records_pressure_control_attribution() {
+    let contract = contract();
+    let gates = contract
+        .get("direct_main_local_gates")
+        .and_then(JsonValue::as_array)
+        .expect("direct_main_local_gates array");
+    let flamegraph = gates
+        .iter()
+        .find(|gate| gate.get("gate_id").and_then(JsonValue::as_str) == Some("flamegraph"))
+        .expect("flamegraph gate");
+    let attribution = flamegraph
+        .get("pressure_control_attribution")
+        .expect("flamegraph pressure_control_attribution object");
+
+    assert_eq!(
+        nonempty_string(attribution, "contract"),
+        "artifacts/runtime_pressure_control_evidence_contract_v1.json"
+    );
+    assert_eq!(
+        nonempty_string(attribution, "contract_test"),
+        "tests/runtime_pressure_control_evidence_contract.rs"
+    );
+    assert_eq!(
+        nonempty_string(attribution, "operator_runbook"),
+        "docs/runtime_pressure_triage_runbook.md"
+    );
+    assert_eq!(
+        nonempty_string(attribution, "signal"),
+        "scheduler_tail_pressure"
+    );
+    assert_eq!(
+        nonempty_string(attribution, "lab_scenario_family"),
+        "cpu_lane_pressure"
+    );
+    assert_eq!(
+        nonempty_string(attribution, "benchmark_surface"),
+        "methodology_baselines"
+    );
+    assert_eq!(
+        string_array(attribution, "benchmark_rows"),
+        vec![
+            "methodology/task_spawn/inject_ready_global_queue".to_string(),
+            "methodology/task_spawn/local_queue_push".to_string(),
+            "methodology/task_spawn/local_queue_spawn_batch/1000".to_string(),
+        ]
+    );
+    let non_claim = nonempty_string(attribution, "non_claim").to_ascii_lowercase();
+    for required in ["does not prove", "throughput", "performance improvement"] {
+        assert!(
+            non_claim.contains(required),
+            "flamegraph pressure attribution must preserve non-claim phrase {required:?}"
         );
     }
 }
