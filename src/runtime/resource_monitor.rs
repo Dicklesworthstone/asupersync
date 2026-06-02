@@ -298,6 +298,59 @@ pub enum RuntimePressureEarlyWarningSeverity {
     Critical,
 }
 
+/// Operator-facing severity for one remediation recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureRecommendationSeverity {
+    Observe,
+    Investigate,
+    Mitigate,
+    Escalate,
+}
+
+/// Stable reason code for one remediation recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureRecommendationReason {
+    Bottleneck,
+    CriticalTopology,
+    EarlyWarning,
+    FragmentedTopology,
+    TrappedWaitCycle,
+}
+
+/// Stable action code for one remediation recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureRecommendationAction {
+    CollectTaskInspectorDetails,
+    ConfirmTrappedCycleEvidence,
+    EnableLabReplay,
+    InspectSpectralBottlenecks,
+    RunTrappedCycleDetection,
+    TightenAdmission,
+}
+
+/// Evidence boundary for a remediation recommendation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePressureRecommendationEvidenceScope {
+    SpectralTopology,
+    SpectralTrend,
+    ExplicitTrappedCycle,
+}
+
+/// Deterministic advisory row for spectral remediation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureSpectralRecommendation {
+    pub severity: RuntimePressureRecommendationSeverity,
+    pub reason: RuntimePressureRecommendationReason,
+    pub action: RuntimePressureRecommendationAction,
+    pub evidence_scope: RuntimePressureRecommendationEvidenceScope,
+    pub deadlock_proven: bool,
+    pub requires_trapped_cycle_proof: bool,
+}
+
 impl From<EarlyWarningSeverity> for RuntimePressureEarlyWarningSeverity {
     fn from(value: EarlyWarningSeverity) -> Self {
         match value {
@@ -405,6 +458,7 @@ pub struct RuntimePressureSnapshot {
     pub resources: Vec<RuntimePressureResourceSnapshot>,
     pub scheduler: Option<SchedulerEvidenceMetrics>,
     pub spectral: RuntimePressureSpectralSnapshot,
+    pub spectral_recommendations: Vec<RuntimePressureSpectralRecommendation>,
 }
 
 impl RuntimePressureSnapshot {
@@ -418,6 +472,7 @@ impl RuntimePressureSnapshot {
         let resources = runtime_pressure_resources(pressure);
         let resource_composite_degradation = pressure.composite_degradation_level();
         let spectral = spectral.unwrap_or_else(RuntimePressureSpectralSnapshot::unknown);
+        let spectral_recommendations = runtime_pressure_spectral_recommendations(&spectral);
 
         let mut signal_statuses = vec![
             runtime_pressure_resource_signal_status(&resources, resource_composite_degradation),
@@ -455,6 +510,7 @@ impl RuntimePressureSnapshot {
             resources,
             scheduler,
             spectral,
+            spectral_recommendations,
         }
     }
 }
@@ -688,6 +744,170 @@ fn runtime_pressure_spectral_signal_status(
             RuntimePressureSignalStatus::Present,
             "spectral_health_present",
         ),
+    }
+}
+
+fn runtime_pressure_spectral_recommendations(
+    spectral: &RuntimePressureSpectralSnapshot,
+) -> Vec<RuntimePressureSpectralRecommendation> {
+    let mut recommendations = Vec::new();
+    let deadlock_proven =
+        spectral.trapped_wait_cycle || spectral.class == RuntimePressureSpectralClass::Deadlocked;
+
+    if deadlock_proven {
+        recommendations.push(runtime_pressure_spectral_recommendation_row(
+            RuntimePressureRecommendationSeverity::Escalate,
+            RuntimePressureRecommendationReason::TrappedWaitCycle,
+            RuntimePressureRecommendationAction::ConfirmTrappedCycleEvidence,
+            RuntimePressureRecommendationEvidenceScope::ExplicitTrappedCycle,
+            RuntimePressureDeadlockProofState::Proven,
+        ));
+    }
+
+    match spectral.class {
+        RuntimePressureSpectralClass::Unknown | RuntimePressureSpectralClass::Healthy => {}
+        RuntimePressureSpectralClass::Degraded => {
+            recommendations.push(runtime_pressure_spectral_recommendation_row(
+                RuntimePressureRecommendationSeverity::Investigate,
+                RuntimePressureRecommendationReason::Bottleneck,
+                RuntimePressureRecommendationAction::CollectTaskInspectorDetails,
+                RuntimePressureRecommendationEvidenceScope::SpectralTopology,
+                RuntimePressureDeadlockProofState::Advisory,
+            ));
+        }
+        RuntimePressureSpectralClass::Critical => {
+            recommendations.push(runtime_pressure_spectral_recommendation_row(
+                RuntimePressureRecommendationSeverity::Mitigate,
+                RuntimePressureRecommendationReason::CriticalTopology,
+                RuntimePressureRecommendationAction::TightenAdmission,
+                RuntimePressureRecommendationEvidenceScope::SpectralTopology,
+                RuntimePressureDeadlockProofState::Advisory,
+            ));
+            if !deadlock_proven {
+                recommendations.push(runtime_pressure_spectral_recommendation_row(
+                    RuntimePressureRecommendationSeverity::Investigate,
+                    RuntimePressureRecommendationReason::CriticalTopology,
+                    RuntimePressureRecommendationAction::RunTrappedCycleDetection,
+                    RuntimePressureRecommendationEvidenceScope::SpectralTopology,
+                    RuntimePressureDeadlockProofState::RequiresTrappedCycleProof,
+                ));
+            }
+        }
+        RuntimePressureSpectralClass::Fragmented => {
+            recommendations.push(runtime_pressure_spectral_recommendation_row(
+                RuntimePressureRecommendationSeverity::Mitigate,
+                RuntimePressureRecommendationReason::FragmentedTopology,
+                RuntimePressureRecommendationAction::CollectTaskInspectorDetails,
+                RuntimePressureRecommendationEvidenceScope::SpectralTopology,
+                RuntimePressureDeadlockProofState::Advisory,
+            ));
+            if !deadlock_proven {
+                recommendations.push(runtime_pressure_spectral_recommendation_row(
+                    RuntimePressureRecommendationSeverity::Escalate,
+                    RuntimePressureRecommendationReason::FragmentedTopology,
+                    RuntimePressureRecommendationAction::RunTrappedCycleDetection,
+                    RuntimePressureRecommendationEvidenceScope::SpectralTopology,
+                    RuntimePressureDeadlockProofState::RequiresTrappedCycleProof,
+                ));
+            }
+        }
+        RuntimePressureSpectralClass::Deadlocked => {}
+    }
+
+    if spectral.bottleneck_count > 0 {
+        recommendations.push(runtime_pressure_spectral_recommendation_row(
+            RuntimePressureRecommendationSeverity::Investigate,
+            RuntimePressureRecommendationReason::Bottleneck,
+            RuntimePressureRecommendationAction::InspectSpectralBottlenecks,
+            RuntimePressureRecommendationEvidenceScope::SpectralTopology,
+            RuntimePressureDeadlockProofState::Advisory,
+        ));
+    }
+
+    match spectral.early_warning_severity {
+        RuntimePressureEarlyWarningSeverity::Unknown
+        | RuntimePressureEarlyWarningSeverity::None => {}
+        RuntimePressureEarlyWarningSeverity::Watch => {
+            recommendations.push(runtime_pressure_spectral_recommendation_row(
+                RuntimePressureRecommendationSeverity::Observe,
+                RuntimePressureRecommendationReason::EarlyWarning,
+                RuntimePressureRecommendationAction::EnableLabReplay,
+                RuntimePressureRecommendationEvidenceScope::SpectralTrend,
+                RuntimePressureDeadlockProofState::Advisory,
+            ));
+        }
+        RuntimePressureEarlyWarningSeverity::Warning => {
+            recommendations.push(runtime_pressure_spectral_recommendation_row(
+                RuntimePressureRecommendationSeverity::Investigate,
+                RuntimePressureRecommendationReason::EarlyWarning,
+                RuntimePressureRecommendationAction::EnableLabReplay,
+                RuntimePressureRecommendationEvidenceScope::SpectralTrend,
+                RuntimePressureDeadlockProofState::Advisory,
+            ));
+        }
+        RuntimePressureEarlyWarningSeverity::Critical => {
+            recommendations.push(runtime_pressure_spectral_recommendation_row(
+                RuntimePressureRecommendationSeverity::Mitigate,
+                RuntimePressureRecommendationReason::EarlyWarning,
+                RuntimePressureRecommendationAction::EnableLabReplay,
+                RuntimePressureRecommendationEvidenceScope::SpectralTrend,
+                RuntimePressureDeadlockProofState::Advisory,
+            ));
+        }
+    }
+
+    recommendations.sort_by_key(|recommendation| {
+        (
+            runtime_pressure_recommendation_severity_rank(recommendation.severity),
+            recommendation.reason,
+            recommendation.action,
+            recommendation.evidence_scope,
+            recommendation.deadlock_proven,
+            recommendation.requires_trapped_cycle_proof,
+        )
+    });
+    recommendations.dedup();
+    recommendations
+}
+
+fn runtime_pressure_spectral_recommendation_row(
+    severity: RuntimePressureRecommendationSeverity,
+    reason: RuntimePressureRecommendationReason,
+    action: RuntimePressureRecommendationAction,
+    evidence_scope: RuntimePressureRecommendationEvidenceScope,
+    proof_state: RuntimePressureDeadlockProofState,
+) -> RuntimePressureSpectralRecommendation {
+    let (deadlock_proven, requires_trapped_cycle_proof) = match proof_state {
+        RuntimePressureDeadlockProofState::Advisory => (false, false),
+        RuntimePressureDeadlockProofState::RequiresTrappedCycleProof => (false, true),
+        RuntimePressureDeadlockProofState::Proven => (true, false),
+    };
+
+    RuntimePressureSpectralRecommendation {
+        severity,
+        reason,
+        action,
+        evidence_scope,
+        deadlock_proven,
+        requires_trapped_cycle_proof,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePressureDeadlockProofState {
+    Advisory,
+    RequiresTrappedCycleProof,
+    Proven,
+}
+
+fn runtime_pressure_recommendation_severity_rank(
+    severity: RuntimePressureRecommendationSeverity,
+) -> u8 {
+    match severity {
+        RuntimePressureRecommendationSeverity::Escalate => 0,
+        RuntimePressureRecommendationSeverity::Mitigate => 1,
+        RuntimePressureRecommendationSeverity::Investigate => 2,
+        RuntimePressureRecommendationSeverity::Observe => 3,
     }
 }
 
@@ -4856,6 +5076,17 @@ mod tests {
         }
     }
 
+    fn snapshot_with_spectral(
+        spectral: RuntimePressureSpectralSnapshot,
+    ) -> RuntimePressureSnapshot {
+        RuntimePressureSnapshot::from_parts(
+            &ResourcePressure::new(),
+            complete_platform_probe_report(),
+            Some(healthy_scheduler_metrics()),
+            Some(spectral),
+        )
+    }
+
     #[test]
     fn runtime_pressure_snapshot_marks_empty_inputs_unknown() {
         let pressure = ResourcePressure::new();
@@ -5010,6 +5241,247 @@ mod tests {
         assert_eq!(
             snapshot.spectral.class,
             RuntimePressureSpectralClass::Critical
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_spectral_recommendations_empty_for_healthy() {
+        let snapshot = snapshot_with_spectral(healthy_spectral_snapshot());
+
+        assert!(snapshot.spectral_recommendations.is_empty());
+    }
+
+    #[test]
+    fn runtime_pressure_spectral_recommendations_cover_degraded_watch() {
+        let spectral = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Degraded,
+            fiedler_micro_units: Some(40_000),
+            spectral_gap_bps: Some(900),
+            spectral_radius_micro_units: Some(1_900_000),
+            bottleneck_count: 2,
+            components: None,
+            approaching_disconnect: false,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Watch,
+        };
+
+        let snapshot = snapshot_with_spectral(spectral);
+        let recommendations = snapshot.spectral_recommendations;
+
+        assert!(recommendations.iter().any(|recommendation| {
+            recommendation.action
+                == RuntimePressureRecommendationAction::CollectTaskInspectorDetails
+                && recommendation.reason == RuntimePressureRecommendationReason::Bottleneck
+        }));
+        assert!(recommendations.iter().any(|recommendation| {
+            recommendation.action == RuntimePressureRecommendationAction::InspectSpectralBottlenecks
+                && recommendation.reason == RuntimePressureRecommendationReason::Bottleneck
+        }));
+        assert!(recommendations.iter().any(|recommendation| {
+            recommendation.action == RuntimePressureRecommendationAction::EnableLabReplay
+                && recommendation.evidence_scope
+                    == RuntimePressureRecommendationEvidenceScope::SpectralTrend
+        }));
+        assert!(
+            recommendations
+                .iter()
+                .all(|recommendation| !recommendation.deadlock_proven
+                    && !recommendation.requires_trapped_cycle_proof)
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_spectral_recommendations_flag_critical_topology_as_advisory() {
+        let spectral = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Critical,
+            fiedler_micro_units: Some(5_000),
+            spectral_gap_bps: Some(50),
+            spectral_radius_micro_units: Some(2_000_000),
+            bottleneck_count: 1,
+            components: None,
+            approaching_disconnect: true,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Critical,
+        };
+
+        let snapshot = snapshot_with_spectral(spectral);
+
+        assert!(
+            snapshot
+                .spectral_recommendations
+                .iter()
+                .any(|recommendation| {
+                    recommendation.action
+                        == RuntimePressureRecommendationAction::RunTrappedCycleDetection
+                        && recommendation.requires_trapped_cycle_proof
+                        && !recommendation.deadlock_proven
+                })
+        );
+        assert!(
+            snapshot
+                .spectral_recommendations
+                .iter()
+                .any(|recommendation| {
+                    recommendation.action == RuntimePressureRecommendationAction::TightenAdmission
+                        && recommendation.evidence_scope
+                            == RuntimePressureRecommendationEvidenceScope::SpectralTopology
+                        && !recommendation.deadlock_proven
+                })
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_spectral_recommendations_cover_oscillation_without_deadlock_proof() {
+        let spectral = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Healthy,
+            fiedler_micro_units: Some(120_000),
+            spectral_gap_bps: Some(2_000),
+            spectral_radius_micro_units: Some(1_700_000),
+            bottleneck_count: 0,
+            components: None,
+            approaching_disconnect: false,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Critical,
+        };
+
+        let snapshot = snapshot_with_spectral(spectral);
+
+        assert_eq!(snapshot.spectral_recommendations.len(), 1);
+        assert_eq!(
+            snapshot.spectral_recommendations[0].action,
+            RuntimePressureRecommendationAction::EnableLabReplay
+        );
+        assert_eq!(
+            snapshot.spectral_recommendations[0].evidence_scope,
+            RuntimePressureRecommendationEvidenceScope::SpectralTrend
+        );
+        assert!(!snapshot.spectral_recommendations[0].deadlock_proven);
+        assert!(!snapshot.spectral_recommendations[0].requires_trapped_cycle_proof);
+    }
+
+    #[test]
+    fn runtime_pressure_spectral_recommendations_separate_trapped_cycle_proof() {
+        let fragmented = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Fragmented,
+            fiedler_micro_units: Some(0),
+            spectral_gap_bps: Some(0),
+            spectral_radius_micro_units: Some(2_400_000),
+            bottleneck_count: 0,
+            components: Some(3),
+            approaching_disconnect: false,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::None,
+        };
+        let deadlocked = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Deadlocked,
+            trapped_wait_cycle: true,
+            ..fragmented.clone()
+        };
+
+        let fragmented_snapshot = snapshot_with_spectral(fragmented);
+        let deadlocked_snapshot = snapshot_with_spectral(deadlocked);
+
+        assert!(
+            fragmented_snapshot
+                .spectral_recommendations
+                .iter()
+                .any(|recommendation| {
+                    recommendation.action
+                        == RuntimePressureRecommendationAction::RunTrappedCycleDetection
+                        && recommendation.requires_trapped_cycle_proof
+                        && !recommendation.deadlock_proven
+                })
+        );
+        assert!(
+            deadlocked_snapshot
+                .spectral_recommendations
+                .iter()
+                .any(|recommendation| {
+                    recommendation.action
+                        == RuntimePressureRecommendationAction::ConfirmTrappedCycleEvidence
+                        && recommendation.evidence_scope
+                            == RuntimePressureRecommendationEvidenceScope::ExplicitTrappedCycle
+                        && recommendation.deadlock_proven
+                        && !recommendation.requires_trapped_cycle_proof
+                })
+        );
+        assert!(
+            !deadlocked_snapshot
+                .spectral_recommendations
+                .iter()
+                .any(|recommendation| recommendation.requires_trapped_cycle_proof)
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_spectral_recommendations_sort_and_serialize_stably() {
+        let spectral = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Fragmented,
+            fiedler_micro_units: Some(0),
+            spectral_gap_bps: Some(0),
+            spectral_radius_micro_units: Some(2_100_000),
+            bottleneck_count: 2,
+            components: Some(4),
+            approaching_disconnect: false,
+            trapped_wait_cycle: false,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Warning,
+        };
+
+        let snapshot = snapshot_with_spectral(spectral);
+        let rows = snapshot
+            .spectral_recommendations
+            .iter()
+            .map(|recommendation| {
+                (
+                    recommendation.severity,
+                    recommendation.reason,
+                    recommendation.action,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    RuntimePressureRecommendationSeverity::Escalate,
+                    RuntimePressureRecommendationReason::FragmentedTopology,
+                    RuntimePressureRecommendationAction::RunTrappedCycleDetection,
+                ),
+                (
+                    RuntimePressureRecommendationSeverity::Mitigate,
+                    RuntimePressureRecommendationReason::FragmentedTopology,
+                    RuntimePressureRecommendationAction::CollectTaskInspectorDetails,
+                ),
+                (
+                    RuntimePressureRecommendationSeverity::Investigate,
+                    RuntimePressureRecommendationReason::Bottleneck,
+                    RuntimePressureRecommendationAction::InspectSpectralBottlenecks,
+                ),
+                (
+                    RuntimePressureRecommendationSeverity::Investigate,
+                    RuntimePressureRecommendationReason::EarlyWarning,
+                    RuntimePressureRecommendationAction::EnableLabReplay,
+                ),
+            ]
+        );
+
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(
+            value["spectral_recommendations"][0]["severity"],
+            json!("escalate")
+        );
+        assert_eq!(
+            value["spectral_recommendations"][0]["reason"],
+            json!("fragmented_topology")
+        );
+        assert_eq!(
+            value["spectral_recommendations"][0]["requires_trapped_cycle_proof"],
+            json!(true)
+        );
+        assert_eq!(
+            value["spectral_recommendations"][3]["evidence_scope"],
+            json!("spectral_trend")
         );
     }
 
