@@ -17,9 +17,10 @@ Canonical contract:
 
 The pressure-control lane proves contract alignment for schema versions,
 deterministic lab scenario families, no-local-RCH fallback evidence,
-documentation markers, and operator scope limits. It does not prove real-host
-throughput, production-on-by-default admission/backpressure, scheduler rewrites,
-RCH fleet availability, or a deadlock without explicit trapped-cycle proof.
+operator diagnostics bundle markers, documentation markers, and operator scope
+limits. It does not prove real-host throughput, production-on-by-default
+admission/backpressure, scheduler rewrites, RCH fleet availability, or a
+deadlock without explicit trapped-cycle proof.
 
 ## First Classify the Symptom
 
@@ -81,6 +82,35 @@ Interpretation rules:
   work may be deferred only through an explicit opt-in policy.
 - `critical` means one or more signals crossed a critical advisory threshold.
   Optional work may be rejected only through an explicit opt-in policy.
+
+## Pressure-Control Diagnostics Bundle
+
+The contract field `operator_diagnostics_bundle` is the compact operator
+handoff for pressure-control closeouts. It does not replace the raw snapshot,
+lab evidence, RCH transcript, or proof-lane manifest; it tells reviewers what
+to summarize before recommending a policy or scheduler follow-up.
+
+| Bundle section | Evidence to cite | Claim boundary |
+| --- | --- | --- |
+| `snapshot_verdict` | `RuntimePressureSnapshot.overall_verdict`, aggregate signal counts, and ordered `signal_statuses` | Advisory unless paired with replay evidence or trapped-cycle proof. |
+| `admission_decision` | `RuntimePressureAdmissionDecision` rows and whether `policy_enabled=true` | Opt-in only; required cleanup and quiescence work must remain admitted. |
+| `region_memory_budget_pressure` | `RuntimePressureRegionMemoryBudgetSnapshot` rows and the `region_memory_budgets` signal | Advisory memory-envelope pressure, not per-region allocator enforcement. |
+| `rch_proof_lane_pressure` | `RuntimePressureRchProofLaneSnapshot` rows and remote-required admission receipts | RCH pressure is not worker-fleet availability or throughput proof. |
+| `deterministic_replay_evidence` | `RuntimePressureLabScenarioEvidence` scenario family, expected verdict, diagnostic labels, and replay artifact if present | Replay-backed only for the cited scenario family and fixed inputs. |
+| `validation_fallback_status` | no-local-RCH fallback evidence, `[RCH] remote` transcript markers, or `local_fallback_refused` receipt fields | A blocked or refused lane must name the first blocker instead of claiming green validation. |
+| `scope_non_claims` | explicit non-claims for throughput, scheduler performance, production admission control, allocator enforcement, and deadlock | A deadlock claim still requires explicit trapped-cycle proof. |
+
+Use these status labels in closeout text:
+
+- `advisory`: live pressure evidence is useful for triage, but is not proof of
+  throughput, scheduler regression closure, or production-safe policy rollout.
+- `replay_backed`: the diagnosis is paired with deterministic lab or replay
+  evidence for the cited scenario family.
+- `trapped_cycle_proven`: a deadlock claim is backed by explicit trapped-cycle
+  proof; spectral fragmentation alone is not enough.
+- `validation_blocked`: remote-required validation lacked workers or refused
+  local fallback, so the closeout names the blocker instead of claiming a green
+  proof.
 
 ## Admission Decisions
 

@@ -284,6 +284,123 @@ fn contract_declares_no_local_rch_fallback_evidence() {
 }
 
 #[test]
+fn contract_declares_operator_diagnostics_bundle() {
+    let contract = json(CONTRACT_PATH);
+    let bundle = contract
+        .get("operator_diagnostics_bundle")
+        .expect("operator_diagnostics_bundle object");
+
+    assert_eq!(
+        string(bundle, "bundle_id"),
+        "pressure-control-operator-diagnostics-bundle"
+    );
+    assert_eq!(string(bundle, "bead_id"), "asupersync-bwcdfl.11");
+    assert_eq!(string(bundle, "operator_doc"), OPERATOR_RUNBOOK_PATH);
+    let purpose = string(bundle, "purpose");
+    for required in [
+        "snapshot verdicts",
+        "admission decisions",
+        "region memory-budget pressure",
+        "RCH proof-lane pressure",
+        "deterministic replay evidence",
+        "validation fallback status",
+        "scope limits",
+    ] {
+        assert!(
+            purpose.contains(required),
+            "diagnostics bundle purpose must contain {required:?}"
+        );
+    }
+
+    assert_eq!(
+        string_vec(bundle, "ordered_sections"),
+        vec![
+            "snapshot_verdict".to_string(),
+            "admission_decision".to_string(),
+            "region_memory_budget_pressure".to_string(),
+            "rch_proof_lane_pressure".to_string(),
+            "deterministic_replay_evidence".to_string(),
+            "validation_fallback_status".to_string(),
+            "scope_non_claims".to_string(),
+        ]
+    );
+    assert_eq!(
+        string_set(bundle, "required_evidence_markers"),
+        BTreeSet::from([
+            "RuntimePressureSnapshot.overall_verdict".to_string(),
+            "RuntimePressureAdmissionDecision".to_string(),
+            "RuntimePressureRegionMemoryBudgetSnapshot".to_string(),
+            "RuntimePressureRchProofLaneSnapshot".to_string(),
+            "RuntimePressureLabScenarioEvidence".to_string(),
+            "no-local-RCH fallback evidence".to_string(),
+            "scheduler_tail_pressure".to_string(),
+            "spectral_recommendations".to_string(),
+        ])
+    );
+
+    let status_meanings = array(bundle, "status_semantics")
+        .iter()
+        .map(|status| {
+            (
+                string(status, "status").to_string(),
+                string(status, "meaning").to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        status_meanings.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "advisory".to_string(),
+            "replay_backed".to_string(),
+            "trapped_cycle_proven".to_string(),
+            "validation_blocked".to_string(),
+        ])
+    );
+    for required in [
+        "does not by itself prove throughput",
+        "deterministic lab or replay evidence",
+        "spectral fragmentation alone is insufficient",
+        "name the first blocker",
+    ] {
+        assert!(
+            status_meanings
+                .values()
+                .any(|meaning| meaning.contains(required)),
+            "diagnostics bundle status meanings must contain {required:?}"
+        );
+    }
+
+    let closeout_rule = string(bundle, "closeout_rule");
+    for required in [
+        "diagnostics bundle status",
+        "strongest evidence class",
+        "non-claim",
+        "policy or scheduler follow-up",
+    ] {
+        assert!(
+            closeout_rule.contains(required),
+            "diagnostics closeout rule must contain {required:?}"
+        );
+    }
+
+    let non_claims = string_vec(bundle, "does_not_prove")
+        .join("\n")
+        .to_ascii_lowercase();
+    for required in [
+        "real-host throughput",
+        "scheduler performance",
+        "production-on-by-default",
+        "per-region allocator enforcement",
+        "trapped-cycle proof",
+    ] {
+        assert!(
+            non_claims.contains(required),
+            "diagnostics bundle must preserve non-claim phrase {required:?}"
+        );
+    }
+}
+
+#[test]
 fn contract_declares_scheduler_pressure_flamegraph_attribution() {
     let contract = json(CONTRACT_PATH);
     let attribution = contract
@@ -432,6 +549,7 @@ fn contract_claims_do_not_overstate_pressure_control_evidence() {
         BTreeSet::from([
             "deterministic-lab-scenario-classification".to_string(),
             "opt-in-pressure-admission-policy".to_string(),
+            "operator-diagnostics-bundle".to_string(),
             "operator-pressure-snapshot-schema".to_string(),
             "rch-proof-lane-pressure-signal".to_string(),
             "rch-no-local-fallback-evidence".to_string(),
@@ -520,6 +638,10 @@ fn proof_lane_manifest_maps_pressure_contract_lane() {
         "{lane_id}: manifest lane must name no-local-RCH fallback evidence"
     );
     assert!(
+        string(lane, "covers").contains("operator diagnostics bundle"),
+        "{lane_id}: manifest lane must name operator diagnostics bundle"
+    );
+    assert!(
         string(lane, "explicit_not_covered").contains("RCH fleet availability"),
         "{lane_id}: manifest lane must preserve RCH fleet non-claim"
     );
@@ -573,6 +695,19 @@ fn operator_runbook_preserves_pressure_triage_and_replay_markers() {
         "RuntimePressureLabScenarioEvidence",
         "RuntimePressureRegionMemoryBudgetSnapshot",
         "RuntimePressureRchProofLaneSnapshot",
+        "Pressure-Control Diagnostics Bundle",
+        "operator_diagnostics_bundle",
+        "snapshot_verdict",
+        "admission_decision",
+        "region_memory_budget_pressure",
+        "rch_proof_lane_pressure",
+        "deterministic_replay_evidence",
+        "validation_fallback_status",
+        "scope_non_claims",
+        "advisory",
+        "replay_backed",
+        "trapped_cycle_proven",
+        "validation_blocked",
         "no-local-RCH fallback evidence",
         "Selected worker:",
         "Executing command remotely:",
