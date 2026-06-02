@@ -85,13 +85,20 @@ def is_number(x) -> bool:
 
 
 def eprocess_alarm(runs_path: str, metric: str, per_bench_thr_pct: float,
-                   alpha: float, p0: float, lam: float) -> Optional[dict]:
+                   alpha: float, p0: float, lam: float,
+                   cv_pct_flake_threshold: float = 5.0) -> Optional[dict]:
     """Anytime-valid betting martingale over the per-bench regression stream.
 
     For each benchmark, order its history records by `generated_at`; each
     consecutive pair yields a regression indicator X in {0,1}
     (X=1 iff cur/prev - 1 > per_bench_thr). The e-value updates multiplicatively
     E *= 1 + lam * (X - p0), clamped at >= 0. Alarm iff E >= 1/alpha.
+
+    Flake filtering (gauntlet PERF-R5, br-asupersync FUZZ-R5 sibling finding):
+    pairs where EITHER record has cv_pct above the flake threshold are skipped
+    and counted in `skipped_flaky_pairs`. Without this, noisy capture history
+    (shared-VPS contention swings of +/-20%) reads as a stream of phantom
+    regressions and the e-value alarms on pure noise.
     """
     if not os.path.isfile(runs_path):
         return None
@@ -107,13 +114,21 @@ def eprocess_alarm(runs_path: str, metric: str, per_bench_thr_pct: float,
                 continue
             by_bench.setdefault(rec.get("name", ""), []).append(rec)
 
+    def is_flaky(rec: dict) -> bool:
+        cv = rec.get("cv_pct")
+        return is_number(cv) and cv > cv_pct_flake_threshold
+
     thr = per_bench_thr_pct / 100.0
     e_value = 1.0
     observations = 0
     regressions = 0
+    skipped_flaky_pairs = 0
     for name, recs in by_bench.items():
         recs.sort(key=lambda r: r.get("generated_at", ""))
         for prev, cur in zip(recs, recs[1:]):
+            if is_flaky(prev) or is_flaky(cur):
+                skipped_flaky_pairs += 1
+                continue
             pv, cv = prev.get(metric), cur.get(metric)
             if not (is_number(pv) and is_number(cv) and pv > 0):
                 continue
@@ -128,7 +143,9 @@ def eprocess_alarm(runs_path: str, metric: str, per_bench_thr_pct: float,
         "alarm": e_value >= threshold,
         "observations": observations,
         "regressions": regressions,
-        "params": {"alpha": alpha, "p0": p0, "lambda": lam},
+        "skipped_flaky_pairs": skipped_flaky_pairs,
+        "params": {"alpha": alpha, "p0": p0, "lambda": lam,
+                   "cv_pct_flake_threshold": cv_pct_flake_threshold},
     }
 
 
@@ -207,7 +224,8 @@ def main() -> int:
     if args.eprocess:
         eproc = eprocess_alarm(
             os.path.join(args.history_dir, "runs.jsonl"), metric, args.per_bench_max_regression_pct,
-            args.eprocess_alpha, args.eprocess_p0, args.eprocess_lambda)
+            args.eprocess_alpha, args.eprocess_p0, args.eprocess_lambda,
+            cv_pct_flake_threshold=args.cv_pct_flake_threshold)
 
     if blocked or geomean_blocked or (args.eprocess_fail and eproc and eproc.get("alarm")):
         verdict = "Block"
@@ -252,7 +270,8 @@ def main() -> int:
             print(f"  note: {len(missing_baseline)} benchmark(s) had no .bench-history baseline (new benches)")
         if eproc:
             print(f"  e-process: E={eproc['e_value']:.3g} vs 1/alpha={eproc['threshold']:.3g} "
-                  f"alarm={eproc['alarm']} (obs={eproc['observations']}, regressions={eproc['regressions']})")
+                  f"alarm={eproc['alarm']} (obs={eproc['observations']}, regressions={eproc['regressions']}, "
+                  f"skipped_flaky_pairs={eproc.get('skipped_flaky_pairs', 0)})")
 
     return {"Allow": 0, "Block": 2, "Quarantine": 3}[verdict]
 
