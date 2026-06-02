@@ -1203,13 +1203,23 @@ fn effective_feedback_policy(
         SchedulerFeedbackPolicy::default().min_admission_threshold,
         evidence,
     );
-    let max_admission_threshold = normalize_policy_threshold(
+    let requested_max_admission_threshold = normalize_policy_threshold(
         SchedulerFeedbackClampReason::AboveMaximum,
         policy.max_admission_threshold,
         SchedulerFeedbackPolicy::default().max_admission_threshold,
         evidence,
-    )
-    .max(min_admission_threshold);
+    );
+    let max_admission_threshold = if requested_max_admission_threshold < min_admission_threshold {
+        evidence.clamps.push(SchedulerFeedbackClamp {
+            knob: SchedulerFeedbackKnob::AdmissionControlThresholds,
+            reason: SchedulerFeedbackClampReason::BelowMinimum,
+            requested: format!("{requested_max_admission_threshold:.3}"),
+            clamped: format!("{min_admission_threshold:.3}"),
+        });
+        min_admission_threshold
+    } else {
+        requested_max_admission_threshold
+    };
 
     EffectiveFeedbackPolicy {
         eligible_knobs: policy.eligible_knobs,
@@ -2116,6 +2126,29 @@ mod tests {
         assert!(recommendation.evidence.clamps.iter().any(|clamp| {
             clamp.knob == SchedulerFeedbackKnob::GlobalQueueLimit
                 && clamp.reason == SchedulerFeedbackClampReason::AboveMaximum
+        }));
+        assert_invariants_preserved(&recommendation);
+    }
+
+    #[test]
+    fn scheduler_feedback_records_inverted_admission_threshold_policy() {
+        let policy = SchedulerFeedbackPolicy {
+            min_admission_threshold: 0.90,
+            max_admission_threshold: 0.20,
+            ..SchedulerFeedbackPolicy::default()
+        };
+
+        let recommendation = recommend_scheduler_feedback(
+            burst_feedback_metrics(),
+            feedback_current_knobs(),
+            policy,
+        );
+
+        assert!(recommendation.evidence.clamps.iter().any(|clamp| {
+            clamp.knob == SchedulerFeedbackKnob::AdmissionControlThresholds
+                && clamp.reason == SchedulerFeedbackClampReason::BelowMinimum
+                && clamp.requested == "0.200"
+                && clamp.clamped == "0.900"
         }));
         assert_invariants_preserved(&recommendation);
     }
