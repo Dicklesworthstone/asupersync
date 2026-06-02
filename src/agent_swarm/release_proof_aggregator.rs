@@ -160,8 +160,8 @@ pub enum BlockerType {
     MissingMailCloseout,
     /// Unpushed commits
     UnpushedCommits,
-    /// Master sync missing after main push
-    MasterSyncMissing,
+    /// Canonical main push missing after commit evidence was collected
+    MainPushMissing,
 }
 
 /// Lease or admission receipt.
@@ -256,8 +256,8 @@ pub struct ProofSummary {
     pub rch_command_count: usize,
     /// Whether all remote proofs passed
     pub remote_proofs_complete: bool,
-    /// Whether main was pushed to master
-    pub master_synced: bool,
+    /// Whether all commit evidence is visible on the canonical main ref
+    pub main_pushed: bool,
     /// Evidence freshness score (0.0-1.0, higher is fresher)
     pub freshness_score: f64,
 }
@@ -538,10 +538,7 @@ impl ReleaseProofAggregator {
             .iter()
             .all(|cmd| !cmd.remote_required || cmd.exit_code == 0);
 
-        let master_synced = record
-            .pushed_refs
-            .iter()
-            .any(|r| r.ref_name.contains("master") && r.pushed);
+        let main_pushed = Self::all_commits_pushed_to_main(&record.commits, &record.pushed_refs);
 
         let freshness_score = self.calculate_freshness_score(record);
         self.metrics
@@ -556,7 +553,7 @@ impl ReleaseProofAggregator {
             commit_count: record.commits.len(),
             rch_command_count: record.rch_commands.len(),
             remote_proofs_complete,
-            master_synced,
+            main_pushed,
             freshness_score,
         }
     }
@@ -1517,15 +1514,33 @@ impl ReleaseProofAggregator {
             return Ok(ProofStatus::Stale);
         }
 
-        // Check if main was pushed to master
-        let master_synced = pushed_refs
-            .iter()
-            .any(|r| r.ref_name.contains("master") && r.pushed);
-        if !pushed_refs.is_empty() && !master_synced {
+        if !Self::all_commits_pushed_to_main(commits, pushed_refs) {
             return Ok(ProofStatus::MissingCloseout);
         }
 
         Ok(ProofStatus::Complete)
+    }
+
+    fn all_commits_pushed_to_main(commits: &[CommitRecord], pushed_refs: &[GitRef]) -> bool {
+        if commits.is_empty() {
+            return true;
+        }
+
+        commits.iter().all(|commit| {
+            commit.pushed
+                && pushed_refs.iter().any(|git_ref| {
+                    git_ref.pushed
+                        && git_ref.commit_hash == commit.hash
+                        && Self::is_canonical_main_ref(&git_ref.ref_name)
+                })
+        })
+    }
+
+    fn is_canonical_main_ref(ref_name: &str) -> bool {
+        matches!(
+            ref_name,
+            "refs/heads/main" | "refs/remotes/origin/main" | "origin/main"
+        )
     }
 
     /// Calculates evidence freshness score (0.0-1.0, higher is fresher).
@@ -1637,7 +1652,7 @@ mod tests {
         }];
 
         let pushed_refs = vec![GitRef {
-            ref_name: "refs/heads/master".to_string(),
+            ref_name: "refs/remotes/origin/main".to_string(),
             commit_hash: "abc123".to_string(),
             pushed: true,
             pushed_at: SystemTime::now(),
@@ -1654,6 +1669,74 @@ mod tests {
             .unwrap();
 
         assert_eq!(status, ProofStatus::Complete);
+    }
+
+    #[test]
+    fn test_proof_status_requires_commits_on_main() {
+        let mut config = AggregatorConfig::default();
+        config.require_remote_rch = false;
+        let aggregator = ReleaseProofAggregator::new(config);
+
+        let commits = vec![CommitRecord {
+            hash: "abc123".to_string(),
+            message: "test commit".to_string(),
+            author: "test".to_string(),
+            timestamp: SystemTime::now(),
+            pushed: true,
+        }];
+
+        let pushed_refs = vec![GitRef {
+            ref_name: "refs/remotes/origin/topic".to_string(),
+            commit_hash: "abc123".to_string(),
+            pushed: true,
+            pushed_at: SystemTime::now(),
+        }];
+
+        let handoff_status = HandoffStatus {
+            capsule_exists: false,
+            decision: None,
+            last_updated: SystemTime::now(),
+        };
+
+        let status = aggregator
+            .determine_proof_status(&commits, &[], None, &handoff_status, &pushed_refs)
+            .unwrap();
+
+        assert_eq!(status, ProofStatus::MissingCloseout);
+    }
+
+    #[test]
+    fn test_proof_status_rejects_unpushed_commits() {
+        let mut config = AggregatorConfig::default();
+        config.require_remote_rch = false;
+        let aggregator = ReleaseProofAggregator::new(config);
+
+        let commits = vec![CommitRecord {
+            hash: "abc123".to_string(),
+            message: "test commit".to_string(),
+            author: "test".to_string(),
+            timestamp: SystemTime::now(),
+            pushed: false,
+        }];
+
+        let pushed_refs = vec![GitRef {
+            ref_name: "refs/remotes/origin/main".to_string(),
+            commit_hash: "abc123".to_string(),
+            pushed: true,
+            pushed_at: SystemTime::now(),
+        }];
+
+        let handoff_status = HandoffStatus {
+            capsule_exists: false,
+            decision: None,
+            last_updated: SystemTime::now(),
+        };
+
+        let status = aggregator
+            .determine_proof_status(&commits, &[], None, &handoff_status, &pushed_refs)
+            .unwrap();
+
+        assert_eq!(status, ProofStatus::MissingCloseout);
     }
 
     #[test]
@@ -1817,6 +1900,7 @@ Remote command finished: exit=0 in 188296ms
         assert_eq!(summary.bead_id, "test-bead");
         assert_eq!(summary.status, ProofStatus::Complete);
         assert_eq!(summary.commit_count, 1);
+        assert!(!summary.main_pushed);
         assert!(summary.summary.contains("Release ready"));
     }
 
