@@ -739,7 +739,7 @@ where
 /// ```
 #[cfg(feature = "tower")]
 pub struct AsupersyncAdapter<S> {
-    inner: parking_lot::Mutex<S>,
+    inner: crate::sync::Mutex<S>,
     config: AdapterConfig,
 }
 
@@ -748,7 +748,7 @@ impl<S> AsupersyncAdapter<S> {
     /// Create a new adapter with default configuration.
     pub fn new(service: S) -> Self {
         Self {
-            inner: parking_lot::Mutex::new(service),
+            inner: crate::sync::Mutex::with_name("service_adapter", service),
             config: AdapterConfig::default(),
         }
     }
@@ -756,7 +756,7 @@ impl<S> AsupersyncAdapter<S> {
     /// Create a new adapter with the specified configuration.
     pub fn with_config(service: S, config: AdapterConfig) -> Self {
         Self {
-            inner: parking_lot::Mutex::new(service),
+            inner: crate::sync::Mutex::with_name("service_adapter", service),
             config,
         }
     }
@@ -764,6 +764,16 @@ impl<S> AsupersyncAdapter<S> {
     /// Returns a reference to the adapter configuration.
     pub fn config(&self) -> &AdapterConfig {
         &self.config
+    }
+
+    fn lock_error<E>(err: crate::sync::LockError) -> TowerAdapterError<E> {
+        match err {
+            crate::sync::LockError::Cancelled => TowerAdapterError::Cancelled,
+            crate::sync::LockError::TimedOut(_) => TowerAdapterError::Timeout,
+            crate::sync::LockError::Poisoned | crate::sync::LockError::PolledAfterCompletion => {
+                TowerAdapterError::Overloaded
+            }
+        }
     }
 }
 
@@ -779,7 +789,6 @@ where
     type Response = S::Response;
     type Error = TowerAdapterError<S::Error>;
 
-    #[allow(clippy::await_holding_lock)]
     #[allow(clippy::future_not_send)]
     async fn call(&self, cx: &Cx, request: Request) -> Result<Self::Response, Self::Error> {
         use std::future::poll_fn;
@@ -804,8 +813,17 @@ where
             _ => None,
         };
 
-        // Get the inner service
-        let mut service = self.inner.lock();
+        // Get the inner service without blocking a worker thread. Tower services
+        // require `&mut self` for readiness and calls, so this adapter serializes
+        // access while letting competing callers yield/cancel/timeout.
+        let mut service = if let Some(deadline) = timeout_deadline {
+            self.inner
+                .lock_until(cx, deadline)
+                .await
+                .map_err(Self::lock_error)?
+        } else {
+            self.inner.lock(cx).await.map_err(Self::lock_error)?
+        };
 
         // Poll for readiness
         let ready_result = if let Some(deadline) = timeout_deadline {
@@ -1614,6 +1632,54 @@ mod tests {
             let timed_out = matches!(result, Poll::Ready(Err(TowerAdapterError::Timeout)));
             crate::assert_with_log!(timed_out, "readiness timeout error", true, timed_out);
             crate::test_complete!("timeout_fallback_times_out_while_waiting_for_ready");
+        }
+
+        #[test]
+        fn concurrent_ready_wait_yields_on_inner_service_lock() {
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("concurrent_ready_wait_yields_on_inner_service_lock");
+
+            let (cx, clock, timer) = test_cx_with_timer();
+            let _guard = Cx::set_current(Some(cx.clone()));
+
+            let config = AdapterConfig::new()
+                .cancellation_mode(CancellationMode::TimeoutFallback)
+                .fallback_timeout(Duration::from_millis(5));
+            let adapter = AsupersyncAdapter::with_config(PendingReadyService, config);
+
+            let mut first_call = pin!(adapter.call(&cx, ()));
+            let mut second_call = pin!(adapter.call(&cx, ()));
+            let waker = noop_waker();
+            let mut context = Context::from_waker(&waker);
+
+            let first = first_call.as_mut().poll(&mut context);
+            assert!(first.is_pending());
+
+            let second = second_call.as_mut().poll(&mut context);
+            assert!(
+                second.is_pending(),
+                "second call should yield instead of blocking on the inner service lock"
+            );
+
+            clock.advance(Time::from_millis(6).as_nanos());
+            let _ = timer.process_timers();
+
+            let first_result = first_call.as_mut().poll(&mut context);
+            let first_timed_out =
+                matches!(first_result, Poll::Ready(Err(TowerAdapterError::Timeout)));
+            crate::assert_with_log!(first_timed_out, "first call timeout", true, first_timed_out);
+
+            let second_result = second_call.as_mut().poll(&mut context);
+            let second_timed_out =
+                matches!(second_result, Poll::Ready(Err(TowerAdapterError::Timeout)));
+            crate::assert_with_log!(
+                second_timed_out,
+                "second call timeout",
+                true,
+                second_timed_out
+            );
+
+            crate::test_complete!("concurrent_ready_wait_yields_on_inner_service_lock");
         }
     }
 
