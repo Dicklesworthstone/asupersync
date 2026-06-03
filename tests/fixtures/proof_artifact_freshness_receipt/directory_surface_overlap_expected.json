@@ -1,5 +1,6 @@
 {
   "agent": "TopazGoose",
+  "agent_mail_summary": "Proof receipt closeout summary: 1 total; 0 citeable; 1 rerun-required; 0 suppressed.\n- artifacts/proof/proof-status-directory.json | classification=dirty-surface-overlap | decision=rerun-required | safe_to_cite=false\n  command: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_status_snapshot cargo test -p asupersync --test proof_status_snapshot_contract -- --nocapture\n  top_remediation: Do not cite stale green output across dirty shared-main work.",
   "artifact_errors": [],
   "current_branch": "main",
   "current_date": "2026-05-08",

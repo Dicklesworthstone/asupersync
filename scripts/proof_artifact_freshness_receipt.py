@@ -880,6 +880,52 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def top_remediation(row: dict[str, Any]) -> str:
+    remediation = row.get("remediation", {})
+    if not isinstance(remediation, dict):
+        return ""
+    operator_note = remediation.get("operator_note")
+    if isinstance(operator_note, str) and operator_note:
+        return operator_note
+    next_steps = remediation.get("next_steps")
+    if isinstance(next_steps, list):
+        for step in next_steps:
+            if isinstance(step, str) and step:
+                return step
+    return ""
+
+
+def summary_scalar(value: Any, fallback: str = "<missing>") -> str:
+    if not isinstance(value, str) or not value:
+        return fallback
+    compact = " ".join(value.split())
+    return compact or fallback
+
+
+def agent_mail_summary(rows: list[dict[str, Any]], summary: dict[str, Any]) -> str:
+    lines = [
+        "Proof receipt closeout summary: "
+        f"{summary['total']} total; "
+        f"{summary['safe_to_cite']} citeable; "
+        f"{summary['rerun_required']} rerun-required; "
+        f"{summary['suppressed']} suppressed."
+    ]
+    if not rows:
+        lines.append("- no proof artifacts found")
+        return "\n".join(lines)
+
+    for row in rows:
+        lines.append(
+            f"- {summary_scalar(row['artifact_path'])} | "
+            f"classification={summary_scalar(row['classification'])} | "
+            f"decision={summary_scalar(row['decision'])} | "
+            f"safe_to_cite={str(row['safe_to_cite']).lower()}"
+        )
+        lines.append(f"  command: {summary_scalar(row['command'])}")
+        lines.append(f"  top_remediation: {summary_scalar(top_remediation(row), '<none>')}")
+    return "\n".join(lines)
+
+
 def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     repo_path = Path(args.repo_path).resolve()
     source = load_json(Path(args.fixture)) if args.fixture else live_probe(repo_path, args.artifact, args.timeout)
@@ -892,18 +938,20 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         classify_artifact(artifact, current_head, current_branch, dirty)
         for artifact in artifact_rows(source)
     ]
+    summary = summarize(rows)
 
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
         "current_date": current_date(generated_at),
         "agent": args.agent,
+        "agent_mail_summary": agent_mail_summary(rows, summary),
         "repo_path": str(repo_path),
         "current_head_sha": current_head,
         "current_branch": current_branch,
         "artifact_errors": source.get("artifact_errors", []),
         "rows": rows,
-        "summary": summarize(rows),
+        "summary": summary,
         "safety": {
             "non_mutating": True,
             "executed_commands": GIT_READ_COMMANDS if not args.fixture else [],

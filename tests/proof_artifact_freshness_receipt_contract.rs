@@ -966,6 +966,119 @@ fn failed_status_requires_rerun_even_at_current_head() {
 }
 
 #[test]
+fn agent_mail_summary_covers_mixed_closeout_rows() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("proof_artifact_freshness_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+head = "2222222222222222222222222222222222222222"
+artifacts = [
+    {
+        "artifact_path": "artifacts/proof/current.json",
+        "git_sha": head,
+        "git_branch": "main",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_current cargo test -p asupersync --lib current",
+        "stdout": "[RCH] remote rch-worker-current (1.0s)",
+        "touched_files": ["src/current.rs"],
+        "status": "pass",
+        "generated_at": "2026-05-08T05:15:00Z",
+    },
+    {
+        "artifact_path": "artifacts/proof/dirty.json",
+        "git_sha": head,
+        "git_branch": "main",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_dirty cargo test -p asupersync --lib dirty",
+        "stdout": "[RCH] remote rch-worker-dirty (1.0s)",
+        "touched_files": ["src/dirty.rs"],
+        "status": "pass",
+        "generated_at": "2026-05-08T05:16:00Z",
+    },
+    {
+        "artifact_path": "artifacts/proof/stale.json",
+        "git_sha": head,
+        "git_branch": "feature/proof",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_stale cargo test -p asupersync --lib stale",
+        "stdout": "[RCH] remote rch-worker-stale (1.0s)",
+        "touched_files": ["src/stale.rs"],
+        "status": "pass",
+        "generated_at": "2026-05-08T05:17:00Z",
+    },
+]
+dirty = [{"status": " M", "path": "src/dirty.rs", "classification": "peer-owned", "owner": "TopazGoose"}]
+rows = [
+    module.classify_artifact(module.normalize_artifact(artifact), head, "main", dirty)
+    for artifact in artifacts
+]
+summary = module.summarize(rows)
+print(json.dumps({
+    "summary": summary,
+    "agent_mail_summary": module.agent_mail_summary(rows, summary),
+    "collapsed_scalar": module.summary_scalar("line one\nline two"),
+}, sort_keys=True))
+"#;
+    let mut child = Command::new("python3")
+        .arg("-")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn proof-artifact agent mail summary smoke");
+    child
+        .stdin
+        .as_mut()
+        .expect("summary smoke stdin")
+        .write_all(script.as_bytes())
+        .expect("write summary smoke script");
+    let output = child
+        .wait_with_output()
+        .expect("run proof-artifact agent mail summary smoke");
+    assert!(
+        output.status.success(),
+        "agent mail summary smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("summary smoke JSON");
+    assert_eq!(parsed["summary"]["total"].as_u64(), Some(3));
+    assert_eq!(parsed["summary"]["safe_to_cite"].as_u64(), Some(1));
+    assert_eq!(parsed["summary"]["rerun_required"].as_u64(), Some(1));
+    assert_eq!(parsed["summary"]["suppressed"].as_u64(), Some(1));
+    assert_eq!(
+        parsed["collapsed_scalar"].as_str(),
+        Some("line one line two")
+    );
+
+    let summary = parsed["agent_mail_summary"]
+        .as_str()
+        .expect("agent mail summary string");
+    for expected in [
+        "Proof receipt closeout summary: 3 total; 1 citeable; 1 rerun-required; 1 suppressed.",
+        "artifacts/proof/current.json | classification=current-clean | decision=cite-as-current | safe_to_cite=true",
+        "artifacts/proof/dirty.json | classification=dirty-surface-overlap | decision=rerun-required | safe_to_cite=false",
+        "artifacts/proof/stale.json | classification=wrong-branch | decision=suppress-as-stale | safe_to_cite=false",
+        "command: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_dirty cargo test -p asupersync --lib dirty",
+        "top_remediation: Do not cite stale green output across dirty shared-main work.",
+        "top_remediation: Suppress this artifact as stale before reporting a green lane.",
+    ] {
+        assert!(
+            summary.contains(expected),
+            "agent mail summary missing {expected:?}: {summary}"
+        );
+    }
+}
+
+#[test]
 fn receipt_safety_contract_declares_read_only_behavior() {
     let receipt = receipt_json("current_clean.json");
 
@@ -994,6 +1107,7 @@ fn receipt_has_required_top_level_shape() {
         "generated_at",
         "current_date",
         "agent",
+        "agent_mail_summary",
         "repo_path",
         "current_head_sha",
         "current_branch",

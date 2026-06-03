@@ -1,5 +1,6 @@
 {
   "agent": "TopazGoose",
+  "agent_mail_summary": "Proof receipt closeout summary: 1 total; 0 citeable; 1 rerun-required; 0 suppressed.\n- artifacts/proof/missing-remote-required-command.json | classification=unsafe-proof-command | decision=rerun-required | safe_to_cite=false\n  command: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_remote_required cargo test --test proof_runner_contract -- --nocapture\n  top_remediation: Do not cite green output from a Cargo proof that can fall back locally.",
   "artifact_errors": [],
   "current_branch": "main",
   "current_date": "2026-05-08",
