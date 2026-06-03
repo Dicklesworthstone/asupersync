@@ -176,6 +176,8 @@ const ADAPTIVE_EPROCESS_LAMBDA: f64 = 0.5;
 // runaway idle burn on noisy wake paths.
 const SPIN_LIMIT: u32 = 8;
 const YIELD_LIMIT: u32 = 2;
+const EMPTY_BACKOFF_PARK_THRESHOLD: u32 = SPIN_LIMIT + YIELD_LIMIT;
+const STALE_DUE_DEADLINE_PARK_NANOS: u64 = 1;
 const SHORT_WAIT_LE_5MS_NANOS: u64 = 5_000_000;
 const IDLE_IO_POLL_MAX_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(any(test, feature = "test-internals"))]
@@ -197,6 +199,13 @@ enum IoPhaseOutcome {
 enum BackoffTimeoutDecision {
     ParkTimeout { nanos: u64 },
     DeadlineDue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyBackoffAction {
+    Spin,
+    Yield,
+    Park,
 }
 
 #[inline]
@@ -1555,6 +1564,7 @@ impl ThreeLaneScheduler {
                 steal_buffer: Vec::new(),
                 steal_batch_size,
                 enable_parking,
+                empty_backoff: 0,
                 cancel_streak: 0,
                 ready_dispatch_streak: 0,
                 browser_ready_handoff_limit,
@@ -2683,6 +2693,8 @@ pub struct ThreeLaneWorker {
     steal_batch_size: usize,
     /// Whether this worker is allowed to park when idle.
     enable_parking: bool,
+    /// Persistent empty-work backoff state across idle outer-loop iterations.
+    empty_backoff: u32,
     /// Number of consecutive cancel-lane dispatches.
     cancel_streak: usize,
     /// Number of consecutive ready-lane dispatches.
@@ -4191,6 +4203,24 @@ impl ThreeLaneWorker {
         }
     }
 
+    #[inline]
+    fn reset_empty_backoff(&mut self) {
+        self.empty_backoff = 0;
+    }
+
+    #[inline]
+    fn advance_empty_backoff(&mut self) -> EmptyBackoffAction {
+        if self.empty_backoff < SPIN_LIMIT {
+            self.empty_backoff += 1;
+            EmptyBackoffAction::Spin
+        } else if self.empty_backoff < EMPTY_BACKOFF_PARK_THRESHOLD {
+            self.empty_backoff += 1;
+            EmptyBackoffAction::Yield
+        } else {
+            EmptyBackoffAction::Park
+        }
+    }
+
     /// Runs the worker scheduling loop.
     ///
     /// The loop maintains strict priority ordering:
@@ -4212,6 +4242,7 @@ impl ThreeLaneWorker {
 
         while !self.shutdown.load(Ordering::Relaxed) {
             if let Some(task) = self.next_task() {
+                self.reset_empty_backoff();
                 self.execute(task);
                 continue;
             }
@@ -4228,11 +4259,9 @@ impl ThreeLaneWorker {
             }
 
             // PHASE 6: Backoff before parking
-            let mut backoff = 0;
-
-            // Fast queue is Single Producer (this worker). If it's empty here, it stays empty
-            // because only this worker pushes to it (via spawn/steal), and we are in the backoff loop.
-            // So we don't need to check it inside the loop.
+            // Keep this cheap fast-queue probe before the idle loop, then
+            // re-check it alongside global work without resetting the
+            // persistent empty backoff budget on spurious runnable flicker.
             if !self.fast_queue.is_empty() {
                 continue;
             }
@@ -4246,81 +4275,118 @@ impl ThreeLaneWorker {
                 // Get current time for runnable checks
                 let now = self.current_scheduler_time();
 
-                // Lock-free check: global injector and fast queue (no mutex needed).
-                if self.global.has_runnable_work(now) || !self.fast_queue.is_empty() {
+                // Lock-free check: ready/cancel queues and the fast queue are
+                // concrete runnable work. A merely-due timed entry is only a
+                // maybe-runnable signal; after `next_task()` found no task, it
+                // must consume the empty backoff budget instead of keeping the
+                // worker out of the park branch forever.
+                if !self.fast_queue.is_empty()
+                    || self.global.has_cancel_work()
+                    || self.global.has_ready_work()
+                {
                     break;
                 }
 
-                if backoff < SPIN_LIMIT {
-                    std::hint::spin_loop();
-                    backoff += 1;
-                } else if backoff < SPIN_LIMIT + YIELD_LIMIT {
-                    std::thread::yield_now();
-                    backoff += 1;
-                } else if self.enable_parking {
-                    // About to park: now check mutex-backed local queues.
-                    // Deferred from the spin/yield phases to avoid 160 mutex
-                    // round-trips per backoff cycle.
-                    let (local_has_runnable, local_deadline) = {
-                        let mut local = self.local.lock();
-                        (local.has_runnable_work(now), local.next_deadline())
-                    };
-                    let local_ready_has_work = !self.local_ready.lock().is_empty();
-                    if local_has_runnable || local_ready_has_work {
+                if self.global.has_runnable_work(now) {
+                    match self.advance_empty_backoff() {
+                        EmptyBackoffAction::Spin => {
+                            std::hint::spin_loop();
+                            break;
+                        }
+                        EmptyBackoffAction::Yield => {
+                            std::thread::yield_now();
+                            break;
+                        }
+                        EmptyBackoffAction::Park => {}
+                    }
+                }
+
+                match self.advance_empty_backoff() {
+                    EmptyBackoffAction::Spin => {
+                        std::hint::spin_loop();
+                    }
+                    EmptyBackoffAction::Yield => {
+                        std::thread::yield_now();
+                    }
+                    EmptyBackoffAction::Park if self.enable_parking => {
+                        // About to park: now check mutex-backed local queues.
+                        // Deferred from the spin/yield phases to avoid 160 mutex
+                        // round-trips per backoff cycle.
+                        let (local_has_runnable, local_deadline) = {
+                            let mut local = self.local.lock();
+                            (local.has_runnable_work(now), local.next_deadline())
+                        };
+                        let local_ready_has_work = !self.local_ready.lock().is_empty();
+                        if local_has_runnable || local_ready_has_work {
+                            break;
+                        }
+                        // Park with timeout based on next timer deadline.
+                        // If we are the IO leader, we shouldn't even be here (we'd block in epoll).
+                        // If we are a follower, we just park until a deadline or woken.
+                        let timer_deadline = self
+                            .timer_driver
+                            .as_ref()
+                            .and_then(TimerDriverHandle::next_deadline);
+                        let global_deadline = self.global.peek_earliest_deadline();
+                        record_backoff_deadline_selection(
+                            &mut self.preemption_metrics,
+                            io_phase,
+                            timer_deadline,
+                            global_deadline,
+                        );
+
+                        let next_deadline = select_backoff_deadline(
+                            io_phase,
+                            timer_deadline,
+                            local_deadline,
+                            global_deadline,
+                        );
+
+                        if let Some(next_deadline) = next_deadline {
+                            // Re-fetch now to ensure we don't sleep if deadline passed during logic
+                            let now = self.current_scheduler_time();
+                            match classify_backoff_timeout_decision(io_phase, next_deadline, now) {
+                                BackoffTimeoutDecision::ParkTimeout { nanos } => {
+                                    record_backoff_timeout_park(
+                                        &mut self.preemption_metrics,
+                                        io_phase,
+                                        nanos,
+                                    );
+                                    self.parker.park_timeout(Duration::from_nanos(nanos));
+                                }
+                                BackoffTimeoutDecision::DeadlineDue => {
+                                    // `next_task()` already failed to dispatch
+                                    // from this due signal. Treat it as a stale
+                                    // timed-deadline flicker after the bounded
+                                    // busy budget is exhausted, and enter the
+                                    // kernel instead of burning another full
+                                    // outer-loop spin/yield cycle.
+                                    record_backoff_timeout_park(
+                                        &mut self.preemption_metrics,
+                                        io_phase,
+                                        STALE_DUE_DEADLINE_PARK_NANOS,
+                                    );
+                                    self.parker.park_timeout(Duration::from_nanos(
+                                        STALE_DUE_DEADLINE_PARK_NANOS,
+                                    ));
+                                }
+                            }
+                        } else {
+                            // Followers park indefinitely.
+                            record_backoff_indefinite_park(&mut self.preemption_metrics, io_phase);
+                            self.parker.park();
+                        }
+                        // After waking, re-check queues by continuing the loop.
+                        // This fixes a lost-wakeup race where work arrives right as we park.
+                        // Reset backoff to spin briefly before parking again (spurious wakeups).
+                        self.reset_empty_backoff();
+                        // Continue loop to re-check condition (no break!)
+                    }
+                    EmptyBackoffAction::Park => {
+                        // Parking disabled; preserve the historical spin/yield cadence.
+                        self.reset_empty_backoff();
                         break;
                     }
-                    // Park with timeout based on next timer deadline.
-                    // If we are the IO leader, we shouldn't even be here (we'd block in epoll).
-                    // If we are a follower, we just park until a deadline or woken.
-                    let timer_deadline = self
-                        .timer_driver
-                        .as_ref()
-                        .and_then(TimerDriverHandle::next_deadline);
-                    let global_deadline = self.global.peek_earliest_deadline();
-                    record_backoff_deadline_selection(
-                        &mut self.preemption_metrics,
-                        io_phase,
-                        timer_deadline,
-                        global_deadline,
-                    );
-
-                    let next_deadline = select_backoff_deadline(
-                        io_phase,
-                        timer_deadline,
-                        local_deadline,
-                        global_deadline,
-                    );
-
-                    if let Some(next_deadline) = next_deadline {
-                        // Re-fetch now to ensure we don't sleep if deadline passed during logic
-                        let now = self.current_scheduler_time();
-                        match classify_backoff_timeout_decision(io_phase, next_deadline, now) {
-                            BackoffTimeoutDecision::ParkTimeout { nanos } => {
-                                record_backoff_timeout_park(
-                                    &mut self.preemption_metrics,
-                                    io_phase,
-                                    nanos,
-                                );
-                                self.parker.park_timeout(Duration::from_nanos(nanos));
-                            }
-                            BackoffTimeoutDecision::DeadlineDue => {
-                                // If deadline is due or passed, don't park - break to process timers/tasks.
-                                break;
-                            }
-                        }
-                    } else {
-                        // Followers park indefinitely.
-                        record_backoff_indefinite_park(&mut self.preemption_metrics, io_phase);
-                        self.parker.park();
-                    }
-                    // After waking, re-check queues by continuing the loop.
-                    // This fixes a lost-wakeup race where work arrives right as we park.
-                    // Reset backoff to spin briefly before parking again (spurious wakeups).
-                    backoff = 0;
-                    // Continue loop to re-check condition (no break!)
-                } else {
-                    // Parking disabled; return to outer loop to keep spinning/yielding.
-                    break;
                 }
             }
 
@@ -7045,6 +7111,47 @@ mod tests {
             selected, global_deadline,
             "leader/no-io path should continue using earliest deadline across all sources"
         );
+    }
+
+    #[test]
+    fn empty_backoff_persists_across_runnable_flicker_breaks() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        for step in 0..EMPTY_BACKOFF_PARK_THRESHOLD {
+            let action = worker.advance_empty_backoff();
+            assert_ne!(
+                action,
+                EmptyBackoffAction::Park,
+                "step {step} should spend the bounded spin/yield budget first"
+            );
+        }
+
+        assert_eq!(
+            worker.empty_backoff, EMPTY_BACKOFF_PARK_THRESHOLD,
+            "spurious outer-loop breaks must not reset the idle backoff budget"
+        );
+        assert_eq!(
+            worker.advance_empty_backoff(),
+            EmptyBackoffAction::Park,
+            "persistent empty backoff must reach parking after the bounded busy budget"
+        );
+    }
+
+    #[test]
+    fn empty_backoff_resets_after_real_progress() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        worker.empty_backoff = EMPTY_BACKOFF_PARK_THRESHOLD;
+        worker.reset_empty_backoff();
+
+        assert_eq!(worker.empty_backoff, 0);
+        assert_eq!(worker.advance_empty_backoff(), EmptyBackoffAction::Spin);
     }
 
     #[test]
