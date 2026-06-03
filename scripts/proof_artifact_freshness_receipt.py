@@ -34,6 +34,25 @@ RCH_LOCAL_FALLBACK_RE = re.compile(
     r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
 )
+FUZZ_ALL_BINS_CHECK_RE = re.compile(
+    r"\bcargo\s+check\b"
+    r"(?=[^\n]*?(?:^|\s)--bins(?:\s|$))"
+    r"(?=[^\n]*?(?:^|\s)--manifest-path(?:=|\s+)[\"']?(?:\./)?fuzz/cargo\.toml[\"']?(?:\s|$))",
+    re.IGNORECASE,
+)
+SUCCESS_ONLY_PROOF_RE = re.compile(
+    r"\bFinished\b|exit\s+(?:status|code):?\s*0|Process exited with code 0",
+    re.IGNORECASE,
+)
+SOURCE_FRESH_TARGET_DIR_VALUES = {
+    "cold",
+    "dedicated",
+    "empty-before-run",
+    "fresh",
+    "isolated",
+    "source-fresh",
+    "unique",
+}
 
 
 def utc_now() -> str:
@@ -161,6 +180,19 @@ def first_string_list(value: Any, paths: list[tuple[str, ...]]) -> list[str]:
     return []
 
 
+def first_bool(value: Any, paths: list[tuple[str, ...]]) -> bool | None:
+    for path in paths:
+        cursor = value
+        for key in path:
+            if not isinstance(cursor, dict) or key not in cursor:
+                cursor = None
+                break
+            cursor = cursor[key]
+        if isinstance(cursor, bool):
+            return cursor
+    return None
+
+
 def string_values(value: Any, paths: list[tuple[str, ...]]) -> list[str]:
     values = []
     for path in paths:
@@ -175,6 +207,88 @@ def string_values(value: Any, paths: list[tuple[str, ...]]) -> list[str]:
         elif isinstance(cursor, list):
             values.extend(item for item in cursor if isinstance(item, str) and item)
     return values
+
+
+def normalize_fuzz_extent(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "registered_targets": first_string_list(
+            raw,
+            [
+                ("registered_targets",),
+                ("expected_targets",),
+                ("fuzz_registered_targets",),
+                ("fuzz_extent", "registered_targets"),
+                ("fuzz_extent", "expected_targets"),
+                ("metadata", "fuzz_extent", "registered_targets"),
+            ],
+        ),
+        "compiled_targets": first_string_list(
+            raw,
+            [
+                ("compiled_targets",),
+                ("observed_compiled_targets",),
+                ("fuzz_compiled_targets",),
+                ("fuzz_extent", "compiled_targets"),
+                ("fuzz_extent", "observed_compiled_targets"),
+                ("metadata", "fuzz_extent", "compiled_targets"),
+            ],
+        ),
+        "source_fresh_targets": first_string_list(
+            raw,
+            [
+                ("source_fresh_targets",),
+                ("fresh_targets",),
+                ("fuzz_extent", "source_fresh_targets"),
+                ("metadata", "fuzz_extent", "source_fresh_targets"),
+            ],
+        ),
+        "command_fingerprint": first_string(
+            raw,
+            [
+                ("command_fingerprint",),
+                ("fuzz_extent", "command_fingerprint"),
+                ("metadata", "fuzz_extent", "command_fingerprint"),
+            ],
+        ),
+        "toolchain_fingerprint": first_string(
+            raw,
+            [
+                ("toolchain_fingerprint",),
+                ("fuzz_extent", "toolchain_fingerprint"),
+                ("metadata", "fuzz_extent", "toolchain_fingerprint"),
+            ],
+        ),
+        "target_dir_identity": first_string(
+            raw,
+            [
+                ("target_dir_identity",),
+                ("target_dir_fingerprint",),
+                ("fuzz_extent", "target_dir_identity"),
+                ("fuzz_extent", "target_dir_fingerprint"),
+                ("metadata", "fuzz_extent", "target_dir_identity"),
+            ],
+        ),
+        "target_dir_freshness": first_string(
+            raw,
+            [
+                ("target_dir_freshness",),
+                ("target_dir_provenance",),
+                ("fuzz_extent", "target_dir_freshness"),
+                ("fuzz_extent", "target_dir_provenance"),
+                ("metadata", "fuzz_extent", "target_dir_freshness"),
+            ],
+        ),
+        "cache_warmth_used_as_correctness_evidence": first_bool(
+            raw,
+            [
+                ("cache_warmth_is_correctness_evidence",),
+                ("cache_warmth_used_as_correctness_evidence",),
+                ("fuzz_extent", "cache_warmth_is_correctness_evidence"),
+                ("fuzz_extent", "cache_warmth_used_as_correctness_evidence"),
+                ("metadata", "fuzz_extent", "cache_warmth_used_as_correctness_evidence"),
+            ],
+        ),
+    }
 
 
 def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
@@ -279,6 +393,7 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
                 ("result", "stderr"),
             ],
         ),
+        "fuzz_extent": normalize_fuzz_extent(raw),
     }
 
 
@@ -365,6 +480,68 @@ def cargo_proof_command_defects(command: str) -> list[str]:
     return sorted(set(defects))
 
 
+def is_fuzz_all_bins_check(command: str) -> bool:
+    return bool(FUZZ_ALL_BINS_CHECK_RE.search(command.replace("\\", "/").lower()))
+
+
+def normalize_target_names(targets: list[str]) -> set[str]:
+    names = set()
+    for target in targets:
+        normalized = normalize_path(target)
+        if normalized.endswith(".rs"):
+            normalized = Path(normalized).stem
+        elif "/" in normalized:
+            normalized = normalized.rsplit("/", 1)[-1]
+        if normalized:
+            names.add(normalized)
+    return names
+
+
+def fuzz_extent_proof_findings(artifact: dict[str, Any]) -> dict[str, Any]:
+    if not is_fuzz_all_bins_check(artifact["command"]):
+        return {"defects": [], "missing_targets": []}
+
+    extent = artifact.get("fuzz_extent", {})
+    registered_targets = normalize_target_names(extent.get("registered_targets", []))
+    compiled_targets = normalize_target_names(extent.get("compiled_targets", []))
+    source_fresh_targets = normalize_target_names(extent.get("source_fresh_targets", []))
+    coverage_targets = source_fresh_targets or compiled_targets
+    target_dir_freshness = str(extent.get("target_dir_freshness", "")).lower()
+
+    defects = []
+    missing_targets: list[str] = []
+    if not registered_targets:
+        defects.append("missing-registered-targets")
+    if not coverage_targets:
+        defects.append("missing-source-fresh-target-coverage")
+    elif registered_targets:
+        missing_targets = sorted(registered_targets - coverage_targets)
+        if missing_targets:
+            defects.append("source-fresh-target-coverage-incomplete")
+
+    if not extent.get("command_fingerprint"):
+        defects.append("missing-command-fingerprint")
+    if not extent.get("toolchain_fingerprint"):
+        defects.append("missing-toolchain-fingerprint")
+    if not extent.get("target_dir_identity"):
+        defects.append("missing-target-dir-identity")
+    if not target_dir_freshness:
+        defects.append("missing-target-dir-freshness")
+    elif target_dir_freshness not in SOURCE_FRESH_TARGET_DIR_VALUES:
+        defects.append("target-dir-not-source-fresh")
+
+    if extent.get("cache_warmth_used_as_correctness_evidence") is True:
+        defects.append("cache-warmth-used-as-correctness-evidence")
+    if (
+        not registered_targets
+        and not coverage_targets
+        and any(SUCCESS_ONLY_PROOF_RE.search(text) for text in artifact.get("proof_text", []))
+    ):
+        defects.append("success-output-without-target-coverage")
+
+    return {"defects": sorted(set(defects)), "missing_targets": missing_targets}
+
+
 def proof_command_uses_bare_cargo(command: str) -> bool:
     return "bare-cargo" in cargo_proof_command_defects(command)
 
@@ -412,6 +589,7 @@ def classify_artifact(
     local_fallback_segments = rch_local_fallback_segments(
         [command, *artifact.get("proof_text", [])]
     )
+    fuzz_extent_findings = fuzz_extent_proof_findings(artifact)
 
     evidence = {
         "artifact_git_sha": git_sha,
@@ -428,6 +606,10 @@ def classify_artifact(
     if local_fallback_segments:
         evidence["rch_local_fallback"] = True
         evidence["rch_local_fallback_segments"] = local_fallback_segments
+    if is_fuzz_all_bins_check(command):
+        evidence["fuzz_extent_proof_reasons"] = fuzz_extent_findings["defects"]
+        evidence["fuzz_extent_missing_targets"] = fuzz_extent_findings["missing_targets"]
+        evidence["fuzz_extent"] = artifact.get("fuzz_extent", {})
 
     if not git_sha or not current_head:
         classification = "unverifiable-head"
@@ -457,6 +639,10 @@ def classify_artifact(
         classification = "rch-local-fallback-proof"
         decision = "rerun-required"
         reason = "artifact proof evidence reports rch local fallback"
+    elif fuzz_extent_findings["defects"]:
+        classification = "unverifiable-fuzz-extent-proof"
+        decision = "rerun-required"
+        reason = "artifact does not prove source-fresh coverage for fuzz all-bins"
     elif overlaps:
         classification = "dirty-surface-overlap"
         decision = "rerun-required"
@@ -512,6 +698,15 @@ def remediation_for(classification: str, command: str) -> dict[str, Any]:
             "next_steps": [
                 "rerun the proof remotely and require an [RCH] remote summary",
                 "replace the artifact output before citing it",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "unverifiable-fuzz-extent-proof":
+        return {
+            "operator_note": "Do not cite fuzz all-bins output without source-fresh target coverage.",
+            "next_steps": [
+                "rerun the fuzz all-bins proof with a unique target directory",
+                "emit registered targets, source-fresh compiled targets, toolchain identity, and target-dir identity",
             ],
             "rerun_command": command,
         }

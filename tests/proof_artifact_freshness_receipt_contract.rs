@@ -320,6 +320,85 @@ fn rch_exec_cargo_without_env_target_dir_requires_rerun() {
 }
 
 #[test]
+fn fuzz_extent_warm_cache_only_requires_source_fresh_target_coverage() {
+    let receipt = receipt_json("fuzz_extent_warm_cache_only.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("unverifiable-fuzz-extent-proof")
+    );
+    assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+    assert_eq!(row["safe_to_cite"].as_bool(), Some(false));
+    let reasons = row["evidence"]["fuzz_extent_proof_reasons"]
+        .as_array()
+        .expect("fuzz extent reasons must be present");
+    for expected in [
+        "cache-warmth-used-as-correctness-evidence",
+        "missing-command-fingerprint",
+        "missing-registered-targets",
+        "missing-source-fresh-target-coverage",
+        "missing-target-dir-identity",
+        "missing-toolchain-fingerprint",
+        "success-output-without-target-coverage",
+        "target-dir-not-source-fresh",
+    ] {
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.as_str() == Some(expected)),
+            "missing fuzz extent proof reason: {expected}"
+        );
+    }
+    assert_eq!(receipt["summary"]["rerun_required"].as_u64(), Some(1));
+}
+
+#[test]
+fn fuzz_extent_missing_registered_target_requires_rerun() {
+    let receipt = receipt_json("fuzz_extent_missing_target.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("unverifiable-fuzz-extent-proof")
+    );
+    assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+    let reasons = row["evidence"]["fuzz_extent_proof_reasons"]
+        .as_array()
+        .expect("fuzz extent reasons must be present");
+    assert!(
+        reasons
+            .iter()
+            .any(|reason| reason.as_str() == Some("source-fresh-target-coverage-incomplete"))
+    );
+    assert_eq!(
+        row["evidence"]["fuzz_extent_missing_targets"][0].as_str(),
+        Some("dns_message_decoder")
+    );
+}
+
+#[test]
+fn fuzz_extent_source_fresh_receipt_is_citeable() {
+    let receipt = receipt_json("fuzz_extent_source_fresh.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(row["classification"].as_str(), Some("current-clean"));
+    assert_eq!(row["decision"].as_str(), Some("cite-as-current"));
+    assert_eq!(row["safe_to_cite"].as_bool(), Some(true));
+    assert_eq!(
+        row["evidence"]["fuzz_extent"]["target_dir_freshness"].as_str(),
+        Some("unique")
+    );
+    assert_eq!(
+        row["evidence"]["fuzz_extent"]["registered_targets"]
+            .as_array()
+            .expect("registered targets")
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn missing_target_dir_command_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "missing_target_dir_command.json",
