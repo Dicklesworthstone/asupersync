@@ -77,6 +77,10 @@ enum FailureKind {
     SourceEsiOutOfRange,
     InvalidSourceSymbolEquation,
     CorruptDecodedOutput,
+    /// br-asupersync-ju2k01 amplification-DoS budget guard (added in 4463a9682).
+    ComputeBudgetExhausted,
+    /// br-asupersync-ju2k01 per-object ESI rate limit (added in 4463a9682).
+    EsiRateLimitExceeded,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -397,6 +401,8 @@ fn failure_kind(error: &DecodeError) -> FailureKind {
         DecodeError::SourceEsiOutOfRange { .. } => FailureKind::SourceEsiOutOfRange,
         DecodeError::InvalidSourceSymbolEquation { .. } => FailureKind::InvalidSourceSymbolEquation,
         DecodeError::CorruptDecodedOutput { .. } => FailureKind::CorruptDecodedOutput,
+        DecodeError::ComputeBudgetExhausted { .. } => FailureKind::ComputeBudgetExhausted,
+        DecodeError::EsiRateLimitExceeded { .. } => FailureKind::EsiRateLimitExceeded,
     }
 }
 
