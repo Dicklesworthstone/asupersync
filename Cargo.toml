@@ -33,7 +33,7 @@ include = [
 ]
 
 [features]
-default = ["test-internals", "proc-macros"]
+default = ["proc-macros"]
 # Reserve a dedicated feature name for the native FABRIC lane. The actual
 # module wiring still lives in `src/messaging/mod.rs` and is not fully gated
 # yet.

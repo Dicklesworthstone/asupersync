@@ -217,7 +217,7 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 
 ```toml
 [features]
-default = ["test-internals", "proc-macros"]
+default = ["proc-macros"]
 messaging-fabric = []          # Native FABRIC messaging lane
 wasm-browser-preview = []      # Guarded browser-targeted compilation surface
 wasm-runtime = ["wasm-browser-preview"]
@@ -229,7 +229,7 @@ wasm-browser-dev = ["wasm-runtime", "browser-io"]
 wasm-browser-prod = ["wasm-runtime", "browser-io"]
 wasm-browser-deterministic = ["wasm-runtime", "deterministic-mode", "browser-trace"]
 wasm-browser-minimal = ["wasm-runtime"]
-test-internals = [...]         # Internal test helpers (Cx::new(), etc.) — NOT for production
+test-internals = [...]         # Opt-in internal test helpers (Cx::new(), etc.) — NOT for production
 metrics = [...]                # OpenTelemetry metrics provider
 tracing-integration = [...]    # Structured logging and spans (zero-cost when disabled)
 proc-macros = [...]            # scope!, spawn!, join!, race! macros
@@ -343,13 +343,13 @@ Prefer deterministic lab-runtime tests for concurrency-sensitive behavior.
 
 ```bash
 # Run all tests
-rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all" cargo test
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all" cargo test --features test-internals
 
 # Run with output
-rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all_nocapture" cargo test -- --nocapture
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all_nocapture" cargo test --features test-internals -- --nocapture
 
 # Run tests for a specific module
-rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_module" cargo test --lib <module_name>
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_module" cargo test --lib --features test-internals <module_name>
 
 # Run tests for a workspace member
 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_asupersync_macros" cargo test -p asupersync-macros
@@ -852,7 +852,7 @@ Every manual Cargo invocation must pass an explicit target directory through `rc
 To manually offload a build:
 ```bash
 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_build_release" cargo build --release
-rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all" cargo test
+rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_test_all" cargo test --features test-internals
 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_clippy" cargo clippy
 ```
 

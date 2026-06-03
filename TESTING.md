@@ -1075,6 +1075,10 @@ CI should run at minimum:
 - `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_clippy cargo clippy --all-targets -- -D warnings`
 - `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_tests cargo test --lib --features test-internals`
 
+`test-internals` is deliberately not part of the default production feature
+set. Any test lane that needs private helpers such as `Cx::new()` must pass
+`--features test-internals` explicitly.
+
 CI also includes scheduled fuzzing via `.github/workflows/fuzz.yml`,
 property tests via `.github/workflows/property-tests.yml`, and
 Phase 6 E2E suites via the `phase6-e2e` job in `.github/workflows/ci.yml`.

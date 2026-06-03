@@ -1012,9 +1012,10 @@ async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
 }
 ```
 
-These macros are available in the default feature set. If you opt out of
-default features for a minimal core-only build, re-enable `proc-macros`
-explicitly.
+These macros are available in the default feature set. The default production
+feature set is intentionally limited to `proc-macros`; test-only internals are
+opt-in. If you opt out of default features for a minimal core-only build,
+re-enable `proc-macros` explicitly.
 
 Current contract:
 
@@ -1249,7 +1250,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `test-internals` | Expose test-only helpers (not for production) | Yes |
+| `test-internals` | Expose test-only helpers (not for production) | No |
 | `metrics` | OpenTelemetry metrics provider (Tokio-free normal graph; OTLP protobuf helpers are fuzz/test-only) | No |
 | `tracing-integration` | Tracing spans/logging integration | No |
 | `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!` proc macros | Yes |

@@ -17,7 +17,7 @@
 - [ ] Code compiles without errors (`cargo check --all-targets`)
 - [ ] Clippy passes (`cargo clippy --all-targets -- -D warnings`)
 - [ ] Formatting verified (`cargo fmt --check`)
-- [ ] Tests pass (`cargo test`)
+- [ ] Tests pass (`cargo test --features test-internals` when exercising internal test helpers)
 - [ ] Documentation updated (if applicable)
 - [ ] Bead references included for any scope change (`bd-...` / `asupersync-...`)
 
