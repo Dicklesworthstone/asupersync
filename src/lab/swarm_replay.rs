@@ -1955,6 +1955,105 @@ pub enum SwarmProofLaneFallbackPolicy {
     ReportOnly,
 }
 
+/// Atlas-aware admission outcome for a proof lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmProofLaneAdmissionDecision {
+    /// Inputs are fresh and the lane may run immediately.
+    Admit,
+    /// Inputs are valid, but resource pressure says to wait.
+    Defer,
+    /// Inputs are valid, but proof evidence must be discarded or refused.
+    Reject,
+    /// Compatible lane should be grouped with a batch on a large host.
+    Batch,
+    /// Coordination state blocks the lane until handoff.
+    Blocked,
+    /// Evidence is stale or incomplete and needs a narrow refresh.
+    StaleEvidence,
+    /// Required structured inputs are malformed.
+    Malformed,
+    /// Spectral evidence is advisory and needs a witness before deadlock claims.
+    AdvisorySpectralWarning,
+    /// A validated trapped-cycle witness permits the proven label.
+    TrappedCycleProven,
+}
+
+/// Target-directory isolation evidence surfaced by atlas-aware planning.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmProofLaneTargetDirIsolationStatus {
+    /// The lane declares and publishes an isolated target directory.
+    #[default]
+    Isolated,
+    /// The lane omitted a target directory.
+    Missing,
+    /// The published command does not expose the declared target directory.
+    NotInCommand,
+    /// Remote provenance observed a different target directory.
+    ProvenanceMismatch,
+}
+
+/// Peer reservation overlap evidence surfaced by atlas-aware planning.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmProofLanePeerReservationOverlapStatus {
+    /// No overlapping peer reservation blocks this lane.
+    #[default]
+    Clear,
+    /// A peer owns a related reservation and handoff is needed.
+    PeerOverlap,
+    /// An active exclusive peer reservation blocks this lane.
+    ActiveExclusiveConflict,
+    /// Reservation evidence is stale or malformed.
+    StaleOrMalformed,
+}
+
+/// Trapped-cycle witness evidence surfaced by atlas-aware planning.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmProofLaneTrappedCycleWitnessStatus {
+    /// This lane does not need trapped-cycle evidence.
+    #[default]
+    NotRequired,
+    /// Spectral evidence says a witness is required but none is validated.
+    RequiredMissing,
+    /// A witness exists but still needs replay validation.
+    ReplayPending,
+    /// Witness evidence is malformed.
+    Malformed,
+    /// A witness row is validated but does not prove a deadlock label.
+    Validated,
+    /// A validated witness row proves the trapped-cycle/deadlock label.
+    Proven,
+}
+
+/// Read-only atlas context consumed by the proof-lane planner.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SwarmProofLaneAtlasAdmissionContext {
+    /// Source atlas rows used for this decision receipt.
+    pub source_rows: Vec<String>,
+    /// Atlas reason codes copied into the final receipt.
+    pub reason_codes: Vec<String>,
+    /// Large-host worker saturation label, if supplied by the atlas.
+    pub worker_saturation: Option<String>,
+    /// Large-host batching recommendation, if supplied by the atlas.
+    pub batching_decision: Option<String>,
+    /// Reservation overlap state from Agent Mail inputs.
+    pub peer_reservation_overlap_status: SwarmProofLanePeerReservationOverlapStatus,
+    /// Target-dir isolation state from atlas inputs, if fresher than command parsing.
+    pub target_dir_isolation_status: Option<SwarmProofLaneTargetDirIsolationStatus>,
+    /// Trapped-cycle witness state from atlas inputs.
+    pub trapped_cycle_witness_status: SwarmProofLaneTrappedCycleWitnessStatus,
+    /// Whether any source row is stale or missing.
+    pub stale_evidence: bool,
+    /// Whether any source row is malformed.
+    pub malformed: bool,
+    /// Whether spectral evidence is advisory and not deadlock-proof.
+    pub spectral_warning_advisory: bool,
+}
+
 /// Planner decision for a proof lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2031,6 +2130,9 @@ pub struct SwarmProofLaneRequest {
     pub covers: Vec<String>,
     /// Claims this lane explicitly does not prove.
     pub does_not_cover: Vec<String>,
+    /// Optional read-only atlas context for admission-aware planning.
+    #[serde(default)]
+    pub atlas_context: Option<SwarmProofLaneAtlasAdmissionContext>,
 }
 
 /// One proof-lane planner finding.
@@ -2071,6 +2173,8 @@ pub struct SwarmProofLanePlan {
     pub fallback_policy: SwarmProofLaneFallbackPolicy,
     /// Planner decision after fail-closed validation.
     pub decision: SwarmProofLaneDecision,
+    /// Atlas-aware admission outcome.
+    pub admission_decision: SwarmProofLaneAdmissionDecision,
     /// Stable key for batching compatible proof lanes.
     pub batch_key: String,
     /// Stable cache key carrying command, target, feature, artifact, and head inputs.
@@ -2085,6 +2189,16 @@ pub struct SwarmProofLanePlan {
     pub remote_provenance_required: bool,
     /// Whether remote provenance was observed.
     pub remote_provenance_observed: bool,
+    /// Source rows consumed by the admission receipt.
+    pub source_rows: Vec<String>,
+    /// Machine-readable reasons that explain the admission decision.
+    pub reason_codes: Vec<String>,
+    /// Target-dir isolation status included in the receipt.
+    pub target_dir_isolation_status: SwarmProofLaneTargetDirIsolationStatus,
+    /// Peer reservation overlap status included in the receipt.
+    pub peer_reservation_overlap_status: SwarmProofLanePeerReservationOverlapStatus,
+    /// Trapped-cycle witness status included in the receipt.
+    pub trapped_cycle_witness_status: SwarmProofLaneTrappedCycleWitnessStatus,
     /// Claims this lane is allowed to prove.
     pub covers: Vec<String>,
     /// Claims this lane explicitly does not prove.
@@ -2577,6 +2691,33 @@ pub fn plan_swarm_proof_lane(request: &SwarmProofLaneRequest) -> SwarmProofLaneP
         }
     }
 
+    let target_dir_isolation_status = proof_lane_target_dir_isolation_status(request);
+    let peer_reservation_overlap_status = request.atlas_context.as_ref().map_or(
+        SwarmProofLanePeerReservationOverlapStatus::Clear,
+        |context| context.peer_reservation_overlap_status,
+    );
+    let trapped_cycle_witness_status = request.atlas_context.as_ref().map_or(
+        SwarmProofLaneTrappedCycleWitnessStatus::NotRequired,
+        |context| context.trapped_cycle_witness_status,
+    );
+    let source_rows = proof_lane_source_rows(request);
+    let reason_codes = proof_lane_reason_codes(
+        request,
+        fallback_policy,
+        target_dir_isolation_status,
+        peer_reservation_overlap_status,
+        trapped_cycle_witness_status,
+        &findings,
+    );
+    let admission_decision = proof_lane_admission_decision(
+        request,
+        stale_head,
+        target_dir_isolation_status,
+        peer_reservation_overlap_status,
+        trapped_cycle_witness_status,
+        &findings,
+    );
+
     let mut plan = SwarmProofLanePlan {
         schema_version: SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION.to_string(),
         lane_id: request.lane_id.clone(),
@@ -2589,6 +2730,7 @@ pub fn plan_swarm_proof_lane(request: &SwarmProofLaneRequest) -> SwarmProofLaneP
         remote_required: request.remote_required,
         fallback_policy,
         decision,
+        admission_decision,
         batch_key: proof_lane_batch_key(request),
         cache_key_fingerprint: proof_lane_cache_key(request),
         stale_head,
@@ -2596,6 +2738,11 @@ pub fn plan_swarm_proof_lane(request: &SwarmProofLaneRequest) -> SwarmProofLaneP
         local_fallback_marker_detected,
         remote_provenance_required,
         remote_provenance_observed,
+        source_rows,
+        reason_codes,
+        target_dir_isolation_status,
+        peer_reservation_overlap_status,
+        trapped_cycle_witness_status,
         covers,
         does_not_cover,
         findings,
@@ -2625,12 +2772,27 @@ pub fn render_swarm_proof_lane_agent_mail_summary(plan: &SwarmProofLanePlan) -> 
         format!("schema_version: {}", plan.schema_version),
         format!("scenario: {}", plan.scenario_id),
         format!("decision: {:?}", plan.decision),
+        format!("admission_decision: {:?}", plan.admission_decision),
         format!(
             "remote_required={} remote_observed={} fallback={:?}",
             plan.remote_required, plan.remote_provenance_observed, plan.fallback_policy
         ),
         format!("target_dir: {}", plan.target_dir),
+        format!(
+            "target_dir_isolation: {:?}",
+            plan.target_dir_isolation_status
+        ),
+        format!(
+            "peer_reservation_overlap: {:?}",
+            plan.peer_reservation_overlap_status
+        ),
+        format!(
+            "trapped_cycle_witness: {:?}",
+            plan.trapped_cycle_witness_status
+        ),
         format!("features: {}", plan.features.join(",")),
+        format!("source_rows: {}", plan.source_rows.join(",")),
+        format!("reason_codes: {}", plan.reason_codes.join(",")),
         format!("covers: {}", plan.covers.join(",")),
         format!("does_not_cover: {}", plan.does_not_cover.join(",")),
         format!("findings: {finding_codes}"),
@@ -7893,6 +8055,265 @@ fn proof_lane_has_feature_scope(request: &SwarmProofLaneRequest) -> bool {
 
 fn proof_lane_command_requires_remote(command: &str) -> bool {
     command.contains("RCH_REQUIRE_REMOTE=1") && command.contains("rch exec")
+}
+
+fn proof_lane_target_dir_isolation_status(
+    request: &SwarmProofLaneRequest,
+) -> SwarmProofLaneTargetDirIsolationStatus {
+    if let Some(status) = request
+        .atlas_context
+        .as_ref()
+        .and_then(|context| context.target_dir_isolation_status)
+    {
+        return status;
+    }
+
+    if request.target_dir.trim().is_empty() {
+        return SwarmProofLaneTargetDirIsolationStatus::Missing;
+    }
+    if request.rch_provenance.as_ref().is_some_and(|provenance| {
+        !provenance.target_dir.trim().is_empty() && provenance.target_dir != request.target_dir
+    }) {
+        return SwarmProofLaneTargetDirIsolationStatus::ProvenanceMismatch;
+    }
+    if request.command.contains(&request.target_dir) || request.command.contains("CARGO_TARGET_DIR")
+    {
+        SwarmProofLaneTargetDirIsolationStatus::Isolated
+    } else {
+        SwarmProofLaneTargetDirIsolationStatus::NotInCommand
+    }
+}
+
+fn proof_lane_source_rows(request: &SwarmProofLaneRequest) -> Vec<String> {
+    let mut rows = request.source_artifacts.clone();
+    if let Some(context) = &request.atlas_context {
+        rows.extend(context.source_rows.clone());
+    }
+    sorted_unique_owned(rows)
+}
+
+fn proof_lane_reason_codes(
+    request: &SwarmProofLaneRequest,
+    fallback_policy: SwarmProofLaneFallbackPolicy,
+    target_dir_status: SwarmProofLaneTargetDirIsolationStatus,
+    peer_reservation_status: SwarmProofLanePeerReservationOverlapStatus,
+    trapped_cycle_witness_status: SwarmProofLaneTrappedCycleWitnessStatus,
+    findings: &[SwarmProofLaneFinding],
+) -> Vec<String> {
+    let mut codes = Vec::new();
+    if let Some(context) = &request.atlas_context {
+        codes.extend(context.reason_codes.clone());
+        if context.stale_evidence {
+            codes.push("atlas_stale_evidence".to_string());
+        }
+        if context.malformed {
+            codes.push("atlas_malformed_input".to_string());
+        }
+        if context.spectral_warning_advisory {
+            codes.push("advisory_spectral_warning".to_string());
+        }
+        if let Some(saturation) = &context.worker_saturation {
+            codes.push(format!("worker_saturation_{saturation}"));
+        }
+        if let Some(decision) = &context.batching_decision {
+            codes.push(format!("batching_decision_{decision}"));
+        }
+    }
+
+    codes.extend(findings.iter().map(|finding| finding.code.clone()));
+    if request.remote_required {
+        codes.push("remote_required_policy".to_string());
+    }
+    codes.push(format!(
+        "fallback_policy_{}",
+        proof_lane_fallback_policy_code(fallback_policy)
+    ));
+    codes.push(format!(
+        "target_dir_{}",
+        proof_lane_target_dir_status_code(target_dir_status)
+    ));
+    codes.push(format!(
+        "peer_reservation_{}",
+        proof_lane_peer_reservation_status_code(peer_reservation_status)
+    ));
+    codes.push(format!(
+        "trapped_cycle_witness_{}",
+        proof_lane_trapped_cycle_witness_status_code(trapped_cycle_witness_status)
+    ));
+    sorted_unique_owned(codes)
+}
+
+fn proof_lane_admission_decision(
+    request: &SwarmProofLaneRequest,
+    stale_head: bool,
+    target_dir_status: SwarmProofLaneTargetDirIsolationStatus,
+    peer_reservation_status: SwarmProofLanePeerReservationOverlapStatus,
+    trapped_cycle_witness_status: SwarmProofLaneTrappedCycleWitnessStatus,
+    findings: &[SwarmProofLaneFinding],
+) -> SwarmProofLaneAdmissionDecision {
+    let context = request.atlas_context.as_ref();
+    if context.is_some_and(|context| context.malformed)
+        || matches!(
+            trapped_cycle_witness_status,
+            SwarmProofLaneTrappedCycleWitnessStatus::Malformed
+        )
+        || proof_lane_has_any_finding(
+            findings,
+            &[
+                "missing_lane_id",
+                "missing_scenario_id",
+                "missing_command",
+                "missing_expected_artifact",
+                "missing_claim_scope",
+            ],
+        )
+    {
+        return SwarmProofLaneAdmissionDecision::Malformed;
+    }
+
+    if matches!(
+        peer_reservation_status,
+        SwarmProofLanePeerReservationOverlapStatus::PeerOverlap
+            | SwarmProofLanePeerReservationOverlapStatus::ActiveExclusiveConflict
+    ) {
+        return SwarmProofLaneAdmissionDecision::Blocked;
+    }
+
+    if stale_head
+        || context.is_some_and(|context| context.stale_evidence)
+        || matches!(
+            target_dir_status,
+            SwarmProofLaneTargetDirIsolationStatus::Missing
+                | SwarmProofLaneTargetDirIsolationStatus::NotInCommand
+                | SwarmProofLaneTargetDirIsolationStatus::ProvenanceMismatch
+        )
+        || matches!(
+            peer_reservation_status,
+            SwarmProofLanePeerReservationOverlapStatus::StaleOrMalformed
+        )
+        || matches!(
+            trapped_cycle_witness_status,
+            SwarmProofLaneTrappedCycleWitnessStatus::ReplayPending
+        )
+    {
+        return SwarmProofLaneAdmissionDecision::StaleEvidence;
+    }
+
+    if proof_lane_has_any_finding(
+        findings,
+        &[
+            "missing_remote_requirement",
+            "missing_rch_provenance",
+            "local_fallback_marker",
+            "proof_not_green",
+            "missing_feature_scope",
+        ],
+    ) {
+        return SwarmProofLaneAdmissionDecision::Reject;
+    }
+
+    if matches!(
+        trapped_cycle_witness_status,
+        SwarmProofLaneTrappedCycleWitnessStatus::Proven
+    ) {
+        return SwarmProofLaneAdmissionDecision::TrappedCycleProven;
+    }
+
+    if context.is_some_and(|context| context.spectral_warning_advisory)
+        || matches!(
+            trapped_cycle_witness_status,
+            SwarmProofLaneTrappedCycleWitnessStatus::RequiredMissing
+        )
+    {
+        return SwarmProofLaneAdmissionDecision::AdvisorySpectralWarning;
+    }
+
+    if context.is_some_and(proof_lane_context_prefers_batch) {
+        return SwarmProofLaneAdmissionDecision::Batch;
+    }
+    if context.is_some_and(proof_lane_context_defers) {
+        return SwarmProofLaneAdmissionDecision::Defer;
+    }
+
+    SwarmProofLaneAdmissionDecision::Admit
+}
+
+fn proof_lane_context_prefers_batch(context: &SwarmProofLaneAtlasAdmissionContext) -> bool {
+    context
+        .batching_decision
+        .as_ref()
+        .is_some_and(|decision| matches!(decision.as_str(), "prefer_warm_worker" | "admit_batch"))
+}
+
+fn proof_lane_context_defers(context: &SwarmProofLaneAtlasAdmissionContext) -> bool {
+    context.batching_decision.as_ref().is_some_and(|decision| {
+        matches!(
+            decision.as_str(),
+            "queue_low_memory"
+                | "defer_worker_saturated"
+                | "queue_disk_headroom"
+                | "defer_non_large_host"
+        )
+    }) || context
+        .worker_saturation
+        .as_ref()
+        .is_some_and(|saturation| {
+            matches!(
+                saturation.as_str(),
+                "low_memory" | "worker_saturated" | "disk_constrained" | "non_large_host"
+            )
+        })
+}
+
+fn proof_lane_has_any_finding(findings: &[SwarmProofLaneFinding], codes: &[&str]) -> bool {
+    findings
+        .iter()
+        .any(|finding| codes.contains(&finding.code.as_str()))
+}
+
+const fn proof_lane_fallback_policy_code(policy: SwarmProofLaneFallbackPolicy) -> &'static str {
+    match policy {
+        SwarmProofLaneFallbackPolicy::RemoteOnly => "remote_only",
+        SwarmProofLaneFallbackPolicy::LocalAuthorized => "local_authorized",
+        SwarmProofLaneFallbackPolicy::ReportOnly => "report_only",
+    }
+}
+
+const fn proof_lane_target_dir_status_code(
+    status: SwarmProofLaneTargetDirIsolationStatus,
+) -> &'static str {
+    match status {
+        SwarmProofLaneTargetDirIsolationStatus::Isolated => "isolated",
+        SwarmProofLaneTargetDirIsolationStatus::Missing => "missing",
+        SwarmProofLaneTargetDirIsolationStatus::NotInCommand => "not_in_command",
+        SwarmProofLaneTargetDirIsolationStatus::ProvenanceMismatch => "provenance_mismatch",
+    }
+}
+
+const fn proof_lane_peer_reservation_status_code(
+    status: SwarmProofLanePeerReservationOverlapStatus,
+) -> &'static str {
+    match status {
+        SwarmProofLanePeerReservationOverlapStatus::Clear => "clear",
+        SwarmProofLanePeerReservationOverlapStatus::PeerOverlap => "peer_overlap",
+        SwarmProofLanePeerReservationOverlapStatus::ActiveExclusiveConflict => {
+            "active_exclusive_conflict"
+        }
+        SwarmProofLanePeerReservationOverlapStatus::StaleOrMalformed => "stale_or_malformed",
+    }
+}
+
+const fn proof_lane_trapped_cycle_witness_status_code(
+    status: SwarmProofLaneTrappedCycleWitnessStatus,
+) -> &'static str {
+    match status {
+        SwarmProofLaneTrappedCycleWitnessStatus::NotRequired => "not_required",
+        SwarmProofLaneTrappedCycleWitnessStatus::RequiredMissing => "required_missing",
+        SwarmProofLaneTrappedCycleWitnessStatus::ReplayPending => "replay_pending",
+        SwarmProofLaneTrappedCycleWitnessStatus::Malformed => "malformed",
+        SwarmProofLaneTrappedCycleWitnessStatus::Validated => "validated",
+        SwarmProofLaneTrappedCycleWitnessStatus::Proven => "proven",
+    }
 }
 
 fn add_proof_lane_finding(

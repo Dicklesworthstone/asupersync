@@ -186,6 +186,7 @@ fn ready_proof_plan(scenario_id: &str) -> asupersync::lab::SwarmProofLanePlan {
             "workspace_release_health".to_string(),
             "broad_conformance".to_string(),
         ],
+        atlas_context: None,
     };
     plan_swarm_proof_lane(&request)
 }

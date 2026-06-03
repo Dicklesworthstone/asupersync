@@ -196,6 +196,7 @@ fn proof_plan(
             "workspace_release_health".to_string(),
             "broad_conformance".to_string(),
         ],
+        atlas_context: None,
     };
     plan_swarm_proof_lane(&request)
 }

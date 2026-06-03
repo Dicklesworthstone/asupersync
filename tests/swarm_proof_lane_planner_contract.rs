@@ -1,9 +1,11 @@
 #![allow(missing_docs)]
 
 use asupersync::lab::{
-    SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION, SwarmProofLaneDecision, SwarmProofLaneFallbackPolicy,
-    SwarmProofLanePlan, SwarmProofLaneRequest, plan_swarm_proof_lane,
-    render_swarm_proof_lane_agent_mail_summary,
+    SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION, SwarmProofLaneAdmissionDecision,
+    SwarmProofLaneAtlasAdmissionContext, SwarmProofLaneDecision, SwarmProofLaneFallbackPolicy,
+    SwarmProofLanePeerReservationOverlapStatus, SwarmProofLanePlan, SwarmProofLaneRequest,
+    SwarmProofLaneTargetDirIsolationStatus, SwarmProofLaneTrappedCycleWitnessStatus,
+    plan_swarm_proof_lane, render_swarm_proof_lane_agent_mail_summary,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,6 +73,29 @@ fn finding_codes(plan: &SwarmProofLanePlan) -> BTreeSet<String> {
         .collect()
 }
 
+fn base_focused_request(contract: &Value) -> SwarmProofLaneRequest {
+    let rows = lane_rows(contract);
+    parse_request(
+        rows.get("swarm-workload-corpus-focused")
+            .expect("focused lane fixture"),
+    )
+}
+
+fn atlas_context(
+    mut configure: impl FnMut(&mut SwarmProofLaneAtlasAdmissionContext),
+) -> SwarmProofLaneAtlasAdmissionContext {
+    let mut context = SwarmProofLaneAtlasAdmissionContext {
+        source_rows: vec![
+            "rch_proof_lane_admission:swarm-workload-corpus-focused".to_string(),
+            "large_host_worker_warmth:rch-worker-fixture-01".to_string(),
+        ],
+        reason_codes: vec!["atlas_fixture".to_string()],
+        ..SwarmProofLaneAtlasAdmissionContext::default()
+    };
+    configure(&mut context);
+    context
+}
+
 #[test]
 fn artifact_declares_source_schema_and_planner_boundary() {
     let contract = contract();
@@ -78,7 +103,7 @@ fn artifact_declares_source_schema_and_planner_boundary() {
         contract["contract_version"].as_str(),
         Some("swarm-proof-lane-planner-v1")
     );
-    assert_eq!(contract["bead_id"].as_str(), Some("asupersync-vssefs.9.2"));
+    assert_eq!(contract["bead_id"].as_str(), Some("asupersync-bt63nr.4"));
     assert_eq!(
         contract["schema_version"].as_str(),
         Some(SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION)
@@ -123,6 +148,10 @@ fn focused_scenario_fixture_maps_to_remote_only_proof_lane() {
     assert_eq!(plan.scenario_id, "swarm-minimal-healthy-run");
     assert_eq!(plan.decision, SwarmProofLaneDecision::Ready);
     assert_eq!(
+        plan.admission_decision,
+        SwarmProofLaneAdmissionDecision::Admit
+    );
+    assert_eq!(
         plan.fallback_policy,
         SwarmProofLaneFallbackPolicy::RemoteOnly
     );
@@ -132,6 +161,26 @@ fn focused_scenario_fixture_maps_to_remote_only_proof_lane() {
     assert!(!plan.local_fallback_marker_detected);
     assert!(!plan.stale_head);
     assert!(!plan.missing_target_dir);
+    assert_eq!(
+        plan.target_dir_isolation_status,
+        SwarmProofLaneTargetDirIsolationStatus::Isolated
+    );
+    assert_eq!(
+        plan.peer_reservation_overlap_status,
+        SwarmProofLanePeerReservationOverlapStatus::Clear
+    );
+    assert_eq!(
+        plan.trapped_cycle_witness_status,
+        SwarmProofLaneTrappedCycleWitnessStatus::NotRequired
+    );
+    assert!(
+        plan.reason_codes
+            .contains(&"remote_required_policy".to_string())
+    );
+    assert!(
+        plan.source_rows
+            .contains(&"src/lab/swarm_replay.rs".to_string())
+    );
     assert_eq!(plan.features, vec!["test-internals"]);
     assert!(
         plan.command.contains("RCH_REQUIRE_REMOTE=1 rch exec --"),
@@ -161,6 +210,10 @@ fn focused_scenario_fixture_maps_to_remote_only_proof_lane() {
     for expected in [
         "proof_lane: swarm-workload-corpus-focused",
         "remote_required=true remote_observed=true",
+        "admission_decision: Admit",
+        "target_dir_isolation: Isolated",
+        "peer_reservation_overlap: Clear",
+        "trapped_cycle_witness: NotRequired",
         "does_not_cover: broad_conformance,workspace_release_health",
         "command: RCH_REQUIRE_REMOTE=1 rch exec --",
     ] {
@@ -175,6 +228,137 @@ fn focused_scenario_fixture_maps_to_remote_only_proof_lane() {
         serde_json::from_str(&serde_json::to_string(&plan).expect("render plan"))
             .expect("parse rendered plan");
     assert_eq!(roundtrip, plan);
+}
+
+#[test]
+fn atlas_aware_admission_outcomes_have_complete_receipts() {
+    let contract = contract();
+    let base = base_focused_request(&contract);
+    let mut fixtures = Vec::new();
+
+    fixtures.push((SwarmProofLaneAdmissionDecision::Admit, base.clone()));
+
+    let mut defer = base.clone();
+    defer.atlas_context = Some(atlas_context(|context| {
+        context.worker_saturation = Some("worker_saturated".to_string());
+        context.batching_decision = Some("defer_worker_saturated".to_string());
+    }));
+    fixtures.push((SwarmProofLaneAdmissionDecision::Defer, defer));
+
+    let mut reject = base.clone();
+    reject
+        .transcript_markers
+        .push("[RCH] local fallback executed".to_string());
+    fixtures.push((SwarmProofLaneAdmissionDecision::Reject, reject));
+
+    let mut batch = base.clone();
+    batch.atlas_context = Some(atlas_context(|context| {
+        context.batching_decision = Some("admit_batch".to_string());
+    }));
+    fixtures.push((SwarmProofLaneAdmissionDecision::Batch, batch));
+
+    let mut blocked = base.clone();
+    blocked.atlas_context = Some(atlas_context(|context| {
+        context.peer_reservation_overlap_status =
+            SwarmProofLanePeerReservationOverlapStatus::ActiveExclusiveConflict;
+    }));
+    fixtures.push((SwarmProofLaneAdmissionDecision::Blocked, blocked));
+
+    let mut stale = base.clone();
+    stale.atlas_context = Some(atlas_context(|context| {
+        context.stale_evidence = true;
+    }));
+    fixtures.push((SwarmProofLaneAdmissionDecision::StaleEvidence, stale));
+
+    let mut malformed = base.clone();
+    malformed.lane_id.clear();
+    fixtures.push((SwarmProofLaneAdmissionDecision::Malformed, malformed));
+
+    let mut advisory = base.clone();
+    advisory.atlas_context = Some(atlas_context(|context| {
+        context.spectral_warning_advisory = true;
+        context.trapped_cycle_witness_status =
+            SwarmProofLaneTrappedCycleWitnessStatus::RequiredMissing;
+    }));
+    fixtures.push((
+        SwarmProofLaneAdmissionDecision::AdvisorySpectralWarning,
+        advisory,
+    ));
+
+    let mut proven = base.clone();
+    proven.atlas_context = Some(atlas_context(|context| {
+        context.trapped_cycle_witness_status = SwarmProofLaneTrappedCycleWitnessStatus::Proven;
+    }));
+    fixtures.push((SwarmProofLaneAdmissionDecision::TrappedCycleProven, proven));
+
+    let mut observed = BTreeSet::new();
+    for (expected, request) in fixtures {
+        let plan = plan_swarm_proof_lane(&request);
+        assert_eq!(
+            plan.admission_decision, expected,
+            "fixture {} mapped to {:?}",
+            plan.lane_id, plan.admission_decision
+        );
+        observed.insert(plan.admission_decision);
+        assert!(
+            !plan.reason_codes.is_empty(),
+            "{} must include reason codes",
+            plan.lane_id
+        );
+        assert!(!plan.covers.is_empty(), "{} covers", plan.lane_id);
+        assert!(
+            !plan.does_not_cover.is_empty(),
+            "{} does_not_cover",
+            plan.lane_id
+        );
+        assert!(!plan.source_rows.is_empty(), "{} source rows", plan.lane_id);
+        assert!(
+            !plan.agent_mail_summary.trim().is_empty(),
+            "{} summary",
+            plan.lane_id
+        );
+        for expected_text in [
+            "admission_decision:",
+            "target_dir_isolation:",
+            "peer_reservation_overlap:",
+            "trapped_cycle_witness:",
+            "reason_codes:",
+            "covers:",
+            "does_not_cover:",
+        ] {
+            assert!(
+                plan.agent_mail_summary.contains(expected_text),
+                "{} summary missing {expected_text}",
+                plan.lane_id
+            );
+        }
+    }
+
+    assert_eq!(
+        observed,
+        BTreeSet::from([
+            SwarmProofLaneAdmissionDecision::Admit,
+            SwarmProofLaneAdmissionDecision::Defer,
+            SwarmProofLaneAdmissionDecision::Reject,
+            SwarmProofLaneAdmissionDecision::Batch,
+            SwarmProofLaneAdmissionDecision::Blocked,
+            SwarmProofLaneAdmissionDecision::StaleEvidence,
+            SwarmProofLaneAdmissionDecision::Malformed,
+            SwarmProofLaneAdmissionDecision::AdvisorySpectralWarning,
+            SwarmProofLaneAdmissionDecision::TrappedCycleProven,
+        ])
+    );
+
+    let mut overclaim = base;
+    overclaim.atlas_context = Some(atlas_context(|context| {
+        context.reason_codes.push("deadlock_proven".to_string());
+        context.trapped_cycle_witness_status = SwarmProofLaneTrappedCycleWitnessStatus::Validated;
+    }));
+    assert_ne!(
+        plan_swarm_proof_lane(&overclaim).admission_decision,
+        SwarmProofLaneAdmissionDecision::TrappedCycleProven,
+        "validated-only witness rows must not produce a proven label"
+    );
 }
 
 #[test]
@@ -274,4 +458,20 @@ fn schema_fields_are_source_backed_and_plan_serializes_stably() {
             "schema reject codes missing {expected}"
         );
     }
+
+    let outcomes = string_set(&contract["schema"], "admission_decision_outcomes");
+    assert_eq!(
+        outcomes,
+        BTreeSet::from([
+            "admit".to_string(),
+            "defer".to_string(),
+            "reject".to_string(),
+            "batch".to_string(),
+            "blocked".to_string(),
+            "stale_evidence".to_string(),
+            "malformed".to_string(),
+            "advisory_spectral_warning".to_string(),
+            "trapped_cycle_proven".to_string(),
+        ])
+    );
 }
