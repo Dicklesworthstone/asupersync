@@ -627,6 +627,10 @@ def classify_artifact(
         classification = "superseded-head"
         decision = "suppress-as-stale"
         reason = "artifact git SHA does not match current HEAD"
+    elif not command:
+        classification = "unverifiable-command"
+        decision = "suppress-as-unverifiable"
+        reason = "artifact does not declare a reproducible proof command"
     elif not touched_files:
         classification = "unverifiable-surface"
         decision = "suppress-as-unverifiable"

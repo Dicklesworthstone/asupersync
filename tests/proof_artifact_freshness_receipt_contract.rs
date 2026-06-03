@@ -673,6 +673,22 @@ fn missing_touched_files_matches_full_output_golden() {
 }
 
 #[test]
+fn missing_command_is_unverifiable() {
+    let receipt = receipt_json("missing_command.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(row["status"].as_str(), Some("pass"));
+    assert_eq!(row["classification"].as_str(), Some("unverifiable-command"));
+    assert_eq!(row["decision"].as_str(), Some("suppress-as-unverifiable"));
+    assert_eq!(row["safe_to_cite"].as_bool(), Some(false));
+    assert_eq!(
+        row["reason"].as_str(),
+        Some("artifact does not declare a reproducible proof command")
+    );
+    assert_eq!(receipt["summary"]["unverifiable"].as_u64(), Some(1));
+}
+
+#[test]
 fn receipt_safety_contract_declares_read_only_behavior() {
     let receipt = receipt_json("current_clean.json");
 
