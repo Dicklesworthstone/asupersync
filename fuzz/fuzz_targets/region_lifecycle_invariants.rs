@@ -286,16 +286,21 @@ fuzz_target!(|input: RegionLifecycleFuzzInput| {
                         );
                     }
                     Err(AdmissionError::LimitReached { kind, limit, live }) => {
-                        // **INVARIANT 6**: Limit checks should be accurate
+                        // **INVARIANT 6**: Limit checks should be accurate.
+                        // Compare against the region's CURRENT limit, not the
+                        // root's initially-captured `limits`: an `UpdateLimits`
+                        // op can have mutated this region's max_children since
+                        // (gauntlet FUZZ-R6 — the stale comparison reported
+                        // limit:0 vs configured:1000 after a mid-run update).
                         assert_eq!(
                             kind,
                             AdmissionKind::Child,
                             "Limit reached should be for children"
                         );
-                        if let Some(max_children) = limits.max_children {
+                        if let Some(max_children) = parent_region.limits().max_children {
                             assert_eq!(
                                 limit, max_children,
-                                "Reported limit should match configured limit"
+                                "Reported limit should match the region's current configured limit"
                             );
                             assert!(
                                 live >= max_children,
