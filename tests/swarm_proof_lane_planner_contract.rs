@@ -1,11 +1,13 @@
 #![allow(missing_docs)]
 
 use asupersync::lab::{
-    SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION, SwarmProofLaneAdmissionDecision,
-    SwarmProofLaneAtlasAdmissionContext, SwarmProofLaneDecision, SwarmProofLaneFallbackPolicy,
-    SwarmProofLanePeerReservationOverlapStatus, SwarmProofLanePlan, SwarmProofLaneRequest,
-    SwarmProofLaneTargetDirIsolationStatus, SwarmProofLaneTrappedCycleWitnessStatus,
+    SWARM_PROOF_LANE_ATLAS_REPORT_SCHEMA_VERSION, SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION,
+    SwarmProofLaneAdmissionDecision, SwarmProofLaneAtlasAdmissionContext, SwarmProofLaneDecision,
+    SwarmProofLaneFallbackPolicy, SwarmProofLanePeerReservationOverlapStatus, SwarmProofLanePlan,
+    SwarmProofLaneRequest, SwarmProofLaneTargetDirIsolationStatus,
+    SwarmProofLaneTrappedCycleWitnessStatus, build_swarm_proof_lane_atlas_report,
     plan_swarm_proof_lane, render_swarm_proof_lane_agent_mail_summary,
+    render_swarm_proof_lane_atlas_report_json, render_swarm_proof_lane_atlas_report_markdown,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -170,6 +172,56 @@ fn scenario_request(base: &SwarmProofLaneRequest, row: &Value) -> SwarmProofLane
     request
 }
 
+fn decision_scenario_rows(contract: &Value) -> BTreeMap<String, &Value> {
+    rows_by_id(
+        contract
+            .get("decision_scenario_corpus")
+            .expect("decision_scenario_corpus"),
+        "cases",
+        "case_id",
+    )
+}
+
+fn report_renderer_plan(contract: &Value, row: &Value) -> SwarmProofLanePlan {
+    let source = string(row, "source");
+    let mut request = match source {
+        "decision_scenario_corpus" => {
+            let decision_rows = decision_scenario_rows(contract);
+            let source_case_id = row
+                .get("base_case_id")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| string(row, "case_id"));
+            let source_row = decision_rows
+                .get(source_case_id)
+                .unwrap_or_else(|| panic!("missing decision scenario {source_case_id}"));
+            scenario_request(&base_focused_request(contract), source_row)
+        }
+        other => panic!("unknown report renderer source {other}"),
+    };
+
+    let case_id = string(row, "case_id");
+    if row.get("base_case_id").is_some() {
+        request.lane_id = case_id.to_string();
+        request.scenario_id = format!("atlas-report-{case_id}");
+    }
+    if let Some(extra_reasons) = row.get("append_reason_codes").and_then(Value::as_array) {
+        let context = request
+            .atlas_context
+            .as_mut()
+            .unwrap_or_else(|| panic!("{case_id} missing atlas context"));
+        context
+            .reason_codes
+            .extend(extra_reasons.iter().map(|reason| {
+                reason
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{case_id} append_reason_codes entry"))
+                    .to_string()
+            }));
+    }
+
+    plan_swarm_proof_lane(&request)
+}
+
 fn assert_stable_log_is_scrubbed(corpus: &Value, row: &Value) {
     let policy = Value::Object(object(corpus, "scrubbing_policy").clone());
     let forbidden = string_set(&policy, "forbidden_log_fragments");
@@ -236,8 +288,20 @@ fn artifact_declares_source_schema_and_planner_boundary() {
         "asupersync::lab::SwarmProofLanePlan"
     );
     assert_eq!(
+        string(source, "runtime_report_type"),
+        "asupersync::lab::SwarmProofLaneAtlasReport"
+    );
+    assert_eq!(
         string(source, "runtime_planner"),
         "asupersync::lab::plan_swarm_proof_lane"
+    );
+    assert_eq!(
+        string(source, "runtime_json_renderer"),
+        "asupersync::lab::render_swarm_proof_lane_atlas_report_json"
+    );
+    assert_eq!(
+        string(source, "runtime_markdown_renderer"),
+        "asupersync::lab::render_swarm_proof_lane_atlas_report_markdown"
     );
 }
 
@@ -317,6 +381,116 @@ fn decision_scenario_corpus_is_stable_scrubbed_and_replayable() {
             );
         }
     }
+}
+
+#[test]
+fn atlas_report_renderer_matches_json_and_markdown_goldens() {
+    let contract = contract();
+    let corpus = contract
+        .get("report_renderer_golden_corpus")
+        .expect("report_renderer_golden_corpus");
+    assert_eq!(
+        corpus["corpus_id"].as_str(),
+        Some("swarm-proof-lane-atlas-report-goldens-v1")
+    );
+    assert_eq!(corpus["bead_id"].as_str(), Some("asupersync-bt63nr.10"));
+    assert_eq!(
+        string(corpus, "schema_version"),
+        SWARM_PROOF_LANE_ATLAS_REPORT_SCHEMA_VERSION
+    );
+
+    let proof_command = string(corpus, "proof_command");
+    for token in [
+        "RCH_REQUIRE_REMOTE=1",
+        "rch exec -- env",
+        "CARGO_TARGET_DIR=",
+        "cargo test -p asupersync --test swarm_proof_lane_planner_contract",
+    ] {
+        assert!(
+            proof_command.contains(token),
+            "renderer proof command missing {token}"
+        );
+    }
+
+    let mut observed_labels = BTreeSet::new();
+    let mut observed_formats = BTreeSet::new();
+    for row in array(corpus, "cases") {
+        let plan = report_renderer_plan(&contract, row);
+        let report = build_swarm_proof_lane_atlas_report(&plan);
+        observed_labels.insert(report.closeout_label.clone());
+        assert_eq!(
+            report.schema_version,
+            SWARM_PROOF_LANE_ATLAS_REPORT_SCHEMA_VERSION
+        );
+        assert!(
+            !report.reason_codes.is_empty(),
+            "{} reasons",
+            report.lane_id
+        );
+        assert!(
+            !report.source_rows.is_empty(),
+            "{} source rows",
+            report.lane_id
+        );
+        assert!(!report.covers.is_empty(), "{} covers", report.lane_id);
+        assert!(
+            !report.does_not_cover.is_empty(),
+            "{} does_not_cover",
+            report.lane_id
+        );
+        assert!(!report.mutates_external_state);
+        assert!(!report.destructive_cleanup_required);
+        assert!(!report.branch_or_worktree_required);
+
+        match string(row, "format") {
+            "json" => {
+                observed_formats.insert("json".to_string());
+                let actual = render_swarm_proof_lane_atlas_report_json(&plan);
+                assert!(
+                    actual.ends_with('\n'),
+                    "{} JSON report must end with one newline",
+                    string(row, "case_id")
+                );
+                let actual_json: Value = serde_json::from_str(&actual)
+                    .unwrap_or_else(|error| panic!("parse rendered JSON: {error}"));
+                assert_eq!(
+                    actual_json,
+                    row.get("expected_json").expect("expected_json").clone(),
+                    "{} JSON golden",
+                    string(row, "case_id")
+                );
+            }
+            "markdown" => {
+                observed_formats.insert("markdown".to_string());
+                let expected = array(row, "expected_markdown_lines")
+                    .iter()
+                    .map(|line| {
+                        line.as_str()
+                            .unwrap_or_else(|| panic!("{} markdown line", string(row, "case_id")))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n";
+                let actual = render_swarm_proof_lane_atlas_report_markdown(&plan);
+                assert_eq!(
+                    actual,
+                    expected,
+                    "{} Markdown golden",
+                    string(row, "case_id")
+                );
+            }
+            other => panic!("unknown report renderer format {other}"),
+        }
+    }
+
+    assert_eq!(
+        observed_labels,
+        string_set(corpus, "required_closeout_labels")
+    );
+    assert_eq!(
+        observed_formats,
+        BTreeSet::from(["json".to_string(), "markdown".to_string()])
+    );
 }
 
 #[test]
@@ -668,8 +842,12 @@ fn schema_fields_are_source_backed_and_plan_serializes_stably() {
         "SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION",
         "pub struct SwarmProofLaneRequest",
         "pub struct SwarmProofLanePlan",
+        "pub struct SwarmProofLaneAtlasReport",
         "pub fn plan_swarm_proof_lane",
         "pub fn render_swarm_proof_lane_agent_mail_summary",
+        "pub fn build_swarm_proof_lane_atlas_report",
+        "pub fn render_swarm_proof_lane_atlas_report_json",
+        "pub fn render_swarm_proof_lane_atlas_report_markdown",
     ] {
         assert!(source.contains(token), "planner source missing {token}");
     }
