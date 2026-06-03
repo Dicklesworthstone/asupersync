@@ -120,13 +120,12 @@ struct MutexState {
     /// FIFO ordering; cleanup, contains-check, and waker update are
     /// all O(1) with no probing of the rest of the queue.
     waiters: WaiterChain,
-    /// Waiter that has been granted the next turn but has not yet
-    /// resumed. Holds the slab index of the granted waiter (or
-    /// `usize::MAX` as a sentinel via Option).
-    granted_waiter: Option<usize>,
+    /// Waiter that has been granted the next turn but has not yet resumed.
+    /// Holds the stable waiter id, not the reusable slab index.
+    granted_waiter: Option<WaiterId>,
 }
 
-use super::waiter::WaiterChain;
+use super::waiter::{WaiterChain, WaiterId};
 
 impl<T> Mutex<T> {
     /// Creates a new mutex in an unlocked state with the given name for lock ordering.

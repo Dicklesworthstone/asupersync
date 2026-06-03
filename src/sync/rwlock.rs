@@ -73,7 +73,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use super::waiter::WaiterChain;
+use super::waiter::{WaiterChain, WaiterId};
 use crate::cx::Cx;
 use crate::sync::lock_ordering::{self, LockRank};
 
@@ -536,7 +536,7 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn abandon_read_waiter(&self, waiter_id: &mut Option<usize>) {
+    fn abandon_read_waiter(&self, waiter_id: &mut Option<WaiterId>) {
         let Some(waiter_id) = waiter_id.take() else {
             return;
         };
@@ -581,7 +581,7 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn abandon_write_waiter(&self, waiter_id: &mut Option<usize>, counted: &mut bool) {
+    fn abandon_write_waiter(&self, waiter_id: &mut Option<WaiterId>, counted: &mut bool) {
         if !*counted {
             return;
         }
@@ -692,7 +692,7 @@ impl<T> RwLock<T> {
 pub struct ReadFuture<'a, 'b, T> {
     lock: &'a RwLock<T>,
     cx: &'b Cx,
-    waiter_id: Option<usize>,
+    waiter_id: Option<WaiterId>,
     completed: bool,
 }
 
@@ -784,7 +784,7 @@ impl<T> Drop for ReadFuture<'_, '_, T> {
 pub struct WriteFuture<'a, 'b, T> {
     lock: &'a RwLock<T>,
     cx: &'b Cx,
-    waiter_id: Option<usize>,
+    waiter_id: Option<WaiterId>,
     counted: bool,
     completed: bool,
 }
@@ -1206,7 +1206,7 @@ impl<T> OwnedRwLockWriteGuard<T> {
 pub struct OwnedReadFuture<'b, T> {
     lock: Arc<RwLock<T>>,
     cx: &'b Cx,
-    waiter_id: Option<usize>,
+    waiter_id: Option<WaiterId>,
     completed: bool,
 }
 
@@ -1302,7 +1302,7 @@ impl<T> Drop for OwnedReadFuture<'_, T> {
 pub struct OwnedWriteFuture<'b, T> {
     lock: Arc<RwLock<T>>,
     cx: &'b Cx,
-    waiter_id: Option<usize>,
+    waiter_id: Option<WaiterId>,
     counted: bool,
     completed: bool,
 }
