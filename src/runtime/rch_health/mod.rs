@@ -519,6 +519,8 @@ pub fn admit_rch_worker(
     let mut reasons = vec![fleet_reason(refusal_class).to_string()];
     if request.remote_required {
         reasons.push("remote-required proof refused local Cargo fallback".to_string());
+    } else {
+        reasons.push("remote proof deferred; local Cargo fallback remains allowed".to_string());
     }
 
     RchWorkerAdmissionReceipt {
@@ -528,7 +530,7 @@ pub fn admit_rch_worker(
         decision,
         selected_worker: None,
         refusal_class: Some(refusal_class),
-        local_fallback_allowed: false,
+        local_fallback_allowed: !request.remote_required,
         candidates,
         reasons,
     }
@@ -993,6 +995,39 @@ mod tests {
                 .filter(|code| **code == "local_fallback_refused")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn non_remote_required_defer_preserves_local_fallback_allowed() {
+        let mut saturated = healthy_worker("vmi-saturated.internal");
+        saturated.queue_state = RchQueueState::Saturated;
+        let local_allowed_request = RchProofLaneRequest::new(
+            "cargo-test-admission",
+            RchTargetDirClass::Warm,
+            false,
+            RchProofPriority::Foreground,
+        );
+
+        let receipt = admit_rch_worker(
+            &local_allowed_request,
+            &[saturated],
+            &RchWorkerAdmissionPolicy::default(),
+        );
+        let row = receipt.schedule_row();
+
+        assert_eq!(receipt.decision, RchAdmissionDecision::Defer);
+        assert_eq!(receipt.refusal_class, Some(RchRefusalClass::QueueSaturated));
+        assert!(receipt.local_fallback_allowed);
+        assert!(row.local_fallback_allowed);
+        assert!(row.reason_codes.contains(&"defer"));
+        assert!(!row.reason_codes.contains(&"remote_required"));
+        assert!(!row.reason_codes.contains(&"local_fallback_refused"));
+        assert!(
+            receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("local Cargo fallback remains allowed"))
         );
     }
 }
