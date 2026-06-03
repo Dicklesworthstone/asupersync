@@ -25,6 +25,10 @@
             "path": "tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json",
             "status": "R "
           }
+        ],
+        "rch_remote_route_required": true,
+        "rch_remote_route_segments": [
+          "[RCH] remote rch-worker-rename-01 (8.8s)"
         ]
       },
       "generated_at": "2026-05-08T05:00:00Z",

@@ -18,7 +18,11 @@
         "current_branch": "main",
         "current_head_sha": "2222222222222222222222222222222222222222",
         "dirty_overlap_count": 0,
-        "dirty_overlaps": []
+        "dirty_overlaps": [],
+        "rch_remote_route_required": true,
+        "rch_remote_route_segments": [
+          "[RCH] remote rch-worker-proof-01 (12.3s)"
+        ]
       },
       "generated_at": "2026-05-08T05:15:00Z",
       "reason": "artifact HEAD and touched files match a clean cited surface",

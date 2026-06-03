@@ -25,6 +25,10 @@
             "path": "tests/proof_status/snapshot.json",
             "status": " M"
           }
+        ],
+        "rch_remote_route_required": true,
+        "rch_remote_route_segments": [
+          "[RCH] remote rch-worker-proof-status-02 (15.1s)"
         ]
       },
       "generated_at": "2026-05-08T05:18:00Z",

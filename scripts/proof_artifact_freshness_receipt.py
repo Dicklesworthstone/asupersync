@@ -34,6 +34,10 @@ RCH_LOCAL_FALLBACK_RE = re.compile(
     r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
 )
+RCH_REMOTE_ROUTE_RE = re.compile(
+    r"(?m)(?:^\s*\[RCH\]\s+remote\s+\S+|\bSelected worker:\s+\S+|\bRCH_WORKER=\S+)",
+    re.IGNORECASE,
+)
 FUZZ_ALL_BINS_CHECK_RE = re.compile(
     r"\bcargo\s+check\b"
     r"(?=[^\n]*?(?:^|\s)--bins(?:\s|$))"
@@ -390,6 +394,7 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
                 ("output",),
                 ("log",),
                 ("run_log",),
+                ("proof_text",),
                 ("command_output",),
                 ("proof_output",),
                 ("validation",),
@@ -587,6 +592,16 @@ def rch_local_fallback_segments(texts: list[str]) -> list[str]:
     return segments
 
 
+def rch_remote_route_segments(texts: list[str]) -> list[str]:
+    segments = []
+    for text in texts:
+        for segment in text.splitlines() or [text]:
+            compact = segment.strip()
+            if compact and RCH_REMOTE_ROUTE_RE.search(compact):
+                segments.append(compact[:260])
+    return segments
+
+
 def dirty_overlaps(touched_files: list[str], entries: list[dict[str, str]]) -> list[dict[str, str]]:
     overlaps = []
     for touched in touched_files:
@@ -612,9 +627,11 @@ def classify_artifact(
     overlaps = dirty_overlaps(touched_files, dirty)
     unsafe_cargo_reasons = cargo_proof_command_defects(command)
     bare_cargo_command = "bare-cargo" in unsafe_cargo_reasons
+    rch_remote_route_required = bool(CARGO_PROOF_COMMAND.search(command)) and not unsafe_cargo_reasons
     local_fallback_segments = rch_local_fallback_segments(
         [command, *artifact.get("proof_text", [])]
     )
+    remote_route_segments = rch_remote_route_segments(artifact.get("proof_text", []))
     fuzz_extent_findings = fuzz_extent_proof_findings(artifact)
 
     evidence = {
@@ -673,6 +690,10 @@ def classify_artifact(
         classification = "rch-local-fallback-proof"
         decision = "rerun-required"
         reason = "artifact proof evidence reports rch local fallback"
+    elif rch_remote_route_required and not remote_route_segments:
+        classification = "unverifiable-rch-remote-proof"
+        decision = "rerun-required"
+        reason = "artifact proof evidence lacks positive rch remote worker route marker"
     elif fuzz_extent_findings["defects"]:
         classification = "unverifiable-fuzz-extent-proof"
         decision = "rerun-required"
@@ -685,6 +706,15 @@ def classify_artifact(
         classification = "current-clean"
         decision = "cite-as-current"
         reason = "artifact HEAD and touched files match a clean cited surface"
+
+    if rch_remote_route_required and classification in {
+        "unverifiable-rch-remote-proof",
+        "unverifiable-fuzz-extent-proof",
+        "dirty-surface-overlap",
+        "current-clean",
+    }:
+        evidence["rch_remote_route_required"] = True
+        evidence["rch_remote_route_segments"] = remote_route_segments
 
     safe_to_cite = classification == "current-clean"
     return {
@@ -731,6 +761,15 @@ def remediation_for(classification: str, command: str) -> dict[str, Any]:
             "operator_note": "Do not cite green output from an rch local fallback proof.",
             "next_steps": [
                 "rerun the proof remotely and require an [RCH] remote summary",
+                "replace the artifact output before citing it",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "unverifiable-rch-remote-proof":
+        return {
+            "operator_note": "Do not cite an RCH Cargo proof without positive remote-worker route evidence.",
+            "next_steps": [
+                "rerun the proof remotely and capture a transcript line starting with [RCH] remote",
                 "replace the artifact output before citing it",
             ],
             "rerun_command": command,

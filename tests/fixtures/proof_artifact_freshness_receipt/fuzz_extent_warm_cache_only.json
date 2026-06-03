@@ -15,7 +15,7 @@
       ],
       "status": "pass",
       "generated_at": "2026-05-08T05:15:00Z",
-      "stdout": "Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s\nProcess exited with code 0",
+      "stdout": "[RCH] remote rch-worker-fuzz-warm-01 (9.1s)\nFinished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s\nProcess exited with code 0",
       "fuzz_extent": {
         "cache_warmth_used_as_correctness_evidence": true,
         "target_dir_freshness": "warm-cache"

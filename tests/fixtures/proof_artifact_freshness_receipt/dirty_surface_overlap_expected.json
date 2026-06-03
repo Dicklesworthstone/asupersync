@@ -25,6 +25,10 @@
             "path": "tests/proof_status_snapshot_contract.rs",
             "status": " M"
           }
+        ],
+        "rch_remote_route_required": true,
+        "rch_remote_route_segments": [
+          "[RCH] remote rch-worker-proof-status-01 (13.6s)"
         ]
       },
       "generated_at": "2026-05-08T05:16:00Z",

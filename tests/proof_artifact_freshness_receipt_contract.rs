@@ -235,6 +235,14 @@ fn current_clean_artifact_is_citeable() {
     assert_eq!(row["classification"].as_str(), Some("current-clean"));
     assert_eq!(row["decision"].as_str(), Some("cite-as-current"));
     assert_eq!(row["safe_to_cite"].as_bool(), Some(true));
+    assert_eq!(
+        row["evidence"]["rch_remote_route_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        row["evidence"]["rch_remote_route_segments"][0].as_str(),
+        Some("[RCH] remote rch-worker-proof-01 (12.3s)")
+    );
     assert_eq!(receipt["summary"]["safe_to_cite"].as_u64(), Some(1));
 }
 
@@ -316,6 +324,40 @@ fn rch_exec_cargo_without_env_target_dir_requires_rerun() {
         reasons
             .iter()
             .any(|reason| reason.as_str() == Some("missing-rch-env-wrapper"))
+    );
+}
+
+#[test]
+fn rch_cargo_without_remote_worker_route_evidence_requires_rerun() {
+    let receipt = receipt_json("missing_remote_route_evidence.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("unverifiable-rch-remote-proof")
+    );
+    assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+    assert_eq!(row["safe_to_cite"].as_bool(), Some(false));
+    assert_eq!(
+        row["reason"].as_str(),
+        Some("artifact proof evidence lacks positive rch remote worker route marker")
+    );
+    assert_eq!(
+        row["evidence"]["rch_remote_route_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        row["evidence"]["rch_remote_route_segments"]
+            .as_array()
+            .expect("remote route segments")
+            .len(),
+        0
+    );
+    assert_eq!(receipt["summary"]["rerun_required"].as_u64(), Some(1));
+    assert_eq!(receipt["summary"]["unverifiable"].as_u64(), Some(1));
+    assert_eq!(
+        row["remediation"]["operator_note"].as_str(),
+        Some("Do not cite an RCH Cargo proof without positive remote-worker route evidence.")
     );
 }
 
@@ -503,6 +545,86 @@ print(json.dumps(row, sort_keys=True))
                 .any(|segment| segment.as_str() == Some(expected)),
             "missing fallback segment: {expected}"
         );
+    }
+}
+
+#[test]
+fn rch_remote_worker_route_evidence_normalizes_from_common_output_fields() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("proof_artifact_freshness_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+head = "2222222222222222222222222222222222222222"
+rows = []
+for field in ["stdout", "stderr", "proof_output", "command_output"]:
+    raw = {
+        "artifact_path": "artifacts/proof/" + field + ".json",
+        "git_sha": head,
+        "git_branch": "main",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_remote_route cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+        field: "[RCH] remote rch-worker-" + field + " (1.0s)",
+        "touched_files": [
+            "scripts/proof_artifact_freshness_receipt.py",
+            "tests/proof_artifact_freshness_receipt_contract.rs"
+        ],
+        "status": "pass",
+        "generated_at": "2026-05-08T05:15:00Z",
+    }
+    artifact = module.normalize_artifact(raw)
+    row = module.classify_artifact(artifact, head, "main", [])
+    rows.append({
+        "field": field,
+        "classification": row["classification"],
+        "safe_to_cite": row["safe_to_cite"],
+        "segments": row["evidence"].get("rch_remote_route_segments", []),
+    })
+print(json.dumps(rows, sort_keys=True))
+"#;
+    let mut child = Command::new("python3")
+        .arg("-")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn proof-artifact remote route classifier smoke");
+    child
+        .stdin
+        .as_mut()
+        .expect("classifier smoke stdin")
+        .write_all(script.as_bytes())
+        .expect("write classifier smoke script");
+    let output = child
+        .wait_with_output()
+        .expect("run proof-artifact remote route classifier smoke");
+    assert!(
+        output.status.success(),
+        "remote route classifier smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("classifier smoke JSON");
+    let rows = parsed.as_array().expect("classifier smoke rows");
+    assert_eq!(rows.len(), 4);
+    for field in ["stdout", "stderr", "proof_output", "command_output"] {
+        let row = rows
+            .iter()
+            .find(|row| row["field"].as_str() == Some(field))
+            .expect("field row");
+        assert_eq!(row["classification"].as_str(), Some("current-clean"));
+        assert_eq!(row["safe_to_cite"].as_bool(), Some(true));
+        let expected_segment = format!("[RCH] remote rch-worker-{field} (1.0s)");
+        assert_eq!(row["segments"][0].as_str(), Some(expected_segment.as_str()));
     }
 }
 

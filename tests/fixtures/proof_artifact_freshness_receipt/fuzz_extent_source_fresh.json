@@ -9,6 +9,7 @@
       "git_sha": "2222222222222222222222222222222222222222",
       "git_branch": "main",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_fuzz_extent_source_fresh cargo check --manifest-path fuzz/Cargo.toml --bins",
+      "stderr": "[RCH] remote rch-worker-fuzz-source-01 (18.2s)",
       "touched_files": [
         "fuzz/Cargo.toml",
         "fuzz/fuzz_targets/dns_lookup_decoder.rs",

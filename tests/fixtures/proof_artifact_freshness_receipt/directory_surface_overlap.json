@@ -9,6 +9,7 @@
       "git_sha": "3333333333333333333333333333333333333333",
       "git_branch": "main",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_status_snapshot cargo test -p asupersync --test proof_status_snapshot_contract -- --nocapture",
+      "stderr": "[RCH] remote rch-worker-proof-status-02 (15.1s)",
       "touched_files": [
         "tests/proof_status"
       ],
