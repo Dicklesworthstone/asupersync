@@ -89,3 +89,59 @@ fn fallback_times_out_runaway_child() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn fallback_rejects_oversized_memory_guard_before_arithmetic() {
+    let output = run_fallback(
+        &[
+            ("RCH_CI_FALLBACK_MEMORY_MB", "999999999999999999999999"),
+            ("RCH_CI_FALLBACK_TIMEOUT_SEC", "0"),
+        ],
+        &["exec", "bash", "-lc", "echo should-not-run"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(64),
+        "oversized memory guard must fail as usage error\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("RCH_CI_FALLBACK_MEMORY_MB must be <= 1048576 MiB"),
+        "stderr must explain the memory guard bound: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).is_empty(),
+        "child command must not run after guard validation failure"
+    );
+}
+
+#[test]
+fn fallback_rejects_oversized_timeout_guard_before_exec() {
+    let output = run_fallback(
+        &[
+            ("RCH_CI_FALLBACK_MEMORY_MB", "0"),
+            ("RCH_CI_FALLBACK_TIMEOUT_SEC", "999999999999999999999999"),
+        ],
+        &["exec", "bash", "-lc", "echo should-not-run"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(64),
+        "oversized timeout guard must fail as usage error\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("RCH_CI_FALLBACK_TIMEOUT_SEC must be <= 604800 seconds"),
+        "stderr must explain the timeout guard bound: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).is_empty(),
+        "child command must not run after guard validation failure"
+    );
+}
