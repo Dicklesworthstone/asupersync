@@ -170,6 +170,108 @@ strings are safe to paste as summaries. They use `NO_GREEN_PROOF` whenever the
 classified transcript is failed or externally blocked, even when a blocker is
 well identified, so closeouts do not accidentally overstate evidence.
 
+## Swarm Proof-Lane Atlas Receipt Runbook
+
+The swarm proof-lane planner contract is
+`artifacts/swarm_proof_lane_planner_contract_v1.json`, verified by
+`tests/swarm_proof_lane_planner_contract.rs`, and backed by the runtime planner
+`asupersync::lab::plan_swarm_proof_lane` plus
+`asupersync::lab::render_swarm_proof_lane_agent_mail_summary`. Its deterministic
+decision scenario corpus is `admission-aware-atlas-decision-scenarios-v1`.
+
+Run the scoped verifier before changing planner receipt claims:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr8_swarm_planner cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture
+```
+
+Use this taxonomy when reading one planner receipt or writing a bead/Agent Mail
+closeout:
+
+| Receipt signal | Claim label | Evidence to cite | Closeout rule |
+|----------------|-------------|------------------|---------------|
+| `admission_decision=Admit` with `decision=Ready`, `remote_required=true`, `fallback_policy=RemoteOnly`, remote transcript markers, and no findings | `replay-backed` | `command`, worker/transcript footer, `source_rows`, `covers`, and `does_not_cover` | Claim only the listed `covers` fields. Do not claim workspace release health, broad conformance, or RCH fleet health unless a separate lane proves them. |
+| `admission_decision=Defer` or `Batch` with saturation or batching reason codes | `advisory` | `reason_codes`, `source_rows`, `target_dir_isolation_status`, and `peer_reservation_overlap_status` | Treat this as scheduling guidance. Record the suggested lane grouping or wait condition, but do not call validation green. |
+| `admission_decision=AdvisorySpectralWarning` and `trapped_cycle_witness_status=RequiredMissing` | `advisory` | spectral wait-graph rows, missing witness status, `reason_codes` | Preserve the warning and request trapped-cycle replay evidence before claiming a deadlock. |
+| `admission_decision=TrappedCycleProven` and `trapped_cycle_witness_status=Proven` | `trapped-cycle-proven` | replay witness row, spectral wait-graph row, `source_rows`, `reason_codes`, and verifier command | Claim a trapped cycle only for the cited witness and scenario. Validated-only or advisory rows are not enough. |
+| `admission_decision=Reject`, `Blocked`, or `Malformed` | `validation-blocked` | first finding code, dirty/reservation/local-fallback marker, `source_rows`, and `agent_mail_summary` | Stop the broad lane. Cite the blocker exactly and use only a narrower supplemental proof if one ran. |
+| `admission_decision=StaleEvidence` | `stale` | stale row id, expected/observed head, `reason_codes`, and `source_rows` | Refresh the narrow atlas rows before rerunning. Do not paste an old green transcript as current proof. |
+
+Every closeout receipt must keep these stable fields visible enough for review:
+`lane_id`, `scenario_id`, `command`, `target_dir`, `remote_required`,
+`fallback_policy`, `decision`, `admission_decision`, `source_rows`,
+`reason_codes`, `target_dir_isolation_status`,
+`peer_reservation_overlap_status`, `trapped_cycle_witness_status`, `covers`,
+`does_not_cover`, `findings`, `agent_mail_summary`, `mutates_external_state`,
+`destructive_cleanup_required`, and `branch_or_worktree_required`.
+
+Before pasting a planner summary into Beads or Agent Mail, verify the receipt in
+this order:
+
+1. Confirm the `command` starts with `RCH_REQUIRE_REMOTE=1 rch exec -- env` and
+   names an isolated `CARGO_TARGET_DIR`.
+2. Confirm `remote_required=true`, `fallback_policy=RemoteOnly`, and no local
+   fallback marker such as `[RCH] local`, `local fallback`, or `executing
+   locally` appears in the transcript.
+3. Read `admission_decision` first, then map it through the taxonomy table
+   above. This is the operator-facing claim label.
+4. Cite `source_rows` and `reason_codes` that explain the decision. If they are
+   empty, the receipt is malformed for closeout purposes.
+5. Copy the exact `covers` and `does_not_cover` boundary. Never broaden the claim in prose.
+6. Keep `mutates_external_state=false`, `destructive_cleanup_required=false`,
+   and `branch_or_worktree_required=false`. If any are true, stop and coordinate
+   instead of running or committing.
+7. Prefer the rendered `agent_mail_summary` when it matches the plan. It is
+   stable handoff text, not a replacement for the remote transcript or artifact
+   evidence.
+
+Acceptable closeout examples:
+
+```text
+replay-backed: `swarm-workload-corpus-focused` admitted and passed through
+remote RCH on `ts2`; source_rows=`src/lab/swarm_replay.rs`,
+`artifacts/swarm_workload_scenario_corpus_v1.json`; covers=
+`scenario_schema_validation`; does_not_cover=`workspace_release_health`.
+```
+
+```text
+advisory: atlas returned `AdvisorySpectralWarning` because
+`trapped_cycle_detection_required` and witness status is `RequiredMissing`.
+No deadlock proof claimed; next action is to run trapped-cycle replay evidence.
+```
+
+```text
+trapped-cycle-proven: atlas returned `TrappedCycleProven` for
+`spectral_wait_graph:deadlocked` with witness
+`trapped_cycle_witness:validated-replay-row`; claim is limited to that scenario.
+```
+
+```text
+validation-blocked: intended remote lane rejected before proof because
+`rch_proof_lane_admission:local-fallback-refused` and transcript requires remote
+execution. Supplemental local evidence, if any, is not the green RCH lane.
+```
+
+```text
+stale: atlas row `atlas_stale_evidence` mismatched the expected head. Refreshed
+atlas rows are required before this lane can be admitted or summarized green.
+```
+
+Misleading closeout language:
+
+```text
+Atlas was green, so the swarm proof lanes are healthy.
+```
+
+This omits the `covers` boundary and overclaims broad release health.
+
+```text
+Spectral warning proves a deadlock.
+```
+
+This is only true when `admission_decision=TrappedCycleProven` and the receipt
+cites a proven trapped-cycle witness row.
+
 ## Declared-Path Commit Preflight
 
 Before committing from a dirty shared-main checkout, run the dirty-tree receipt

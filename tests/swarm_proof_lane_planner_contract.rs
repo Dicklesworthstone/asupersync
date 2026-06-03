@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/swarm_proof_lane_planner_contract_v1.json";
+const RUNBOOK_PATH: &str = "docs/proof_runner_usage.md";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -21,6 +22,11 @@ fn contract() -> Value {
     let raw = std::fs::read_to_string(repo_path(ARTIFACT_PATH))
         .unwrap_or_else(|error| panic!("read {ARTIFACT_PATH}: {error}"));
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {ARTIFACT_PATH}: {error}"))
+}
+
+fn read_repo_file(relative: &str) -> String {
+    std::fs::read_to_string(repo_path(relative))
+        .unwrap_or_else(|error| panic!("read {relative}: {error}"))
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
@@ -310,6 +316,61 @@ fn decision_scenario_corpus_is_stable_scrubbed_and_replayable() {
                 string(row, "case_id")
             );
         }
+    }
+}
+
+#[test]
+fn operator_runbook_preserves_closeout_receipt_taxonomy() {
+    let text = read_repo_file(RUNBOOK_PATH);
+    for required in [
+        ARTIFACT_PATH,
+        "tests/swarm_proof_lane_planner_contract.rs",
+        "asupersync::lab::plan_swarm_proof_lane",
+        "asupersync::lab::render_swarm_proof_lane_agent_mail_summary",
+        "admission-aware-atlas-decision-scenarios-v1",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr8_swarm_planner cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture",
+        "replay-backed",
+        "advisory",
+        "trapped-cycle-proven",
+        "validation-blocked",
+        "stale",
+        "admission_decision",
+        "source_rows",
+        "reason_codes",
+        "covers",
+        "does_not_cover",
+        "agent_mail_summary",
+        "target_dir_isolation_status",
+        "peer_reservation_overlap_status",
+        "trapped_cycle_witness_status",
+        "mutates_external_state=false",
+        "destructive_cleanup_required=false",
+        "branch_or_worktree_required=false",
+        "Validated-only or advisory rows are not enough",
+        "Do not paste an old green transcript as current proof",
+        "Never broaden the claim in prose",
+    ] {
+        assert!(
+            text.contains(required),
+            "{RUNBOOK_PATH} must contain closeout taxonomy marker {required:?}"
+        );
+    }
+
+    for outcome in [
+        "Admit",
+        "Defer",
+        "Batch",
+        "AdvisorySpectralWarning",
+        "TrappedCycleProven",
+        "Reject",
+        "Blocked",
+        "Malformed",
+        "StaleEvidence",
+    ] {
+        assert!(
+            text.contains(outcome),
+            "{RUNBOOK_PATH} must describe admission outcome {outcome}"
+        );
     }
 }
 
