@@ -25,6 +25,7 @@ use asupersync::error::{Error, ErrorKind};
 use asupersync::record::region::RegionState;
 use asupersync::security::AuthenticatedSymbol;
 use asupersync::security::tag::AuthenticationTag;
+use asupersync::trace::distributed::VectorClock;
 use asupersync::types::symbol::{ObjectId, ObjectParams, Symbol};
 use asupersync::types::{RegionId, TaskId, Time};
 use libfuzzer_sys::fuzz_target;
@@ -218,6 +219,7 @@ fn build_snapshot(input: &SnapshotInput) -> RegionSnapshot {
         state: input.state.into_region_state(),
         timestamp: Time::from_secs(input.timestamp_secs),
         sequence: input.sequence,
+        vector_clock: VectorClock::new(),
         origin_id: input.origin_id,
         epoch: input.epoch,
         tasks: input
@@ -254,6 +256,7 @@ fn build_snapshot(input: &SnapshotInput) -> RegionSnapshot {
             .copied()
             .take(MAX_METADATA_LEN)
             .collect(),
+        auth_tag: AuthenticationTag::zero(),
     }
 }
 
