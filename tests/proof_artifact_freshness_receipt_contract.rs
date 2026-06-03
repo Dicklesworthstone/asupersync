@@ -243,6 +243,26 @@ fn current_clean_artifact_is_citeable() {
         row["evidence"]["rch_remote_route_segments"][0].as_str(),
         Some("[RCH] remote rch-worker-proof-01 (12.3s)")
     );
+    assert_eq!(
+        row["evidence"]["proof_output_digest"].as_str(),
+        Some("sha256:424dd7b9454acabbeeabcd07f2023c8b268aed605036a5e13c8b727b0a96f180")
+    );
+    assert_eq!(
+        row["evidence"]["proof_output_byte_count"].as_u64(),
+        Some(40)
+    );
+    assert_eq!(
+        row["evidence"]["proof_output_segment_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        row["evidence"]["artifact_source_fingerprint"].as_str(),
+        Some("sha256:source-current-clean")
+    );
+    assert_eq!(
+        row["evidence"]["artifact_tree_fingerprint"].as_str(),
+        Some("git-tree:current-clean")
+    );
     assert_eq!(receipt["summary"]["safe_to_cite"].as_u64(), Some(1));
 }
 
@@ -352,6 +372,15 @@ fn rch_cargo_without_remote_worker_route_evidence_requires_rerun() {
             .expect("remote route segments")
             .len(),
         0
+    );
+    assert_eq!(
+        row["evidence"]["proof_output_digest"].as_str(),
+        Some("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    );
+    assert_eq!(row["evidence"]["proof_output_byte_count"].as_u64(), Some(0));
+    assert_eq!(
+        row["evidence"]["proof_output_segment_count"].as_u64(),
+        Some(0)
     );
     assert_eq!(receipt["summary"]["rerun_required"].as_u64(), Some(1));
     assert_eq!(receipt["summary"]["unverifiable"].as_u64(), Some(1));
@@ -625,6 +654,103 @@ print(json.dumps(rows, sort_keys=True))
         assert_eq!(row["safe_to_cite"].as_bool(), Some(true));
         let expected_segment = format!("[RCH] remote rch-worker-{field} (1.0s)");
         assert_eq!(row["segments"][0].as_str(), Some(expected_segment.as_str()));
+    }
+}
+
+#[test]
+fn proof_output_digest_normalizes_line_endings_and_accepts_fingerprints() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("proof_artifact_freshness_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+head = "2222222222222222222222222222222222222222"
+base = {
+    "artifact_path": "artifacts/proof/digest.json",
+    "git_sha": head,
+    "git_branch": "main",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_digest cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+    "touched_files": [
+        "scripts/proof_artifact_freshness_receipt.py",
+        "tests/proof_artifact_freshness_receipt_contract.rs"
+    ],
+    "status": "pass",
+    "generated_at": "2026-05-08T05:15:00Z",
+}
+with_crlf = dict(base)
+with_crlf.update({
+    "stderr": "[RCH] remote rch-worker-digest (1.0s)",
+    "stdout": "line one\r\nline two\n",
+    "source": {"fingerprint": "sha256:source-digest"},
+    "metadata": {"source_tree_fingerprint": "git-tree:digest"},
+})
+split_fields = dict(base)
+split_fields.update({
+    "stderr": "line two",
+    "stdout": "line one",
+    "proof_output": "[RCH] remote rch-worker-digest (1.0s)",
+    "metadata": {
+        "source_fingerprint": "sha256:source-digest",
+        "git_tree_sha": "git-tree:digest",
+    },
+})
+rows = []
+for name, raw in [("with_crlf", with_crlf), ("split_fields", split_fields)]:
+    artifact = module.normalize_artifact(raw)
+    row = module.classify_artifact(artifact, head, "main", [])
+    rows.append({"name": name, "evidence": row["evidence"]})
+print(json.dumps(rows, sort_keys=True))
+"#;
+    let mut child = Command::new("python3")
+        .arg("-")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn proof-output digest classifier smoke");
+    child
+        .stdin
+        .as_mut()
+        .expect("classifier smoke stdin")
+        .write_all(script.as_bytes())
+        .expect("write classifier smoke script");
+    let output = child
+        .wait_with_output()
+        .expect("run proof-output digest classifier smoke");
+    assert!(
+        output.status.success(),
+        "proof-output digest classifier smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("classifier smoke JSON");
+    let rows = parsed.as_array().expect("classifier smoke rows");
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        let evidence = &row["evidence"];
+        assert_eq!(
+            evidence["proof_output_digest"].as_str(),
+            Some("sha256:db286a313e464f83b82a2f2726df39ad11dd82f58ab3431084939d3551e31583")
+        );
+        assert_eq!(evidence["proof_output_byte_count"].as_u64(), Some(55));
+        assert_eq!(
+            evidence["artifact_source_fingerprint"].as_str(),
+            Some("sha256:source-digest")
+        );
+        assert_eq!(
+            evidence["artifact_tree_fingerprint"].as_str(),
+            Some("git-tree:digest")
+        );
     }
 }
 

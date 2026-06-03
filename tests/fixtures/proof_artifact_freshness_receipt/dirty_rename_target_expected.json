@@ -26,6 +26,9 @@
             "status": "R "
           }
         ],
+        "proof_output_byte_count": 40,
+        "proof_output_digest": "sha256:4a5254da5fa9c1fbde843bcc35c60df9ec62af235103b91e61d94aac921b0266",
+        "proof_output_segment_count": 1,
         "rch_remote_route_required": true,
         "rch_remote_route_segments": [
           "[RCH] remote rch-worker-rename-01 (8.8s)"

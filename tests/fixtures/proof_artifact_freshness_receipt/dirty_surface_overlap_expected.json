@@ -26,6 +26,9 @@
             "status": " M"
           }
         ],
+        "proof_output_byte_count": 47,
+        "proof_output_digest": "sha256:e706ebf1b7ffdb7244db46226a6d39a56629ea9f83a39bf2f60c834baa66b53c",
+        "proof_output_segment_count": 1,
         "rch_remote_route_required": true,
         "rch_remote_route_segments": [
           "[RCH] remote rch-worker-proof-status-01 (13.6s)"

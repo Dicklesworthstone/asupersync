@@ -9,6 +9,7 @@ current dirty work.
 
 import argparse
 import datetime as dt
+import hashlib
 import fnmatch
 import json
 import re
@@ -307,6 +308,24 @@ def normalize_fuzz_extent(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_proof_output_text(texts: list[str]) -> str:
+    normalized = [
+        text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+        for text in texts
+    ]
+    return "\n".join(normalized)
+
+
+def proof_output_digest(texts: list[str]) -> dict[str, Any]:
+    normalized = normalize_proof_output_text(texts)
+    payload = normalized.encode("utf-8")
+    return {
+        "proof_output_digest": f"sha256:{hashlib.sha256(payload).hexdigest()}",
+        "proof_output_byte_count": len(payload),
+        "proof_output_segment_count": len(texts),
+    }
+
+
 def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {
@@ -408,6 +427,32 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
                 ("proof", "stderr"),
                 ("result", "stdout"),
                 ("result", "stderr"),
+            ],
+        ),
+        "source_fingerprint": first_string(
+            raw,
+            [
+                ("source_fingerprint",),
+                ("source_digest",),
+                ("source_sha256",),
+                ("source", "fingerprint"),
+                ("source", "sha256"),
+                ("metadata", "source_fingerprint"),
+                ("metadata", "source_digest"),
+                ("metadata", "source_sha256"),
+            ],
+        ),
+        "tree_fingerprint": first_string(
+            raw,
+            [
+                ("tree_fingerprint",),
+                ("source_tree_fingerprint",),
+                ("git_tree_sha",),
+                ("tree", "fingerprint"),
+                ("source_tree", "fingerprint"),
+                ("metadata", "tree_fingerprint"),
+                ("metadata", "source_tree_fingerprint"),
+                ("metadata", "git_tree_sha"),
             ],
         ),
         "fuzz_extent": normalize_fuzz_extent(raw),
@@ -641,7 +686,12 @@ def classify_artifact(
         "current_branch": current_branch,
         "dirty_overlap_count": len(overlaps),
         "dirty_overlaps": overlaps,
+        **proof_output_digest(artifact.get("proof_text", [])),
     }
+    if artifact.get("source_fingerprint"):
+        evidence["artifact_source_fingerprint"] = artifact["source_fingerprint"]
+    if artifact.get("tree_fingerprint"):
+        evidence["artifact_tree_fingerprint"] = artifact["tree_fingerprint"]
     if bare_cargo_command:
         evidence["bare_cargo_command"] = True
     if unsafe_cargo_reasons:

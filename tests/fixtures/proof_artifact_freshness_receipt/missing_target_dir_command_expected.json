@@ -19,6 +19,9 @@
         "current_head_sha": "2222222222222222222222222222222222222222",
         "dirty_overlap_count": 0,
         "dirty_overlaps": [],
+        "proof_output_byte_count": 0,
+        "proof_output_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "proof_output_segment_count": 0,
         "unsafe_cargo_command_reasons": [
           "missing-cargo-target-dir",
           "missing-rch-env-wrapper"
