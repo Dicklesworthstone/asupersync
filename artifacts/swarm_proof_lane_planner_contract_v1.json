@@ -15,6 +15,18 @@
     "runtime_json_renderer": "asupersync::lab::render_swarm_proof_lane_atlas_report_json",
     "runtime_markdown_renderer": "asupersync::lab::render_swarm_proof_lane_atlas_report_markdown"
   },
+  "overhead_evidence": {
+    "bead_id": "asupersync-bt63nr.12",
+    "evidence_contract": "artifacts/perf/asupersync-bt63nr12-atlas-overhead-evidence-v1.json",
+    "required_buckets": [
+      "lock_metrics_disabled",
+      "lock_metrics_enabled",
+      "snapshot_render_json",
+      "snapshot_render_markdown",
+      "planner_cost"
+    ],
+    "production_boundary": "Production admission and backpressure remain opt-in unless a later policy bead proves otherwise."
+  },
   "schema": {
     "required_request_fields": [
       "lane_id",

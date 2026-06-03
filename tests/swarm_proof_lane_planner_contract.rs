@@ -11,10 +11,17 @@ use asupersync::lab::{
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hint::black_box;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
+const ADMISSION_ATLAS_CONTRACT_PATH: &str =
+    "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json";
 const ARTIFACT_PATH: &str = "artifacts/swarm_proof_lane_planner_contract_v1.json";
 const AGENTS_PATH: &str = "AGENTS.md";
+const ATLAS_OVERHEAD_EVIDENCE_PATH: &str =
+    "artifacts/perf/asupersync-bt63nr12-atlas-overhead-evidence-v1.json";
+const LOCK_CONTENTION_CONTRACT_PATH: &str = "artifacts/lock_contention_atlas_contract_v1.json";
 const PROOF_LANE_MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const PROOF_STATUS_SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 const README_PATH: &str = "README.md";
@@ -63,6 +70,20 @@ fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     text
 }
 
+fn bool_field(value: &Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} must be a bool"))
+}
+
+fn u64_field(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{key} must be a u64"))
+}
+
 fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
     array(value, key)
         .iter()
@@ -72,6 +93,14 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn elapsed_ns(start: Instant) -> u128 {
+    start.elapsed().as_nanos().max(1)
+}
+
+fn per_op_ns(elapsed_ns: u128, ops: u64) -> u128 {
+    elapsed_ns / u128::from(ops.max(1))
 }
 
 fn rows_by_id<'a>(value: &'a Value, key: &str, id_key: &str) -> BTreeMap<String, &'a Value> {
@@ -311,6 +340,300 @@ fn artifact_declares_source_schema_and_planner_boundary() {
     assert_eq!(
         string(source, "runtime_markdown_renderer"),
         "asupersync::lab::render_swarm_proof_lane_atlas_report_markdown"
+    );
+}
+
+#[test]
+fn atlas_overhead_evidence_separates_buckets_and_keeps_production_opt_in() {
+    let contract = contract();
+    let evidence = json_file(ATLAS_OVERHEAD_EVIDENCE_PATH);
+    assert_eq!(
+        evidence["contract_version"].as_str(),
+        Some("atlas-overhead-evidence-v1")
+    );
+    assert_eq!(evidence["bead_id"].as_str(), Some("asupersync-bt63nr.12"));
+
+    let overhead_link = contract
+        .get("overhead_evidence")
+        .expect("planner overhead_evidence link");
+    assert_eq!(
+        string(overhead_link, "evidence_contract"),
+        ATLAS_OVERHEAD_EVIDENCE_PATH
+    );
+    assert_eq!(
+        string_set(overhead_link, "required_buckets"),
+        string_set(&evidence, "required_buckets")
+    );
+    assert!(
+        string(overhead_link, "production_boundary")
+            .contains("Production admission and backpressure remain opt-in"),
+        "planner contract must preserve the production opt-in marker"
+    );
+
+    let source = evidence
+        .get("source_of_truth")
+        .expect("evidence source_of_truth object");
+    for key in [
+        "evidence_contract",
+        "lock_contention_contract",
+        "lock_contention_test",
+        "planner_contract",
+        "planner_contract_test",
+        "planner_source",
+        "admission_boundary_contract",
+        "admission_boundary_test",
+    ] {
+        let path = string(source, key);
+        assert!(
+            repo_path(path).exists(),
+            "source_of_truth.{key} must point to a live repo file: {path}"
+        );
+    }
+
+    let expected_buckets = BTreeSet::from([
+        "lock_metrics_disabled".to_string(),
+        "lock_metrics_enabled".to_string(),
+        "planner_cost".to_string(),
+        "snapshot_render_json".to_string(),
+        "snapshot_render_markdown".to_string(),
+    ]);
+    assert_eq!(string_set(&evidence, "required_buckets"), expected_buckets);
+    let buckets = rows_by_id(&evidence, "buckets", "bucket_id");
+    assert_eq!(
+        buckets.keys().cloned().collect::<BTreeSet<_>>(),
+        expected_buckets,
+        "overhead evidence must keep all required buckets separate"
+    );
+
+    let disabled = buckets
+        .get("lock_metrics_disabled")
+        .expect("disabled lock metrics bucket");
+    assert!(array(disabled, "feature_flags").is_empty());
+    assert_eq!(
+        string(disabled, "microharness_test"),
+        "lock_metrics_disabled_overhead_probe_reports_per_op_cost"
+    );
+
+    let enabled = buckets
+        .get("lock_metrics_enabled")
+        .expect("enabled lock metrics bucket");
+    assert_eq!(
+        string_set(enabled, "feature_flags"),
+        BTreeSet::from(["lock-metrics".to_string()])
+    );
+    assert_eq!(
+        string(enabled, "microharness_test"),
+        "lock_metrics_enabled_overhead_probe_reports_per_op_cost"
+    );
+
+    for bucket_id in [
+        "planner_cost",
+        "snapshot_render_json",
+        "snapshot_render_markdown",
+    ] {
+        assert_eq!(
+            string(
+                buckets.get(bucket_id).expect("planner bucket"),
+                "microharness_test"
+            ),
+            "atlas_overhead_microharness_reports_planner_and_renderer_costs"
+        );
+    }
+
+    for (bucket_id, row) in &buckets {
+        let command = string(row, "proof_command");
+        assert!(
+            command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- env "),
+            "{bucket_id} proof command must fail closed to remote RCH"
+        );
+        assert!(
+            command.contains("cargo test -p asupersync") && command.contains("--test "),
+            "{bucket_id} proof command must be a focused contract test"
+        );
+        assert!(
+            string(row, "expected_signal").contains(bucket_id),
+            "{bucket_id} expected signal must name the bucket"
+        );
+
+        let receipt = row
+            .get("last_rch_receipt")
+            .unwrap_or_else(|| panic!("{bucket_id} missing last_rch_receipt"));
+        match string(receipt, "status") {
+            "measured" => {
+                assert!(u64_field(receipt, "ops") > 0, "{bucket_id} ops");
+                assert!(
+                    u64_field(receipt, "elapsed_ns") > 0,
+                    "{bucket_id} elapsed_ns"
+                );
+                assert!(u64_field(receipt, "per_op_ns") > 0, "{bucket_id} per_op_ns");
+                assert!(
+                    !string(receipt, "measured_at").is_empty(),
+                    "{bucket_id} measured_at"
+                );
+                assert!(!string(receipt, "worker").is_empty(), "{bucket_id} worker");
+            }
+            "documented_blocker" => {
+                assert!(
+                    !string(receipt, "blocker").is_empty(),
+                    "{bucket_id} blocker"
+                );
+            }
+            other => panic!("{bucket_id} has unsupported receipt status {other}"),
+        }
+    }
+
+    let policy = evidence
+        .get("microharness_policy")
+        .expect("microharness_policy");
+    assert!(u64_field(policy, "planner_iterations") >= 1024);
+    assert!(u64_field(policy, "renderer_iterations") >= 512);
+    assert!(u64_field(policy, "lock_iterations") >= 4096);
+    assert!(!bool_field(policy, "asserts_thresholds"));
+
+    let scope = evidence.get("scope_boundary").expect("scope_boundary");
+    assert!(bool_field(scope, "measures_overhead_only"));
+    for key in [
+        "changes_runtime_policy",
+        "touches_scheduler_hot_paths",
+        "touches_sync_hot_paths",
+        "touches_cancel_hot_paths",
+        "touches_obligation_hot_paths",
+        "touches_channel_hot_paths",
+        "phase6_flamegraph_required",
+        "production_admission_default_enabled",
+        "production_backpressure_default_enabled",
+    ] {
+        assert!(
+            !bool_field(scope, key),
+            "scope boundary {key} must remain false"
+        );
+    }
+    assert!(bool_field(
+        scope,
+        "production_enablement_requires_later_policy_bead"
+    ));
+    assert!(
+        string(scope, "phase6_proof_note").contains(
+            "No scheduler, sync, cancel, obligation, or channel implementation hot paths are edited"
+        ),
+        "Phase 6 proof note must explain why no flamegraph is required"
+    );
+
+    let lock_contract = json_file(LOCK_CONTENTION_CONTRACT_PATH);
+    let lock_policy = lock_contract
+        .get("atlas_policy")
+        .expect("lock atlas policy");
+    assert_eq!(string(lock_policy, "default_mode"), "disabled");
+    assert_eq!(string(lock_policy, "enabled_mode"), "opt_in_lock_metrics");
+    assert!(bool_field(
+        lock_policy,
+        "instrumentation_off_overhead_must_be_measured"
+    ));
+
+    let admission_contract = json_file(ADMISSION_ATLAS_CONTRACT_PATH);
+    let admission_scope = admission_contract
+        .get("scope_boundary")
+        .expect("admission scope_boundary");
+    assert!(!bool_field(
+        admission_scope,
+        "production_admission_default_enabled"
+    ));
+    assert!(!bool_field(admission_scope, "changes_runtime_policy"));
+    let admission_non_coverage = string_set(admission_scope, "non_coverage")
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        admission_non_coverage
+            .contains("does not make production admission or backpressure on by default"),
+        "admission atlas must preserve the opt-in production boundary"
+    );
+
+    let closeout = array(&evidence, "closeout_requirements")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("closeout requirement string")
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        closeout.contains("production admission and production backpressure remain opt-in"),
+        "closeout requirements must force the production opt-in statement"
+    );
+}
+
+#[test]
+fn atlas_overhead_microharness_reports_planner_and_renderer_costs() {
+    let evidence = json_file(ATLAS_OVERHEAD_EVIDENCE_PATH);
+    let policy = evidence
+        .get("microharness_policy")
+        .expect("microharness_policy");
+    let planner_ops = u64_field(policy, "planner_iterations");
+    let renderer_ops = u64_field(policy, "renderer_iterations");
+    assert!(planner_ops > 0);
+    assert!(renderer_ops > 0);
+
+    let contract = contract();
+    let request = base_focused_request(&contract);
+
+    let planner_start = Instant::now();
+    let mut admitted = 0_u64;
+    for _ in 0..planner_ops {
+        let plan = plan_swarm_proof_lane(black_box(&request));
+        if plan.admission_decision == SwarmProofLaneAdmissionDecision::Admit {
+            admitted += 1;
+        }
+        black_box(plan);
+    }
+    let planner_elapsed_ns = elapsed_ns(planner_start);
+    assert_eq!(admitted, planner_ops);
+    println!(
+        "ATLAS_OVERHEAD_SAMPLE bucket=planner_cost ops={planner_ops} elapsed_ns={planner_elapsed_ns} per_op_ns={}",
+        per_op_ns(planner_elapsed_ns, planner_ops)
+    );
+
+    let corpus = contract
+        .get("report_renderer_golden_corpus")
+        .expect("report_renderer_golden_corpus");
+    let row = array(corpus, "cases")
+        .first()
+        .expect("renderer corpus has a first case");
+    let plan = report_renderer_plan(&contract, row);
+    let report = build_swarm_proof_lane_atlas_report(&plan);
+    assert_eq!(
+        report.schema_version,
+        SWARM_PROOF_LANE_ATLAS_REPORT_SCHEMA_VERSION
+    );
+
+    let json_start = Instant::now();
+    let mut json_bytes = 0_usize;
+    for _ in 0..renderer_ops {
+        let rendered = render_swarm_proof_lane_atlas_report_json(black_box(&plan));
+        json_bytes += rendered.len();
+        black_box(rendered);
+    }
+    let json_elapsed_ns = elapsed_ns(json_start);
+    assert!(json_bytes > 0);
+    println!(
+        "ATLAS_OVERHEAD_SAMPLE bucket=snapshot_render_json ops={renderer_ops} elapsed_ns={json_elapsed_ns} per_op_ns={}",
+        per_op_ns(json_elapsed_ns, renderer_ops)
+    );
+
+    let markdown_start = Instant::now();
+    let mut markdown_bytes = 0_usize;
+    for _ in 0..renderer_ops {
+        let rendered = render_swarm_proof_lane_atlas_report_markdown(black_box(&plan));
+        markdown_bytes += rendered.len();
+        black_box(rendered);
+    }
+    let markdown_elapsed_ns = elapsed_ns(markdown_start);
+    assert!(markdown_bytes > 0);
+    println!(
+        "ATLAS_OVERHEAD_SAMPLE bucket=snapshot_render_markdown ops={renderer_ops} elapsed_ns={markdown_elapsed_ns} per_op_ns={}",
+        per_op_ns(markdown_elapsed_ns, renderer_ops)
     );
 }
 
