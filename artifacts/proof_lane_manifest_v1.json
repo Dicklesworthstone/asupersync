@@ -33,6 +33,7 @@
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
+    "admission-aware-proof-lane-atlas",
     "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
@@ -404,6 +405,36 @@
       "escalation_notes": "Use this lane for ASW-7 guard changes; if it fails, do not commit from a shared dirty checkout until the first failing scenario is understood."
     },
     {
+      "lane_id": "swarm-proof-lane-planner-contract",
+      "kind": "artifact_contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "admission-aware-proof-lane-atlas"
+      ],
+      "covers": "Admission-aware proof-lane planner fixtures, atlas decision receipts, deterministic JSON/Markdown report goldens, docs markers, manifest mapping, and proof-status claim rows stay aligned.",
+      "explicit_not_covered": "Does not prove broad workspace release health, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target.",
+      "expected_signal": "swarm_proof_lane_planner_contract tests pass",
+      "source_paths": [
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "tests/swarm_proof_lane_planner_contract.rs",
+        "src/lab/swarm_replay.rs",
+        "src/lab/mod.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md",
+        "docs/proof_runner_usage.md"
+      ],
+      "common_unrelated_blockers": [
+        "proof-lane planner fixture drift",
+        "docs marker drift",
+        "manifest or proof-status snapshot mapping drift"
+      ],
+      "escalation_notes": "Use this lane for admission-aware atlas/planner/renderer changes; do not cite it as broad release, conformance, or performance proof."
+    },
+    {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
@@ -558,6 +589,13 @@
       "description": "Pressure-control evidence claims, schema versions, docs, and scoped proof command stay aligned.",
       "lane_ids": [
         "runtime-pressure-control-evidence-contract"
+      ]
+    },
+    {
+      "guarantee_id": "admission-aware-proof-lane-atlas",
+      "description": "Admission-aware proof-lane planner fixtures, atlas receipts, deterministic report goldens, docs markers, manifest mapping, and proof-status claim rows stay aligned.",
+      "lane_ids": [
+        "swarm-proof-lane-planner-contract"
       ]
     },
     {

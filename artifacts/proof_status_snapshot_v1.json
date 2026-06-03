@@ -39,6 +39,7 @@
     "scheduler fairness",
     "fuzz manifest",
     "conformance runners",
+    "admission-aware proof-lane atlas",
     "formal Lean posture",
     "rustdoc/API examples"
   ],
@@ -245,6 +246,32 @@
       ],
       "blocked_frontier": null,
       "notes": "This row demonstrates the required exact red/blocker shape for conformance-adjacent proof stops."
+    },
+    {
+      "claim_id": "admission-aware-proof-lane-atlas",
+      "category": "admission-aware proof-lane atlas",
+      "status": "green",
+      "doc_claim_markers": {
+        "README.md": [
+          "admission-aware proof-lane atlas",
+          "swarm-proof-lane-planner-contract"
+        ],
+        "AGENTS.md": [
+          "admission-aware proof-lane atlas",
+          "swarm-proof-lane-planner-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "admission-aware-proof-lane-atlas"
+      ],
+      "manifest_lane_ids": [
+        "swarm-proof-lane-planner-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps the focused atlas/planner artifact contract; it does not prove broad workspace release health, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target."
     },
     {
       "claim_id": "formal-lean-posture",

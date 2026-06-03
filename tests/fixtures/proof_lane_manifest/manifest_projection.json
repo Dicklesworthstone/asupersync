@@ -40,6 +40,7 @@
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
+    "admission-aware-proof-lane-atlas",
     "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
@@ -307,6 +308,28 @@
       ]
     },
     {
+      "lane_id": "swarm-proof-lane-planner-contract",
+      "kind": "artifact_contract",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture",
+      "guarantee_ids": [
+        "admission-aware-proof-lane-atlas"
+      ],
+      "feature_flags": [],
+      "expected_signal": "swarm_proof_lane_planner_contract tests pass",
+      "source_paths": [
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "tests/swarm_proof_lane_planner_contract.rs",
+        "src/lab/swarm_replay.rs",
+        "src/lab/mod.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md",
+        "docs/proof_runner_usage.md"
+      ]
+    },
+    {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
       "package": "asupersync",
@@ -431,6 +454,12 @@
       "guarantee_id": "runtime-pressure-control-evidence-contract",
       "lane_ids": [
         "runtime-pressure-control-evidence-contract"
+      ]
+    },
+    {
+      "guarantee_id": "admission-aware-proof-lane-atlas",
+      "lane_ids": [
+        "swarm-proof-lane-planner-contract"
       ]
     },
     {

@@ -168,6 +168,8 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 
 **Canonical proof-command manifest:** `artifacts/proof_lane_manifest_v1.json`, checked by `tests/proof_lane_manifest_contract.rs`, maps each `RCH_REQUIRE_REMOTE=1 rch exec -- ...` proof lane to the guarantee it covers and the surfaces it explicitly does not cover. Use it when deciding whether a green or blocked command is production-graph proof, fuzz smoke evidence, lib/all-target/clippy/rustdoc frontier evidence, or formal Lean proof evidence. The current claim-to-status dashboard lives in `artifacts/proof_status_snapshot_v1.json`, checked by `tests/proof_status_snapshot_contract.rs`, and maps the README/AGENTS proof claims to manifest lanes plus validation-frontier blocker rows.
 
+**admission-aware proof-lane atlas:** `artifacts/swarm_proof_lane_planner_contract_v1.json`, checked by `tests/swarm_proof_lane_planner_contract.rs`, is the canonical planner, atlas receipt, and deterministic report-golden contract. Its focused manifest lane is `swarm-proof-lane-planner-contract`; cite it only for planner fixtures, atlas decision receipts, JSON/Markdown report goldens, docs markers, manifest mapping, and proof-status claim rows, not for broad workspace health, conformance, throughput, scheduler-performance, or all-target claims.
+
 **Pattern**: All async functions take `&Cx` as first parameter. The `Cx` flows down through structured concurrency scopes.
 
 ### Dependency Policy

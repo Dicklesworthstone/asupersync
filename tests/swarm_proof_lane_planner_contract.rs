@@ -14,6 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const ARTIFACT_PATH: &str = "artifacts/swarm_proof_lane_planner_contract_v1.json";
+const AGENTS_PATH: &str = "AGENTS.md";
+const PROOF_LANE_MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
+const PROOF_STATUS_SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
+const README_PATH: &str = "README.md";
 const RUNBOOK_PATH: &str = "docs/proof_runner_usage.md";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -29,6 +33,11 @@ fn contract() -> Value {
 fn read_repo_file(relative: &str) -> String {
     std::fs::read_to_string(repo_path(relative))
         .unwrap_or_else(|error| panic!("read {relative}: {error}"))
+}
+
+fn json_file(relative: &str) -> Value {
+    serde_json::from_str(&read_repo_file(relative))
+        .unwrap_or_else(|error| panic!("parse {relative}: {error}"))
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
@@ -303,6 +312,138 @@ fn artifact_declares_source_schema_and_planner_boundary() {
         string(source, "runtime_markdown_renderer"),
         "asupersync::lab::render_swarm_proof_lane_atlas_report_markdown"
     );
+}
+
+#[test]
+fn planner_contract_is_listed_in_manifest_status_and_docs() {
+    let manifest = json_file(PROOF_LANE_MANIFEST_PATH);
+    let status = json_file(PROOF_STATUS_SNAPSHOT_PATH);
+    let lane = array(&manifest, "lanes")
+        .iter()
+        .find(|lane| lane["lane_id"].as_str() == Some("swarm-proof-lane-planner-contract"))
+        .expect("swarm proof-lane planner manifest lane");
+
+    assert_eq!(string(lane, "kind"), "artifact_contract");
+    assert_eq!(string(lane, "package"), "asupersync");
+    let command = string(lane, "command");
+    for token in [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract",
+        "cargo test -p asupersync --test swarm_proof_lane_planner_contract",
+    ] {
+        assert!(
+            command.contains(token),
+            "manifest lane command missing {token}"
+        );
+    }
+
+    assert!(
+        string(lane, "covers").contains("deterministic JSON/Markdown report goldens"),
+        "lane must name renderer golden coverage"
+    );
+    let explicit_not_covered = string(lane, "explicit_not_covered");
+    for excluded in [
+        "broad workspace release health",
+        "conformance behavior",
+        "RCH fleet throughput",
+        "scheduler performance",
+        "every Cargo target",
+    ] {
+        assert!(
+            explicit_not_covered.contains(excluded),
+            "lane must not overclaim {excluded}"
+        );
+    }
+
+    let source_paths = string_set(lane, "source_paths");
+    for path in [
+        ARTIFACT_PATH,
+        "tests/swarm_proof_lane_planner_contract.rs",
+        "src/lab/swarm_replay.rs",
+        "src/lab/mod.rs",
+        PROOF_LANE_MANIFEST_PATH,
+        PROOF_STATUS_SNAPSHOT_PATH,
+        README_PATH,
+        AGENTS_PATH,
+        RUNBOOK_PATH,
+    ] {
+        assert!(
+            source_paths.contains(path),
+            "lane source paths missing {path}"
+        );
+        assert!(
+            repo_path(path).exists(),
+            "lane source path must exist: {path}"
+        );
+    }
+    assert_eq!(
+        string_set(lane, "guarantee_ids"),
+        BTreeSet::from(["admission-aware-proof-lane-atlas".to_string()])
+    );
+
+    let guarantee = array(&manifest, "guarantees")
+        .iter()
+        .find(|guarantee| {
+            guarantee["guarantee_id"].as_str() == Some("admission-aware-proof-lane-atlas")
+        })
+        .expect("admission-aware proof-lane atlas guarantee");
+    assert!(
+        string_set(guarantee, "lane_ids").contains("swarm-proof-lane-planner-contract"),
+        "guarantee must map back to focused planner lane"
+    );
+    assert!(
+        string_set(&manifest, "required_guarantee_ids")
+            .contains("admission-aware-proof-lane-atlas"),
+        "required guarantee list must include atlas guarantee"
+    );
+
+    let claim = array(&status, "claim_categories")
+        .iter()
+        .find(|claim| claim["claim_id"].as_str() == Some("admission-aware-proof-lane-atlas"))
+        .expect("proof-status atlas claim row");
+    assert_eq!(string(claim, "status"), "green");
+    assert_eq!(
+        string_set(claim, "manifest_lane_ids"),
+        BTreeSet::from(["swarm-proof-lane-planner-contract".to_string()])
+    );
+    assert_eq!(
+        string_set(claim, "manifest_guarantee_ids"),
+        BTreeSet::from(["admission-aware-proof-lane-atlas".to_string()])
+    );
+    assert_eq!(
+        string_set(claim, "proof_commands"),
+        BTreeSet::from([command.to_string()])
+    );
+    for excluded in [
+        "broad workspace release health",
+        "conformance behavior",
+        "RCH fleet throughput",
+        "scheduler performance",
+        "every Cargo target",
+    ] {
+        assert!(
+            string(claim, "notes").contains(excluded),
+            "proof-status row must preserve scope limit {excluded}"
+        );
+    }
+
+    let doc_markers = object(claim, "doc_claim_markers");
+    for path in [README_PATH, AGENTS_PATH] {
+        let doc = read_repo_file(path);
+        let marker_array = doc_markers
+            .get(path)
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{path} doc markers must be an array"));
+        for marker in marker_array {
+            let marker = marker
+                .as_str()
+                .unwrap_or_else(|| panic!("{path} marker must be string"));
+            assert!(
+                doc.contains(marker),
+                "{path} must contain proof-status marker {marker:?}"
+            );
+        }
+    }
 }
 
 #[test]

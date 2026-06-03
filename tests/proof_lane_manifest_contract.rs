@@ -278,6 +278,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "rustdoc-api",
         "formal-lean-build",
         "dirty-tree-ownership-receipt-contract",
+        "swarm-proof-lane-planner-contract",
         "proof-lane-manifest-contract",
     ] {
         assert!(lane_ids.contains(required), "missing lane {required}");
