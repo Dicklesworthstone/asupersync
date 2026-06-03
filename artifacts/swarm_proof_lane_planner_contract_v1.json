@@ -1,7 +1,7 @@
 {
   "contract_version": "swarm-proof-lane-planner-v1",
   "schema_version": "asupersync.swarm-proof-lane-plan.v1",
-  "bead_id": "asupersync-bt63nr.4",
+  "bead_id": "asupersync-bt63nr.8",
   "description": "Stable proof-lane planner contract for mapping swarm scenario fixtures and admission-aware atlas rows to remote-only RCH validation decisions with provenance, stale-input checks, explicit receipts, and Agent Mail handoff text.",
   "source_of_truth": {
     "contract": "artifacts/swarm_proof_lane_planner_contract_v1.json",
@@ -150,6 +150,312 @@
       }
     }
   ],
+  "decision_scenario_corpus": {
+    "corpus_id": "admission-aware-atlas-decision-scenarios-v1",
+    "bead_id": "asupersync-bt63nr.8",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr8_swarm_planner cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture",
+    "scrubbing_policy": {
+      "forbidden_log_fragments": [
+        "/data/",
+        "/home/",
+        "/tmp/",
+        "ubuntu@",
+        "2026-",
+        "T00:",
+        "worker-scoped path"
+      ],
+      "stable_tokens": [
+        "proof_lane",
+        "decision",
+        "source_rows",
+        "closeout"
+      ]
+    },
+    "required_cases": [
+      "healthy_large_host_admission",
+      "degraded_advisory_low_memory",
+      "critical_advisory_spectral_warning",
+      "trapped_cycle_proven",
+      "rch_local_fallback_refused",
+      "dirty_tree_conflict",
+      "stale_evidence",
+      "malformed_input"
+    ],
+    "cases": [
+      {
+        "case_id": "healthy_large_host_admission",
+        "expected_admission_decision": "admit",
+        "atlas_context": {
+          "source_rows": [
+            "runtime_pressure:healthy-large-host",
+            "large_host_worker_warmth:rch-worker-fixture-01"
+          ],
+          "reason_codes": [
+            "healthy_large_host",
+            "remote_required_policy_observed"
+          ],
+          "worker_saturation": "available",
+          "batching_decision": null,
+          "peer_reservation_overlap_status": "clear",
+          "target_dir_isolation_status": "isolated",
+          "trapped_cycle_witness_status": "not_required",
+          "stale_evidence": false,
+          "malformed": false,
+          "spectral_warning_advisory": false
+        },
+        "stable_log": [
+          "proof_lane healthy_large_host_admission",
+          "decision admit remote_required=true remote_observed=true",
+          "source_rows runtime_pressure:healthy-large-host large_host_worker_warmth:rch-worker-fixture-01",
+          "closeout run remote proof lane and record green receipt"
+        ],
+        "expected_summary_tokens": [
+          "admission_decision: Admit",
+          "peer_reservation_overlap: Clear",
+          "trapped_cycle_witness: NotRequired"
+        ]
+      },
+      {
+        "case_id": "degraded_advisory_low_memory",
+        "expected_admission_decision": "defer",
+        "atlas_context": {
+          "source_rows": [
+            "runtime_pressure:degraded-memory-watch",
+            "large_host_worker_warmth:rch-worker-fixture-low-memory"
+          ],
+          "reason_codes": [
+            "degraded_advisory",
+            "worker_memory_low"
+          ],
+          "worker_saturation": "low_memory",
+          "batching_decision": "queue_low_memory",
+          "peer_reservation_overlap_status": "clear",
+          "target_dir_isolation_status": "isolated",
+          "trapped_cycle_witness_status": "not_required",
+          "stale_evidence": false,
+          "malformed": false,
+          "spectral_warning_advisory": false
+        },
+        "stable_log": [
+          "proof_lane degraded_advisory_low_memory",
+          "decision defer reason=worker_memory_low",
+          "source_rows runtime_pressure:degraded-memory-watch large_host_worker_warmth:rch-worker-fixture-low-memory",
+          "closeout wait for worker memory headroom before widening proof batch"
+        ],
+        "expected_summary_tokens": [
+          "admission_decision: Defer",
+          "reason_codes:",
+          "worker_saturation_low_memory"
+        ]
+      },
+      {
+        "case_id": "critical_advisory_spectral_warning",
+        "expected_admission_decision": "advisory_spectral_warning",
+        "atlas_context": {
+          "source_rows": [
+            "runtime_pressure:critical-spectral-fragmented",
+            "spectral_wait_graph:fragmented-without-witness"
+          ],
+          "reason_codes": [
+            "critical_advisory",
+            "trapped_cycle_detection_required"
+          ],
+          "worker_saturation": "available",
+          "batching_decision": null,
+          "peer_reservation_overlap_status": "clear",
+          "target_dir_isolation_status": "isolated",
+          "trapped_cycle_witness_status": "required_missing",
+          "stale_evidence": false,
+          "malformed": false,
+          "spectral_warning_advisory": true
+        },
+        "stable_log": [
+          "proof_lane critical_advisory_spectral_warning",
+          "decision advisory_spectral_warning reason=trapped_cycle_detection_required",
+          "source_rows runtime_pressure:critical-spectral-fragmented spectral_wait_graph:fragmented-without-witness",
+          "closeout keep spectral evidence advisory until a validated witness exists"
+        ],
+        "expected_summary_tokens": [
+          "admission_decision: AdvisorySpectralWarning",
+          "trapped_cycle_witness: RequiredMissing",
+          "advisory_spectral_warning"
+        ]
+      },
+      {
+        "case_id": "trapped_cycle_proven",
+        "expected_admission_decision": "trapped_cycle_proven",
+        "atlas_context": {
+          "source_rows": [
+            "spectral_wait_graph:deadlocked",
+            "trapped_cycle_witness:validated-replay-row"
+          ],
+          "reason_codes": [
+            "trapped_cycle_witness_validated",
+            "deadlock_label_allowed"
+          ],
+          "worker_saturation": "available",
+          "batching_decision": null,
+          "peer_reservation_overlap_status": "clear",
+          "target_dir_isolation_status": "isolated",
+          "trapped_cycle_witness_status": "proven",
+          "stale_evidence": false,
+          "malformed": false,
+          "spectral_warning_advisory": false
+        },
+        "stable_log": [
+          "proof_lane trapped_cycle_proven",
+          "decision trapped_cycle_proven reason=trapped_cycle_witness_validated",
+          "source_rows spectral_wait_graph:deadlocked trapped_cycle_witness:validated-replay-row",
+          "closeout attach replay witness before using proven label"
+        ],
+        "expected_summary_tokens": [
+          "admission_decision: TrappedCycleProven",
+          "trapped_cycle_witness: Proven",
+          "deadlock_label_allowed"
+        ]
+      },
+      {
+        "case_id": "rch_local_fallback_refused",
+        "expected_admission_decision": "reject",
+        "atlas_context": {
+          "source_rows": [
+            "rch_proof_lane_admission:local-fallback-refused",
+            "proof_transcript:remote-required"
+          ],
+          "reason_codes": [
+            "remote_required_policy",
+            "local_fallback_refused"
+          ],
+          "worker_saturation": "available",
+          "batching_decision": null,
+          "peer_reservation_overlap_status": "clear",
+          "target_dir_isolation_status": "isolated",
+          "trapped_cycle_witness_status": "not_required",
+          "stale_evidence": false,
+          "malformed": false,
+          "spectral_warning_advisory": false
+        },
+        "request_overrides": {
+          "append_transcript_markers": [
+            "[RCH] local fallback executed after worker refusal"
+          ]
+        },
+        "stable_log": [
+          "proof_lane rch_local_fallback_refused",
+          "decision reject reason=local_fallback_marker",
+          "source_rows rch_proof_lane_admission:local-fallback-refused proof_transcript:remote-required",
+          "closeout discard local fallback result and rerun through remote RCH"
+        ],
+        "expected_summary_tokens": [
+          "admission_decision: Reject",
+          "local_fallback_marker",
+          "fallback=RemoteOnly"
+        ]
+      },
+      {
+        "case_id": "dirty_tree_conflict",
+        "expected_admission_decision": "blocked",
+        "atlas_context": {
+          "source_rows": [
+            "dirty_tree_peer_ownership:peer-owned-source",
+            "agent_mail_reservations:active-exclusive-conflict"
+          ],
+          "reason_codes": [
+            "peer_dirty_tree_overlap",
+            "active_exclusive_agent_mail_conflict"
+          ],
+          "worker_saturation": "available",
+          "batching_decision": null,
+          "peer_reservation_overlap_status": "active_exclusive_conflict",
+          "target_dir_isolation_status": "isolated",
+          "trapped_cycle_witness_status": "not_required",
+          "stale_evidence": false,
+          "malformed": false,
+          "spectral_warning_advisory": false
+        },
+        "stable_log": [
+          "proof_lane dirty_tree_conflict",
+          "decision blocked reason=active_exclusive_agent_mail_conflict",
+          "source_rows dirty_tree_peer_ownership:peer-owned-source agent_mail_reservations:active-exclusive-conflict",
+          "closeout coordinate handoff before touching peer-owned source"
+        ],
+        "expected_summary_tokens": [
+          "admission_decision: Blocked",
+          "peer_reservation_overlap: ActiveExclusiveConflict",
+          "active_exclusive_agent_mail_conflict"
+        ]
+      },
+      {
+        "case_id": "stale_evidence",
+        "expected_admission_decision": "stale_evidence",
+        "atlas_context": {
+          "source_rows": [
+            "runtime_pressure:stale-snapshot",
+            "agent_mail_reservations:stale-snapshot"
+          ],
+          "reason_codes": [
+            "atlas_stale_evidence",
+            "reservation_snapshot_stale"
+          ],
+          "worker_saturation": "available",
+          "batching_decision": null,
+          "peer_reservation_overlap_status": "stale_or_malformed",
+          "target_dir_isolation_status": "isolated",
+          "trapped_cycle_witness_status": "not_required",
+          "stale_evidence": true,
+          "malformed": false,
+          "spectral_warning_advisory": false
+        },
+        "stable_log": [
+          "proof_lane stale_evidence",
+          "decision stale_evidence reason=atlas_stale_evidence",
+          "source_rows runtime_pressure:stale-snapshot agent_mail_reservations:stale-snapshot",
+          "closeout refresh narrow atlas rows before admitting proof lane"
+        ],
+        "expected_summary_tokens": [
+          "admission_decision: StaleEvidence",
+          "peer_reservation_overlap: StaleOrMalformed",
+          "atlas_stale_evidence"
+        ]
+      },
+      {
+        "case_id": "malformed_input",
+        "expected_admission_decision": "malformed",
+        "atlas_context": {
+          "source_rows": [
+            "runtime_pressure:malformed-row",
+            "rch_proof_lane_admission:missing-lane-id"
+          ],
+          "reason_codes": [
+            "atlas_malformed_input",
+            "missing_lane_id"
+          ],
+          "worker_saturation": "available",
+          "batching_decision": null,
+          "peer_reservation_overlap_status": "clear",
+          "target_dir_isolation_status": "isolated",
+          "trapped_cycle_witness_status": "not_required",
+          "stale_evidence": false,
+          "malformed": true,
+          "spectral_warning_advisory": false
+        },
+        "request_overrides": {
+          "lane_id": ""
+        },
+        "stable_log": [
+          "proof_lane malformed_input",
+          "decision malformed reason=missing_lane_id",
+          "source_rows runtime_pressure:malformed-row rch_proof_lane_admission:missing-lane-id",
+          "closeout fix malformed planner input before publishing receipt"
+        ],
+        "expected_summary_tokens": [
+          "admission_decision: Malformed",
+          "atlas_malformed_input",
+          "missing_lane_id"
+        ]
+      }
+    ]
+  },
   "malformed_examples": [
     {
       "lane_id": "missing-rch-provenance",

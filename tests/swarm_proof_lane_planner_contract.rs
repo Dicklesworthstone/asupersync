@@ -30,6 +30,13 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
         .unwrap_or_else(|| panic!("{key} must be an array"))
 }
 
+fn object<'a>(value: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{key} must be an object"))
+}
+
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     let text = value
         .get(key)
@@ -47,6 +54,13 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
                 .unwrap_or_else(|| panic!("{key} entries must be strings"))
                 .to_string()
         })
+        .collect()
+}
+
+fn rows_by_id<'a>(value: &'a Value, key: &str, id_key: &str) -> BTreeMap<String, &'a Value> {
+    array(value, key)
+        .iter()
+        .map(|row| (string(row, id_key).to_string(), row))
         .collect()
 }
 
@@ -96,6 +110,94 @@ fn atlas_context(
     context
 }
 
+fn admission_decision(value: &Value, key: &str) -> SwarmProofLaneAdmissionDecision {
+    match string(value, key) {
+        "admit" => SwarmProofLaneAdmissionDecision::Admit,
+        "defer" => SwarmProofLaneAdmissionDecision::Defer,
+        "reject" => SwarmProofLaneAdmissionDecision::Reject,
+        "batch" => SwarmProofLaneAdmissionDecision::Batch,
+        "blocked" => SwarmProofLaneAdmissionDecision::Blocked,
+        "stale_evidence" => SwarmProofLaneAdmissionDecision::StaleEvidence,
+        "malformed" => SwarmProofLaneAdmissionDecision::Malformed,
+        "advisory_spectral_warning" => SwarmProofLaneAdmissionDecision::AdvisorySpectralWarning,
+        "trapped_cycle_proven" => SwarmProofLaneAdmissionDecision::TrappedCycleProven,
+        other => panic!("unknown admission decision {other}"),
+    }
+}
+
+fn apply_request_overrides(request: &mut SwarmProofLaneRequest, row: &Value) {
+    let Some(overrides) = row.get("request_overrides").and_then(Value::as_object) else {
+        return;
+    };
+    if let Some(lane_id) = overrides.get("lane_id").and_then(Value::as_str) {
+        request.lane_id = lane_id.to_string();
+    }
+    if let Some(markers) = overrides
+        .get("append_transcript_markers")
+        .and_then(Value::as_array)
+    {
+        request
+            .transcript_markers
+            .extend(markers.iter().map(|marker| {
+                marker
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{} transcript marker", string(row, "case_id")))
+                    .to_string()
+            }));
+    }
+}
+
+fn scenario_request(base: &SwarmProofLaneRequest, row: &Value) -> SwarmProofLaneRequest {
+    let case_id = string(row, "case_id");
+    let mut request = base.clone();
+    request.lane_id = case_id.to_string();
+    request.scenario_id = format!("atlas-decision-{case_id}");
+    request.atlas_context = Some(
+        serde_json::from_value(
+            row.get("atlas_context")
+                .unwrap_or_else(|| panic!("{case_id} missing atlas_context"))
+                .clone(),
+        )
+        .unwrap_or_else(|error| panic!("{case_id} atlas_context parse failed: {error}")),
+    );
+    apply_request_overrides(&mut request, row);
+    request
+}
+
+fn assert_stable_log_is_scrubbed(corpus: &Value, row: &Value) {
+    let policy = Value::Object(object(corpus, "scrubbing_policy").clone());
+    let forbidden = string_set(&policy, "forbidden_log_fragments");
+    let stable_tokens = string_set(&policy, "stable_tokens");
+    let lines = array(row, "stable_log");
+    assert!(
+        lines.len() >= 4,
+        "{} stable_log must include replay and closeout detail",
+        string(row, "case_id")
+    );
+    let joined = lines
+        .iter()
+        .map(|line| {
+            line.as_str()
+                .unwrap_or_else(|| panic!("{} stable_log entries", string(row, "case_id")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for fragment in forbidden {
+        assert!(
+            !joined.contains(&fragment),
+            "{} stable log leaks host-specific fragment {fragment}",
+            string(row, "case_id")
+        );
+    }
+    for token in stable_tokens {
+        assert!(
+            joined.contains(&token),
+            "{} stable log missing {token}",
+            string(row, "case_id")
+        );
+    }
+}
+
 #[test]
 fn artifact_declares_source_schema_and_planner_boundary() {
     let contract = contract();
@@ -103,7 +205,7 @@ fn artifact_declares_source_schema_and_planner_boundary() {
         contract["contract_version"].as_str(),
         Some("swarm-proof-lane-planner-v1")
     );
-    assert_eq!(contract["bead_id"].as_str(), Some("asupersync-bt63nr.4"));
+    assert_eq!(contract["bead_id"].as_str(), Some("asupersync-bt63nr.8"));
     assert_eq!(
         contract["schema_version"].as_str(),
         Some(SWARM_PROOF_LANE_PLAN_SCHEMA_VERSION)
@@ -131,6 +233,84 @@ fn artifact_declares_source_schema_and_planner_boundary() {
         string(source, "runtime_planner"),
         "asupersync::lab::plan_swarm_proof_lane"
     );
+}
+
+#[test]
+fn decision_scenario_corpus_is_stable_scrubbed_and_replayable() {
+    let contract = contract();
+    let corpus = contract
+        .get("decision_scenario_corpus")
+        .expect("decision_scenario_corpus");
+    assert_eq!(
+        corpus["corpus_id"].as_str(),
+        Some("admission-aware-atlas-decision-scenarios-v1")
+    );
+    assert_eq!(corpus["bead_id"].as_str(), Some("asupersync-bt63nr.8"));
+
+    let proof_command = string(corpus, "proof_command");
+    for token in [
+        "RCH_REQUIRE_REMOTE=1",
+        "rch exec -- env",
+        "CARGO_TARGET_DIR=",
+        "cargo test -p asupersync --test swarm_proof_lane_planner_contract",
+    ] {
+        assert!(
+            proof_command.contains(token),
+            "proof command missing {token}"
+        );
+    }
+
+    let required = string_set(corpus, "required_cases");
+    let cases = rows_by_id(corpus, "cases", "case_id");
+    assert_eq!(
+        cases.keys().cloned().collect::<BTreeSet<_>>(),
+        required,
+        "scenario corpus cases must match required_cases exactly"
+    );
+
+    let base = base_focused_request(&contract);
+    for row in cases.values() {
+        assert_stable_log_is_scrubbed(corpus, row);
+        let request = scenario_request(&base, row);
+        let plan = plan_swarm_proof_lane(&request);
+        assert_eq!(
+            plan.admission_decision,
+            admission_decision(row, "expected_admission_decision"),
+            "{} admission decision",
+            string(row, "case_id")
+        );
+        assert!(!plan.source_rows.is_empty(), "{} source rows", plan.lane_id);
+        assert!(
+            !plan.reason_codes.is_empty(),
+            "{} reason codes",
+            plan.lane_id
+        );
+        assert!(!plan.covers.is_empty(), "{} cover claims", plan.lane_id);
+        assert!(
+            !plan.does_not_cover.is_empty(),
+            "{} does_not_cover claims",
+            plan.lane_id
+        );
+        assert!(
+            !plan.agent_mail_summary.trim().is_empty(),
+            "{} summary",
+            plan.lane_id
+        );
+        assert!(!plan.mutates_external_state);
+        assert!(!plan.destructive_cleanup_required);
+        assert!(!plan.branch_or_worktree_required);
+        for token in array(row, "expected_summary_tokens") {
+            let token = token
+                .as_str()
+                .unwrap_or_else(|| panic!("{} expected token", string(row, "case_id")));
+            assert!(
+                plan.agent_mail_summary.contains(token)
+                    || plan.reason_codes.iter().any(|code| code == token),
+                "{} receipt missing {token}",
+                string(row, "case_id")
+            );
+        }
+    }
 }
 
 #[test]
