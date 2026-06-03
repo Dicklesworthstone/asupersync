@@ -505,6 +505,7 @@ fn capture_baseline_default_run_uses_rch_override() {
         .arg(&save_dir)
         .env("CRITERION_DIR", temp.path().join("criterion"))
         .env("RCH_BIN", &rch_shim)
+        .env_remove("RCH_BUILD_TIMEOUT_SEC")
         .output()
         .expect("run capture_baseline.sh");
 
@@ -642,6 +643,51 @@ fn capture_baseline_default_run_preserves_rch_timeout_override() {
     assert!(
         !argv.contains("RCH_BUILD_TIMEOUT_SEC=5400"),
         "default timeout must not overwrite explicit caller overrides: {argv}"
+    );
+}
+
+#[test]
+fn capture_baseline_custom_smoke_does_not_claim_default_rch_timeout() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+    let save_dir = temp.path().join("baselines");
+
+    let script = repo_root().join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--smoke")
+        .arg("--save")
+        .arg(&save_dir)
+        .arg("--cmd")
+        .arg("printf '%s\\n' custom-smoke")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env_remove("RCH_BUILD_TIMEOUT_SEC")
+        .output()
+        .expect("run capture_baseline.sh");
+
+    assert!(
+        output.status.success(),
+        "capture_baseline should succeed with custom smoke command: status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let smoke_report = fs::read_dir(&save_dir)
+        .expect("read save dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("smoke_report_") && name.ends_with(".json"))
+        })
+        .expect("smoke report path");
+    let smoke_report_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(smoke_report).expect("read smoke report"))
+            .expect("parse smoke report");
+    assert!(
+        smoke_report_json["config"]["rch_build_timeout_sec"].is_null(),
+        "custom command smoke reports must not claim the default RCH timeout was applied: {smoke_report_json}"
     );
 }
 

@@ -31,7 +31,8 @@ SMOKE=0
 SMOKE_SEED=""
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_capture_baseline_phase0}"
-RCH_BUILD_TIMEOUT_SEC="${RCH_BUILD_TIMEOUT_SEC:-5400}"
+DEFAULT_RCH_BUILD_TIMEOUT_SEC="5400"
+RCH_BUILD_TIMEOUT_SEC="${RCH_BUILD_TIMEOUT_SEC:-}"
 RUN_OUTPUT_LOG="${RUN_OUTPUT_LOG:-${TMPDIR:-/tmp}/asupersync_capture_baseline_run_$$.log}"
 BASELINE_TMP_PATH="${BASELINE_TMP_PATH:-${TMPDIR:-/tmp}/asupersync_baseline_$$.json}"
 BENCH_CARGO_PROFILE="${BENCH_CARGO_PROFILE:-release-perf}"
@@ -169,6 +170,9 @@ if [[ -n "$CMD_B64" ]]; then
 fi
 
 if [[ -z "$CMD_STRING" ]]; then
+    if [[ -z "$RCH_BUILD_TIMEOUT_SEC" ]]; then
+        RCH_BUILD_TIMEOUT_SEC="$DEFAULT_RCH_BUILD_TIMEOUT_SEC"
+    fi
     export RCH_BUILD_TIMEOUT_SEC
     CMD=(
         "$RCH_BIN" exec -- env
@@ -445,7 +449,7 @@ report = {
         "max_regression_pct": float("${MAX_REGRESSION_PCT}"),
         "cargo_profile": "${BENCH_CARGO_PROFILE}",
         "bench_rustflags": "${BENCH_RUSTFLAGS}",
-        "rch_build_timeout_sec": "${RCH_BUILD_TIMEOUT_SEC}",
+        "rch_build_timeout_sec": os.environ.get("RCH_BUILD_TIMEOUT_SEC") or None,
     },
     "env": {
         "CI": os.environ.get("CI"),
