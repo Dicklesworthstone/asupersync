@@ -689,6 +689,35 @@ fn missing_command_is_unverifiable() {
 }
 
 #[test]
+fn failed_status_requires_rerun_even_at_current_head() {
+    let receipt = receipt_json("failed_status.json");
+    let rows = receipt["rows"].as_array().expect("rows must be array");
+
+    assert_eq!(rows.len(), 3);
+    for (row, status) in rows
+        .iter()
+        .zip(["failed", "non-zero-exit", "exit-code-101"])
+    {
+        assert_eq!(row["status"].as_str(), Some(status));
+        assert_eq!(
+            row["classification"].as_str(),
+            Some("failed-proof-artifact")
+        );
+        assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+        assert_eq!(row["safe_to_cite"].as_bool(), Some(false));
+        assert_eq!(
+            row["reason"].as_str(),
+            Some("artifact status reports a failed proof")
+        );
+        assert_eq!(
+            row["remediation"]["operator_note"].as_str(),
+            Some("Do not cite a proof artifact whose own status is failed.")
+        );
+    }
+    assert_eq!(receipt["summary"]["rerun_required"].as_u64(), Some(3));
+}
+
+#[test]
 fn receipt_safety_contract_declares_read_only_behavior() {
     let receipt = receipt_json("current_clean.json");
 

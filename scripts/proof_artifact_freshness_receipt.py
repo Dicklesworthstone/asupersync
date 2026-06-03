@@ -53,6 +53,18 @@ SOURCE_FRESH_TARGET_DIR_VALUES = {
     "source-fresh",
     "unique",
 }
+FAILED_ARTIFACT_STATUSES = {
+    "error",
+    "fail",
+    "failed",
+    "failure",
+    "nonzero",
+    "non-zero",
+    "non-zero-exit",
+    "red",
+    "timeout",
+    "timed-out",
+}
 
 
 def utc_now() -> str:
@@ -480,6 +492,19 @@ def cargo_proof_command_defects(command: str) -> list[str]:
     return sorted(set(defects))
 
 
+def artifact_status_is_failed(status: str) -> bool:
+    normalized = status.strip().lower().replace("_", "-")
+    if not normalized:
+        return False
+    if normalized in FAILED_ARTIFACT_STATUSES:
+        return True
+    tokens = [token for token in normalized.split("-") if token]
+    if "exit" not in tokens:
+        return False
+    exit_codes = [int(token) for token in tokens if token.isdigit()]
+    return bool(exit_codes) and exit_codes[-1] != 0
+
+
 def is_fuzz_all_bins_check(command: str) -> bool:
     return bool(FUZZ_ALL_BINS_CHECK_RE.search(command.replace("\\", "/").lower()))
 
@@ -583,6 +608,7 @@ def classify_artifact(
     git_branch = artifact["git_branch"]
     command = artifact["command"]
     touched_files = artifact["touched_files"]
+    status = artifact["status"]
     overlaps = dirty_overlaps(touched_files, dirty)
     unsafe_cargo_reasons = cargo_proof_command_defects(command)
     bare_cargo_command = "bare-cargo" in unsafe_cargo_reasons
@@ -635,6 +661,10 @@ def classify_artifact(
         classification = "unverifiable-surface"
         decision = "suppress-as-unverifiable"
         reason = "artifact does not declare touched files"
+    elif artifact_status_is_failed(status):
+        classification = "failed-proof-artifact"
+        decision = "rerun-required"
+        reason = "artifact status reports a failed proof"
     elif unsafe_cargo_reasons:
         classification = "unsafe-proof-command"
         decision = "rerun-required"
@@ -663,7 +693,7 @@ def classify_artifact(
         "decision": decision,
         "safe_to_cite": safe_to_cite,
         "reason": reason,
-        "status": artifact["status"],
+        "status": status,
         "command": command,
         "touched_files": touched_files,
         "generated_at": artifact["generated_at"],
@@ -702,6 +732,15 @@ def remediation_for(classification: str, command: str) -> dict[str, Any]:
             "next_steps": [
                 "rerun the proof remotely and require an [RCH] remote summary",
                 "replace the artifact output before citing it",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "failed-proof-artifact":
+        return {
+            "operator_note": "Do not cite a proof artifact whose own status is failed.",
+            "next_steps": [
+                "inspect the failed proof output",
+                "fix the underlying failure or rerun the proof after the relevant source changes",
             ],
             "rerun_command": command,
         }
