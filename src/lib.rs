@@ -433,8 +433,6 @@ pub mod real_database_sqlite_obligation_dialectica_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_database_sqlite_obligation_saga_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_database_sqlite_obligation_saga_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_distributed_bridge_trace_distributed_sheaf_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_distributed_consistent_hash_distributed_assignment_integration_e2e_tests;
@@ -466,8 +464,6 @@ pub mod real_fs_file_channel_mpsc_integration_e2e_tests;
 pub mod real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_uring_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_fs_uring_io_buf_writer_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_uring_io_buf_writer_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
