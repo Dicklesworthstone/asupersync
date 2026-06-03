@@ -106,3 +106,22 @@ fn repaired_round_six_targets_are_in_scheduled_fuzz_matrix() {
         );
     }
 }
+
+#[test]
+fn dns_message_decoder_is_not_a_nested_no_main_include() {
+    let dns_message_decoder = include_str!("../fuzz/fuzz_targets/dns_message_decoder.rs");
+
+    assert!(
+        dns_message_decoder.contains("#![no_main]"),
+        "dns_message_decoder must remain a standalone libFuzzer target"
+    );
+    assert!(
+        !dns_message_decoder.contains("include!(\"dns_lookup_decoder.rs\")"),
+        "dns_message_decoder must not include the lookup target with its own crate attributes"
+    );
+    assert!(
+        dns_message_decoder.contains("parse_dns_response_for_fuzz")
+            && dns_message_decoder.contains("decode_dns_name_for_fuzz"),
+        "dns_message_decoder must drive the direct DNS parser fuzz seams"
+    );
+}
