@@ -10,6 +10,7 @@ Asupersync uses [Criterion.rs](https://crates.io/crates/criterion) for statistic
 export BENCH_CARGO_PROFILE=release-perf
 export BENCH_RUSTFLAGS="-C force-frame-pointers=yes"
 export BENCH_FEATURES=criterion-benches
+export RCH_BUILD_TIMEOUT_SEC="${RCH_BUILD_TIMEOUT_SEC:-5400}"
 
 # Run all benchmarks (saves to target/criterion/)
 rch exec -- env RUSTFLAGS="$BENCH_RUSTFLAGS" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --profile "$BENCH_CARGO_PROFILE" --features "$BENCH_FEATURES"
@@ -49,7 +50,10 @@ Example baseline + smoke capture:
 
 The helper script above requires `rch` to be reachable via `RCH_BIN`
 (default: `rch` on `PATH`) for benchmark execution. It now fails closed rather
-than silently running a local benchmark fallback.
+than silently running a local benchmark fallback. Its default `--run` and
+`--smoke` benchmark path sets `RCH_BUILD_TIMEOUT_SEC=5400` unless the caller
+already provided a different value, because cold `release-perf` /
+`phase0_baseline` sweeps can exceed rch's default 1200-second command timeout.
 
 ### Smoke Report Schema (artifact manifest)
 
@@ -240,10 +244,12 @@ run a smoke capture end-to-end with structured metadata.
 
 `--run` / `--smoke` require `rch` via `RCH_BIN` for the default benchmark path.
 The default run path uses Cargo profile `release-perf` and
-`RUSTFLAGS=-C force-frame-pointers=yes`; override with
-`BENCH_CARGO_PROFILE`, `BENCH_RUSTFLAGS`, `--cargo-profile`, or
-`--bench-rustflags` only when you are intentionally producing a differently
-scoped baseline.
+`RUSTFLAGS=-C force-frame-pointers=yes`; it also sets
+`RCH_BUILD_TIMEOUT_SEC=5400` unless already overridden so cold full sweeps do
+not die at rch's default 1200-second timeout. Override with
+`BENCH_CARGO_PROFILE`, `BENCH_RUSTFLAGS`, `RCH_BUILD_TIMEOUT_SEC`,
+`--cargo-profile`, or `--bench-rustflags` only when you are intentionally
+producing a differently scoped baseline.
 Read-only capture / compare flows that only parse existing Criterion output do
 not need `rch`.
 

@@ -520,6 +520,7 @@ fn capture_baseline_default_run_uses_rch_override() {
         "exec",
         "--",
         "env",
+        "RCH_BUILD_TIMEOUT_SEC=5400",
         "RUSTFLAGS=-C force-frame-pointers=yes",
         "CARGO_TARGET_DIR=",
         "cargo",
@@ -554,7 +555,9 @@ fn capture_baseline_default_run_uses_rch_override() {
             .as_str()
             .expect("command field should be present");
         assert!(
-            command.contains("exec -- env RUSTFLAGS=-C force-frame-pointers=yes CARGO_TARGET_DIR=")
+            command.contains(
+                "exec -- env RCH_BUILD_TIMEOUT_SEC=5400 RUSTFLAGS=-C force-frame-pointers=yes CARGO_TARGET_DIR="
+            )
                 && command.contains(" cargo bench --profile release-perf")
                 && command.contains(" --features criterion-benches")
                 && command.contains(" --bench phase0_baseline"),
@@ -580,7 +583,7 @@ fn capture_baseline_default_run_uses_rch_override() {
         .expect("smoke report command field should be present");
     assert!(
         smoke_command
-            .contains("exec -- env RUSTFLAGS=-C force-frame-pointers=yes CARGO_TARGET_DIR=")
+            .contains("exec -- env RCH_BUILD_TIMEOUT_SEC=5400 RUSTFLAGS=-C force-frame-pointers=yes CARGO_TARGET_DIR=")
             && smoke_command.contains(" cargo bench --profile release-perf")
             && smoke_command.contains(" --features criterion-benches")
             && smoke_command.contains(" --bench phase0_baseline"),
@@ -593,6 +596,52 @@ fn capture_baseline_default_run_uses_rch_override() {
     assert_eq!(
         smoke_report_json["config"]["bench_rustflags"], "-C force-frame-pointers=yes",
         "smoke report should record benchmark RUSTFLAGS"
+    );
+    assert_eq!(
+        smoke_report_json["config"]["rch_build_timeout_sec"], "5400",
+        "smoke report should record the default RCH timeout budget"
+    );
+}
+
+#[test]
+fn capture_baseline_default_run_preserves_rch_timeout_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+    let rch_argv_log = temp.path().join("rch-shim-argv.log");
+    let rch_shim = temp.path().join("rch-shim");
+    write_executable_script(
+        &rch_shim,
+        &format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" > {}\n",
+            rch_argv_log.display()
+        ),
+    );
+
+    let script = repo_root().join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--run")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env("RCH_BIN", &rch_shim)
+        .env("RCH_BUILD_TIMEOUT_SEC", "3000")
+        .output()
+        .expect("run capture_baseline.sh");
+
+    assert!(
+        output.status.success(),
+        "capture_baseline should succeed with scripted rch shim: status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let argv = fs::read_to_string(&rch_argv_log).expect("read rch argv log");
+    assert!(
+        argv.contains("RCH_BUILD_TIMEOUT_SEC=3000"),
+        "default run path must preserve caller-provided RCH timeout override: {argv}"
+    );
+    assert!(
+        !argv.contains("RCH_BUILD_TIMEOUT_SEC=5400"),
+        "default timeout must not overwrite explicit caller overrides: {argv}"
     );
 }
 
@@ -1249,6 +1298,7 @@ fn capture_baseline_help_documents_perf_history_options() {
         "--no-swarm-ledger",
         "--swarm-ledger-dir <dir>",
         "--scenario-id <id>",
+        "RCH_BUILD_TIMEOUT_SEC",
     ] {
         assert!(
             stdout.contains(expected),

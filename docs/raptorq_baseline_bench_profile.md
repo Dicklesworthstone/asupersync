@@ -33,8 +33,14 @@ rch exec -- target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench rapto
 
 ### Full
 ```bash
-rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare
+RCH_BUILD_TIMEOUT_SEC=5400 rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare
 ```
+
+Cold full `release-perf` / `phase0_baseline` sweeps can run for longer than
+rch's default 1200-second command timeout. Keep `RCH_BUILD_TIMEOUT_SEC=5400`
+on full-sweep commands unless you are intentionally supplying a different
+timeout budget; `scripts/capture_baseline.sh --run` and `--smoke` apply the
+same default for their built-in benchmark command.
 
 ### Forensics
 ```bash
