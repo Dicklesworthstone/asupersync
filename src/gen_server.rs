@@ -2860,7 +2860,7 @@ mod tests {
         init_test("supervised_gen_server_stays_alive");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let region = named_gen_server_test_region(&mut runtime, Budget::INFINITE);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
         let registry = Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
@@ -2879,7 +2879,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         let task = runtime.state.task(task_id).expect("task exists");
         crate::assert_with_log!(
@@ -3378,7 +3378,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Queue a handful of casts, then disconnect. Shutdown must drain the mailbox
         // before running on_stop, so the final count reflects the cast effects.
@@ -3427,7 +3427,7 @@ mod tests {
             {
                 runtime.scheduler.lock().schedule(task_id, 0);
             }
-            runtime.run_until_quiescent();
+            runtime.run_until_idle();
 
             // 5 resets then disconnect
             for _ in 0..5 {
@@ -4660,7 +4660,7 @@ mod tests {
             type Info = SystemMsg;
 
             fn on_stop_budget(&self) -> Budget {
-                Budget::new().with_poll_quota(100_000).with_priority(250)
+                Budget::new().with_poll_quota(42).with_priority(250)
             }
 
             fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
@@ -4710,7 +4710,7 @@ mod tests {
 
         let stop_quota = stop_poll_quota.load(Ordering::SeqCst);
         // The stop budget is meet(original, on_stop_budget), so
-        // poll_quota should be min(10_000, 42) = 42
+        // poll_quota should be min(100_000, 42) = 42.
         assert_eq!(stop_quota, 42, "stop phase should use the tighter budget");
 
         crate::test_complete!("stop_budget_constrains_stop_phase");
@@ -4785,7 +4785,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Stop the server and reschedule so on_stop runs
         let phases_clone = Arc::clone(&phases);
@@ -5706,6 +5706,17 @@ mod tests {
     // Named GenServer integration tests (bd-23az1)
     // =========================================================================
 
+    fn named_gen_server_test_region(
+        runtime: &mut crate::lab::LabRuntime,
+        budget: Budget,
+    ) -> RegionId {
+        let root = runtime.state.create_root_region(budget);
+        runtime
+            .state
+            .create_child_region(root, budget)
+            .expect("named gen_server tests need a non-root lease region")
+    }
+
     /// Named server: spawn registers name, whereis finds it.
     #[test]
     fn named_server_register_and_whereis() {
@@ -5714,7 +5725,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -5775,7 +5786,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         let release_now = runtime.state.now;
         named_handle
             .release_name(&mut registry, release_now)
@@ -5820,7 +5831,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -5907,7 +5918,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6008,7 +6019,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6091,7 +6102,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6171,7 +6182,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6263,7 +6274,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6337,7 +6348,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6415,7 +6426,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
