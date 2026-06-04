@@ -976,6 +976,12 @@ impl<T> RequestSink<T> {
         }
     }
 
+    /// Return the number of request messages accepted by this sink.
+    #[must_use]
+    pub fn sent_count(&self) -> usize {
+        lock_unpoisoned(&self.state).sent_count
+    }
+
     fn from_state(state: Arc<Mutex<RequestSinkState>>) -> Self {
         Self {
             state,

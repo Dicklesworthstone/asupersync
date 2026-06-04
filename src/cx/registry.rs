@@ -4567,22 +4567,23 @@ mod tests {
     /// continues to work.
     #[test]
     fn name_lease_description_matches_legacy_format() {
-        let lease = NameLease::new(
+        let mut lease = NameLease::new(
             "alice-service",
             tid(1),
             rid(0),
             Time::from_nanos(1_000_000_000),
         );
         let want = format!("name_lease:{}", "alice-service");
-        let got = lease.token.as_ref().unwrap().description();
+        let got = lease.token.as_ref().unwrap().description().to_string();
         assert_eq!(got, want, "n4103r refactor changed description shape");
+        let _ = lease.release().expect("description test cleanup");
     }
 
     /// br-asupersync-n4103r: same byte-for-byte parity test for
     /// NamePermit::new.
     #[test]
     fn name_permit_description_matches_legacy_format() {
-        let permit = NamePermit::new(
+        let mut permit = NamePermit::new(
             "svc-name",
             tid(1),
             rid(0),
@@ -4590,8 +4591,9 @@ mod tests {
             1,
         );
         let want = format!("name_permit:{}", "svc-name");
-        let got = permit.token.as_ref().unwrap().description();
+        let got = permit.token.as_ref().unwrap().description().to_string();
         assert_eq!(got, want, "n4103r refactor changed description shape");
+        let _ = permit.abort().expect("description test cleanup");
     }
 
     /// br-asupersync-n4103r: empty-name and unicode-name edge cases.
@@ -4599,10 +4601,11 @@ mod tests {
     /// passes through without re-encoding.
     #[test]
     fn name_lease_description_handles_edge_cases() {
-        let empty = NameLease::new("", tid(1), rid(0), Time::from_nanos(1_000_000_000));
+        let mut empty = NameLease::new("", tid(1), rid(0), Time::from_nanos(1_000_000_000));
         assert_eq!(empty.token.as_ref().unwrap().description(), "name_lease:");
+        let _ = empty.release().expect("empty lease cleanup");
 
-        let uni = NameLease::new(
+        let mut uni = NameLease::new(
             "сервис-α-🔒",
             tid(1),
             rid(0),
@@ -4612,5 +4615,6 @@ mod tests {
             uni.token.as_ref().unwrap().description(),
             "name_lease:сервис-α-🔒"
         );
+        let _ = uni.release().expect("unicode lease cleanup");
     }
 }

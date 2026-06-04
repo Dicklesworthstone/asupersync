@@ -265,12 +265,15 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_no_csp_or_permissions() {
+    fn default_policy_sets_safe_csp_but_no_permissions() {
         let mw =
             SecurityHeadersMiddleware::new(FnHandler::new(ok_handler), SecurityPolicy::default());
         let resp = mw.call(make_request());
 
-        assert!(!resp.headers.contains_key("content-security-policy"));
+        assert_eq!(
+            resp.headers.get("content-security-policy").unwrap(),
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'"
+        );
         assert!(!resp.headers.contains_key("permissions-policy"));
     }
 

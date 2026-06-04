@@ -141,6 +141,20 @@ impl SecurityContext {
         ctx
     }
 
+    /// Test-internals constructor for fuzz/conformance harnesses that need to
+    /// exercise non-Strict modes with externally generated key material.
+    ///
+    /// Production callers must construct [`SecurityContext`] with
+    /// [`Self::new`] and use [`Self::with_mode`] so the no-downgrade policy is
+    /// enforced at the runtime boundary.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[must_use]
+    pub fn for_testing_with_key_and_mode(key: AuthKey, mode: AuthMode) -> Self {
+        let mut ctx = Self::new(key);
+        ctx.mode = mode;
+        ctx
+    }
+
     /// Sets the authentication mode.
     ///
     /// # br-asupersync-jgpcvp: NO-DOWNGRADE policy
