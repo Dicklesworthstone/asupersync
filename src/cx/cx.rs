@@ -1447,7 +1447,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasRemote,
     {
-        self.handles.remote_cap.is_some()
+        self.runtime_mask.has(cap::CapMask::REMOTE) && self.handles.remote_cap.is_some()
     }
 
     /// Registers an I/O source with the reactor for the given interest.
@@ -5234,6 +5234,30 @@ mod tests {
         // After drop, outer ALL is restored.
         drop(_restrict);
         assert_eq!(Cx::current().unwrap().runtime_mask, cap::CapMask::all());
+    }
+
+    #[test]
+    fn _5ckssb_has_remote_respects_push_restriction_mask() {
+        while CURRENT_CX_STACK.with(|s| s.borrow().last().is_some()) {
+            CURRENT_CX_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+
+        let full_cx = Cx::for_testing_with_remote(crate::remote::RemoteCap::new());
+        let _outer = Cx::set_current(Some(full_cx));
+        assert!(
+            Cx::current().unwrap().has_remote(),
+            "unrestricted context should expose REMOTE"
+        );
+
+        let _restrict = Cx::push_restriction(cap::CapMask::none());
+        let observed = Cx::current().unwrap();
+        assert!(observed.remote().is_none(), "REMOTE handle must be masked");
+        assert!(
+            !observed.has_remote(),
+            "has_remote must agree with the runtime capability mask"
+        );
     }
 
     /// push_restriction with no installed cx must return a no-op
