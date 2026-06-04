@@ -568,5 +568,25 @@ fn validate_decode_error(error: &DecodeError, k: usize, symbols: &[ReceivedSymbo
             // Decoder detected corruption in the decoded output
             // This is a valid error condition
         }
+        DecodeError::ComputeBudgetExhausted {
+            used,
+            requested,
+            max,
+        } => {
+            assert!(
+                used.saturating_add(*requested) > *max || *used > *max,
+                "compute-budget error must report an exhausted budget"
+            );
+        }
+        DecodeError::EsiRateLimitExceeded {
+            esi: _,
+            column_count,
+            max_columns,
+        } => {
+            assert!(
+                *column_count == 0 || *column_count > *max_columns,
+                "ESI rate-limit error must report either a sentinel high-ESI rejection or too many columns"
+            );
+        }
     }
 }

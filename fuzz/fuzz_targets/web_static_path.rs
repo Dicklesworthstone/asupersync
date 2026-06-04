@@ -33,10 +33,12 @@
 //! Unicode normalization (full-width slashes), and raw bytes. This yields
 //! much higher edge-case density than uniform random strings.
 
+use asupersync::Cx;
 use asupersync::web::extract::Request;
 use asupersync::web::handler::Handler;
 use asupersync::web::response::StatusCode;
 use asupersync::web::static_files::StaticFiles;
+use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::sync::OnceLock;
 use tempfile::TempDir;
@@ -122,7 +124,8 @@ fn shape_path(data: &[u8]) -> String {
 fuzz_target!(|data: &[u8]| {
     let path = shape_path(data);
     let req = Request::new("GET", path.clone());
-    let resp = handler().call(req);
+    let cx = Cx::for_testing();
+    let resp = block_on(handler().call(&cx, req));
 
     // ── Property 1: no panic ────────────────────────────────────────────
     // (already implied — if we reach this assertion, the handler returned)

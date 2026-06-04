@@ -15,11 +15,9 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::OnceCell;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct OnceCellTakeConfig {
@@ -186,6 +184,7 @@ impl TakeRaceTracker {
 }
 
 /// Tracks concurrent operations for testing
+#[derive(Debug)]
 struct ConcurrentTakeResult {
     taker_id: u8,
     result: Option<i32>,
@@ -266,39 +265,42 @@ fn test_take_race_scenario(
                     OnceCell::new(),
                 )));
                 let results = Arc::new(std::sync::Mutex::new(Vec::new()));
-                let mut handles = Vec::new();
+                thread::scope(|scope| {
+                    let mut handles = Vec::new();
 
-                for &taker_id in taker_ids.iter().take(concurrent_count) {
-                    let cell_ref = Arc::clone(&cell_arc);
-                    let results_ref = Arc::clone(&results);
+                    for &taker_id in taker_ids.iter().take(concurrent_count) {
+                        let cell_ref = Arc::clone(&cell_arc);
+                        let results_ref = Arc::clone(&results);
 
-                    handles.push(thread::spawn(move || {
-                        let mut cell_guard = cell_ref.lock().unwrap();
-                        tracker.record_take_attempted();
+                        handles.push(scope.spawn(move || {
+                            let mut cell_guard = cell_ref.lock().unwrap();
+                            tracker.record_take_attempted();
 
-                        let result = cell_guard.take();
-                        let success = result.is_some();
+                            let result = cell_guard.take();
+                            let success = result.is_some();
 
-                        if let Some(value) = result {
-                            tracker.record_take_succeeded(value);
-                        } else {
-                            tracker.record_take_failed();
-                        }
+                            if let Some(value) = result {
+                                tracker.record_take_succeeded(value);
+                            } else {
+                                tracker.record_take_failed();
+                            }
 
-                        let take_result = ConcurrentTakeResult {
-                            taker_id,
-                            result,
-                            success,
-                        };
+                            let take_result = ConcurrentTakeResult {
+                                taker_id,
+                                result,
+                                success,
+                            };
 
-                        results_ref.lock().unwrap().push(take_result);
-                    }));
-                }
+                            results_ref.lock().unwrap().push(take_result);
+                        }));
+                    }
 
-                // Wait for all threads to complete
-                for handle in handles {
-                    handle.join().expect("Thread should not panic");
-                }
+                    // Wait for all scoped threads to complete before restoring
+                    // the shared OnceCell back into the sequential harness.
+                    for handle in handles {
+                        handle.join().expect("Thread should not panic");
+                    }
+                });
 
                 let final_results = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
                 let successful_takes: Vec<_> = final_results.iter().filter(|r| r.success).collect();

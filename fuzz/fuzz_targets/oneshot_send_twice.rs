@@ -15,9 +15,12 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::oneshot::{self, SendError, TryRecvError};
 use asupersync::cx::Cx;
-use asupersync::types::{Budget, CancelKind};
+use asupersync::types::{Budget, CancelKind, RegionId, TaskId};
 use libfuzzer_sys::fuzz_target;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -350,7 +353,11 @@ fn execute_send(
 
 /// Create test context
 fn create_test_cx() -> Cx {
-    Cx::new("oneshot_send_twice_fuzz", Budget::INFINITE)
+    Cx::new(
+        RegionId::new_for_test(53, 0),
+        TaskId::new_for_test(53, 1),
+        Budget::INFINITE,
+    )
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -366,7 +373,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let max_scenarios = config.max_scenarios.min(MultiSendConfig::max_scenarios()) as usize;
-    let tracker = SendTracker::new();
+    let tracker = Arc::new(SendTracker::new());
 
     // Test each scenario with each value
     for scenario in config.scenarios.iter().take(max_scenarios) {
@@ -387,10 +394,10 @@ fuzz_target!(|data: &[u8]| {
             .map(|(i, scenario)| {
                 let scenario = scenario.clone();
                 let send_value = config.values[i % config.values.len()].clone();
-                let tracker = &tracker;
+                let tracker = Arc::clone(&tracker);
 
                 thread::spawn(move || {
-                    if let Err(msg) = test_send_scenario(&scenario, &send_value, tracker) {
+                    if let Err(msg) = test_send_scenario(&scenario, &send_value, &tracker) {
                         panic!("Concurrent send scenario #{} failed: {}", i, msg);
                     }
                 })

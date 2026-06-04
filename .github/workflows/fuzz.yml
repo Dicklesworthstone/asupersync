@@ -6,10 +6,8 @@
 name: Fuzz
 
 on:
-  # Compile the high-signal registered fuzz targets on main updates so public
-  # API drift does not silently disable round-six coverage until the nightly
-  # fuzz run. A full fuzz-crate all-targets build gate is intentionally deferred
-  # until the existing non-round-six fuzz compile debt is retired.
+  # Compile every registered fuzz target on main updates so public API drift
+  # cannot silently disable fuzz coverage until the nightly fuzz run.
   push:
     branches: [main]
     paths:
@@ -94,10 +92,6 @@ env:
   ASAN_OPTIONS: malloc_context_size=64:quarantine_size_mb=256
   # Use thin LTO for faster builds
   CARGO_PROFILE_RELEASE_LTO: thin
-  FUZZ_BUILD_GATE_TARGETS: >-
-    raptorq_decoder_gauss_matrix
-    fuzz_distributed_recovery_decode
-    mutex_poison_persistence
 
 jobs:
   fuzz-build-gate:
@@ -146,44 +140,39 @@ jobs:
           echo "RCH_BIN=$resolved" >> "$GITHUB_ENV"
           echo "RCH_EXECUTOR_MODE=$mode" >> "$GITHUB_ENV"
 
-      - name: Check round-six fuzz targets compile
+      - name: Check all fuzz targets compile
         run: |
           set -euo pipefail
-          BASE_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_fuzz_build_gate_${GITHUB_RUN_ID:-local}"
+          target_dir="${TMPDIR:-/tmp}/rch_target_fuzz_build_gate_${GITHUB_RUN_ID:-local}_all_bins"
 
           echo "::group::Fuzz build gate context"
           echo "UTC start: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           echo "event: ${GITHUB_EVENT_NAME:-unknown}"
           echo "sha: ${GITHUB_SHA:-unknown}"
-          echo "base target dir: ${BASE_TARGET_DIR}"
-          echo "targets: ${FUZZ_BUILD_GATE_TARGETS}"
+          echo "target dir: ${target_dir}"
           echo "executor: ${RCH_BIN}"
           echo "executor mode: ${RCH_EXECUTOR_MODE:-unknown}"
           rustc -Vv
           cargo -V
           echo "::endgroup::"
 
-          for fuzz_target in ${FUZZ_BUILD_GATE_TARGETS}; do
-            target_dir="${BASE_TARGET_DIR}_${fuzz_target}"
-            echo "::group::RCH fuzz build gate: ${fuzz_target}"
-            echo "target dir: ${target_dir}"
-            if [[ "${RCH_EXECUTOR_MODE:-remote}" == "remote" ]]; then
-              echo 'RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR="${target_dir}" cargo check --manifest-path fuzz/Cargo.toml --bin "${fuzz_target}"'
-              RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
-                CARGO_INCREMENTAL=0 \
-                CARGO_PROFILE_DEV_DEBUG=0 \
-                CARGO_TARGET_DIR="${target_dir}" \
-                cargo check --manifest-path fuzz/Cargo.toml --bin "${fuzz_target}"
-            else
-              echo '"$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR="${target_dir}" cargo check --manifest-path fuzz/Cargo.toml --bin "${fuzz_target}"'
-              "$RCH_BIN" exec -- env \
-                CARGO_INCREMENTAL=0 \
-                CARGO_PROFILE_DEV_DEBUG=0 \
-                CARGO_TARGET_DIR="${target_dir}" \
-                cargo check --manifest-path fuzz/Cargo.toml --bin "${fuzz_target}"
-            fi
-            echo "::endgroup::"
-          done
+          echo "::group::RCH fuzz build gate: all bins"
+          if [[ "${RCH_EXECUTOR_MODE:-remote}" == "remote" ]]; then
+            echo 'RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR="${target_dir}" cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going'
+            RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_DEV_DEBUG=0 \
+              CARGO_TARGET_DIR="${target_dir}" \
+              cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going
+          else
+            echo '"$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR="${target_dir}" cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going'
+            "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_DEV_DEBUG=0 \
+              CARGO_TARGET_DIR="${target_dir}" \
+              cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going
+          fi
+          echo "::endgroup::"
 
   fuzz:
     name: Fuzz ${{ matrix.target }}

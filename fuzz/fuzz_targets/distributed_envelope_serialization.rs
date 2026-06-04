@@ -6,6 +6,8 @@ use asupersync::distributed::{
     TaskSnapshot, TaskState,
 };
 use asupersync::record::region::RegionState;
+use asupersync::security::AuthenticationTag;
+use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::{ObjectId, RegionId, TaskId, Time};
 use asupersync::util::DetRng;
 use libfuzzer_sys::fuzz_target;
@@ -193,6 +195,9 @@ fn build_snapshot(input: &SnapshotInput) -> RegionSnapshot {
         state: input.state.into_region_state(),
         timestamp: Time::from_secs(input.timestamp_secs),
         sequence: input.sequence,
+        vector_clock: VectorClock::new(),
+        origin_id: u64::from(input.region_index),
+        epoch: u64::from(input.region_generation),
         tasks: input
             .tasks
             .iter()
@@ -227,6 +232,7 @@ fn build_snapshot(input: &SnapshotInput) -> RegionSnapshot {
             .copied()
             .take(MAX_METADATA_LEN)
             .collect(),
+        auth_tag: AuthenticationTag::zero(),
     }
 }
 

@@ -14,8 +14,8 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::bytes::{Buf, BufMut, Bytes, BytesMut};
-use asupersync::http::h3_native::{H3Frame, H3NativeError, H3QpackMode, H3RequestStreamState};
+use asupersync::bytes::BytesMut;
+use asupersync::http::h3_native::{H3ConnectionConfig, H3Frame, H3NativeError};
 use asupersync::net::quic_core::{decode_varint, encode_varint};
 
 /// Fuzz input for HTTP/3 body streaming scenarios
@@ -245,6 +245,10 @@ const MAX_FRAME_SIZE: usize = 64 * 1024; // 64KB
 const MAX_PAYLOAD_SIZE: usize = 16 * 1024; // 16KB
 const MAX_OPERATIONS: usize = 50;
 
+fn decode_h3_frame(input: &[u8]) -> Result<(H3Frame, usize), H3NativeError> {
+    H3Frame::decode(input, &H3ConnectionConfig::default())
+}
+
 fuzz_target!(|input: H3BodyFuzzInput| {
     // Normalize input to prevent timeouts
     let mut input = input;
@@ -418,7 +422,7 @@ fn test_send_data_frame(
 
         // Test frame parsing
         let frame_data = frame_bytes.freeze();
-        let result = H3Frame::decode(&frame_data);
+        let result = decode_h3_frame(&frame_data);
 
         match result {
             Ok((frame, consumed)) => {
@@ -482,7 +486,7 @@ fn test_malformed_data_frame(
         frame_bytes.extend_from_slice(actual_payload);
 
         let frame_data = frame_bytes.freeze();
-        let result = H3Frame::decode(&frame_data);
+        let result = decode_h3_frame(&frame_data);
 
         match result {
             Ok((frame, _)) => {
@@ -548,7 +552,7 @@ fn test_trailer_headers(
         }
 
         let frame_data = frame_bytes.freeze();
-        let result = H3Frame::decode(&frame_data);
+        let result = decode_h3_frame(&frame_data);
 
         match result {
             Ok((frame, _)) => {
@@ -744,7 +748,8 @@ fn process_invalid_frame(invalid_frame: &InvalidFrame) -> Result<(), String> {
             frame_bytes.extend_from_slice(&temp_vec);
             frame_bytes.extend_from_slice(payload);
 
-            let result = H3Frame::decode(&frame_bytes.freeze());
+            let frame_data = frame_bytes.freeze();
+            let result = decode_h3_frame(&frame_data);
             match result {
                 Ok((
                     H3Frame::Unknown {
@@ -780,7 +785,8 @@ fn process_invalid_frame(invalid_frame: &InvalidFrame) -> Result<(), String> {
             frame_bytes.extend_from_slice(&temp_vec);
             frame_bytes.extend_from_slice(actual_payload);
 
-            let result = H3Frame::decode(&frame_bytes.freeze());
+            let frame_data = frame_bytes.freeze();
+            let result = decode_h3_frame(&frame_data);
             match result {
                 Ok(_) => {
                     if *declared_length as usize != actual_payload.len() {
@@ -813,7 +819,8 @@ fn process_invalid_frame(invalid_frame: &InvalidFrame) -> Result<(), String> {
             // Only include half the payload to create truncation
             frame_bytes.extend_from_slice(&payload[..payload.len() / 2]);
 
-            let result = H3Frame::decode(&frame_bytes.freeze());
+            let frame_data = frame_bytes.freeze();
+            let result = decode_h3_frame(&frame_data);
             match result {
                 Err(H3NativeError::UnexpectedEof) => Ok(()), // Expected
                 _ => Err("Truncated frame was not properly rejected".to_string()),

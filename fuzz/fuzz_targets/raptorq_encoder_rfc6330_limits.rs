@@ -60,14 +60,14 @@ enum DataPattern {
 fn k_boundary_generator(u: &mut Unstructured) -> arbitrary::Result<usize> {
     let choice: u8 = u.arbitrary()?;
     match choice % 8 {
-        0 => Ok(0),                       // Invalid: K=0
-        1 => Ok(1),                       // Minimum valid K
-        2 => Ok(56_402),                  // Just under limit
-        3 => Ok(56_403),                  // At limit (should work)
-        4 => Ok(56_404),                  // Just over limit (should fail)
-        5 => Ok(56_500),                  // Well over limit
-        6 => Ok(u32::MAX as usize),       // Extreme overflow
-        _ => u.int_in_range(1..=57_000)?, // Random around boundary
+        0 => Ok(0),                           // Invalid: K=0
+        1 => Ok(1),                           // Minimum valid K
+        2 => Ok(56_402),                      // Just under limit
+        3 => Ok(56_403),                      // At limit (should work)
+        4 => Ok(56_404),                      // Just over limit (should fail)
+        5 => Ok(56_500),                      // Well over limit
+        6 => Ok(u32::MAX as usize),           // Extreme overflow
+        _ => Ok(u.int_in_range(1..=57_000)?), // Random around boundary
     }
 }
 
@@ -75,12 +75,12 @@ fn k_boundary_generator(u: &mut Unstructured) -> arbitrary::Result<usize> {
 fn symbol_size_generator(u: &mut Unstructured) -> arbitrary::Result<u16> {
     let choice: u8 = u.arbitrary()?;
     match choice % 6 {
-        0 => Ok(0),                     // Invalid
-        1 => Ok(1),                     // Minimum (creates large K)
-        2 => Ok(8),                     // Small (common test size)
-        3 => Ok(64),                    // Medium
-        4 => Ok(1024),                  // Large (creates small K)
-        _ => u.int_in_range(1..=1500)?, // Random valid range
+        0 => Ok(0),                         // Invalid
+        1 => Ok(1),                         // Minimum (creates large K)
+        2 => Ok(8),                         // Small (common test size)
+        3 => Ok(64),                        // Medium
+        4 => Ok(1024),                      // Large (creates small K)
+        _ => Ok(u.int_in_range(1..=1500)?), // Random valid range
     }
 }
 
@@ -95,7 +95,7 @@ fn repair_overhead_generator(u: &mut Unstructured) -> arbitrary::Result<f64> {
         4 => Ok(0.5), // Invalid: < 1.0
         5 => Ok(1.0), // Minimum valid
         6 => Ok(1.5), // Common value
-        _ => u.arbitrary::<f32>().map(|f| f.into())?,
+        _ => u.arbitrary::<f32>().map(f64::from),
     }
 }
 
@@ -108,7 +108,7 @@ fn block_size_generator(u: &mut Unstructured) -> arbitrary::Result<usize> {
         2 => Ok(64),        // Small
         3 => Ok(8192),      // Medium
         4 => Ok(1_000_000), // Large
-        _ => u.int_in_range(1..=2_000_000)?,
+        _ => Ok(u.int_in_range(1..=2_000_000)?),
     }
 }
 
@@ -150,7 +150,7 @@ fuzz_target!(|params: Rfc6330TestParams| {
 
     // Create pipeline - this should never panic
     let pool = SymbolPool::new(PoolConfig::default());
-    let mut pipeline = EncodingPipeline::new(config, pool);
+    let mut pipeline = EncodingPipeline::new(config.clone(), pool);
 
     // Generate test data
     let data = params.generate_data();
@@ -184,27 +184,20 @@ fuzz_target!(|params: Rfc6330TestParams| {
 
 /// Verify that successfully encoded symbols have valid properties
 fn assert_symbols_valid(
-    symbols: &[Result<
-        asupersync::codec::raptorq::EncodedSymbol,
-        asupersync::codec::raptorq::EncodingError,
-    >],
+    symbols: &[asupersync::codec::raptorq::EncodedSymbol],
     params: &Rfc6330TestParams,
 ) {
-    for (idx, symbol_result) in symbols.iter().enumerate() {
-        if let Ok(symbol) = symbol_result {
-            // Symbol data length should match symbol_size
-            assert_eq!(
-                symbol.symbol().data().len(),
-                params.symbol_size as usize,
-                "Symbol {idx} has wrong data length"
-            );
+    for (idx, symbol) in symbols.iter().enumerate() {
+        // Symbol data length should match symbol_size
+        assert_eq!(
+            symbol.symbol().data().len(),
+            params.symbol_size as usize,
+            "Symbol {idx} has wrong data length"
+        );
 
-            // Symbol ID should be valid
-            let id = symbol.id();
-            assert!(id.esi() < u32::MAX, "Symbol {idx} has invalid ESI");
-        } else {
-            panic!("Symbol {idx} encoding failed when pipeline reported success");
-        }
+        // Symbol ID should be valid
+        let id = symbol.id();
+        assert!(id.esi() < u32::MAX, "Symbol {idx} has invalid ESI");
     }
 }
 

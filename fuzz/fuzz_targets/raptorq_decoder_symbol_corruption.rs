@@ -15,11 +15,7 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
-
-/// Maximum values for fuzzer performance and memory bounds
-const MAX_K: usize = 100;
-const MAX_SYMBOL_SIZE: usize = 512;
-const MAX_SYMBOLS: usize = 200;
+use asupersync::types::ObjectId;
 
 /// Test scenario for decoder symbol corruption fuzzing
 #[derive(Arbitrary, Debug, Clone)]
@@ -344,7 +340,7 @@ fn test_corruption_detection(scenario: &SymbolCorruptionScenario) {
     };
 
     // Generate symbols and apply controlled corruption
-    let mut clean_symbols = generate_clean_symbols(k, symbol_size, &decoder);
+    let clean_symbols = generate_clean_symbols(k, symbol_size, &decoder);
     let mut corrupted_symbols = clean_symbols.clone();
 
     // Apply single controlled corruption
@@ -427,7 +423,7 @@ fn generate_clean_symbols(
             esi: esi as u32,
             is_source: true,
             columns: vec![esi],
-            coefficients: vec![Gf256::from(1)],
+            coefficients: vec![Gf256::ONE],
             data,
         });
     }
@@ -590,17 +586,17 @@ fn apply_coefficient_corruption(
     match pattern {
         CoefficientCorruptionPattern::Single { index, new_value } => {
             let idx = (*index as usize) % coefficients.len();
-            coefficients[idx] = Gf256::from(*new_value);
+            coefficients[idx] = Gf256::new(*new_value);
         }
         CoefficientCorruptionPattern::Multiple { corruptions } => {
             for corruption in corruptions {
                 let idx = (corruption.index as usize) % coefficients.len();
-                coefficients[idx] = Gf256::from(corruption.new_value);
+                coefficients[idx] = Gf256::new(corruption.new_value);
             }
         }
         CoefficientCorruptionPattern::Uniform { value } => {
             for coeff in coefficients.iter_mut() {
-                *coeff = Gf256::from(*value);
+                *coeff = Gf256::new(*value);
             }
         }
         CoefficientCorruptionPattern::Pattern { pattern } => {
@@ -666,23 +662,23 @@ fn apply_corruption_pattern_to_coefficients(
     match pattern {
         CorruptionPattern::Alternating => {
             for (i, coeff) in coefficients.iter_mut().enumerate() {
-                *coeff = Gf256::from(if i % 2 == 0 { 0xAA } else { 0x55 });
+                *coeff = Gf256::new(if i % 2 == 0 { 0xAA } else { 0x55 });
             }
         }
         CorruptionPattern::AllOnes => {
             for coeff in coefficients.iter_mut() {
-                *coeff = Gf256::from(0xFF);
+                *coeff = Gf256::new(0xFF);
             }
         }
         CorruptionPattern::Incremental => {
             for (i, coeff) in coefficients.iter_mut().enumerate() {
-                *coeff = Gf256::from((i % 256) as u8);
+                *coeff = Gf256::new((i % 256) as u8);
             }
         }
         CorruptionPattern::Xor(value) => {
             for coeff in coefficients.iter_mut() {
-                let current_val = u8::from(*coeff);
-                *coeff = Gf256::from(current_val ^ value);
+                let current_val = coeff.raw();
+                *coeff = Gf256::new(current_val ^ value);
             }
         }
     }
@@ -720,7 +716,7 @@ fn apply_single_corruption_op(symbol: &mut ReceivedSymbol, corruption: &SingleCo
         } => {
             if !symbol.coefficients.is_empty() {
                 let idx = (*coeff_index as usize) % symbol.coefficients.len();
-                symbol.coefficients[idx] = Gf256::from(*new_value);
+                symbol.coefficients[idx] = Gf256::new(*new_value);
             }
         }
         SingleCorruption::CorruptColumn {
@@ -756,7 +752,7 @@ fn test_decode_operation(
             }
         }
         DecodeOperation::DecodeWithProof => {
-            let _result = decoder.decode_with_proof(symbols);
+            let _result = decoder.decode_with_proof(symbols, ObjectId::new_for_test(0xDEC0_DE), 0);
         }
         DecodeOperation::ValidateCorruption => {
             // Just ensure decoder doesn't crash on corrupted input

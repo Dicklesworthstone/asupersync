@@ -13,7 +13,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::notify::Notify;
+use asupersync::sync::Notify;
 use futures::task::{Context, noop_waker};
 use libfuzzer_sys::fuzz_target;
 use std::future::Future;

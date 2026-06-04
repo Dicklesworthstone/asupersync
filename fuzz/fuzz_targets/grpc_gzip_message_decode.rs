@@ -94,7 +94,7 @@ fn fuzz_mutated_frame(input: &FuzzInput) {
     let mut body = if input.raw_gzip.first().is_some_and(|byte| byte & 1 == 0) {
         bounded_bytes(&input.raw_gzip, MAX_GZIP_BYTES).to_vec()
     } else {
-        match gzip_frame_compress(payload) {
+        match gzip_frame_compress(Bytes::copy_from_slice(payload)) {
             Ok(bytes) => bytes.to_vec(),
             Err(GrpcError::Compression(_) | GrpcError::MessageTooLarge) => return,
             Err(err) => panic!("unexpected gzip encode error: {err:?}"),
@@ -136,7 +136,7 @@ fn fuzz_mutated_frame(input: &FuzzInput) {
             | GrpcError::MessageTooLarge
             | GrpcError::Protocol(_)
             | GrpcError::InvalidMessage(_)
-            | GrpcError::Transport(_)
+            | GrpcError::Transport(..)
             | GrpcError::Status(_),
         ) => {}
     }
@@ -146,7 +146,7 @@ fn fuzz_raw_gzip(input: &FuzzInput) {
     let raw_gzip = bounded_bytes(&input.raw_gzip, MAX_GZIP_BYTES);
     let decode_limit = decode_limit(input.decode_limit);
 
-    match gzip_frame_decompress(raw_gzip, decode_limit) {
+    match gzip_frame_decompress(Bytes::copy_from_slice(raw_gzip), decode_limit) {
         Ok(decoded) => assert!(decoded.len() <= decode_limit),
         Err(GrpcError::Compression(_) | GrpcError::MessageTooLarge) => {}
         Err(err) => panic!("unexpected raw gzip decode error: {err:?}"),
@@ -157,13 +157,13 @@ fn fuzz_bomb_guard(input: &FuzzInput) {
     let repeated_len = usize::from(input.repeat_count).min(MAX_BOMB_BYTES);
     let repeated = vec![input.repeat_byte; repeated_len];
     let decode_limit = decode_limit(input.decode_limit);
-    let compressed = match gzip_frame_compress(&repeated) {
+    let compressed = match gzip_frame_compress(Bytes::copy_from_slice(&repeated)) {
         Ok(bytes) => bytes,
         Err(GrpcError::Compression(_) | GrpcError::MessageTooLarge) => return,
         Err(err) => panic!("unexpected bomb encode error: {err:?}"),
     };
 
-    match gzip_frame_decompress(compressed.as_ref(), decode_limit) {
+    match gzip_frame_decompress(compressed, decode_limit) {
         Ok(decoded) => {
             assert!(repeated_len <= decode_limit);
             assert_eq!(decoded.as_ref(), repeated.as_slice());

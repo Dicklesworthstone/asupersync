@@ -171,7 +171,7 @@ async fn test_clone_drop_scenario(
         .into_iter()
         .enumerate()
         .map(|(i, mut receiver)| {
-            let tracker_clone = Arc::clone(tracker);
+            let tracker_clone = tracker;
             let expected_value = config.test_value;
             let cx_clone = cx.clone();
 

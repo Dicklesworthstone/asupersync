@@ -21,7 +21,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::config::EncodingConfig;
-use asupersync::encoding::{EncodingError, EncodingPipeline};
+use asupersync::encoding::EncodingPipeline;
 use asupersync::types::ObjectId;
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 
@@ -199,7 +199,8 @@ fn fuzz_k1_boundary(input: K1BoundaryInput) {
     let data = generate_data(&input.data_spec, config.symbol_size);
 
     // Step 4: Create pipeline and test K=1 boundary behavior
-    exercise_k1_encoding(config, pool, &data, &input.edge_cases);
+    let object_id = ObjectId::new_for_test(input.data_spec.object_id);
+    exercise_k1_encoding(config, pool, object_id, &data, &input.edge_cases);
 }
 
 fn build_encoding_config(spec: &K1ConfigSpec) -> EncodingConfig {
@@ -211,8 +212,8 @@ fn build_encoding_config(spec: &K1ConfigSpec) -> EncodingConfig {
         symbol_size,
         max_block_size,
         repair_overhead,
-        encoding_parallelism: (spec.encoding_parallelism % 8).max(1),
-        decoding_parallelism: (spec.decoding_parallelism % 8).max(1),
+        encoding_parallelism: usize::from((spec.encoding_parallelism % 8).max(1)),
+        decoding_parallelism: usize::from((spec.decoding_parallelism % 8).max(1)),
     }
 }
 
@@ -232,7 +233,7 @@ fn resolve_max_block_size(choice: &BlockSizeChoice) -> usize {
         BlockSizeChoice::Tiny(v) => (*v % 8).max(1) as usize,
         BlockSizeChoice::Small(v) => ((*v % 24) + 9) as usize,
         BlockSizeChoice::Medium(v) => ((*v % 224) + 33) as usize,
-        BlockSizeChoice::Large(v) => ((*v % 768) + 257) as usize,
+        BlockSizeChoice::Large(v) => 257 + (usize::from(*v) % (MAX_BLOCK_SIZE - 256)),
         BlockSizeChoice::Zero => 0, // Should trigger validation error
     }
 }
@@ -267,30 +268,35 @@ fn create_symbol_pool(config_spec: &K1ConfigSpec, pool_edge: &PoolEdgeCase) -> S
             max_size: 0,
             initial_size: 0,
             allow_growth: false,
+            growth_increment: 0,
         },
         PoolEdgeCase::Matching => PoolConfig {
             symbol_size: symbol_size,
             max_size: 16,
             initial_size: 4,
             allow_growth: true,
+            growth_increment: 4,
         },
         PoolEdgeCase::Mismatched { pool_symbol_size } => PoolConfig {
             symbol_size: *pool_symbol_size,
             max_size: 16,
             initial_size: 4,
             allow_growth: true,
+            growth_increment: 4,
         },
         PoolEdgeCase::ZeroSize => PoolConfig {
             symbol_size: symbol_size,
             max_size: 0,
             initial_size: 0,
             allow_growth: false,
+            growth_increment: 0,
         },
         PoolEdgeCase::Exhausted { tiny_size } => PoolConfig {
             symbol_size: symbol_size,
             max_size: (*tiny_size % 3) as usize,
             initial_size: 0,
             allow_growth: false,
+            growth_increment: 0,
         },
     };
 
@@ -311,7 +317,11 @@ fn generate_data(spec: &DataSpec, symbol_size: u16) -> Vec<u8> {
             };
 
             let mut data = Vec::with_capacity(target_size.min(MAX_DATA_SIZE));
-            let padding_cycle = if padding.is_empty() { &[0u8] } else { padding };
+            let padding_cycle: &[u8] = if padding.is_empty() {
+                &[0u8]
+            } else {
+                padding.as_slice()
+            };
 
             for i in 0..target_size.min(MAX_DATA_SIZE) {
                 data.push(padding_cycle[i % padding_cycle.len()]);
@@ -345,11 +355,11 @@ fn generate_data(spec: &DataSpec, symbol_size: u16) -> Vec<u8> {
 fn exercise_k1_encoding(
     config: EncodingConfig,
     pool: SymbolPool,
+    object_id: ObjectId,
     data: &[u8],
     edge_cases: &K1EdgeCases,
 ) {
-    let mut pipeline = EncodingPipeline::new(config, pool);
-    let object_id = ObjectId::new_for_test(0xDEADBEEF);
+    let mut pipeline = EncodingPipeline::new(config.clone(), pool);
 
     // Test 1: Basic encoding - expect either success or specific failure modes
     let encoding_result: Vec<_> = pipeline.encode(object_id, data).collect();
@@ -425,13 +435,20 @@ fn exercise_k1_encoding(
     }
 
     // Test 3: Edge case exploration
+    if edge_cases.force_index_boundary && config.symbol_size > 0 {
+        let boundary_k = data.len().div_ceil(config.symbol_size as usize);
+        let _ = std::hint::black_box(boundary_k <= 10);
+    }
+
+    // Test 4: Edge case exploration
     if edge_cases.test_repair_equations {
         // Try creating a new pipeline to test parameter validation in isolation
-        let test_pipeline = EncodingPipeline::new(config, SymbolPool::new(PoolConfig::default()));
+        let test_pipeline =
+            EncodingPipeline::new(config.clone(), SymbolPool::new(PoolConfig::default()));
         let _ = std::hint::black_box(test_pipeline);
     }
 
-    // Test 4: ESI overflow testing
+    // Test 5: ESI overflow testing
     if edge_cases.test_esi_overflow {
         // This would require calling systematic encoder directly, but we test the boundary through pipeline
         let _ = std::hint::black_box(config);

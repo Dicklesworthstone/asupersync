@@ -34,6 +34,8 @@ use libfuzzer_sys::fuzz_target;
 /// - State enum out-of-bounds values
 use asupersync::distributed::snapshot::{RegionSnapshot, SnapshotError};
 use asupersync::record::region::RegionState;
+use asupersync::security::AuthenticationTag;
+use asupersync::trace::distributed::VectorClock;
 use asupersync::types::{RegionId, Time};
 
 /// Maximum input size for fuzzing (16 MB - matches parser limit)
@@ -145,13 +147,9 @@ fn arbitrary_bounded_string(u: &mut arbitrary::Unstructured) -> arbitrary::Resul
     if u.arbitrary::<bool>()? {
         let len = u.int_in_range(0..=MAX_STRING_LEN)?;
         let bytes = u.bytes(len)?.to_vec();
-        // Generate both valid and invalid UTF-8 to test string handling
-        if u.arbitrary::<bool>()? {
-            Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
-        } else {
-            // Raw bytes that may not be valid UTF-8 (for testing error paths)
-            Ok(Some(unsafe { String::from_utf8_unchecked(bytes) }))
-        }
+        // `String` must always be valid UTF-8. Raw byte parsing below covers
+        // malformed UTF-8 in the serialized representation.
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     } else {
         Ok(None)
     }
@@ -187,6 +185,7 @@ impl FuzzableSnapshot {
             state,
             timestamp: Time::from_nanos(self.timestamp_nanos),
             sequence: self.sequence,
+            vector_clock: VectorClock::new(),
             origin_id: self.origin_id,
             epoch: self.epoch,
             tasks: self
@@ -206,6 +205,7 @@ impl FuzzableSnapshot {
                 .parent
                 .map(|(idx, generation)| RegionId::new_for_test(idx, generation)),
             metadata: self.metadata.clone(),
+            auth_tag: AuthenticationTag::zero(),
         })
     }
 }

@@ -3,7 +3,15 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
+use asupersync::Cx;
+use asupersync::types::{Budget, RegionId, TaskId};
+use asupersync::util::ArenaIndex;
 use asupersync::web::{Handler, Response, extract::Request, middleware::CorsMiddleware};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::thread;
+use std::time::Duration;
 
 /// Fuzz input for CORS Origin parsing under multi-Origin headers (RFC 6454)
 #[derive(Arbitrary, Debug)]
@@ -84,8 +92,32 @@ enum CorsPolicyType {
 struct TestHandler;
 
 impl Handler for TestHandler {
-    fn call(&self, _req: Request) -> Response {
-        Response::new(asupersync::web::StatusCode::OK, b"ok".to_vec())
+    fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async { Response::new(asupersync::web::StatusCode::OK, b"ok".to_vec()) })
+    }
+}
+
+fn fuzz_cx() -> Cx {
+    Cx::new(
+        RegionId::from_arena(ArenaIndex::new(92, 0)),
+        TaskId::from_arena(ArenaIndex::new(92, 1)),
+        Budget::INFINITE,
+    )
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = std::task::Waker::noop();
+    let mut task_cx = Context::from_waker(waker);
+    let mut pinned = Box::pin(future);
+
+    loop {
+        match pinned.as_mut().poll(&mut task_cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => {
+                thread::yield_now();
+                thread::sleep(Duration::from_micros(1));
+            }
+        }
     }
 }
 
@@ -168,7 +200,8 @@ fn test_multi_origin_rfc6454_compliance(input: &CorsOriginFuzzInput) {
     let req = request_with_origin_scenario(input);
 
     // Call middleware - should never panic
-    let response = middleware.call(req);
+    let cx = fuzz_cx();
+    let response = block_on(middleware.call(&cx, req));
     observe_cors_response("multi-origin compliance", &response, &input.origin_scenario);
 }
 
@@ -176,7 +209,8 @@ fn test_origin_parsing_robustness(input: &CorsOriginFuzzInput) {
     // Test that origin parsing doesn't panic on any input
     let cors_policy = build_cors_policy(&input.cors_policy_type);
     let middleware = CorsMiddleware::new(TestHandler, cors_policy);
-    let response = middleware.call(request_with_origin_scenario(input));
+    let cx = fuzz_cx();
+    let response = block_on(middleware.call(&cx, request_with_origin_scenario(input)));
     observe_cors_response(
         "origin parsing robustness",
         &response,
@@ -234,8 +268,9 @@ fn test_cors_policy_consistency(input: &CorsOriginFuzzInput) {
         let req1 = Request::new(input.method.as_str(), &input.path).with_header("Origin", origin);
         let req2 = Request::new(input.method.as_str(), &input.path).with_header("Origin", origin);
 
-        let resp1 = middleware.call(req1);
-        let resp2 = middleware.call(req2);
+        let cx = fuzz_cx();
+        let resp1 = block_on(middleware.call(&cx, req1));
+        let resp2 = block_on(middleware.call(&cx, req2));
 
         // Same request should produce same CORS headers
         assert_eq!(
@@ -259,9 +294,10 @@ fn test_header_case_insensitivity(input: &CorsOriginFuzzInput) {
         let req_mixed =
             Request::new(input.method.as_str(), &input.path).with_header("OrIgIn", origin);
 
-        let resp_lower = middleware.call(req_lower);
-        let resp_upper = middleware.call(req_upper);
-        let resp_mixed = middleware.call(req_mixed);
+        let cx = fuzz_cx();
+        let resp_lower = block_on(middleware.call(&cx, req_lower));
+        let resp_upper = block_on(middleware.call(&cx, req_upper));
+        let resp_mixed = block_on(middleware.call(&cx, req_mixed));
 
         // All variations should be treated identically
         assert_eq!(

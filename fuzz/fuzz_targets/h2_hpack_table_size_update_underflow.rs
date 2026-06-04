@@ -48,14 +48,24 @@ pub struct HeaderString(String);
 impl Arbitrary<'_> for HeaderString {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let len = u8::arbitrary(u)? as usize % 64; // Cap at 64 chars
-        let chars: Vec<char> = (0..len)
-            .map(|_| {
-                // ASCII printable chars for header names/values
-                let c = (u8::arbitrary(u)? % 94) + 32;
-                char::from(c)
-            })
-            .collect();
-        Ok(HeaderString(chars.into_iter().collect()))
+        let mut chars = String::with_capacity(len);
+        for _ in 0..len {
+            // ASCII printable chars for header names/values.
+            let c = (u8::arbitrary(u)? % 94) + 32;
+            chars.push(char::from(c));
+        }
+        Ok(HeaderString(chars))
+    }
+}
+
+impl TableSizeTestMode {
+    fn initial_max_size(&self) -> usize {
+        match self {
+            Self::GradualReduction => 4096,
+            Self::AggressiveReduction => 2048,
+            Self::SizeRecovery => 1024,
+            Self::EdgeCases => 128,
+        }
     }
 }
 
@@ -355,15 +365,21 @@ pub struct TableStats {
 }
 
 fuzz_target!(|input: HpackTableSizeUpdateInput| {
-    let mut table = MockHpackDynamicTable::new();
+    let mut table = MockHpackDynamicTable::with_max_size(input.mode.initial_max_size());
 
     // Populate table with initial entries
     let initial_count = input.initial_entries.len().min(100); // Cap for performance
     for entry in input.initial_entries.iter().take(initial_count) {
-        table.insert(entry.name.clone(), entry.value.clone());
+        table.insert(entry.name.to_string(), entry.value.to_string());
     }
 
     let initial_stats = table.stats();
+    assert!(
+        initial_stats.total_size <= initial_stats.max_size,
+        "Initial table size {} exceeds max {}",
+        initial_stats.total_size,
+        initial_stats.max_size
+    );
 
     // Perform size updates (potential eviction triggers)
     for size_update in input.size_updates.iter().take(20) {
@@ -417,7 +433,7 @@ fuzz_target!(|input: HpackTableSizeUpdateInput| {
     for operation in input.operations.iter().take(20) {
         match operation {
             TableOperation::Insert { entry } => {
-                table.insert(entry.name.clone(), entry.value.clone());
+                table.insert(entry.name.to_string(), entry.value.to_string());
             }
             TableOperation::Lookup { index } => {
                 let _ = table.lookup(*index as usize);

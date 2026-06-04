@@ -173,5 +173,18 @@ fn assert_weak_key_diagnostics_visible(err: &asupersync::security::key::AuthKeyE
                 "weak Hamming-weight rejection should describe Hamming-weight weakness"
             );
         }
+        asupersync::security::key::WeakKeyReason::ExcessiveByteConcentration { .. } => {
+            assert!(
+                display.contains("concentration")
+                    || debug.contains("concentration")
+                    || reason_display.contains("concentration")
+                    || reason_debug.contains("concentration")
+                    || display.contains("frequency")
+                    || debug.contains("frequency")
+                    || reason_display.contains("frequency")
+                    || reason_debug.contains("frequency"),
+                "byte-concentration rejection should describe byte-frequency weakness"
+            );
+        }
     }
 }

@@ -14,7 +14,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::security::authenticated::AuthenticatedSymbol;
-use asupersync::security::{AuthKey, AuthenticationTag};
+use asupersync::security::{AuthKey, AuthenticationTag, SecurityContext};
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 
@@ -186,13 +186,16 @@ fn fuzz_key_rotation(
         let test_key = &keys[key_idx];
 
         let result = valid_tag.verify(test_key, &symbol);
-
-        // Only the primary key should verify successfully
-        if key_idx == 0 {
-            assert!(result, "Primary key should verify its own tag");
-        } else {
-            // Cross-key verification should fail (unless keys collide, which is astronomically unlikely)
-            assert!(!result, "Different key should not verify tag");
+        let expected_by_key = test_key == primary_key;
+        assert_eq!(
+            result, expected_by_key,
+            "Only byte-identical primary key material should verify its tag"
+        );
+        if attempt.expected_result != expected_by_key {
+            assert_ne!(
+                result, attempt.expected_result,
+                "Fuzzer-provided expectations must not override key ownership"
+            );
         }
     }
 }
@@ -262,8 +265,9 @@ fn fuzz_symbol_manipulation(
             let auth_variant = AuthenticatedSymbol::from_parts(variant.clone(), variant_tag);
             assert!(!auth_variant.is_verified()); // Starts unverified
 
-            // Test creating a verified symbol
-            let verified_variant = AuthenticatedSymbol::new_verified(variant.clone(), variant_tag);
+            // Test creating a verified symbol through the public trusted signing path.
+            let verified_variant = SecurityContext::new(key.clone()).sign_symbol(&variant);
+            assert_eq!(verified_variant.tag(), &variant_tag);
             assert!(verified_variant.is_verified()); // Created verified
         } else {
             // Test with original tag - should fail unless symbols identical

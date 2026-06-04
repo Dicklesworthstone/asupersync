@@ -86,6 +86,10 @@ fn normalize_config(config: &mut FuzzConfig) {
 fn max_supported_source_block_size() -> usize {
     match SystematicParams::try_for_source_block(0, 1).unwrap_err() {
         SystematicParamError::UnsupportedSourceBlockSize { max_supported, .. } => max_supported,
+        unexpected @ (SystematicParamError::KPrimeExceedsU32 { .. }
+        | SystematicParamError::RfcTableInvariantViolation { .. }) => {
+            panic!("K=0 must report unsupported source-block size, got {unexpected:?}")
+        }
     }
 }
 

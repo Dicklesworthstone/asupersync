@@ -12,7 +12,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::once_cell::OnceCell;
+use asupersync::sync::OnceCell;
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};

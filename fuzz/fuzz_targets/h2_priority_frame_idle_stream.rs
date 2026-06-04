@@ -173,7 +173,7 @@ fn test_priority_on_idle_stream(test_case: &PriorityIdleTest) {
     );
 
     if let Ok(result) = priority_result {
-        match result {
+        match &result {
             PriorityResult::Accepted { recorded_priority } => {
                 // Verify priority was recorded for idle stream
                 assert_eq!(
@@ -596,8 +596,8 @@ impl DependencyTree {
         if exclusive {
             // Move existing children to be children of the new child
             if let Some(existing_children) = self.children.remove(&parent) {
-                for existing_child in existing_children {
-                    self.dependencies.insert(existing_child, child);
+                for existing_child in &existing_children {
+                    self.dependencies.insert(*existing_child, child);
                 }
                 self.children.insert(child, existing_children);
             }

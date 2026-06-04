@@ -9,7 +9,7 @@ use asupersync::cx::Cx;
 use asupersync::database::postgres::{
     PgColumn, PgError, fuzz_parse_row_description, fuzz_read_backend_message, oid,
 };
-use futures_lite::future::block_on;
+use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
 
@@ -317,7 +317,8 @@ fuzz_target!(|scenario: Scenario| {
     let packet = build_packet(&body, &scenario.packet_length);
 
     let cx = Cx::for_testing();
-    match block_on(fuzz_read_backend_message(&cx, &packet)) {
+    let decoded: Result<(u8, Vec<u8>), PgError> = block_on(fuzz_read_backend_message(&cx, &packet));
+    match decoded {
         Ok((msg_type, extracted_body)) => {
             assert_eq!(
                 msg_type, b'T',

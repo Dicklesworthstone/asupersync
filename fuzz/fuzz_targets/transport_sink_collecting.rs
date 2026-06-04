@@ -22,8 +22,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::security::{AuthKey, SecurityContext};
-use asupersync::transport::sink::CollectingSink;
+use asupersync::transport::sink::{CollectingSink, SymbolSinkExt};
 use asupersync::types::symbol::Symbol;
+use futures::executor::block_on;
 
 #[derive(Debug, Arbitrary)]
 enum Op {
@@ -42,7 +43,6 @@ fuzz_target!(|ops: Vec<Op>| {
 
     let mut closed = false;
     let mut expected_count = 0_usize;
-    let cx = asupersync::Cx::for_testing();
 
     for op in ops.into_iter().take(64) {
         match op {
@@ -56,10 +56,7 @@ fuzz_target!(|ops: Vec<Op>| {
                 }
                 let sym = Symbol::new_for_test(u64::from(object_id), 0, esi, &payload);
                 let auth_sym = auth.sign_symbol(&sym);
-                let result = futures_lite::future::block_on(async {
-                    use asupersync::transport::sink::SymbolSinkExt;
-                    sink.send_one(&cx, auth_sym).await
-                });
+                let result = block_on(sink.send(auth_sym));
                 if !closed {
                     assert!(result.is_ok(), "send to open sink failed: {result:?}");
                     expected_count += 1;
@@ -68,10 +65,7 @@ fuzz_target!(|ops: Vec<Op>| {
                 }
             }
             Op::Flush => {
-                let result = futures_lite::future::block_on(async {
-                    use asupersync::transport::sink::SymbolSinkExt;
-                    sink.flush_now(&cx).await
-                });
+                let result = block_on(sink.flush());
                 if !closed {
                     assert!(result.is_ok(), "flush on open sink failed");
                 }
@@ -79,10 +73,7 @@ fuzz_target!(|ops: Vec<Op>| {
             }
             Op::Close => {
                 if !closed {
-                    let result = futures_lite::future::block_on(async {
-                        use asupersync::transport::sink::SymbolSinkExt;
-                        sink.close_now(&cx).await
-                    });
+                    let result = block_on(sink.close());
                     assert!(result.is_ok(), "first close failed");
                     closed = true;
                 }
@@ -90,17 +81,17 @@ fuzz_target!(|ops: Vec<Op>| {
         }
         // Invariant: collected count never exceeds the expected.
         assert!(
-            sink.collected().len() <= expected_count,
+            sink.symbols().len() <= expected_count,
             "collected count exceeds expected"
         );
     }
 
     // Final invariant: collected count equals expected (no symbols dropped on the floor).
     assert_eq!(
-        sink.collected().len(),
+        sink.symbols().len(),
         expected_count,
         "CollectingSink lost symbols: collected={}, expected={}",
-        sink.collected().len(),
+        sink.symbols().len(),
         expected_count
     );
 });

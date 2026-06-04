@@ -349,6 +349,10 @@ fn verify_tls_error(error: &TlsError, domain: &str, config: &ConnectorConfig) {
         TlsError::Configuration(_msg) => {
             // Configuration errors are expected with invalid ALPN/certs
         }
+        TlsError::FeatureDisabled { .. } => {
+            // Feature-gate errors are expected when fuzzed config requests
+            // TLS capabilities that are not enabled for the current build.
+        }
         TlsError::Io(_io_error) => {
             // I/O errors are expected with mock transport failures
         }

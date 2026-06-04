@@ -211,7 +211,7 @@ struct ChunkData {
 }
 
 /// Connection termination scenarios.
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, PartialEq, Eq)]
 enum TerminationScenario {
     /// Normal pipeline completion
     Normal,
@@ -524,7 +524,7 @@ fuzz_target!(|input: H1PipelineFuzz| {
     // In a real server, responses would be sent back in the same order
     // Here we verify that parser maintained request order correctly
     for (idx, parsed_request) in parsed_requests.iter().enumerate() {
-        if let Some((expected_idx, expected_method, expected_uri)) = expected_requests.get(idx) {
+        if let Some((expected_idx, _expected_method, _expected_uri)) = expected_requests.get(idx) {
             // Verify request was parsed in the correct order
             assert_eq!(
                 idx, *expected_idx,
@@ -534,7 +534,7 @@ fuzz_target!(|input: H1PipelineFuzz| {
 
             // Basic request integrity check
             assert!(
-                !parsed_request.uri().is_empty(),
+                !parsed_request.uri.is_empty(),
                 "Parsed request URI should not be empty"
             );
         }
@@ -579,12 +579,12 @@ fn validate_pipeline_state(requests: &[Request]) {
     // 4. Proper header structure
 
     for (idx, request) in requests.iter().enumerate() {
-        assert!(!request.uri().is_empty(), "Request {} has empty URI", idx);
+        assert!(!request.uri.is_empty(), "Request {} has empty URI", idx);
 
         // Verify request is in a valid state after parsing
-        let _method = request.method();
-        let _version = request.version();
-        let _headers = request.headers();
+        let _method = &request.method;
+        let _version = &request.version;
+        let _headers = &request.headers;
 
         // If we can access all these fields without panicking,
         // the request was parsed correctly

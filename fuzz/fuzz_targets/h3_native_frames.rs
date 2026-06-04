@@ -13,12 +13,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::http::h3_native::{H3Frame, H3NativeError};
+use asupersync::http::h3_native::{H3ConnectionConfig, H3Frame, H3NativeError};
 use asupersync::net::quic_core::{QUIC_VARINT_MAX, encode_varint};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum frame payload size to prevent OOM during fuzzing
 const MAX_FRAME_PAYLOAD: usize = 65536;
+
+fn decode_h3_frame(input: &[u8]) -> Result<(H3Frame, usize), H3NativeError> {
+    H3Frame::decode(input, &H3ConnectionConfig::default())
+}
 
 /// Known HTTP/3 frame types from RFC 9114
 const KNOWN_FRAME_TYPES: &[u64] = &[
@@ -271,7 +275,7 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
                 if encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok() {
                     frame_data.extend_from_slice(&limited_payload);
 
-                    match H3Frame::decode(&frame_data) {
+                    match decode_h3_frame(&frame_data) {
                         Ok((frame, consumed)) => {
                             // Verify complete consumption
                             assert_eq!(
@@ -319,7 +323,7 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
                 if encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok() {
                     frame_data.extend_from_slice(&limited_payload);
 
-                    match H3Frame::decode(&frame_data) {
+                    match decode_h3_frame(&frame_data) {
                         Ok((H3Frame::Unknown { frame_type, .. }, _)) => {
                             assert_eq!(
                                 frame_type, QUIC_VARINT_MAX,
@@ -351,7 +355,7 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
                 frame_data.extend_from_slice(&limited_payload);
 
                 // Should either parse successfully or fail gracefully
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok(_) => {
                         // Success is fine - malformed data might accidentally be valid
                     }
@@ -382,7 +386,7 @@ fn test_frame_type_parsing(test: &FrameTypeTest) {
                 frame_data.extend_from_slice(&length_bytes);
                 frame_data.extend_from_slice(&limited_payload);
 
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok(_) => {
                         // If it parses, the oversized type was actually valid
                     }
@@ -417,7 +421,7 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
                 let limited_payload = limit_payload(actual_payload);
                 frame_data.extend_from_slice(&limited_payload);
 
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok((_frame, consumed)) => {
                         assert!(
                             consumed <= frame_data.len(),
@@ -454,7 +458,7 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
                 let limited_payload = limit_payload(payload);
                 frame_data.extend_from_slice(&limited_payload);
 
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok(_) => {
                         // Malformed data might accidentally be valid
                     }
@@ -488,7 +492,7 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
                 let limited_data = limit_payload(actual_data);
                 frame_data.extend_from_slice(&limited_data);
 
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok(_) => {
                         // Success implies claimed_length <= actual_data.len()
                         assert!(
@@ -517,7 +521,7 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
             {
                 // Don't actually include QUIC_VARINT_MAX bytes of payload
                 // Just test that the length varint itself is handled
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok(_) => {
                         panic!("Should not succeed with max varint length and no payload");
                     }
@@ -546,7 +550,7 @@ fn test_frame_length_parsing(test: &FrameLengthTest) {
             if encode_varint(*frame_type, &mut frame_data).is_ok()
                 && encode_varint(0, &mut frame_data).is_ok()
             {
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok((frame, consumed)) => {
                         // Zero-length frames should parse successfully
                         let expected_consumed =
@@ -590,7 +594,7 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
                 if encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok() {
                     frame_data.extend_from_slice(&limited_payload);
 
-                    match H3Frame::decode(&frame_data) {
+                    match decode_h3_frame(&frame_data) {
                         Ok((
                             H3Frame::Unknown {
                                 frame_type,
@@ -655,7 +659,7 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
                     break;
                 }
 
-                match H3Frame::decode(&combined_data[pos..]) {
+                match decode_h3_frame(&combined_data[pos..]) {
                     Ok((frame, consumed)) => {
                         verify_frame_matches_expected(&frame, expected_type, &expected_payload);
                         pos += consumed;
@@ -684,7 +688,7 @@ fn test_unknown_frame_handling(test: &UnknownFrameTest) {
             {
                 frame_data.extend_from_slice(&test_payload);
 
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok((
                         H3Frame::Unknown {
                             frame_type,
@@ -723,7 +727,7 @@ fn test_grease_frame_handling(test: &GreaseTest) {
                 if encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok() {
                     frame_data.extend_from_slice(&limited_payload);
 
-                    match H3Frame::decode(&frame_data) {
+                    match decode_h3_frame(&frame_data) {
                         Ok((
                             H3Frame::Unknown {
                                 frame_type,
@@ -768,7 +772,7 @@ fn test_grease_frame_handling(test: &GreaseTest) {
             // Parse multiple GREASE frames
             let mut pos = 0;
             while pos < combined_data.len() {
-                match H3Frame::decode(&combined_data[pos..]) {
+                match decode_h3_frame(&combined_data[pos..]) {
                     Ok((H3Frame::Unknown { frame_type, .. }, consumed)) => {
                         assert!(
                             GREASE_FRAME_TYPES.contains(&frame_type),
@@ -801,7 +805,7 @@ fn test_grease_frame_handling(test: &GreaseTest) {
             {
                 frame_data.extend_from_slice(&test_payload);
 
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok((
                         H3Frame::Unknown {
                             frame_type,
@@ -840,7 +844,7 @@ fn test_reserved_frame_handling(test: &ReservedTest) {
                 if encode_varint(limited_payload.len() as u64, &mut frame_data).is_ok() {
                     frame_data.extend_from_slice(&limited_payload);
 
-                    match H3Frame::decode(&frame_data) {
+                    match decode_h3_frame(&frame_data) {
                         Ok((H3Frame::Unknown { frame_type, .. }, _)) => {
                             // HTTP/2 reserved frames are treated as unknown in HTTP/3
                             // This is actually correct per RFC 9114
@@ -876,7 +880,7 @@ fn test_reserved_frame_handling(test: &ReservedTest) {
                     frame_data.extend_from_slice(&limited_payload);
 
                     // Custom reserved types should be handled as unknown frames
-                    match H3Frame::decode(&frame_data) {
+                    match decode_h3_frame(&frame_data) {
                         Ok((frame, _)) => {
                             verify_frame_handled_appropriately(&frame, *reserved_type);
                         }
@@ -915,7 +919,7 @@ fn test_boundary_conditions(test: &BoundaryTest) {
             {
                 if payload_length == 0 {
                     // Zero-length frame
-                    match H3Frame::decode(&frame_data) {
+                    match decode_h3_frame(&frame_data) {
                         Ok((frame, _)) => {
                             if *is_frame_type {
                                 // Boundary frame type should be handled appropriately
@@ -931,7 +935,7 @@ fn test_boundary_conditions(test: &BoundaryTest) {
                     }
                 } else {
                     // Don't actually create large payload - just test length parsing
-                    match H3Frame::decode(&frame_data) {
+                    match decode_h3_frame(&frame_data) {
                         Ok(_) => {
                             panic!("Should not succeed with large length and no payload");
                         }
@@ -948,7 +952,7 @@ fn test_boundary_conditions(test: &BoundaryTest) {
 
         BoundaryTest::EmptyFrame => {
             // Test completely empty frame data
-            match H3Frame::decode(&[]) {
+            match decode_h3_frame(&[]) {
                 Ok(_) => {
                     panic!("Empty frame data should not parse successfully");
                 }
@@ -962,7 +966,7 @@ fn test_boundary_conditions(test: &BoundaryTest) {
         }
 
         BoundaryTest::SingleByte { byte } => {
-            match H3Frame::decode(&[*byte]) {
+            match decode_h3_frame(&[*byte]) {
                 Ok(_) => {
                     panic!("Single byte should not be sufficient for a frame");
                 }
@@ -985,7 +989,7 @@ fn test_boundary_conditions(test: &BoundaryTest) {
                 && encode_varint(MAX_FRAME_PAYLOAD as u64, &mut frame_data).is_ok()
             {
                 // Don't actually create max payload - just test the header
-                match H3Frame::decode(&frame_data) {
+                match decode_h3_frame(&frame_data) {
                     Ok(_) => {
                         panic!("Should not succeed with max payload length and no actual payload");
                     }
@@ -1026,7 +1030,7 @@ fn test_boundary_conditions(test: &BoundaryTest) {
             let mut parsed_count = 0;
 
             while pos < combined_data.len() && parsed_count < expected_count {
-                match H3Frame::decode(&combined_data[pos..]) {
+                match decode_h3_frame(&combined_data[pos..]) {
                     Ok((_, consumed)) => {
                         pos += consumed;
                         parsed_count += 1;

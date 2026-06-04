@@ -155,17 +155,15 @@ fuzz_target!(|input: FuzzInput| {
     // Property 2: a correctly-computed mac verifies; tampered macs do not
     // -------------------------------------------------------------------
     if input.exercise_symbol_path {
-        let symbol = Symbol::new(
-            SymbolId::new(
-                ObjectId::new_for_test(input.sym_object_id),
-                input.sym_sbn,
-                input.sym_esi,
-            ),
-            SymbolKind::Source,
-            // Use a small slice of msg as the symbol payload to keep
-            // serialization cheap.
-            msg.iter().copied().take(256).collect(),
+        let object_id = (input.sym_object_id as u64) ^ ((input.sym_object_id >> u64::BITS) as u64);
+        let symbol_id = SymbolId::new(
+            ObjectId::new_for_test(object_id),
+            input.sym_sbn,
+            input.sym_esi,
         );
+        // Use a small slice of msg as the symbol payload to keep serialization cheap.
+        let payload: Vec<u8> = msg.iter().copied().take(256).collect();
+        let symbol = Symbol::new(symbol_id, payload, SymbolKind::Source);
 
         let valid_tag = AuthenticationTag::compute(&key_a, &symbol);
 
@@ -204,7 +202,8 @@ fuzz_target!(|input: FuzzInput| {
                 "[testing-fuzzing][CRITICAL] AuthenticationTag::verify accepted a \
                  single-bit-tampered tag. byte_idx={} bit_idx={}. This would \
                  indicate a non-constant-time prefix comparison or a bug in the \
-                 tag's underlying byte-equality."
+                 tag's underlying byte-equality.",
+                byte_idx, bit_idx
             );
         }
 

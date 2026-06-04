@@ -30,9 +30,9 @@
 
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
@@ -260,6 +260,10 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
 
                     let old_symbol_count = state.accumulated_symbols.len();
                     state.add_symbols(&symbols);
+                    assert!(
+                        state.accumulated_symbols.len() >= old_symbol_count,
+                        "Adding symbols must not drop previously accumulated symbols"
+                    );
 
                     // Assertion 5: Memory bounded by max-block-size
                     assert!(
@@ -299,9 +303,7 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
                 count,
             } => {
                 // Assertion 1: Decoder rejects duplicate symbols idempotently
-                if let Some((k, symbol_size, _)) = state.current_params {
-                    let l = k + (k / 4) + 8;
-
+                if state.current_params.is_some() {
                     for &idx in symbol_indices {
                         let idx = idx as usize % state.accumulated_symbols.len().max(1);
                         if idx < state.accumulated_symbols.len() {
@@ -316,6 +318,16 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
                             let old_hash_count = state.symbol_hashes.len();
 
                             state.add_symbols(&duplicates);
+                            assert_eq!(
+                                state.accumulated_symbols.len(),
+                                old_count,
+                                "Duplicate symbol insertion must preserve accumulated count"
+                            );
+                            assert_eq!(
+                                state.symbol_hashes.len(),
+                                old_hash_count,
+                                "Duplicate symbol insertion must preserve symbol-hash count"
+                            );
 
                             // First decode attempt
                             let result1 = state.attempt_decode();
@@ -361,7 +373,7 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
     }
 
     // Final invariant checks
-    if let Some((k, symbol_size, _)) = state.current_params {
+    if let Some((_k, _symbol_size, _)) = state.current_params {
         // Memory should still be bounded after all operations
         assert!(
             state.check_memory_bounds(),
@@ -377,7 +389,8 @@ fn execute_state_machine_test(input: &DecoderStateMachineInput) {
     }
 }
 
-fuzz_target!(|mut input: DecoderStateMachineInput| {
+fuzz_target!(|input: DecoderStateMachineInput| {
+    let mut input = input;
     normalize_input(&mut input);
 
     // Skip empty operation sequences

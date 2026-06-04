@@ -12,6 +12,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::{
+    Cx,
     transport::router::{
         Endpoint, EndpointId, EndpointState, LoadBalanceStrategy, RouteKey, RoutingEntry,
         RoutingError, RoutingTable, SymbolRouter,
@@ -215,20 +216,23 @@ fn run_scenario(mut scenario: RouterScenario) {
 
     let table = Arc::new(RoutingTable::new());
     let router = SymbolRouter::new(table.clone());
+    let cx = Cx::for_testing();
     let mut model = ShadowModel::new();
 
     for endpoint in scenario.initial_endpoints {
-        ensure_endpoint(&table, &mut model, endpoint);
+        ensure_endpoint(&cx, &table, &mut model, endpoint);
     }
     assert_global_invariants(&table, &model);
 
     for op in scenario.operations {
         match op {
-            RouterOp::EnsureEndpoint(endpoint) => ensure_endpoint(&table, &mut model, endpoint),
-            RouterOp::SetEndpointState { slot, state } => {
-                set_endpoint_state(&table, &mut model, slot, state);
+            RouterOp::EnsureEndpoint(endpoint) => {
+                ensure_endpoint(&cx, &table, &mut model, endpoint);
             }
-            RouterOp::RemoveEndpoint { slot } => remove_endpoint(&table, &mut model, slot),
+            RouterOp::SetEndpointState { slot, state } => {
+                set_endpoint_state(&cx, &table, &mut model, slot, state);
+            }
+            RouterOp::RemoveEndpoint { slot } => remove_endpoint(&cx, &table, &mut model, slot),
             RouterOp::PutObjectRoute {
                 object,
                 endpoint_slots,
@@ -267,13 +271,15 @@ fn run_scenario(mut scenario: RouterScenario) {
     }
 }
 
-fn ensure_endpoint(table: &RoutingTable, model: &mut ShadowModel, seed: EndpointSeed) {
+fn ensure_endpoint(cx: &Cx, table: &RoutingTable, model: &mut ShadowModel, seed: EndpointSeed) {
     let endpoint_id = endpoint_id(seed.slot);
     let state = EndpointState::from(seed.state);
 
     if let Some(endpoint) = model.endpoints.get_mut(&endpoint_id) {
         assert!(
-            table.update_endpoint_state(endpoint_id, state),
+            table
+                .update_endpoint_state(cx, endpoint_id, state)
+                .expect("existing endpoint state update must pass admin capability"),
             "existing endpoint must accept state update"
         );
         endpoint.state = state;
@@ -293,6 +299,7 @@ fn ensure_endpoint(table: &RoutingTable, model: &mut ShadowModel, seed: Endpoint
 }
 
 fn set_endpoint_state(
+    cx: &Cx,
     table: &RoutingTable,
     model: &mut ShadowModel,
     slot: u8,
@@ -300,7 +307,9 @@ fn set_endpoint_state(
 ) {
     let endpoint_id = endpoint_id(slot);
     let expected_present = model.endpoints.contains_key(&endpoint_id);
-    let actual = table.update_endpoint_state(endpoint_id, state.into());
+    let actual = table
+        .update_endpoint_state(cx, endpoint_id, state.into())
+        .expect("endpoint state update must pass admin capability");
     assert_eq!(
         actual, expected_present,
         "endpoint state update presence must match shadow state"
@@ -310,9 +319,11 @@ fn set_endpoint_state(
     }
 }
 
-fn remove_endpoint(table: &RoutingTable, model: &mut ShadowModel, slot: u8) {
+fn remove_endpoint(cx: &Cx, table: &RoutingTable, model: &mut ShadowModel, slot: u8) {
     let endpoint_id = endpoint_id(slot);
-    let removed = table.remove_endpoint(endpoint_id);
+    let removed = table
+        .remove_endpoint(cx, endpoint_id)
+        .expect("endpoint removal must pass admin capability");
     let expected = model.endpoints.contains_key(&endpoint_id);
     assert_eq!(
         removed.is_some(),

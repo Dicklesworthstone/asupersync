@@ -2,7 +2,9 @@
 
 #![allow(missing_docs)]
 
+const FUZZ_CARGO_TOML: &str = include_str!("../fuzz/Cargo.toml");
 const FUZZ_WORKFLOW: &str = include_str!("../.github/workflows/fuzz.yml");
+const DNS_LOOKUP_DECODER: &str = include_str!("../fuzz/fuzz_targets/dns_lookup_decoder.rs");
 
 #[test]
 fn fuzz_workflow_has_push_and_pull_request_compile_gate_triggers() {
@@ -23,20 +25,18 @@ fn fuzz_workflow_has_push_and_pull_request_compile_gate_triggers() {
 }
 
 #[test]
-fn fuzz_build_gate_compiles_round_six_targets_through_rch_executor() {
+fn fuzz_build_gate_compiles_all_bins_through_rch_executor() {
     for required in [
         "fuzz-build-gate:",
         "name: Fuzz target compile gate",
-        "FUZZ_BUILD_GATE_TARGETS: >-",
-        "BASE_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_fuzz_build_gate_${GITHUB_RUN_ID:-local}\"",
-        "for fuzz_target in ${FUZZ_BUILD_GATE_TARGETS}; do",
+        "target_dir=\"${TMPDIR:-/tmp}/rch_target_fuzz_build_gate_${GITHUB_RUN_ID:-local}_all_bins\"",
         "if [[ \"${RCH_EXECUTOR_MODE:-remote}\" == \"remote\" ]]; then",
         "RCH_REQUIRE_REMOTE=1 \"$RCH_BIN\" exec -- env \\",
         "\"$RCH_BIN\" exec -- env \\",
         "CARGO_INCREMENTAL=0 \\",
         "CARGO_PROFILE_DEV_DEBUG=0 \\",
         "CARGO_TARGET_DIR=\"${target_dir}\" \\",
-        "cargo check --manifest-path fuzz/Cargo.toml --bin \"${fuzz_target}\"",
+        "cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going",
     ] {
         assert!(
             FUZZ_WORKFLOW.contains(required),
@@ -44,8 +44,30 @@ fn fuzz_build_gate_compiles_round_six_targets_through_rch_executor() {
         );
     }
     assert!(
-        !FUZZ_WORKFLOW.contains("cargo check --manifest-path fuzz/Cargo.toml --bins"),
-        "full all-bin fuzz gate is known-red and must not be wired as CI-blocking yet"
+        !FUZZ_WORKFLOW
+            .contains("cargo check --manifest-path fuzz/Cargo.toml --bin \"${fuzz_target}\""),
+        "fuzz compile gate must cover every registered bin, not a selected target loop"
+    );
+    assert!(
+        !FUZZ_WORKFLOW.contains("FUZZ_BUILD_GATE_TARGETS"),
+        "fuzz compile gate must not carry a curated target allowlist"
+    );
+}
+
+#[test]
+fn all_bins_gate_keeps_dns_lookup_decoder_registered() {
+    for required in [
+        "name = \"dns_lookup_decoder\"",
+        "path = \"fuzz_targets/dns_lookup_decoder.rs\"",
+    ] {
+        assert!(
+            FUZZ_CARGO_TOML.contains(required),
+            "dns_lookup_decoder must stay registered as a fuzz binary: {required}"
+        );
+    }
+    assert!(
+        DNS_LOOKUP_DECODER.contains("#![no_main]"),
+        "dns_lookup_decoder must keep the libFuzzer no_main entrypoint"
     );
 }
 
@@ -61,14 +83,12 @@ fn fuzz_build_gate_declares_executor_mode_and_logs_context() {
         "UTC start:",
         "event:",
         "sha:",
-        "base target dir:",
-        "targets:",
+        "target dir:",
         "executor:",
         "executor mode:",
-        "target dir:",
         "rustc -Vv",
         "cargo -V",
-        "::group::RCH fuzz build gate: ${fuzz_target}",
+        "::group::RCH fuzz build gate: all bins",
     ] {
         assert!(
             FUZZ_WORKFLOW.contains(required),

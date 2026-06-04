@@ -27,10 +27,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::security::{
-    AuthError, AuthErrorKind, AuthKey, AuthMode, AuthenticatedSymbol, AuthenticationTag,
-    SecurityContext,
-};
+use asupersync::security::{AuthKey, AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -172,6 +169,9 @@ struct AuthFuzzState {
     attack_attempts: u32,
     successful_forgeries: u32,
     timing_measurements: Vec<Duration>,
+    base_timestamp: u64,
+    replay_window_seconds: u64,
+    test_expiration: bool,
 }
 
 impl AuthFuzzState {
@@ -197,6 +197,9 @@ impl AuthFuzzState {
             attack_attempts: 0,
             successful_forgeries: 0,
             timing_measurements: Vec::new(),
+            base_timestamp: config.base_timestamp,
+            replay_window_seconds: config.replay_window_seconds.clamp(1, 86_400),
+            test_expiration: config.test_expiration,
         }
     }
 
@@ -205,7 +208,7 @@ impl AuthFuzzState {
     }
 
     fn create_symbol(&self, data: &SymbolData) -> Symbol {
-        let id = SymbolId::new_for_test(data.object_id as u64, data.sbn as u32, data.esi);
+        let id = SymbolId::new_for_test(data.object_id as u64, data.sbn, data.esi);
         Symbol::new(id, data.payload.clone(), data.kind.clone().into())
     }
 
@@ -236,7 +239,8 @@ fn fuzz_symbol_authentication(input: SymbolAuthFuzzInput) {
     let mut state = AuthFuzzState::new(&input.config);
 
     // Limit operations to prevent excessive runtime
-    let operations = input.operations.into_iter().take(100);
+    let operation_limit = input.config.symbol_count.clamp(1, 100);
+    let operations = input.operations.into_iter().take(operation_limit);
 
     for operation in operations {
         match input.strategy {
@@ -449,35 +453,59 @@ fn test_replay_attack(operation: &AuthOperation, state: &mut AuthFuzzState) {
         let symbol = state.create_symbol(symbol_data);
 
         // Simulate timestamp-based authentication
-        let current_timestamp = SystemTime::now()
+        let wall_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let current_timestamp = if state.base_timestamp == 0 {
+            wall_timestamp
+        } else {
+            state.base_timestamp
+        };
 
-        let token_timestamp = (current_timestamp as i64 + timestamp_offset) as u64;
+        let token_timestamp = if *timestamp_offset >= 0 {
+            current_timestamp.saturating_add(*timestamp_offset as u64)
+        } else {
+            current_timestamp.saturating_sub(timestamp_offset.unsigned_abs())
+        };
 
         // For replay testing, we simulate by embedding timestamp in symbol payload
-        let mut timestamped_symbol = symbol;
+        let timestamped_symbol = symbol;
         let mut new_payload = timestamped_symbol.data().to_vec();
         new_payload.extend_from_slice(&token_timestamp.to_le_bytes());
 
         let id = timestamped_symbol.id();
         let timestamped = Symbol::new(id, new_payload, timestamped_symbol.kind());
 
-        let authenticated = context.sign_symbol(&timestamped);
+        let mut authenticated = context.sign_symbol(&timestamped);
+        assert!(
+            context
+                .verify_authenticated_symbol(&mut authenticated)
+                .is_ok(),
+            "freshly signed timestamped symbol should verify"
+        );
 
         // Property 3: Replay window enforcement (simulated)
-        let replay_window = 300; // 5 minutes in seconds
+        let replay_window = state.replay_window_seconds;
         let age = current_timestamp.saturating_sub(token_timestamp);
+        let valid_for_window = !state.test_expiration || age <= replay_window;
 
-        if age > replay_window {
+        if *expected_valid != valid_for_window {
+            state.log_attack_attempt();
+        }
+
+        if state.test_expiration && age > replay_window {
             // Property 4: Expired tokens should be rejected (simulated)
             // In a real implementation, this would be checked during verification
             assert!(
-                !*expected_valid || age <= replay_window,
+                !valid_for_window,
                 "Expired token should be rejected (age: {}s, window: {}s)",
-                age,
-                replay_window
+                age, replay_window
+            );
+        } else {
+            assert!(
+                authenticated.is_verified(),
+                "fresh replay token should remain authenticated"
             );
         }
     }
