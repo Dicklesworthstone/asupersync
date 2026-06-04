@@ -815,11 +815,21 @@ pub(crate) fn check_side_conditions(
     if !checker.obligations_safe(after) {
         return Err("obligations not safe after rewrite".to_string());
     }
-    if !checker.cancel_safe(before) {
-        return Err("cancel safety not satisfied before rewrite".to_string());
-    }
-    if !checker.cancel_safe(after) {
-        return Err("cancel safety not satisfied after rewrite".to_string());
+    let affects_race_loser_drain = matches!(
+        rule,
+        RewriteRule::RaceAssoc | RewriteRule::RaceCommute | RewriteRule::DedupRaceJoin
+    );
+    if affects_race_loser_drain {
+        if !checker.rewrite_preserves_loser_drain(before, after) {
+            return Err("rewrite violates loser-drain preservation".to_string());
+        }
+    } else {
+        if !checker.cancel_safe(before) {
+            return Err("cancel safety not satisfied before rewrite".to_string());
+        }
+        if !checker.cancel_safe(after) {
+            return Err("cancel safety not satisfied after rewrite".to_string());
+        }
     }
     if !checker.rewrite_preserves_budget(before, after) {
         return Err("budget monotonicity violated".to_string());
@@ -830,15 +840,6 @@ pub(crate) fn check_side_conditions(
     // No rewrite may introduce new obligation leak candidates.
     if !checker.rewrite_no_new_obligation_leaks(before, after) {
         return Err("rewrite introduces new obligation leak candidates".to_string());
-    }
-
-    // Race-affecting rewrites must preserve loser-drain semantics.
-    if matches!(
-        rule,
-        RewriteRule::RaceAssoc | RewriteRule::RaceCommute | RewriteRule::DedupRaceJoin
-    ) && !checker.rewrite_preserves_loser_drain(before, after)
-    {
-        return Err("rewrite violates loser-drain preservation".to_string());
     }
 
     // Join-affecting rewrites must preserve finalize ordering.
