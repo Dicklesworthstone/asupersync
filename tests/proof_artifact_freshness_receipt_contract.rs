@@ -966,6 +966,162 @@ fn failed_status_requires_rerun_even_at_current_head() {
 }
 
 #[test]
+fn proof_reuse_classifier_accepts_exact_fail_closed_cache_hit() {
+    let receipt = receipt_json("reuse_classifier_exact_hit.json");
+    let reuse = receipt
+        .get("proof_reuse")
+        .expect("reuse classifier output must be present");
+    assert_eq!(
+        reuse["schema_version"].as_str(),
+        Some("proof-reuse-classifier-v1")
+    );
+    assert_eq!(
+        reuse["request"]["request_id"].as_str(),
+        Some("proof-reuse-exact-hit")
+    );
+    assert_eq!(reuse["summary"]["total"].as_u64(), Some(1));
+    assert_eq!(reuse["summary"]["reusable"].as_u64(), Some(1));
+    assert_eq!(reuse["summary"]["refused"].as_u64(), Some(0));
+    assert_eq!(
+        reuse["safety"]["cache_hit_is_never_fresh_rch_pass"].as_bool(),
+        Some(true)
+    );
+
+    let row = reuse["rows"].as_array().expect("reuse rows")[0].clone();
+    assert_eq!(row["decision"].as_str(), Some("reusable"));
+    assert_eq!(row["safe_to_reuse"].as_bool(), Some(true));
+    assert_eq!(row["cache_hit_is_fresh_rch_pass"].as_bool(), Some(false));
+    assert_eq!(
+        row["candidate_id"].as_str(),
+        Some("artifacts/proof/reusable-proof-lane-manifest.json")
+    );
+    assert_eq!(
+        row["evidence"]["request_command_fingerprint"].as_str(),
+        Some("sha256:proof-lane-manifest-command")
+    );
+    assert_eq!(
+        row["evidence"]["candidate_command_fingerprint"].as_str(),
+        Some("sha256:proof-lane-manifest-command")
+    );
+    assert_eq!(
+        row["evidence"]["rch_remote_route_segments"][0].as_str(),
+        Some("[RCH] remote rch-worker-reuse-01 (11.0s)")
+    );
+    assert_eq!(
+        row["remediation"]["operator_note"].as_str(),
+        Some("Candidate may be cited only as an approved cache hit for the requested scope.")
+    );
+}
+
+#[test]
+fn proof_reuse_classifier_reports_specific_miss_and_refusal_reasons() {
+    let receipt = receipt_json("reuse_classifier_refusals.json");
+    let reuse = receipt
+        .get("proof_reuse")
+        .expect("reuse classifier output must be present");
+    assert_eq!(reuse["summary"]["total"].as_u64(), Some(12));
+    assert_eq!(reuse["summary"]["reusable"].as_u64(), Some(0));
+    assert_eq!(reuse["summary"]["miss"].as_u64(), Some(1));
+    assert_eq!(reuse["summary"]["refused"].as_u64(), Some(11));
+
+    let rows = reuse["rows"].as_array().expect("reuse rows");
+    let by_candidate = |candidate: &str| -> &Value {
+        rows.iter()
+            .find(|row| row["candidate_id"].as_str() == Some(candidate))
+            .unwrap_or_else(|| panic!("missing candidate {candidate}"))
+    };
+    for (candidate, decision, reason) in [
+        (
+            "artifacts/proof/local-fallback.json",
+            "refused",
+            "local-fallback-marker",
+        ),
+        (
+            "artifacts/proof/failed-status.json",
+            "refused",
+            "failed-proof-status",
+        ),
+        ("artifacts/proof/stale-head.json", "refused", "stale-head"),
+        (
+            "artifacts/proof/dirty-overlap.json",
+            "refused",
+            "dirty-frontier-overlap",
+        ),
+        (
+            "artifacts/proof/command-mismatch.json",
+            "refused",
+            "command-mismatch",
+        ),
+        (
+            "artifacts/proof/source-mismatch.json",
+            "refused",
+            "source-hash-mismatch",
+        ),
+        (
+            "artifacts/proof/toolchain-mismatch.json",
+            "refused",
+            "toolchain-mismatch",
+        ),
+        (
+            "artifacts/proof/broad-claim.json",
+            "refused",
+            "broad-claim-unsupported",
+        ),
+        (
+            "artifacts/proof/missing-allowed-claims.json",
+            "refused",
+            "unknown-cache-policy",
+        ),
+        (
+            "artifacts/proof/non-rch-command.json",
+            "refused",
+            "missing-command-fingerprint",
+        ),
+        (
+            "artifacts/proof/explicit-local-fallback-marker.json",
+            "refused",
+            "local-fallback-marker",
+        ),
+        (
+            "artifacts/proof/lane-mismatch.json",
+            "miss",
+            "lane-mismatch",
+        ),
+    ] {
+        let row = by_candidate(candidate);
+        assert_eq!(
+            row["decision"].as_str(),
+            Some(decision),
+            "{candidate} decision drifted"
+        );
+        assert_eq!(row["safe_to_reuse"].as_bool(), Some(false));
+        let reasons = row["reason_codes"].as_array().expect("reason codes");
+        assert!(
+            reasons.iter().any(|item| item.as_str() == Some(reason)),
+            "{candidate} missing reason {reason}: {reasons:?}"
+        );
+        assert_eq!(row["cache_hit_is_fresh_rch_pass"].as_bool(), Some(false));
+    }
+
+    assert_eq!(
+        reuse["summary"]["by_reason_code"]["local-fallback-marker"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        reuse["summary"]["by_reason_code"]["lane-mismatch"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        reuse["summary"]["by_reason_code"]["missing-command-fingerprint"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        reuse["summary"]["by_reason_code"]["unknown-cache-policy"].as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
 fn agent_mail_summary_covers_mixed_closeout_rows() {
     let script = r#"
 import importlib.util

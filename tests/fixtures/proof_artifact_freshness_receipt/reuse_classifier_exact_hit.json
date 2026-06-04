@@ -1,0 +1,53 @@
+{
+  "repo": {
+    "head_sha": "3333333333333333333333333333333333333333",
+    "branch": "main"
+  },
+  "reuse_request": {
+    "request_id": "proof-reuse-exact-hit",
+    "manifest_lane_id": "proof-lane-manifest-contract",
+    "claim_scope": "proof-lane-manifest-schema",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+    "command_fingerprint": "sha256:proof-lane-manifest-command",
+    "source_fingerprint": "sha256:source-current",
+    "tree_fingerprint": "git-tree:current",
+    "toolchain_fingerprint": "sha256:toolchain-current",
+    "feature_flags": [],
+    "touched_files": [
+      "artifacts/proof_lane_manifest_v1.json",
+      "tests/proof_lane_manifest_contract.rs"
+    ],
+    "dirty_frontier_status": "clean"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/reusable-proof-lane-manifest.json",
+      "git_sha": "3333333333333333333333333333333333333333",
+      "git_branch": "main",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "manifest_guarantee_ids": [
+        "proof-lane-manifest-verifier"
+      ],
+      "claim_scope": "proof-lane-manifest-schema",
+      "allowed_cache_hit_claims": [
+        "proof-lane-manifest-schema"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_lane_manifest cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "command_fingerprint": "sha256:proof-lane-manifest-command",
+      "source_fingerprint": "sha256:source-current",
+      "tree_fingerprint": "git-tree:current",
+      "toolchain_fingerprint": "sha256:toolchain-current",
+      "feature_flags": [],
+      "stdout": "[RCH] remote rch-worker-reuse-01 (11.0s)",
+      "touched_files": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-06-04T01:20:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

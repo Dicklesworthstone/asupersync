@@ -13,6 +13,7 @@ import hashlib
 import fnmatch
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "proof-artifact-freshness-receipt-v1"
+PROOF_REUSE_SCHEMA_VERSION = "proof-reuse-classifier-v1"
 MAIN_BRANCH = "main"
 GIT_READ_COMMANDS = [
     "git rev-parse HEAD",
@@ -69,6 +71,25 @@ FAILED_ARTIFACT_STATUSES = {
     "red",
     "timeout",
     "timed-out",
+}
+BROAD_CACHE_CLAIMS = {
+    "fresh-rch-pass",
+    "release-readiness",
+    "workspace-health",
+}
+REUSE_REFUSAL_BY_CLASSIFICATION = {
+    "dirty-surface-overlap": "dirty-frontier-overlap",
+    "failed-proof-artifact": "failed-proof-status",
+    "repo-not-main": "branch-mismatch",
+    "rch-local-fallback-proof": "local-fallback-marker",
+    "superseded-head": "stale-head",
+    "unverifiable-command": "missing-command-fingerprint",
+    "unverifiable-fuzz-extent-proof": "missing-command-fingerprint",
+    "unverifiable-head": "stale-head",
+    "unverifiable-rch-remote-proof": "missing-command-fingerprint",
+    "unverifiable-surface": "missing-touched-files",
+    "unsafe-proof-command": "command-mismatch",
+    "wrong-branch": "branch-mismatch",
 }
 
 
@@ -316,6 +337,10 @@ def normalize_proof_output_text(texts: list[str]) -> str:
     return "\n".join(normalized)
 
 
+def sha256_text(text: str) -> str:
+    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+
+
 def proof_output_digest(texts: list[str]) -> dict[str, Any]:
     normalized = normalize_proof_output_text(texts)
     payload = normalized.encode("utf-8")
@@ -324,6 +349,25 @@ def proof_output_digest(texts: list[str]) -> dict[str, Any]:
         "proof_output_byte_count": len(payload),
         "proof_output_segment_count": len(texts),
     }
+
+
+def normalized_command_argv(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def command_fingerprint(command: str) -> str:
+    argv = normalized_command_argv(command)
+    return sha256_text(json.dumps(argv, separators=(",", ":"), ensure_ascii=True))
+
+
+def command_has_required_rch_prefix(command: str) -> bool:
+    argv = normalized_command_argv(command)
+    if len(argv) < 4:
+        return False
+    return argv[:4] == ["RCH_REQUIRE_REMOTE=1", "rch", "exec", "--"]
 
 
 def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
@@ -378,6 +422,62 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
                 ("metadata", "command"),
             ],
         ),
+        "command_fingerprint": first_string(
+            raw,
+            [
+                ("command_fingerprint",),
+                ("proof", "command_fingerprint"),
+                ("metadata", "command_fingerprint"),
+                ("reuse", "command_fingerprint"),
+            ],
+        ),
+        "manifest_lane_id": first_string(
+            raw,
+            [
+                ("manifest_lane_id",),
+                ("lane_id",),
+                ("proof", "manifest_lane_id"),
+                ("metadata", "manifest_lane_id"),
+                ("reuse", "manifest_lane_id"),
+            ],
+        ),
+        "manifest_guarantee_ids": first_string_list(
+            raw,
+            [
+                ("manifest_guarantee_ids",),
+                ("guarantee_ids",),
+                ("proof", "manifest_guarantee_ids"),
+                ("metadata", "manifest_guarantee_ids"),
+                ("reuse", "manifest_guarantee_ids"),
+            ],
+        ),
+        "claim_scope": first_string(
+            raw,
+            [
+                ("claim_scope",),
+                ("proof", "claim_scope"),
+                ("metadata", "claim_scope"),
+                ("reuse", "claim_scope"),
+            ],
+        ),
+        "allowed_cache_hit_claims": first_string_list(
+            raw,
+            [
+                ("allowed_cache_hit_claims",),
+                ("reuse", "allowed_cache_hit_claims"),
+                ("metadata", "allowed_cache_hit_claims"),
+            ],
+        ),
+        "feature_flags": first_string_list(
+            raw,
+            [
+                ("feature_flags",),
+                ("features",),
+                ("proof", "feature_flags"),
+                ("metadata", "feature_flags"),
+                ("reuse", "feature_flags"),
+            ],
+        ),
         "touched_files": first_string_list(
             raw,
             [
@@ -429,6 +529,31 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
                 ("result", "stderr"),
             ],
         ),
+        "local_fallback_markers": first_string_list(
+            raw,
+            [
+                ("local_fallback_markers",),
+                ("rch_local_fallback_segments",),
+                ("evidence", "local_fallback_markers"),
+                ("evidence", "rch_local_fallback_segments"),
+                ("metadata", "local_fallback_markers"),
+                ("outcome", "local_fallback_markers"),
+                ("proof", "local_fallback_markers"),
+                ("reuse", "local_fallback_markers"),
+            ],
+        ),
+        "rch_remote_route_segments": first_string_list(
+            raw,
+            [
+                ("rch_remote_route_segments",),
+                ("remote_route_segments",),
+                ("evidence", "rch_remote_route_segments"),
+                ("metadata", "rch_remote_route_segments"),
+                ("outcome", "rch_remote_route_segments"),
+                ("proof", "rch_remote_route_segments"),
+                ("reuse", "rch_remote_route_segments"),
+            ],
+        ),
         "source_fingerprint": first_string(
             raw,
             [
@@ -453,6 +578,15 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
                 ("metadata", "tree_fingerprint"),
                 ("metadata", "source_tree_fingerprint"),
                 ("metadata", "git_tree_sha"),
+            ],
+        ),
+        "toolchain_fingerprint": first_string(
+            raw,
+            [
+                ("toolchain_fingerprint",),
+                ("toolchain", "fingerprint"),
+                ("metadata", "toolchain_fingerprint"),
+                ("reuse", "toolchain_fingerprint"),
             ],
         ),
         "fuzz_extent": normalize_fuzz_extent(raw),
@@ -673,10 +807,22 @@ def classify_artifact(
     unsafe_cargo_reasons = cargo_proof_command_defects(command)
     bare_cargo_command = "bare-cargo" in unsafe_cargo_reasons
     rch_remote_route_required = bool(CARGO_PROOF_COMMAND.search(command)) and not unsafe_cargo_reasons
-    local_fallback_segments = rch_local_fallback_segments(
-        [command, *artifact.get("proof_text", [])]
+    local_fallback_segments = sorted(
+        set(
+            [
+                *artifact.get("local_fallback_markers", []),
+                *rch_local_fallback_segments([command, *artifact.get("proof_text", [])]),
+            ]
+        )
     )
-    remote_route_segments = rch_remote_route_segments(artifact.get("proof_text", []))
+    remote_route_segments = sorted(
+        set(
+            [
+                *artifact.get("rch_remote_route_segments", []),
+                *rch_remote_route_segments(artifact.get("proof_text", [])),
+            ]
+        )
+    )
     fuzz_extent_findings = fuzz_extent_proof_findings(artifact)
 
     evidence = {
@@ -779,6 +925,301 @@ def classify_artifact(
         "generated_at": artifact["generated_at"],
         "evidence": evidence,
         "remediation": remediation_for(classification, command),
+    }
+
+
+def normalize_reuse_request(raw: Any) -> dict[str, Any]:
+    request = raw if isinstance(raw, dict) else {}
+    command = first_string(request, [("command",), ("proof_command",)])
+    explicit_fingerprint = first_string(
+        request,
+        [
+            ("command_fingerprint",),
+            ("proof", "command_fingerprint"),
+            ("reuse", "command_fingerprint"),
+        ],
+    )
+    return {
+        "request_id": first_string(request, [("request_id",), ("id",)]) or "proof-reuse-request",
+        "manifest_lane_id": first_string(request, [("manifest_lane_id",), ("lane_id",)]),
+        "claim_scope": first_string(request, [("claim_scope",), ("claim",)]),
+        "command": command,
+        "command_fingerprint": explicit_fingerprint or (command_fingerprint(command) if command else ""),
+        "source_fingerprint": first_string(
+            request,
+            [
+                ("source_fingerprint",),
+                ("source", "fingerprint"),
+                ("metadata", "source_fingerprint"),
+            ],
+        ),
+        "tree_fingerprint": first_string(
+            request,
+            [
+                ("tree_fingerprint",),
+                ("source_tree_fingerprint",),
+                ("source_tree", "fingerprint"),
+                ("metadata", "tree_fingerprint"),
+            ],
+        ),
+        "toolchain_fingerprint": first_string(
+            request,
+            [
+                ("toolchain_fingerprint",),
+                ("toolchain", "fingerprint"),
+                ("metadata", "toolchain_fingerprint"),
+            ],
+        ),
+        "feature_flags": first_string_list(
+            request,
+            [
+                ("feature_flags",),
+                ("features",),
+                ("metadata", "feature_flags"),
+            ],
+        ),
+        "touched_files": first_string_list(
+            request,
+            [
+                ("touched_files",),
+                ("files",),
+                ("changed_files",),
+                ("metadata", "touched_files"),
+            ],
+        ),
+        "dirty_frontier_status": first_string(
+            request,
+            [
+                ("dirty_frontier_status",),
+                ("dirty_frontier", "status"),
+                ("metadata", "dirty_frontier_status"),
+            ],
+        ),
+        "require_full_pass": first_bool(
+            request,
+            [
+                ("require_full_pass",),
+                ("reuse", "require_full_pass"),
+                ("metadata", "require_full_pass"),
+            ],
+        )
+        is not False,
+    }
+
+
+def candidate_command_fingerprint(artifact: dict[str, Any]) -> str:
+    return artifact.get("command_fingerprint") or command_fingerprint(artifact.get("command", ""))
+
+
+def reusable_candidate_evidence(
+    request: dict[str, Any],
+    artifact: dict[str, Any],
+    freshness_row: dict[str, Any],
+) -> dict[str, Any]:
+    evidence = {
+        "request_command_fingerprint": request.get("command_fingerprint", ""),
+        "candidate_command_fingerprint": candidate_command_fingerprint(artifact),
+        "request_manifest_lane_id": request.get("manifest_lane_id", ""),
+        "candidate_manifest_lane_id": artifact.get("manifest_lane_id", ""),
+        "request_claim_scope": request.get("claim_scope", ""),
+        "candidate_allowed_cache_hit_claims": artifact.get("allowed_cache_hit_claims", []),
+        "request_source_fingerprint": request.get("source_fingerprint", ""),
+        "candidate_source_fingerprint": artifact.get("source_fingerprint", ""),
+        "request_tree_fingerprint": request.get("tree_fingerprint", ""),
+        "candidate_tree_fingerprint": artifact.get("tree_fingerprint", ""),
+        "request_toolchain_fingerprint": request.get("toolchain_fingerprint", ""),
+        "candidate_toolchain_fingerprint": artifact.get("toolchain_fingerprint", ""),
+        "request_feature_flags": request.get("feature_flags", []),
+        "candidate_feature_flags": artifact.get("feature_flags", []),
+        "candidate_local_fallback_markers": artifact.get("local_fallback_markers", []),
+        "required_rch_command_prefix_present": command_has_required_rch_prefix(
+            artifact.get("command", "")
+        ),
+        "freshness_classification": freshness_row.get("classification", ""),
+        "freshness_safe_to_cite": bool(freshness_row.get("safe_to_cite")),
+    }
+    if "rch_remote_route_segments" in freshness_row.get("evidence", {}):
+        evidence["rch_remote_route_segments"] = freshness_row["evidence"][
+            "rch_remote_route_segments"
+        ]
+    return evidence
+
+
+def proof_reuse_reason_codes(
+    request: dict[str, Any],
+    artifact: dict[str, Any],
+    freshness_row: dict[str, Any],
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+
+    request_lane = request.get("manifest_lane_id", "")
+    candidate_lane = artifact.get("manifest_lane_id", "")
+    if request_lane and candidate_lane and request_lane != candidate_lane:
+        return "miss", ["lane-mismatch"]
+    if not request_lane or not candidate_lane:
+        reasons.append("unknown-cache-policy")
+
+    if not request.get("dirty_frontier_status"):
+        reasons.append("missing-dirty-frontier-status")
+    elif request["dirty_frontier_status"] != "clean":
+        reasons.append("dirty-frontier-overlap")
+
+    if not request.get("touched_files") or not artifact.get("touched_files"):
+        reasons.append("missing-touched-files")
+    elif set(request.get("touched_files", [])) != set(artifact.get("touched_files", [])):
+        reasons.append("source-hash-mismatch")
+
+    request_claim = request.get("claim_scope", "")
+    allowed_claims = set(artifact.get("allowed_cache_hit_claims", []))
+    if not request_claim or not allowed_claims:
+        reasons.append("unknown-cache-policy")
+    elif request_claim in BROAD_CACHE_CLAIMS or request_claim not in allowed_claims:
+        reasons.append("broad-claim-unsupported")
+
+    if (
+        not request.get("command")
+        or not artifact.get("command")
+        or not request.get("command_fingerprint")
+        or not artifact.get("command_fingerprint")
+        or not command_has_required_rch_prefix(artifact.get("command", ""))
+    ):
+        reasons.append("missing-command-fingerprint")
+    elif request.get("command_fingerprint") != candidate_command_fingerprint(artifact):
+        reasons.append("command-mismatch")
+
+    evidence = freshness_row.get("evidence", {})
+    if freshness_row.get("safe_to_cite") and (
+        not isinstance(evidence, dict) or not evidence.get("rch_remote_route_segments")
+    ):
+        reasons.append("missing-command-fingerprint")
+    if artifact.get("local_fallback_markers"):
+        reasons.append("local-fallback-marker")
+
+    for key, reason in [
+        ("source_fingerprint", "source-hash-mismatch"),
+        ("tree_fingerprint", "source-hash-mismatch"),
+        ("toolchain_fingerprint", "toolchain-mismatch"),
+    ]:
+        request_value = request.get(key, "")
+        candidate_value = artifact.get(key, "")
+        if not request_value or not candidate_value or request_value != candidate_value:
+            reasons.append(reason)
+
+    if set(request.get("feature_flags", [])) != set(artifact.get("feature_flags", [])):
+        reasons.append("toolchain-mismatch")
+
+    if not freshness_row.get("safe_to_cite"):
+        reasons.append(
+            REUSE_REFUSAL_BY_CLASSIFICATION.get(
+                str(freshness_row.get("classification", "")),
+                "unknown-cache-policy",
+            )
+        )
+
+    reasons = sorted(set(reasons))
+    return ("refused", reasons) if reasons else ("reusable", [])
+
+
+def classify_proof_reuse_candidate(
+    request: dict[str, Any],
+    artifact: dict[str, Any],
+    freshness_row: dict[str, Any],
+) -> dict[str, Any]:
+    decision, reason_codes = proof_reuse_reason_codes(request, artifact, freshness_row)
+    safe_to_reuse = decision == "reusable"
+    return {
+        "candidate_id": artifact.get("artifact_path") or "candidate",
+        "manifest_lane_id": artifact.get("manifest_lane_id", ""),
+        "decision": decision,
+        "safe_to_reuse": safe_to_reuse,
+        "cache_hit_is_fresh_rch_pass": False,
+        "reason_codes": reason_codes,
+        "freshness_classification": freshness_row.get("classification", ""),
+        "freshness_decision": freshness_row.get("decision", ""),
+        "evidence": reusable_candidate_evidence(request, artifact, freshness_row),
+        "remediation": proof_reuse_remediation(decision, reason_codes, request, artifact),
+    }
+
+
+def proof_reuse_remediation(
+    decision: str,
+    reason_codes: list[str],
+    request: dict[str, Any],
+    artifact: dict[str, Any],
+) -> dict[str, Any]:
+    if decision == "reusable":
+        return {
+            "operator_note": "Candidate may be cited only as an approved cache hit for the requested scope.",
+            "next_steps": [
+                "include the candidate id, request fingerprint, and cache-hit wording in closeout"
+            ],
+        }
+    if decision == "miss":
+        return {
+            "operator_note": "Candidate does not cover the requested proof lane.",
+            "next_steps": ["continue scanning candidates or rerun the requested proof lane"],
+            "rerun_command": request.get("command", ""),
+        }
+    notes = {
+        "broad-claim-unsupported": "Cache hit cannot support the requested broad claim.",
+        "command-mismatch": "Rerun because the command fingerprint differs.",
+        "dirty-frontier-overlap": "Rerun after the dirty frontier is clean or non-overlapping.",
+        "failed-proof-status": "Rerun because the candidate proof failed.",
+        "local-fallback-marker": "Rerun remotely because candidate evidence records local fallback.",
+        "missing-command-fingerprint": "Rerun because the candidate lacks required remote RCH command provenance.",
+        "missing-dirty-frontier-status": "Add a dirty-frontier verdict before reusing proof evidence.",
+        "missing-touched-files": "Candidate and request must both declare touched files.",
+        "source-hash-mismatch": "Rerun because source fingerprints differ.",
+        "stale-head": "Rerun because candidate HEAD is stale.",
+        "toolchain-mismatch": "Rerun because toolchain, feature, or environment fingerprints differ.",
+        "unknown-cache-policy": "Candidate reuse policy is missing or not explicit enough.",
+    }
+    top_reason = reason_codes[0] if reason_codes else "unknown-cache-policy"
+    return {
+        "operator_note": notes.get(top_reason, "Candidate is not safe to reuse."),
+        "next_steps": ["rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"],
+        "rerun_command": request.get("command") or artifact.get("command", ""),
+    }
+
+
+def summarize_proof_reuse(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "total": len(rows),
+        "reusable": 0,
+        "miss": 0,
+        "refused": 0,
+        "by_reason_code": {},
+    }
+    for row in rows:
+        summary[row["decision"]] += 1
+        for reason in row.get("reason_codes", []):
+            summary["by_reason_code"][reason] = summary["by_reason_code"].get(reason, 0) + 1
+    return summary
+
+
+def build_proof_reuse_receipt(
+    source: dict[str, Any],
+    artifacts: list[dict[str, Any]],
+    freshness_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    raw_request = source.get("reuse_request")
+    if not isinstance(raw_request, dict):
+        return None
+    request = normalize_reuse_request(raw_request)
+    rows = [
+        classify_proof_reuse_candidate(request, artifact, freshness_row)
+        for artifact, freshness_row in zip(artifacts, freshness_rows, strict=True)
+    ]
+    return {
+        "schema_version": PROOF_REUSE_SCHEMA_VERSION,
+        "request": request,
+        "rows": rows,
+        "summary": summarize_proof_reuse(rows),
+        "safety": {
+            "non_mutating": True,
+            "cache_hit_is_never_fresh_rch_pass": True,
+            "tracker_mutation_allowed": False,
+        },
     }
 
 
@@ -934,13 +1375,13 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     current_head = str(repo.get("head_sha") or repo.get("current_head") or "")
     current_branch = str(repo.get("branch") or "")
     dirty = dirty_entries(source)
+    artifacts = artifact_rows(source)
     rows = [
         classify_artifact(artifact, current_head, current_branch, dirty)
-        for artifact in artifact_rows(source)
+        for artifact in artifacts
     ]
     summary = summarize(rows)
-
-    return {
+    receipt = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
         "current_date": current_date(generated_at),
@@ -962,6 +1403,10 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             "destructive_commands_executed": False,
         },
     }
+    proof_reuse = build_proof_reuse_receipt(source, artifacts, rows)
+    if proof_reuse is not None:
+        receipt["proof_reuse"] = proof_reuse
+    return receipt
 
 
 def main() -> int:
