@@ -1238,10 +1238,10 @@ Payoff: bridge from deterministic runtime traces to model-checking workflows whe
 ```toml
 [dependencies]
 # crates.io
-asupersync = "0.2.5"
+asupersync = "0.3.3"
 
 # or git
-# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.2.5" }
+# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.3.3" }
 ```
 
 ### Feature Flags
