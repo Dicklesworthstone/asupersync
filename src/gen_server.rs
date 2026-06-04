@@ -1744,50 +1744,13 @@ async fn dispatch_envelope<S: GenServer>(server: &mut S, cx: &Cx, envelope: Enve
             reply_permit,
         } => {
             let reply = Reply::<S::Reply>::new(cx, reply_permit);
-            // Wrap handler in panic isolation to prevent cascading failures
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Box::pin(server.handle_call(cx, request, reply))
-            }));
-            match result {
-                Ok(fut) => {
-                    fut.await;
-                }
-                Err(_panic_payload) => {
-                    cx.trace("gen_server::handle_call_panic_isolated");
-                    // Panic isolated - server continues processing other messages
-                    // The reply handle will be dropped, properly aborting the obligation
-                }
-            }
+            server.handle_call(cx, request, reply).await;
         }
         Envelope::Cast { msg } => {
-            // Wrap handler in panic isolation to prevent cascading failures
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Box::pin(server.handle_cast(cx, msg))
-            }));
-            match result {
-                Ok(fut) => {
-                    fut.await;
-                }
-                Err(_panic_payload) => {
-                    cx.trace("gen_server::handle_cast_panic_isolated");
-                    // Panic isolated - server continues processing other messages
-                }
-            }
+            server.handle_cast(cx, msg).await;
         }
         Envelope::Info { msg } => {
-            // Wrap handler in panic isolation to prevent cascading failures
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Box::pin(server.handle_info(cx, msg))
-            }));
-            match result {
-                Ok(fut) => {
-                    fut.await;
-                }
-                Err(_panic_payload) => {
-                    cx.trace("gen_server::handle_info_panic_isolated");
-                    // Panic isolated - server continues processing other messages
-                }
-            }
+            server.handle_info(cx, msg).await;
         }
     }
 }
@@ -5269,70 +5232,38 @@ mod tests {
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
         // DropOldest counter with capacity 2.
-        let (handle, stored) = scope
+        let (mut handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, DropOldestCounter { count: 0 }, 2)
             .unwrap();
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
-        let server_ref = handle.server_ref();
-
         // Fill mailbox with Set(1) and Set(2).
-        server_ref.try_cast(TaggedCast::Set(1)).unwrap();
-        server_ref.try_cast(TaggedCast::Set(2)).unwrap();
+        handle.try_cast(TaggedCast::Set(1)).unwrap();
+        handle.try_cast(TaggedCast::Set(2)).unwrap();
 
         // Overflow with Set(100) — should evict Set(1), keeping Set(2) and Set(100).
-        server_ref.try_cast(TaggedCast::Set(100)).unwrap();
-
-        // Process all messages.
-        {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-
-        // The final value should be 100 (last Set wins).
-        let result_ref = handle.server_ref();
-        let result: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
-        let result_clone = Arc::clone(&result);
-        let (ch, cs) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                if let Ok(val) = result_ref.call(&cx, CounterCall::Get).await {
-                    *result_clone.lock() = Some(val);
-                }
-            })
-            .unwrap();
-        let cid = ch.task_id();
-        runtime.state.store_spawned_task(cid, cs);
-
-        // Drive the caller first so the call envelope is definitely queued
-        // before the server is expected to observe it under deterministic lab scheduling.
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(cid, 0);
-        }
-        runtime.run_until_quiescent();
-        {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-        {
-            runtime.scheduler.lock().schedule(cid, 0);
-        }
-        runtime.run_until_quiescent();
-
-        // The server should have processed Set(2), then Set(100).
-        // Set(1) was evicted. Final count = 100.
+        handle.try_cast(TaggedCast::Set(100)).unwrap();
         assert_eq!(
-            *result.lock(),
-            Some(100),
-            "DropOldest should evict oldest, keeping newest"
+            handle.evicted_count(),
+            1,
+            "DropOldest should report exactly one eviction"
         );
 
-        drop(handle);
+        // Stop before first scheduling so the queued messages drain to a
+        // terminal server result instead of parking the server on an empty
+        // mailbox and making the join path scheduler-order dependent.
+        handle.stop();
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
         runtime.run_until_quiescent();
+
+        let server = futures_lite::future::block_on(handle.join(&cx)).expect("server join ok");
+        assert_eq!(
+            server.count, 100,
+            "DropOldest should evict oldest and leave newest value in server state"
+        );
 
         crate::test_complete!("conformance_mailbox_drop_oldest_preserves_newest");
     }
@@ -5468,33 +5399,21 @@ mod tests {
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
-        let server_ref = handle.server_ref();
-        let call_result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
-        let call_result_clone = Arc::clone(&call_result);
+        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<u64>();
+        let reply_permit = reply_tx
+            .reserve(&cx)
+            .expect("reply reserve should succeed in healthy test cx");
+        let envelope: Envelope<ReplyTracker> = Envelope::Call {
+            request: 21,
+            reply_permit,
+        };
+        handle
+            .sender
+            .try_send(envelope)
+            .expect("call envelope should enqueue");
 
-        let (ch, cs) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                let r = server_ref.call(&cx, 21).await;
-                *call_result_clone.lock() = Some(r);
-            })
-            .unwrap();
-        let client_id = ch.task_id();
-        runtime.state.store_spawned_task(client_id, cs);
-
-        // Let the client enqueue its call before polling the server. If the
-        // server polls an empty mailbox first, this conformance check becomes
-        // scheduler-order dependent rather than testing reply linearity.
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(client_id, 0);
-        }
-        runtime.run_until_quiescent();
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-        {
-            runtime.scheduler.lock().schedule(client_id, 0);
         }
         runtime.run_until_quiescent();
 
@@ -5506,13 +5425,8 @@ mod tests {
         );
 
         // Verify the caller received the correct value.
-        {
-            let r = call_result.lock();
-            match r.as_ref() {
-                Some(Ok(value)) => assert_eq!(*value, 42, "21 * 2 = 42"),
-                other => unreachable!("expected Ok(42), got {other:?}"),
-            }
-        }
+        let recv = futures_lite::future::block_on(reply_rx.recv(&cx));
+        assert_eq!(recv, Ok(42), "21 * 2 = 42");
 
         handle.stop();
         {
@@ -5650,27 +5564,21 @@ mod tests {
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
-        let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                server_ref.call(&cx, ()).await
-            })
-            .unwrap();
-        let client_task_id = client_handle.task_id();
-        runtime
-            .state
-            .store_spawned_task(client_task_id, client_stored);
+        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<()>();
+        let reply_permit = reply_tx
+            .reserve(&cx)
+            .expect("reply reserve should succeed in healthy test cx");
+        let envelope: Envelope<PanicOnCall> = Envelope::Call {
+            request: (),
+            reply_permit,
+        };
+        handle
+            .sender
+            .try_send(envelope)
+            .expect("call envelope should enqueue");
 
         {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
-            sched.schedule(client_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
-            sched.schedule(client_task_id, 0);
+            runtime.scheduler.lock().schedule(server_task_id, 0);
         }
         runtime.run_until_quiescent();
 
@@ -5680,10 +5588,9 @@ mod tests {
             "panicking call handler should surface JoinError::Panicked"
         );
 
-        let client_result =
-            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        let client_result = futures_lite::future::block_on(reply_rx.recv(&cx));
         assert!(
-            matches!(client_result, Err(CallError::NoReply)),
+            matches!(client_result, Err(oneshot::RecvError::Closed)),
             "caller should observe closed reply after panic, got {client_result:?}"
         );
 
@@ -5776,13 +5683,9 @@ mod tests {
             .try_cast(AccumCast::Add(30))
             .expect("should cast Add(30)");
 
-        // Start the server (init runs, then it will process casts).
-        {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-
-        // Stop and let it drain remaining messages.
+        // Stop before first scheduling so this verifies stop-drain semantics
+        // specifically: queued casts must be processed before on_stop records
+        // the final state.
         handle.stop();
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
