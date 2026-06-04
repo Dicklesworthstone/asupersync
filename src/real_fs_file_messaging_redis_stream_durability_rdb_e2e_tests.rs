@@ -239,13 +239,11 @@ mod real_fs_file_messaging_redis_e2e {
             rdb_data.extend_from_slice(b"REDIS0010");
 
             // Add checkpoint metadata
+            let entries_count = self.stats.lock().unwrap().stream_entries_added;
             let metadata = json!({
                 "checkpoint_time": chrono::Utc::now().to_rfc3339(),
                 "stream_count": self.test_streams.len(),
-                "entries_count": {
-                    let stats = self.stats.lock().unwrap();
-                    stats.stream_entries_added
-                },
+                "entries_count": entries_count,
             });
 
             let metadata_bytes = serde_json::to_vec(&metadata)?;

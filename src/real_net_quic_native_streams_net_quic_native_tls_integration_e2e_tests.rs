@@ -30,8 +30,8 @@ use crate::{
             packet::{PacketType, QuicPacket},
             streams::{
                 BidirectionalStream, QuicStream, QuicStreamId, QuicStreamType, StreamConfig,
-                StreamController, StreamDirection, StreamEvent, StreamFlowController, StreamFrame,
-                StreamManager, StreamMultiplexer, StreamState, UnidirectionalStream,
+                StreamController, StreamEvent, StreamFlowController, StreamFrame, StreamManager,
+                StreamMultiplexer, StreamState, UnidirectionalStream,
             },
             tls::{
                 CipherSuite, EncryptionLevel, KeyRotationEvent, KeyRotationState, KeyUpdateTrigger,

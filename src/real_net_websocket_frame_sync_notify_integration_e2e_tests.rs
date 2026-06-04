@@ -25,7 +25,7 @@ use crate::{
     net::{
         TcpStream,
         websocket::{
-            WebSocketConfig, WebSocketError,
+            WebSocketError,
             frame::{
                 CloseCode, CloseFrame, FrameBuffer, FrameHeader, FrameNotificationEvent,
                 FrameOpcode, FrameParser, FrameProcessingState, FrameReader, FrameType,

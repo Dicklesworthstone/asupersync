@@ -23,16 +23,16 @@ use crate::{
     cx::{
         Cx, Scope,
         macaroon::{
-            AttenuationChain, CapabilityToken, Caveat, CaveatType, DischargeToken,
-            FirstPartyCaveat, Macaroon, MacaroonBuilder, MacaroonId, MacaroonSecret,
-            MacaroonVerifier, ThirdPartyCaveat,
+            AttenuationChain, CapabilityToken, CaveatType, DischargeToken, FirstPartyCaveat,
+            Macaroon, MacaroonBuilder, MacaroonId, MacaroonSecret, MacaroonVerifier,
+            ThirdPartyCaveat,
         },
     },
     error::Outcome,
     obligation::{
         ObligationId, ObligationState, ObligationTracker,
         marking::{
-            MarkingCapability, MarkingEvent, MarkingOperation, MarkingPolicy, MarkingRestriction,
+            MarkingCapability, MarkingOperation, MarkingPolicy, MarkingRestriction,
             MarkingSecurityContext, MarkingState, ObligationMark, ObligationMarker,
             ObligationMarkingController,
         },

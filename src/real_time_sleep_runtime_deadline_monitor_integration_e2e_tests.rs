@@ -32,8 +32,7 @@ mod tests {
         runtime::{
             Runtime,
             deadline_monitor::{
-                AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig,
-                WarningReason,
+                AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig, WarningReason,
             },
             spawn,
         },
@@ -500,7 +499,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_sleep_deadline_monitor_basic_integration() -> Result<()> {
+    fn test_sleep_deadline_monitor_basic_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -560,7 +559,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_sleep_checkpoint_progress_monitoring() -> Result<()> {
+    fn test_sleep_checkpoint_progress_monitoring() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -591,7 +590,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_sleep_timeout_deadline_enforcement() -> Result<()> {
+    fn test_sleep_timeout_deadline_enforcement() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -618,7 +617,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_sleep_adaptive_deadline_thresholds() -> Result<()> {
+    fn test_sleep_adaptive_deadline_thresholds() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -645,7 +644,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_sleep_lab_runtime_deadline_integration() -> Result<()> {
+    fn test_sleep_lab_runtime_deadline_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {

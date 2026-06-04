@@ -19,10 +19,9 @@ mod tests {
             },
             h2::{
                 connection::{
-                    ConnectionConfig, ConnectionState, H2Connection, StreamConfig, StreamId,
-                    StreamState,
+                    ConnectionConfig, H2Connection, StreamConfig, StreamId, StreamState,
                 },
-                frame::{DataFrame, HeadersFrame, SettingsFrame},
+                frame::SettingsFrame,
                 hpack::HeaderMap,
             },
         },

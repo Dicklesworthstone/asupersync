@@ -47,7 +47,7 @@ mod tests {
     use crate::obligation::{
         calm::Monotonicity as CalmMonotonicity,
         saga::{
-            Lattice, Monotonicity, SagaBatch, SagaExecutionPlan, SagaOpKind, SagaPlan, SagaStep,
+            Lattice, Monotonicity, SagaBatch, SagaOpKind, SagaPlan, SagaStep,
         },
     };
     use crate::types::{Budget, Outcome, Time};

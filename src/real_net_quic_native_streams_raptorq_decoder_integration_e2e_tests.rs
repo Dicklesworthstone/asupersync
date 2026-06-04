@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_quic_streams_raptorq_basic_integration() -> Result<()> {
+    fn test_quic_streams_raptorq_basic_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_quic_stream_reset_raptorq_recovery() -> Result<()> {
+    fn test_quic_stream_reset_raptorq_recovery() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1030,7 +1030,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_quic_stream_re_establishment_decode_continuity() -> Result<()> {
+    fn test_quic_stream_re_establishment_decode_continuity() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1059,7 +1059,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_quic_flow_control_raptorq_backpressure() -> Result<()> {
+    fn test_quic_flow_control_raptorq_backpressure() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1080,7 +1080,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_multi_stream_raptorq_delivery() -> Result<()> {
+    fn test_multi_stream_raptorq_delivery() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_partial_raptorq_block_recovery() -> Result<()> {
+    fn test_partial_raptorq_block_recovery() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {

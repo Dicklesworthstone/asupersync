@@ -23,12 +23,12 @@ use crate::{
     cx::{Cx, Scope},
     error::Outcome,
     plan::{
-        ExecutionPath, PlanEdge, PlanGraph, PlanId, PlanNode, PlanOptimizer, PlanRewrite,
-        RePlanner, SLAViolation, TransportSLA,
+        ExecutionPath, PlanEdge, PlanGraph, PlanOptimizer, PlanRewrite, RePlanner, SLAViolation,
+        TransportSLA,
         certificate::{
             BoundValidation, CertificateBuilder, CertificateIntegrity, CertificateProof,
-            CertificateSynthesis, CertificateValidator, CertificateVersion, CertificateWitness,
-            LatencyAssertion, LatencyBound, PlanCertificate,
+            CertificateSynthesis, CertificateValidator, CertificateWitness, LatencyAssertion,
+            LatencyBound, PlanCertificate,
         },
         latency_algebra::{
             AlgebraicBound, AlgebraicValidation, BoundComposition, BoundPropagation,

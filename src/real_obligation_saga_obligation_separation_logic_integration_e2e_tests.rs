@@ -25,7 +25,7 @@ use crate::{
         ledger::{LedgerEntry, ObligationLedger},
         saga::{
             CompensationAction, Saga, SagaConfig, SagaExecution, SagaParticipant, SagaRollback,
-            SagaState, SagaStep, SagaTransaction,
+            SagaState, SagaTransaction,
         },
         separation_logic::{
             AccessPermission, FrameRule, HeapAssertion, LogicalAssertion, OwnershipTransfer,

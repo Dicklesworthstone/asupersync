@@ -15,8 +15,7 @@ mod tests {
         error::Result,
         lab::LabRuntime,
         observability::metrics::{
-            Counter, Gauge, Histogram, MetricRegistry, MetricsCollector, MetricsSnapshot,
-            ThroughputMeter, Timer,
+            MetricRegistry, MetricsCollector, MetricsSnapshot, ThroughputMeter, Timer,
         },
         time::{Duration, Instant, Time},
         types::{Budget, Outcome, TaskId},

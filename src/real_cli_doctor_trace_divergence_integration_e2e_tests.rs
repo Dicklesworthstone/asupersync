@@ -18,9 +18,8 @@ mod tests {
         cx::{Cx, Scope},
         error::Result,
         lab::LabRuntime,
-        sync::{Arc, Mutex},
         trace::{
-            CausalityChain, EventSequence, ExecutionContext, TraceAnalyzer, TraceEvent, TraceFile,
+            CausalityChain, EventSequence, ExecutionContext, TraceAnalyzer, TraceFile,
             TraceReader,
             divergence::{
                 CausalityViolation, DivergenceAnalysis, DivergenceClassification,

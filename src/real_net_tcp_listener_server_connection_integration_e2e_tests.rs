@@ -23,8 +23,8 @@ mod tests {
         server::{
             ServerConfig, ServerError,
             connection::{
-                ConnectionConfig, ConnectionId, ConnectionLimits, ConnectionManager,
-                ConnectionPool, ConnectionState, ServerConnection,
+                ConnectionConfig, ConnectionLimits, ConnectionManager, ConnectionPool,
+                ConnectionState, ServerConnection,
             },
         },
         sync::Semaphore,

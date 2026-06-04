@@ -23,7 +23,6 @@ use crate::{
     cx::{Cx, Scope},
     error::Outcome,
     runtime::{
-        RuntimeConfig, RuntimeState,
         obligation_table::{
             ObligationConsistencyCheck, ObligationEntry, ObligationEvent, ObligationId,
             ObligationLifecycle, ObligationMigration, ObligationModification, ObligationOwnership,
@@ -34,7 +33,7 @@ use crate::{
             RegionConsistencyCheck, RegionEntry, RegionHierarchy, RegionId, RegionLifecycle,
             RegionState, RegionTable,
         },
-        sharded_state::{LockOrder, LockOrderValidator, ShardGuard, ShardedState},
+        sharded_state::{LockOrder, LockOrderValidator, ShardedState},
     },
     sync::{ContendedMutex, Mutex, RwLock},
     time::{Duration, Instant, Sleep, Timeout},

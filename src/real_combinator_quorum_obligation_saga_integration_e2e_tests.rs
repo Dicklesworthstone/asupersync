@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_quorum_saga_basic_integration() -> Result<()> {
+    fn test_quorum_saga_basic_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_quorum_failure_triggers_saga_compensation() -> Result<()> {
+    fn test_quorum_failure_triggers_saga_compensation() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_saga_compensation_ordering() -> Result<()> {
+    fn test_saga_compensation_ordering() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_quorum_saga_consistency_after_compensation() -> Result<()> {
+    fn test_quorum_saga_consistency_after_compensation() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_quorum_saga_cancellation_propagation() -> Result<()> {
+    fn test_quorum_saga_cancellation_propagation() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {

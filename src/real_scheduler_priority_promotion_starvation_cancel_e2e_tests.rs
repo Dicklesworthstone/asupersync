@@ -24,7 +24,7 @@ mod tests {
 
     // Import scheduler types and testing utilities
     use crate::cx::Cx;
-    use crate::runtime::scheduler::priority::{DispatchLane, PriorityScheduler, SchedulerEntry};
+    use crate::runtime::scheduler::priority::{PriorityScheduler, SchedulerEntry};
     use crate::runtime::scheduler::priority_inversion_oracle::{
         InversionType, Priority, PriorityInversion, PriorityInversionOracle, ResourceId,
     };

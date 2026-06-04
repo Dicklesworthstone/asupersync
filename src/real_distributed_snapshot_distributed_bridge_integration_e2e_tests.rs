@@ -8,7 +8,7 @@ use crate::{
     bytes::Bytes,
     cx::Cx,
     distributed::{
-        bridge::{Bridge, BridgeConfig, BridgeEvent, BridgeStats, MessageSequence},
+        bridge::{Bridge, BridgeEvent, BridgeStats, MessageSequence},
         snapshot::{Snapshot, SnapshotConfig, SnapshotError, SnapshotManager, SnapshotMetadata},
     },
     runtime::Runtime,

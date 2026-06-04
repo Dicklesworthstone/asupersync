@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_timer_wheel_notify_basic_integration() -> Result<()> {
+    fn test_timer_wheel_notify_basic_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_multiple_timer_notify_coordination() -> Result<()> {
+    fn test_multiple_timer_notify_coordination() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_timer_notify_cancellation() -> Result<()> {
+    fn test_timer_notify_cancellation() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {

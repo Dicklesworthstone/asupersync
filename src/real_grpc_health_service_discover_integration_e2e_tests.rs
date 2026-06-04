@@ -29,7 +29,7 @@ mod tests {
     use crate::{
         cx::{Cx, Scope},
         error::{Error, Result},
-        grpc::health::{HealthError, HealthService, ServingStatus},
+        grpc::health::{HealthError, ServingStatus},
         runtime::{Runtime, spawn},
         service::discover::{
             Change, Discover, DnsDiscoveryConfig, DnsServiceDiscovery, StaticList,
@@ -905,7 +905,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_grpc_health_service_discover_basic_integration() -> Result<()> {
+    fn test_grpc_health_service_discover_basic_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_health_status_propagation_to_discovery() -> Result<()> {
+    fn test_health_status_propagation_to_discovery() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -998,7 +998,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_unhealthy_backend_removal_from_discovery() -> Result<()> {
+    fn test_unhealthy_backend_removal_from_discovery() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1023,7 +1023,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_healthy_backend_restoration_to_discovery() -> Result<()> {
+    fn test_healthy_backend_restoration_to_discovery() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_multi_service_health_state_management() -> Result<()> {
+    fn test_multi_service_health_state_management() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1073,7 +1073,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_health_check_subscription_integration() -> Result<()> {
+    fn test_health_check_subscription_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1098,7 +1098,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_discovery_polling_with_health_filtering() -> Result<()> {
+    fn test_discovery_polling_with_health_filtering() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {

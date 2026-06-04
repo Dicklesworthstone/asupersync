@@ -44,7 +44,7 @@ mod tests {
     use crate::cx::{Cx, Registry};
     use crate::obligation::calm::Monotonicity;
     use crate::obligation::saga::{
-        Lattice, MonotoneSagaExecutor, Saga, SagaExecutionPlan, SagaOpKind, SagaPlan, SagaStep,
+        Lattice, MonotoneSagaExecutor, Saga, SagaExecutionPlan, SagaOpKind, SagaStep,
     };
     use crate::time::{Duration, Instant, sleep};
     use crate::types::{CancelReason, ObligationId, Outcome, TaskId, Time};

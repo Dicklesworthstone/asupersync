@@ -30,10 +30,9 @@ use crate::{
             ServiceInfo,
         },
         server::{
-            ConnectionManager, GrpcServer, GrpcServerBuilder, ServerConfig, ServiceRegistry,
-            StreamHandle,
+            ConnectionManager, GrpcServer, GrpcServerBuilder, ServiceRegistry, StreamHandle,
         },
-        service::{GrpcService, ServiceDescriptor},
+        service::GrpcService,
         status::{Code, Status},
         streaming::{BidirectionalStream, StreamingRequest, StreamingResponse},
     },

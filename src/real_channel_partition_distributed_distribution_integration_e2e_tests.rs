@@ -29,8 +29,8 @@ mod tests {
             assignment::{AssignmentStrategy, ReplicaAssignment, SymbolAssigner},
             consistent_hash::{ConsistentHashError, HashRing},
             distribution::{
-                ConsistencyLevel, DistributionConfig, DistributionResult, ReplicaAck,
-                ReplicaFailure, SymbolDistributor,
+                ConsistencyLevel, DistributionConfig, ReplicaAck, ReplicaFailure,
+                SymbolDistributor,
             },
         },
         error::RuntimeError,
