@@ -1964,7 +1964,7 @@ mod tests {
         // Test control character rejection (null byte)
         let json = r#"{
             "id": "test",
-            "include": [{"path": "config .yaml"}]
+            "include": [{"path": "config\u0000.yaml"}]
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
