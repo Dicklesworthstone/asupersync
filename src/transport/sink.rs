@@ -686,6 +686,7 @@ impl SymbolSink for ChannelSink {
 #[derive(Default)]
 pub struct CollectingSink {
     symbols: Vec<AuthenticatedSymbol>,
+    closed: bool,
 }
 
 impl CollectingSink {
@@ -710,7 +711,11 @@ impl CollectingSink {
 
 impl SymbolSink for CollectingSink {
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
-        Poll::Ready(Ok(()))
+        if self.closed {
+            Poll::Ready(Err(SinkError::Closed))
+        } else {
+            Poll::Ready(Ok(()))
+        }
     }
 
     fn poll_send(
@@ -718,15 +723,23 @@ impl SymbolSink for CollectingSink {
         _cx: &mut Context<'_>,
         symbol: AuthenticatedSymbol,
     ) -> Poll<Result<(), SinkError>> {
+        if self.closed {
+            return Poll::Ready(Err(SinkError::Closed));
+        }
         self.symbols.push(symbol);
         Poll::Ready(Ok(()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
-        Poll::Ready(Ok(()))
+        if self.closed {
+            Poll::Ready(Err(SinkError::Closed))
+        } else {
+            Poll::Ready(Ok(()))
+        }
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+    fn poll_close(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
+        self.closed = true;
         Poll::Ready(Ok(()))
     }
 }
