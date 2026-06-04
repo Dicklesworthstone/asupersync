@@ -504,6 +504,99 @@ fn line_contains_grep_literal(line: &str, literal: &str) -> bool {
     })
 }
 
+fn ambient_pattern_key(literal: &str, category: AmbientCategory) -> &'static str {
+    match category {
+        AmbientCategory::Time => {
+            if literal.contains("Instant::now") {
+                "time_instant_now"
+            } else if literal.contains("SystemTime::now") {
+                "time_system_time_now"
+            } else if literal.contains("Clock::now") {
+                "time_clock_now"
+            } else if literal.contains("WallTime::now") {
+                "time_wall_time_now"
+            } else {
+                "time_other"
+            }
+        }
+        AmbientCategory::Spawn => {
+            if literal.contains("thread::spawn") || literal.contains("Thread::spawn") {
+                "spawn_thread_spawn"
+            } else if literal.contains("thread::Builder") {
+                "spawn_thread_builder"
+            } else {
+                "spawn_other"
+            }
+        }
+        AmbientCategory::Entropy => {
+            if literal.contains("getrandom") {
+                "entropy_getrandom"
+            } else if literal.contains("thread_rng") {
+                "entropy_thread_rng"
+            } else if literal.contains("rand::random") {
+                "entropy_rand_random"
+            } else if literal.contains("RandomState") {
+                "entropy_random_state"
+            } else if literal.contains("Rng::") {
+                "entropy_rng_trait"
+            } else {
+                "entropy_other"
+            }
+        }
+        AmbientCategory::Io => {
+            if literal.contains("TcpListener") {
+                "io_tcp_listener"
+            } else if literal.contains("TcpStream") {
+                "io_tcp_stream"
+            } else if literal.contains("UdpSocket") {
+                "io_udp_socket"
+            } else if literal.contains("File::open") {
+                "io_file_open"
+            } else if literal.contains("File::create") {
+                "io_file_create"
+            } else if literal.contains("OpenOptions") {
+                "io_open_options"
+            } else if literal.contains("fs::read") {
+                "io_fs_read"
+            } else if literal.contains("fs::write") {
+                "io_fs_write"
+            } else {
+                "io_other"
+            }
+        }
+        AmbientCategory::Env => {
+            if literal.contains("var_os") {
+                "env_var_os"
+            } else if literal.contains("vars") {
+                "env_vars"
+            } else if literal.contains("set_var") {
+                "env_set_var"
+            } else if literal.contains("remove_var") {
+                "env_remove_var"
+            } else if literal.contains("var(") {
+                "env_var"
+            } else {
+                "env_other"
+            }
+        }
+        AmbientCategory::Output => {
+            if literal.contains("println!") {
+                "output_println"
+            } else if literal.contains("eprintln!") {
+                "output_eprintln"
+            } else if literal.contains("print!") {
+                "output_print"
+            } else if literal.contains("eprint!") {
+                "output_eprint"
+            } else if literal.contains("dbg!") {
+                "output_dbg"
+            } else {
+                "output_other"
+            }
+        }
+    }
+}
+
 fn matching_grep_patterns(line: &str) -> Vec<(&'static str, AmbientCategory)> {
     let mut patterns: Vec<_> = GREP_PATTERNS
         .iter()
@@ -513,12 +606,17 @@ fn matching_grep_patterns(line: &str) -> Vec<(&'static str, AmbientCategory)> {
 
     let mut matches = Vec::new();
     let mut matched_literals: Vec<String> = Vec::new();
+    let mut matched_keys: Vec<(AmbientCategory, &'static str)> = Vec::new();
     for (pattern, literal, category) in patterns {
+        let operation_key = ambient_pattern_key(&literal, category);
         let already_covered = matched_literals.iter().any(|matched| {
             matched.ends_with(literal.as_str()) || literal.ends_with(matched.as_str())
+        }) || matched_keys.iter().any(|(matched_category, matched_key)| {
+            *matched_category == category && *matched_key == operation_key
         });
         if !already_covered && line_contains_grep_literal(line, &literal) {
             matched_literals.push(literal);
+            matched_keys.push((category, operation_key));
             matches.push((pattern, category));
         }
     }
@@ -681,6 +779,7 @@ fn strip_comments_and_literals_for_detection(
 #[derive(Default)]
 struct AmbientDetectionLineFilter {
     pending_cfg_test: bool,
+    pending_cfg_test_attr_depth: i32,
     pending_cfg_test_item_body: bool,
     in_cfg_test_item: bool,
     cfg_test_depth: i32,
@@ -702,16 +801,23 @@ impl AmbientDetectionLineFilter {
             return None;
         }
 
-        if trimmed == "#[cfg(test)]" {
+        if is_test_only_attribute(trimmed) {
             self.pending_cfg_test = true;
+            self.pending_cfg_test_attr_depth = 0;
             return None;
         }
 
         if self.pending_cfg_test {
-            if trimmed.is_empty() || trimmed.starts_with("#[") {
+            if trimmed.is_empty() {
+                return None;
+            }
+            if self.pending_cfg_test_attr_depth > 0 || trimmed.starts_with("#[") {
+                self.pending_cfg_test_attr_depth += attribute_delimiter_delta(trimmed);
+                self.pending_cfg_test_attr_depth = self.pending_cfg_test_attr_depth.max(0);
                 return None;
             }
             self.pending_cfg_test = false;
+            self.pending_cfg_test_attr_depth = 0;
             if starts_cfg_test_item(trimmed) {
                 self.start_or_continue_cfg_test_item(line);
                 return None;
@@ -764,6 +870,22 @@ fn starts_cfg_test_item(trimmed: &str) -> bool {
         || trimmed.starts_with("async fn ")
         || trimmed.starts_with("pub async fn ")
         || trimmed.starts_with("impl ")
+}
+
+fn is_test_only_attribute(trimmed: &str) -> bool {
+    trimmed == "#[cfg(test)]"
+        || trimmed.starts_with("#[cfg(all(test")
+        || trimmed.starts_with("#[cfg(any(test")
+        || trimmed == "#[test]"
+        || trimmed.starts_with("#[tokio::test")
+}
+
+fn attribute_delimiter_delta(line: &str) -> i32 {
+    line.chars().fold(0, |depth, ch| match ch {
+        '[' | '(' => depth + 1,
+        ']' | ')' => depth - 1,
+        _ => depth,
+    })
 }
 
 /// Represents a detected ambient authority violation.
@@ -1305,7 +1427,10 @@ fn test_function() {
     // **Escape hatches for tests:**
     // - Code inside `#[cfg(test)] mod tests { ... }` is excluded from scanning.
     // - Files listed in EXEMPT_PREFIXES are skipped entirely (these ARE the
-    //   capability providers).
+    //   capability providers or process-boundary tools).
+    // - CLI and benchmark adapters are process boundaries: they may read env,
+    //   measure wall time, or write caller-facing output without weakening the
+    //   core runtime's explicit-capability invariant.
     // - Top-level `src/*_tests.rs`/conformance/metamorphic/e2e harnesses are
     //   test surfaces even when compiled through the lib-test crate rather than
     //   nested under an inline `#[cfg(test)] mod tests`.
@@ -1332,6 +1457,8 @@ fn test_function() {
         "obligation/conformance_runner.rs",
         "audit/",
         "bin/",
+        "cli/",
+        "atp/benchmark/",
     ];
 
     /// Modules that MUST have zero ambient authority in non-test code.
@@ -1382,6 +1509,7 @@ fn test_function() {
             || file_name.ends_with("_metamorphic_tests.rs")
             || file_name.ends_with("_testing.rs")
             || file_name.ends_with("_mutations.rs")
+            || file_name.ends_with("_verification_suite.rs")
             || file_name.ends_with("_audit.rs")
             || file_name.ends_with("_e2e_tests.rs")
             || file_name.starts_with("real_") && file_name.ends_with(".rs")
@@ -1507,12 +1635,23 @@ fn test_function() {
         let mut in_cfg_test_item = false;
         let mut brace_depth: i32 = 0;
         let mut pending_cfg_test = false;
+        let mut pending_cfg_test_attr_depth: i32 = 0;
         let mut pending_cfg_test_item_body = false;
         let mut cfg_test_sanitizer_state = ScanSanitizerState::default();
         let mut sanitizer_state = ScanSanitizerState::default();
 
         for (idx, line) in content.lines().enumerate() {
             let trimmed = line.trim();
+
+            if in_cfg_test_item {
+                brace_depth += brace_delta_for_scan(line, &mut cfg_test_sanitizer_state);
+                if brace_depth <= 0 {
+                    in_cfg_test_item = false;
+                    brace_depth = 0;
+                    cfg_test_sanitizer_state = ScanSanitizerState::default();
+                }
+                continue;
+            }
 
             if pending_cfg_test_item_body {
                 let delta = brace_delta_for_scan(line, &mut cfg_test_sanitizer_state);
@@ -1526,14 +1665,16 @@ fn test_function() {
                 continue;
             }
 
-            if trimmed == "#[cfg(test)]" {
+            if is_test_only_attribute(trimmed) {
                 pending_cfg_test = true;
+                pending_cfg_test_attr_depth = 0;
                 continue;
             }
 
             if pending_cfg_test {
                 if starts_cfg_test_item(trimmed) {
                     pending_cfg_test = false;
+                    pending_cfg_test_attr_depth = 0;
                     cfg_test_sanitizer_state = ScanSanitizerState::default();
                     let delta = brace_delta_for_scan(line, &mut cfg_test_sanitizer_state);
                     if delta > 0 {
@@ -1544,19 +1685,18 @@ fn test_function() {
                     }
                     continue;
                 }
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if pending_cfg_test_attr_depth > 0 || trimmed.starts_with("#[") {
+                    pending_cfg_test_attr_depth += attribute_delimiter_delta(trimmed);
+                    pending_cfg_test_attr_depth = pending_cfg_test_attr_depth.max(0);
+                    continue;
+                }
+                if !trimmed.starts_with('#') {
                     pending_cfg_test = false;
+                    pending_cfg_test_attr_depth = 0;
                 }
-            }
-
-            if in_cfg_test_item {
-                brace_depth += brace_delta_for_scan(line, &mut cfg_test_sanitizer_state);
-                if brace_depth <= 0 {
-                    in_cfg_test_item = false;
-                    brace_depth = 0;
-                    cfg_test_sanitizer_state = ScanSanitizerState::default();
-                }
-                continue;
             }
 
             if trimmed.starts_with("//") && !sanitizer_state.in_block_comment {
@@ -1608,17 +1748,14 @@ fn test_function() {
 
         let lines = non_test_lines(content);
 
-        for (pattern, category) in GREP_PATTERNS {
-            let literal = pattern_to_literal(pattern);
-            for (line_num, line_text) in &lines {
-                if line_contains_literal(line_text, &literal) {
-                    violations.push(Violation {
-                        file: rel.to_string(),
-                        line: *line_num,
-                        pattern: literal.clone(),
-                        category: *category,
-                    });
-                }
+        for (line_num, line_text) in &lines {
+            for (pattern, category) in matching_grep_patterns(line_text) {
+                violations.push(Violation {
+                    file: rel.to_string(),
+                    line: *line_num,
+                    pattern: pattern_to_literal(pattern),
+                    category,
+                });
             }
         }
 
@@ -1827,6 +1964,37 @@ mod tests {
         assert!(
             !text.iter().any(|l| l.contains("test_code")),
             "Should exclude #[cfg(test)] module code"
+        );
+    }
+
+    #[test]
+    fn non_test_lines_filter_keeps_skipping_after_nested_test_functions() {
+        let source = "\
+fn real_code() {
+    Instant::now();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn first_test() {
+        Instant::now();
+    }
+
+    fn helper_after_test() {
+        std::net::TcpListener::bind(\"127.0.0.1:0\").unwrap();
+    }
+}
+";
+        let lines = non_test_lines(source);
+        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            text.iter().any(|l| l.contains("real_code")),
+            "Should include production code"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("helper_after_test")),
+            "Should exclude the full #[cfg(test)] module after nested #[test] functions"
         );
     }
 
