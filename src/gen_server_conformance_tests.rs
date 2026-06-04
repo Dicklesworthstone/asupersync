@@ -378,6 +378,54 @@ impl GenServerConformanceHarness {
         results
     }
 
+    fn drive_mock_lifecycle(name: &str) -> Result<(), String> {
+        let mut runtime = LabRuntime::new(crate::lab::LabConfig::new(0x6E57_50C0).max_steps(1_000));
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope =
+            crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
+
+        let server = MockGenServer::new(name);
+        let started = Arc::clone(&server.on_start_called);
+        let stopped = Arc::clone(&server.on_stop_called);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, server, 8)
+            .map_err(|err| format!("spawn_gen_server failed: {err:?}"))?;
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        let init_steps = runtime.run_until_idle();
+
+        if !started.load(Ordering::SeqCst) {
+            return Err(format!(
+                "on_start() was not called during initialization after {init_steps} lab steps"
+            ));
+        }
+
+        handle.stop();
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        let stop_steps = runtime.run_until_idle();
+
+        if !stopped.load(Ordering::SeqCst) {
+            return Err(format!(
+                "on_stop() was not called during shutdown after {stop_steps} lab steps"
+            ));
+        }
+        if !handle.is_finished() {
+            return Err(format!(
+                "server did not publish its final state after shutdown; stop_steps={stop_steps}"
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Test that call handlers must consume Reply obligation.
     fn test_call_reply_obligation(&mut self) -> ConformanceTestResult {
         // MUST: Every call must result in reply.send() or reply.abort()
@@ -485,14 +533,8 @@ impl GenServerConformanceHarness {
     /// Test on_start lifecycle hook execution.
     fn test_on_start_lifecycle(&mut self) -> ConformanceTestResult {
         // MUST: on_start() called once before message processing
-        let server = MockGenServer::new("test_start");
-
-        // Verify on_start was called during server initialization
-        let verdict = if server.was_on_start_called() {
-            TestVerdict::Pass
-        } else {
-            TestVerdict::Fail("on_start() was not called during initialization".into())
-        };
+        let verdict = Self::drive_mock_lifecycle("test_start")
+            .map_or_else(TestVerdict::Fail, |()| TestVerdict::Pass);
 
         ConformanceTestResult {
             test_name: "on_start_lifecycle",
@@ -505,10 +547,8 @@ impl GenServerConformanceHarness {
     /// Test on_stop lifecycle hook execution.
     fn test_on_stop_lifecycle(&mut self) -> ConformanceTestResult {
         // MUST: on_stop() called once after mailbox drain
-        let _server = MockGenServer::new("test_stop");
-
-        // Verify on_stop would be called during shutdown
-        let verdict = TestVerdict::Pass; // Lifecycle hook properly configured
+        let verdict = Self::drive_mock_lifecycle("test_stop")
+            .map_or_else(TestVerdict::Fail, |()| TestVerdict::Pass);
 
         ConformanceTestResult {
             test_name: "on_stop_lifecycle",

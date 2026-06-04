@@ -3087,7 +3087,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         handle.stop();
 
         let call_err =
@@ -3107,7 +3107,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         assert!(handle.is_finished());
 
         crate::test_complete!("gen_server_handle_rejects_call_and_cast_after_stop");
@@ -3236,11 +3236,11 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Stop should wake the blocked recv waiter. No manual reschedule here.
         handle.stop();
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         assert_eq!(
             stop_ran.load(Ordering::SeqCst),
@@ -3276,7 +3276,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         assert_eq!(
             handle.state.load(),
             ActorState::Running,
@@ -3291,7 +3291,7 @@ mod tests {
             "dropping join future should mirror GenServerHandle::abort state transition"
         );
 
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         assert!(
             handle.is_finished(),
             "server should stop after join future drop"

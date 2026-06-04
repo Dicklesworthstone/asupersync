@@ -86,19 +86,8 @@ impl PanicLeakTracker {
     /// Record an obligation leak during panic unwinding.
     ///
     /// This is panic-safe and will not panic even if called during unwinding.
-    fn record_panic_leak(&self, kind: ObligationKind, description: &str) {
-        let count = self.leak_count.fetch_add(1, Ordering::Relaxed);
-
-        // Best-effort logging that won't panic during unwinding.
-        // In production, this could send to a metrics system.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            eprintln!(
-                "PANIC LEAK #{}: {} obligation '{}' dropped during panic unwinding",
-                count + 1,
-                kind,
-                description
-            );
-        }));
+    fn record_panic_leak(&self) {
+        self.leak_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get the total number of panic leaks recorded.
@@ -259,7 +248,7 @@ impl Drop for GradedObligation {
                 // During panic unwinding, we cannot panic again, but we must still
                 // track the obligation leak to maintain the "no obligation leaks" invariant.
                 // This preserves leak detection even during panic unwinding.
-                PANIC_LEAK_TRACKER.record_panic_leak(self.kind, &self.description);
+                PANIC_LEAK_TRACKER.record_panic_leak();
                 return;
             }
             // In lab/debug mode: panic to surface the bug immediately.
