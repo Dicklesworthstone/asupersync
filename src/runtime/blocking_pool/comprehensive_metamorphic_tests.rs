@@ -443,19 +443,29 @@ fn mr_cancellation_commutativity() {
         handle2b.cancel();
         handle2a.cancel();
 
-        // Allow time for cancellation processing
-        thread::sleep(Duration::from_millis(50));
+        prop_assert!(handle1a.is_cancelled(), "A should be cancelled in pool1");
+        prop_assert!(handle1b.is_cancelled(), "B should be cancelled in pool1");
+        prop_assert!(handle2a.is_cancelled(), "A should be cancelled in pool2");
+        prop_assert!(handle2b.is_cancelled(), "B should be cancelled in pool2");
 
-        let pending1 = pool1.pending_count();
-        let pending2 = pool2.pending_count();
+        prop_assert!(pool1.pending_count() + pool1.busy_threads() <= 2,
+            "Pool1 should never report more in-flight work than submitted");
+        prop_assert!(pool2.pending_count() + pool2.busy_threads() <= 2,
+            "Pool2 should never report more in-flight work than submitted");
 
-        // Both pools should have equivalent final states
-        prop_assert_eq!(pending1, pending2,
-            "Cancellation commutativity violated: pool1_pending={}, pool2_pending={}",
-            pending1, pending2);
+        prop_assert!(pool1.shutdown_and_wait(Duration::from_secs(5)),
+            "Pool1 should shut down cleanly after cancellation");
+        prop_assert!(pool2.shutdown_and_wait(Duration::from_secs(5)),
+            "Pool2 should shut down cleanly after cancellation");
 
-        pool1.shutdown_and_wait(Duration::from_secs(5));
-        pool2.shutdown_and_wait(Duration::from_secs(5));
+        prop_assert_eq!(pool1.pending_count(), 0, "Pool1 should drain queued work");
+        prop_assert_eq!(pool2.pending_count(), 0, "Pool2 should drain queued work");
+        prop_assert_eq!(pool1.busy_threads(), 0, "Pool1 should have no busy workers");
+        prop_assert_eq!(pool2.busy_threads(), 0, "Pool2 should have no busy workers");
+        prop_assert!(handle1a.is_done(), "Pool1 task A should reach a terminal state");
+        prop_assert!(handle1b.is_done(), "Pool1 task B should reach a terminal state");
+        prop_assert!(handle2a.is_done(), "Pool2 task A should reach a terminal state");
+        prop_assert!(handle2b.is_done(), "Pool2 task B should reach a terminal state");
     });
 }
 
@@ -524,25 +534,40 @@ fn mr_configuration_invariance() {
             pool2.spawn(move || thread::sleep(Duration::from_millis(100)));
         }
 
-        // Allow some processing time
+        // Allow some processing time. Instantaneous queue/busy distribution is
+        // scheduler-dependent, so this test only checks stable configuration
+        // invariants before comparing final quiescence below.
         thread::sleep(Duration::from_millis(50));
 
         let active1 = pool1.active_threads();
         let active2 = pool2.active_threads();
 
-        // Core configuration-derived properties should be identical
-        prop_assert_eq!(active1, active2,
-            "Active thread counts differ for identical configurations");
+        prop_assert!(active1 <= config.max_threads,
+            "Pool1 active threads {} exceeded max {}",
+            active1, config.max_threads);
+        prop_assert!(active2 <= config.max_threads,
+            "Pool2 active threads {} exceeded max {}",
+            active2, config.max_threads);
 
-        // Under identical load, pools should behave similarly
         let total_work1 = pool1.pending_count() + pool1.busy_threads();
         let total_work2 = pool2.pending_count() + pool2.busy_threads();
-        prop_assert_eq!(total_work1, total_work2,
-            "Total work distribution differs for identical configurations: pool1={}, pool2={}",
-            total_work1, total_work2);
+        prop_assert!(total_work1 <= task_count,
+            "Pool1 reported more in-flight work than submitted: {} > {}",
+            total_work1, task_count);
+        prop_assert!(total_work2 <= task_count,
+            "Pool2 reported more in-flight work than submitted: {} > {}",
+            total_work2, task_count);
 
-        pool1.shutdown_and_wait(Duration::from_secs(5));
-        pool2.shutdown_and_wait(Duration::from_secs(5));
+        prop_assert!(pool1.shutdown_and_wait(Duration::from_secs(5)),
+            "Pool1 should shut down cleanly");
+        prop_assert!(pool2.shutdown_and_wait(Duration::from_secs(5)),
+            "Pool2 should shut down cleanly");
+        prop_assert_eq!(pool1.pending_count(), pool2.pending_count(),
+            "Identical pools should converge to the same drained queue depth");
+        prop_assert_eq!(pool1.busy_threads(), pool2.busy_threads(),
+            "Identical pools should converge to the same drained busy count");
+        prop_assert_eq!(pool1.active_threads(), pool2.active_threads(),
+            "Identical pools should converge to the same retired worker count");
     });
 }
 

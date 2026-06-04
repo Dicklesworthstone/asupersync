@@ -86,9 +86,11 @@ fn create_test_obligation(
 fn mr1_state_machine_monotonicity() {
     proptest!(|(
         region_count in 1usize..8,
-        operation_sequences: Vec<Vec<u8>>
+        operation_sequences in prop::collection::vec(
+            prop::collection::vec(any::<u8>(), 0..=5),
+            1..=8,
+        )
     )| {
-        prop_assume!(!operation_sequences.is_empty() && operation_sequences.len() <= region_count);
 
         let mut state = RuntimeState::new();
 
