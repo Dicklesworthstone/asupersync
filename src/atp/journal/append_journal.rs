@@ -1033,6 +1033,8 @@ pub struct JournalConfig {
     pub base_dir: PathBuf,
     /// Maximum size before triggering compaction
     pub max_journal_size: u64,
+    /// Maximum number of recent entries kept in memory.
+    pub recent_entries_limit: usize,
     /// Whether to fsync after every write
     pub force_sync: bool,
     /// Buffer size for writes
@@ -1048,6 +1050,7 @@ impl Default for JournalConfig {
         Self {
             base_dir: std::env::temp_dir().join("atp_journal"),
             max_journal_size: 100 * 1024 * 1024, // 100MB
+            recent_entries_limit: 1000,
             force_sync: true,
             write_buffer_size: 64 * 1024, // 64KB
             max_generations: 10,
@@ -1103,6 +1106,7 @@ impl AppendJournal {
         if let Err(e) = std::fs::create_dir_all(&config.base_dir) {
             return Outcome::Err(JournalError::DirectoryCreation(e.to_string()));
         }
+        let cache_limit = config.recent_entries_limit;
 
         let mut journal = Self {
             config,
@@ -1112,7 +1116,7 @@ impl AppendJournal {
             current_file: None,
             recent_entries: VecDeque::new(),
             transfer_entries: HashMap::new(),
-            cache_limit: 1000,
+            cache_limit,
             auth_key,
         };
 
@@ -1845,11 +1849,11 @@ mod tests {
         ));
         let config = JournalConfig {
             base_dir: temp_dir,
+            recent_entries_limit: 1,
             ..Default::default()
         };
 
         let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
-        journal.cache_limit = 1;
 
         for (transfer_id, timestamp) in [
             ("transfer_a", 1000),

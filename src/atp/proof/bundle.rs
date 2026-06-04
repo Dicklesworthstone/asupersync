@@ -1839,7 +1839,8 @@ mod tests {
 
         let manifest_root = crate::atp::manifest::MerkleRoot::new([1; 32]);
         let object_id = Object::file(b"test".to_vec()).id;
-        let chunk_bitmap = ChunkBitmap::new(1);
+        let mut chunk_bitmap = ChunkBitmap::new(1);
+        chunk_bitmap.mark_received(0);
 
         let peer_identity = PeerIdentityInfo {
             source_peer_id: "source".to_string(),
