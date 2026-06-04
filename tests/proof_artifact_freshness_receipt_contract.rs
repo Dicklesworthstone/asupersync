@@ -38,6 +38,44 @@ fn run_receipt_with_repo_path(fixture: &str, repo_path: &str) -> Output {
         .expect("run proof artifact freshness receipt")
 }
 
+fn run_reuse_index(output_format: &str) -> Output {
+    Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--repo-path")
+        .arg("/repo")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--reuse-index-root")
+        .arg(repo_root().join(FIXTURE_ROOT).join("reuse_index_receipts"))
+        .arg("--output")
+        .arg(output_format)
+        .current_dir(repo_root())
+        .output()
+        .expect("run proof reuse index")
+}
+
+fn run_reuse_query(output_format: &str) -> Output {
+    Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--repo-path")
+        .arg("/repo")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--reuse-index-root")
+        .arg(repo_root().join(FIXTURE_ROOT).join("reuse_index_receipts"))
+        .arg("--request")
+        .arg(
+            repo_root()
+                .join(FIXTURE_ROOT)
+                .join("reuse_index_request.json"),
+        )
+        .arg("--output")
+        .arg(output_format)
+        .current_dir(repo_root())
+        .output()
+        .expect("run proof reuse query")
+}
+
 fn receipt_json(fixture: &str) -> Value {
     let output = run_receipt(fixture);
     assert!(
@@ -48,6 +86,18 @@ fn receipt_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn reuse_query_json() -> Value {
+    let output = run_reuse_query("json");
+    assert!(
+        output.status.success(),
+        "proof reuse query failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("proof reuse query output must be JSON")
 }
 
 fn fixture_text(fixture: &str) -> String {
@@ -1118,6 +1168,218 @@ fn proof_reuse_classifier_reports_specific_miss_and_refusal_reasons() {
     assert_eq!(
         reuse["summary"]["by_reason_code"]["unknown-cache-policy"].as_u64(),
         Some(1)
+    );
+}
+
+#[test]
+fn proof_reuse_index_emits_normalized_entries_from_approved_fixture_root() {
+    let output = run_reuse_index("json");
+    assert!(
+        output.status.success(),
+        "proof reuse index failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let index: Value = serde_json::from_slice(&output.stdout).expect("proof reuse index JSON");
+
+    assert_eq!(
+        index["schema_version"].as_str(),
+        Some("proof-reuse-index-v1")
+    );
+    assert_eq!(index["repo_path"].as_str(), Some("/repo"));
+    assert_eq!(index["summary"]["candidate_count"].as_u64(), Some(6));
+    assert_eq!(index["summary"]["safe_to_cite"].as_u64(), Some(2));
+    assert_eq!(index["summary"]["freshness_refused"].as_u64(), Some(4));
+    assert_eq!(
+        index["summary"]["by_lane"]["proof-reuse-cache-contract"].as_u64(),
+        Some(5)
+    );
+    assert_eq!(
+        index["safety"]["raw_proof_logs_embedded"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        index["safety"]["tracker_mutation_allowed"].as_bool(),
+        Some(false)
+    );
+
+    let entries = index["entries"].as_array().expect("index entries");
+    assert_eq!(entries.len(), 6);
+    let reusable = entries
+        .iter()
+        .find(|entry| entry["proof_id"].as_str() == Some("proof:reuse-index-reusable"))
+        .expect("reusable proof entry");
+    assert_eq!(
+        reusable["manifest_lane_id"].as_str(),
+        Some("proof-reuse-cache-contract")
+    );
+    assert_eq!(
+        reusable["command_fingerprint"].as_str(),
+        Some("sha256:proof-reuse-cache-command")
+    );
+    assert_eq!(
+        reusable["source_fingerprint"].as_str(),
+        Some("sha256:source-index-current")
+    );
+    assert_eq!(
+        reusable["toolchain_fingerprint"].as_str(),
+        Some("sha256:toolchain-index-current")
+    );
+    assert_eq!(
+        reusable["env_fingerprint"].as_str(),
+        Some("sha256:env-index-current")
+    );
+    assert_eq!(
+        reusable["citeable_claims"][0].as_str(),
+        Some("proof-reuse-cache-schema")
+    );
+    assert_eq!(
+        reusable["refusal_metadata"]["safe_to_cite"].as_bool(),
+        Some(true)
+    );
+
+    let local_fallback = entries
+        .iter()
+        .find(|entry| entry["proof_id"].as_str() == Some("proof:reuse-index-local-fallback"))
+        .expect("local fallback proof entry");
+    assert_eq!(
+        local_fallback["refusal_metadata"]["freshness_refusal_reason_code"].as_str(),
+        Some("local-fallback-marker")
+    );
+    assert_eq!(
+        local_fallback["refusal_metadata"]["local_fallback_marker_count"].as_u64(),
+        Some(2)
+    );
+}
+
+#[test]
+fn proof_reuse_query_selects_only_classifier_approved_candidate() {
+    let query = reuse_query_json();
+    assert_eq!(
+        query["schema_version"].as_str(),
+        Some("proof-reuse-query-result-v1")
+    );
+    assert_eq!(query["summary"]["candidate_count"].as_u64(), Some(6));
+    assert_eq!(query["summary"]["accepted_count"].as_u64(), Some(1));
+    assert_eq!(query["summary"]["refused_count"].as_u64(), Some(4));
+    assert_eq!(query["summary"]["miss_count"].as_u64(), Some(1));
+    assert_eq!(
+        query["summary"]["chosen_proof_id"].as_str(),
+        Some("proof:reuse-index-reusable")
+    );
+    assert_eq!(
+        query["safety"]["cache_hit_is_never_fresh_rch_pass"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        query["safety"]["query_never_overrides_classifier"].as_bool(),
+        Some(true)
+    );
+
+    let best = &query["best_candidate"];
+    assert_eq!(best["decision"].as_str(), Some("reusable"));
+    assert_eq!(best["classifier_decision"].as_str(), Some("reusable"));
+    assert_eq!(best["safe_to_reuse"].as_bool(), Some(true));
+    assert_eq!(best["cache_hit_is_fresh_rch_pass"].as_bool(), Some(false));
+    assert_eq!(
+        best["proof_id"].as_str(),
+        Some("proof:reuse-index-reusable")
+    );
+
+    let rows = query["rows"].as_array().expect("query rows");
+    assert_eq!(rows.len(), 6);
+    assert!(rows.iter().all(|row| {
+        row["decision"].as_str() != Some("reusable")
+            || (row["classifier_decision"].as_str() == Some("reusable")
+                && row["safe_to_reuse"].as_bool() == Some(true))
+    }));
+
+    let reason_counts = &query["summary"]["by_reason_code"];
+    for reason in [
+        "stale-head",
+        "failed-proof-status",
+        "local-fallback-marker",
+        "dirty-frontier-overlap",
+        "lane-mismatch",
+    ] {
+        assert_eq!(
+            reason_counts[reason].as_u64(),
+            Some(1),
+            "missing reason count for {reason}"
+        );
+    }
+    assert_eq!(query["logs"][0]["stage"].as_str(), Some("scan"));
+    assert_eq!(query["logs"][1]["stage"].as_str(), Some("classify"));
+    assert_eq!(query["logs"][1]["accepted_count"].as_u64(), Some(1));
+    assert_eq!(query["logs"][2]["stage"].as_str(), Some("choose"));
+    assert_eq!(
+        query["logs"][2]["chosen_proof_id"].as_str(),
+        Some("proof:reuse-index-reusable")
+    );
+    assert!(
+        query["logs"][2]["top_rerun_command"]
+            .as_str()
+            .expect("top rerun command")
+            .starts_with("RCH_REQUIRE_REMOTE=1 rch exec --")
+    );
+}
+
+#[test]
+fn proof_reuse_query_json_matches_full_output_golden() {
+    let output = run_reuse_query("json");
+    assert!(
+        output.status.success(),
+        "proof reuse query failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("query stdout is utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("query output JSON");
+    let expected = fixture_text("reuse_index_query_expected.json");
+    let expected_json: Value = serde_json::from_str(&expected).expect("expected query JSON");
+
+    assert_eq!(actual_json, expected_json, "proof reuse query JSON drifted");
+    assert_eq!(actual, expected, "proof reuse query text drifted");
+}
+
+#[test]
+fn proof_reuse_query_markdown_matches_summary_golden() {
+    let output = run_reuse_query("markdown");
+    assert!(
+        output.status.success(),
+        "proof reuse query markdown failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("markdown stdout is utf-8");
+    let expected = fixture_text("reuse_index_query_expected.md");
+    assert_eq!(actual, expected, "proof reuse query markdown drifted");
+}
+
+#[test]
+fn proof_reuse_index_rejects_unapproved_roots() {
+    let output = Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--repo-path")
+        .arg("/repo")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--reuse-index-root")
+        .arg("/tmp")
+        .arg("--output")
+        .arg("json")
+        .current_dir(repo_root())
+        .output()
+        .expect("run proof reuse index with unapproved root");
+    assert!(!output.status.success(), "unapproved root should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("proof reuse index root must be inside repo")
+            || stderr.contains("is not approved"),
+        "unexpected stderr for unapproved root: {stderr}"
     );
 }
 

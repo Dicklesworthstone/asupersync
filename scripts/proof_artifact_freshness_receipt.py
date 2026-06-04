@@ -22,7 +22,13 @@ from typing import Any
 
 SCHEMA_VERSION = "proof-artifact-freshness-receipt-v1"
 PROOF_REUSE_SCHEMA_VERSION = "proof-reuse-classifier-v1"
+PROOF_REUSE_INDEX_SCHEMA_VERSION = "proof-reuse-index-v1"
+PROOF_REUSE_QUERY_SCHEMA_VERSION = "proof-reuse-query-result-v1"
 MAIN_BRANCH = "main"
+APPROVED_PROOF_REUSE_INDEX_ROOTS = (
+    "artifacts",
+    "tests/fixtures/proof_artifact_freshness_receipt",
+)
 GIT_READ_COMMANDS = [
     "git rev-parse HEAD",
     "git branch --show-current",
@@ -373,6 +379,7 @@ def command_has_required_rch_prefix(command: str) -> bool:
 def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {
+            "proof_id": "",
             "artifact_path": fallback_path,
             "git_sha": "",
             "git_branch": "",
@@ -383,6 +390,16 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
         }
 
     return {
+        "proof_id": first_string(
+            raw,
+            [
+                ("proof_id",),
+                ("id",),
+                ("proof", "proof_id"),
+                ("metadata", "proof_id"),
+                ("reuse", "proof_id"),
+            ],
+        ),
         "artifact_path": first_string(
             raw,
             [
@@ -587,6 +604,18 @@ def normalize_artifact(raw: Any, fallback_path: str = "") -> dict[str, Any]:
                 ("toolchain", "fingerprint"),
                 ("metadata", "toolchain_fingerprint"),
                 ("reuse", "toolchain_fingerprint"),
+            ],
+        ),
+        "env_fingerprint": first_string(
+            raw,
+            [
+                ("env_fingerprint",),
+                ("environment_fingerprint",),
+                ("env", "fingerprint"),
+                ("environment", "fingerprint"),
+                ("metadata", "env_fingerprint"),
+                ("metadata", "environment_fingerprint"),
+                ("reuse", "env_fingerprint"),
             ],
         ),
         "fuzz_extent": normalize_fuzz_extent(raw),
@@ -970,6 +999,17 @@ def normalize_reuse_request(raw: Any) -> dict[str, Any]:
                 ("metadata", "toolchain_fingerprint"),
             ],
         ),
+        "env_fingerprint": first_string(
+            request,
+            [
+                ("env_fingerprint",),
+                ("environment_fingerprint",),
+                ("env", "fingerprint"),
+                ("environment", "fingerprint"),
+                ("metadata", "env_fingerprint"),
+                ("metadata", "environment_fingerprint"),
+            ],
+        ),
         "feature_flags": first_string_list(
             request,
             [
@@ -1029,6 +1069,8 @@ def reusable_candidate_evidence(
         "candidate_tree_fingerprint": artifact.get("tree_fingerprint", ""),
         "request_toolchain_fingerprint": request.get("toolchain_fingerprint", ""),
         "candidate_toolchain_fingerprint": artifact.get("toolchain_fingerprint", ""),
+        "request_env_fingerprint": request.get("env_fingerprint", ""),
+        "candidate_env_fingerprint": artifact.get("env_fingerprint", ""),
         "request_feature_flags": request.get("feature_flags", []),
         "candidate_feature_flags": artifact.get("feature_flags", []),
         "candidate_local_fallback_markers": artifact.get("local_fallback_markers", []),
@@ -1108,6 +1150,12 @@ def proof_reuse_reason_codes(
     if set(request.get("feature_flags", [])) != set(artifact.get("feature_flags", [])):
         reasons.append("toolchain-mismatch")
 
+    request_env = request.get("env_fingerprint", "")
+    candidate_env = artifact.get("env_fingerprint", "")
+    if request_env or candidate_env:
+        if not request_env or not candidate_env or request_env != candidate_env:
+            reasons.append("toolchain-mismatch")
+
     if not freshness_row.get("safe_to_cite"):
         reasons.append(
             REUSE_REFUSAL_BY_CLASSIFICATION.get(
@@ -1128,7 +1176,7 @@ def classify_proof_reuse_candidate(
     decision, reason_codes = proof_reuse_reason_codes(request, artifact, freshness_row)
     safe_to_reuse = decision == "reusable"
     return {
-        "candidate_id": artifact.get("artifact_path") or "candidate",
+        "candidate_id": artifact.get("proof_id") or artifact.get("artifact_path") or "candidate",
         "manifest_lane_id": artifact.get("manifest_lane_id", ""),
         "decision": decision,
         "safe_to_reuse": safe_to_reuse,
@@ -1221,6 +1269,521 @@ def build_proof_reuse_receipt(
             "tracker_mutation_allowed": False,
         },
     }
+
+
+def stable_digest(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256_text(payload)
+
+
+def sorted_strings(values: list[str]) -> list[str]:
+    return sorted(set(value for value in values if value))
+
+
+def resolve_repo_local_path(path_text: str, repo_path: Path) -> Path:
+    path = Path(path_text)
+    if path.is_absolute():
+        return path.resolve()
+    repo_candidate = repo_path / path
+    if repo_candidate.exists():
+        return repo_candidate.resolve()
+    return path.resolve()
+
+
+def repo_relative_path(path_text: str, repo_path: Path) -> tuple[Path, str]:
+    resolved = resolve_repo_local_path(path_text, repo_path)
+    bases = [repo_path.resolve(), Path.cwd().resolve()]
+    for base in bases:
+        try:
+            relative = resolved.relative_to(base)
+            return resolved, normalize_path(str(relative))
+        except ValueError:
+            continue
+    raise ValueError(f"proof reuse index root must be inside repo: {path_text}")
+
+
+def require_approved_reuse_root(path_text: str, repo_path: Path) -> tuple[Path, str]:
+    path, relative = repo_relative_path(path_text, repo_path)
+    if not any(
+        relative == approved or relative.startswith(f"{approved}/")
+        for approved in APPROVED_PROOF_REUSE_INDEX_ROOTS
+    ):
+        approved = ", ".join(APPROVED_PROOF_REUSE_INDEX_ROOTS)
+        raise ValueError(
+            f"proof reuse index root {relative!r} is not approved; use one of: {approved}"
+        )
+    return path, relative
+
+
+def iter_reuse_index_json_files(root_texts: list[str], repo_path: Path) -> list[tuple[Path, str]]:
+    files: list[tuple[Path, str]] = []
+    for root_text in root_texts:
+        root, _relative = require_approved_reuse_root(root_text, repo_path)
+        if root.is_file():
+            if root.suffix == ".json":
+                files.append(repo_relative_path(str(root), repo_path))
+            continue
+        if not root.is_dir():
+            continue
+        for candidate in sorted(root.rglob("*.json")):
+            if candidate.is_file():
+                files.append(repo_relative_path(str(candidate), repo_path))
+    return sorted(set(files), key=lambda item: item[1])
+
+
+def normalized_approved_reuse_roots(root_texts: list[str], repo_path: Path) -> list[str]:
+    return sorted(
+        {
+            relative
+            for _path, relative in (
+                require_approved_reuse_root(root_text, repo_path) for root_text in root_texts
+            )
+        }
+    )
+
+
+def raw_looks_like_artifact(raw: dict[str, Any]) -> bool:
+    return any(
+        key in raw
+        for key in [
+            "artifact_path",
+            "command",
+            "proof_command",
+            "git_sha",
+            "head_sha",
+            "status",
+            "touched_files",
+        ]
+    )
+
+
+def artifact_from_freshness_row(row: dict[str, Any], source_path: str, index: int) -> dict[str, Any]:
+    evidence = row.get("evidence", {}) if isinstance(row.get("evidence"), dict) else {}
+    raw = {
+        "proof_id": row.get("proof_id", ""),
+        "artifact_path": row.get("artifact_path") or f"{source_path}#row[{index}]",
+        "git_sha": evidence.get("artifact_git_sha", ""),
+        "git_branch": evidence.get("artifact_git_branch", ""),
+        "command": row.get("command", ""),
+        "command_fingerprint": row.get("command_fingerprint", ""),
+        "manifest_lane_id": row.get("manifest_lane_id", ""),
+        "manifest_guarantee_ids": row.get("manifest_guarantee_ids", []),
+        "claim_scope": row.get("claim_scope", ""),
+        "allowed_cache_hit_claims": row.get("allowed_cache_hit_claims", []),
+        "source_fingerprint": evidence.get("artifact_source_fingerprint", ""),
+        "tree_fingerprint": evidence.get("artifact_tree_fingerprint", ""),
+        "toolchain_fingerprint": row.get("toolchain_fingerprint", ""),
+        "env_fingerprint": row.get("env_fingerprint", ""),
+        "feature_flags": row.get("feature_flags", []),
+        "touched_files": row.get("touched_files", []),
+        "status": row.get("status", ""),
+        "generated_at": row.get("generated_at", ""),
+        "rch_remote_route_segments": evidence.get("rch_remote_route_segments", []),
+        "local_fallback_markers": evidence.get("rch_local_fallback_segments", []),
+    }
+    return normalize_artifact(raw)
+
+
+def candidate_sources_from_json(
+    raw: Any,
+    source_path: str,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    if not isinstance(raw, dict):
+        return []
+    if isinstance(raw.get("artifacts"), list):
+        repo = raw.get("repo", {}) if isinstance(raw.get("repo"), dict) else {}
+        current_head = str(repo.get("head_sha") or repo.get("current_head") or "")
+        current_branch = str(repo.get("branch") or "")
+        dirty = dirty_entries(raw)
+        artifacts = artifact_rows(raw)
+        return [
+            (artifact, classify_artifact(artifact, current_head, current_branch, dirty))
+            for artifact in artifacts
+        ]
+    if isinstance(raw.get("rows"), list):
+        pairs = []
+        for index, row in enumerate(raw["rows"]):
+            if not isinstance(row, dict):
+                continue
+            artifact = artifact_from_freshness_row(row, source_path, index)
+            pairs.append((artifact, row))
+        return pairs
+    if raw_looks_like_artifact(raw):
+        artifact = normalize_artifact(raw, source_path)
+        current_head = first_string(raw, [("current_head_sha",), ("repo", "head_sha")])
+        current_branch = first_string(raw, [("current_branch",), ("repo", "branch")])
+        if not current_head:
+            current_head = artifact.get("git_sha", "")
+        if not current_branch:
+            current_branch = MAIN_BRANCH
+        dirty = dirty_entries(raw)
+        return [(artifact, classify_artifact(artifact, current_head, current_branch, dirty))]
+    return []
+
+
+def proof_id_for(artifact: dict[str, Any], source_path: str, index: int) -> str:
+    if artifact.get("proof_id"):
+        return artifact["proof_id"]
+    if artifact.get("artifact_path"):
+        return artifact["artifact_path"]
+    digest = stable_digest({"source_path": source_path, "index": index, "artifact": artifact})
+    return f"proof:{digest.removeprefix('sha256:')[:16]}"
+
+
+def freshness_refusal_reason(row: dict[str, Any]) -> str:
+    if row.get("safe_to_cite"):
+        return ""
+    return REUSE_REFUSAL_BY_CLASSIFICATION.get(
+        str(row.get("classification", "")),
+        "unknown-cache-policy",
+    )
+
+
+def proof_reuse_index_entry(
+    artifact: dict[str, Any],
+    freshness_row: dict[str, Any],
+    source_path: str,
+    index: int,
+) -> dict[str, Any]:
+    evidence = freshness_row.get("evidence", {})
+    if not isinstance(evidence, dict):
+        evidence = {}
+    return {
+        "proof_id": proof_id_for(artifact, source_path, index),
+        "source_path": source_path,
+        "artifact_path": artifact.get("artifact_path", ""),
+        "manifest_lane_id": artifact.get("manifest_lane_id", ""),
+        "manifest_guarantee_ids": sorted_strings(artifact.get("manifest_guarantee_ids", [])),
+        "command": artifact.get("command", ""),
+        "command_fingerprint": candidate_command_fingerprint(artifact),
+        "source_fingerprint": artifact.get("source_fingerprint", ""),
+        "tree_fingerprint": artifact.get("tree_fingerprint", ""),
+        "toolchain_fingerprint": artifact.get("toolchain_fingerprint", ""),
+        "env_fingerprint": artifact.get("env_fingerprint", ""),
+        "feature_flags": sorted_strings(artifact.get("feature_flags", [])),
+        "touched_surfaces": sorted_strings(artifact.get("touched_files", [])),
+        "status": artifact.get("status", ""),
+        "generated_at": artifact.get("generated_at", ""),
+        "citeable_claims": sorted_strings(artifact.get("allowed_cache_hit_claims", [])),
+        "refusal_metadata": {
+            "freshness_classification": freshness_row.get("classification", ""),
+            "freshness_decision": freshness_row.get("decision", ""),
+            "freshness_reason": freshness_row.get("reason", ""),
+            "freshness_refusal_reason_code": freshness_refusal_reason(freshness_row),
+            "safe_to_cite": bool(freshness_row.get("safe_to_cite")),
+            "dirty_overlap_count": evidence.get("dirty_overlap_count", 0),
+            "remote_route_count": len(evidence.get("rch_remote_route_segments", [])),
+            "local_fallback_marker_count": len(evidence.get("rch_local_fallback_segments", [])),
+        },
+    }
+
+
+def build_proof_reuse_corpus(
+    root_texts: list[str],
+    repo_path: Path,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    corpus = []
+    approved_sources = []
+    for path, relative in iter_reuse_index_json_files(root_texts, repo_path):
+        approved_sources.append(relative)
+        raw = load_json(path)
+        for artifact, freshness_row in candidate_sources_from_json(raw, relative):
+            corpus.append(
+                {
+                    "source_path": relative,
+                    "artifact": artifact,
+                    "freshness_row": freshness_row,
+                }
+            )
+    corpus.sort(
+        key=lambda item: (
+            str(item["artifact"].get("manifest_lane_id", "")),
+            str(item["artifact"].get("generated_at", "")),
+            str(item["artifact"].get("artifact_path", "")),
+            str(item["source_path"]),
+        )
+    )
+    for index, item in enumerate(corpus):
+        item["index_entry"] = proof_reuse_index_entry(
+            item["artifact"],
+            item["freshness_row"],
+            item["source_path"],
+            index,
+        )
+    return corpus, sorted(set(approved_sources))
+
+
+def summarize_proof_reuse_index(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "candidate_count": len(entries),
+        "safe_to_cite": 0,
+        "freshness_refused": 0,
+        "by_lane": {},
+        "by_freshness_classification": {},
+    }
+    for entry in entries:
+        metadata = entry["refusal_metadata"]
+        lane = entry.get("manifest_lane_id") or "<missing>"
+        classification = metadata.get("freshness_classification") or "<missing>"
+        summary["by_lane"][lane] = summary["by_lane"].get(lane, 0) + 1
+        summary["by_freshness_classification"][classification] = (
+            summary["by_freshness_classification"].get(classification, 0) + 1
+        )
+        if metadata.get("safe_to_cite"):
+            summary["safe_to_cite"] += 1
+        else:
+            summary["freshness_refused"] += 1
+    summary["by_lane"] = dict(sorted(summary["by_lane"].items()))
+    summary["by_freshness_classification"] = dict(
+        sorted(summary["by_freshness_classification"].items())
+    )
+    return summary
+
+
+def build_proof_reuse_index(args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    repo_path = Path(args.repo_path).resolve()
+    generated_at = args.generated_at or utc_now()
+    corpus, approved_sources = build_proof_reuse_corpus(args.reuse_index_root, repo_path)
+    entries = [item["index_entry"] for item in corpus]
+    summary = summarize_proof_reuse_index(entries)
+    index = {
+        "schema_version": PROOF_REUSE_INDEX_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "repo_path": str(repo_path),
+        "approved_roots": normalized_approved_reuse_roots(args.reuse_index_root, repo_path),
+        "approved_sources": approved_sources,
+        "entries": entries,
+        "summary": summary,
+        "logs": [
+            {
+                "stage": "scan",
+                "approved_root_count": len(args.reuse_index_root),
+                "approved_source_count": len(approved_sources),
+                "candidate_count": summary["candidate_count"],
+            }
+        ],
+        "safety": {
+            "non_mutating": True,
+            "network_access_required": False,
+            "tracker_mutation_allowed": False,
+            "beads_mutated": False,
+            "cargo_executed": False,
+            "branch_or_worktree_operations": False,
+            "destructive_commands_executed": False,
+            "raw_proof_logs_embedded": False,
+        },
+    }
+    return index, corpus
+
+
+REUSE_REASON_RANK_WEIGHTS = {
+    "lane-mismatch": 1000,
+    "unknown-cache-policy": 600,
+    "missing-command-fingerprint": 500,
+    "command-mismatch": 450,
+    "source-hash-mismatch": 400,
+    "toolchain-mismatch": 350,
+    "dirty-frontier-overlap": 300,
+    "local-fallback-marker": 250,
+    "failed-proof-status": 220,
+    "stale-head": 200,
+    "branch-mismatch": 180,
+    "missing-touched-files": 160,
+    "missing-dirty-frontier-status": 140,
+    "broad-claim-unsupported": 120,
+}
+
+
+def proof_reuse_rank_score(row: dict[str, Any]) -> int:
+    if row["decision"] == "reusable":
+        return 0
+    reason_codes = row.get("reason_codes", [])
+    score = sum(REUSE_REASON_RANK_WEIGHTS.get(reason, 700) for reason in reason_codes)
+    return score + len(reason_codes)
+
+
+def compact_proof_reuse_query_row(
+    item: dict[str, Any],
+    classifier_row: dict[str, Any],
+) -> dict[str, Any]:
+    entry = item["index_entry"]
+    row = {
+        "rank": 0,
+        "rank_score": proof_reuse_rank_score(classifier_row),
+        "proof_id": entry["proof_id"],
+        "candidate_id": classifier_row["candidate_id"],
+        "source_path": entry["source_path"],
+        "manifest_lane_id": entry["manifest_lane_id"],
+        "decision": classifier_row["decision"],
+        "safe_to_reuse": classifier_row["safe_to_reuse"],
+        "classifier_decision": classifier_row["decision"],
+        "cache_hit_is_fresh_rch_pass": classifier_row["cache_hit_is_fresh_rch_pass"],
+        "reason_codes": classifier_row["reason_codes"],
+        "freshness_classification": classifier_row["freshness_classification"],
+        "freshness_decision": classifier_row["freshness_decision"],
+        "command_fingerprint": entry["command_fingerprint"],
+        "source_fingerprint": entry["source_fingerprint"],
+        "tree_fingerprint": entry["tree_fingerprint"],
+        "toolchain_fingerprint": entry["toolchain_fingerprint"],
+        "env_fingerprint": entry["env_fingerprint"],
+        "feature_flags": entry["feature_flags"],
+        "touched_surfaces": entry["touched_surfaces"],
+        "status": entry["status"],
+        "citeable_claims": entry["citeable_claims"],
+        "remediation": classifier_row["remediation"],
+    }
+    return row
+
+
+def sort_proof_reuse_query_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    decision_rank = {"reusable": 0, "refused": 1, "miss": 2}
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            decision_rank.get(str(row["decision"]), 9),
+            row["rank_score"],
+            str(row.get("proof_id", "")),
+            str(row.get("source_path", "")),
+        ),
+    )
+    for index, row in enumerate(rows, start=1):
+        row["rank"] = index
+    return rows
+
+
+def summarize_proof_reuse_query(
+    rows: list[dict[str, Any]],
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "candidate_count": len(rows),
+        "accepted_count": 0,
+        "refused_count": 0,
+        "miss_count": 0,
+        "chosen_proof_id": "",
+        "top_rerun_command": request.get("command", ""),
+        "by_reason_code": {},
+    }
+    for row in rows:
+        if row["decision"] == "reusable":
+            summary["accepted_count"] += 1
+            if not summary["chosen_proof_id"]:
+                summary["chosen_proof_id"] = row["proof_id"]
+        elif row["decision"] == "refused":
+            summary["refused_count"] += 1
+        elif row["decision"] == "miss":
+            summary["miss_count"] += 1
+        for reason in row.get("reason_codes", []):
+            summary["by_reason_code"][reason] = summary["by_reason_code"].get(reason, 0) + 1
+    summary["by_reason_code"] = dict(sorted(summary["by_reason_code"].items()))
+    if not summary["top_rerun_command"]:
+        for row in rows:
+            rerun = row.get("remediation", {}).get("rerun_command", "")
+            if rerun:
+                summary["top_rerun_command"] = rerun
+                break
+    return summary
+
+
+def build_proof_reuse_query(args: argparse.Namespace) -> dict[str, Any]:
+    index, corpus = build_proof_reuse_index(args)
+    request_path, _request_relative = repo_relative_path(
+        args.reuse_request_path,
+        Path(args.repo_path).resolve(),
+    )
+    request = normalize_reuse_request(load_json(request_path))
+    rows = sort_proof_reuse_query_rows(
+        [
+            compact_proof_reuse_query_row(
+                item,
+                classify_proof_reuse_candidate(
+                    request,
+                    item["artifact"],
+                    item["freshness_row"],
+                ),
+            )
+            for item in corpus
+        ]
+    )
+    summary = summarize_proof_reuse_query(rows, request)
+    best_candidate = next((row for row in rows if row["decision"] == "reusable"), None)
+    result = {
+        "schema_version": PROOF_REUSE_QUERY_SCHEMA_VERSION,
+        "generated_at": index["generated_at"],
+        "request": request,
+        "best_candidate": best_candidate,
+        "rows": rows,
+        "summary": summary,
+        "index_summary": index["summary"],
+        "logs": [
+            index["logs"][0],
+            {
+                "stage": "classify",
+                "candidate_count": summary["candidate_count"],
+                "accepted_count": summary["accepted_count"],
+                "refused_count": summary["refused_count"],
+                "miss_count": summary["miss_count"],
+            },
+            {
+                "stage": "choose",
+                "chosen_proof_id": summary["chosen_proof_id"],
+                "top_rerun_command": summary["top_rerun_command"],
+            },
+        ],
+        "safety": {
+            "non_mutating": True,
+            "network_access_required": False,
+            "tracker_mutation_allowed": False,
+            "beads_mutated": False,
+            "cache_hit_is_never_fresh_rch_pass": True,
+            "query_never_overrides_classifier": True,
+            "raw_proof_logs_embedded": False,
+        },
+    }
+    return result
+
+
+def render_proof_reuse_query_markdown(result: dict[str, Any]) -> str:
+    request = result["request"]
+    summary = result["summary"]
+    chosen = summary["chosen_proof_id"] or "<none>"
+    lines = [
+        f"# Proof reuse query: {request.get('request_id') or '<missing>'}",
+        "",
+        f"- lane: {request.get('manifest_lane_id') or '<missing>'}",
+        f"- claim_scope: {request.get('claim_scope') or '<missing>'}",
+        f"- candidates_scanned: {summary['candidate_count']}",
+        f"- accepted: {summary['accepted_count']}",
+        f"- refused: {summary['refused_count']}",
+        f"- misses: {summary['miss_count']}",
+        f"- chosen_proof_id: {chosen}",
+        f"- top_rerun_command: {summary['top_rerun_command'] or '<missing>'}",
+        "",
+        "## Ranked candidates",
+    ]
+    for row in result["rows"]:
+        reasons = ",".join(row.get("reason_codes", [])) or "<none>"
+        lines.append(
+            f"{row['rank']}. {row['proof_id']} | decision={row['decision']} | "
+            f"safe_to_reuse={str(row['safe_to_reuse']).lower()} | reasons={reasons}"
+        )
+    return "\n".join(lines)
+
+
+def render_proof_reuse_index_markdown(index: dict[str, Any]) -> str:
+    summary = index["summary"]
+    lines = [
+        "# Proof reuse index",
+        "",
+        f"- candidates_scanned: {summary['candidate_count']}",
+        f"- safe_to_cite: {summary['safe_to_cite']}",
+        f"- freshness_refused: {summary['freshness_refused']}",
+        "",
+        "## Lanes",
+    ]
+    for lane, count in summary["by_lane"].items():
+        lines.append(f"- {lane}: {count}")
+    return "\n".join(lines)
 
 
 def remediation_for(classification: str, command: str) -> dict[str, Any]:
@@ -1417,16 +1980,46 @@ def main() -> int:
     parser.add_argument("--agent", default="", help="Agent generating the receipt")
     parser.add_argument("--generated-at", default="", help="Stable timestamp for deterministic receipts")
     parser.add_argument("--timeout", type=float, default=2.0, help="Per-probe timeout in seconds")
-    parser.add_argument("--output", choices=["json"], default="json")
+    parser.add_argument(
+        "--reuse-index-root",
+        action="append",
+        default=[],
+        help="Approved repo-local artifact or receipt-fixture root to scan for proof reuse",
+    )
+    parser.add_argument(
+        "--request",
+        "--query",
+        dest="reuse_request_path",
+        default="",
+        help="Desired proof lane JSON envelope for proof reuse query mode",
+    )
+    parser.add_argument("--output", choices=["json", "markdown"], default="json")
     args = parser.parse_args()
 
     try:
-        receipt = build_receipt(args)
-    except (OSError, json.JSONDecodeError) as error:
+        if args.reuse_index_root:
+            receipt = (
+                build_proof_reuse_query(args)
+                if args.reuse_request_path
+                else build_proof_reuse_index(args)[0]
+            )
+        elif args.reuse_request_path:
+            raise ValueError("--request/--query requires at least one --reuse-index-root")
+        else:
+            receipt = build_receipt(args)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
         print(json.dumps({"error": str(error)}, indent=2), file=sys.stderr)
         return 2
 
-    print(json.dumps(receipt, indent=2, sort_keys=True))
+    if args.output == "markdown":
+        if receipt.get("schema_version") == PROOF_REUSE_QUERY_SCHEMA_VERSION:
+            print(render_proof_reuse_query_markdown(receipt))
+        elif receipt.get("schema_version") == PROOF_REUSE_INDEX_SCHEMA_VERSION:
+            print(render_proof_reuse_index_markdown(receipt))
+        else:
+            print(receipt.get("agent_mail_summary", ""))
+    else:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0
 
 
