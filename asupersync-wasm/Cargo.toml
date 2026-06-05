@@ -2,7 +2,7 @@
 name = "asupersync-wasm"
 version = "0.1.0"
 edition = "2024"
-license-file = "../LICENSE"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Non-canonical scaffold for future or alternative Browser Edition WASM binding strategies."
 repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["async", "wasm", "browser", "bindings", "structured-concurrency"]
