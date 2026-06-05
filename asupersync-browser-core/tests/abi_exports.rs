@@ -29,7 +29,7 @@ fn error_message(err: wasm_bindgen::JsValue) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn error_message(err: String) -> String {
+const fn error_message(err: String) -> String {
     err
 }
 
