@@ -41,6 +41,46 @@ CARGO_PROOF_COMMAND = re.compile(
     r"(?:build|check|clippy|doc|fmt|fuzz|run|test|tree)\b",
     re.IGNORECASE,
 )
+LIBTEST_RUNNING_COUNT_RE = re.compile(
+    r"(?m)^\s*running\s+(\d+)\s+tests?\b",
+    re.IGNORECASE,
+)
+LIBTEST_RESULT_RE = re.compile(
+    r"test result:\s+\w+\.\s+"
+    r"(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored\b",
+    re.IGNORECASE,
+)
+CARGO_TEST_VALUE_OPTIONS = {
+    "-j",
+    "-p",
+    "-Z",
+    "--bench",
+    "--bin",
+    "--color",
+    "--config",
+    "--example",
+    "--exclude",
+    "--features",
+    "--jobs",
+    "--manifest-path",
+    "--message-format",
+    "--package",
+    "--profile",
+    "--target",
+    "--target-dir",
+    "--test",
+}
+LIBTEST_VALUE_OPTIONS = {
+    "--color",
+    "--ensure-time",
+    "--exclude-should-panic",
+    "--format",
+    "--logfile",
+    "--report-time",
+    "--shuffle-seed",
+    "--skip",
+    "--test-threads",
+}
 RCH_LOCAL_FALLBACK_RE = re.compile(
     r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
@@ -88,9 +128,12 @@ BROAD_CACHE_CLAIMS = {
 REUSE_REFUSAL_BY_CLASSIFICATION = {
     "dirty-surface-overlap": "dirty-frontier-overlap",
     "failed-proof-artifact": "failed-proof-status",
+    "exact-filter-no-executed-tests": "exact-filter-no-executed-tests",
+    "exact-filter-zero-tests": "exact-filter-zero-tests",
     "repo-not-main": "branch-mismatch",
     "rch-local-fallback-proof": "local-fallback-marker",
     "superseded-head": "stale-head",
+    "unverifiable-exact-filter-proof": "missing-exact-filter-test-count",
     "unverifiable-command": "missing-command-fingerprint",
     "unverifiable-fuzz-extent-proof": "missing-command-fingerprint",
     "unverifiable-head": "stale-head",
@@ -369,6 +412,102 @@ def normalized_command_argv(command: str) -> list[str]:
 def command_fingerprint(command: str) -> str:
     argv = normalized_command_argv(command)
     return sha256_text(json.dumps(argv, separators=(",", ":"), ensure_ascii=True))
+
+
+def split_option_separator(args: list[str]) -> tuple[list[str], list[str]]:
+    if "--" not in args:
+        return args, []
+    index = args.index("--")
+    return args[:index], args[index + 1 :]
+
+
+def positional_arguments(args: list[str], value_options: set[str]) -> list[str]:
+    positionals = []
+    skip_next = False
+    for token in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("--"):
+            if "=" not in token and token in value_options:
+                skip_next = True
+            continue
+        if token.startswith("-") and token != "-":
+            if token in value_options:
+                skip_next = True
+            continue
+        positionals.append(token)
+    return positionals
+
+
+def cargo_test_exact_filter(command: str) -> str:
+    argv = normalized_command_argv(command)
+    for index, token in enumerate(argv):
+        if token != "cargo":
+            continue
+        command_index = index + 1
+        if command_index < len(argv) and argv[command_index].startswith("+"):
+            command_index += 1
+        if command_index >= len(argv) or argv[command_index] != "test":
+            continue
+        cargo_args, harness_args = split_option_separator(argv[command_index + 1 :])
+        if "--exact" not in harness_args:
+            continue
+        filter_candidates = [
+            *positional_arguments(cargo_args, CARGO_TEST_VALUE_OPTIONS),
+            *positional_arguments(
+                [arg for arg in harness_args if arg != "--exact"],
+                LIBTEST_VALUE_OPTIONS,
+            ),
+        ]
+        if filter_candidates:
+            return filter_candidates[0]
+    return ""
+
+
+def exact_cargo_test_findings(command: str, texts: list[str]) -> dict[str, Any]:
+    exact_filter = cargo_test_exact_filter(command)
+    if not exact_filter:
+        return {"is_exact_filter": False, "defects": []}
+
+    output = normalize_proof_output_text(texts)
+    running_counts = [int(match.group(1)) for match in LIBTEST_RUNNING_COUNT_RE.finditer(output)]
+    result_counts = [
+        {
+            "passed": int(match.group(1)),
+            "failed": int(match.group(2)),
+            "ignored": int(match.group(3)),
+        }
+        for match in LIBTEST_RESULT_RE.finditer(output)
+    ]
+    total_tests = sum(running_counts)
+    passed_tests = sum(row["passed"] for row in result_counts)
+    failed_tests = sum(row["failed"] for row in result_counts)
+    ignored_tests = sum(row["ignored"] for row in result_counts)
+    executed_tests = passed_tests + failed_tests
+
+    defects = []
+    if not running_counts:
+        defects.append("missing-test-count")
+    elif total_tests == 0:
+        defects.append("zero-tests")
+    elif not result_counts:
+        defects.append("missing-test-result")
+    elif executed_tests == 0:
+        defects.append("no-executed-tests")
+
+    return {
+        "is_exact_filter": True,
+        "exact_filter": exact_filter,
+        "running_count_segments": running_counts,
+        "result_count_segments": result_counts,
+        "total_tests": total_tests,
+        "passed_tests": passed_tests,
+        "failed_tests": failed_tests,
+        "ignored_tests": ignored_tests,
+        "executed_tests": executed_tests,
+        "defects": defects,
+    }
 
 
 def command_has_required_rch_prefix(command: str) -> bool:
@@ -855,6 +994,7 @@ def classify_artifact(
         )
     )
     fuzz_extent_findings = fuzz_extent_proof_findings(artifact)
+    exact_test_findings = exact_cargo_test_findings(command, artifact.get("proof_text", []))
 
     evidence = {
         "artifact_git_sha": git_sha,
@@ -880,6 +1020,21 @@ def classify_artifact(
         evidence["fuzz_extent_proof_reasons"] = fuzz_extent_findings["defects"]
         evidence["fuzz_extent_missing_targets"] = fuzz_extent_findings["missing_targets"]
         evidence["fuzz_extent"] = artifact.get("fuzz_extent", {})
+    if exact_test_findings.get("is_exact_filter"):
+        evidence["exact_filter"] = exact_test_findings["exact_filter"]
+        evidence["exact_filter_running_count_segments"] = exact_test_findings[
+            "running_count_segments"
+        ]
+        evidence["exact_filter_result_count_segments"] = exact_test_findings[
+            "result_count_segments"
+        ]
+        evidence["exact_filter_total_tests"] = exact_test_findings["total_tests"]
+        evidence["exact_filter_passed_tests"] = exact_test_findings["passed_tests"]
+        evidence["exact_filter_failed_tests"] = exact_test_findings["failed_tests"]
+        evidence["exact_filter_ignored_tests"] = exact_test_findings["ignored_tests"]
+        evidence["exact_filter_executed_tests"] = exact_test_findings["executed_tests"]
+        if exact_test_findings["defects"]:
+            evidence["exact_filter_proof_reasons"] = exact_test_findings["defects"]
 
     if not git_sha or not current_head:
         classification = "unverifiable-head"
@@ -921,6 +1076,18 @@ def classify_artifact(
         classification = "unverifiable-rch-remote-proof"
         decision = "rerun-required"
         reason = "artifact proof evidence lacks positive rch remote worker route marker"
+    elif exact_test_findings.get("is_exact_filter") and "zero-tests" in exact_test_findings["defects"]:
+        classification = "exact-filter-zero-tests"
+        decision = "rerun-required"
+        reason = "artifact exact cargo test proof ran zero tests"
+    elif exact_test_findings.get("is_exact_filter") and "no-executed-tests" in exact_test_findings["defects"]:
+        classification = "exact-filter-no-executed-tests"
+        decision = "rerun-required"
+        reason = "artifact exact cargo test proof did not execute a matched test"
+    elif exact_test_findings.get("is_exact_filter") and exact_test_findings["defects"]:
+        classification = "unverifiable-exact-filter-proof"
+        decision = "rerun-required"
+        reason = "artifact exact cargo test proof lacks parseable executed-test evidence"
     elif fuzz_extent_findings["defects"]:
         classification = "unverifiable-fuzz-extent-proof"
         decision = "rerun-required"
@@ -937,6 +1104,9 @@ def classify_artifact(
     if rch_remote_route_required and classification in {
         "unverifiable-rch-remote-proof",
         "unverifiable-fuzz-extent-proof",
+        "exact-filter-no-executed-tests",
+        "exact-filter-zero-tests",
+        "unverifiable-exact-filter-proof",
         "dirty-surface-overlap",
         "current-clean",
     }:
@@ -1862,6 +2032,33 @@ def remediation_for(classification: str, command: str) -> dict[str, Any]:
             "operator_note": "Do not cite an RCH Cargo proof without positive remote-worker route evidence.",
             "next_steps": [
                 "rerun the proof remotely and capture a transcript line starting with [RCH] remote",
+                "replace the artifact output before citing it",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "exact-filter-zero-tests":
+        return {
+            "operator_note": "Do not cite an exact-filter Cargo proof that ran zero tests.",
+            "next_steps": [
+                "verify that the exact test name still exists on current main",
+                "rerun the intended proof lane or update the stale filter before citing it",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "exact-filter-no-executed-tests":
+        return {
+            "operator_note": "Do not cite an exact-filter Cargo proof whose matched tests were all ignored.",
+            "next_steps": [
+                "run a proof lane that executes at least one matched test",
+                "keep the stale or ignored exact-filter output as diagnostic evidence only",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "unverifiable-exact-filter-proof":
+        return {
+            "operator_note": "Do not cite an exact-filter Cargo proof without parseable test-count evidence.",
+            "next_steps": [
+                "rerun with --nocapture or otherwise capture libtest running/test-result summary lines",
                 "replace the artifact output before citing it",
             ],
             "rerun_command": command,

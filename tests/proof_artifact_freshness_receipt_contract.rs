@@ -384,6 +384,14 @@ fn missing_remote_required_command_matches_full_output_golden() {
 }
 
 #[test]
+fn exact_filter_zero_tests_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "exact_filter_zero_tests.json",
+        "exact_filter_zero_tests_expected.json",
+    );
+}
+
+#[test]
 fn rch_exec_cargo_without_env_target_dir_requires_rerun() {
     let receipt = receipt_json("missing_target_dir_command.json");
     let row = first_row(&receipt);
@@ -713,6 +721,198 @@ print(json.dumps(rows, sort_keys=True))
         let expected_segment = format!("[RCH] remote rch-worker-{field} (1.0s)");
         assert_eq!(row["segments"][0].as_str(), Some(expected_segment.as_str()));
     }
+}
+
+#[test]
+fn exact_filter_cargo_test_requires_executed_tests() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("proof_artifact_freshness_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+head = "2222222222222222222222222222222222222222"
+base = {
+    "artifact_path": "artifacts/proof/exact-filter.json",
+    "git_sha": head,
+    "git_branch": "main",
+    "touched_files": [
+        "scripts/proof_artifact_freshness_receipt.py",
+        "tests/proof_artifact_freshness_receipt_contract.rs"
+    ],
+    "status": "pass",
+    "generated_at": "2026-05-08T05:15:00Z",
+}
+remote = "[RCH] remote rch-worker-exact-filter (1.0s)"
+cases = [
+    {
+        "case": "exact_filter_zero_tests",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exact_filter cargo test -p asupersync --test proof_artifact_freshness_receipt_contract missing_test_name -- --exact --nocapture",
+        "stdout": "\n".join([
+            remote,
+            "running 0 tests",
+            "",
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s",
+        ]),
+    },
+    {
+        "case": "exact_filter_one_passed_test",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exact_filter cargo test -p asupersync --test proof_artifact_freshness_receipt_contract current_clean_artifact_is_citeable -- --exact --nocapture",
+        "stdout": "\n".join([
+            remote,
+            "running 1 test",
+            "test current_clean_artifact_is_citeable ... ok",
+            "",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s",
+        ]),
+    },
+    {
+        "case": "exact_filter_in_harness_args",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exact_filter cargo test -p asupersync --test proof_artifact_freshness_receipt_contract -- --exact current_clean_artifact_is_citeable --nocapture",
+        "stdout": "\n".join([
+            remote,
+            "running 1 test",
+            "test current_clean_artifact_is_citeable ... ok",
+            "",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s",
+        ]),
+    },
+    {
+        "case": "exact_filter_ignored_only",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exact_filter cargo test -p asupersync --test proof_artifact_freshness_receipt_contract ignored_only_fixture -- --exact --nocapture",
+        "stdout": "\n".join([
+            remote,
+            "running 1 test",
+            "test ignored_only_fixture ... ignored",
+            "",
+            "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 11 filtered out; finished in 0.00s",
+        ]),
+    },
+    {
+        "case": "exact_filter_missing_counts",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exact_filter cargo test -p asupersync --test proof_artifact_freshness_receipt_contract missing_counts -- --exact --nocapture",
+        "stdout": remote,
+    },
+    {
+        "case": "non_exact_zero_tests",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exact_filter cargo test -p asupersync --test proof_artifact_freshness_receipt_contract -- --nocapture",
+        "stdout": "\n".join([
+            remote,
+            "running 0 tests",
+            "",
+            "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s",
+        ]),
+    },
+]
+
+rows = []
+for item in cases:
+    raw = dict(base)
+    raw.update(item)
+    artifact = module.normalize_artifact(raw)
+    row = module.classify_artifact(artifact, head, "main", [])
+    rows.append({
+        "case": item["case"],
+        "classification": row["classification"],
+        "decision": row["decision"],
+        "safe_to_cite": row["safe_to_cite"],
+        "exact_filter": row["evidence"].get("exact_filter", ""),
+        "total_tests": row["evidence"].get("exact_filter_total_tests"),
+        "executed_tests": row["evidence"].get("exact_filter_executed_tests"),
+        "reasons": row["evidence"].get("exact_filter_proof_reasons", []),
+        "operator_note": row["remediation"]["operator_note"],
+    })
+print(json.dumps(rows, sort_keys=True))
+"#;
+    let mut child = Command::new("python3")
+        .arg("-")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn exact-filter classifier smoke");
+    child
+        .stdin
+        .as_mut()
+        .expect("classifier smoke stdin")
+        .write_all(script.as_bytes())
+        .expect("write classifier smoke script");
+    let output = child
+        .wait_with_output()
+        .expect("run exact-filter classifier smoke");
+    assert!(
+        output.status.success(),
+        "exact-filter classifier smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("classifier smoke JSON");
+    let rows = parsed.as_array().expect("classifier smoke rows");
+    assert_eq!(rows.len(), 6);
+
+    let by_case = |case_name: &str| -> &Value {
+        rows.iter()
+            .find(|row| row["case"].as_str() == Some(case_name))
+            .unwrap_or_else(|| panic!("missing case {case_name}"))
+    };
+
+    let zero = by_case("exact_filter_zero_tests");
+    assert_eq!(
+        zero["classification"].as_str(),
+        Some("exact-filter-zero-tests")
+    );
+    assert_eq!(zero["decision"].as_str(), Some("rerun-required"));
+    assert_eq!(zero["safe_to_cite"].as_bool(), Some(false));
+    assert_eq!(zero["exact_filter"].as_str(), Some("missing_test_name"));
+    assert_eq!(zero["total_tests"].as_u64(), Some(0));
+    assert_eq!(zero["reasons"][0].as_str(), Some("zero-tests"));
+
+    for case_name in [
+        "exact_filter_one_passed_test",
+        "exact_filter_in_harness_args",
+    ] {
+        let row = by_case(case_name);
+        assert_eq!(row["classification"].as_str(), Some("current-clean"));
+        assert_eq!(row["safe_to_cite"].as_bool(), Some(true));
+        assert_eq!(row["total_tests"].as_u64(), Some(1));
+        assert_eq!(row["executed_tests"].as_u64(), Some(1));
+    }
+    assert_eq!(
+        by_case("exact_filter_in_harness_args")["exact_filter"].as_str(),
+        Some("current_clean_artifact_is_citeable")
+    );
+
+    let ignored = by_case("exact_filter_ignored_only");
+    assert_eq!(
+        ignored["classification"].as_str(),
+        Some("exact-filter-no-executed-tests")
+    );
+    assert_eq!(ignored["safe_to_cite"].as_bool(), Some(false));
+    assert_eq!(ignored["total_tests"].as_u64(), Some(1));
+    assert_eq!(ignored["executed_tests"].as_u64(), Some(0));
+    assert_eq!(ignored["reasons"][0].as_str(), Some("no-executed-tests"));
+
+    let missing = by_case("exact_filter_missing_counts");
+    assert_eq!(
+        missing["classification"].as_str(),
+        Some("unverifiable-exact-filter-proof")
+    );
+    assert_eq!(missing["safe_to_cite"].as_bool(), Some(false));
+    assert_eq!(missing["reasons"][0].as_str(), Some("missing-test-count"));
+
+    let non_exact = by_case("non_exact_zero_tests");
+    assert_eq!(non_exact["classification"].as_str(), Some("current-clean"));
+    assert_eq!(non_exact["safe_to_cite"].as_bool(), Some(true));
+    assert_eq!(non_exact["total_tests"].as_u64(), None);
 }
 
 #[test]
