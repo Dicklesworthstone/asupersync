@@ -168,19 +168,19 @@ fn generate_summary_output(report: &PingComplianceReport) -> String {
     // Summary of RTT behavior
     output.push_str("\nRTT BEHAVIOR:\n");
     for result in &report.results {
-        if let Some(state) = &result.asupersync_state {
-            if !state.ping_timings.is_empty() {
-                output.push_str(&format!(
-                    "  📊 {}: {} RTT measurements\n",
-                    result.case_id,
-                    state.ping_timings.len()
-                ));
-                for (i, timing) in state.ping_timings.iter().enumerate() {
-                    if let Some(rtt) = timing.rtt_ms {
-                        output.push_str(&format!("      RTT[{}]: {}ms\n", i, rtt));
-                    } else {
-                        output.push_str(&format!("      RTT[{}]: pending\n", i));
-                    }
+        if let Some(state) = &result.asupersync_state
+            && !state.ping_timings.is_empty()
+        {
+            output.push_str(&format!(
+                "  📊 {}: {} RTT measurements\n",
+                result.case_id,
+                state.ping_timings.len()
+            ));
+            for (i, timing) in state.ping_timings.iter().enumerate() {
+                if let Some(rtt) = timing.rtt_ms {
+                    output.push_str(&format!("      RTT[{}]: {}ms\n", i, rtt));
+                } else {
+                    output.push_str(&format!("      RTT[{}]: pending\n", i));
                 }
             }
         }

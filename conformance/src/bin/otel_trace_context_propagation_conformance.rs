@@ -147,11 +147,9 @@ fn main() {
         }
         "report" => {
             generate_compliance_report();
-            return;
         }
         "all" => {
             run_all_tests(verbose);
-            return;
         }
         _ => {
             eprintln!("Unknown test: {}", test_name);
@@ -856,12 +854,10 @@ fn create_test_span_context_with_state(
 }
 
 /// Check if test case has known propagation divergences
-fn is_known_propagation_divergence(test_name: &str, context_name: &str) -> bool {
+fn is_known_propagation_divergence(_test_name: &str, _context_name: &str) -> bool {
     // Define known divergences here
     // For now, assume no known divergences
-    match (test_name, context_name) {
-        _ => false,
-    }
+    false
 }
 
 /// Simple test span wrapper for SpanContext

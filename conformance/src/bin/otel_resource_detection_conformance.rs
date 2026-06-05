@@ -244,13 +244,14 @@ fn compare_resources(
 
     // Schema URL comparison is optional since our implementation may not set it
     // But if both set it, they should match
-    if our_resource.schema_url.is_some() && reference_resource.schema_url.is_some() {
-        if our_resource.schema_url != reference_resource.schema_url {
-            return Err(format!(
-                "Schema URL mismatch: our={:?}, reference={:?}",
-                our_resource.schema_url, reference_resource.schema_url
-            ));
-        }
+    if our_resource.schema_url.is_some()
+        && reference_resource.schema_url.is_some()
+        && our_resource.schema_url != reference_resource.schema_url
+    {
+        return Err(format!(
+            "Schema URL mismatch: our={:?}, reference={:?}",
+            our_resource.schema_url, reference_resource.schema_url
+        ));
     }
 
     Ok(())

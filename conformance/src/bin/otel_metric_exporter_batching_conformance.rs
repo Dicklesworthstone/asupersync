@@ -265,7 +265,7 @@ fn create_metrics_snapshot(metrics_data: &[MetricData]) -> MetricsSnapshot {
     let mut histograms = Vec::new();
 
     for metric in metrics_data {
-        let labels: MetricLabels = metric.labels.iter().cloned().collect();
+        let labels: MetricLabels = metric.labels.to_vec();
 
         match &metric.metric_type {
             MetricType::Counter => {
@@ -296,7 +296,7 @@ fn convert_otlp_request_to_batch_data(request: ExportMetricsServiceRequest) -> M
     let resource_metrics = request
         .resource_metrics
         .into_iter()
-        .map(|rm| convert_resource_metrics(rm))
+        .map(convert_resource_metrics)
         .collect();
 
     MetricBatchData { resource_metrics }
@@ -311,10 +311,11 @@ fn convert_resource_metrics(rm: ResourceMetrics) -> ResourceMetricsData {
         for attr in resource.attributes {
             match attr.key.as_str() {
                 "service.name" => {
-                    if let Some(value) = attr.value.and_then(|v| v.value) {
-                        if let opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s) = value {
-                            service_name = s;
-                        }
+                    if let Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(s),
+                    ) = attr.value.and_then(|v| v.value)
+                    {
+                        service_name = s;
                     }
                 }
                 "batch.sequence" => {
@@ -328,7 +329,7 @@ fn convert_resource_metrics(rm: ResourceMetrics) -> ResourceMetricsData {
     let scope_metrics = rm
         .scope_metrics
         .into_iter()
-        .map(|sm| convert_scope_metrics(sm))
+        .map(convert_scope_metrics)
         .collect();
 
     ResourceMetricsData {
@@ -345,7 +346,7 @@ fn convert_scope_metrics(sm: ScopeMetrics) -> ScopeMetricsData {
         ("unknown".to_string(), "".to_string())
     };
 
-    let metrics = sm.metrics.into_iter().map(|m| convert_metric(m)).collect();
+    let metrics = sm.metrics.into_iter().map(convert_metric).collect();
 
     ScopeMetricsData {
         scope_name,

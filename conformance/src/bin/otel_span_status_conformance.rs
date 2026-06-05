@@ -120,7 +120,6 @@ fn main() {
         ),
         "report" => {
             generate_compliance_report();
-            return;
         }
         "all" => run_all_tests(verbose),
         _ => {
