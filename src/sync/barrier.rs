@@ -92,7 +92,7 @@ impl Barrier {
     /// decrements the arrival count so the barrier remains consistent for
     /// other waiters.
     #[inline]
-    pub fn wait<'a>(&'a self, cx: &'a Cx) -> BarrierWaitFuture<'a> {
+    pub fn wait<'a, Caps>(&'a self, cx: &'a Cx<Caps>) -> BarrierWaitFuture<'a, Caps> {
         BarrierWaitFuture {
             barrier: self,
             cx,
@@ -116,13 +116,13 @@ enum WaitState {
 
 /// Future returned by `Barrier::wait`.
 #[derive(Debug)]
-pub struct BarrierWaitFuture<'a> {
+pub struct BarrierWaitFuture<'a, Caps = crate::cx::cap::All> {
     barrier: &'a Barrier,
-    cx: &'a Cx,
+    cx: &'a Cx<Caps>,
     state: WaitState,
 }
 
-impl Future for BarrierWaitFuture<'_> {
+impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
     type Output = Result<BarrierWaitResult, BarrierWaitError>;
 
     #[allow(clippy::too_many_lines)]
@@ -275,7 +275,7 @@ impl Future for BarrierWaitFuture<'_> {
     }
 }
 
-impl Drop for BarrierWaitFuture<'_> {
+impl<Caps> Drop for BarrierWaitFuture<'_, Caps> {
     fn drop(&mut self) {
         if let WaitState::Waiting {
             generation,
@@ -475,6 +475,18 @@ mod tests {
         );
 
         summaries
+    }
+
+    #[test]
+    fn wait_accepts_detached_no_cap_context() {
+        init_test("wait_accepts_detached_no_cap_context");
+        let barrier = Barrier::new(1);
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+
+        let result = block_on(barrier.wait(&cx)).expect("wait should accept cap::None Cx");
+
+        crate::assert_with_log!(result.is_leader(), "leader", true, result.is_leader());
+        crate::test_complete!("wait_accepts_detached_no_cap_context");
     }
 
     #[test]

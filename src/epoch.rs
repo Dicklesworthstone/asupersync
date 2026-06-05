@@ -2095,8 +2095,10 @@ mod tests {
     fn test_epoch_clock_advance() {
         init_test("test_epoch_clock_advance");
         let config = EpochConfig::short_lived();
+        let min_duration_ns = config.min_duration.as_nanos();
         let clock = EpochClock::new(config);
-        clock.initialize(Time::from_nanos(1_000_000_000));
+        let started_at = Time::from_nanos(1_000_000_000);
+        clock.initialize(started_at);
 
         crate::assert_with_log!(
             clock.current() == EpochId::GENESIS,
@@ -2106,7 +2108,9 @@ mod tests {
         );
 
         // Advance after minimum duration
-        let new_epoch = clock.advance(Time::from_millis(100)).unwrap();
+        let new_epoch = clock
+            .advance(started_at.saturating_add_nanos(min_duration_ns.saturating_add(1)))
+            .unwrap();
         crate::assert_with_log!(new_epoch == EpochId(1), "new epoch", EpochId(1), new_epoch);
         crate::assert_with_log!(
             clock.current() == EpochId(1),
@@ -2128,12 +2132,15 @@ mod tests {
             retention_epochs: 3,
             ..EpochConfig::default()
         };
+        let min_duration_ns = config.min_duration.as_nanos();
         let clock = EpochClock::new(config);
-        clock.initialize(Time::from_nanos(1_000_000_000));
+        let mut now = Time::from_nanos(1_000_000_000);
+        clock.initialize(now);
 
         // Advance through multiple epochs
-        for i in 1..=5 {
-            clock.advance(Time::from_millis(i * 20)).unwrap();
+        for _ in 1..=5 {
+            now = now.saturating_add_nanos(min_duration_ns.saturating_add(1));
+            clock.advance(now).unwrap();
         }
 
         let history = clock.history();

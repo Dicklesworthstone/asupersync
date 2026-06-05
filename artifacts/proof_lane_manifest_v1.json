@@ -17,6 +17,164 @@
     "formal_lean_build_must_not_shell_wrap": true,
     "broad_validation_is_frontier_evidence_not_local_change_proof": true
   },
+  "resource_envelope_policy": {
+    "policy_id": "proof-lane-resource-envelope-policy-v1",
+    "schema_version": "proof-lane-resource-envelope-v1",
+    "scope_note": "Proof metadata only: these envelopes classify expected remote proof-lane resource pressure and fail-closed admission semantics. They do not implement, replace, or prove OS-level worker cgroup MemoryMax/CPU quota enforcement.",
+    "operator_log_fields": [
+      "lane_id",
+      "command_prefix",
+      "resource_envelope_class",
+      "timeout_seconds",
+      "memory_mb",
+      "remote_required",
+      "local_fallback_allowed",
+      "fail_closed_reason"
+    ],
+    "classes": [
+      {
+        "class_id": "dependency-graph-light",
+        "lane_kinds": [
+          "dependency_graph"
+        ],
+        "timeout_seconds": 900,
+        "memory_mb": 4096,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Cargo dependency graph audits should be remote-routed but are expected to consume modest memory and wall time."
+      },
+      {
+        "class_id": "compile-frontier-heavy",
+        "lane_kinds": [
+          "compile_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 49152,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Broad cargo check/build frontiers may compile large feature graphs and need explicit remote time and memory envelopes."
+      },
+      {
+        "class_id": "test-frontier-heavy",
+        "lane_kinds": [
+          "test_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 65536,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Broad lib/integration test frontiers can run large deterministic suites and must never silently fall back to local execution."
+      },
+      {
+        "class_id": "lint-frontier-heavy",
+        "lane_kinds": [
+          "lint_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 49152,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Workspace clippy frontiers are expensive compile-like proof lanes with strict remote-only routing."
+      },
+      {
+        "class_id": "format-frontier-light",
+        "lane_kinds": [
+          "format_frontier"
+        ],
+        "timeout_seconds": 600,
+        "memory_mb": 2048,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Formatting checks are cheap but still inherit the manifest's remote-required proof-command policy."
+      },
+      {
+        "class_id": "documentation-frontier-medium",
+        "lane_kinds": [
+          "documentation_frontier"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Rustdoc/API proof lanes are compile-adjacent and require a bounded remote envelope without being treated as broad workspace health."
+      },
+      {
+        "class_id": "formal-frontier-medium",
+        "lane_kinds": [
+          "formal_frontier"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Lean/formal proof builds are remote-required proof lanes with explicit finite wall-clock and memory envelopes."
+      },
+      {
+        "class_id": "artifact-contract-medium",
+        "lane_kinds": [
+          "artifact_contract"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Contract-only lanes run focused Rust verifier tests or artifact checks and should stay bounded without inheriting broad-suite pressure."
+      },
+      {
+        "class_id": "dependency-audit-light",
+        "lane_kinds": [
+          "dependency_audit"
+        ],
+        "timeout_seconds": 900,
+        "memory_mb": 2048,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Shell dependency audits are lightweight remote-required proof lanes with explicit no-local-fallback semantics."
+      }
+    ]
+  },
+  "proof_reuse_policy": {
+    "policy_id": "strict-rch-proof-reuse-policy-v1",
+    "proof_reuse_cache_contract": "artifacts/proof_reuse_cache_contract_v1.json",
+    "cache_hit_is_never_fresh_rch_pass": true,
+    "default_required_match_field_set": "strict-rch-proof-reuse-v1",
+    "required_match_field_sets": {
+      "strict-rch-proof-reuse-v1": [
+        "manifest_lane_id",
+        "manifest_guarantee_ids",
+        "command_fingerprint",
+        "source_tree_fingerprint",
+        "toolchain_fingerprint",
+        "head_commit",
+        "branch",
+        "dirty_frontier_status",
+        "touched_files",
+        "touched_file_hashes",
+        "feature_flags",
+        "cargo_lock_hash",
+        "rust_toolchain_toml_hash",
+        "status",
+        "proof_output_digest",
+        "rch_remote_worker",
+        "rch_remote_route_segments",
+        "local_fallback_markers"
+      ]
+    },
+    "default_non_citeable_claim_scopes": [
+      "fresh-rch-pass",
+      "release-readiness",
+      "workspace-health"
+    ]
+  },
   "required_guarantee_ids": [
     "default-production-tokio-free",
     "metrics-production-tokio-free",
@@ -33,6 +191,7 @@
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
+    "admission-aware-proof-lane-atlas",
     "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
@@ -40,6 +199,7 @@
     {
       "lane_id": "default-production-tokio-tree",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
       "package": "asupersync",
       "feature_flags": [],
@@ -58,11 +218,25 @@
       "common_unrelated_blockers": [
         "Cargo.lock or dependency graph drift from unrelated feature work"
       ],
-      "escalation_notes": "Any tokio path here is a production regression; file or update a blocker bead with the full cargo-tree path."
+      "escalation_notes": "Any tokio path here is a production regression; file or update a blocker bead with the full cargo-tree path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "default-production-tokio-free"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "metrics-production-tokio-tree",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
       "package": "asupersync",
       "feature_flags": [
@@ -84,11 +258,25 @@
         "opentelemetry or opentelemetry_sdk feature drift",
         "accidental metrics dependency on opentelemetry-proto"
       ],
-      "escalation_notes": "Treat any tokio edge as a metrics production regression and capture the feature path."
+      "escalation_notes": "Treat any tokio edge as a metrics production regression and capture the feature path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "metrics-production-tokio-free"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "fuzz-tokio-quarantine-tree",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
       "package": "asupersync",
       "feature_flags": [
@@ -108,11 +296,25 @@
       "common_unrelated_blockers": [
         "fuzz feature dependency churn"
       ],
-      "escalation_notes": "If the path disappears, update the quarantine contract; if it appears in default or metrics lanes, file a production blocker."
+      "escalation_notes": "If the path disappears, update the quarantine contract; if it appears in default or metrics lanes, file a production blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fuzz-tokio-quarantine"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "workspace-normal-tokio-audit",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
       "package": "workspace",
       "feature_flags": [],
@@ -130,11 +332,25 @@
       "common_unrelated_blockers": [
         "new workspace member enables tokio without documentation"
       ],
-      "escalation_notes": "Compare output against AGENTS documented carve-outs before filing a regression."
+      "escalation_notes": "Compare output against AGENTS documented carve-outs before filing a regression.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "workspace-tokio-audit"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "full-feature-tokio-audit",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_full_tokio_tree cargo tree -e features --workspace --invert tokio",
       "package": "workspace",
       "feature_flags": [],
@@ -155,11 +371,25 @@
         "new dev-dependency enables tokio without documentation",
         "new optional feature unifies into a production graph accidentally"
       ],
-      "escalation_notes": "Classify every tokio path before citing this lane; any default or metrics overlap remains a production blocker."
+      "escalation_notes": "Classify every tokio path before citing this lane; any default or metrics overlap remains a production blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "full-graph-tokio-audit"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "native-feature-smoke",
       "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
       "package": "asupersync",
       "feature_flags": [
@@ -186,11 +416,25 @@
         "feature-specific compile drift",
         "native dependency availability on remote workers"
       ],
-      "escalation_notes": "If this fails before touched files compile, capture the first file/error as a validation frontier blocker."
+      "escalation_notes": "If this fails before touched files compile, capture the first file/error as a validation frontier blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "feature-gated-native-surfaces"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "fuzz-manifest-smoke",
       "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
       "package": "fuzz",
       "feature_flags": [],
@@ -208,11 +452,25 @@
         "peer-dirty fuzz target",
         "shared fuzz/Cargo.toml registration conflict"
       ],
-      "escalation_notes": "For one-target work, pair this broad lane with a narrower --bin target proof if the manifest is blocked elsewhere."
+      "escalation_notes": "For one-target work, pair this broad lane with a narrower --bin target proof if the manifest is blocked elsewhere.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fuzz-manifest-smoke"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "lib-tests",
       "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
       "package": "asupersync",
       "feature_flags": [
@@ -233,11 +491,25 @@
         "peer-dirty lib module",
         "warning wall promoted by RUSTFLAGS"
       ],
-      "escalation_notes": "Do not claim all-target health from this lane; use it as scoped lib-frontier evidence."
+      "escalation_notes": "Do not claim all-target health from this lane; use it as scoped lib-frontier evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "lib-test-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "all-targets-check",
       "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
       "package": "asupersync",
       "feature_flags": [],
@@ -257,11 +529,25 @@
         "peer-staged conformance or audit files",
         "feature-gated test missing cfg"
       ],
-      "escalation_notes": "If blocked outside touched files, cite exact file/error and use a narrower supplemental proof for local changes."
+      "escalation_notes": "If blocked outside touched files, cite exact file/error and use a narrower supplemental proof for local changes.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "all-target-compile-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "clippy-all-targets",
       "kind": "lint_frontier",
+      "resource_envelope_class": "lint-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
       "package": "asupersync",
       "feature_flags": [],
@@ -280,11 +566,25 @@
         "warning debt in unrelated audit modules",
         "peer-dirty tests"
       ],
-      "escalation_notes": "Preserve first lint file/error in Beads or validation-frontier records; avoid widening from unrelated lint debt."
+      "escalation_notes": "Preserve first lint file/error in Beads or validation-frontier records; avoid widening from unrelated lint debt.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "clippy-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "rustfmt-check",
       "kind": "format_frontier",
+      "resource_envelope_class": "format-frontier-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
       "package": "workspace",
       "feature_flags": [],
@@ -300,11 +600,25 @@
       "common_unrelated_blockers": [
         "peer-dirty formatting changes"
       ],
-      "escalation_notes": "For narrow standalone files, include an explicit rustfmt --edition 2024 supplemental proof."
+      "escalation_notes": "For narrow standalone files, include an explicit rustfmt --edition 2024 supplemental proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rustfmt-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "rustdoc-api",
       "kind": "documentation_frontier",
+      "resource_envelope_class": "documentation-frontier-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
       "package": "asupersync",
       "feature_flags": [
@@ -324,11 +638,25 @@
         "rustdoc warning in unrelated public API",
         "feature-gated doc cfg drift"
       ],
-      "escalation_notes": "For method-level rustdoc work, cite the method-specific proof separately if this broad lane is blocked."
+      "escalation_notes": "For method-level rustdoc work, cite the method-specific proof separately if this broad lane is blocked.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rustdoc-api-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "formal-lean-build",
       "kind": "formal_frontier",
+      "resource_envelope_class": "formal-frontier-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build",
       "package": "formal/lean",
       "feature_flags": [],
@@ -347,23 +675,39 @@
       "common_unrelated_blockers": [
         "Lean toolchain or lake cache availability on worker"
       ],
-      "escalation_notes": "Keep this command direct; do not shell-wrap through bash or cd."
+      "escalation_notes": "Keep this command direct; do not shell-wrap through bash or cd.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "formal-lean-core-invariants"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "runtime-pressure-control-evidence-contract",
       "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
       "guarantee_ids": [
         "runtime-pressure-control-evidence-contract"
       ],
-      "covers": "Pressure-control evidence artifact, docs, source schema versions, RCH proof-lane pressure rows, deterministic lab scenario families, and operator scope limits remain aligned.",
-      "explicit_not_covered": "Does not prove real-host throughput, autonomous admission/backpressure behavior, scheduler rewrites, production-on-by-default controls, or a deadlock without trapped-cycle proof.",
+      "covers": "Pressure-control evidence artifact, docs, source schema versions, region memory-budget pressure rows, RCH proof-lane pressure rows, no-local-RCH fallback evidence, operator diagnostics bundle, scheduler pressure flamegraph attribution, deterministic lab scenario families, and operator scope limits remain aligned.",
+      "explicit_not_covered": "Does not prove real-host throughput, performance improvement, scheduler regression closure, RCH fleet availability, autonomous admission/backpressure behavior, scheduler rewrites, production-on-by-default controls, or a deadlock without trapped-cycle proof.",
       "expected_signal": "runtime_pressure_control_evidence_contract tests pass",
       "source_paths": [
         "artifacts/runtime_pressure_control_evidence_contract_v1.json",
         "tests/runtime_pressure_control_evidence_contract.rs",
+        "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+        "tests/phase6_methodology_gate_contract.rs",
         "src/runtime/rch_health/mod.rs",
         "src/runtime/resource_monitor.rs",
         "README.md",
@@ -375,11 +719,25 @@
         "documentation marker drift",
         "proof lane command drift"
       ],
-      "escalation_notes": "If this fails, update the artifact, docs, manifest lane, and verifier together before citing pressure-control evidence."
+      "escalation_notes": "If this fails, update the artifact, docs, manifest lane, and verifier together before citing pressure-control evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "runtime-pressure-control-evidence-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dirty_tree_ownership_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test dirty_tree_ownership_receipt_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
@@ -399,11 +757,69 @@
         "offline reservation artifact shape drift",
         "dirty-tree golden fixture drift"
       ],
-      "escalation_notes": "Use this lane for ASW-7 guard changes; if it fails, do not commit from a shared dirty checkout until the first failing scenario is understood."
+      "escalation_notes": "Use this lane for ASW-7 guard changes; if it fails, do not commit from a shared dirty checkout until the first failing scenario is understood.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "shared-main-commit-guard"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "swarm-proof-lane-planner-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "admission-aware-proof-lane-atlas"
+      ],
+      "covers": "Admission-aware proof-lane planner fixtures, atlas decision receipts, deterministic JSON/Markdown report goldens, docs markers, manifest mapping, and proof-status claim rows stay aligned.",
+      "explicit_not_covered": "Does not prove broad workspace release health, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target.",
+      "expected_signal": "swarm_proof_lane_planner_contract tests pass",
+      "source_paths": [
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "tests/swarm_proof_lane_planner_contract.rs",
+        "src/lab/swarm_replay.rs",
+        "src/lab/mod.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md",
+        "docs/proof_runner_usage.md"
+      ],
+      "common_unrelated_blockers": [
+        "proof-lane planner fixture drift",
+        "docs marker drift",
+        "manifest or proof-status snapshot mapping drift"
+      ],
+      "escalation_notes": "Use this lane for admission-aware atlas/planner/renderer changes; do not cite it as broad release, conformance, or performance proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "admission-aware-proof-lane-atlas"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
@@ -424,11 +840,25 @@
         "manifest references a removed file",
         "feature name drift in Cargo.toml"
       ],
-      "escalation_notes": "This is the minimum proof for edits to the manifest itself."
+      "escalation_notes": "This is the minimum proof for edits to the manifest itself.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "proof-lane-manifest-verifier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "atp-native-quic-dependency-audit",
       "kind": "dependency_audit",
+      "resource_envelope_class": "dependency-audit-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
       "package": "asupersync",
       "feature_flags": [],
@@ -449,7 +879,20 @@
         "new feature accidentally pulls external QUIC stack",
         "Tokio dependency creep in production profiles"
       ],
-      "escalation_notes": "Any forbidden QUIC stack (quinn, s2n-quic, quiche) or Tokio dependency in ATP production profiles is a blocker. File immediately with dependency path."
+      "escalation_notes": "Any forbidden QUIC stack (quinn, s2n-quic, quiche) or Tokio dependency in ATP production profiles is a blocker. File immediately with dependency path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "atp-native-self-contained"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     }
   ],
   "guarantees": [
@@ -556,6 +999,13 @@
       "description": "Pressure-control evidence claims, schema versions, docs, and scoped proof command stay aligned.",
       "lane_ids": [
         "runtime-pressure-control-evidence-contract"
+      ]
+    },
+    {
+      "guarantee_id": "admission-aware-proof-lane-atlas",
+      "description": "Admission-aware proof-lane planner fixtures, atlas receipts, deterministic report goldens, docs markers, manifest mapping, and proof-status claim rows stay aligned.",
+      "lane_ids": [
+        "swarm-proof-lane-planner-contract"
       ]
     },
     {

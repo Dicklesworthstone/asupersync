@@ -2,9 +2,12 @@
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hint::black_box;
 use std::path::Path;
+use std::time::Instant;
 
 const CONTRACT_PATH: &str = "artifacts/lock_contention_atlas_contract_v1.json";
+const LOCK_OVERHEAD_PROBE_OPS: u64 = 4096;
 
 fn repo_path(relative: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -57,6 +60,14 @@ fn string_list(value: &Value, key: &str) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn elapsed_ns(start: Instant) -> u128 {
+    start.elapsed().as_nanos().max(1)
+}
+
+fn per_op_ns(elapsed_ns: u128, ops: u64) -> u128 {
+    elapsed_ns / u128::from(ops.max(1))
 }
 
 fn rows_by_surface(contract: &Value) -> BTreeMap<String, &Value> {
@@ -284,6 +295,37 @@ fn live_contended_mutex_snapshot_projects_tail_latency_fields() {
     assert!(snapshot.p999_hold_ns <= snapshot.max_hold_ns);
 }
 
+#[cfg(feature = "lock-metrics")]
+#[test]
+fn lock_metrics_enabled_overhead_probe_reports_per_op_cost() {
+    use asupersync::sync::ContendedMutex;
+
+    let lock = ContendedMutex::new("tasks", 0_u64);
+    let start = Instant::now();
+    for _ in 0..LOCK_OVERHEAD_PROBE_OPS {
+        let mut guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard += 1;
+        black_box(*guard);
+    }
+    let elapsed_ns = elapsed_ns(start);
+
+    let snapshot = lock.snapshot();
+    assert_eq!(snapshot.name, "tasks");
+    assert_eq!(snapshot.instrumentation_mode, "opt_in_lock_metrics");
+    assert_eq!(snapshot.acquisitions, LOCK_OVERHEAD_PROBE_OPS);
+    assert!(snapshot.p95_wait_ns <= snapshot.max_wait_ns);
+    assert!(snapshot.p999_wait_ns <= snapshot.max_wait_ns);
+    assert!(snapshot.p95_hold_ns <= snapshot.max_hold_ns);
+    assert!(snapshot.p999_hold_ns <= snapshot.max_hold_ns);
+
+    println!(
+        "ATLAS_OVERHEAD_SAMPLE bucket=lock_metrics_enabled ops={LOCK_OVERHEAD_PROBE_OPS} elapsed_ns={elapsed_ns} per_op_ns={}",
+        per_op_ns(elapsed_ns, LOCK_OVERHEAD_PROBE_OPS)
+    );
+}
+
 #[cfg(not(feature = "lock-metrics"))]
 #[test]
 fn instrumentation_disabled_path_does_not_record_or_sample_metrics() {
@@ -330,6 +372,36 @@ fn instrumentation_disabled_path_does_not_record_or_sample_metrics() {
     assert_eq!(after_reset.instrumentation_mode, "disabled");
     assert_eq!(after_reset.acquisitions, 0);
     assert_eq!(after_reset.contentions, 0);
+}
+
+#[cfg(not(feature = "lock-metrics"))]
+#[test]
+fn lock_metrics_disabled_overhead_probe_reports_per_op_cost() {
+    use asupersync::sync::ContendedMutex;
+
+    let lock = ContendedMutex::new("tasks", 0_u64);
+    let start = Instant::now();
+    for _ in 0..LOCK_OVERHEAD_PROBE_OPS {
+        let mut guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard += 1;
+        black_box(*guard);
+    }
+    let elapsed_ns = elapsed_ns(start);
+
+    let snapshot = lock.snapshot();
+    assert_eq!(snapshot.name, "tasks");
+    assert_eq!(snapshot.instrumentation_mode, "disabled");
+    assert_eq!(snapshot.acquisitions, 0);
+    assert_eq!(snapshot.contentions, 0);
+    assert_eq!(snapshot.wait_ns, 0);
+    assert_eq!(snapshot.hold_ns, 0);
+
+    println!(
+        "ATLAS_OVERHEAD_SAMPLE bucket=lock_metrics_disabled ops={LOCK_OVERHEAD_PROBE_OPS} elapsed_ns={elapsed_ns} per_op_ns={}",
+        per_op_ns(elapsed_ns, LOCK_OVERHEAD_PROBE_OPS)
+    );
 }
 
 #[cfg(debug_assertions)]

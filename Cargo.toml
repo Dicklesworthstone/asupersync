@@ -16,7 +16,7 @@ exclude = ["fuzz", "asupersync-wasm"]
 name = "asupersync"
 version = "0.3.3"
 edition = "2024"
-license-file = "LICENSE"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Spec-first, cancel-correct, capability-secure async runtime for Rust."
 repository = "https://github.com/Dicklesworthstone/asupersync"
 readme = "README.md"
@@ -33,7 +33,7 @@ include = [
 ]
 
 [features]
-default = ["test-internals", "proc-macros"]
+default = ["proc-macros"]
 # Reserve a dedicated feature name for the native FABRIC lane. The actual
 # module wiring still lives in `src/messaging/mod.rs` and is not fully gated
 # yet.
@@ -62,8 +62,12 @@ legacy-internal-test-harnesses = []
 # Focused proof lane for protocol serialization goldens and messaging
 # conformance rows without compiling the full legacy harness set.
 serialization-golden-harnesses = []
-# Opt-in compile surface for ignored, environment-gated real-service E2E tests.
-real-service-e2e = []
+# Opt-in umbrella for admitted, environment-gated real-service E2E proof lanes.
+real-service-e2e = [
+    "h3-websocket-e2e",
+    "obligation-cleanup-e2e",
+    "raptorq-roundtrip-e2e",
+]
 # Focused proof lane for the H3 WebSocket endpoint/result E2E harness.
 h3-websocket-e2e = []
 # Focused proof lane for the deterministic RaptorQ roundtrip E2E harness.

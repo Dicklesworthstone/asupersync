@@ -1,10 +1,8 @@
 //! Focused obligation cleanup E2E runner.
 //!
 //! The runner lives in `asupersync::real_obligation_leak_check_e2e_tests`,
-//! which is itself gated by the `real-service-e2e` or `obligation-cleanup-e2e`
-//! features. Gate this integration test the same way so it compiles cleanly
-//! in the default test build instead of failing closed with an unresolved
-//! import.
+//! which is itself gated by `obligation-cleanup-e2e`. The broader
+//! `real-service-e2e` umbrella enables that focused lane transitively.
 #![cfg(any(feature = "real-service-e2e", feature = "obligation-cleanup-e2e"))]
 
 #[test]

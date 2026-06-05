@@ -31,8 +31,7 @@ mod tests {
             gf256::{Gf256, gf256_add_slice, gf256_addmul_slice, gf256_mul_slice},
             rfc6330::{derive_systematic_params, repair_indices_for_esi},
             systematic::{
-                ConstraintMatrix, DecodeError, DecodeResult, ReceivedSymbol, SystematicDecoder,
-                SystematicEncoder, SystematicParams,
+                DecodeError, DecodeResult, ReceivedSymbol, SystematicDecoder,
             },
         },
         time::Time,

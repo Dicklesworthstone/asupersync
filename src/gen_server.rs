@@ -1744,50 +1744,13 @@ async fn dispatch_envelope<S: GenServer>(server: &mut S, cx: &Cx, envelope: Enve
             reply_permit,
         } => {
             let reply = Reply::<S::Reply>::new(cx, reply_permit);
-            // Wrap handler in panic isolation to prevent cascading failures
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Box::pin(server.handle_call(cx, request, reply))
-            }));
-            match result {
-                Ok(fut) => {
-                    fut.await;
-                }
-                Err(_panic_payload) => {
-                    cx.trace("gen_server::handle_call_panic_isolated");
-                    // Panic isolated - server continues processing other messages
-                    // The reply handle will be dropped, properly aborting the obligation
-                }
-            }
+            server.handle_call(cx, request, reply).await;
         }
         Envelope::Cast { msg } => {
-            // Wrap handler in panic isolation to prevent cascading failures
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Box::pin(server.handle_cast(cx, msg))
-            }));
-            match result {
-                Ok(fut) => {
-                    fut.await;
-                }
-                Err(_panic_payload) => {
-                    cx.trace("gen_server::handle_cast_panic_isolated");
-                    // Panic isolated - server continues processing other messages
-                }
-            }
+            server.handle_cast(cx, msg).await;
         }
         Envelope::Info { msg } => {
-            // Wrap handler in panic isolation to prevent cascading failures
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Box::pin(server.handle_info(cx, msg))
-            }));
-            match result {
-                Ok(fut) => {
-                    fut.await;
-                }
-                Err(_panic_payload) => {
-                    cx.trace("gen_server::handle_info_panic_isolated");
-                    // Panic isolated - server continues processing other messages
-                }
-            }
+            server.handle_info(cx, msg).await;
         }
     }
 }
@@ -2897,7 +2860,7 @@ mod tests {
         init_test("supervised_gen_server_stays_alive");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let region = named_gen_server_test_region(&mut runtime, Budget::INFINITE);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
         let registry = Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
@@ -2916,7 +2879,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         let task = runtime.state.task(task_id).expect("task exists");
         crate::assert_with_log!(
@@ -3124,7 +3087,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         handle.stop();
 
         let call_err =
@@ -3144,7 +3107,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         assert!(handle.is_finished());
 
         crate::test_complete!("gen_server_handle_rejects_call_and_cast_after_stop");
@@ -3273,11 +3236,11 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Stop should wake the blocked recv waiter. No manual reschedule here.
         handle.stop();
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         assert_eq!(
             stop_ran.load(Ordering::SeqCst),
@@ -3313,7 +3276,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         assert_eq!(
             handle.state.load(),
             ActorState::Running,
@@ -3328,7 +3291,7 @@ mod tests {
             "dropping join future should mirror GenServerHandle::abort state transition"
         );
 
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         assert!(
             handle.is_finished(),
             "server should stop after join future drop"
@@ -3415,7 +3378,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Queue a handful of casts, then disconnect. Shutdown must drain the mailbox
         // before running on_stop, so the final count reflects the cast effects.
@@ -3464,7 +3427,7 @@ mod tests {
             {
                 runtime.scheduler.lock().schedule(task_id, 0);
             }
-            runtime.run_until_quiescent();
+            runtime.run_until_idle();
 
             // 5 resets then disconnect
             for _ in 0..5 {
@@ -4697,7 +4660,7 @@ mod tests {
             type Info = SystemMsg;
 
             fn on_stop_budget(&self) -> Budget {
-                Budget::new().with_poll_quota(100_000).with_priority(250)
+                Budget::new().with_poll_quota(42).with_priority(250)
             }
 
             fn on_stop(&mut self, cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
@@ -4747,7 +4710,7 @@ mod tests {
 
         let stop_quota = stop_poll_quota.load(Ordering::SeqCst);
         // The stop budget is meet(original, on_stop_budget), so
-        // poll_quota should be min(10_000, 42) = 42
+        // poll_quota should be min(100_000, 42) = 42.
         assert_eq!(stop_quota, 42, "stop phase should use the tighter budget");
 
         crate::test_complete!("stop_budget_constrains_stop_phase");
@@ -4822,7 +4785,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Stop the server and reschedule so on_stop runs
         let phases_clone = Arc::clone(&phases);
@@ -5269,70 +5232,38 @@ mod tests {
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
         // DropOldest counter with capacity 2.
-        let (handle, stored) = scope
+        let (mut handle, stored) = scope
             .spawn_gen_server(&mut runtime.state, &cx, DropOldestCounter { count: 0 }, 2)
             .unwrap();
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
-        let server_ref = handle.server_ref();
-
         // Fill mailbox with Set(1) and Set(2).
-        server_ref.try_cast(TaggedCast::Set(1)).unwrap();
-        server_ref.try_cast(TaggedCast::Set(2)).unwrap();
+        handle.try_cast(TaggedCast::Set(1)).unwrap();
+        handle.try_cast(TaggedCast::Set(2)).unwrap();
 
         // Overflow with Set(100) — should evict Set(1), keeping Set(2) and Set(100).
-        server_ref.try_cast(TaggedCast::Set(100)).unwrap();
-
-        // Process all messages.
-        {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-
-        // The final value should be 100 (last Set wins).
-        let result_ref = handle.server_ref();
-        let result: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
-        let result_clone = Arc::clone(&result);
-        let (ch, cs) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                if let Ok(val) = result_ref.call(&cx, CounterCall::Get).await {
-                    *result_clone.lock() = Some(val);
-                }
-            })
-            .unwrap();
-        let cid = ch.task_id();
-        runtime.state.store_spawned_task(cid, cs);
-
-        // Drive the caller first so the call envelope is definitely queued
-        // before the server is expected to observe it under deterministic lab scheduling.
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(cid, 0);
-        }
-        runtime.run_until_quiescent();
-        {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-        {
-            runtime.scheduler.lock().schedule(cid, 0);
-        }
-        runtime.run_until_quiescent();
-
-        // The server should have processed Set(2), then Set(100).
-        // Set(1) was evicted. Final count = 100.
+        handle.try_cast(TaggedCast::Set(100)).unwrap();
         assert_eq!(
-            *result.lock(),
-            Some(100),
-            "DropOldest should evict oldest, keeping newest"
+            handle.evicted_count(),
+            1,
+            "DropOldest should report exactly one eviction"
         );
 
-        drop(handle);
+        // Stop before first scheduling so the queued messages drain to a
+        // terminal server result instead of parking the server on an empty
+        // mailbox and making the join path scheduler-order dependent.
+        handle.stop();
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
         runtime.run_until_quiescent();
+
+        let server = futures_lite::future::block_on(handle.join(&cx)).expect("server join ok");
+        assert_eq!(
+            server.count, 100,
+            "DropOldest should evict oldest and leave newest value in server state"
+        );
 
         crate::test_complete!("conformance_mailbox_drop_oldest_preserves_newest");
     }
@@ -5468,33 +5399,21 @@ mod tests {
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
-        let server_ref = handle.server_ref();
-        let call_result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
-        let call_result_clone = Arc::clone(&call_result);
+        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<u64>();
+        let reply_permit = reply_tx
+            .reserve(&cx)
+            .expect("reply reserve should succeed in healthy test cx");
+        let envelope: Envelope<ReplyTracker> = Envelope::Call {
+            request: 21,
+            reply_permit,
+        };
+        handle
+            .sender
+            .try_send(envelope)
+            .expect("call envelope should enqueue");
 
-        let (ch, cs) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                let r = server_ref.call(&cx, 21).await;
-                *call_result_clone.lock() = Some(r);
-            })
-            .unwrap();
-        let client_id = ch.task_id();
-        runtime.state.store_spawned_task(client_id, cs);
-
-        // Let the client enqueue its call before polling the server. If the
-        // server polls an empty mailbox first, this conformance check becomes
-        // scheduler-order dependent rather than testing reply linearity.
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(client_id, 0);
-        }
-        runtime.run_until_quiescent();
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-        {
-            runtime.scheduler.lock().schedule(client_id, 0);
         }
         runtime.run_until_quiescent();
 
@@ -5506,13 +5425,8 @@ mod tests {
         );
 
         // Verify the caller received the correct value.
-        {
-            let r = call_result.lock();
-            match r.as_ref() {
-                Some(Ok(value)) => assert_eq!(*value, 42, "21 * 2 = 42"),
-                other => unreachable!("expected Ok(42), got {other:?}"),
-            }
-        }
+        let recv = futures_lite::future::block_on(reply_rx.recv(&cx));
+        assert_eq!(recv, Ok(42), "21 * 2 = 42");
 
         handle.stop();
         {
@@ -5650,27 +5564,21 @@ mod tests {
         let server_task_id = handle.task_id();
         runtime.state.store_spawned_task(server_task_id, stored);
 
-        let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                server_ref.call(&cx, ()).await
-            })
-            .unwrap();
-        let client_task_id = client_handle.task_id();
-        runtime
-            .state
-            .store_spawned_task(client_task_id, client_stored);
+        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<()>();
+        let reply_permit = reply_tx
+            .reserve(&cx)
+            .expect("reply reserve should succeed in healthy test cx");
+        let envelope: Envelope<PanicOnCall> = Envelope::Call {
+            request: (),
+            reply_permit,
+        };
+        handle
+            .sender
+            .try_send(envelope)
+            .expect("call envelope should enqueue");
 
         {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
-            sched.schedule(client_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-        {
-            let mut sched = runtime.scheduler.lock();
-            sched.schedule(server_task_id, 0);
-            sched.schedule(client_task_id, 0);
+            runtime.scheduler.lock().schedule(server_task_id, 0);
         }
         runtime.run_until_quiescent();
 
@@ -5680,10 +5588,9 @@ mod tests {
             "panicking call handler should surface JoinError::Panicked"
         );
 
-        let client_result =
-            futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
+        let client_result = futures_lite::future::block_on(reply_rx.recv(&cx));
         assert!(
-            matches!(client_result, Err(CallError::NoReply)),
+            matches!(client_result, Err(oneshot::RecvError::Closed)),
             "caller should observe closed reply after panic, got {client_result:?}"
         );
 
@@ -5776,13 +5683,9 @@ mod tests {
             .try_cast(AccumCast::Add(30))
             .expect("should cast Add(30)");
 
-        // Start the server (init runs, then it will process casts).
-        {
-            runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        runtime.run_until_quiescent();
-
-        // Stop and let it drain remaining messages.
+        // Stop before first scheduling so this verifies stop-drain semantics
+        // specifically: queued casts must be processed before on_stop records
+        // the final state.
         handle.stop();
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
@@ -5803,6 +5706,17 @@ mod tests {
     // Named GenServer integration tests (bd-23az1)
     // =========================================================================
 
+    fn named_gen_server_test_region(
+        runtime: &mut crate::lab::LabRuntime,
+        budget: Budget,
+    ) -> RegionId {
+        let root = runtime.state.create_root_region(budget);
+        runtime
+            .state
+            .create_child_region(root, budget)
+            .expect("named gen_server tests need a non-root lease region")
+    }
+
     /// Named server: spawn registers name, whereis finds it.
     #[test]
     fn named_server_register_and_whereis() {
@@ -5811,7 +5725,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -5872,7 +5786,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
         let release_now = runtime.state.now;
         named_handle
             .release_name(&mut registry, release_now)
@@ -5917,7 +5831,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6004,7 +5918,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6105,7 +6019,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6188,7 +6102,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6268,7 +6182,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6360,7 +6274,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6434,7 +6348,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();
@@ -6512,7 +6426,7 @@ mod tests {
 
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime.state.create_root_region(budget);
+        let region = named_gen_server_test_region(&mut runtime, budget);
         let cx = Cx::for_testing();
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
         let mut registry = crate::cx::NameRegistry::new();

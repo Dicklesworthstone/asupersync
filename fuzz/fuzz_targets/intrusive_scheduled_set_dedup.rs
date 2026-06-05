@@ -146,7 +146,7 @@ fuzz_target!(|input: IntrusiveScheduledSetDedupInput| {
                             .iter()
                             .position(|&queued| queued == task_id)
                             .map(|pos| queue_shadow.remove(pos));
-                        assert_eq!(removed_shadow, Some(task_id));
+                        assert_eq!(removed_shadow, Some(Some(task_id)));
                     }
                 }
             }

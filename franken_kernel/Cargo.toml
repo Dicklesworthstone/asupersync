@@ -2,7 +2,7 @@
 name = "franken-kernel"
 version = "0.3.3"
 edition = "2024"
-license-file = "../LICENSE"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Suite-wide type substrate for FrankenSuite: TraceId, DecisionId, PolicyId, SchemaVersion."
 repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["types", "tracing", "decisions", "schema"]

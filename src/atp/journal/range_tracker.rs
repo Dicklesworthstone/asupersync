@@ -21,7 +21,17 @@ impl SparseRange {
 
     /// Create a range from offset and size
     pub fn from_offset_size(offset: u64, size: u64) -> Self {
-        Self::new(offset, offset + size)
+        Self::try_from_offset_size(offset, size).unwrap_or_else(|| {
+            panic!("range offset overflow: offset {offset} + size {size} exceeds u64::MAX")
+        })
+    }
+
+    /// Try to create a range from offset and size.
+    ///
+    /// Returns `None` if `offset + size` would overflow.
+    #[must_use]
+    pub fn try_from_offset_size(offset: u64, size: u64) -> Option<Self> {
+        Some(Self::new(offset, offset.checked_add(size)?))
     }
 
     /// Get the size of this range
@@ -112,7 +122,18 @@ pub struct ChunkRange {
 impl ChunkRange {
     /// Create a new chunk range
     pub fn new(offset: u64, size: u64) -> Self {
-        Self { offset, size }
+        Self::try_new(offset, size).unwrap_or_else(|| {
+            panic!("chunk range overflow: offset {offset} + size {size} exceeds u64::MAX")
+        })
+    }
+
+    /// Try to create a new chunk range.
+    ///
+    /// Returns `None` if `offset + size` would overflow.
+    #[must_use]
+    pub fn try_new(offset: u64, size: u64) -> Option<Self> {
+        offset.checked_add(size)?;
+        Some(Self { offset, size })
     }
 
     /// Convert to a SparseRange
@@ -120,19 +141,44 @@ impl ChunkRange {
         SparseRange::from_offset_size(self.offset, self.size)
     }
 
+    /// Try to convert to a SparseRange.
+    ///
+    /// Returns `None` if `offset + size` would overflow.
+    #[must_use]
+    pub fn try_to_sparse_range(&self) -> Option<SparseRange> {
+        SparseRange::try_from_offset_size(self.offset, self.size)
+    }
+
     /// Get the end offset (exclusive)
     pub fn end_offset(&self) -> u64 {
-        self.offset + self.size
+        self.try_end_offset().unwrap_or_else(|| {
+            panic!(
+                "chunk range end overflow: offset {} + size {} exceeds u64::MAX",
+                self.offset, self.size
+            )
+        })
+    }
+
+    /// Try to get the end offset (exclusive).
+    ///
+    /// Returns `None` if `offset + size` would overflow.
+    #[must_use]
+    pub fn try_end_offset(&self) -> Option<u64> {
+        self.offset.checked_add(self.size)
     }
 
     /// Check if this chunk overlaps with another chunk
     pub fn overlaps(&self, other: &ChunkRange) -> bool {
-        self.to_sparse_range().overlaps(&other.to_sparse_range())
+        match (self.try_to_sparse_range(), other.try_to_sparse_range()) {
+            (Some(left), Some(right)) => left.overlaps(&right),
+            _ => false,
+        }
     }
 
     /// Check if this chunk contains the given offset
     pub fn contains_offset(&self, offset: u64) -> bool {
-        offset >= self.offset && offset < self.end_offset()
+        self.try_end_offset()
+            .is_some_and(|end| offset >= self.offset && offset < end)
     }
 }
 
@@ -593,6 +639,27 @@ mod tests {
 
         let sparse_range = chunk1.to_sparse_range();
         assert_eq!(sparse_range, SparseRange::new(100, 150));
+    }
+
+    #[test]
+    fn test_offset_size_overflow_rejected_explicitly() {
+        assert!(SparseRange::try_from_offset_size(u64::MAX, 1).is_none());
+        assert!(ChunkRange::try_new(u64::MAX, 1).is_none());
+
+        let sparse_panic = std::panic::catch_unwind(|| SparseRange::from_offset_size(u64::MAX, 1));
+        assert!(sparse_panic.is_err());
+
+        let chunk_panic = std::panic::catch_unwind(|| ChunkRange::new(u64::MAX, 1));
+        assert!(chunk_panic.is_err());
+
+        let invalid_chunk = ChunkRange {
+            offset: u64::MAX,
+            size: 1,
+        };
+        assert!(invalid_chunk.try_end_offset().is_none());
+        assert!(invalid_chunk.try_to_sparse_range().is_none());
+        assert!(!invalid_chunk.contains_offset(0));
+        assert!(!invalid_chunk.overlaps(&ChunkRange::new(0, 1)));
     }
 
     #[test]

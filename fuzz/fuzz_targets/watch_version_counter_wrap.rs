@@ -128,7 +128,13 @@ fuzz_target!(|data: &[u8]| {
             }
 
             WatchOp::BorrowAndUpdate => {
-                let _value = receiver.borrow_and_update();
+                // Drop the borrow guard (Ref) before calling has_changed():
+                // borrow_and_update() returns a Ref that holds receiver borrowed,
+                // and its destructor needs &mut, so it must be released before the
+                // immutable has_changed() read (E0502).
+                {
+                    let _value = receiver.borrow_and_update();
+                }
                 expected_seen = expected_version;
 
                 // After borrow_and_update, has_changed() should return false
@@ -185,15 +191,21 @@ fuzz_target!(|data: &[u8]| {
             WatchOp::WaitChanged => {
                 // Only test wait if there's actually a change to wait for
                 if expected_version != expected_seen {
-                    // Use a simple poll to avoid blocking the fuzzer
-                    let mut changed_future = receiver.changed(&cx);
-
-                    // Poll once - should either be ready or pending
-                    let poll_context = std::task::Context::from_waker(&futures::task::noop_waker());
                     use std::future::Future;
                     use std::pin::Pin;
 
-                    match Pin::new(&mut changed_future).poll(&poll_context) {
+                    // Bind the waker so the Context does not borrow a dropped
+                    // temporary (E0716), and poll once into an owned result so
+                    // the `&mut receiver` held by changed_future is released
+                    // before any later immutable use of `receiver` (E0502).
+                    let waker = futures::task::noop_waker();
+                    let mut poll_context = std::task::Context::from_waker(&waker);
+                    let poll = {
+                        let mut changed_future = receiver.changed(&cx);
+                        Pin::new(&mut changed_future).poll(&mut poll_context)
+                    };
+
+                    match poll {
                         std::task::Poll::Ready(Ok(())) => {
                             // Changed successfully, seen_version should now equal current
                             expected_seen = expected_version;

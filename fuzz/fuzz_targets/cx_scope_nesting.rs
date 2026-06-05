@@ -1,17 +1,15 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::cx::cap::{All, CapMask};
 use asupersync::cx::{
     Cx,
-    macaroon::{CaveatPredicate, MacaroonToken, VerificationContext},
+    cap::All,
+    macaroon::{CaveatPredicate, MacaroonToken},
 };
-use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::OsEntropy;
+use asupersync::security::key::AuthKey;
+use asupersync::types::{Budget, Time};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 
 /// Structure-aware fuzz target for Cx scope nesting restrictions
 ///
@@ -374,25 +372,30 @@ fn execute_scope_hierarchy(
 /// Extract observable properties from a Cx for invariant checking
 fn extract_scope_properties(cx: &Cx<All>, parent_id: Option<u64>, depth: usize) -> ScopeProperties {
     // Use region_id as a proxy for context identity
-    let id = cx.region().as_u64();
+    let id = cx.region_id().as_u64();
 
     let budget = cx.budget();
-    let (budget_time_ms, budget_polls) = match budget {
-        Budget::INFINITE => (u64::MAX, u64::MAX),
-        Budget::Finite { time, polls } => {
-            (time.as_millis().min(u64::MAX as u128) as u64, polls as u64)
-        }
-    };
+    let budget_time_ms = budget.deadline.map_or(u64::MAX, Time::as_millis);
+    let budget_polls = u64::from(budget.poll_quota);
+    let caveats = cx
+        .macaroon()
+        .map(|token| {
+            token
+                .caveats()
+                .iter()
+                .map(|caveat| format!("{caveat:?}"))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    // Simplified property extraction (in practice would need more access)
     ScopeProperties {
         id,
         parent_id,
         budget_time_ms,
         budget_polls,
-        deadline_ms: None,         // Would need deadline API
+        deadline_ms: budget.deadline.map(Time::as_millis),
         capability_mask: u64::MAX, // Would extract actual mask
-        caveats: Vec::new(),       // Would extract actual caveats
+        caveats,
         depth,
     }
 }
@@ -405,62 +408,80 @@ fn apply_scope_mutation(cx: Cx<All>, mutation: &ScopeMutation) -> Cx<All> {
             poll_reduction,
         } => {
             let current_budget = cx.budget();
-            let new_budget = match current_budget {
-                Budget::INFINITE => Budget::Finite {
-                    time: Duration::from_millis(*time_reduction_ms as u64),
-                    polls: *poll_reduction as usize,
-                },
-                Budget::Finite { time, polls } => Budget::Finite {
-                    time: time.saturating_sub(Duration::from_millis(*time_reduction_ms as u64)),
-                    polls: polls.saturating_sub(*poll_reduction as usize),
-                },
-            };
+            let reduction_nanos = u64::from(*time_reduction_ms).saturating_mul(1_000_000);
+            let deadline = current_budget.deadline.map_or(
+                Time::from_millis(u64::from(*time_reduction_ms)),
+                |deadline| deadline.saturating_sub_nanos(reduction_nanos),
+            );
+            let new_budget = Budget::new().with_deadline(deadline).with_poll_quota(
+                current_budget
+                    .poll_quota
+                    .saturating_sub(u32::from(*poll_reduction)),
+            );
 
-            // In practice, would use Cx::with_budget or similar
-            // For fuzzing, we simulate the restriction
-            cx
+            Cx::for_testing_with_budget(new_budget)
         }
 
-        ScopeMutation::SetDeadline {
-            deadline_offset_ms: _,
-        } => {
-            // Would create deadline-restricted context
-            cx
+        ScopeMutation::SetDeadline { deadline_offset_ms } => {
+            let current_budget = cx.budget();
+            let requested_deadline = Time::from_millis(u64::from(*deadline_offset_ms));
+            let deadline = current_budget
+                .deadline
+                .map_or(requested_deadline, |current| {
+                    current.min(requested_deadline)
+                });
+            let new_budget = Budget::new()
+                .with_deadline(deadline)
+                .with_poll_quota(current_budget.poll_quota);
+
+            Cx::for_testing_with_budget(new_budget)
+                .with_macaroon(cx.macaroon().cloned().unwrap_or_else(test_scope_macaroon))
         }
 
-        ScopeMutation::RestrictCapabilities { remove_mask: _ } => {
-            // Would create capability-restricted context
-            cx
+        ScopeMutation::RestrictCapabilities { remove_mask } => {
+            let denied_bits = u32::from(*remove_mask & 0b0001_1111);
+            if denied_bits == 0 {
+                cx
+            } else {
+                attenuate_or_keep(
+                    cx,
+                    CaveatPredicate::ResourceScope(format!("cap-mask-deny/{denied_bits:05b}")),
+                )
+            }
         }
 
         ScopeMutation::AddCaveat { caveat } => {
-            // Would add macaroon caveat
-            let _ = convert_arbitrary_caveat(caveat);
-            cx
+            let predicate = convert_arbitrary_caveat(caveat);
+            attenuate_or_keep(cx, predicate)
         }
 
-        ScopeMutation::ScopeToRegion { region_id: _ } => {
-            // Would create region-scoped context
-            cx
+        ScopeMutation::ScopeToRegion { region_id } => {
+            attenuate_or_keep(cx, CaveatPredicate::RegionScope(u64::from(*region_id)))
         }
 
-        ScopeMutation::ScopeToTask { task_id: _ } => {
-            // Would create task-scoped context
-            cx
+        ScopeMutation::ScopeToTask { task_id } => {
+            attenuate_or_keep(cx, CaveatPredicate::TaskScope(u64::from(*task_id)))
         }
 
-        ScopeMutation::CreateCheckpoint => {
-            // Would create checkpoint
-            cx
-        }
+        ScopeMutation::CreateCheckpoint => cx,
 
         ScopeMutation::ApplyRateLimit {
-            max_operations: _,
-            window_seconds: _,
-        } => {
-            // Would apply rate limiting
-            cx
-        }
+            max_operations,
+            window_seconds,
+        } => attenuate_or_keep(
+            cx,
+            CaveatPredicate::RateLimit {
+                max_count: u32::from(*max_operations),
+                window_secs: u32::from(*window_seconds),
+            },
+        ),
+    }
+}
+
+fn attenuate_or_keep(cx: Cx<All>, predicate: CaveatPredicate) -> Cx<All> {
+    match cx.attenuate(predicate) {
+        Some(attenuated) => attenuated,
+        None => cx,
     }
 }
 
@@ -512,17 +533,20 @@ fn convert_arbitrary_pattern(pattern: &ArbitraryPattern) -> String {
 
 /// Create a test context for fuzzing
 fn create_test_context(config: &TestConfig) -> Cx<All> {
-    let budget = Budget::Finite {
-        time: Duration::from_millis(config.base_budget_ms as u64),
-        polls: config.base_poll_quota as usize,
-    };
+    let budget = Budget::new()
+        .with_deadline(Time::from_millis(u64::from(config.base_budget_ms)))
+        .with_poll_quota(u32::from(config.base_poll_quota));
 
-    // Create test context (simplified for fuzzing)
-    Cx::for_testing()
+    Cx::for_testing_with_budget(budget).with_macaroon(test_scope_macaroon())
+}
+
+fn test_scope_macaroon() -> MacaroonToken {
+    let root_key = AuthKey::from_seed(0x4358_5343_4f50_45);
+    MacaroonToken::mint(&root_key, "cx_scope_nesting", "fuzz")
 }
 
 /// Create a child context from a parent (simulates scope nesting)
-fn create_child_context(parent: &Cx<All>, child_index: u32) -> Cx<All> {
+fn create_child_context(parent: &Cx<All>, _child_index: u32) -> Cx<All> {
     // In practice would use proper child creation APIs
     // For fuzzing, simulate child with modified identity
     parent.clone()

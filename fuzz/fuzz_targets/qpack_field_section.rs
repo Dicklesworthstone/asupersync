@@ -82,7 +82,8 @@ fuzz_target!(|data: &[u8]| {
                 QpackFieldPlan::StaticIndex(decoded_index) => assert_eq!(*decoded_index, index),
                 other => panic!("expected static index, got {other:?}"),
             }
-            let expanded = qpack_plan_to_header_fields(&decoded).expect("expand static field");
+            let expanded =
+                qpack_plan_to_header_fields(&decoded, None).expect("expand static field");
             assert_eq!(expanded.len(), 1);
         }
         Scenario::DynamicIndexReference => {
@@ -108,7 +109,8 @@ fuzz_target!(|data: &[u8]| {
                 }
                 other => panic!("expected literal field line, got {other:?}"),
             }
-            let expanded = qpack_plan_to_header_fields(&decoded).expect("expand literal field");
+            let expanded =
+                qpack_plan_to_header_fields(&decoded, None).expect("expand literal field");
             assert_eq!(expanded, vec![(expected_name.to_string(), expected_value)]);
         }
         Scenario::PrefixIntegerOverflow => {

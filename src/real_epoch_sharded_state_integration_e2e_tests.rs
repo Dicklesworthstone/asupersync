@@ -21,14 +21,14 @@
 use crate::{
     cx::{Cx, Scope},
     epoch::{
-        Epoch, EpochBasedReclaim, EpochBoundary, EpochGuard, EpochManager, EpochReclamation,
+        EpochBasedReclaim, EpochBoundary, EpochGuard, EpochManager, EpochReclamation,
         EpochTracker, GlobalEpoch, HazardDomain, HazardPointer, MemoryReclamation,
         ProtectedReference, ReclamationEpoch,
     },
     error::Outcome,
     runtime::RuntimeBuilder,
     runtime::sharded_state::{
-        ShardConfiguration, ShardCoordinator, ShardGuard, ShardId, ShardMetrics, ShardSlot,
+        ShardConfiguration, ShardCoordinator, ShardId, ShardMetrics, ShardSlot,
         ShardTable, ShardedState, SlotAllocator, SlotId, SlotLifecycle, SlotReclamation,
         SlotRetirement, SlotState,
     },

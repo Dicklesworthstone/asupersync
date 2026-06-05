@@ -12,6 +12,9 @@
 //! cases instead of random header soup.
 
 use arbitrary::Arbitrary;
+use asupersync::Cx;
+use asupersync::types::{Budget, RegionId, TaskId};
+use asupersync::util::ArenaIndex;
 use asupersync::web::{
     FnHandler, Handler,
     extract::Request,
@@ -19,6 +22,10 @@ use asupersync::web::{
     response::{Response, StatusCode},
 };
 use libfuzzer_sys::fuzz_target;
+use std::future::Future;
+use std::task::{Context, Poll};
+use std::thread;
+use std::time::Duration;
 
 const MAX_LIST_LEN: usize = 6;
 const MAX_TOKEN_LEN: usize = 24;
@@ -259,6 +266,30 @@ fn vary_contains(resp: &Response, token: &str) -> bool {
     })
 }
 
+fn fuzz_cx() -> Cx {
+    Cx::new(
+        RegionId::from_arena(ArenaIndex::new(91, 0)),
+        TaskId::from_arena(ArenaIndex::new(91, 1)),
+        Budget::INFINITE,
+    )
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = std::task::Waker::noop();
+    let mut task_cx = Context::from_waker(waker);
+    let mut pinned = Box::pin(future);
+
+    loop {
+        match pinned.as_mut().poll(&mut task_cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => {
+                thread::yield_now();
+                thread::sleep(Duration::from_micros(1));
+            }
+        }
+    }
+}
+
 fuzz_target!(|input: CorsFuzzInput| {
     let allowed_origins = build_allowed_origins(&input.allowed_origins);
     let allow_methods = build_methods(&input.allow_methods);
@@ -312,7 +343,8 @@ fuzz_target!(|input: CorsFuzzInput| {
     }
 
     let mw = CorsMiddleware::new(FnHandler::new(inner_handler), policy.clone());
-    let resp = mw.call(req);
+    let cx = fuzz_cx();
+    let resp = block_on(mw.call(&cx, req));
 
     let expected_origin = request_origin
         .as_deref()

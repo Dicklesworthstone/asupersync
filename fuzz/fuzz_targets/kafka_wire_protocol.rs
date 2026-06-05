@@ -15,8 +15,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::messaging::kafka::{
-    Acks, Compression, KafkaError, KafkaProducer, ProducerConfig, RecordMetadata,
-    TransactionalConfig, TransactionalProducer,
+    Acks, Compression, KafkaError, KafkaProducer, ProducerConfig, TransactionalConfig,
+    TransactionalProducer,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -144,7 +144,7 @@ struct RetryAttempt {
     should_retry: bool,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Copy, Debug)]
 enum ErrorTypeFuzz {
     QueueFull,
     Broker,
@@ -318,12 +318,14 @@ fn fuzz_config_validation(
     if request_timeout_secs > 0 && request_timeout_secs <= 3600 {
         // Only set reasonable timeouts to avoid hang in tests
         let timeout = Duration::from_secs(request_timeout_secs as u64);
+        assert_eq!(timeout.as_secs(), u64::from(request_timeout_secs));
         // Note: ProducerConfig doesn't expose request_timeout setter in the builder pattern
         // but we can still test that the default validation works
     }
 
     // Test message size validation
     if max_message_size > 0 {
+        assert!(max_message_size as usize <= u32::MAX as usize);
         // ProducerConfig doesn't expose max_message_size setter in builder, but internal validation exists
     }
 
@@ -393,6 +395,7 @@ fn fuzz_message_validation(
     for &size in payload_sizes.iter().take(8) {
         let size = (size as usize).min(MAX_PAYLOAD_SIZE);
         let payload = vec![0u8; size];
+        assert_eq!(payload.len(), size);
 
         // Check if message would be too large
         let max_size = max_message_size.max(1) as usize;
@@ -401,7 +404,9 @@ fn fuzz_message_validation(
         // Test size validation logic
         if size > config.max_message_size {
             // Should fail size check
-            let _expected_error = size > config.max_message_size;
+            assert!(!should_pass);
+        } else {
+            assert_eq!(should_pass, size <= max_size);
         }
     }
 
@@ -438,6 +443,24 @@ fn fuzz_retry_logic(
         if is_retryable {
             assert!(is_transient, "Retryable errors should be transient");
         }
+        assert_eq!(
+            is_connection,
+            matches!(&error, KafkaError::Io(_) | KafkaError::Broker(_)),
+            "connection-error classification drifted for {error:?}"
+        );
+        assert_eq!(
+            is_capacity,
+            matches!(
+                &error,
+                KafkaError::QueueFull | KafkaError::MessageTooLarge { .. }
+            ),
+            "capacity-error classification drifted for {error:?}"
+        );
+        assert_eq!(
+            is_timeout,
+            matches!(&error, KafkaError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut),
+            "timeout classification drifted for {error:?}"
+        );
     }
 
     // Test backoff calculation
@@ -514,7 +537,14 @@ fn fuzz_transactional_validation(
         } else {
             // Non-empty transaction ID should be accepted for config creation
             let config = TransactionalConfig::new(producer_config.clone(), sanitized_tx_id);
-            // Producer creation might still fail due to feature flags, but config should be valid
+            assert!(!config.transaction_id.is_empty());
+            let producer_config_valid = config.producer.validate().is_ok();
+            let result = TransactionalProducer::new(config);
+            assert_eq!(
+                result.is_ok(),
+                producer_config_valid,
+                "transactional construction should track producer config validity"
+            );
         }
     }
 
@@ -625,6 +655,7 @@ fn test_header_scenario(scenario: &HeaderScenario) {
     for (key, value) in &scenario.headers {
         // Validate header key/value constraints
         assert!(!key.is_empty() || scenario.key_corruption.is_empty());
+        assert!(value.len() <= MAX_PAYLOAD_SIZE);
 
         // Test key corruptions
         for corruption in &scenario.key_corruption {

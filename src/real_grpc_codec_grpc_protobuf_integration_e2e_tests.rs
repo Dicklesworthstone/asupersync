@@ -7,10 +7,6 @@
 use crate::{
     bytes::{Bytes, BytesMut},
     cx::Cx,
-    grpc::{
-        codec::{Codec, CodecConfig, CodecError, CodecStats, FramingMode},
-        protobuf::{Message, ProtobufCodec, ProtobufError, ProtobufMessage, ProtobufSerializer},
-    },
     runtime::Runtime,
     time::Duration,
     types::{Budget, Outcome, TaskId},

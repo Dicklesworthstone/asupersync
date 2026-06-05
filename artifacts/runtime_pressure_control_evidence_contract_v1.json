@@ -2,13 +2,15 @@
   "contract_version": "runtime-pressure-control-evidence-contract-v1",
   "bead_id": "asupersync-bwcdfl.4",
   "created_date": "2026-06-02",
-  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, RCH proof-lane pressure rows, deterministic lab scenario evidence, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
+  "description": "Operator-facing contract for the pressure-control evidence lane. It records what the runtime pressure snapshot, opt-in admission policy, region memory-budget pressure rows, RCH proof-lane pressure rows, no-local-RCH fallback evidence, scheduler pressure flamegraph attribution, deterministic lab scenario evidence, operator diagnostics bundle, and pressure triage runbook prove, what they deliberately do not prove, and which RCH-routed command verifies the artifact/docs/source alignment.",
   "source_of_truth": {
     "contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
     "verifier": "tests/runtime_pressure_control_evidence_contract.rs",
     "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
     "rch_health_source": "src/runtime/rch_health/mod.rs",
     "runtime_source": "src/runtime/resource_monitor.rs",
+    "phase6_gate_contract": "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+    "phase6_gate_verifier": "tests/phase6_methodology_gate_contract.rs",
     "readme": "README.md",
     "runbook": "docs/proof_runner_usage.md",
     "operator_runbook": "docs/runtime_pressure_triage_runbook.md"
@@ -18,6 +20,7 @@
     "runtime_pressure_lab_scenario_evidence": "asupersync.runtime-pressure-lab-scenario-evidence.v1",
     "runtime_pressure_admission_policy": "asupersync.runtime-pressure-admission-policy.v1",
     "runtime_pressure_admission_decision": "asupersync.runtime-pressure-admission-decision.v1",
+    "runtime_pressure_region_memory_budget": "asupersync.runtime-pressure-region-memory-budget.v1",
     "runtime_pressure_rch_proof_lane": "asupersync.runtime-pressure-rch-proof-lane.v1"
   },
   "proof_lanes": [
@@ -33,6 +36,119 @@
     "adaptive_controls_remain_opt_in_until_stronger_evidence": true,
     "lab_scenarios_are_real_host_throughput_proof": false,
     "deadlock_claims_require_explicit_trapped_cycle_proof": true
+  },
+  "scheduler_pressure_flamegraph_attribution": {
+    "phase6_gate_id": "flamegraph",
+    "phase6_contract": "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+    "phase6_verifier": "tests/phase6_methodology_gate_contract.rs",
+    "scheduler_pressure_signal": "scheduler_tail_pressure",
+    "pressure_snapshot_field": "RuntimePressureSnapshot.signal_statuses[signal=scheduler]",
+    "lab_scenario_family": "cpu_lane_pressure",
+    "direct_main_trigger": "Direct-main changes under src/runtime/scheduler/ or scheduler-pressure changes that cite scheduler_tail_pressure must attach the Phase 6 flamegraph artifact when the flamegraph gate is triggered.",
+    "artifact_path_pattern": "artifacts/flamegraphs/main-<bead-or-short-sha>.svg",
+    "benchmark_surface": "methodology_baselines",
+    "benchmark_rows": [
+      "methodology/task_spawn/inject_ready_global_queue",
+      "methodology/task_spawn/local_queue_push",
+      "methodology/task_spawn/local_queue_spawn_batch/1000"
+    ],
+    "supports": [
+      "The pressure-control lane can point operators from scheduler_tail_pressure evidence to the exact direct-main flamegraph artifact required by the Phase 6 gate.",
+      "The attribution names the benchmark surface and scheduler-adjacent baseline rows that the artifact is allowed to support."
+    ],
+    "does_not_support": [
+      "The flamegraph attribution does not prove a performance improvement, real-host throughput, absence of scheduler regressions, or autonomous scheduler rewrites.",
+      "The attribution is not required for docs-only pressure-control changes that do not touch a Phase 6 hot-path trigger."
+    ]
+  },
+  "no_local_rch_fallback_evidence": {
+    "evidence_id": "pressure-proof-no-local-rch-fallback",
+    "bead_id": "asupersync-bwcdfl.10",
+    "applies_to_lanes": [
+      "runtime-pressure-control-evidence-contract"
+    ],
+    "remote_execution_command_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "required_command_markers": [
+      "RCH_REQUIRE_REMOTE=1",
+      "rch exec -- env",
+      "CARGO_TARGET_DIR=",
+      "cargo test -p asupersync --test runtime_pressure_control_evidence_contract"
+    ],
+    "remote_transcript_success_markers": [
+      "Selected worker:",
+      "Executing command remotely:",
+      "Remote command finished: exit=0",
+      "[RCH] remote"
+    ],
+    "forbidden_transcript_markers": [
+      "[RCH] local",
+      "Executing command locally",
+      "local fallback accepted"
+    ],
+    "receipt_source": "src/runtime/rch_health/mod.rs",
+    "receipt_required_fields": {
+      "remote_required": true,
+      "local_fallback_allowed": false,
+      "refusal_code": "local_fallback_refused",
+      "reason_codes": [
+        "remote_required",
+        "local_fallback_refused"
+      ]
+    },
+    "closeout_rule": "A pressure-control proof lane may cite a green RCH Cargo proof only when the command starts with the remote-required prefix, uses an isolated CARGO_TARGET_DIR, and the saved transcript or admission receipt rules out local Cargo fallback.",
+    "does_not_prove": [
+      "No-local-RCH fallback evidence does not prove the RCH fleet is generally healthy or available.",
+      "No-local-RCH fallback evidence does not prove real-host throughput, production admission control, or scheduler performance."
+    ]
+  },
+  "operator_diagnostics_bundle": {
+    "bundle_id": "pressure-control-operator-diagnostics-bundle",
+    "bead_id": "asupersync-bwcdfl.11",
+    "operator_doc": "docs/runtime_pressure_triage_runbook.md",
+    "purpose": "Give operators one compact pressure-control handoff that summarizes snapshot verdicts, admission decisions, region memory-budget pressure, RCH proof-lane pressure, deterministic replay evidence, validation fallback status, and scope limits without requiring scattered artifact inspection.",
+    "ordered_sections": [
+      "snapshot_verdict",
+      "admission_decision",
+      "region_memory_budget_pressure",
+      "rch_proof_lane_pressure",
+      "deterministic_replay_evidence",
+      "validation_fallback_status",
+      "scope_non_claims"
+    ],
+    "required_evidence_markers": [
+      "RuntimePressureSnapshot.overall_verdict",
+      "RuntimePressureAdmissionDecision",
+      "RuntimePressureRegionMemoryBudgetSnapshot",
+      "RuntimePressureRchProofLaneSnapshot",
+      "RuntimePressureLabScenarioEvidence",
+      "no-local-RCH fallback evidence",
+      "scheduler_tail_pressure",
+      "spectral_recommendations"
+    ],
+    "status_semantics": [
+      {
+        "status": "advisory",
+        "meaning": "Live pressure evidence can guide triage, but does not by itself prove throughput, scheduler regression closure, or production-safe policy rollout."
+      },
+      {
+        "status": "replay_backed",
+        "meaning": "The cited pressure diagnosis is paired with deterministic lab or replay evidence for the scenario family under discussion."
+      },
+      {
+        "status": "trapped_cycle_proven",
+        "meaning": "A deadlock claim is allowed only when explicit trapped-cycle proof is present; spectral fragmentation alone is insufficient."
+      },
+      {
+        "status": "validation_blocked",
+        "meaning": "A remote-required validation lane lacked workers or refused local fallback, so the operator report must name the first blocker instead of claiming a green proof."
+      }
+    ],
+    "closeout_rule": "Pressure-control closeouts should summarize the diagnostics bundle status, cite the strongest evidence class actually present, and preserve every non-claim before recommending any policy or scheduler follow-up.",
+    "does_not_prove": [
+      "The diagnostics bundle does not prove real-host throughput or scheduler performance.",
+      "The diagnostics bundle does not prove production-on-by-default admission control, autonomous scheduler rewrites, or per-region allocator enforcement.",
+      "The diagnostics bundle does not prove a deadlock unless explicit trapped-cycle proof is cited."
+    ]
   },
   "evidence_claims": [
     {
@@ -108,6 +224,69 @@
         "production throughput claims",
         "automatic proof-lane scheduling"
       ]
+    },
+    {
+      "claim_id": "rch-no-local-fallback-evidence",
+      "proves": [
+        "Pressure-control proof lanes name the remote-required command prefix and transcript markers needed before citing a green RCH Cargo proof.",
+        "Remote-required proof-lane refusals preserve receipt fields that make local Cargo fallback explicit and fail closed."
+      ],
+      "does_not_prove": [
+        "No-local-RCH fallback evidence does not prove RCH fleet availability, real-host throughput, production admission control, or scheduler performance."
+      ],
+      "requires_additional_proof_for": [
+        "live RCH fleet health claims",
+        "production throughput claims",
+        "automatic proof-lane scheduling",
+        "scheduler performance claims"
+      ]
+    },
+    {
+      "claim_id": "operator-diagnostics-bundle",
+      "proves": [
+        "The pressure triage runbook provides one compact operator diagnostics bundle that ties snapshot verdicts, admission decisions, memory-budget pressure, RCH proof-lane pressure, replay evidence, validation fallback status, and scope limits together.",
+        "The bundle names the evidence class operators may cite before making policy or scheduler recommendations."
+      ],
+      "does_not_prove": [
+        "The diagnostics bundle does not prove real-host throughput, scheduler performance, production-on-by-default admission control, autonomous scheduler rewrites, per-region allocator enforcement, or deadlock without trapped-cycle proof."
+      ],
+      "requires_additional_proof_for": [
+        "production rollout decisions",
+        "large-host throughput claims",
+        "scheduler performance claims",
+        "deadlock declarations"
+      ]
+    },
+    {
+      "claim_id": "region-memory-budget-pressure-signal",
+      "proves": [
+        "RuntimePressureRegionMemoryBudgetSnapshot folds explicitly declared region memory envelopes into deterministic advisory pressure rows.",
+        "Region memory-budget overrun evidence can make optional work rejectable through the opt-in admission policy while required cleanup, cancellation, finalizers, and quiescence work remain admitted."
+      ],
+      "does_not_prove": [
+        "Region memory-budget pressure rows do not prove per-region allocator accounting, automatic allocation throttling, production throughput, or production-on-by-default admission control."
+      ],
+      "requires_additional_proof_for": [
+        "per-region allocator enforcement",
+        "automatic memory throttling",
+        "large-host throughput claims"
+      ]
+    },
+    {
+      "claim_id": "scheduler-pressure-flamegraph-attribution",
+      "proves": [
+        "Scheduler tail-pressure evidence is tied to the Phase 6 flamegraph gate by an explicit artifact path pattern, benchmark surface, and scheduler-adjacent baseline rows.",
+        "Operators can distinguish advisory scheduler pressure attribution from performance-improvement or throughput claims."
+      ],
+      "does_not_prove": [
+        "Scheduler pressure flamegraph attribution does not prove real-host throughput, absence of scheduler regressions, a performance improvement, autonomous scheduler rewrites, or deadlock absence."
+      ],
+      "requires_additional_proof_for": [
+        "performance improvement claims",
+        "large-host throughput claims",
+        "scheduler regression closure",
+        "deadlock declarations"
+      ]
     }
   ],
   "scenario_families": [
@@ -133,6 +312,14 @@
       "diagnostic_labels": [
         "memory_soft_pressure",
         "platform_probe_fallback"
+      ]
+    },
+    {
+      "scenario_kind": "region_memory_budget_overrun",
+      "expected_verdict": "critical",
+      "diagnostic_labels": [
+        "region_memory_budget_advisory",
+        "region_memory_budget_exhausted"
       ]
     },
     {

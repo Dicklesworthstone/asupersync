@@ -307,9 +307,11 @@ The runtime design is backed by a small-step operational semantics (`asupersync_
 
 The proof posture is exact: these are Lean-checked core invariants with theorem and executable-test linkage. This is not a blanket mechanized proof of every adapter, protocol implementation, platform backend, or distributed runtime transport path. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
-The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. The current green/red claim dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows.
+The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. It also carries proof-lane resource-envelope classes for expected timeout, memory, remote-required, and no-local-fallback semantics; those classes harden proof admission metadata and do not replace OS-level RCH worker cgroup limits. The current green/red claim dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows.
 
-The runtime pressure-control evidence contract is [`artifacts/runtime_pressure_control_evidence_contract_v1.json`](./artifacts/runtime_pressure_control_evidence_contract_v1.json), checked by [`tests/runtime_pressure_control_evidence_contract.rs`](./tests/runtime_pressure_control_evidence_contract.rs). Its canonical lane is `runtime-pressure-control-evidence-contract` in the proof manifest. The operator handoff is [`docs/runtime_pressure_triage_runbook.md`](./docs/runtime_pressure_triage_runbook.md). That lane proves the pressure snapshot schema versions, RCH proof-lane pressure row schema, deterministic lab scenario families, docs markers, and operator scope limits stay aligned. It does not prove real-host throughput, autonomous scheduler rewrites, production-on-by-default admission/backpressure, RCH fleet availability, or a deadlock without explicit trapped-cycle proof. Production pressure signals are advisory unless paired with lab/replay evidence or a trapped-cycle proof, and adaptive controls remain opt-in until stronger evidence supports a wider rollout.
+The admission-aware proof-lane atlas is anchored by [`artifacts/swarm_proof_lane_planner_contract_v1.json`](./artifacts/swarm_proof_lane_planner_contract_v1.json) and checked by [`tests/swarm_proof_lane_planner_contract.rs`](./tests/swarm_proof_lane_planner_contract.rs). Its focused manifest lane is `swarm-proof-lane-planner-contract`, which proves planner fixtures, atlas decision receipts, deterministic JSON/Markdown report goldens, docs markers, manifest mapping, and proof-status claim rows without broad workspace, conformance, throughput, scheduler-performance, or all-target claims.
+
+The runtime pressure-control evidence contract is [`artifacts/runtime_pressure_control_evidence_contract_v1.json`](./artifacts/runtime_pressure_control_evidence_contract_v1.json), checked by [`tests/runtime_pressure_control_evidence_contract.rs`](./tests/runtime_pressure_control_evidence_contract.rs). Its canonical lane is `runtime-pressure-control-evidence-contract` in the proof manifest. The operator handoff is [`docs/runtime_pressure_triage_runbook.md`](./docs/runtime_pressure_triage_runbook.md). That lane proves the pressure snapshot schema versions, region memory-budget pressure row schema, RCH proof-lane pressure row schema, no-local-RCH fallback evidence, operator diagnostics bundle, scheduler pressure flamegraph attribution, deterministic lab scenario families, docs markers, and operator scope limits stay aligned. It does not prove real-host throughput, performance improvement, scheduler regression closure, autonomous scheduler rewrites, production-on-by-default admission/backpressure, per-region allocator enforcement, RCH fleet availability, or a deadlock without explicit trapped-cycle proof. Production pressure signals are advisory unless paired with lab/replay evidence, a committed `artifacts/flamegraphs/main-<bead-or-short-sha>.svg` attribution artifact for triggered scheduler hot-path work, an RCH transcript or admission receipt that rules out local Cargo fallback for remote-required proof lanes, or a trapped-cycle proof, and adaptive controls remain opt-in until stronger evidence supports a wider rollout.
 
 One example: the cancellation/cleanup **budget** composes as a semiring-like object (componentwise `min`, with priority as `max`), which makes "who constrains whom?" algebraic instead of ad-hoc:
 
@@ -1010,9 +1012,10 @@ async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
 }
 ```
 
-These macros are available in the default feature set. If you opt out of
-default features for a minimal core-only build, re-enable `proc-macros`
-explicitly.
+These macros are available in the default feature set. The default production
+feature set is intentionally limited to `proc-macros`; test-only internals are
+opt-in. If you opt out of default features for a minimal core-only build,
+re-enable `proc-macros` explicitly.
 
 Current contract:
 
@@ -1235,10 +1238,10 @@ Payoff: bridge from deterministic runtime traces to model-checking workflows whe
 ```toml
 [dependencies]
 # crates.io
-asupersync = "0.2.5"
+asupersync = "0.3.3"
 
 # or git
-# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.2.5" }
+# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.3.3" }
 ```
 
 ### Feature Flags
@@ -1247,7 +1250,7 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 
 | Feature | Description | Default |
 |---------|-------------|---------|
-| `test-internals` | Expose test-only helpers (not for production) | Yes |
+| `test-internals` | Expose test-only helpers (not for production) | No |
 | `metrics` | OpenTelemetry metrics provider (Tokio-free normal graph; OTLP protobuf helpers are fuzz/test-only) | No |
 | `tracing-integration` | Tracing spans/logging integration | No |
 | `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!` proc macros | Yes |
@@ -1680,7 +1683,7 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_docs CARG
 | Gate | Direct-main trigger | Direct-main enforcement | PR workflow enforcement | Required artifact |
 |------|---------------------|-------------------------|-------------------------|-------------------|
 | Baseline benchmarks | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` benchmark command from the signoff contract and compare against `artifacts/baseline.json`. | **CI-blocking** for PRs. Fails if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` plus criterion output. |
-| Flamegraph | Direct-main changes under `src/runtime/scheduler/`, `src/channel/`, `src/obligation/`, `src/cancel/`, or `src/sync/` | Generate and commit `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`; PR lane: `artifacts/flamegraphs/pr-<N>.svg`. |
+| Flamegraph | Direct-main changes under `src/runtime/scheduler/`, `src/channel/`, `src/obligation/`, `src/cancel/`, or `src/sync/` | Generate and commit `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`. Pressure-control work that cites `scheduler_tail_pressure` uses this artifact only as attribution for the `methodology_baselines` scheduler-adjacent rows, not as a throughput or regression-closure claim. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/flamegraphs/main-<bead-or-short-sha>.svg`; PR lane: `artifacts/flamegraphs/pr-<N>.svg`. |
 | Golden checksums | Every substantive direct-main change before commit/push | Run the scoped `rch exec --` golden benchmark and integration test commands. | **CI-blocking** for PRs. Fails on any `[GOLDEN] MISMATCH` or failing `golden_outputs` integration test. | `artifacts/golden_checksums.json` when intentionally updated. |
 | Proof notes | Direct-main changes under `src/obligation/` or `src/safety/`, or any changed `.rs` file containing an `unsafe { ... }` block | Commit `artifacts/proof_notes/main-<bead-or-short-sha>.md` and validate it is substantive. | **CI-blocking** for PRs when triggered; otherwise skipped. | Direct-main: `artifacts/proof_notes/main-<bead-or-short-sha>.md`; PR lane: `artifacts/proof_notes/pr-<N>.md`. |
 

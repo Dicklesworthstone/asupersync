@@ -97,13 +97,13 @@ fuzz_target!(|input: AuthenticatedMacInput| {
         &input.payload,
     );
 
-    let signed = SecurityContext::new(signing_key).sign_symbol(&symbol);
+    let signed = SecurityContext::new(signing_key.clone()).sign_symbol(&symbol);
     assert!(
         signed.is_verified(),
         "sign_symbol must produce a verified wrapper"
     );
 
-    let (candidate_symbol, candidate_tag) = apply_tamper(&input.tamper, signing_key, &symbol);
+    let (candidate_symbol, candidate_tag) = apply_tamper(&input.tamper, &signing_key, &symbol);
     let verifier_key = match input.verifier {
         VerifierKey::SigningKey => signing_key,
         VerifierKey::AlternateKey => alternate_key,
@@ -119,17 +119,17 @@ fuzz_target!(|input: AuthenticatedMacInput| {
 
     assert_strict_contract(
         expected_valid,
-        verifier_key,
+        &verifier_key,
         &candidate_symbol,
         candidate_tag,
     );
     assert_permissive_contract(
         expected_valid,
-        verifier_key,
+        &verifier_key,
         &candidate_symbol,
         candidate_tag,
     );
-    assert_disabled_contract(verifier_key, &candidate_symbol, candidate_tag);
+    assert_disabled_contract(&verifier_key, &candidate_symbol, candidate_tag);
 });
 
 fn build_symbol(
@@ -146,10 +146,10 @@ fn build_symbol(
 
 fn apply_tamper(
     tamper: &Tamper,
-    signing_key: AuthKey,
+    signing_key: &AuthKey,
     symbol: &Symbol,
 ) -> (Symbol, AuthenticationTag) {
-    let base_tag = AuthenticationTag::compute(&signing_key, symbol);
+    let base_tag = AuthenticationTag::compute(signing_key, symbol);
     match tamper {
         Tamper::None => (symbol.clone(), base_tag),
         Tamper::FlipTagBit { bit } => {
@@ -182,7 +182,7 @@ fn apply_tamper(
                 *other_kind,
                 other_payload,
             );
-            let other_tag = AuthenticationTag::compute(&signing_key, &other_symbol);
+            let other_tag = AuthenticationTag::compute(signing_key, &other_symbol);
             let prefix_len = usize::from(*prefix_len) % base_tag.as_bytes().len();
             let mut mixed = *other_tag.as_bytes();
             mixed[..prefix_len].copy_from_slice(&base_tag.as_bytes()[..prefix_len]);
@@ -253,11 +253,11 @@ fn apply_tamper(
 
 fn assert_strict_contract(
     expected_valid: bool,
-    verifier_key: AuthKey,
+    verifier_key: &AuthKey,
     symbol: &Symbol,
     tag: AuthenticationTag,
 ) {
-    let ctx = SecurityContext::new(verifier_key).with_mode(AuthMode::Strict);
+    let ctx = SecurityContext::new(verifier_key.clone()).with_mode(AuthMode::Strict);
 
     let mut received = AuthenticatedSymbol::from_parts(symbol.clone(), tag);
     let result = ctx.verify_authenticated_symbol(&mut received);
@@ -268,30 +268,38 @@ fn assert_strict_contract(
         "strict mode must set verified to the verification result",
     );
 
-    let mut preverified = AuthenticatedSymbol::new_verified(symbol.clone(), tag);
+    let mut preverified = verified_with_key(verifier_key, symbol);
     let result = ctx.verify_authenticated_symbol(&mut preverified);
-    assert_result_matches(result, expected_valid);
+    assert_result_matches(result, true);
     assert_eq!(
         preverified.is_verified(),
-        expected_valid,
-        "strict mode must clear stale trusted state on failure and preserve it on success",
+        true,
+        "strict mode must preserve a public wrapper signed by the verifier key",
     );
 
-    let repeat = ctx.verify_authenticated_symbol(&mut preverified);
-    assert_result_matches(repeat, expected_valid);
+    let mut stale_preverified = verified_with_stale_key(verifier_key, symbol);
+    let result = ctx.verify_authenticated_symbol(&mut stale_preverified);
+    assert_result_matches(result, false);
+    assert!(
+        !stale_preverified.is_verified(),
+        "strict mode must clear stale trusted state on failure",
+    );
+
+    let repeat = ctx.verify_authenticated_symbol(&mut stale_preverified);
+    assert_result_matches(repeat, false);
     assert_eq!(
-        preverified.is_verified(),
-        expected_valid,
-        "repeated strict verification must be replay-stable",
+        stale_preverified.is_verified(),
+        false,
+        "repeated strict verification must keep stale trusted state cleared",
     );
 
     assert_eq!(
         ctx.stats().verified_ok.load(Ordering::Relaxed),
-        if expected_valid { 3 } else { 0 },
+        if expected_valid { 2 } else { 1 },
     );
     assert_eq!(
         ctx.stats().verified_fail.load(Ordering::Relaxed),
-        if expected_valid { 0 } else { 3 },
+        if expected_valid { 2 } else { 3 },
     );
     assert_eq!(ctx.stats().failures_allowed.load(Ordering::Relaxed), 0);
     assert_eq!(ctx.stats().skipped.load(Ordering::Relaxed), 0);
@@ -299,11 +307,12 @@ fn assert_strict_contract(
 
 fn assert_permissive_contract(
     expected_valid: bool,
-    verifier_key: AuthKey,
+    verifier_key: &AuthKey,
     symbol: &Symbol,
     tag: AuthenticationTag,
 ) {
-    let ctx = SecurityContext::new(verifier_key).with_mode(AuthMode::Permissive);
+    let ctx =
+        SecurityContext::for_testing_with_key_and_mode(verifier_key.clone(), AuthMode::Permissive);
 
     let mut received = AuthenticatedSymbol::from_parts(symbol.clone(), tag);
     let result = ctx.verify_authenticated_symbol(&mut received);
@@ -314,32 +323,42 @@ fn assert_permissive_contract(
         "permissive mode must still reflect the MAC verdict in verified state",
     );
 
-    let mut preverified = AuthenticatedSymbol::new_verified(symbol.clone(), tag);
+    let mut preverified = verified_with_key(verifier_key, symbol);
     let result = ctx.verify_authenticated_symbol(&mut preverified);
     assert!(result.is_ok(), "permissive mode must not return Err");
     assert_eq!(
         preverified.is_verified(),
-        expected_valid,
+        true,
+        "permissive mode must preserve a public wrapper signed by the verifier key",
+    );
+
+    let mut stale_preverified = verified_with_stale_key(verifier_key, symbol);
+    let result = ctx.verify_authenticated_symbol(&mut stale_preverified);
+    assert!(result.is_ok(), "permissive mode must not return Err");
+    assert_eq!(
+        stale_preverified.is_verified(),
+        false,
         "permissive mode must clear stale trusted state on failure",
     );
 
     assert_eq!(
         ctx.stats().verified_ok.load(Ordering::Relaxed),
-        if expected_valid { 2 } else { 0 },
+        if expected_valid { 2 } else { 1 },
     );
     assert_eq!(
         ctx.stats().verified_fail.load(Ordering::Relaxed),
-        if expected_valid { 0 } else { 2 },
+        if expected_valid { 1 } else { 2 },
     );
     assert_eq!(
         ctx.stats().failures_allowed.load(Ordering::Relaxed),
-        if expected_valid { 0 } else { 2 },
+        if expected_valid { 1 } else { 2 },
     );
     assert_eq!(ctx.stats().skipped.load(Ordering::Relaxed), 0);
 }
 
-fn assert_disabled_contract(verifier_key: AuthKey, symbol: &Symbol, tag: AuthenticationTag) {
-    let ctx = SecurityContext::new(verifier_key).with_mode(AuthMode::Disabled);
+fn assert_disabled_contract(verifier_key: &AuthKey, symbol: &Symbol, tag: AuthenticationTag) {
+    let ctx =
+        SecurityContext::for_testing_with_key_and_mode(verifier_key.clone(), AuthMode::Disabled);
 
     let mut received = AuthenticatedSymbol::from_parts(symbol.clone(), tag);
     let result = ctx.verify_authenticated_symbol(&mut received);
@@ -349,7 +368,7 @@ fn assert_disabled_contract(verifier_key: AuthKey, symbol: &Symbol, tag: Authent
         "disabled mode must leave an unverified wrapper untouched",
     );
 
-    let mut preverified = AuthenticatedSymbol::new_verified(symbol.clone(), tag);
+    let mut preverified = verified_with_key(verifier_key, symbol);
     let result = ctx.verify_authenticated_symbol(&mut preverified);
     assert!(result.is_ok(), "disabled mode must never return Err");
     assert!(
@@ -361,6 +380,20 @@ fn assert_disabled_contract(verifier_key: AuthKey, symbol: &Symbol, tag: Authent
     assert_eq!(ctx.stats().verified_ok.load(Ordering::Relaxed), 0);
     assert_eq!(ctx.stats().verified_fail.load(Ordering::Relaxed), 0);
     assert_eq!(ctx.stats().failures_allowed.load(Ordering::Relaxed), 0);
+}
+
+fn verified_with_key(verifier_key: &AuthKey, symbol: &Symbol) -> AuthenticatedSymbol {
+    SecurityContext::new(verifier_key.clone()).sign_symbol(symbol)
+}
+
+fn verified_with_stale_key(verifier_key: &AuthKey, symbol: &Symbol) -> AuthenticatedSymbol {
+    let stale_key = verifier_key.derive_subkey(b"asupersync:fuzz:stale-preverified");
+    let auth = SecurityContext::new(stale_key).sign_symbol(symbol);
+    assert!(
+        !auth.tag().verify(verifier_key, auth.symbol()),
+        "stale preverified wrapper unexpectedly verifies under the verifier key",
+    );
+    auth
 }
 
 fn assert_result_matches(

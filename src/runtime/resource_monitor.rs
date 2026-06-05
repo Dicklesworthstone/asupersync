@@ -27,11 +27,13 @@ use crate::observability::spectral_health::{
 };
 use crate::runtime::rch_health::{RchAdmissionDecision, RchWorkerAdmissionReceipt};
 use crate::runtime::scheduler::SchedulerEvidenceMetrics;
-use crate::types::RegionId;
+use crate::sync::LockMetricsSnapshot;
+use crate::sync::lock_ordering::{LockModule, LockOrderAtlasSnapshot, LockRank};
 use crate::types::pressure::SystemPressure;
+use crate::types::{CapabilityBudget, RegionId};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -61,7 +63,23 @@ pub const RUNTIME_PRESSURE_ADMISSION_DECISION_SCHEMA_VERSION: &str =
 pub const RUNTIME_PRESSURE_RCH_PROOF_LANE_SCHEMA_VERSION: &str =
     "asupersync.runtime-pressure-rch-proof-lane.v1";
 
+/// Stable schema for region memory-budget pressure rows folded into runtime snapshots.
+pub const RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION: &str =
+    "asupersync.runtime-pressure-region-memory-budget.v1";
+
+/// Stable schema for source-backed admission-aware runtime pressure atlas snapshots.
+pub const ADMISSION_AWARE_RUNTIME_PRESSURE_ATLAS_SCHEMA_VERSION: &str =
+    "admission-aware-runtime-pressure-atlas-v1";
+
 const RESOURCE_PROBE_WARNING_THROTTLE_EVERY: u64 = 8;
+const REGION_MEMORY_BUDGET_SOFT_LIMIT_BPS: u16 = 8_000;
+const REGION_MEMORY_BUDGET_HARD_LIMIT_BPS: u16 = 10_000;
+const ADMISSION_AWARE_LARGE_HOST_CPU_CORES: u16 = 64;
+const ADMISSION_AWARE_LARGE_HOST_MEMORY_BYTES: u64 = 256 * 1024 * 1024 * 1024;
+const ADMISSION_AWARE_LARGE_HOST_MIN_NUMA_NODES: u16 = 2;
+const ADMISSION_AWARE_LARGE_HOST_BATCH_CORE_FLOOR: u16 = 8;
+const ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const ADMISSION_AWARE_LARGE_HOST_DISK_HEADROOM_FLOOR_BYTES: u64 = 128 * 1024 * 1024 * 1024;
 
 /// Errors that can occur during resource monitoring.
 #[derive(Debug, Error)]
@@ -252,6 +270,7 @@ pub enum RuntimePressureVerdict {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimePressureSignal {
     Resources,
+    RegionMemoryBudgets,
     Scheduler,
     Spectral,
     PlatformProbes,
@@ -376,6 +395,7 @@ pub enum RuntimePressureLabScenarioKind {
     Healthy,
     CpuLanePressure,
     ResourceFallbackDegraded,
+    RegionMemoryBudgetOverrun,
     StructuralWarning,
     RchProofLaneRemoteRefusal,
 }
@@ -568,6 +588,92 @@ impl RuntimePressureRchProofLaneSnapshot {
     }
 }
 
+/// Deterministic region memory-budget pressure row folded into runtime pressure snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePressureRegionMemoryBudgetSnapshot {
+    pub schema_version: String,
+    pub region_id: RegionId,
+    pub region_label: String,
+    pub declared_memory_budget_bytes: u64,
+    pub observed_memory_bytes: u64,
+    pub over_budget_bytes: u64,
+    /// Usage in basis points, where `10_000` represents the declared budget.
+    pub usage_bps: u16,
+    pub soft_limit_bps: u16,
+    pub hard_limit_bps: u16,
+    pub soft_limit_exceeded: bool,
+    pub hard_limit_exceeded: bool,
+    pub budget_exhausted: bool,
+    pub advisory_only: bool,
+}
+
+impl RuntimePressureRegionMemoryBudgetSnapshot {
+    #[must_use]
+    pub fn new(
+        region_id: RegionId,
+        declared_memory_budget_bytes: u64,
+        observed_memory_bytes: u64,
+    ) -> Self {
+        Self::with_label(
+            region_id,
+            region_id.to_string(),
+            declared_memory_budget_bytes,
+            observed_memory_bytes,
+        )
+    }
+
+    #[must_use]
+    pub fn with_label(
+        region_id: RegionId,
+        region_label: impl Into<String>,
+        declared_memory_budget_bytes: u64,
+        observed_memory_bytes: u64,
+    ) -> Self {
+        let usage_bps =
+            region_memory_budget_usage_bps(observed_memory_bytes, declared_memory_budget_bytes);
+        let over_budget_bytes = observed_memory_bytes.saturating_sub(declared_memory_budget_bytes);
+        let soft_limit_exceeded = usage_bps >= REGION_MEMORY_BUDGET_SOFT_LIMIT_BPS
+            || (declared_memory_budget_bytes == 0 && observed_memory_bytes > 0);
+        let hard_limit_exceeded = usage_bps >= REGION_MEMORY_BUDGET_HARD_LIMIT_BPS
+            || (declared_memory_budget_bytes == 0 && observed_memory_bytes > 0);
+        let budget_exhausted = declared_memory_budget_bytes == 0
+            || observed_memory_bytes >= declared_memory_budget_bytes;
+
+        Self {
+            schema_version: RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION.to_string(),
+            region_id,
+            region_label: region_label.into(),
+            declared_memory_budget_bytes,
+            observed_memory_bytes,
+            over_budget_bytes,
+            usage_bps,
+            soft_limit_bps: REGION_MEMORY_BUDGET_SOFT_LIMIT_BPS,
+            hard_limit_bps: REGION_MEMORY_BUDGET_HARD_LIMIT_BPS,
+            soft_limit_exceeded,
+            hard_limit_exceeded,
+            budget_exhausted,
+            advisory_only: true,
+        }
+    }
+
+    #[must_use]
+    pub fn from_capability_budget(
+        region_id: RegionId,
+        capability_budget: CapabilityBudget,
+        observed_memory_bytes: u64,
+    ) -> Option<Self> {
+        capability_budget
+            .memory_bytes
+            .map(|declared_memory_budget_bytes| {
+                Self::new(
+                    region_id,
+                    declared_memory_budget_bytes,
+                    observed_memory_bytes,
+                )
+            })
+    }
+}
+
 /// Unified operator-facing runtime pressure report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePressureSnapshot {
@@ -583,6 +689,7 @@ pub struct RuntimePressureSnapshot {
     pub scheduler: Option<SchedulerEvidenceMetrics>,
     pub spectral: RuntimePressureSpectralSnapshot,
     pub spectral_recommendations: Vec<RuntimePressureSpectralRecommendation>,
+    pub region_memory_budgets: Vec<RuntimePressureRegionMemoryBudgetSnapshot>,
     pub rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
 }
 
@@ -594,11 +701,12 @@ impl RuntimePressureSnapshot {
         scheduler: Option<SchedulerEvidenceMetrics>,
         spectral: Option<RuntimePressureSpectralSnapshot>,
     ) -> Self {
-        Self::from_parts_with_rch_proof_lanes(
+        Self::from_parts_with_extended_pressure_evidence(
             pressure,
             platform_probe_report,
             scheduler,
             spectral,
+            Vec::new(),
             Vec::new(),
         )
     }
@@ -609,12 +717,73 @@ impl RuntimePressureSnapshot {
         platform_probe_report: ResourcePlatformProbeReport,
         scheduler: Option<SchedulerEvidenceMetrics>,
         spectral: Option<RuntimePressureSpectralSnapshot>,
+        rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
+    ) -> Self {
+        Self::from_parts_with_extended_pressure_evidence(
+            pressure,
+            platform_probe_report,
+            scheduler,
+            spectral,
+            Vec::new(),
+            rch_proof_lanes,
+        )
+    }
+
+    #[must_use]
+    pub fn from_parts_with_region_memory_budgets(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<RuntimePressureSpectralSnapshot>,
+        region_memory_budgets: Vec<RuntimePressureRegionMemoryBudgetSnapshot>,
+    ) -> Self {
+        Self::from_parts_with_extended_pressure_evidence(
+            pressure,
+            platform_probe_report,
+            scheduler,
+            spectral,
+            region_memory_budgets,
+            Vec::new(),
+        )
+    }
+
+    #[must_use]
+    pub fn from_parts_with_region_memory_budgets_and_rch_proof_lanes(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<RuntimePressureSpectralSnapshot>,
+        region_memory_budgets: Vec<RuntimePressureRegionMemoryBudgetSnapshot>,
+        rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
+    ) -> Self {
+        Self::from_parts_with_extended_pressure_evidence(
+            pressure,
+            platform_probe_report,
+            scheduler,
+            spectral,
+            region_memory_budgets,
+            rch_proof_lanes,
+        )
+    }
+
+    fn from_parts_with_extended_pressure_evidence(
+        pressure: &ResourcePressure,
+        platform_probe_report: ResourcePlatformProbeReport,
+        scheduler: Option<SchedulerEvidenceMetrics>,
+        spectral: Option<RuntimePressureSpectralSnapshot>,
+        mut region_memory_budgets: Vec<RuntimePressureRegionMemoryBudgetSnapshot>,
         mut rch_proof_lanes: Vec<RuntimePressureRchProofLaneSnapshot>,
     ) -> Self {
         let resources = runtime_pressure_resources(pressure);
         let resource_composite_degradation = pressure.composite_degradation_level();
         let spectral = spectral.unwrap_or_else(RuntimePressureSpectralSnapshot::unknown);
         let spectral_recommendations = runtime_pressure_spectral_recommendations(&spectral);
+        region_memory_budgets.sort_by(|left, right| {
+            left.region_label
+                .cmp(&right.region_label)
+                .then_with(|| left.region_id.as_u64().cmp(&right.region_id.as_u64()))
+        });
+        region_memory_budgets.dedup_by(|left, right| left.region_id == right.region_id);
         rch_proof_lanes.sort_by(|left, right| {
             left.lane_id
                 .cmp(&right.lane_id)
@@ -633,6 +802,11 @@ impl RuntimePressureSnapshot {
             runtime_pressure_spectral_signal_status(&spectral),
             runtime_pressure_platform_probe_signal_status(&platform_probe_report),
         ];
+        if let Some(row) =
+            runtime_pressure_region_memory_budget_signal_status(&region_memory_budgets)
+        {
+            signal_statuses.push(row);
+        }
         if let Some(row) = runtime_pressure_rch_proof_lane_signal_status(&rch_proof_lanes) {
             signal_statuses.push(row);
         }
@@ -667,8 +841,1349 @@ impl RuntimePressureSnapshot {
             scheduler,
             spectral,
             spectral_recommendations,
+            region_memory_budgets,
             rch_proof_lanes,
         }
+    }
+}
+
+/// Freshness status attached to one admission-aware atlas input row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareAtlasFreshnessStatus {
+    Fresh,
+    Stale,
+    Missing,
+    Unsupported,
+    Malformed,
+}
+
+impl AdmissionAwareAtlasFreshnessStatus {
+    #[must_use]
+    pub fn is_stale_or_missing(self) -> bool {
+        matches!(self, Self::Stale | Self::Missing)
+    }
+
+    #[must_use]
+    pub fn blocks_validation(self) -> bool {
+        matches!(self, Self::Unsupported | Self::Malformed)
+    }
+}
+
+/// Read-only overlap classification for coordination evidence supplied to the atlas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareCoordinationOverlapClass {
+    NoOverlap,
+    OwnedExact,
+    OwnedGlob,
+    PeerExact,
+    PeerGlob,
+    ActiveExclusiveConflict,
+    ExpiredReservation,
+    TrackerOnly,
+    UnrelatedPeerWork,
+    Malformed,
+}
+
+/// Conservative coordination decision derived from externally supplied atlas rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareCoordinationDecision {
+    Proceed,
+    Defer,
+    HandoffRequired,
+    Blocked,
+}
+
+/// Stable labels for the evidence boundary an atlas snapshot may claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareAtlasClaimLabel {
+    Advisory,
+    ReplayBacked,
+    TrappedCycleProven,
+    DeadlockProven,
+    ValidationBlocked,
+    StaleEvidence,
+}
+
+/// Advisory worker saturation class for the 64-core/256GiB swarm host profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareLargeHostWorkerSaturation {
+    Available,
+    LowMemory,
+    WorkerSaturated,
+    DiskConstrained,
+    NonLargeHost,
+}
+
+/// Advisory batching decision for a large RCH swarm host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareLargeHostBatchingDecision {
+    PreferWarmWorker,
+    AdmitBatch,
+    QueueLowMemory,
+    DeferWorkerSaturated,
+    QueueDiskHeadroom,
+    DeferNonLargeHost,
+}
+
+/// Serializable lock contention row projected from existing lock metrics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareLockContentionAtlasRow {
+    pub lock_name: String,
+    pub lock_rank: String,
+    pub lock_module: String,
+    pub acquisitions: u64,
+    pub contentions: u64,
+    pub wait_ns: u64,
+    pub hold_ns: u64,
+    pub max_wait_ns: u64,
+    pub max_hold_ns: u64,
+    pub p95_wait_ns: u64,
+    pub p999_wait_ns: u64,
+    pub p95_hold_ns: u64,
+    pub p999_hold_ns: u64,
+    pub order_edges_exercised: usize,
+    pub order_violations: usize,
+    pub instrumentation_mode: String,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Serializable scheduler pressure row projected from runtime pressure evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareSchedulerPressureRow {
+    pub scheduler_tail_pressure_label: String,
+    pub methodology_baseline_rows: usize,
+    pub flamegraph_artifact_path: Option<String>,
+    pub phase6_gate_triggered: bool,
+    pub attribution_claim_only: bool,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Serializable region memory budget row projected from runtime pressure evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareRegionMemoryBudgetPressureRow {
+    pub region_id: RegionId,
+    pub region_label: String,
+    pub budget_schema_version: String,
+    pub declared_budget_bytes: u64,
+    pub observed_usage_bytes: u64,
+    pub pressure_level: RuntimePressureSignalStatus,
+    pub optional_work_action: RuntimePressureAdmissionAction,
+    pub required_cleanup_admitted: bool,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Serializable spectral wait-graph row projected from runtime pressure evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareSpectralWaitGraphRow {
+    pub early_warning_severity: RuntimePressureEarlyWarningSeverity,
+    pub health_classification: RuntimePressureSpectralClass,
+    pub fiedler_trend: Option<u64>,
+    pub recommendations: Vec<RuntimePressureSpectralRecommendation>,
+    pub deadlock_proven: bool,
+    pub requires_trapped_cycle_detection: bool,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Proof status for a trapped-cycle witness row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAwareTrappedCycleWitnessProofStatus {
+    Validated,
+    ReplayPending,
+    Failed,
+    Stale,
+    Malformed,
+}
+
+/// Directed wait edge inside an explicit trapped-cycle witness.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AdmissionAwareTrappedCycleWaitEdgeRow {
+    pub waiting_participant: String,
+    pub held_by_participant: String,
+    pub resource: String,
+}
+
+/// Explicit trapped-cycle witness required before deadlock-style claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareTrappedCycleWitnessRow {
+    pub witness_id: String,
+    pub participants: Vec<String>,
+    pub held_resources: Vec<String>,
+    pub wait_edges: Vec<AdmissionAwareTrappedCycleWaitEdgeRow>,
+    pub source_step_or_timestamp: String,
+    pub replay_command: String,
+    pub proof_status: AdmissionAwareTrappedCycleWitnessProofStatus,
+    pub witness_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+impl AdmissionAwareTrappedCycleWitnessRow {
+    #[must_use]
+    pub fn is_validated(&self) -> bool {
+        self.proof_status == AdmissionAwareTrappedCycleWitnessProofStatus::Validated
+            && self.witness_freshness == AdmissionAwareAtlasFreshnessStatus::Fresh
+            && !self.witness_id.trim().is_empty()
+            && !self.participants.is_empty()
+            && !self.held_resources.is_empty()
+            && !self.wait_edges.is_empty()
+            && !self.source_step_or_timestamp.trim().is_empty()
+            && !self.replay_command.trim().is_empty()
+    }
+
+    #[must_use]
+    pub fn is_malformed(&self) -> bool {
+        self.proof_status == AdmissionAwareTrappedCycleWitnessProofStatus::Malformed
+            || self.witness_freshness == AdmissionAwareAtlasFreshnessStatus::Malformed
+            || self.witness_id.trim().is_empty()
+            || self.participants.is_empty()
+            || self.held_resources.is_empty()
+            || self.wait_edges.is_empty()
+            || self.source_step_or_timestamp.trim().is_empty()
+            || self.replay_command.trim().is_empty()
+    }
+}
+
+/// Serializable proof-lane admission row projected from runtime pressure evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareRchProofLaneAdmissionRow {
+    pub lane_id: String,
+    pub admission_decision: String,
+    pub reason_codes: Vec<String>,
+    pub remote_required: bool,
+    pub local_fallback_allowed: bool,
+    pub target_dir_isolated: bool,
+    pub recommended_worker_id: Option<String>,
+    pub cover_claims: Vec<String>,
+    pub does_not_cover_claims: Vec<String>,
+    pub suggested_command: Option<String>,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Read-only dirty-tree coordination row supplied by a caller or fixture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareDirtyTreePeerOwnershipRow {
+    pub path: String,
+    pub dirty_classification: String,
+    pub holder: Option<String>,
+    pub bead_id: Option<String>,
+    pub source: String,
+    pub overlap_classification: AdmissionAwareCoordinationOverlapClass,
+    pub coordination_decision: AdmissionAwareCoordinationDecision,
+    pub blocks_admission: bool,
+    pub handoff_required: bool,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Read-only Agent Mail reservation row supplied by a caller or fixture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareAgentMailReservationRow {
+    pub path_pattern: String,
+    pub holder: String,
+    pub exclusive: bool,
+    pub reason: String,
+    pub expires_ts: Option<String>,
+    pub bead_id: Option<String>,
+    pub overlap_classification: AdmissionAwareCoordinationOverlapClass,
+    pub coordination_decision: AdmissionAwareCoordinationDecision,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Read-only bead tracker status row supplied by a caller or fixture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareBrTrackerStatusRow {
+    pub bead_id: String,
+    pub status: String,
+    pub priority: Option<u8>,
+    pub blocked_by: Vec<String>,
+    pub ready: bool,
+    pub assignee: Option<String>,
+    pub updated_at: Option<String>,
+    pub overlap_classification: AdmissionAwareCoordinationOverlapClass,
+    pub coordination_decision: AdmissionAwareCoordinationDecision,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Read-only large-host worker warmth row supplied by a caller or fixture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareLargeHostWorkerWarmthRow {
+    pub worker_id: String,
+    pub cpu_cores: u16,
+    pub memory_bytes: u64,
+    pub numa_nodes: u16,
+    pub disk_headroom_bytes: u64,
+    pub worker_queue_state: String,
+    pub worker_available_cores: u16,
+    pub worker_available_memory_bytes: u64,
+    pub cache_warmth: String,
+    pub target_dir_isolated: bool,
+    pub active_project_excluded: bool,
+    pub proof_lane_cost_estimate: Option<String>,
+    pub worker_saturation: AdmissionAwareLargeHostWorkerSaturation,
+    pub advisory_batching_decision: AdmissionAwareLargeHostBatchingDecision,
+    pub advisory_batching_reason_codes: Vec<String>,
+    pub advisory_batch_size_hint: Option<u16>,
+    pub advisory_non_claims: Vec<String>,
+    pub advisory_only: bool,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Stable claim-boundary row emitted by the atlas builder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareClaimBoundaryLabelRow {
+    pub label: AdmissionAwareAtlasClaimLabel,
+    pub required_evidence: Vec<String>,
+    pub forbidden_overclaims: Vec<String>,
+    pub closeout_text: String,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Read-only operator closeout receipt supplied by a caller or fixture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareOperatorCloseoutReceiptRow {
+    pub bead_id: String,
+    pub status: String,
+    pub commit: Option<String>,
+    pub proof_commands: Vec<String>,
+    pub pushed_main: bool,
+    pub pushed_master_mirror: bool,
+    pub sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+}
+
+/// Pure inputs for source-backed admission-aware atlas assembly.
+#[derive(Debug, Clone)]
+pub struct AdmissionAwareRuntimePressureAtlasBuilderInput {
+    pub runtime_pressure: RuntimePressureSnapshot,
+    pub lock_metrics: Vec<LockMetricsSnapshot>,
+    pub lock_order_atlas: LockOrderAtlasSnapshot,
+    pub dirty_tree_peer_ownership: Vec<AdmissionAwareDirtyTreePeerOwnershipRow>,
+    pub agent_mail_reservations: Vec<AdmissionAwareAgentMailReservationRow>,
+    pub br_tracker_status: Vec<AdmissionAwareBrTrackerStatusRow>,
+    pub large_host_worker_warmth: Vec<AdmissionAwareLargeHostWorkerWarmthRow>,
+    pub operator_closeout_receipts: Vec<AdmissionAwareOperatorCloseoutReceiptRow>,
+    pub replay_backed: bool,
+    pub trapped_cycle_witnesses: Vec<AdmissionAwareTrappedCycleWitnessRow>,
+}
+
+impl AdmissionAwareRuntimePressureAtlasBuilderInput {
+    #[must_use]
+    pub fn new(
+        runtime_pressure: RuntimePressureSnapshot,
+        lock_order_atlas: LockOrderAtlasSnapshot,
+    ) -> Self {
+        Self {
+            runtime_pressure,
+            lock_metrics: Vec::new(),
+            lock_order_atlas,
+            dirty_tree_peer_ownership: Vec::new(),
+            agent_mail_reservations: Vec::new(),
+            br_tracker_status: Vec::new(),
+            large_host_worker_warmth: Vec::new(),
+            operator_closeout_receipts: Vec::new(),
+            replay_backed: false,
+            trapped_cycle_witnesses: Vec::new(),
+        }
+    }
+}
+
+/// Source-backed admission-aware atlas snapshot assembled from explicit inputs only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmissionAwareRuntimePressureAtlasSnapshot {
+    pub schema_version: String,
+    pub runtime_pressure_schema_version: String,
+    pub overall_label: AdmissionAwareAtlasClaimLabel,
+    pub claim_boundary_labels: Vec<AdmissionAwareClaimBoundaryLabelRow>,
+    pub missing_required_sections: Vec<String>,
+    pub production_admission_default_enabled: bool,
+    pub mutates_agent_mail: bool,
+    pub mutates_beads: bool,
+    pub mutates_filesystem: bool,
+    pub starts_rch: bool,
+    pub deadlock_proven: bool,
+    pub replay_backed: bool,
+    pub coordination_decision: AdmissionAwareCoordinationDecision,
+    pub coordination_reason_codes: Vec<String>,
+    pub lock_contention: Vec<AdmissionAwareLockContentionAtlasRow>,
+    pub scheduler_pressure: Vec<AdmissionAwareSchedulerPressureRow>,
+    pub region_memory_budget_pressure: Vec<AdmissionAwareRegionMemoryBudgetPressureRow>,
+    pub spectral_wait_graph: Vec<AdmissionAwareSpectralWaitGraphRow>,
+    pub trapped_cycle_witness: Vec<AdmissionAwareTrappedCycleWitnessRow>,
+    pub rch_proof_lane_admission: Vec<AdmissionAwareRchProofLaneAdmissionRow>,
+    pub dirty_tree_peer_ownership: Vec<AdmissionAwareDirtyTreePeerOwnershipRow>,
+    pub agent_mail_reservations: Vec<AdmissionAwareAgentMailReservationRow>,
+    pub br_tracker_status: Vec<AdmissionAwareBrTrackerStatusRow>,
+    pub large_host_worker_warmth: Vec<AdmissionAwareLargeHostWorkerWarmthRow>,
+    pub operator_closeout_receipt: Vec<AdmissionAwareOperatorCloseoutReceiptRow>,
+}
+
+impl AdmissionAwareRuntimePressureAtlasSnapshot {
+    #[must_use]
+    pub fn from_source_snapshots(
+        mut input: AdmissionAwareRuntimePressureAtlasBuilderInput,
+    ) -> Self {
+        admission_aware_normalize_coordination_inputs(&mut input);
+        admission_aware_normalize_large_host_rows(&mut input);
+        sort_input_rows(&mut input);
+
+        let lock_contention = admission_aware_lock_contention_rows(
+            &input.lock_metrics,
+            &input.lock_order_atlas,
+            AdmissionAwareAtlasFreshnessStatus::Fresh,
+        );
+        let scheduler_pressure = input
+            .runtime_pressure
+            .scheduler
+            .as_ref()
+            .map(admission_aware_scheduler_pressure_row)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let region_memory_budget_pressure = input
+            .runtime_pressure
+            .region_memory_budgets
+            .iter()
+            .map(admission_aware_region_memory_budget_pressure_row)
+            .collect::<Vec<_>>();
+        let validated_trapped_cycle_witness_present = input
+            .trapped_cycle_witnesses
+            .iter()
+            .any(AdmissionAwareTrappedCycleWitnessRow::is_validated);
+        let spectral_wait_graph = admission_aware_spectral_wait_graph_rows(
+            &input.runtime_pressure,
+            validated_trapped_cycle_witness_present,
+        );
+        let rch_proof_lane_admission = input
+            .runtime_pressure
+            .rch_proof_lanes
+            .iter()
+            .map(admission_aware_rch_proof_lane_admission_row)
+            .collect::<Vec<_>>();
+
+        let deadlock_proven = validated_trapped_cycle_witness_present
+            && input.runtime_pressure.spectral.trapped_wait_cycle
+            && input.runtime_pressure.spectral.class == RuntimePressureSpectralClass::Deadlocked;
+        let mut missing_required_sections = admission_aware_missing_sections(
+            &lock_contention,
+            &scheduler_pressure,
+            &spectral_wait_graph,
+            &rch_proof_lane_admission,
+            &input,
+        );
+        missing_required_sections.sort();
+        missing_required_sections.dedup();
+
+        let coordination_summary = admission_aware_coordination_summary(&input);
+        let validation_blocked = (input.runtime_pressure.overall_verdict
+            == RuntimePressureVerdict::Critical
+            && !deadlock_proven)
+            || input
+                .trapped_cycle_witnesses
+                .iter()
+                .any(AdmissionAwareTrappedCycleWitnessRow::is_malformed)
+            || coordination_summary.validation_blocked;
+        let claim_state = AdmissionAwareAtlasClaimState {
+            deadlock_proven,
+            replay_backed: input.replay_backed,
+            validation_blocked,
+            stale_evidence: !missing_required_sections.is_empty()
+                || coordination_summary.stale_evidence,
+        };
+        let overall_label = admission_aware_overall_label(claim_state);
+        let claim_boundary_labels =
+            admission_aware_claim_boundary_labels(overall_label, claim_state);
+
+        Self {
+            schema_version: ADMISSION_AWARE_RUNTIME_PRESSURE_ATLAS_SCHEMA_VERSION.to_string(),
+            runtime_pressure_schema_version: input.runtime_pressure.schema_version,
+            overall_label,
+            claim_boundary_labels,
+            missing_required_sections,
+            production_admission_default_enabled: false,
+            mutates_agent_mail: false,
+            mutates_beads: false,
+            mutates_filesystem: false,
+            starts_rch: false,
+            deadlock_proven,
+            replay_backed: input.replay_backed,
+            coordination_decision: coordination_summary.decision,
+            coordination_reason_codes: coordination_summary.reason_codes,
+            lock_contention,
+            scheduler_pressure,
+            region_memory_budget_pressure,
+            spectral_wait_graph,
+            trapped_cycle_witness: input.trapped_cycle_witnesses,
+            rch_proof_lane_admission,
+            dirty_tree_peer_ownership: input.dirty_tree_peer_ownership,
+            agent_mail_reservations: input.agent_mail_reservations,
+            br_tracker_status: input.br_tracker_status,
+            large_host_worker_warmth: input.large_host_worker_warmth,
+            operator_closeout_receipt: input.operator_closeout_receipts,
+        }
+    }
+
+    pub fn stable_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+}
+
+fn sort_input_rows(input: &mut AdmissionAwareRuntimePressureAtlasBuilderInput) {
+    input.lock_metrics.sort_by(|left, right| {
+        left.name
+            .cmp(right.name)
+            .then_with(|| right.acquisitions.cmp(&left.acquisitions))
+            .then_with(|| right.contentions.cmp(&left.contentions))
+    });
+    input
+        .lock_metrics
+        .dedup_by(|left, right| left.name == right.name);
+    input.dirty_tree_peer_ownership.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.holder.cmp(&right.holder))
+            .then_with(|| left.source.cmp(&right.source))
+    });
+    input
+        .dirty_tree_peer_ownership
+        .dedup_by(|left, right| left.path == right.path);
+    input.agent_mail_reservations.sort_by(|left, right| {
+        left.path_pattern
+            .cmp(&right.path_pattern)
+            .then_with(|| left.holder.cmp(&right.holder))
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    input.agent_mail_reservations.dedup_by(|left, right| {
+        left.path_pattern == right.path_pattern && left.holder == right.holder
+    });
+    input.br_tracker_status.sort_by(|left, right| {
+        left.bead_id
+            .cmp(&right.bead_id)
+            .then_with(|| left.status.cmp(&right.status))
+    });
+    input
+        .br_tracker_status
+        .dedup_by(|left, right| left.bead_id == right.bead_id);
+    input.large_host_worker_warmth.sort_by(|left, right| {
+        left.worker_id.cmp(&right.worker_id).then_with(|| {
+            right
+                .worker_available_cores
+                .cmp(&left.worker_available_cores)
+        })
+    });
+    input
+        .large_host_worker_warmth
+        .dedup_by(|left, right| left.worker_id == right.worker_id);
+    input
+        .operator_closeout_receipts
+        .sort_by(|left, right| left.bead_id.cmp(&right.bead_id));
+    input
+        .operator_closeout_receipts
+        .dedup_by(|left, right| left.bead_id == right.bead_id);
+    for witness in &mut input.trapped_cycle_witnesses {
+        witness.participants.sort();
+        witness.participants.dedup();
+        witness.held_resources.sort();
+        witness.held_resources.dedup();
+        witness.wait_edges.sort();
+        witness.wait_edges.dedup();
+    }
+    input
+        .trapped_cycle_witnesses
+        .sort_by(|left, right| left.witness_id.cmp(&right.witness_id));
+    input
+        .trapped_cycle_witnesses
+        .dedup_by(|left, right| left.witness_id == right.witness_id);
+}
+
+fn admission_aware_normalize_coordination_inputs(
+    input: &mut AdmissionAwareRuntimePressureAtlasBuilderInput,
+) {
+    for row in &mut input.dirty_tree_peer_ownership {
+        row.coordination_decision = admission_aware_dirty_tree_coordination_decision(row);
+    }
+    for row in &mut input.agent_mail_reservations {
+        row.coordination_decision = admission_aware_agent_mail_coordination_decision(row);
+    }
+    for row in &mut input.br_tracker_status {
+        row.coordination_decision = admission_aware_br_tracker_coordination_decision(row);
+    }
+}
+
+fn admission_aware_normalize_large_host_rows(
+    input: &mut AdmissionAwareRuntimePressureAtlasBuilderInput,
+) {
+    for row in &mut input.large_host_worker_warmth {
+        let profile = admission_aware_large_host_advisory_profile(row);
+        row.worker_saturation = profile.saturation;
+        row.advisory_batching_decision = profile.decision;
+        row.advisory_batching_reason_codes = profile.reason_codes;
+        row.advisory_batch_size_hint = profile.batch_size_hint;
+        row.advisory_non_claims = admission_aware_large_host_advisory_non_claims();
+        row.advisory_only = true;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AdmissionAwareLargeHostAdvisoryProfile {
+    saturation: AdmissionAwareLargeHostWorkerSaturation,
+    decision: AdmissionAwareLargeHostBatchingDecision,
+    reason_codes: Vec<String>,
+    batch_size_hint: Option<u16>,
+}
+
+fn admission_aware_large_host_advisory_profile(
+    row: &AdmissionAwareLargeHostWorkerWarmthRow,
+) -> AdmissionAwareLargeHostAdvisoryProfile {
+    let queue_state = row.worker_queue_state.to_ascii_lowercase();
+    let cache_warmth = row.cache_warmth.to_ascii_lowercase();
+    let mut reason_codes = Vec::new();
+
+    let large_host_shape = row.cpu_cores >= ADMISSION_AWARE_LARGE_HOST_CPU_CORES
+        && row.memory_bytes >= ADMISSION_AWARE_LARGE_HOST_MEMORY_BYTES
+        && row.numa_nodes >= ADMISSION_AWARE_LARGE_HOST_MIN_NUMA_NODES;
+    if large_host_shape {
+        reason_codes.push("large_host_shape_64_core_256_gib".to_string());
+    } else {
+        reason_codes.push("large_host_shape_missing".to_string());
+    }
+
+    if row.numa_nodes >= ADMISSION_AWARE_LARGE_HOST_MIN_NUMA_NODES {
+        reason_codes.push("numa_nodes_present".to_string());
+    } else {
+        reason_codes.push("numa_nodes_missing".to_string());
+    }
+
+    if row.disk_headroom_bytes >= ADMISSION_AWARE_LARGE_HOST_DISK_HEADROOM_FLOOR_BYTES {
+        reason_codes.push("disk_headroom_available".to_string());
+    } else {
+        reason_codes.push("disk_headroom_low".to_string());
+    }
+
+    if queue_state.contains("saturated") || queue_state.contains("closed") {
+        reason_codes.push("worker_queue_saturated".to_string());
+    } else {
+        reason_codes.push("worker_queue_open".to_string());
+    }
+
+    if row.worker_available_cores >= ADMISSION_AWARE_LARGE_HOST_BATCH_CORE_FLOOR {
+        reason_codes.push("worker_core_headroom_available".to_string());
+    } else {
+        reason_codes.push("worker_core_saturation".to_string());
+    }
+
+    if row.worker_available_memory_bytes >= ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES {
+        reason_codes.push("worker_memory_headroom_available".to_string());
+    } else {
+        reason_codes.push("worker_memory_low".to_string());
+    }
+
+    if cache_warmth.contains("warm") {
+        reason_codes.push("worker_cache_warm".to_string());
+    } else {
+        reason_codes.push("worker_cache_cold".to_string());
+    }
+
+    if row.target_dir_isolated {
+        reason_codes.push("target_dir_isolated".to_string());
+    } else {
+        reason_codes.push("target_dir_shared".to_string());
+    }
+
+    if row.active_project_excluded {
+        reason_codes.push("active_project_excluded".to_string());
+    } else {
+        reason_codes.push("active_project_not_excluded".to_string());
+    }
+
+    if row.proof_lane_cost_estimate.is_some() {
+        reason_codes.push("proof_lane_cost_estimate_present".to_string());
+    } else {
+        reason_codes.push("proof_lane_cost_estimate_missing".to_string());
+    }
+    reason_codes.push("advisory_batching_only".to_string());
+
+    let (saturation, decision, batch_size_hint) = if !large_host_shape {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::NonLargeHost,
+            AdmissionAwareLargeHostBatchingDecision::DeferNonLargeHost,
+            None,
+        )
+    } else if row.disk_headroom_bytes < ADMISSION_AWARE_LARGE_HOST_DISK_HEADROOM_FLOOR_BYTES {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::DiskConstrained,
+            AdmissionAwareLargeHostBatchingDecision::QueueDiskHeadroom,
+            None,
+        )
+    } else if queue_state.contains("saturated")
+        || queue_state.contains("closed")
+        || row.worker_available_cores < ADMISSION_AWARE_LARGE_HOST_BATCH_CORE_FLOOR
+    {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::WorkerSaturated,
+            AdmissionAwareLargeHostBatchingDecision::DeferWorkerSaturated,
+            None,
+        )
+    } else if row.worker_available_memory_bytes
+        < ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES
+    {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::LowMemory,
+            AdmissionAwareLargeHostBatchingDecision::QueueLowMemory,
+            None,
+        )
+    } else if cache_warmth.contains("warm") {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::Available,
+            AdmissionAwareLargeHostBatchingDecision::PreferWarmWorker,
+            admission_aware_large_host_batch_size_hint(row),
+        )
+    } else {
+        (
+            AdmissionAwareLargeHostWorkerSaturation::Available,
+            AdmissionAwareLargeHostBatchingDecision::AdmitBatch,
+            admission_aware_large_host_batch_size_hint(row),
+        )
+    };
+
+    reason_codes.sort();
+    reason_codes.dedup();
+    AdmissionAwareLargeHostAdvisoryProfile {
+        saturation,
+        decision,
+        reason_codes,
+        batch_size_hint,
+    }
+}
+
+fn admission_aware_large_host_batch_size_hint(
+    row: &AdmissionAwareLargeHostWorkerWarmthRow,
+) -> Option<u16> {
+    let core_slots = row.worker_available_cores / ADMISSION_AWARE_LARGE_HOST_BATCH_CORE_FLOOR;
+    let memory_slots =
+        row.worker_available_memory_bytes / ADMISSION_AWARE_LARGE_HOST_BATCH_MEMORY_FLOOR_BYTES;
+    let batch_slots = u64::from(core_slots).min(memory_slots).min(8);
+    u16::try_from(batch_slots).ok().filter(|slots| *slots > 0)
+}
+
+fn admission_aware_large_host_advisory_non_claims() -> Vec<String> {
+    vec![
+        "allocator_enforcement".to_string(),
+        "production_admission_default".to_string(),
+        "throughput_improvement".to_string(),
+    ]
+}
+
+#[derive(Debug, Clone)]
+struct AdmissionAwareCoordinationSummary {
+    decision: AdmissionAwareCoordinationDecision,
+    reason_codes: Vec<String>,
+    stale_evidence: bool,
+    validation_blocked: bool,
+}
+
+fn admission_aware_coordination_summary(
+    input: &AdmissionAwareRuntimePressureAtlasBuilderInput,
+) -> AdmissionAwareCoordinationSummary {
+    let mut decision = AdmissionAwareCoordinationDecision::Proceed;
+    let mut reason_codes = Vec::new();
+    let mut stale_evidence = false;
+
+    for row in &input.dirty_tree_peer_ownership {
+        decision = admission_aware_max_coordination_decision(decision, row.coordination_decision);
+        admission_aware_collect_freshness_reason(
+            row.sample_freshness,
+            "dirty_tree_snapshot_stale",
+            &mut stale_evidence,
+            &mut reason_codes,
+        );
+        if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::Malformed {
+            reason_codes.push("malformed_coordination_snapshot".to_string());
+        }
+        if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::TrackerOnly {
+            reason_codes.push("tracker_only_dirty_tree_change".to_string());
+        }
+        if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::UnrelatedPeerWork {
+            reason_codes.push("unrelated_peer_work".to_string());
+        }
+        if row.handoff_required || admission_aware_overlap_is_peer(row.overlap_classification) {
+            reason_codes.push("peer_dirty_tree_overlap".to_string());
+        } else if row.blocks_admission {
+            reason_codes.push("dirty_tree_blocks_admission".to_string());
+        }
+    }
+
+    for row in &input.agent_mail_reservations {
+        decision = admission_aware_max_coordination_decision(decision, row.coordination_decision);
+        admission_aware_collect_freshness_reason(
+            row.sample_freshness,
+            "reservation_snapshot_stale",
+            &mut stale_evidence,
+            &mut reason_codes,
+        );
+        match row.overlap_classification {
+            AdmissionAwareCoordinationOverlapClass::ActiveExclusiveConflict => {
+                reason_codes.push("active_exclusive_agent_mail_conflict".to_string());
+            }
+            AdmissionAwareCoordinationOverlapClass::ExpiredReservation => {
+                reason_codes.push("expired_agent_mail_reservation".to_string());
+            }
+            AdmissionAwareCoordinationOverlapClass::Malformed => {
+                reason_codes.push("malformed_coordination_snapshot".to_string());
+            }
+            overlap if admission_aware_overlap_is_peer(overlap) => {
+                reason_codes.push("peer_agent_mail_overlap".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    for row in &input.br_tracker_status {
+        decision = admission_aware_max_coordination_decision(decision, row.coordination_decision);
+        admission_aware_collect_freshness_reason(
+            row.sample_freshness,
+            "tracker_snapshot_stale",
+            &mut stale_evidence,
+            &mut reason_codes,
+        );
+        if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::Malformed {
+            reason_codes.push("malformed_coordination_snapshot".to_string());
+        }
+        if admission_aware_overlap_is_peer(row.overlap_classification) {
+            reason_codes.push("peer_tracker_overlap".to_string());
+        }
+        if !row.blocked_by.is_empty() {
+            reason_codes.push("bead_blocked_by_dependencies".to_string());
+        }
+        if !row.ready {
+            reason_codes.push("bead_not_ready".to_string());
+        }
+    }
+
+    reason_codes.sort();
+    reason_codes.dedup();
+    AdmissionAwareCoordinationSummary {
+        decision,
+        reason_codes,
+        stale_evidence,
+        validation_blocked: decision != AdmissionAwareCoordinationDecision::Proceed,
+    }
+}
+
+fn admission_aware_collect_freshness_reason(
+    freshness: AdmissionAwareAtlasFreshnessStatus,
+    stale_reason: &str,
+    stale_evidence: &mut bool,
+    reason_codes: &mut Vec<String>,
+) {
+    if freshness.is_stale_or_missing() {
+        *stale_evidence = true;
+        reason_codes.push(stale_reason.to_string());
+    }
+    if freshness.blocks_validation() {
+        reason_codes.push("malformed_coordination_snapshot".to_string());
+    }
+}
+
+fn admission_aware_dirty_tree_coordination_decision(
+    row: &AdmissionAwareDirtyTreePeerOwnershipRow,
+) -> AdmissionAwareCoordinationDecision {
+    if let Some(decision) = admission_aware_freshness_coordination_decision(row.sample_freshness) {
+        return decision;
+    }
+    if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::Malformed {
+        return AdmissionAwareCoordinationDecision::Blocked;
+    }
+    if row.handoff_required || admission_aware_overlap_is_peer(row.overlap_classification) {
+        return AdmissionAwareCoordinationDecision::HandoffRequired;
+    }
+    if row.blocks_admission {
+        return AdmissionAwareCoordinationDecision::Defer;
+    }
+    AdmissionAwareCoordinationDecision::Proceed
+}
+
+fn admission_aware_agent_mail_coordination_decision(
+    row: &AdmissionAwareAgentMailReservationRow,
+) -> AdmissionAwareCoordinationDecision {
+    if let Some(decision) = admission_aware_freshness_coordination_decision(row.sample_freshness) {
+        return decision;
+    }
+    match row.overlap_classification {
+        AdmissionAwareCoordinationOverlapClass::Malformed => {
+            AdmissionAwareCoordinationDecision::Blocked
+        }
+        AdmissionAwareCoordinationOverlapClass::ActiveExclusiveConflict => {
+            AdmissionAwareCoordinationDecision::Defer
+        }
+        AdmissionAwareCoordinationOverlapClass::PeerExact
+        | AdmissionAwareCoordinationOverlapClass::PeerGlob => {
+            if row.exclusive {
+                AdmissionAwareCoordinationDecision::Defer
+            } else {
+                AdmissionAwareCoordinationDecision::HandoffRequired
+            }
+        }
+        _ => AdmissionAwareCoordinationDecision::Proceed,
+    }
+}
+
+fn admission_aware_br_tracker_coordination_decision(
+    row: &AdmissionAwareBrTrackerStatusRow,
+) -> AdmissionAwareCoordinationDecision {
+    if let Some(decision) = admission_aware_freshness_coordination_decision(row.sample_freshness) {
+        return decision;
+    }
+    if row.overlap_classification == AdmissionAwareCoordinationOverlapClass::Malformed {
+        return AdmissionAwareCoordinationDecision::Blocked;
+    }
+    if admission_aware_overlap_is_peer(row.overlap_classification) {
+        return AdmissionAwareCoordinationDecision::HandoffRequired;
+    }
+    if !row.ready || !row.blocked_by.is_empty() {
+        return AdmissionAwareCoordinationDecision::Defer;
+    }
+    AdmissionAwareCoordinationDecision::Proceed
+}
+
+fn admission_aware_freshness_coordination_decision(
+    freshness: AdmissionAwareAtlasFreshnessStatus,
+) -> Option<AdmissionAwareCoordinationDecision> {
+    if freshness.blocks_validation() {
+        Some(AdmissionAwareCoordinationDecision::Blocked)
+    } else if freshness.is_stale_or_missing() {
+        Some(AdmissionAwareCoordinationDecision::Defer)
+    } else {
+        None
+    }
+}
+
+fn admission_aware_overlap_is_peer(overlap: AdmissionAwareCoordinationOverlapClass) -> bool {
+    matches!(
+        overlap,
+        AdmissionAwareCoordinationOverlapClass::PeerExact
+            | AdmissionAwareCoordinationOverlapClass::PeerGlob
+            | AdmissionAwareCoordinationOverlapClass::ActiveExclusiveConflict
+    )
+}
+
+fn admission_aware_max_coordination_decision(
+    left: AdmissionAwareCoordinationDecision,
+    right: AdmissionAwareCoordinationDecision,
+) -> AdmissionAwareCoordinationDecision {
+    if admission_aware_coordination_decision_rank(right)
+        > admission_aware_coordination_decision_rank(left)
+    {
+        right
+    } else {
+        left
+    }
+}
+
+fn admission_aware_coordination_decision_rank(decision: AdmissionAwareCoordinationDecision) -> u8 {
+    match decision {
+        AdmissionAwareCoordinationDecision::Proceed => 0,
+        AdmissionAwareCoordinationDecision::Defer => 1,
+        AdmissionAwareCoordinationDecision::HandoffRequired => 2,
+        AdmissionAwareCoordinationDecision::Blocked => 3,
+    }
+}
+
+fn admission_aware_lock_contention_rows(
+    lock_metrics: &[LockMetricsSnapshot],
+    lock_order_atlas: &LockOrderAtlasSnapshot,
+    sample_freshness: AdmissionAwareAtlasFreshnessStatus,
+) -> Vec<AdmissionAwareLockContentionAtlasRow> {
+    let mut rows = BTreeMap::new();
+    for metrics in lock_metrics {
+        let row = AdmissionAwareLockContentionAtlasRow {
+            lock_name: metrics.name.to_string(),
+            lock_rank: admission_aware_lock_rank_name(metrics.name, lock_order_atlas).to_string(),
+            lock_module: admission_aware_lock_module_name(metrics.name, lock_order_atlas)
+                .to_string(),
+            acquisitions: metrics.acquisitions,
+            contentions: metrics.contentions,
+            wait_ns: metrics.wait_ns,
+            hold_ns: metrics.hold_ns,
+            max_wait_ns: metrics.max_wait_ns,
+            max_hold_ns: metrics.max_hold_ns,
+            p95_wait_ns: metrics.p95_wait_ns,
+            p999_wait_ns: metrics.p999_wait_ns,
+            p95_hold_ns: metrics.p95_hold_ns,
+            p999_hold_ns: metrics.p999_hold_ns,
+            order_edges_exercised: lock_order_atlas
+                .order_edges_exercised
+                .iter()
+                .filter(|edge| {
+                    edge.held_lock_name == metrics.name || edge.acquired_lock_name == metrics.name
+                })
+                .count(),
+            order_violations: lock_order_atlas
+                .order_violations
+                .iter()
+                .filter(|violation| violation.lock_name == metrics.name)
+                .count(),
+            instrumentation_mode: metrics.instrumentation_mode.to_string(),
+            sample_freshness,
+        };
+        rows.entry(row.lock_name.clone())
+            .and_modify(|existing: &mut AdmissionAwareLockContentionAtlasRow| {
+                if row.acquisitions > existing.acquisitions
+                    || (row.acquisitions == existing.acquisitions
+                        && row.contentions > existing.contentions)
+                {
+                    *existing = row.clone();
+                }
+            })
+            .or_insert(row);
+    }
+    rows.into_values().collect()
+}
+
+fn admission_aware_lock_rank_name(
+    lock_name: &str,
+    lock_order_atlas: &LockOrderAtlasSnapshot,
+) -> &'static str {
+    lock_order_atlas
+        .order_edges_exercised
+        .iter()
+        .find_map(|edge| {
+            if edge.held_lock_name == lock_name {
+                Some(edge.held_rank.name())
+            } else if edge.acquired_lock_name == lock_name {
+                Some(edge.acquired_rank.name())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            lock_order_atlas
+                .order_violations
+                .iter()
+                .find(|violation| violation.lock_name == lock_name)
+                .map(|violation| violation.lock_rank.name())
+        })
+        .or_else(|| LockRank::from_name(lock_name).map(LockRank::name))
+        .unwrap_or("Unknown")
+}
+
+fn admission_aware_lock_module_name(
+    lock_name: &str,
+    lock_order_atlas: &LockOrderAtlasSnapshot,
+) -> &'static str {
+    lock_order_atlas
+        .order_edges_exercised
+        .iter()
+        .find_map(|edge| {
+            if edge.held_lock_name == lock_name {
+                Some(edge.held_module.name())
+            } else if edge.acquired_lock_name == lock_name {
+                Some(edge.acquired_module.name())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            lock_order_atlas
+                .order_violations
+                .iter()
+                .find(|violation| violation.lock_name == lock_name)
+                .map(|violation| violation.lock_module.name())
+        })
+        .unwrap_or_else(|| LockModule::from_name(lock_name).name())
+}
+
+fn admission_aware_scheduler_pressure_row(
+    scheduler: &SchedulerEvidenceMetrics,
+) -> AdmissionAwareSchedulerPressureRow {
+    let scheduler_tail_pressure_label = if scheduler.ready_backlog_p99 >= 256
+        || scheduler.cancel_debt_p99 >= 128
+        || scheduler.wake_to_run_p99_ns >= 250_000
+    {
+        "tail_pressure"
+    } else if scheduler.ready_backlog_p95 >= 96 || scheduler.wake_to_run_p95_ns >= 100_000 {
+        "watch"
+    } else {
+        "nominal"
+    };
+
+    AdmissionAwareSchedulerPressureRow {
+        scheduler_tail_pressure_label: scheduler_tail_pressure_label.to_string(),
+        methodology_baseline_rows: usize::from(scheduler.remote_steal_ratio_pct.is_some())
+            + usize::from(scheduler.cross_cohort_wake_p99_ns.is_some()),
+        flamegraph_artifact_path: None,
+        phase6_gate_triggered: scheduler_tail_pressure_label == "tail_pressure",
+        attribution_claim_only: true,
+        sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+    }
+}
+
+fn admission_aware_region_memory_budget_pressure_row(
+    row: &RuntimePressureRegionMemoryBudgetSnapshot,
+) -> AdmissionAwareRegionMemoryBudgetPressureRow {
+    let pressure_level = if row.hard_limit_exceeded {
+        RuntimePressureSignalStatus::Critical
+    } else if row.soft_limit_exceeded {
+        RuntimePressureSignalStatus::Degraded
+    } else {
+        RuntimePressureSignalStatus::Present
+    };
+    let optional_work_action = if row.hard_limit_exceeded {
+        RuntimePressureAdmissionAction::Reject
+    } else if row.soft_limit_exceeded {
+        RuntimePressureAdmissionAction::Defer
+    } else {
+        RuntimePressureAdmissionAction::Admit
+    };
+
+    AdmissionAwareRegionMemoryBudgetPressureRow {
+        region_id: row.region_id,
+        region_label: row.region_label.clone(),
+        budget_schema_version: row.schema_version.clone(),
+        declared_budget_bytes: row.declared_memory_budget_bytes,
+        observed_usage_bytes: row.observed_memory_bytes,
+        pressure_level,
+        optional_work_action,
+        required_cleanup_admitted: true,
+        sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+    }
+}
+
+fn admission_aware_spectral_wait_graph_rows(
+    runtime_pressure: &RuntimePressureSnapshot,
+    trapped_cycle_witness_present: bool,
+) -> Vec<AdmissionAwareSpectralWaitGraphRow> {
+    if runtime_pressure.spectral.class == RuntimePressureSpectralClass::Unknown {
+        return Vec::new();
+    }
+
+    let deadlock_proven = trapped_cycle_witness_present
+        && runtime_pressure.spectral.trapped_wait_cycle
+        && runtime_pressure.spectral.class == RuntimePressureSpectralClass::Deadlocked;
+    let requires_trapped_cycle_detection = runtime_pressure
+        .spectral_recommendations
+        .iter()
+        .any(|recommendation| recommendation.requires_trapped_cycle_proof);
+
+    vec![AdmissionAwareSpectralWaitGraphRow {
+        early_warning_severity: runtime_pressure.spectral.early_warning_severity,
+        health_classification: runtime_pressure.spectral.class,
+        fiedler_trend: runtime_pressure.spectral.fiedler_micro_units,
+        recommendations: runtime_pressure.spectral_recommendations.clone(),
+        deadlock_proven,
+        requires_trapped_cycle_detection,
+        sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+    }]
+}
+
+fn admission_aware_rch_proof_lane_admission_row(
+    row: &RuntimePressureRchProofLaneSnapshot,
+) -> AdmissionAwareRchProofLaneAdmissionRow {
+    let mut cover_claims = vec!["remote_proof_lane_admission_planner".to_string()];
+    if row.remote_required {
+        cover_claims.push("remote_required_policy".to_string());
+    }
+    if row.selected_worker.is_some() {
+        cover_claims.push("worker_capacity_selected".to_string());
+    }
+    cover_claims.sort();
+    cover_claims.dedup();
+
+    let mut does_not_cover_claims = vec![
+        "cargo_command_completed".to_string(),
+        "fleet_availability_after_snapshot".to_string(),
+    ];
+    if row.local_fallback_allowed {
+        does_not_cover_claims.push("no_local_fallback_policy".to_string());
+    }
+    does_not_cover_claims.sort();
+    does_not_cover_claims.dedup();
+
+    AdmissionAwareRchProofLaneAdmissionRow {
+        lane_id: row.lane_id.clone(),
+        admission_decision: row.decision_code.clone(),
+        reason_codes: row.reason_codes.clone(),
+        remote_required: row.remote_required,
+        local_fallback_allowed: row.local_fallback_allowed,
+        target_dir_isolated: true,
+        recommended_worker_id: row.selected_worker.clone(),
+        cover_claims,
+        does_not_cover_claims,
+        suggested_command: Some(format!(
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${{TMPDIR:-/tmp}}/rch_target_{}\" cargo test",
+            row.lane_id.replace('-', "_")
+        )),
+        sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+    }
+}
+
+fn admission_aware_missing_sections(
+    lock_contention: &[AdmissionAwareLockContentionAtlasRow],
+    scheduler_pressure: &[AdmissionAwareSchedulerPressureRow],
+    spectral_wait_graph: &[AdmissionAwareSpectralWaitGraphRow],
+    rch_proof_lane_admission: &[AdmissionAwareRchProofLaneAdmissionRow],
+    input: &AdmissionAwareRuntimePressureAtlasBuilderInput,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if lock_contention.is_empty() {
+        missing.push("lock_contention".to_string());
+    }
+    if scheduler_pressure.is_empty() {
+        missing.push("scheduler_pressure".to_string());
+    }
+    if spectral_wait_graph.is_empty() {
+        missing.push("spectral_wait_graph".to_string());
+    }
+    if rch_proof_lane_admission.is_empty() {
+        missing.push("rch_proof_lane_admission".to_string());
+    }
+    if input.dirty_tree_peer_ownership.is_empty() {
+        missing.push("dirty_tree_peer_ownership".to_string());
+    }
+    if input.agent_mail_reservations.is_empty() {
+        missing.push("agent_mail_reservations".to_string());
+    }
+    if input.br_tracker_status.is_empty() {
+        missing.push("br_tracker_status".to_string());
+    }
+    if input.large_host_worker_warmth.is_empty() {
+        missing.push("large_host_worker_warmth".to_string());
+    }
+    if input.operator_closeout_receipts.is_empty() {
+        missing.push("operator_closeout_receipt".to_string());
+    }
+    if spectral_wait_graph.iter().any(|row| {
+        row.requires_trapped_cycle_detection
+            || row.health_classification == RuntimePressureSpectralClass::Deadlocked
+            || row.health_classification == RuntimePressureSpectralClass::Fragmented
+    }) && !input
+        .trapped_cycle_witnesses
+        .iter()
+        .any(AdmissionAwareTrappedCycleWitnessRow::is_validated)
+    {
+        missing.push("trapped_cycle_witness".to_string());
+    }
+    missing
+}
+
+fn admission_aware_overall_label(
+    state: AdmissionAwareAtlasClaimState,
+) -> AdmissionAwareAtlasClaimLabel {
+    if state.deadlock_proven {
+        AdmissionAwareAtlasClaimLabel::DeadlockProven
+    } else if state.stale_evidence {
+        AdmissionAwareAtlasClaimLabel::StaleEvidence
+    } else if state.validation_blocked {
+        AdmissionAwareAtlasClaimLabel::ValidationBlocked
+    } else if state.replay_backed {
+        AdmissionAwareAtlasClaimLabel::ReplayBacked
+    } else {
+        AdmissionAwareAtlasClaimLabel::Advisory
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdmissionAwareAtlasClaimState {
+    deadlock_proven: bool,
+    replay_backed: bool,
+    validation_blocked: bool,
+    stale_evidence: bool,
+}
+
+fn admission_aware_claim_boundary_labels(
+    overall_label: AdmissionAwareAtlasClaimLabel,
+    state: AdmissionAwareAtlasClaimState,
+) -> Vec<AdmissionAwareClaimBoundaryLabelRow> {
+    let mut labels = vec![admission_aware_claim_boundary_row(
+        AdmissionAwareAtlasClaimLabel::Advisory,
+    )];
+    for include in [
+        (
+            state.replay_backed,
+            AdmissionAwareAtlasClaimLabel::ReplayBacked,
+        ),
+        (
+            state.deadlock_proven,
+            AdmissionAwareAtlasClaimLabel::TrappedCycleProven,
+        ),
+        (
+            state.deadlock_proven,
+            AdmissionAwareAtlasClaimLabel::DeadlockProven,
+        ),
+        (
+            state.validation_blocked,
+            AdmissionAwareAtlasClaimLabel::ValidationBlocked,
+        ),
+        (
+            state.stale_evidence,
+            AdmissionAwareAtlasClaimLabel::StaleEvidence,
+        ),
+        (true, overall_label),
+    ] {
+        if include.0 {
+            labels.push(admission_aware_claim_boundary_row(include.1));
+        }
+    }
+    labels.sort_by_key(|row| row.label);
+    labels.dedup_by_key(|row| row.label);
+    labels
+}
+
+fn admission_aware_claim_boundary_row(
+    label: AdmissionAwareAtlasClaimLabel,
+) -> AdmissionAwareClaimBoundaryLabelRow {
+    let (required_evidence, forbidden_overclaims, closeout_text) = match label {
+        AdmissionAwareAtlasClaimLabel::Advisory => (
+            vec!["source_snapshots".to_string()],
+            vec![
+                "deadlock_proven".to_string(),
+                "cargo_lane_green".to_string(),
+            ],
+            "ADVISORY: source-backed atlas rows only".to_string(),
+        ),
+        AdmissionAwareAtlasClaimLabel::ReplayBacked => (
+            vec![
+                "deterministic_replay_evidence".to_string(),
+                "source_snapshots".to_string(),
+            ],
+            vec!["deadlock_proven_without_witness".to_string()],
+            "REPLAY_BACKED: deterministic replay evidence included".to_string(),
+        ),
+        AdmissionAwareAtlasClaimLabel::TrappedCycleProven => (
+            vec!["explicit_trapped_cycle_witness".to_string()],
+            vec!["spectral_warning_only".to_string()],
+            "TRAPPED_CYCLE_PROVEN: explicit witness present".to_string(),
+        ),
+        AdmissionAwareAtlasClaimLabel::DeadlockProven => (
+            vec![
+                "explicit_trapped_cycle_witness".to_string(),
+                "deadlocked_spectral_class".to_string(),
+            ],
+            vec!["advisory_spectral_only".to_string()],
+            "DEADLOCK_PROVEN: explicit trapped-cycle witness confirmed".to_string(),
+        ),
+        AdmissionAwareAtlasClaimLabel::ValidationBlocked => (
+            vec![
+                "critical_runtime_pressure_or_coordination_conflict".to_string(),
+                "blocker_code".to_string(),
+            ],
+            vec!["validation_green".to_string()],
+            "VALIDATION_BLOCKED: critical pressure or coordination blocker present".to_string(),
+        ),
+        AdmissionAwareAtlasClaimLabel::StaleEvidence => (
+            vec!["all_required_source_sections".to_string()],
+            vec!["complete_atlas".to_string()],
+            "STALE_EVIDENCE: required atlas inputs are missing".to_string(),
+        ),
+    };
+
+    AdmissionAwareClaimBoundaryLabelRow {
+        label,
+        required_evidence,
+        forbidden_overclaims,
+        closeout_text,
+        sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
     }
 }
 
@@ -1301,6 +2816,39 @@ fn runtime_pressure_rch_proof_lane_signal_status(
     ))
 }
 
+fn runtime_pressure_region_memory_budget_signal_status(
+    rows: &[RuntimePressureRegionMemoryBudgetSnapshot],
+) -> Option<RuntimePressureSignalSnapshot> {
+    if rows.is_empty() {
+        return None;
+    }
+
+    if rows
+        .iter()
+        .any(|row| row.budget_exhausted || row.hard_limit_exceeded)
+    {
+        return Some(runtime_pressure_signal_row(
+            RuntimePressureSignal::RegionMemoryBudgets,
+            RuntimePressureSignalStatus::Critical,
+            "region_memory_budget_hard_pressure",
+        ));
+    }
+
+    if rows.iter().any(|row| row.soft_limit_exceeded) {
+        return Some(runtime_pressure_signal_row(
+            RuntimePressureSignal::RegionMemoryBudgets,
+            RuntimePressureSignalStatus::Degraded,
+            "region_memory_budget_soft_pressure",
+        ));
+    }
+
+    Some(runtime_pressure_signal_row(
+        RuntimePressureSignal::RegionMemoryBudgets,
+        RuntimePressureSignalStatus::Present,
+        "region_memory_budget_envelopes_present",
+    ))
+}
+
 fn runtime_pressure_signal_row(
     signal: RuntimePressureSignal,
     status: RuntimePressureSignalStatus,
@@ -1331,6 +2879,13 @@ fn resource_usage_bps(current: u64, max_limit: u64) -> u16 {
     let current = u128::from(current).min(max_limit);
     let rounded = (current * 10_000 + (max_limit / 2)) / max_limit;
     u16::try_from(rounded.min(10_000)).expect("basis points are clamped to u16 range")
+}
+
+fn region_memory_budget_usage_bps(current: u64, declared_budget: u64) -> u16 {
+    if declared_budget == 0 {
+        return if current == 0 { 0 } else { 10_000 };
+    }
+    resource_usage_bps(current, declared_budget)
 }
 
 #[allow(
@@ -4887,6 +6442,10 @@ mod tests {
         RchQueueState, RchTargetDirClass, RchWorkerAdmissionPolicy, RchWorkerDiskPressure,
         RchWorkerSnapshot, admit_rch_worker,
     };
+    use crate::sync::LockMetricsSnapshot;
+    use crate::sync::lock_ordering::{
+        LockModule, LockOrderAtlasSnapshot, LockOrderEdge, LockOrderViolation, LockRank,
+    };
     use serde_json::{Value, json};
     use std::collections::hash_map::DefaultHasher;
     use std::fs;
@@ -5545,6 +7104,200 @@ mod tests {
         admit_rch_worker(&request, &[], &RchWorkerAdmissionPolicy::default())
     }
 
+    fn sample_lock_metrics(
+        name: &'static str,
+        acquisitions: u64,
+        contentions: u64,
+    ) -> LockMetricsSnapshot {
+        LockMetricsSnapshot {
+            name,
+            acquisitions,
+            contentions,
+            wait_ns: acquisitions.saturating_mul(1_000),
+            hold_ns: acquisitions.saturating_mul(2_000),
+            max_wait_ns: 9_000,
+            max_hold_ns: 12_000,
+            p95_wait_ns: 4_000,
+            p999_wait_ns: 8_000,
+            p95_hold_ns: 6_000,
+            p999_hold_ns: 10_000,
+            instrumentation_mode: "lock-metrics-test",
+        }
+    }
+
+    fn sample_lock_order_atlas() -> LockOrderAtlasSnapshot {
+        LockOrderAtlasSnapshot {
+            order_edges_exercised: vec![LockOrderEdge {
+                held_lock_name: "regions".to_string(),
+                held_rank: LockRank::Regions,
+                held_module: LockModule::Runtime,
+                acquired_lock_name: "tasks".to_string(),
+                acquired_rank: LockRank::Tasks,
+                acquired_module: LockModule::Runtime,
+            }],
+            order_violations: vec![LockOrderViolation {
+                lock_name: "tasks".to_string(),
+                lock_rank: LockRank::Tasks,
+                lock_module: LockModule::Runtime,
+                held_rank: LockRank::Obligations,
+                reason: "rank-order".to_string(),
+            }],
+            instrumentation_mode: "lock-metrics-test",
+        }
+    }
+
+    fn sample_trapped_cycle_witness() -> AdmissionAwareTrappedCycleWitnessRow {
+        AdmissionAwareTrappedCycleWitnessRow {
+            witness_id: "atlas-witness-001".to_string(),
+            participants: vec![
+                "task:00000001-00000000".to_string(),
+                "task:00000002-00000000".to_string(),
+            ],
+            held_resources: vec![
+                "lock:regions".to_string(),
+                "obligation:send-permit:00000004-00000000".to_string(),
+            ],
+            wait_edges: vec![
+                AdmissionAwareTrappedCycleWaitEdgeRow {
+                    waiting_participant: "task:00000002-00000000".to_string(),
+                    held_by_participant: "task:00000001-00000000".to_string(),
+                    resource: "lock:regions".to_string(),
+                },
+                AdmissionAwareTrappedCycleWaitEdgeRow {
+                    waiting_participant: "task:00000001-00000000".to_string(),
+                    held_by_participant: "task:00000002-00000000".to_string(),
+                    resource: "obligation:send-permit:00000004-00000000".to_string(),
+                },
+            ],
+            source_step_or_timestamp: "lab-step:4242".to_string(),
+            replay_command: "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_trapped_cycle_witness\" cargo test -p asupersync --test runtime_wait_cause_remediation_contract actionable_report -- --nocapture".to_string(),
+            proof_status: AdmissionAwareTrappedCycleWitnessProofStatus::Validated,
+            witness_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+        }
+    }
+
+    fn complete_atlas_builder_input(
+        spectral: RuntimePressureSpectralSnapshot,
+        include_trapped_cycle_witness: bool,
+    ) -> AdmissionAwareRuntimePressureAtlasBuilderInput {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(32, 80, 95, 100),
+        );
+        let region_budget = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "atlas-region",
+            4_096,
+            2_048,
+        );
+        let rch_row =
+            RuntimePressureRchProofLaneSnapshot::from_receipt(&admitted_rch_receipt("cargo-test"));
+        let runtime_pressure =
+            RuntimePressureSnapshot::from_parts_with_region_memory_budgets_and_rch_proof_lanes(
+                &pressure,
+                complete_platform_probe_report(),
+                Some(healthy_scheduler_metrics()),
+                Some(spectral),
+                vec![region_budget],
+                vec![rch_row],
+            );
+        let mut input = AdmissionAwareRuntimePressureAtlasBuilderInput::new(
+            runtime_pressure,
+            sample_lock_order_atlas(),
+        );
+        input.lock_metrics = vec![
+            sample_lock_metrics("tasks", 16, 2),
+            sample_lock_metrics("regions", 12, 1),
+            sample_lock_metrics("tasks", 8, 1),
+        ];
+        input.dirty_tree_peer_ownership = vec![
+            AdmissionAwareDirtyTreePeerOwnershipRow {
+                path: "src/runtime/resource_monitor.rs".to_string(),
+                dirty_classification: "owned".to_string(),
+                holder: Some("SageWolf".to_string()),
+                bead_id: Some("asupersync-bt63nr.7".to_string()),
+                source: "agent-mail-reservation".to_string(),
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::OwnedExact,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+                blocks_admission: false,
+                handoff_required: false,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            },
+            AdmissionAwareDirtyTreePeerOwnershipRow {
+                path: ".beads/issues.jsonl".to_string(),
+                dirty_classification: "tracker-only".to_string(),
+                holder: Some("SageWolf".to_string()),
+                bead_id: Some("asupersync-bt63nr.7".to_string()),
+                source: "beads-claim".to_string(),
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::TrackerOnly,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+                blocks_admission: false,
+                handoff_required: false,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            },
+        ];
+        input.agent_mail_reservations = vec![AdmissionAwareAgentMailReservationRow {
+            path_pattern: "src/runtime/resource_monitor.rs".to_string(),
+            holder: "SageWolf".to_string(),
+            exclusive: true,
+            reason: "asupersync-bt63nr.3".to_string(),
+            expires_ts: Some("2026-06-02T23:00:00Z".to_string()),
+            bead_id: Some("asupersync-bt63nr.7".to_string()),
+            overlap_classification: AdmissionAwareCoordinationOverlapClass::OwnedExact,
+            coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+            sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+        }];
+        input.br_tracker_status = vec![AdmissionAwareBrTrackerStatusRow {
+            bead_id: "asupersync-bt63nr.3".to_string(),
+            status: "in_progress".to_string(),
+            priority: Some(1),
+            blocked_by: Vec::new(),
+            ready: true,
+            assignee: Some("SageWolf".to_string()),
+            updated_at: Some("2026-06-02T21:02:56Z".to_string()),
+            overlap_classification: AdmissionAwareCoordinationOverlapClass::OwnedExact,
+            coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+            sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+        }];
+        input.large_host_worker_warmth = vec![AdmissionAwareLargeHostWorkerWarmthRow {
+            worker_id: "rchw-large-1".to_string(),
+            cpu_cores: 64,
+            memory_bytes: 256 * 1024 * 1024 * 1024,
+            numa_nodes: 2,
+            disk_headroom_bytes: 512 * 1024 * 1024 * 1024,
+            worker_queue_state: "open".to_string(),
+            worker_available_cores: 48,
+            worker_available_memory_bytes: 192 * 1024 * 1024 * 1024,
+            cache_warmth: "warm".to_string(),
+            target_dir_isolated: true,
+            active_project_excluded: true,
+            proof_lane_cost_estimate: Some("cargo-test-focused".to_string()),
+            worker_saturation: AdmissionAwareLargeHostWorkerSaturation::Available,
+            advisory_batching_decision: AdmissionAwareLargeHostBatchingDecision::AdmitBatch,
+            advisory_batching_reason_codes: Vec::new(),
+            advisory_batch_size_hint: None,
+            advisory_non_claims: Vec::new(),
+            advisory_only: false,
+            sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+        }];
+        input.operator_closeout_receipts = vec![AdmissionAwareOperatorCloseoutReceiptRow {
+            bead_id: "asupersync-bt63nr.3".to_string(),
+            status: "pending-validation".to_string(),
+            commit: None,
+            proof_commands: vec![
+                "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --lib admission_aware_runtime_pressure_atlas".to_string(),
+            ],
+            pushed_main: false,
+            pushed_master_mirror: false,
+            sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+        }];
+        if include_trapped_cycle_witness {
+            input.trapped_cycle_witnesses = vec![sample_trapped_cycle_witness()];
+        }
+        input
+    }
+
     fn snapshot_with_spectral(
         spectral: RuntimePressureSpectralSnapshot,
     ) -> RuntimePressureSnapshot {
@@ -5660,6 +7413,38 @@ mod tests {
                 healthy_spectral_snapshot(),
             ),
             &["memory_soft_pressure", "platform_probe_fallback"],
+        )
+    }
+
+    fn region_memory_budget_overrun_lab_evidence() -> RuntimePressureLabScenarioEvidence {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(45, 80, 95, 100),
+        );
+        let region_memory_budget = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "pressure-lab-region",
+            1_000,
+            1_125,
+        );
+
+        runtime_pressure_lab_scenario_evidence(
+            "runtime-pressure-lab-region-memory-budget-overrun",
+            0x57A9_BAD9,
+            RuntimePressureLabScenarioKind::RegionMemoryBudgetOverrun,
+            RuntimePressureVerdict::Critical,
+            RuntimePressureSnapshot::from_parts_with_region_memory_budgets(
+                &pressure,
+                complete_platform_probe_report(),
+                Some(healthy_scheduler_metrics()),
+                Some(healthy_spectral_snapshot()),
+                vec![region_memory_budget],
+            ),
+            &[
+                "region_memory_budget_advisory",
+                "region_memory_budget_exhausted",
+            ],
         )
     }
 
@@ -5842,8 +7627,135 @@ mod tests {
             0
         );
         assert_eq!(
+            value["region_memory_budgets"]
+                .as_array()
+                .expect("region memory budgets array")
+                .len(),
+            0
+        );
+        assert_eq!(
             value["signal_statuses"][0]["signal"], "resources",
             "signal rows stay sorted by enum order"
+        );
+    }
+
+    #[test]
+    fn runtime_pressure_region_memory_budget_rows_use_capability_envelopes() {
+        let region_id = RegionId::new_ephemeral();
+
+        assert!(
+            RuntimePressureRegionMemoryBudgetSnapshot::from_capability_budget(
+                region_id,
+                CapabilityBudget::UNSPECIFIED,
+                512,
+            )
+            .is_none(),
+            "regions without explicit memory envelopes should not invent budget evidence"
+        );
+
+        let row = RuntimePressureRegionMemoryBudgetSnapshot::from_capability_budget(
+            region_id,
+            CapabilityBudget::new().with_memory_bytes(4_096),
+            2_048,
+        )
+        .expect("memory envelope should project to a row");
+
+        assert_eq!(
+            row.schema_version,
+            RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION
+        );
+        assert_eq!(row.region_id, region_id);
+        assert_eq!(row.region_label, region_id.to_string());
+        assert_eq!(row.declared_memory_budget_bytes, 4_096);
+        assert_eq!(row.observed_memory_bytes, 2_048);
+        assert_eq!(row.usage_bps, 5_000);
+        assert_eq!(row.over_budget_bytes, 0);
+        assert!(!row.soft_limit_exceeded);
+        assert!(!row.hard_limit_exceeded);
+        assert!(!row.budget_exhausted);
+        assert!(row.advisory_only);
+    }
+
+    #[test]
+    fn runtime_pressure_snapshot_folds_region_memory_budget_pressure() {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(32, 80, 95, 100),
+        );
+
+        let under_budget = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "under-budget",
+            1_000,
+            512,
+        );
+        let soft_pressure = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "soft-pressure",
+            1_000,
+            850,
+        );
+        let over_budget = RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+            RegionId::new_ephemeral(),
+            "over-budget",
+            1_000,
+            1_250,
+        );
+
+        let snapshot = RuntimePressureSnapshot::from_parts_with_region_memory_budgets(
+            &pressure,
+            complete_platform_probe_report(),
+            Some(healthy_scheduler_metrics()),
+            Some(healthy_spectral_snapshot()),
+            vec![
+                soft_pressure.clone(),
+                over_budget.clone(),
+                under_budget.clone(),
+            ],
+        );
+
+        assert_eq!(snapshot.overall_verdict, RuntimePressureVerdict::Critical);
+        assert_eq!(snapshot.missing_signal_count, 0);
+        assert_eq!(snapshot.degraded_signal_count, 0);
+        assert_eq!(snapshot.critical_signal_count, 1);
+        assert_eq!(
+            snapshot
+                .region_memory_budgets
+                .iter()
+                .map(|row| row.region_label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["over-budget", "soft-pressure", "under-budget"]
+        );
+        assert_eq!(snapshot.region_memory_budgets[0].usage_bps, 10_000);
+        assert_eq!(snapshot.region_memory_budgets[0].over_budget_bytes, 250);
+        assert!(snapshot.region_memory_budgets[0].hard_limit_exceeded);
+        assert!(snapshot.region_memory_budgets[0].budget_exhausted);
+        assert_eq!(snapshot.region_memory_budgets[1].usage_bps, 8_500);
+        assert!(snapshot.region_memory_budgets[1].soft_limit_exceeded);
+        assert!(!snapshot.region_memory_budgets[1].hard_limit_exceeded);
+        assert_eq!(snapshot.region_memory_budgets[2].usage_bps, 5_120);
+        assert!(!snapshot.region_memory_budgets[2].soft_limit_exceeded);
+        assert_eq!(
+            snapshot
+                .signal_statuses
+                .iter()
+                .find(|row| row.signal == RuntimePressureSignal::RegionMemoryBudgets)
+                .map(|row| (row.status, row.reason.as_str())),
+            Some((
+                RuntimePressureSignalStatus::Critical,
+                "region_memory_budget_hard_pressure",
+            ))
+        );
+
+        let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(
+            value["region_memory_budgets"][0]["schema_version"],
+            RUNTIME_PRESSURE_REGION_MEMORY_BUDGET_SCHEMA_VERSION
+        );
+        assert_eq!(
+            value["region_memory_budgets"][0]["advisory_only"],
+            json!(true)
         );
     }
 
@@ -5917,6 +7829,511 @@ mod tests {
             value["signal_statuses"][4]["signal"],
             json!("rch_proof_lanes")
         );
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_serializes_stable_source_projection() {
+        let mut input = complete_atlas_builder_input(healthy_spectral_snapshot(), false);
+        input.replay_backed = true;
+        input.dirty_tree_peer_ownership.reverse();
+        input.lock_metrics.reverse();
+
+        let atlas = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(input);
+        let reparsed: AdmissionAwareRuntimePressureAtlasSnapshot =
+            serde_json::from_str(&atlas.stable_json().expect("serialize atlas"))
+                .expect("deserialize atlas");
+        let value = serde_json::to_value(&atlas).expect("atlas to value");
+
+        assert_eq!(
+            atlas.schema_version,
+            ADMISSION_AWARE_RUNTIME_PRESSURE_ATLAS_SCHEMA_VERSION
+        );
+        assert_eq!(
+            atlas.overall_label,
+            AdmissionAwareAtlasClaimLabel::ReplayBacked
+        );
+        assert!(atlas.missing_required_sections.is_empty());
+        assert!(!atlas.production_admission_default_enabled);
+        assert!(!atlas.mutates_agent_mail);
+        assert!(!atlas.mutates_beads);
+        assert!(!atlas.mutates_filesystem);
+        assert!(!atlas.starts_rch);
+        assert_eq!(
+            atlas.coordination_decision,
+            AdmissionAwareCoordinationDecision::Proceed
+        );
+        assert_eq!(
+            atlas.coordination_reason_codes,
+            vec!["tracker_only_dirty_tree_change"]
+        );
+        assert_eq!(reparsed, atlas);
+        assert_eq!(
+            atlas
+                .lock_contention
+                .iter()
+                .map(|row| row.lock_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["regions", "tasks"]
+        );
+        assert_eq!(atlas.lock_contention[1].acquisitions, 16);
+        assert_eq!(atlas.lock_contention[1].order_edges_exercised, 1);
+        assert_eq!(atlas.lock_contention[1].order_violations, 1);
+        assert_eq!(
+            atlas
+                .dirty_tree_peer_ownership
+                .iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![".beads/issues.jsonl", "src/runtime/resource_monitor.rs"]
+        );
+        assert_eq!(
+            value["schema_version"],
+            "admission-aware-runtime-pressure-atlas-v1"
+        );
+        assert_eq!(value["overall_label"], "replay_backed");
+        assert_eq!(value["coordination_decision"], "proceed");
+        assert_eq!(
+            value["scheduler_pressure"][0]["scheduler_tail_pressure_label"],
+            "nominal"
+        );
+        assert_eq!(value["trapped_cycle_witness"], json!([]));
+        assert_eq!(
+            value["rch_proof_lane_admission"][0]["cover_claims"],
+            json!([
+                "remote_proof_lane_admission_planner",
+                "remote_required_policy",
+                "worker_capacity_selected",
+            ])
+        );
+        assert_eq!(
+            value["large_host_worker_warmth"][0]["worker_saturation"],
+            "available"
+        );
+        assert_eq!(
+            value["large_host_worker_warmth"][0]["advisory_batching_decision"],
+            "prefer_warm_worker"
+        );
+        assert_eq!(
+            value["large_host_worker_warmth"][0]["advisory_batch_size_hint"],
+            json!(3)
+        );
+        assert_eq!(
+            value["large_host_worker_warmth"][0]["advisory_only"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_classifies_large_host_advisory_batching_profile() {
+        let mut input = complete_atlas_builder_input(healthy_spectral_snapshot(), false);
+        let healthy = input.large_host_worker_warmth[0].clone();
+        let mut low_memory = healthy.clone();
+        low_memory.worker_id = "rchw-large-low-memory".to_string();
+        low_memory.worker_available_cores = 32;
+        low_memory.worker_available_memory_bytes = 32 * 1024 * 1024 * 1024;
+
+        let mut saturated = healthy.clone();
+        saturated.worker_id = "rchw-large-saturated".to_string();
+        saturated.worker_queue_state = "saturated".to_string();
+        saturated.worker_available_cores = 4;
+        saturated.worker_available_memory_bytes = 192 * 1024 * 1024 * 1024;
+
+        let mut cold = healthy.clone();
+        cold.worker_id = "rchw-large-cold".to_string();
+        cold.cache_warmth = "cold".to_string();
+        cold.worker_available_cores = 16;
+        cold.worker_available_memory_bytes = 128 * 1024 * 1024 * 1024;
+
+        input.large_host_worker_warmth = vec![saturated, low_memory, cold, healthy];
+
+        let atlas = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(input);
+        let rows = atlas
+            .large_host_worker_warmth
+            .iter()
+            .map(|row| (row.worker_id.as_str(), row))
+            .collect::<BTreeMap<_, _>>();
+        let healthy = rows.get("rchw-large-1").expect("healthy worker");
+        let low_memory = rows
+            .get("rchw-large-low-memory")
+            .expect("low-memory worker");
+        let saturated = rows.get("rchw-large-saturated").expect("saturated worker");
+        let cold = rows.get("rchw-large-cold").expect("cold worker");
+
+        assert_eq!(healthy.cpu_cores, ADMISSION_AWARE_LARGE_HOST_CPU_CORES);
+        assert_eq!(
+            healthy.memory_bytes,
+            ADMISSION_AWARE_LARGE_HOST_MEMORY_BYTES
+        );
+        assert_eq!(
+            healthy.numa_nodes,
+            ADMISSION_AWARE_LARGE_HOST_MIN_NUMA_NODES
+        );
+        assert_eq!(healthy.cache_warmth, "warm");
+        assert!(healthy.target_dir_isolated);
+        assert!(healthy.active_project_excluded);
+        assert_eq!(
+            healthy.worker_saturation,
+            AdmissionAwareLargeHostWorkerSaturation::Available
+        );
+        assert_eq!(
+            healthy.advisory_batching_decision,
+            AdmissionAwareLargeHostBatchingDecision::PreferWarmWorker
+        );
+        assert_eq!(healthy.advisory_batch_size_hint, Some(3));
+        for required in [
+            "active_project_excluded",
+            "advisory_batching_only",
+            "large_host_shape_64_core_256_gib",
+            "proof_lane_cost_estimate_present",
+            "target_dir_isolated",
+            "worker_cache_warm",
+        ] {
+            assert!(
+                healthy
+                    .advisory_batching_reason_codes
+                    .iter()
+                    .any(|code| code == required),
+                "healthy worker reason missing {required}"
+            );
+        }
+
+        assert_eq!(
+            low_memory.worker_saturation,
+            AdmissionAwareLargeHostWorkerSaturation::LowMemory
+        );
+        assert_eq!(
+            low_memory.advisory_batching_decision,
+            AdmissionAwareLargeHostBatchingDecision::QueueLowMemory
+        );
+        assert_eq!(low_memory.advisory_batch_size_hint, None);
+        assert!(
+            low_memory
+                .advisory_batching_reason_codes
+                .iter()
+                .any(|code| code == "worker_memory_low")
+        );
+
+        assert_eq!(
+            saturated.worker_saturation,
+            AdmissionAwareLargeHostWorkerSaturation::WorkerSaturated
+        );
+        assert_eq!(
+            saturated.advisory_batching_decision,
+            AdmissionAwareLargeHostBatchingDecision::DeferWorkerSaturated
+        );
+        assert_eq!(saturated.advisory_batch_size_hint, None);
+        assert!(
+            saturated
+                .advisory_batching_reason_codes
+                .iter()
+                .any(|code| code == "worker_queue_saturated")
+        );
+
+        assert_eq!(
+            cold.worker_saturation,
+            AdmissionAwareLargeHostWorkerSaturation::Available
+        );
+        assert_eq!(
+            cold.advisory_batching_decision,
+            AdmissionAwareLargeHostBatchingDecision::AdmitBatch
+        );
+        assert_eq!(cold.advisory_batch_size_hint, Some(2));
+        assert!(
+            cold.advisory_batching_reason_codes
+                .iter()
+                .any(|code| code == "worker_cache_cold")
+        );
+
+        for row in atlas.large_host_worker_warmth {
+            assert!(row.advisory_only);
+            for forbidden in [
+                "allocator_enforcement",
+                "production_admission_default",
+                "throughput_improvement",
+            ] {
+                assert!(
+                    row.advisory_non_claims
+                        .iter()
+                        .any(|claim| claim == forbidden),
+                    "large-host row must keep {forbidden} as a non-claim"
+                );
+            }
+        }
+        assert!(!atlas.production_admission_default_enabled);
+        assert!(!atlas.mutates_agent_mail);
+        assert!(!atlas.mutates_beads);
+        assert!(!atlas.mutates_filesystem);
+        assert!(!atlas.starts_rch);
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_correlates_read_only_coordination_inputs() {
+        let mut input = complete_atlas_builder_input(healthy_spectral_snapshot(), false);
+        input
+            .dirty_tree_peer_ownership
+            .push(AdmissionAwareDirtyTreePeerOwnershipRow {
+                path: "src/channel/mpsc.rs".to_string(),
+                dirty_classification: "peer-owned-source-overlap".to_string(),
+                holder: Some("PeerAgent".to_string()),
+                bead_id: Some("asupersync-peer.1".to_string()),
+                source: "agent-mail-reservation".to_string(),
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::PeerExact,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+                blocks_admission: true,
+                handoff_required: true,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            });
+        input
+            .agent_mail_reservations
+            .push(AdmissionAwareAgentMailReservationRow {
+                path_pattern: "src/channel/*.rs".to_string(),
+                holder: "PeerAgent".to_string(),
+                exclusive: true,
+                reason: "asupersync-peer.1".to_string(),
+                expires_ts: Some("2026-06-02T23:30:00Z".to_string()),
+                bead_id: Some("asupersync-peer.1".to_string()),
+                overlap_classification:
+                    AdmissionAwareCoordinationOverlapClass::ActiveExclusiveConflict,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            });
+        input
+            .agent_mail_reservations
+            .push(AdmissionAwareAgentMailReservationRow {
+                path_pattern: "docs/runtime_pressure_triage_runbook.md".to_string(),
+                holder: "PeerAgent".to_string(),
+                exclusive: true,
+                reason: "old-docs-reservation".to_string(),
+                expires_ts: Some("2026-06-02T19:00:00Z".to_string()),
+                bead_id: None,
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::ExpiredReservation,
+                coordination_decision: AdmissionAwareCoordinationDecision::Blocked,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            });
+        input
+            .br_tracker_status
+            .push(AdmissionAwareBrTrackerStatusRow {
+                bead_id: "asupersync-bt63nr.4".to_string(),
+                status: "open".to_string(),
+                priority: Some(1),
+                blocked_by: vec!["asupersync-bt63nr.7".to_string()],
+                ready: false,
+                assignee: None,
+                updated_at: Some("2026-06-02T22:44:00Z".to_string()),
+                overlap_classification: AdmissionAwareCoordinationOverlapClass::TrackerOnly,
+                coordination_decision: AdmissionAwareCoordinationDecision::Proceed,
+                sample_freshness: AdmissionAwareAtlasFreshnessStatus::Fresh,
+            });
+
+        let atlas = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(input);
+
+        assert_eq!(
+            atlas.overall_label,
+            AdmissionAwareAtlasClaimLabel::ValidationBlocked
+        );
+        assert_eq!(
+            atlas.coordination_decision,
+            AdmissionAwareCoordinationDecision::HandoffRequired
+        );
+        for reason in [
+            "active_exclusive_agent_mail_conflict",
+            "bead_blocked_by_dependencies",
+            "bead_not_ready",
+            "expired_agent_mail_reservation",
+            "peer_dirty_tree_overlap",
+            "tracker_only_dirty_tree_change",
+        ] {
+            assert!(
+                atlas
+                    .coordination_reason_codes
+                    .iter()
+                    .any(|code| code == reason),
+                "coordination reason missing {reason}"
+            );
+        }
+        assert_eq!(
+            atlas
+                .dirty_tree_peer_ownership
+                .iter()
+                .map(|row| (row.path.as_str(), row.coordination_decision))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    ".beads/issues.jsonl",
+                    AdmissionAwareCoordinationDecision::Proceed
+                ),
+                (
+                    "src/channel/mpsc.rs",
+                    AdmissionAwareCoordinationDecision::HandoffRequired
+                ),
+                (
+                    "src/runtime/resource_monitor.rs",
+                    AdmissionAwareCoordinationDecision::Proceed
+                ),
+            ]
+        );
+        let expired = atlas
+            .agent_mail_reservations
+            .iter()
+            .find(|row| {
+                row.overlap_classification
+                    == AdmissionAwareCoordinationOverlapClass::ExpiredReservation
+            })
+            .expect("expired reservation row");
+        assert_eq!(
+            expired.coordination_decision,
+            AdmissionAwareCoordinationDecision::Proceed,
+            "expired reservations are visible but should not block the lane"
+        );
+        assert!(!atlas.mutates_agent_mail);
+        assert!(!atlas.mutates_beads);
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_fails_closed_for_missing_source_rows() {
+        let runtime_pressure = RuntimePressureSnapshot::from_parts(
+            &ResourcePressure::new(),
+            ResourcePlatformProbeReport::from_snapshots("test/noarch".to_string(), Vec::new()),
+            None,
+            None,
+        );
+        let atlas = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(
+            AdmissionAwareRuntimePressureAtlasBuilderInput::new(
+                runtime_pressure,
+                LockOrderAtlasSnapshot {
+                    order_edges_exercised: Vec::new(),
+                    order_violations: Vec::new(),
+                    instrumentation_mode: "disabled",
+                },
+            ),
+        );
+
+        assert_eq!(
+            atlas.overall_label,
+            AdmissionAwareAtlasClaimLabel::StaleEvidence
+        );
+        assert!(!atlas.deadlock_proven);
+        assert_eq!(
+            atlas.missing_required_sections,
+            vec![
+                "agent_mail_reservations",
+                "br_tracker_status",
+                "dirty_tree_peer_ownership",
+                "large_host_worker_warmth",
+                "lock_contention",
+                "operator_closeout_receipt",
+                "rch_proof_lane_admission",
+                "scheduler_pressure",
+                "spectral_wait_graph",
+            ]
+        );
+        assert!(
+            atlas
+                .claim_boundary_labels
+                .iter()
+                .any(|row| row.label == AdmissionAwareAtlasClaimLabel::StaleEvidence)
+        );
+        assert!(atlas.lock_contention.is_empty());
+        assert!(atlas.scheduler_pressure.is_empty());
+        assert!(atlas.spectral_wait_graph.is_empty());
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_requires_explicit_trapped_cycle_witness() {
+        let deadlocked = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Deadlocked,
+            fiedler_micro_units: Some(0),
+            spectral_gap_bps: Some(0),
+            spectral_radius_micro_units: Some(2_400_000),
+            bottleneck_count: 0,
+            components: Some(2),
+            approaching_disconnect: false,
+            trapped_wait_cycle: true,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Critical,
+        };
+
+        let advisory = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(
+            complete_atlas_builder_input(deadlocked.clone(), false),
+        );
+        let proven = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(
+            complete_atlas_builder_input(deadlocked, true),
+        );
+
+        assert!(!advisory.deadlock_proven);
+        assert_eq!(
+            advisory.overall_label,
+            AdmissionAwareAtlasClaimLabel::StaleEvidence
+        );
+        assert!(
+            advisory
+                .missing_required_sections
+                .contains(&"trapped_cycle_witness".to_string())
+        );
+        assert_eq!(
+            advisory.spectral_wait_graph[0].deadlock_proven, false,
+            "spectral deadlocked class alone must not upgrade the claim"
+        );
+
+        assert!(proven.deadlock_proven);
+        assert_eq!(
+            proven.overall_label,
+            AdmissionAwareAtlasClaimLabel::DeadlockProven
+        );
+        assert!(proven.missing_required_sections.is_empty());
+        assert!(proven.spectral_wait_graph[0].deadlock_proven);
+        assert_eq!(proven.trapped_cycle_witness.len(), 1);
+        assert_eq!(
+            proven.trapped_cycle_witness[0].proof_status,
+            AdmissionAwareTrappedCycleWitnessProofStatus::Validated
+        );
+        assert_eq!(
+            proven.trapped_cycle_witness[0].wait_edges[0].waiting_participant,
+            "task:00000001-00000000",
+            "witness wait edges should be canonically sorted"
+        );
+        assert!(
+            proven
+                .claim_boundary_labels
+                .iter()
+                .any(|row| row.label == AdmissionAwareAtlasClaimLabel::DeadlockProven)
+        );
+    }
+
+    #[test]
+    fn admission_aware_runtime_pressure_atlas_rejects_unvalidated_trapped_cycle_witness() {
+        let deadlocked = RuntimePressureSpectralSnapshot {
+            class: RuntimePressureSpectralClass::Deadlocked,
+            fiedler_micro_units: Some(0),
+            spectral_gap_bps: Some(0),
+            spectral_radius_micro_units: Some(2_400_000),
+            bottleneck_count: 0,
+            components: Some(2),
+            approaching_disconnect: false,
+            trapped_wait_cycle: true,
+            early_warning_severity: RuntimePressureEarlyWarningSeverity::Critical,
+        };
+        let mut input = complete_atlas_builder_input(deadlocked, false);
+        let mut witness = sample_trapped_cycle_witness();
+        witness.proof_status = AdmissionAwareTrappedCycleWitnessProofStatus::ReplayPending;
+        input.trapped_cycle_witnesses = vec![witness];
+
+        let atlas = AdmissionAwareRuntimePressureAtlasSnapshot::from_source_snapshots(input);
+
+        assert!(!atlas.deadlock_proven);
+        assert_eq!(
+            atlas.overall_label,
+            AdmissionAwareAtlasClaimLabel::StaleEvidence
+        );
+        assert!(
+            atlas
+                .missing_required_sections
+                .contains(&"trapped_cycle_witness".to_string())
+        );
+        assert_eq!(
+            atlas.trapped_cycle_witness[0].proof_status,
+            AdmissionAwareTrappedCycleWitnessProofStatus::ReplayPending
+        );
+        assert!(!atlas.spectral_wait_graph[0].deadlock_proven);
     }
 
     #[test]
@@ -6197,6 +8614,7 @@ mod tests {
             healthy_pressure_lab_evidence(),
             cpu_lane_pressure_lab_evidence(),
             resource_fallback_degraded_lab_evidence(),
+            region_memory_budget_overrun_lab_evidence(),
             structural_warning_lab_evidence(),
             rch_proof_lane_remote_refusal_lab_evidence(),
         ];
@@ -6210,6 +8628,7 @@ mod tests {
                 RuntimePressureLabScenarioKind::Healthy,
                 RuntimePressureLabScenarioKind::CpuLanePressure,
                 RuntimePressureLabScenarioKind::ResourceFallbackDegraded,
+                RuntimePressureLabScenarioKind::RegionMemoryBudgetOverrun,
                 RuntimePressureLabScenarioKind::StructuralWarning,
                 RuntimePressureLabScenarioKind::RchProofLaneRemoteRefusal,
             ]
@@ -6230,6 +8649,7 @@ mod tests {
                 RuntimePressureVerdict::Degraded,
                 RuntimePressureVerdict::Critical,
                 RuntimePressureVerdict::Critical,
+                RuntimePressureVerdict::Critical,
             ]
         );
     }
@@ -6240,6 +8660,7 @@ mod tests {
             healthy_pressure_lab_evidence(),
             cpu_lane_pressure_lab_evidence(),
             resource_fallback_degraded_lab_evidence(),
+            region_memory_budget_overrun_lab_evidence(),
             structural_warning_lab_evidence(),
             rch_proof_lane_remote_refusal_lab_evidence(),
         ];
@@ -6258,6 +8679,7 @@ mod tests {
                     "classification_matches_expected": row["classification_matches_expected"],
                     "diagnostic_labels": row["diagnostic_labels"],
                     "resources": row["snapshot"]["resources"].as_array().map_or(0, Vec::len),
+                    "region_memory_budgets": row["snapshot"]["region_memory_budgets"].as_array().map_or(0, Vec::len),
                     "rch_proof_lanes": row["snapshot"]["rch_proof_lanes"].as_array().map_or(0, Vec::len),
                     "critical_signal_count": row["snapshot"]["critical_signal_count"],
                     "degraded_signal_count": row["snapshot"]["degraded_signal_count"],
@@ -6278,6 +8700,7 @@ mod tests {
                     "classification_matches_expected": true,
                     "diagnostic_labels": ["all_signals_present"],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 0,
                     "critical_signal_count": 0,
                     "degraded_signal_count": 0,
@@ -6296,6 +8719,7 @@ mod tests {
                         "scheduler_tail_pressure",
                     ],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 0,
                     "critical_signal_count": 1,
                     "degraded_signal_count": 1,
@@ -6313,9 +8737,28 @@ mod tests {
                         "platform_probe_fallback",
                     ],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 0,
                     "critical_signal_count": 0,
                     "degraded_signal_count": 2,
+                    "spectral_class": "healthy",
+                }),
+                json!({
+                    "schema_version": RUNTIME_PRESSURE_LAB_SCENARIO_EVIDENCE_SCHEMA_VERSION,
+                    "scenario_id": "runtime-pressure-lab-region-memory-budget-overrun",
+                    "seed": 1470741209u64,
+                    "scenario_kind": "region_memory_budget_overrun",
+                    "observed_verdict": "critical",
+                    "classification_matches_expected": true,
+                    "diagnostic_labels": [
+                        "region_memory_budget_advisory",
+                        "region_memory_budget_exhausted",
+                    ],
+                    "resources": 1,
+                    "region_memory_budgets": 1,
+                    "rch_proof_lanes": 0,
+                    "critical_signal_count": 1,
+                    "degraded_signal_count": 0,
                     "spectral_class": "healthy",
                 }),
                 json!({
@@ -6330,6 +8773,7 @@ mod tests {
                         "trapped_cycle_detection_required",
                     ],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 0,
                     "critical_signal_count": 1,
                     "degraded_signal_count": 0,
@@ -6347,6 +8791,7 @@ mod tests {
                         "rch_remote_required_refused",
                     ],
                     "resources": 1,
+                    "region_memory_budgets": 0,
                     "rch_proof_lanes": 1,
                     "critical_signal_count": 1,
                     "degraded_signal_count": 0,
@@ -6481,6 +8926,43 @@ mod tests {
             vec![RuntimePressureAdmissionReason::SnapshotCritical]
         );
         assert_eq!(decision.critical_signal_count, 1);
+    }
+
+    #[test]
+    fn runtime_pressure_admission_keeps_required_work_on_memory_budget_pressure() {
+        let pressure = ResourcePressure::new();
+        pressure.update_measurement(
+            ResourceType::Memory,
+            ResourceMeasurement::new(32, 80, 95, 100),
+        );
+        let snapshot = RuntimePressureSnapshot::from_parts_with_region_memory_budgets(
+            &pressure,
+            complete_platform_probe_report(),
+            Some(healthy_scheduler_metrics()),
+            Some(healthy_spectral_snapshot()),
+            vec![RuntimePressureRegionMemoryBudgetSnapshot::with_label(
+                RegionId::new_ephemeral(),
+                "cleanup-region",
+                1_000,
+                1_100,
+            )],
+        );
+        let policy = RuntimePressureAdmissionPolicy::conservative_optional_backpressure();
+
+        let optional = policy.decide(RuntimePressureAdmissionWorkClass::Optional, &snapshot);
+        assert_eq!(optional.action, RuntimePressureAdmissionAction::Reject);
+        assert_eq!(
+            optional.reason_codes,
+            vec![RuntimePressureAdmissionReason::SnapshotCritical]
+        );
+
+        let required = policy.decide(RuntimePressureAdmissionWorkClass::Required, &snapshot);
+        assert_eq!(required.action, RuntimePressureAdmissionAction::Admit);
+        assert_eq!(
+            required.reason_codes,
+            vec![RuntimePressureAdmissionReason::RequiredWorkBypass]
+        );
+        assert_eq!(required.critical_signal_count, 1);
     }
 
     #[test]

@@ -1,0 +1,39 @@
+{
+  "repo": {
+    "head_sha": "4444444444444444444444444444444444444444",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "proof_id": "proof:reuse-index-failed",
+      "artifact_path": "artifacts/proof/reuse-index/failed.json",
+      "git_sha": "4444444444444444444444444444444444444444",
+      "git_branch": "main",
+      "manifest_lane_id": "proof-reuse-cache-contract",
+      "manifest_guarantee_ids": [
+        "proof-reuse-cache-schema"
+      ],
+      "claim_scope": "proof-reuse-cache-schema",
+      "allowed_cache_hit_claims": [
+        "proof-reuse-cache-schema"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture",
+      "command_fingerprint": "sha256:proof-reuse-cache-command",
+      "source_fingerprint": "sha256:source-index-current",
+      "tree_fingerprint": "git-tree:index-current",
+      "toolchain_fingerprint": "sha256:toolchain-index-current",
+      "env_fingerprint": "sha256:env-index-current",
+      "feature_flags": [],
+      "stderr": "test proof_reuse_cache_contract ... FAILED",
+      "touched_files": [
+        "artifacts/proof_reuse_cache_contract_v1.json",
+        "tests/proof_reuse_cache_contract.rs"
+      ],
+      "status": "failed",
+      "generated_at": "2026-06-04T02:03:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

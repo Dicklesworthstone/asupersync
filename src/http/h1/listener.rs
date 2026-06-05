@@ -562,6 +562,7 @@ mod tests {
     )]
     use super::*;
     use crate::cx::Cx;
+    use crate::http::h1::server::HostPolicy;
     use crate::http::h1::types::Response;
     use crate::io::AsyncWriteExt;
     use crate::record::RegionLimits;
@@ -583,6 +584,13 @@ mod tests {
 
     fn http1_listener_test_time() -> Time {
         HTTP1_LISTENER_TEST_NOW.with(|now| Time::from_nanos(now.get()))
+    }
+
+    fn localhost_http_config() -> Http1Config {
+        Http1Config {
+            allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+            ..Http1Config::default()
+        }
     }
 
     #[test]
@@ -696,7 +704,7 @@ mod tests {
             let listener = Http1Listener::bind_with_config(
                 "127.0.0.1:0",
                 |_req| async { Response::new(200, "OK", b"listener alive".to_vec()) },
-                Http1ListenerConfig::default(),
+                Http1ListenerConfig::default().http_config(localhost_http_config()),
             )
             .await
             .expect("bind failed");
@@ -941,6 +949,7 @@ mod tests {
             let finished_signal = Arc::clone(&finished);
 
             let config = Http1ListenerConfig {
+                http_config: localhost_http_config(),
                 drain_timeout: Duration::from_millis(0),
                 ..Default::default()
             };
@@ -1010,6 +1019,7 @@ mod tests {
             let finished_signal = Arc::clone(&finished);
 
             let config = Http1ListenerConfig::default()
+                .http_config(localhost_http_config())
                 .drain_timeout(Duration::from_millis(0))
                 .time_getter(http1_listener_test_time);
 

@@ -616,6 +616,26 @@ fn observe_progressive_decode_error(
                 "{context}: corrupt output should report a byte mismatch"
             );
         }
+        DecodeError::ComputeBudgetExhausted {
+            used,
+            requested,
+            max,
+        } => {
+            assert!(
+                used.saturating_add(*requested) > *max || *used > *max,
+                "{context}: compute-budget error should report an exhausted budget"
+            );
+        }
+        DecodeError::EsiRateLimitExceeded {
+            esi: _,
+            column_count,
+            max_columns,
+        } => {
+            assert!(
+                *column_count == 0 || *column_count > *max_columns,
+                "{context}: ESI rate-limit error should report high-ESI sentinel or excessive columns"
+            );
+        }
         DecodeError::SingularMatrix { .. } | DecodeError::InvalidSourceSymbolEquation { .. } => {}
     }
 }

@@ -1,0 +1,415 @@
+{
+  "schema_version": "proof-reuse-signoff-contract-v1",
+  "bead_id": "asupersync-5pziae.8",
+  "epic_id": "asupersync-5pziae",
+  "generated_at": "2026-06-05T02:24:00Z",
+  "source_of_truth": {
+    "contract": "artifacts/proof_reuse_signoff_contract_v1.json",
+    "contract_test": "tests/proof_reuse_signoff_contract.rs",
+    "beads_database": ".beads/issues.jsonl",
+    "agent_instructions": "AGENTS.md",
+    "proof_reuse_cache_contract": "artifacts/proof_reuse_cache_contract_v1.json",
+    "proof_reuse_cache_contract_test": "tests/proof_reuse_cache_contract.rs",
+    "proof_reuse_e2e_contract": "artifacts/proof_reuse_e2e_contract_v1.json",
+    "proof_reuse_e2e_contract_test": "tests/proof_reuse_e2e_contract.rs",
+    "proof_reuse_handoff_contract": "artifacts/proof_reuse_handoff_receipt_contract_v1.json",
+    "proof_reuse_handoff_contract_test": "tests/proof_reuse_handoff_receipt_contract.rs",
+    "proof_reuse_large_corpus_contract": "artifacts/proof_reuse_large_corpus_contract_v1.json",
+    "proof_artifact_freshness_contract_test": "tests/proof_artifact_freshness_receipt_contract.rs",
+    "proof_freshness_helper": "scripts/proof_artifact_freshness_receipt.py",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_lane_manifest_test": "tests/proof_lane_manifest_contract.rs",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "proof_status_snapshot_test": "tests/proof_status_snapshot_contract.rs",
+    "reuse_query_json_golden": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.json",
+    "reuse_query_markdown_golden": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.md"
+  },
+  "source_artifact_hashes": [
+    {
+      "path": "artifacts/proof_reuse_cache_contract_v1.json",
+      "sha256": "34acc1ca38d218fee0fdf4f6c25890ec90ad7bad5939c9275e4c097fa9696e33",
+      "covers": "strict proof reuse fingerprint schema and refusal policy"
+    },
+    {
+      "path": "artifacts/proof_reuse_e2e_contract_v1.json",
+      "sha256": "1db3e7509dcdeea58248f9015a7ff84e669d1e3a0fcb11fbc4a2a1e7a8a2371a",
+      "covers": "deterministic cache-hit, refusal, rerun, no-win, and redaction scenarios"
+    },
+    {
+      "path": "artifacts/proof_reuse_handoff_receipt_contract_v1.json",
+      "sha256": "511dffb211a2c306436c487df33f240c105e66ecbf9d2879fa4817865163fc35",
+      "covers": "Agent Mail handoff receipt redaction and wording fixtures"
+    },
+    {
+      "path": "artifacts/proof_reuse_large_corpus_contract_v1.json",
+      "sha256": "0ba2a7d0e3644d20aef0c6895f096620a4d8a795ef338f3a9db8f71b989214e0",
+      "covers": "large-corpus bounded query performance guard"
+    },
+    {
+      "path": "artifacts/proof_lane_manifest_v1.json",
+      "sha256": "67cf41259a9b84c5cb5b428e823fa6a2f7c835feb64c18ab7eee2d28ea99ee40",
+      "covers": "RCH lane command policy and cache-hit claim scopes"
+    },
+    {
+      "path": "artifacts/proof_status_snapshot_v1.json",
+      "sha256": "4ff15d618e13f76f86e1fd126f6a88780e5a8019c74c51468e6bb7303a42a2c9",
+      "covers": "fresh pass, approved cache hit, rerun-required, blocked, no-win, and unsupported status rows"
+    },
+    {
+      "path": "scripts/proof_artifact_freshness_receipt.py",
+      "sha256": "46495166efd6f3be6b89d872ccfe0063a8e7c6b389bc23c4f50bc3ce1c5dc322",
+      "covers": "proof freshness receipt classifier, index, and query implementation"
+    },
+    {
+      "path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.json",
+      "sha256": "e6064eb90db3a72b94c333cad9996b6f92d1c7cdf2773b247cd30e02b1bec990",
+      "covers": "deterministic proof reuse JSON query golden"
+    },
+    {
+      "path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.md",
+      "sha256": "c3edf9de94bd82845905852804cf51845e9eff1887dad74fbddf8d8e8311d58a",
+      "covers": "deterministic proof reuse Markdown query golden"
+    }
+  ],
+  "required_child_gates": [
+    {
+      "bead_id": "asupersync-5pziae.1",
+      "required_status": "closed",
+      "artifact": "artifacts/proof_reuse_cache_contract_v1.json",
+      "artifact_version_field": "contract_version",
+      "artifact_version": "proof-reuse-cache-contract-v1",
+      "contract_test": "tests/proof_reuse_cache_contract.rs",
+      "command_id": "cache-schema-contract"
+    },
+    {
+      "bead_id": "asupersync-5pziae.2",
+      "required_status": "closed",
+      "artifact": "scripts/proof_artifact_freshness_receipt.py",
+      "artifact_version_field": null,
+      "artifact_version": null,
+      "contract_test": "tests/proof_artifact_freshness_receipt_contract.rs",
+      "command_id": "classifier-contract"
+    },
+    {
+      "bead_id": "asupersync-5pziae.3",
+      "required_status": "closed",
+      "artifact": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.json",
+      "artifact_version_field": null,
+      "artifact_version": null,
+      "contract_test": "tests/proof_artifact_freshness_receipt_contract.rs",
+      "command_id": "index-query-contract"
+    },
+    {
+      "bead_id": "asupersync-5pziae.4",
+      "required_status": "closed",
+      "artifact": "artifacts/proof_status_snapshot_v1.json",
+      "artifact_version_field": "contract_version",
+      "artifact_version": "proof-status-snapshot-v1",
+      "contract_test": "tests/proof_status_snapshot_contract.rs",
+      "command_id": "manifest-status-contract"
+    },
+    {
+      "bead_id": "asupersync-5pziae.5",
+      "required_status": "closed",
+      "artifact": "artifacts/proof_reuse_handoff_receipt_contract_v1.json",
+      "artifact_version_field": "contract_version",
+      "artifact_version": "proof-reuse-handoff-receipt-contract-v1",
+      "contract_test": "tests/proof_reuse_handoff_receipt_contract.rs",
+      "command_id": "handoff-receipt-contract"
+    },
+    {
+      "bead_id": "asupersync-5pziae.6",
+      "required_status": "closed",
+      "artifact": "artifacts/proof_reuse_e2e_contract_v1.json",
+      "artifact_version_field": "contract_version",
+      "artifact_version": "proof-reuse-e2e-contract-v1",
+      "contract_test": "tests/proof_reuse_e2e_contract.rs",
+      "command_id": "e2e-scenarios-contract"
+    },
+    {
+      "bead_id": "asupersync-5pziae.7",
+      "required_status": "closed",
+      "artifact": "artifacts/proof_reuse_large_corpus_contract_v1.json",
+      "artifact_version_field": "schema_version",
+      "artifact_version": "proof-reuse-large-corpus-contract-v1",
+      "contract_test": "tests/proof_artifact_freshness_receipt_contract.rs",
+      "command_id": "large-corpus-contract"
+    }
+  ],
+  "required_validation_commands": [
+    {
+      "command_id": "cache-schema-contract",
+      "bead_id": "asupersync-5pziae.1",
+      "fresh_rch_required_for_final_signoff": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae1_cache_schema CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture",
+      "exact_output_must_report": "proof_reuse_cache_contract tests pass",
+      "cache_hit_citeable_claim": "strict-proof-reuse-schema"
+    },
+    {
+      "command_id": "classifier-contract",
+      "bead_id": "asupersync-5pziae.2",
+      "fresh_rch_required_for_final_signoff": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae2_classifier CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_artifact_freshness_receipt_contract proof_reuse_classifier -- --nocapture",
+      "exact_output_must_report": "proof_reuse_classifier tests pass",
+      "cache_hit_citeable_claim": "fail-closed-proof-reuse-classifier"
+    },
+    {
+      "command_id": "index-query-contract",
+      "bead_id": "asupersync-5pziae.3",
+      "fresh_rch_required_for_final_signoff": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae3_index_query CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_artifact_freshness_receipt_contract proof_reuse_query -- --nocapture",
+      "exact_output_must_report": "proof_reuse_query fixture tests pass",
+      "cache_hit_citeable_claim": "deterministic-proof-reuse-index-query"
+    },
+    {
+      "command_id": "manifest-status-contract",
+      "bead_id": "asupersync-5pziae.4",
+      "fresh_rch_required_for_final_signoff": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae4_manifest_status CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_reuse_cache_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture",
+      "exact_output_must_report": "proof reuse manifest and status policy tests pass",
+      "cache_hit_citeable_claim": "manifest-status-cache-hit-policy"
+    },
+    {
+      "command_id": "handoff-receipt-contract",
+      "bead_id": "asupersync-5pziae.5",
+      "fresh_rch_required_for_final_signoff": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae5_handoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_reuse_handoff_receipt_contract -- --nocapture",
+      "exact_output_must_report": "handoff receipt redaction and wording tests pass",
+      "cache_hit_citeable_claim": "agent-mail-proof-reuse-handoff"
+    },
+    {
+      "command_id": "e2e-scenarios-contract",
+      "bead_id": "asupersync-5pziae.6",
+      "fresh_rch_required_for_final_signoff": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae6_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_reuse_e2e_contract -- --nocapture",
+      "exact_output_must_report": "deterministic proof reuse E2E scenarios pass",
+      "cache_hit_citeable_claim": "deterministic-proof-reuse-e2e"
+    },
+    {
+      "command_id": "large-corpus-contract",
+      "bead_id": "asupersync-5pziae.7",
+      "fresh_rch_required_for_final_signoff": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae7_large_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_artifact_freshness_receipt_contract proof_reuse_large_corpus -- --nocapture",
+      "exact_output_must_report": "large-corpus performance guard passes or records a no-win verdict",
+      "cache_hit_citeable_claim": "large-corpus-proof-reuse-query-guard"
+    },
+    {
+      "command_id": "signoff-contract-test",
+      "bead_id": "asupersync-5pziae.8",
+      "fresh_rch_required_for_final_signoff": true,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae8_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_reuse_signoff_contract -- --nocapture",
+      "exact_output_must_report": "proof_reuse_signoff_contract tests pass",
+      "cache_hit_citeable_claim": null
+    },
+    {
+      "command_id": "signoff-contract-clippy",
+      "bead_id": "asupersync-5pziae.8",
+      "fresh_rch_required_for_final_signoff": true,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_5pziae8_signoff_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo clippy -p asupersync --test proof_reuse_signoff_contract -- -D warnings",
+      "exact_output_must_report": "proof_reuse_signoff_contract clippy passes with -D warnings",
+      "cache_hit_citeable_claim": null
+    }
+  ],
+  "graph_alert_evidence": {
+    "command": "bv --robot-alerts",
+    "generated_at": "2026-06-05T02:27:52Z",
+    "data_hash": "f71c2626b50f51b6",
+    "summary": {
+      "total": 0,
+      "critical": 0,
+      "warning": 0,
+      "info": 0
+    },
+    "relevant_alerts": []
+  },
+  "closeout_policy": {
+    "required_branch": "main",
+    "forbidden_branch": "master",
+    "post_push_sync_command": "git push origin main:master",
+    "exact_rch_commands_must_be_cited": true,
+    "cache_hit_is_never_fresh_rch_pass": true,
+    "approved_cache_hits_must_be_counted_separately": true,
+    "fresh_rch_passes_must_be_counted_separately": true,
+    "first_blocker_line_required_when_blocked": true,
+    "unsupported_broad_claims_fail_closed": true,
+    "epic_close_requires_all_child_gates_closed": true,
+    "epic_close_requires_signoff_bead_closed": true,
+    "allowed_final_verdicts": [
+      "pass",
+      "blocked",
+      "no-win"
+    ],
+    "allowed_no_win_reason_codes": [
+      "rch-unavailable-no-safe-cache",
+      "large-corpus-threshold-unachievable-with-safe-cache"
+    ]
+  },
+  "final_output_fixture": {
+    "scenario_id": "final-proof-reuse-signoff-v1",
+    "schema_version": "proof-reuse-signoff-contract-v1",
+    "final_verdict": "pass",
+    "blocked": false,
+    "first_blocker_line": null,
+    "fresh_rch_pass_count": 2,
+    "approved_cache_hit_count": 7,
+    "cache_hit_is_fresh_rch_pass": false,
+    "source_artifacts": [
+      "artifacts/proof_reuse_cache_contract_v1.json",
+      "artifacts/proof_reuse_e2e_contract_v1.json",
+      "artifacts/proof_reuse_handoff_receipt_contract_v1.json",
+      "artifacts/proof_reuse_large_corpus_contract_v1.json",
+      "artifacts/proof_lane_manifest_v1.json",
+      "artifacts/proof_status_snapshot_v1.json",
+      "scripts/proof_artifact_freshness_receipt.py",
+      "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.json",
+      "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.md"
+    ],
+    "exact_command_ids": [
+      "cache-schema-contract",
+      "classifier-contract",
+      "index-query-contract",
+      "manifest-status-contract",
+      "handoff-receipt-contract",
+      "e2e-scenarios-contract",
+      "large-corpus-contract",
+      "signoff-contract-test",
+      "signoff-contract-clippy"
+    ],
+    "operator_closeout_text": "Final proof reuse signoff passed. Fresh RCH passes: signoff-contract-test and signoff-contract-clippy. Approved cache hits: cache-schema-contract, classifier-contract, index-query-contract, manifest-status-contract, handoff-receipt-contract, e2e-scenarios-contract, and large-corpus-contract. Approved cache hit evidence is not a fresh RCH pass. No workspace-health or release-readiness claim is made from cache evidence. After committing, push main and mirror with git push origin main:master."
+  },
+  "negative_fixtures": [
+    {
+      "scenario_id": "missing-schema",
+      "mutations": [
+        "remove schema_version"
+      ],
+      "expected_verdict": "blocked",
+      "expected_reason_code": "missing-schema",
+      "first_blocker_line": "missing schema_version"
+    },
+    {
+      "scenario_id": "stale-cache-hit",
+      "mutations": [
+        "set source_artifact_hashes[0].sha256 to stale value"
+      ],
+      "expected_verdict": "blocked",
+      "expected_reason_code": "stale-cache-hit",
+      "first_blocker_line": "source hash mismatch for artifacts/proof_reuse_cache_contract_v1.json"
+    },
+    {
+      "scenario_id": "local-fallback",
+      "mutations": [
+        "remove RCH_REQUIRE_REMOTE=1 prefix from signoff-contract-test command"
+      ],
+      "expected_verdict": "blocked",
+      "expected_reason_code": "local-fallback-marker",
+      "first_blocker_line": "command signoff-contract-test is not remote-required RCH"
+    },
+    {
+      "scenario_id": "missing-rch-command",
+      "mutations": [
+        "drop large-corpus-contract from exact_command_ids"
+      ],
+      "expected_verdict": "blocked",
+      "expected_reason_code": "missing-rch-command",
+      "first_blocker_line": "missing required command large-corpus-contract"
+    },
+    {
+      "scenario_id": "unsupported-broad-claim",
+      "mutations": [
+        "add workspace-health cache claim"
+      ],
+      "expected_verdict": "blocked",
+      "expected_reason_code": "unsupported-broad-claim",
+      "first_blocker_line": "cache evidence cannot support workspace-health"
+    },
+    {
+      "scenario_id": "missing-first-blocker-line",
+      "mutations": [
+        "set blocked true and first_blocker_line null"
+      ],
+      "expected_verdict": "blocked",
+      "expected_reason_code": "missing-first-blocker-line",
+      "first_blocker_line": null
+    }
+  ],
+  "epic_close_gate": {
+    "parent_bead": "asupersync-5pziae",
+    "tracker_snapshot": {
+      "captured_with": "br show asupersync-5pziae --json and br show asupersync-5pziae.1 asupersync-5pziae.2 asupersync-5pziae.3 asupersync-5pziae.4 asupersync-5pziae.5 asupersync-5pziae.6 asupersync-5pziae.7 asupersync-5pziae.8 --json",
+      "parent_status": "open",
+      "parent_dependencies": [
+        "asupersync-5pziae.1",
+        "asupersync-5pziae.2",
+        "asupersync-5pziae.3",
+        "asupersync-5pziae.4",
+        "asupersync-5pziae.5",
+        "asupersync-5pziae.6",
+        "asupersync-5pziae.7",
+        "asupersync-5pziae.8"
+      ],
+      "child_statuses": [
+        {
+          "bead_id": "asupersync-5pziae.1",
+          "status": "closed"
+        },
+        {
+          "bead_id": "asupersync-5pziae.2",
+          "status": "closed"
+        },
+        {
+          "bead_id": "asupersync-5pziae.3",
+          "status": "closed"
+        },
+        {
+          "bead_id": "asupersync-5pziae.4",
+          "status": "closed"
+        },
+        {
+          "bead_id": "asupersync-5pziae.5",
+          "status": "closed"
+        },
+        {
+          "bead_id": "asupersync-5pziae.6",
+          "status": "closed"
+        },
+        {
+          "bead_id": "asupersync-5pziae.7",
+          "status": "closed"
+        },
+        {
+          "bead_id": "asupersync-5pziae.8",
+          "status": "in_progress"
+        }
+      ]
+    },
+    "parent_must_depend_on": [
+      "asupersync-5pziae.1",
+      "asupersync-5pziae.2",
+      "asupersync-5pziae.3",
+      "asupersync-5pziae.4",
+      "asupersync-5pziae.5",
+      "asupersync-5pziae.6",
+      "asupersync-5pziae.7",
+      "asupersync-5pziae.8"
+    ],
+    "closed_child_gates_required_before_signoff_close": [
+      "asupersync-5pziae.1",
+      "asupersync-5pziae.2",
+      "asupersync-5pziae.3",
+      "asupersync-5pziae.4",
+      "asupersync-5pziae.5",
+      "asupersync-5pziae.6",
+      "asupersync-5pziae.7"
+    ],
+    "signoff_status_allowed_while_validating": [
+      "in_progress",
+      "closed"
+    ],
+    "epic_can_close_only_when": [
+      "all parent dependencies are closed",
+      "final_output_fixture.final_verdict is pass or explicit no-win with first_blocker_line",
+      "post_push_sync_command has been executed after the final signoff commit"
+    ]
+  }
+}

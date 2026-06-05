@@ -5,6 +5,8 @@ use asupersync::distributed::snapshot::{
     BudgetSnapshot, RegionSnapshot, SnapshotMergeError, TaskSnapshot, TaskState,
 };
 use asupersync::record::region::RegionState;
+use asupersync::security::AuthenticationTag;
+use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::{RegionId, TaskId, Time};
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeMap;
@@ -172,6 +174,9 @@ fn build_snapshot(base_region: RegionId, delta: &DeltaInput) -> RegionSnapshot {
         state: delta.state.into_region_state(),
         timestamp: Time::from_secs(u64::from(delta.timestamp_secs)),
         sequence: u64::from(delta.sequence),
+        vector_clock: VectorClock::new(),
+        origin_id: u64::from(delta.region_slot),
+        epoch: u64::from(delta.region_generation),
         tasks: normalize_tasks(&delta.tasks),
         children: normalize_children(&delta.children),
         finalizer_count: u32::from(delta.finalizer_count),
@@ -186,6 +191,7 @@ fn build_snapshot(base_region: RegionId, delta: &DeltaInput) -> RegionSnapshot {
             .map(|reason| reason.chars().take(24).collect()),
         parent: Some(RegionId::new_for_test(0, 1)),
         metadata: normalize_metadata(&delta.metadata),
+        auth_tag: AuthenticationTag::zero(),
     }
 }
 

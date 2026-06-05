@@ -25,8 +25,9 @@ use asupersync::distributed::bridge::{
 };
 use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use asupersync::record::region::RegionState;
+use asupersync::security::AuthenticationTag;
+use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
-use asupersync::util::ArenaIndex;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -224,17 +225,15 @@ impl FuzzBridgeConfig {
 impl FuzzRegionSnapshot {
     fn to_region_snapshot(self) -> Option<RegionSnapshot> {
         // Convert with validation and bounds checking
-        let region_id = RegionId::from_arena(ArenaIndex::new(
-            self.region_arena_gen,
-            self.region_arena_slot,
-        ));
+        let region_id = RegionId::new_for_test(self.region_arena_slot, self.region_arena_gen);
 
         // Validate region state
         let state = match self.state_value {
             0 => RegionState::Open,
             1 => RegionState::Closing,
-            2 => RegionState::Closed,
-            3 => RegionState::Cancelled,
+            2 => RegionState::Draining,
+            3 => RegionState::Finalizing,
+            4 => RegionState::Closed,
             _ => return None, // Invalid state - should be ignored
         };
 
@@ -251,7 +250,7 @@ impl FuzzRegionSnapshot {
             .children
             .into_iter()
             .take(50) // Limit children
-            .map(|child| RegionId::from_arena(ArenaIndex::new(child.arena_gen, child.arena_slot)))
+            .map(|child| RegionId::new_for_test(child.arena_slot, child.arena_gen))
             .collect();
 
         // Limit metadata size
@@ -270,6 +269,9 @@ impl FuzzRegionSnapshot {
             state,
             timestamp,
             sequence,
+            vector_clock: VectorClock::new(),
+            origin_id: region_id.as_u64(),
+            epoch: sequence,
             tasks,
             children,
             finalizer_count: self.finalizer_count,
@@ -281,16 +283,16 @@ impl FuzzRegionSnapshot {
             cancel_reason: self.cancel_reason,
             parent: self
                 .parent
-                .map(|p| RegionId::from_arena(ArenaIndex::new(p.arena_gen, p.arena_slot))),
+                .map(|p| RegionId::new_for_test(p.arena_slot, p.arena_gen)),
             metadata,
+            auth_tag: AuthenticationTag::zero(),
         })
     }
 }
 
 impl FuzzTaskSnapshot {
     fn to_task_snapshot(self) -> Option<TaskSnapshot> {
-        let task_id =
-            TaskId::from_arena(ArenaIndex::new(self.task_arena_gen, self.task_arena_slot));
+        let task_id = TaskId::new_for_test(self.task_arena_slot, self.task_arena_gen);
 
         // Validate task state
         let state = match self.state_value {
@@ -326,12 +328,13 @@ fuzz_target!(|data: &[u8]| {
     let messages: Vec<_> = config.messages.into_iter().take(MAX_SNAPSHOTS).collect();
 
     // Create test region
-    let region_id = RegionId::from_arena(ArenaIndex::new(1, 0));
+    let region_id = RegionId::new_for_test(0, 1);
 
     // Create bridge with fuzz configuration
     let region_mode = config.mode.to_region_mode();
     let bridge_config = config.bridge_config.to_bridge_config();
-    let mut bridge = RegionBridge::new(region_id, region_mode);
+    let mut bridge = RegionBridge::with_mode(region_id, None, Budget::default(), region_mode);
+    bridge.config = bridge_config;
 
     // Track sequence numbers per channel for monotonicity validation
     let mut channel_sequences: HashMap<u16, u64> = HashMap::new();
@@ -369,7 +372,7 @@ fuzz_target!(|data: &[u8]| {
                     }
 
                     // Property 5: Snapshot apply idempotent
-                    let region_key = snapshot.region_id.into_u64();
+                    let region_key = snapshot.region_id.as_u64();
                     if let Some(&prev_seq) = applied_snapshots.get(&region_key) {
                         if snapshot.sequence == prev_seq {
                             // Re-applying same snapshot should be idempotent

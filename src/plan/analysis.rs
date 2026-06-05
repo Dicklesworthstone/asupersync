@@ -956,14 +956,10 @@ impl PlanAnalyzer {
                     && child_analyses.iter().all(|a| a.obligation.is_safe())
                 {
                     // Additional check for simple dedup patterns: if all children
-                    // are joins or leaves with no complex nesting, the pattern is safe
-                    let all_simple = children.iter().all(|&child_id| {
-                        if let Some(child_node) = dag.node(child_id) {
-                            matches!(child_node, PlanNode::Leaf { .. } | PlanNode::Join { .. })
-                        } else {
-                            false
-                        }
-                    });
+                    // are directly drainable shapes, the pattern is safe.
+                    let all_simple = children
+                        .iter()
+                        .all(|&child_id| race_child_has_simple_drain_shape(dag, child_id));
                     if all_simple {
                         CancelSafety::Safe
                     } else {
@@ -1103,6 +1099,19 @@ impl PlanAnalyzer {
 
         results.insert(id.index(), analysis.clone());
         analysis
+    }
+}
+
+fn race_child_has_simple_drain_shape(dag: &PlanDag, child_id: PlanId) -> bool {
+    match dag.node(child_id) {
+        Some(PlanNode::Leaf { .. } | PlanNode::Join { .. }) => true,
+        Some(PlanNode::Timeout { child, .. }) => {
+            matches!(
+                dag.node(*child),
+                Some(PlanNode::Leaf { .. } | PlanNode::Join { .. })
+            )
+        }
+        Some(PlanNode::Race { .. }) | None => false,
     }
 }
 
@@ -1252,8 +1261,8 @@ impl<'a> SideConditionChecker<'a> {
 
     /// Returns true when a rewrite preserves the loser-drain property.
     ///
-    /// A rewrite is safe if it does not degrade cancel-safety (Safe → non-Safe)
-    /// and does not introduce new obligation leak candidates on the cancel path.
+    /// A rewrite is safe if it does not move to a less-safe cancel state and
+    /// does not introduce new obligation leak candidates on the cancel path.
     #[must_use]
     pub fn rewrite_preserves_loser_drain(&self, before: PlanId, after: PlanId) -> bool {
         let Some(before_a) = self.analysis.get(before) else {
@@ -1262,8 +1271,8 @@ impl<'a> SideConditionChecker<'a> {
         let Some(after_a) = self.analysis.get(after) else {
             return false;
         };
-        // Degrading from Safe to non-Safe is forbidden.
-        if !after_a.cancel.is_safe() && before_a.cancel.is_safe() {
+        // Degrading to a less-safe cancel state is forbidden.
+        if after_a.cancel > before_a.cancel {
             return false;
         }
         // The set of obligations that may leak on cancel must not grow.
@@ -1900,6 +1909,22 @@ mod tests {
     }
 
     #[test]
+    fn race_of_timeout_leaves_is_safe() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let timed_a = dag.timeout(a, Duration::from_secs(2));
+        let timed_b = dag.timeout(b, Duration::from_secs(4));
+        let race = dag.race(vec![timed_a, timed_b]);
+        dag.set_root(race);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let node = analysis.get(race).expect("race analyzed");
+        assert!(node.is_safe());
+        assert_eq!(node.cancel, CancelSafety::Safe);
+    }
+
+    #[test]
     fn race_cost_uses_min_critical_path() {
         let mut dag = PlanDag::new();
         let a = dag.leaf("a");
@@ -2323,6 +2348,21 @@ mod tests {
         assert_eq!(timeout_node.obligation, ObligationSafety::MayLeak);
         assert_eq!(timeout_node.cancel, CancelSafety::MayOrphan);
         assert!(!timeout_node.is_safe());
+    }
+
+    #[test]
+    fn race_of_timeout_obligation_leaf_reports_cancel_leak_risk() {
+        let mut dag = PlanDag::new();
+        let fast = dag.leaf("fast");
+        let obligation = dag.leaf("obl:lease");
+        let timeout = dag.timeout(obligation, Duration::from_secs(1));
+        let race = dag.race(vec![fast, timeout]);
+        dag.set_root(race);
+
+        let analysis = PlanAnalyzer::analyze(&dag);
+        let race_node = analysis.get(race).expect("race analyzed");
+        assert_eq!(race_node.cancel, CancelSafety::MayOrphan);
+        assert!(!race_node.is_safe());
     }
 
     #[test]

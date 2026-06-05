@@ -6,6 +6,22 @@
 name: Fuzz
 
 on:
+  # Compile every registered fuzz target on main updates so public API drift
+  # cannot silently disable fuzz coverage until the nightly fuzz run.
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'fuzz/Cargo.toml'
+      - 'fuzz/fuzz_targets/**'
+      - '.github/workflows/fuzz.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'fuzz/Cargo.toml'
+      - 'fuzz/fuzz_targets/**'
+      - '.github/workflows/fuzz.yml'
   # Run nightly
   schedule:
     - cron: '0 3 * * *'  # 3 AM UTC daily
@@ -51,6 +67,8 @@ on:
           - postgres_scram
           - mysql_ok_packet
           - raptorq_decoder_gauss_matrix
+          - fuzz_distributed_recovery_decode
+          - mutex_poison_persistence
           - source_payload_hash_verification
           - fuzz_raptorq_rfc6330
           - tls_stream_record_framing
@@ -76,8 +94,90 @@ env:
   CARGO_PROFILE_RELEASE_LTO: thin
 
 jobs:
+  fuzz-build-gate:
+    name: Fuzz target compile gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-action@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Resolve cargo executor
+        run: |
+          configured="${RCH_BIN:-}"
+          resolved=""
+          mode=""
+
+          if [[ -n "$configured" && -x "$configured" && "$configured" != *scripts/rch_ci_fallback.sh ]]; then
+            resolved="$configured"
+            mode="remote"
+          elif command -v rch >/dev/null 2>&1; then
+            resolved="$(command -v rch)"
+            mode="remote"
+          elif [[ -x "$HOME/.local/bin/rch" ]]; then
+            resolved="$HOME/.local/bin/rch"
+            mode="remote"
+          elif [[ -n "$configured" && -x "$configured" ]]; then
+            resolved="$configured"
+            mode="ci-fallback"
+          elif [[ -x "./scripts/rch_ci_fallback.sh" ]]; then
+            resolved="./scripts/rch_ci_fallback.sh"
+            mode="ci-fallback"
+          else
+            echo "a cargo executor is required for fuzz-target builds" >&2
+            exit 1
+          fi
+
+          case "$resolved" in
+            *scripts/rch_ci_fallback.sh)
+              mode="ci-fallback"
+              ;;
+          esac
+
+          echo "RCH_BIN=$resolved" >> "$GITHUB_ENV"
+          echo "RCH_EXECUTOR_MODE=$mode" >> "$GITHUB_ENV"
+
+      - name: Check all fuzz targets compile
+        run: |
+          set -euo pipefail
+          target_dir="${TMPDIR:-/tmp}/rch_target_fuzz_build_gate_${GITHUB_RUN_ID:-local}_all_bins"
+
+          echo "::group::Fuzz build gate context"
+          echo "UTC start: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "event: ${GITHUB_EVENT_NAME:-unknown}"
+          echo "sha: ${GITHUB_SHA:-unknown}"
+          echo "target dir: ${target_dir}"
+          echo "executor: ${RCH_BIN}"
+          echo "executor mode: ${RCH_EXECUTOR_MODE:-unknown}"
+          rustc -Vv
+          cargo -V
+          echo "::endgroup::"
+
+          echo "::group::RCH fuzz build gate: all bins"
+          if [[ "${RCH_EXECUTOR_MODE:-remote}" == "remote" ]]; then
+            echo 'RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR="${target_dir}" cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going'
+            RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_DEV_DEBUG=0 \
+              CARGO_TARGET_DIR="${target_dir}" \
+              cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going
+          else
+            echo '"$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR="${target_dir}" cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going'
+            "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_DEV_DEBUG=0 \
+              CARGO_TARGET_DIR="${target_dir}" \
+              cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going
+          fi
+          echo "::endgroup::"
+
   fuzz:
     name: Fuzz ${{ matrix.target }}
+    needs: fuzz-build-gate
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -115,6 +215,8 @@ jobs:
           - postgres_scram
           - mysql_ok_packet
           - raptorq_decoder_gauss_matrix
+          - fuzz_distributed_recovery_decode
+          - mutex_poison_persistence
           - source_payload_hash_verification
           - fuzz_raptorq_rfc6330
           - tls_stream_record_framing
@@ -141,28 +243,40 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      - name: Resolve remote cargo executor
+      - name: Resolve cargo executor
         run: |
-          resolved="${RCH_BIN:-}"
-          if [[ -n "$resolved" && -x "$resolved" ]]; then
-            :
+          configured="${RCH_BIN:-}"
+          resolved=""
+          mode=""
+
+          if [[ -n "$configured" && -x "$configured" && "$configured" != *scripts/rch_ci_fallback.sh ]]; then
+            resolved="$configured"
+            mode="remote"
           elif command -v rch >/dev/null 2>&1; then
             resolved="$(command -v rch)"
+            mode="remote"
           elif [[ -x "$HOME/.local/bin/rch" ]]; then
             resolved="$HOME/.local/bin/rch"
+            mode="remote"
+          elif [[ -n "$configured" && -x "$configured" ]]; then
+            resolved="$configured"
+            mode="ci-fallback"
+          elif [[ -x "./scripts/rch_ci_fallback.sh" ]]; then
+            resolved="./scripts/rch_ci_fallback.sh"
+            mode="ci-fallback"
           else
-            echo "a real rch binary is required for fuzz-target builds" >&2
+            echo "a cargo executor is required for fuzz-target builds" >&2
             exit 1
           fi
 
           case "$resolved" in
             *scripts/rch_ci_fallback.sh)
-              echo "refusing local fallback executor for fuzz-target builds: $resolved" >&2
-              exit 1
+              mode="ci-fallback"
               ;;
           esac
 
           echo "RCH_BIN=$resolved" >> "$GITHUB_ENV"
+          echo "RCH_EXECUTOR_MODE=$mode" >> "$GITHUB_ENV"
 
       - name: Cache corpus
         uses: actions/cache@v4
@@ -189,14 +303,25 @@ jobs:
           TARGET_RUSTFLAGS="--cfg fuzzing -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table -Cllvm-args=-sanitizer-coverage-trace-compares"
           FUZZ_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/release/${FUZZ_TARGET}"
           echo "Fuzzing ${FUZZ_TARGET} for ${DURATION}s"
+          echo "executor: ${RCH_BIN}"
+          echo "executor mode: ${RCH_EXECUTOR_MODE:-unknown}"
           mkdir -p "fuzz/artifacts/${FUZZ_TARGET}" "fuzz/corpus/${FUZZ_TARGET}"
 
-          RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
-            CARGO_INCREMENTAL=0 \
-            CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}" \
-            CARGO_TARGET_DIR="${TARGET_DIR}" \
-            "${TARGET_RUSTFLAGS_ENV}=${TARGET_RUSTFLAGS}" \
-            cargo build --manifest-path fuzz/Cargo.toml --release --target "${TARGET_TRIPLE}" --bin "${FUZZ_TARGET}"
+          if [[ "${RCH_EXECUTOR_MODE:-remote}" == "remote" ]]; then
+            RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}" \
+              CARGO_TARGET_DIR="${TARGET_DIR}" \
+              "${TARGET_RUSTFLAGS_ENV}=${TARGET_RUSTFLAGS}" \
+              cargo build --manifest-path fuzz/Cargo.toml --release --target "${TARGET_TRIPLE}" --bin "${FUZZ_TARGET}"
+          else
+            "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}" \
+              CARGO_TARGET_DIR="${TARGET_DIR}" \
+              "${TARGET_RUSTFLAGS_ENV}=${TARGET_RUSTFLAGS}" \
+              cargo build --manifest-path fuzz/Cargo.toml --release --target "${TARGET_TRIPLE}" --bin "${FUZZ_TARGET}"
+          fi
 
           if [[ ! -x "$FUZZ_BIN" ]]; then
             echo "built fuzz binary is missing or not executable: $FUZZ_BIN" >&2
@@ -231,7 +356,7 @@ jobs:
     name: Fuzz Summary
     needs: fuzz
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Check results
         run: |

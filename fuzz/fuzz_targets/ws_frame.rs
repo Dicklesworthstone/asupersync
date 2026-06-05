@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
-use asupersync::net::websocket::frame::{Frame, FrameCodec, Opcode, Role, apply_mask};
+use asupersync::net::websocket::{Frame, FrameCodec, Opcode, Role, apply_mask};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
@@ -38,7 +38,7 @@ impl FuzzFrame {
             rsv3: self.rsv3,
             opcode,
             masked: self.mask_key.is_some(),
-            mask_key: self.mask_key.unwrap_or([0; 4]),
+            mask_key: self.mask_key,
             payload: Bytes::from(self.payload.clone()),
         })
     }
@@ -85,8 +85,8 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
     if opcode.is_control() {
         if frame.payload.len() > 125 {
             // Large control frames should be rejected by codec
-            let mut client_codec = FrameCodec::new(Role::Client, true);
-            let mut server_codec = FrameCodec::new(Role::Server, true);
+            let mut client_codec = FrameCodec::new(Role::Client);
+            let mut server_codec = FrameCodec::new(Role::Server);
             let mut dst = BytesMut::new();
 
             // Both codecs should reject oversized control frames
@@ -103,8 +103,8 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
 
         if !frame.fin {
             // Fragmented control frames should be rejected by codec
-            let mut client_codec = FrameCodec::new(Role::Client, true);
-            let mut server_codec = FrameCodec::new(Role::Server, true);
+            let mut client_codec = FrameCodec::new(Role::Client);
+            let mut server_codec = FrameCodec::new(Role::Server);
             let mut dst = BytesMut::new();
 
             // Both codecs should reject fragmented control frames
@@ -121,9 +121,9 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
     }
 
     // MR2: Reserved RSV bits non-zero rejected unless extension negotiated
-    if (frame.rsv1 || frame.rsv2 || frame.rsv3) {
+    if frame.rsv1 || frame.rsv2 || frame.rsv3 {
         // With validate_reserved_bits=true, RSV bits should be rejected
-        let mut server_codec = FrameCodec::new(Role::Server, true);
+        let mut server_codec = FrameCodec::new(Role::Server);
         let mut dst = BytesMut::new();
 
         // Encode a valid frame first, then decode with RSV bits set
@@ -144,7 +144,7 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
                 dst[0] = with_rsv;
 
                 // Decoding should fail due to reserved bits
-                let mut decode_codec = FrameCodec::new(Role::Server, true);
+                let mut decode_codec = FrameCodec::new(Role::Server);
                 assert!(
                     decode_codec.decode(&mut dst).is_err(),
                     "Decoder should reject frame with reserved bits set"
@@ -156,7 +156,7 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
 
     // MR3: Unmasked client frames rejected by server
     if !frame.masked {
-        let mut server_codec = FrameCodec::new(Role::Server, true);
+        let mut server_codec = FrameCodec::new(Role::Server);
         let mut dst = BytesMut::new();
 
         // Create client frame (unmasked from server perspective means it should be masked)
@@ -164,7 +164,7 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
         client_frame.masked = false; // Simulate unmasked client frame
 
         // Try to encode and then decode from server perspective
-        let mut client_codec = FrameCodec::new(Role::Client, true);
+        let mut client_codec = FrameCodec::new(Role::Client);
         if client_codec.encode(frame.clone(), &mut dst).is_ok() && !dst.is_empty() {
             // Manually clear the mask bit to simulate unmasked client frame
             dst[1] &= 0x7f; // Clear mask bit
@@ -181,7 +181,7 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
     // MR4: Fragmented messages with FIN=0 continue with opcode=0
     if !frame.fin && opcode.is_data() {
         // First fragment should have data opcode
-        let mut server_codec = FrameCodec::new(Role::Server, true);
+        let mut server_codec = FrameCodec::new(Role::Server);
         let mut dst = BytesMut::new();
 
         let mut first_fragment = frame.clone();
@@ -190,14 +190,14 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
 
         if server_codec.encode(first_fragment, &mut dst).is_ok() {
             // Continuation frame should have opcode=0
-            let mut continuation = Frame {
+            let continuation = Frame {
                 fin: true, // End the sequence
                 rsv1: false,
                 rsv2: false,
                 rsv3: false,
                 opcode: Opcode::Continuation,
                 masked: false,
-                mask_key: [0; 4],
+                mask_key: Some([0; 4]),
                 payload: Bytes::from(vec![1, 2, 3]), // Small payload
             };
 
@@ -211,8 +211,8 @@ fuzz_target!(|fuzz_frame: FuzzFrame| {
     }
 
     // Basic round-trip test for valid frames
-    let mut client_codec = FrameCodec::new(Role::Client, true);
-    let mut server_codec = FrameCodec::new(Role::Server, true);
+    let mut client_codec = FrameCodec::new(Role::Client);
+    let mut server_codec = FrameCodec::new(Role::Server);
     let mut dst = BytesMut::new();
 
     // Client encodes (always masked)

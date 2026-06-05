@@ -14,7 +14,7 @@ use asupersync::grpc::codec::{GrpcCodec, GrpcMessage};
 use asupersync::http::h2::{
     Connection,
     connection::DEFAULT_CONNECTION_WINDOW_SIZE,
-    frame::{DataFrame, Frame, HeadersFrame, SettingsFrame, WindowUpdateFrame},
+    frame::{DataFrame, Frame, HeadersFrame, SettingsFrame},
     hpack::{Encoder as HpackEncoder, Header},
     settings,
 };
@@ -41,7 +41,8 @@ struct DelayedUpdate {
     increment: u32,
 }
 
-fuzz_target!(|mut scenario: Scenario| {
+fuzz_target!(|scenario: Scenario| {
+    let mut scenario = scenario;
     scenario.messages.truncate(MAX_MESSAGES);
     if scenario.messages.is_empty() {
         scenario.messages.push(Vec::new());

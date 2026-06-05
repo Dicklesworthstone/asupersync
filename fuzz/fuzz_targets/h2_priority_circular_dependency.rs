@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length per RFC 7540 §4.1
@@ -11,26 +11,6 @@ const PRIORITY_FRAME_TYPE: u8 = 0x2;
 
 /// PRIORITY frame payload length per RFC 7540 §6.3
 const PRIORITY_PAYLOAD_LEN: usize = 5;
-
-/// HTTP/2 error codes per RFC 7540 §7
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-enum Http2ErrorCode {
-    NoError = 0x0,
-    ProtocolError = 0x1,
-    InternalError = 0x2,
-    FlowControlError = 0x3,
-    SettingsTimeout = 0x4,
-    StreamClosed = 0x5,
-    FrameSizeError = 0x6,
-    RefusedStream = 0x7,
-    Cancel = 0x8,
-    CompressionError = 0x9,
-    ConnectError = 0xa,
-    EnhanceYourCalm = 0xb,
-    InadequateSecurity = 0xc,
-    Http11Required = 0xd,
-}
 
 /// PRIORITY frame data per RFC 7540 §6.3
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +69,7 @@ impl PriorityData {
 }
 
 /// HTTP/2 frame header per RFC 7540 §4.1
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FrameHeader {
     length: u32,
     frame_type: u8,
@@ -145,7 +125,7 @@ impl FrameHeader {
 }
 
 /// PRIORITY frame per RFC 7540 §6.3
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PriorityFrame {
     header: FrameHeader,
     priority_data: PriorityData,

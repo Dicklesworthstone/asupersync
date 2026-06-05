@@ -24,7 +24,8 @@ struct RepairSymbolInput {
     split_emit: bool,
 }
 
-fuzz_target!(|mut input: RepairSymbolInput| {
+fuzz_target!(|input: RepairSymbolInput| {
+    let mut input = input;
     input.source_bytes.truncate(MAX_SOURCE_BYTES);
 
     let k = K_VALUES[usize::from(input.k_selector) % K_VALUES.len()];

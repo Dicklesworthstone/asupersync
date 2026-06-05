@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -278,7 +278,7 @@ const WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     |data| {
         // Clone: increment reference count (simplified for testing)
         let waker_ptr = data as *const TestWaker;
-        RawWaker::new(waker_ptr, &WAKER_VTABLE)
+        RawWaker::new(waker_ptr as *const (), &WAKER_VTABLE)
     },
     |data| {
         // Wake: call the wake implementation
@@ -338,10 +338,12 @@ fn execute_and_verify_notify_correctness(operations: Vec<NotifyOperation>, max_w
                 // Create test waker
                 let (test_waker, woken_flag) = TestWaker::new(waiter_key, tracker.clone());
 
-                // Create notified future
-                let notified_future = notify.notified();
-                let boxed_future: Pin<Box<dyn Future<Output = ()> + Send>> =
-                    Box::pin(notified_future);
+                // Own an Arc inside the waiter future so the boxed future does not borrow
+                // the stack-local `notify` binding.
+                let waiter_notify = Arc::clone(&notify);
+                let boxed_future: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+                    waiter_notify.notified().await;
+                });
 
                 active_waiters.insert(waiter_key, (boxed_future, woken_flag, test_waker));
             }

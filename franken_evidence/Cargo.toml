@@ -2,7 +2,7 @@
 name = "franken-evidence"
 version = "0.3.3"
 edition = "2024"
-license-file = "../LICENSE"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Canonical EvidenceLedger schema for FrankenSuite decision tracing."
 repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["evidence", "ledger", "decisions", "tracing"]

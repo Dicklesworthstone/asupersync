@@ -122,6 +122,34 @@ affected files, and `green_proof_claimed`. Closeout text may only claim a green
 proof when `green_proof_claimed=true` and the cited lane's own verdict supports
 the claim.
 
+## Pressure-Control RCH Fallback Evidence
+
+The pressure-control evidence contract
+(`artifacts/runtime_pressure_control_evidence_contract_v1.json`, verified by
+`tests/runtime_pressure_control_evidence_contract.rs`) treats local Cargo
+fallback as a fail-closed validation issue for remote-required proof lanes. A
+pressure-control closeout may cite a green RCH Cargo proof only when the saved
+command and transcript prove remote execution:
+
+- command starts with `RCH_REQUIRE_REMOTE=1 rch exec -- `
+- command contains `rch exec -- env` and `CARGO_TARGET_DIR=`
+- transcript contains `Selected worker:`, `Executing command remotely:`,
+  `Remote command finished: exit=0`, and `[RCH] remote`
+- transcript does not contain `[RCH] local`, `Executing command locally`, or
+  `local fallback accepted`
+
+When the proof runner is classifying admission receipts rather than a transcript,
+the equivalent no-local-RCH fallback evidence is:
+
+- `remote_required=true`
+- `local_fallback_allowed=false`
+- `refusal_code=local_fallback_refused`
+- `reason_codes` contains both `remote_required` and `local_fallback_refused`
+
+These markers prove only that the cited proof did not silently substitute local
+Cargo for a remote-required pressure-control lane. They do not prove RCH fleet
+availability, real-host throughput, production admission control, or scheduler performance.
+
 Saved RCH transcript classification also emits a deterministic
 `closeout_summary` object for Beads and Agent Mail. Pass `--bead-id` (alias
 `--likely-bead`) and `--likely-owner` when the transcript belongs to a known
@@ -141,6 +169,108 @@ The `closeout_summary.beads_comment` and `closeout_summary.agent_mail_body`
 strings are safe to paste as summaries. They use `NO_GREEN_PROOF` whenever the
 classified transcript is failed or externally blocked, even when a blocker is
 well identified, so closeouts do not accidentally overstate evidence.
+
+## Swarm Proof-Lane Atlas Receipt Runbook
+
+The swarm proof-lane planner contract is
+`artifacts/swarm_proof_lane_planner_contract_v1.json`, verified by
+`tests/swarm_proof_lane_planner_contract.rs`, and backed by the runtime planner
+`asupersync::lab::plan_swarm_proof_lane` plus
+`asupersync::lab::render_swarm_proof_lane_agent_mail_summary`. Its deterministic
+decision scenario corpus is `admission-aware-atlas-decision-scenarios-v1`.
+
+Run the scoped verifier before changing planner receipt claims:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr8_swarm_planner cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture
+```
+
+Use this taxonomy when reading one planner receipt or writing a bead/Agent Mail
+closeout:
+
+| Receipt signal | Claim label | Evidence to cite | Closeout rule |
+|----------------|-------------|------------------|---------------|
+| `admission_decision=Admit` with `decision=Ready`, `remote_required=true`, `fallback_policy=RemoteOnly`, remote transcript markers, and no findings | `replay-backed` | `command`, worker/transcript footer, `source_rows`, `covers`, and `does_not_cover` | Claim only the listed `covers` fields. Do not claim workspace release health, broad conformance, or RCH fleet health unless a separate lane proves them. |
+| `admission_decision=Defer` or `Batch` with saturation or batching reason codes | `advisory` | `reason_codes`, `source_rows`, `target_dir_isolation_status`, and `peer_reservation_overlap_status` | Treat this as scheduling guidance. Record the suggested lane grouping or wait condition, but do not call validation green. |
+| `admission_decision=AdvisorySpectralWarning` and `trapped_cycle_witness_status=RequiredMissing` | `advisory` | spectral wait-graph rows, missing witness status, `reason_codes` | Preserve the warning and request trapped-cycle replay evidence before claiming a deadlock. |
+| `admission_decision=TrappedCycleProven` and `trapped_cycle_witness_status=Proven` | `trapped-cycle-proven` | replay witness row, spectral wait-graph row, `source_rows`, `reason_codes`, and verifier command | Claim a trapped cycle only for the cited witness and scenario. Validated-only or advisory rows are not enough. |
+| `admission_decision=Reject`, `Blocked`, or `Malformed` | `validation-blocked` | first finding code, dirty/reservation/local-fallback marker, `source_rows`, and `agent_mail_summary` | Stop the broad lane. Cite the blocker exactly and use only a narrower supplemental proof if one ran. |
+| `admission_decision=StaleEvidence` | `stale` | stale row id, expected/observed head, `reason_codes`, and `source_rows` | Refresh the narrow atlas rows before rerunning. Do not paste an old green transcript as current proof. |
+
+Every closeout receipt must keep these stable fields visible enough for review:
+`lane_id`, `scenario_id`, `command`, `target_dir`, `remote_required`,
+`fallback_policy`, `decision`, `admission_decision`, `source_rows`,
+`reason_codes`, `target_dir_isolation_status`,
+`peer_reservation_overlap_status`, `trapped_cycle_witness_status`, `covers`,
+`does_not_cover`, `findings`, `agent_mail_summary`, `mutates_external_state`,
+`destructive_cleanup_required`, and `branch_or_worktree_required`.
+
+Before pasting a planner summary into Beads or Agent Mail, verify the receipt in
+this order:
+
+1. Confirm the `command` starts with `RCH_REQUIRE_REMOTE=1 rch exec -- env` and
+   names an isolated `CARGO_TARGET_DIR`.
+2. Confirm `remote_required=true`, `fallback_policy=RemoteOnly`, and no local
+   fallback marker such as `[RCH] local`, `local fallback`, or `executing
+   locally` appears in the transcript.
+3. Read `admission_decision` first, then map it through the taxonomy table
+   above. This is the operator-facing claim label.
+4. Cite `source_rows` and `reason_codes` that explain the decision. If they are
+   empty, the receipt is malformed for closeout purposes.
+5. Copy the exact `covers` and `does_not_cover` boundary. Never broaden the claim in prose.
+6. Keep `mutates_external_state=false`, `destructive_cleanup_required=false`,
+   and `branch_or_worktree_required=false`. If any are true, stop and coordinate
+   instead of running or committing.
+7. Prefer the rendered `agent_mail_summary` when it matches the plan. It is
+   stable handoff text, not a replacement for the remote transcript or artifact
+   evidence.
+
+Acceptable closeout examples:
+
+```text
+replay-backed: `swarm-workload-corpus-focused` admitted and passed through
+remote RCH on `ts2`; source_rows=`src/lab/swarm_replay.rs`,
+`artifacts/swarm_workload_scenario_corpus_v1.json`; covers=
+`scenario_schema_validation`; does_not_cover=`workspace_release_health`.
+```
+
+```text
+advisory: atlas returned `AdvisorySpectralWarning` because
+`trapped_cycle_detection_required` and witness status is `RequiredMissing`.
+No deadlock proof claimed; next action is to run trapped-cycle replay evidence.
+```
+
+```text
+trapped-cycle-proven: atlas returned `TrappedCycleProven` for
+`spectral_wait_graph:deadlocked` with witness
+`trapped_cycle_witness:validated-replay-row`; claim is limited to that scenario.
+```
+
+```text
+validation-blocked: intended remote lane rejected before proof because
+`rch_proof_lane_admission:local-fallback-refused` and transcript requires remote
+execution. Supplemental local evidence, if any, is not the green RCH lane.
+```
+
+```text
+stale: atlas row `atlas_stale_evidence` mismatched the expected head. Refreshed
+atlas rows are required before this lane can be admitted or summarized green.
+```
+
+Misleading closeout language:
+
+```text
+Atlas was green, so the swarm proof lanes are healthy.
+```
+
+This omits the `covers` boundary and overclaims broad release health.
+
+```text
+Spectral warning proves a deadlock.
+```
+
+This is only true when `admission_decision=TrappedCycleProven` and the receipt
+cites a proven trapped-cycle witness row.
 
 ## Declared-Path Commit Preflight
 
@@ -270,6 +400,34 @@ and the first `asupersync-*` bead id parsed from that recent history. This is
 provenance evidence only: it helps route a blocker to a recent slice, but the
 `decision` and `green_proof_claimed` fields remain authoritative for whether a
 closeout may claim a green proof.
+
+## Proof-Lane Resource Envelopes
+
+The proof runner reads resource-envelope metadata from
+`artifacts/proof_lane_manifest_v1.json`, verified by
+`tests/proof_lane_manifest_contract.rs`. Every lane declares a
+`resource_envelope_class` whose class records:
+
+- `timeout_seconds`
+- `memory_mb`
+- `remote_required`
+- `local_fallback_allowed`
+- `resource_pressure`
+- admitted lane kinds
+
+The contract rejects missing classes, unknown classes, zero or negative budgets,
+lane-kind mismatches, missing remote-required semantics, and any
+remote-required class that permits local fallback. Bad-envelope diagnostics must
+carry the lane id, required command prefix, envelope class, timeout, memory,
+remote-required decision, local-fallback decision, and the exact fail-closed
+reason so an operator can route the blocker without guessing.
+
+This metadata hardens proof admission and closeout evidence only. It does not
+implement, replace, or prove OS-level RCH worker controls such as systemd
+`MemoryMax`, cgroup CPU quotas, scheduler backpressure, or fleet-level admission
+limits. A manifest envelope makes an expensive lane visible and rejectable
+before dispatch; worker-enforced resource limits remain a separate operations
+control.
 
 ## Available Proof Lanes
 
@@ -402,7 +560,8 @@ The pressure-control evidence lane is recorded in
 `artifacts/runtime_pressure_control_evidence_contract_v1.json` and verified by
 `tests/runtime_pressure_control_evidence_contract.rs`. Use the canonical manifest
 lane `runtime-pressure-control-evidence-contract` when changes touch runtime
-pressure snapshots, RCH proof-lane pressure rows, deterministic pressure lab
+pressure snapshots, region memory-budget pressure rows, RCH proof-lane pressure
+rows, scheduler pressure flamegraph attribution, deterministic pressure lab
 evidence, or pressure-control operator docs.
 
 The dedicated operator runbook is `docs/runtime_pressure_triage_runbook.md`. It
@@ -410,13 +569,23 @@ maps symptoms to snapshot fields, admission decisions, lab replay evidence, and
 the exact RCH verifier commands without widening the contract's claims.
 
 That lane proves only contract alignment: source schema versions, documented
-RCH proof-lane pressure row semantics, scenario families, docs markers, and the
-exact RCH command. It does not prove real-host throughput, autonomous scheduler
-rewrites, production-on-by-default admission/backpressure, RCH fleet
-availability, or a deadlock without explicit trapped-cycle proof. Treat live
-production pressure signals as advisory unless they are paired with lab/replay
-evidence or trapped-cycle proof. Adaptive controls remain opt-in until stronger
-evidence supports a broader policy.
+region memory-budget pressure row semantics, RCH proof-lane pressure row
+semantics, scheduler pressure flamegraph attribution, scenario families, docs
+markers, and the exact RCH command. Scheduler attribution links
+`scheduler_tail_pressure` evidence to the Phase 6 flamegraph gate,
+`artifacts/flamegraphs/main-<bead-or-short-sha>.svg`, and the
+`methodology_baselines` rows
+`methodology/task_spawn/inject_ready_global_queue`,
+`methodology/task_spawn/local_queue_push`, and
+`methodology/task_spawn/local_queue_spawn_batch/1000`. It does not prove
+real-host throughput, performance improvement, scheduler regression closure,
+autonomous scheduler rewrites, production-on-by-default admission/backpressure,
+per-region allocator enforcement, RCH fleet availability, or a deadlock without
+explicit trapped-cycle proof. Treat live production pressure signals as
+advisory unless they are paired with lab/replay evidence, the required
+flamegraph attribution for triggered scheduler hot-path work, or trapped-cycle
+proof. Adaptive controls remain opt-in until stronger evidence supports a
+broader policy.
 
 Run the scoped verifier:
 

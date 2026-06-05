@@ -47,11 +47,14 @@
 //!    prefix MUST match every path that begins with that prefix and
 //!    leave non-prefixed paths unmatched (404 from fallback).
 
+use asupersync::Cx;
 use asupersync::web::extract::Request;
 use asupersync::web::handler::Handler;
 use asupersync::web::response::{Response, StatusCode};
 use asupersync::web::router::{Router, get, post};
 use libfuzzer_sys::fuzz_target;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
@@ -166,8 +169,9 @@ struct StatusHandler(StatusCode);
 
 impl Handler for StatusHandler {
     #[inline]
-    fn call(&self, _req: Request) -> Response {
-        Response::empty(self.0)
+    fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let status = self.0;
+        Box::pin(async move { Response::empty(status) })
     }
 }
 

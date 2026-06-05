@@ -22,11 +22,10 @@ mod tests {
             ObligationError, ObligationId, ObligationLedger, ObligationState,
             marking::{
                 LifecycleTracker, MarkConsistency, MarkLifecycle, MarkScope, MarkingConfig,
-                MarkingEvent, MarkingMetrics, MarkingStrategy, MarkingValidation, ObligationMark,
+                MarkingMetrics, MarkingStrategy, MarkingValidation, ObligationMark,
                 ObligationMarker, ObligationTracker, ResourceMarker,
             },
         },
-        sync::{Arc, Mutex},
         types::{Budget, Outcome, RegionId, TaskId, Time},
     };
     use std::{

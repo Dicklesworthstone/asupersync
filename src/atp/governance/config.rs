@@ -241,7 +241,10 @@ impl AtpGovernanceCliArgs {
             },
             max_repair_symbols_per_second: self.repair_rate,
             max_disk_write_concurrency: self.disk_concurrency,
-            max_relay_cost_micros_per_mib: self.relay_cost_ms_per_mib.map(|ms| ms * 1_000),
+            max_relay_cost_micros_per_mib: self
+                .relay_cost_ms_per_mib
+                .map(parse_relay_cost_millis)
+                .transpose()?,
             background_priority: if self.background { Some(true) } else { None },
             metered_network: if self.metered { Some(true) } else { None },
         };
@@ -304,7 +307,8 @@ fn parse_fairness_policy(name: &str) -> Result<AtpFairnessPolicy, String> {
 
 /// Parse size string (e.g., "64M", "1G", "512K") into bytes.
 fn parse_size_string(size: &str) -> Result<u64, String> {
-    let size = size.trim().to_lowercase();
+    let original = size.trim();
+    let size = original.to_lowercase();
     let (number_part, suffix) = if let Some(pos) = size.chars().position(|c| c.is_alphabetic()) {
         (&size[..pos], &size[pos..])
     } else {
@@ -331,7 +335,14 @@ fn parse_size_string(size: &str) -> Result<u64, String> {
         }
     };
 
-    Ok(number * multiplier)
+    number
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("Size string overflows u64 bytes: {original}"))
+}
+
+fn parse_relay_cost_millis(ms: u64) -> Result<u64, String> {
+    ms.checked_mul(1_000)
+        .ok_or_else(|| format!("Relay cost is too large: {ms} ms/MiB"))
 }
 
 #[cfg(test)]
@@ -414,6 +425,33 @@ mod tests {
 
         assert!(parse_size_string("invalid").is_err());
         assert!(parse_size_string("64X").is_err());
+    }
+
+    #[test]
+    fn parse_size_string_rejects_byte_overflow() {
+        let too_large_kib = format!("{}K", u64::MAX / 1_024 + 1);
+        let too_large_tib = format!("{}T", u64::MAX / 1_099_511_627_776 + 1);
+
+        assert!(parse_size_string(&too_large_kib).is_err());
+        assert!(parse_size_string(&too_large_tib).is_err());
+        assert_eq!(
+            parse_size_string(&format!("{}B", u64::MAX)).unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn cli_args_parse_config_rejects_relay_cost_overflow() {
+        let args = AtpGovernanceCliArgs {
+            relay_cost_ms_per_mib: Some(u64::MAX),
+            ..AtpGovernanceCliArgs::default()
+        };
+
+        assert!(args.parse_config().is_err());
+        assert_eq!(
+            parse_relay_cost_millis(u64::MAX / 1_000).unwrap(),
+            (u64::MAX / 1_000) * 1_000
+        );
     }
 
     #[test]

@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_jetstream_broadcast_basic_integration() -> Result<()> {
+    fn test_jetstream_broadcast_basic_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_jetstream_broadcast_fanout() -> Result<()> {
+    fn test_jetstream_broadcast_fanout() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_jetstream_broadcast_ordering() -> Result<()> {
+    fn test_jetstream_broadcast_ordering() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_jetstream_broadcast_cancellation() -> Result<()> {
+    fn test_jetstream_broadcast_cancellation() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_jetstream_broadcast_lagged_receivers() -> Result<()> {
+    fn test_jetstream_broadcast_lagged_receivers() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {

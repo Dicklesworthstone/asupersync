@@ -34,7 +34,8 @@ struct FuzzHeader {
     value_seed: Vec<u8>,
 }
 
-fuzz_target!(|mut scenario: DynamicTableEvictionScenario| {
+fuzz_target!(|scenario: DynamicTableEvictionScenario| {
+    let mut scenario = scenario;
     normalize_scenario(&mut scenario);
 
     let new_max = usize::from(scenario.new_table_size) % (MAX_NEW_TABLE_SIZE + 1);

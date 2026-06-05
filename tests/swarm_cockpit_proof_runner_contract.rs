@@ -288,6 +288,7 @@ fn proof_lane_for_run(
             "broad_conformance".to_string(),
             "wall_clock_performance_baselines".to_string(),
         ],
+        atlas_context: None,
     };
     plan_swarm_proof_lane(&request)
 }

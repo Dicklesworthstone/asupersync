@@ -1447,7 +1447,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasRemote,
     {
-        self.handles.remote_cap.is_some()
+        self.runtime_mask.has(cap::CapMask::REMOTE) && self.handles.remote_cap.is_some()
     }
 
     /// Registers an I/O source with the reactor for the given interest.
@@ -4115,9 +4115,7 @@ mod tests {
 
     #[test]
     fn checkpoint_deadline_exhaustion_sets_cancel_reason() {
-        let cx = Cx::for_testing_with_budget(
-            Budget::new().with_deadline(Time::from_nanos(1_000_000_000)),
-        );
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
 
         assert!(cx.checkpoint().is_err());
         let reason = cx
@@ -4178,7 +4176,7 @@ mod tests {
         assert_eq!(effective.io_bytes, Some(512));
         assert_eq!(
             effective.cleanup_budget.map(|budget| budget.poll_quota),
-            Some(10)
+            Some(100_000)
         );
         assert_eq!(cx.capability_budget(), parent);
     }
@@ -4234,9 +4232,7 @@ mod tests {
 
     #[test]
     fn masked_checkpoint_defers_budget_exhaustion() {
-        let cx = Cx::for_testing_with_budget(
-            Budget::new().with_deadline(Time::from_nanos(1_000_000_000)),
-        );
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
 
         cx.masked(|| {
             assert!(
@@ -4575,7 +4571,7 @@ mod tests {
     fn cx_verify_with_caveats() {
         let key = test_root_key();
         let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler")
-            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX / 2))
+            .add_caveat(CaveatPredicate::TimeBefore(5_000))
             .add_caveat(CaveatPredicate::RegionScope(42));
 
         let cx = test_cx().with_macaroon(token);
@@ -4613,7 +4609,7 @@ mod tests {
 
         // Attenuate with time limit
         let cx2 = cx
-            .attenuate(CaveatPredicate::TimeBefore(u64::MAX / 4))
+            .attenuate(CaveatPredicate::TimeBefore(3_000))
             .expect("attenuation should succeed");
 
         // Further attenuate with max uses
@@ -5238,6 +5234,30 @@ mod tests {
         // After drop, outer ALL is restored.
         drop(_restrict);
         assert_eq!(Cx::current().unwrap().runtime_mask, cap::CapMask::all());
+    }
+
+    #[test]
+    fn _5ckssb_has_remote_respects_push_restriction_mask() {
+        while CURRENT_CX_STACK.with(|s| s.borrow().last().is_some()) {
+            CURRENT_CX_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+
+        let full_cx = Cx::for_testing_with_remote(crate::remote::RemoteCap::new());
+        let _outer = Cx::set_current(Some(full_cx));
+        assert!(
+            Cx::current().unwrap().has_remote(),
+            "unrestricted context should expose REMOTE"
+        );
+
+        let _restrict = Cx::push_restriction(cap::CapMask::none());
+        let observed = Cx::current().unwrap();
+        assert!(observed.remote().is_none(), "REMOTE handle must be masked");
+        assert!(
+            !observed.has_remote(),
+            "has_remote must agree with the runtime capability mask"
+        );
     }
 
     /// push_restriction with no installed cx must return a no-op

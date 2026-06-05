@@ -210,7 +210,9 @@ impl PersistentCongestionDetector {
             .max_by_key(|p| p.time_sent_micros)
             .unwrap();
 
-        let loss_span_micros = latest_lost.time_sent_micros - earliest_lost.time_sent_micros;
+        let loss_span_micros = latest_lost
+            .time_sent_micros
+            .saturating_sub(earliest_lost.time_sent_micros);
 
         // Record congestion event
         let loss_rate = self.estimate_loss_rate(lost_packets, bytes_in_flight);
@@ -257,6 +259,10 @@ impl PersistentCongestionDetector {
 
     /// Record RTT spike event.
     pub fn on_rtt_spike(&mut self, old_rtt: u64, new_rtt: u64, conditions: NetworkConditions) {
+        if old_rtt == 0 || new_rtt <= old_rtt {
+            return;
+        }
+
         let spike_ratio = new_rtt as f64 / old_rtt as f64;
         if spike_ratio > 2.0 {
             // Significant RTT increase
@@ -276,6 +282,10 @@ impl PersistentCongestionDetector {
         new_cwnd: u64,
         conditions: NetworkConditions,
     ) {
+        if old_cwnd == 0 || new_cwnd >= old_cwnd {
+            return;
+        }
+
         let reduction_ratio = (old_cwnd - new_cwnd) as f64 / old_cwnd as f64;
         if reduction_ratio > 0.1 {
             // Significant reduction
@@ -307,7 +317,10 @@ impl PersistentCongestionDetector {
     // Private helper methods
 
     fn calculate_threshold_duration(&self, rtt: &RttEstimator) -> u64 {
-        let base_rtt = rtt.smoothed_rtt_micros().unwrap_or(333_000); // 333ms default
+        let base_rtt = rtt
+            .smoothed_rtt_micros()
+            .filter(|&rtt_micros| rtt_micros > 0)
+            .unwrap_or(333_000); // 333ms default
 
         let threshold = if self.config.adaptive_threshold {
             // Adaptive threshold based on RTT variance
@@ -327,8 +340,10 @@ impl PersistentCongestionDetector {
             return 0.0;
         }
 
-        let lost_bytes: u64 = lost_packets.iter().map(|p| p.bytes).sum();
-        lost_bytes as f64 / bytes_in_flight as f64
+        let lost_bytes = lost_packets
+            .iter()
+            .fold(0_u64, |total, packet| total.saturating_add(packet.bytes));
+        (lost_bytes as f64 / bytes_in_flight as f64).min(1.0)
     }
 
     fn calculate_congestion_severity(
@@ -379,10 +394,11 @@ impl PersistentCongestionDetector {
         }
 
         // Clean up old events outside tracking window
-        let cutoff = now
-            .checked_sub(Duration::from_micros(self.config.tracking_window_micros))
-            .unwrap();
-        self.congestion_events.retain(|e| e.timestamp >= cutoff);
+        if let Some(cutoff) =
+            now.checked_sub(Duration::from_micros(self.config.tracking_window_micros))
+        {
+            self.congestion_events.retain(|e| e.timestamp >= cutoff);
+        }
     }
 
     fn start_or_extend_epoch(&mut self, severity: f64, now: Instant) {
@@ -407,9 +423,14 @@ impl PersistentCongestionDetector {
     fn end_current_epoch(&mut self, now: Instant) {
         if let Some(mut epoch) = self.current_epoch.take() {
             epoch.is_active = false;
-            let duration_micros = now.duration_since(epoch.start_time).as_micros() as u64;
+            let duration_micros = now
+                .checked_duration_since(epoch.start_time)
+                .map_or(0, duration_as_micros_saturating);
 
-            self.metrics.total_duration_micros += duration_micros;
+            self.metrics.total_duration_micros = self
+                .metrics
+                .total_duration_micros
+                .saturating_add(duration_micros);
             self.metrics.avg_episode_duration_micros =
                 self.metrics.total_duration_micros as f64 / self.metrics.total_episodes as f64;
             self.metrics.peak_severity = self.metrics.peak_severity.max(epoch.peak_severity);
@@ -472,7 +493,8 @@ impl PersistentCongestionDetector {
     }
 
     fn calculate_detection_confidence(&self, severity: f64, duration: u64, threshold: u64) -> f64 {
-        let duration_confidence = if duration >= threshold * 2 {
+        let doubled_threshold = threshold.saturating_mul(2);
+        let duration_confidence = if duration >= doubled_threshold {
             1.0
         } else if duration >= threshold {
             0.8
@@ -524,6 +546,10 @@ pub struct CongestionAnalysisExport {
     pub current_epoch: Option<CongestionEpoch>,
 }
 
+fn duration_as_micros_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +563,16 @@ mod tests {
             ack_eliciting: true,
             in_flight: true,
             time_sent_micros: time_micros,
+        }
+    }
+
+    fn test_conditions() -> NetworkConditions {
+        NetworkConditions {
+            rtt_micros: Some(100_000),
+            rttvar_micros: Some(25_000),
+            loss_rate: 0.0,
+            bytes_in_flight: 6000,
+            congestion_window: 12_000,
         }
     }
 
@@ -654,5 +690,89 @@ mod tests {
         // Adaptive threshold should be different from base
         assert_ne!(threshold as f64, base_threshold);
         assert!(threshold >= detector.config.min_duration_micros);
+    }
+
+    #[test]
+    fn rtt_spike_requires_positive_increasing_baseline() {
+        let mut detector = PersistentCongestionDetector::new();
+
+        detector.on_rtt_spike(0, 100_000, test_conditions());
+        detector.on_rtt_spike(100_000, 100_000, test_conditions());
+        detector.on_rtt_spike(100_000, 90_000, test_conditions());
+
+        assert!(detector.congestion_events.is_empty());
+
+        detector.on_rtt_spike(100_000, 250_000, test_conditions());
+        assert_eq!(detector.congestion_events.len(), 1);
+    }
+
+    #[test]
+    fn cwnd_reduction_requires_positive_decrease() {
+        let mut detector = PersistentCongestionDetector::new();
+
+        detector.on_cwnd_reduction(0, 0, test_conditions());
+        detector.on_cwnd_reduction(10_000, 10_000, test_conditions());
+        detector.on_cwnd_reduction(10_000, 12_000, test_conditions());
+        detector.on_cwnd_reduction(10_000, 9_500, test_conditions());
+
+        assert!(detector.congestion_events.is_empty());
+
+        detector.on_cwnd_reduction(10_000, 8_000, test_conditions());
+        assert_eq!(detector.congestion_events.len(), 1);
+    }
+
+    #[test]
+    fn tracking_window_that_precedes_instant_epoch_keeps_current_events() {
+        let mut detector = PersistentCongestionDetector::with_config(PersistentCongestionConfig {
+            tracking_window_micros: u64::MAX,
+            ..Default::default()
+        });
+
+        detector.on_pto_event(test_conditions());
+
+        assert_eq!(detector.congestion_events.len(), 1);
+    }
+
+    #[test]
+    fn ending_epoch_before_start_saturates_to_zero_duration() {
+        let mut detector = PersistentCongestionDetector::new();
+        let now = Instant::now();
+
+        detector.start_or_extend_epoch(0.6, now);
+        let earlier = now.checked_sub(Duration::from_millis(1)).unwrap_or(now);
+        detector.end_current_epoch(earlier);
+
+        assert_eq!(detector.metrics.total_duration_micros, 0);
+        assert!(detector.metrics.avg_episode_duration_micros.abs() < f64::EPSILON);
+        assert!(detector.current_epoch.is_none());
+    }
+
+    #[test]
+    fn loss_rate_uses_saturating_sum_and_is_capped() {
+        let detector = PersistentCongestionDetector::new();
+        let lost_packets = [
+            SentPacketMeta {
+                bytes: u64::MAX,
+                ..create_test_packet(0, 0)
+            },
+            SentPacketMeta {
+                bytes: u64::MAX,
+                ..create_test_packet(1, 10)
+            },
+        ];
+
+        let loss_rate = detector.estimate_loss_rate(&lost_packets, 1200);
+
+        assert!((loss_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn confidence_threshold_doubling_is_saturating() {
+        let detector = PersistentCongestionDetector::new();
+
+        let confidence = detector.calculate_detection_confidence(0.5, u64::MAX, u64::MAX);
+
+        assert!(confidence.is_finite());
+        assert!(confidence > 0.0);
     }
 }

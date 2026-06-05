@@ -1719,30 +1719,13 @@ fn glob_match_parts(pat: &[&str], path: &[&str]) -> bool {
 fn check_caveat(predicate: &CaveatPredicate, ctx: &VerificationContext) -> Result<(), String> {
     match predicate {
         CaveatPredicate::TimeBefore(deadline) => match ctx.current_time_ms {
-            Some(current_time_ms) => {
-                // P0 FIX (asupersync-bbis7r): Use checked arithmetic to prevent integer overflow attacks
-                // Reject extreme deadline values that could cause overflow in arithmetic
-                if *deadline == u64::MAX {
-                    return Err("deadline value rejected (potential overflow)".to_string());
-                }
-                // Use checked subtraction to safely compare times
-                match deadline.checked_sub(current_time_ms) {
-                    Some(remaining) if remaining > 0 => Ok(()),
-                    Some(_) => Err("current time >= deadline".to_string()),
-                    None => Err("deadline arithmetic overflow detected".to_string()),
-                }
-            }
+            Some(current_time_ms) if current_time_ms < *deadline => Ok(()),
+            Some(_) => Err("current time >= deadline".to_string()),
             None => Err("no current time in context".to_string()),
         },
         CaveatPredicate::TimeAfter(start) => match ctx.current_time_ms {
-            Some(current_time_ms) => {
-                // P0 FIX (asupersync-bbis7r): Use checked arithmetic to prevent integer overflow attacks
-                // Use checked subtraction to safely validate time progression
-                match current_time_ms.checked_sub(*start) {
-                    Some(_) => Ok(()), // current_time >= start (no underflow)
-                    None => Err("time validation failed (arithmetic underflow)".to_string()),
-                }
-            }
+            Some(current_time_ms) if current_time_ms >= *start => Ok(()),
+            Some(_) => Err("current time < start".to_string()),
             None => Err("no current time in context".to_string()),
         },
         CaveatPredicate::RegionScope(expected) => match ctx.region_id {
@@ -1989,8 +1972,8 @@ mod tests {
     #[test]
     fn time_before_caveat_passes() {
         let key = test_root_key();
-        let token = MacaroonToken::mint(&key, "cap", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let token =
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1_000));
 
         let ctx = VerificationContext::new().with_time(500);
         assert!(token.verify(&key, &ctx).is_ok());
@@ -1999,8 +1982,8 @@ mod tests {
     #[test]
     fn time_before_caveat_fails_when_expired() {
         let key = test_root_key();
-        let token = MacaroonToken::mint(&key, "cap", "loc")
-            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+        let token =
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(1_000));
 
         let ctx = VerificationContext::new().with_time(1500);
         let err = token.verify(&key, &ctx).unwrap_err();
@@ -2034,7 +2017,7 @@ mod tests {
     fn time_after_caveat_fails_when_too_early() {
         let key = test_root_key();
         let token =
-            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeAfter(0));
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeAfter(100));
 
         let ctx = VerificationContext::new().with_time(50);
         assert!(token.verify(&key, &ctx).is_err());
@@ -2457,7 +2440,7 @@ mod tests {
         );
 
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
-            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+            .add_caveat(CaveatPredicate::TimeBefore(1_000));
         let bound = token
             .bind_for_request(&discharge)
             .expect("discharge binding should succeed");
@@ -2996,7 +2979,7 @@ mod tests {
         // Adding caveats can only restrict, never expand
         let token_time = token_base
             .clone()
-            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX));
+            .add_caveat(CaveatPredicate::TimeBefore(5_000));
         let token_scope = token_time
             .clone()
             .add_caveat(CaveatPredicate::ResourceScope("api/**".to_string()));
@@ -3508,7 +3491,7 @@ mod tests {
         // Service attenuates to read-only with time limit.
         let svc_token = root_token
             .clone()
-            .add_caveat(CaveatPredicate::TimeBefore(u64::MAX))
+            .add_caveat(CaveatPredicate::TimeBefore(10_000))
             .add_caveat(CaveatPredicate::ResourceScope("data/users/**".to_string()));
 
         // Service delegates to subsystem with further restriction.

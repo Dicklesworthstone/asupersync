@@ -199,6 +199,34 @@ fn observe_try_abort_by_id(
                 "{context}: finalized-region error named a non-finalized region"
             );
         }
+        Err(LedgerError::NotPending { obligation, state }) => {
+            assert_eq!(
+                obligation, id,
+                "{context}: not-pending error reported a different obligation"
+            );
+            assert!(
+                !matches!(state, ObligationState::Reserved),
+                "{context}: not-pending error carried a reserved state"
+            );
+        }
+        Err(LedgerError::TokenMismatch { obligation, field }) => {
+            assert_eq!(
+                obligation, id,
+                "{context}: token-mismatch error reported a different obligation"
+            );
+            assert!(
+                !field.is_empty(),
+                "{context}: token-mismatch error must name the mismatched field"
+            );
+        }
+        Err(
+            error @ (LedgerError::StatsUnderflow { .. }
+            | LedgerError::AcquireAfterFinalize { .. }
+            | LedgerError::IndexOverflow { .. }
+            | LedgerError::GenerationOverflow),
+        ) => {
+            panic!("{context}: try_abort_by_id hit impossible ledger error: {error:?}");
+        }
     }
 }
 

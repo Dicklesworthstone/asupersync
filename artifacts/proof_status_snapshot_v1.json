@@ -31,6 +31,36 @@
       "meaning": "The claim is currently represented by an exact validation-frontier blocker row and should be cited with the attached failure file, line, command, and supplemental proof."
     }
   ],
+  "proof_evidence_status_catalog": [
+    {
+      "status": "fresh-rch-pass",
+      "meaning": "The exact manifest lane command was rerun through remote-required RCH for the current source surface and exited successfully."
+    },
+    {
+      "status": "approved-cache-hit",
+      "meaning": "A classifier-approved reusable proof exists for the exact manifest lane, claim scope, command, source, toolchain, outcome, and remote-provenance fingerprint; this is not a fresh RCH rerun."
+    },
+    {
+      "status": "rerun-required",
+      "meaning": "The manifest lane exists, but the current request must run the listed RCH command before claiming fresh proof."
+    },
+    {
+      "status": "stale-evidence",
+      "meaning": "A candidate cache hit was found but cannot be cited because the source or toolchain fingerprint is stale."
+    },
+    {
+      "status": "blocked",
+      "meaning": "The proof request is blocked by an external or validation-frontier condition and must carry an exact blocker record."
+    },
+    {
+      "status": "no-win",
+      "meaning": "No safe reuse or rerun path is available under the current constraints; this is an explicit fail-closed operator outcome."
+    },
+    {
+      "status": "unsupported",
+      "meaning": "The requested claim scope is not citeable from cache for the selected manifest lane."
+    }
+  ],
   "required_claim_categories": [
     "no-Tokio production graph",
     "no-Tokio scoped audit graphs",
@@ -39,6 +69,7 @@
     "scheduler fairness",
     "fuzz manifest",
     "conformance runners",
+    "admission-aware proof-lane atlas",
     "formal Lean posture",
     "rustdoc/API examples"
   ],
@@ -47,6 +78,7 @@
       "claim_id": "no-tokio-production-graph",
       "category": "no-Tokio production graph",
       "status": "green",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "default production graph has no normal-edge dependency on tokio",
@@ -76,6 +108,7 @@
       "claim_id": "no-tokio-scoped-audit-graphs",
       "category": "no-Tokio scoped audit graphs",
       "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "Workspace-wide, full-graph, and fuzz-enabled cargo-tree output",
@@ -108,6 +141,7 @@
       "claim_id": "structured-concurrency-invariants",
       "category": "structured concurrency invariants",
       "status": "green",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "checks the six non-negotiable runtime invariants",
@@ -134,6 +168,7 @@
       "claim_id": "cancellation-oracle-suite",
       "category": "cancellation/oracle suite",
       "status": "yellow_frontier",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "Cancellation is request",
@@ -163,6 +198,7 @@
       "claim_id": "scheduler-fairness",
       "category": "scheduler fairness",
       "status": "yellow_frontier",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "Scheduler behavior is intentionally explicit",
@@ -192,6 +228,7 @@
       "claim_id": "fuzz-manifest",
       "category": "fuzz manifest",
       "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "fuzz smoke",
@@ -221,6 +258,7 @@
       "claim_id": "conformance-runners",
       "category": "conformance runners",
       "status": "yellow_frontier",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "tests/conformance/mod.rs",
@@ -247,9 +285,37 @@
       "notes": "This row demonstrates the required exact red/blocker shape for conformance-adjacent proof stops."
     },
     {
+      "claim_id": "admission-aware-proof-lane-atlas",
+      "category": "admission-aware proof-lane atlas",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "admission-aware proof-lane atlas",
+          "swarm-proof-lane-planner-contract"
+        ],
+        "AGENTS.md": [
+          "admission-aware proof-lane atlas",
+          "swarm-proof-lane-planner-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "admission-aware-proof-lane-atlas"
+      ],
+      "manifest_lane_ids": [
+        "swarm-proof-lane-planner-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps the focused atlas/planner artifact contract; it does not prove broad workspace release health, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target."
+    },
+    {
       "claim_id": "formal-lean-posture",
       "category": "formal Lean posture",
       "status": "green",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "The proof posture is exact",
@@ -276,6 +342,7 @@
       "claim_id": "rustdoc-api-examples",
       "category": "rustdoc/API examples",
       "status": "yellow_frontier",
+      "proof_evidence_status": "rerun-required",
       "doc_claim_markers": {
         "README.md": [
           "rustdoc frontier",
@@ -297,6 +364,95 @@
       ],
       "blocked_frontier": null,
       "notes": "This is API-doc frontier evidence, not a substitute for integration, conformance, or fuzz lanes."
+    }
+  ],
+  "proof_reuse_status_rows": [
+    {
+      "row_id": "focused-contract-fresh-rch-pass",
+      "proof_evidence_status": "fresh-rch-pass",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "dirty_frontier_status": "clean",
+      "cache_hit_is_fresh_rch_pass": false,
+      "reason_codes": [],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "Fresh pass rows come only from rerunning the exact manifest command through remote-required RCH."
+    },
+    {
+      "row_id": "focused-contract-approved-cache-hit",
+      "proof_evidence_status": "approved-cache-hit",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "dirty_frontier_status": "clean",
+      "cache_hit_is_fresh_rch_pass": false,
+      "reason_codes": [],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "This is citeable only as an approved cache hit for the focused manifest verifier claim, never as a fresh RCH pass."
+    },
+    {
+      "row_id": "frontier-dirty-overlap-rerun-required",
+      "proof_evidence_status": "rerun-required",
+      "manifest_lane_id": "all-targets-check",
+      "claim_scope": "all-target-compile-frontier",
+      "dirty_frontier_status": "dirty-overlap",
+      "cache_hit_is_fresh_rch_pass": false,
+      "reason_codes": [
+        "dirty-frontier-overlap"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "notes": "Frontier cache hits are refused when the dirty surface overlaps the lane source surface."
+    },
+    {
+      "row_id": "focused-contract-stale-cache-hit",
+      "proof_evidence_status": "stale-evidence",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "dirty_frontier_status": "clean",
+      "cache_hit_is_fresh_rch_pass": false,
+      "reason_codes": [
+        "stale-head"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A stale cache hit is not citeable even when the lane and command match."
+    },
+    {
+      "row_id": "remote-proof-blocked",
+      "proof_evidence_status": "blocked",
+      "manifest_lane_id": "clippy-all-targets",
+      "claim_scope": "clippy-frontier",
+      "dirty_frontier_status": "unknown",
+      "cache_hit_is_fresh_rch_pass": false,
+      "reason_codes": [
+        "blocked-rch-unavailable"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
+      "notes": "Blocked rows are fail-closed and require exact blocker evidence before any proof claim is made."
+    },
+    {
+      "row_id": "no-safe-proof-reuse-no-win",
+      "proof_evidence_status": "no-win",
+      "manifest_lane_id": "rustfmt-check",
+      "claim_scope": "rustfmt-frontier",
+      "dirty_frontier_status": "dirty-overlap",
+      "cache_hit_is_fresh_rch_pass": false,
+      "reason_codes": [
+        "no-win-rerun-unavailable"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
+      "notes": "No-win rows are explicit refusal receipts, not degraded passes."
+    },
+    {
+      "row_id": "unsupported-workspace-health-cache-claim",
+      "proof_evidence_status": "unsupported",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "workspace-health",
+      "dirty_frontier_status": "clean",
+      "cache_hit_is_fresh_rch_pass": false,
+      "reason_codes": [
+        "broad-claim-unsupported"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "Broad workspace health is non-citeable from cache unless a manifest lane explicitly permits that exact claim scope."
     }
   ],
   "documentation_contract": {

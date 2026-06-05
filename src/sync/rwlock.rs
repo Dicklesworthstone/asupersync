@@ -73,7 +73,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use super::waiter::WaiterChain;
+use super::waiter::{WaiterChain, WaiterId};
 use crate::cx::Cx;
 use crate::sync::lock_ordering::{self, LockRank};
 
@@ -260,7 +260,7 @@ impl<T> RwLock<T> {
     /// This is cancel-safe: cancellation while waiting returns an error
     /// without acquiring the lock.
     #[inline]
-    pub fn read<'a, 'b>(&'a self, cx: &'b Cx) -> ReadFuture<'a, 'b, T> {
+    pub fn read<'a, 'b, Caps>(&'a self, cx: &'b Cx<Caps>) -> ReadFuture<'a, 'b, T, Caps> {
         ReadFuture {
             lock: self,
             cx,
@@ -281,7 +281,7 @@ impl<T> RwLock<T> {
     /// This is cancel-safe: cancellation while waiting returns an error
     /// without acquiring the lock.
     #[inline]
-    pub fn write<'a, 'b>(&'a self, cx: &'b Cx) -> WriteFuture<'a, 'b, T> {
+    pub fn write<'a, 'b, Caps>(&'a self, cx: &'b Cx<Caps>) -> WriteFuture<'a, 'b, T, Caps> {
         WriteFuture {
             lock: self,
             cx,
@@ -536,7 +536,7 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn abandon_read_waiter(&self, waiter_id: &mut Option<usize>) {
+    fn abandon_read_waiter(&self, waiter_id: &mut Option<WaiterId>) {
         let Some(waiter_id) = waiter_id.take() else {
             return;
         };
@@ -581,7 +581,7 @@ impl<T> RwLock<T> {
     }
 
     #[inline]
-    fn abandon_write_waiter(&self, waiter_id: &mut Option<usize>, counted: &mut bool) {
+    fn abandon_write_waiter(&self, waiter_id: &mut Option<WaiterId>, counted: &mut bool) {
         if !*counted {
             return;
         }
@@ -689,14 +689,14 @@ impl<T> RwLock<T> {
 // Guards removed.
 
 /// Future returned by `RwLock::read`.
-pub struct ReadFuture<'a, 'b, T> {
+pub struct ReadFuture<'a, 'b, T, Caps = crate::cx::cap::All> {
     lock: &'a RwLock<T>,
-    cx: &'b Cx,
-    waiter_id: Option<usize>,
+    cx: &'b Cx<Caps>,
+    waiter_id: Option<WaiterId>,
     completed: bool,
 }
 
-impl<'a, T> Future for ReadFuture<'a, '_, T> {
+impl<'a, T, Caps> Future for ReadFuture<'a, '_, T, Caps> {
     type Output = Result<RwLockReadGuard<'a, T>, RwLockError>;
 
     #[inline]
@@ -774,22 +774,22 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
     }
 }
 
-impl<T> Drop for ReadFuture<'_, '_, T> {
+impl<T, Caps> Drop for ReadFuture<'_, '_, T, Caps> {
     fn drop(&mut self) {
         self.lock.abandon_read_waiter(&mut self.waiter_id);
     }
 }
 
 /// Future returned by `RwLock::write`.
-pub struct WriteFuture<'a, 'b, T> {
+pub struct WriteFuture<'a, 'b, T, Caps = crate::cx::cap::All> {
     lock: &'a RwLock<T>,
-    cx: &'b Cx,
-    waiter_id: Option<usize>,
+    cx: &'b Cx<Caps>,
+    waiter_id: Option<WaiterId>,
     counted: bool,
     completed: bool,
 }
 
-impl<'a, T> Future for WriteFuture<'a, '_, T> {
+impl<'a, T, Caps> Future for WriteFuture<'a, '_, T, Caps> {
     type Output = Result<RwLockWriteGuard<'a, T>, RwLockError>;
 
     #[inline]
@@ -878,7 +878,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
     }
 }
 
-impl<T> Drop for WriteFuture<'_, '_, T> {
+impl<T, Caps> Drop for WriteFuture<'_, '_, T, Caps> {
     fn drop(&mut self) {
         self.lock
             .abandon_write_waiter(&mut self.waiter_id, &mut self.counted);
@@ -1027,7 +1027,7 @@ pub struct OwnedRwLockReadGuard<T> {
 
 impl<T> OwnedRwLockReadGuard<T> {
     /// Acquires an owned read guard from an `Arc<RwLock<T>>`.
-    pub fn read(lock: Arc<RwLock<T>>, cx: &Cx) -> OwnedReadFuture<'_, T> {
+    pub fn read<Caps>(lock: Arc<RwLock<T>>, cx: &Cx<Caps>) -> OwnedReadFuture<'_, T, Caps> {
         OwnedReadFuture {
             lock,
             cx,
@@ -1087,7 +1087,7 @@ pub struct OwnedRwLockWriteGuard<T> {
 
 impl<T> OwnedRwLockWriteGuard<T> {
     /// Acquires an owned write guard from an `Arc<RwLock<T>>`.
-    pub fn write(lock: Arc<RwLock<T>>, cx: &Cx) -> OwnedWriteFuture<'_, T> {
+    pub fn write<Caps>(lock: Arc<RwLock<T>>, cx: &Cx<Caps>) -> OwnedWriteFuture<'_, T, Caps> {
         OwnedWriteFuture {
             lock,
             cx,
@@ -1203,14 +1203,14 @@ impl<T> OwnedRwLockWriteGuard<T> {
 }
 
 /// Future returned by `OwnedRwLockReadGuard::read`.
-pub struct OwnedReadFuture<'b, T> {
+pub struct OwnedReadFuture<'b, T, Caps = crate::cx::cap::All> {
     lock: Arc<RwLock<T>>,
-    cx: &'b Cx,
-    waiter_id: Option<usize>,
+    cx: &'b Cx<Caps>,
+    waiter_id: Option<WaiterId>,
     completed: bool,
 }
 
-impl<T> Future for OwnedReadFuture<'_, T> {
+impl<T, Caps> Future for OwnedReadFuture<'_, T, Caps> {
     type Output = Result<OwnedRwLockReadGuard<T>, RwLockError>;
 
     #[inline]
@@ -1292,22 +1292,22 @@ impl<T> Future for OwnedReadFuture<'_, T> {
     }
 }
 
-impl<T> Drop for OwnedReadFuture<'_, T> {
+impl<T, Caps> Drop for OwnedReadFuture<'_, T, Caps> {
     fn drop(&mut self) {
         self.lock.abandon_read_waiter(&mut self.waiter_id);
     }
 }
 
 /// Future returned by `OwnedRwLockWriteGuard::write`.
-pub struct OwnedWriteFuture<'b, T> {
+pub struct OwnedWriteFuture<'b, T, Caps = crate::cx::cap::All> {
     lock: Arc<RwLock<T>>,
-    cx: &'b Cx,
-    waiter_id: Option<usize>,
+    cx: &'b Cx<Caps>,
+    waiter_id: Option<WaiterId>,
     counted: bool,
     completed: bool,
 }
 
-impl<T> Future for OwnedWriteFuture<'_, T> {
+impl<T, Caps> Future for OwnedWriteFuture<'_, T, Caps> {
     type Output = Result<OwnedRwLockWriteGuard<T>, RwLockError>;
 
     #[inline]
@@ -1402,7 +1402,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
     }
 }
 
-impl<T> Drop for OwnedWriteFuture<'_, T> {
+impl<T, Caps> Drop for OwnedWriteFuture<'_, T, Caps> {
     fn drop(&mut self) {
         self.lock
             .abandon_write_waiter(&mut self.waiter_id, &mut self.counted);
@@ -1479,6 +1479,59 @@ mod tests {
         crate::assert_with_log!(*guard1 == 42, "guard1 value", 42u32, *guard1);
         crate::assert_with_log!(*guard2 == 42, "guard2 value", 42u32, *guard2);
         crate::test_complete!("multiple_readers_allowed");
+    }
+
+    #[test]
+    fn read_accepts_detached_no_cap_context() {
+        init_test("read_accepts_detached_no_cap_context");
+        let cx = Cx::<cap::None>::detached_cancel_context();
+        let lock = RwLock::new(42_u32);
+
+        let guard = poll_until_ready(lock.read(&cx)).expect("read should accept cap::None Cx");
+
+        crate::assert_with_log!(*guard == 42, "read guard value", 42u32, *guard);
+        crate::test_complete!("read_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn write_accepts_detached_no_cap_context() {
+        init_test("write_accepts_detached_no_cap_context");
+        let cx = Cx::<cap::None>::detached_cancel_context();
+        let lock = RwLock::new(5_u32);
+
+        let mut guard =
+            poll_until_ready(lock.write(&cx)).expect("write should accept cap::None Cx");
+        *guard = 7;
+
+        crate::assert_with_log!(*guard == 7, "write guard value", 7u32, *guard);
+        crate::test_complete!("write_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn owned_read_accepts_detached_no_cap_context() {
+        init_test("owned_read_accepts_detached_no_cap_context");
+        let cx = Cx::<cap::None>::detached_cancel_context();
+        let lock = StdArc::new(RwLock::new(42_u32));
+
+        let guard = poll_until_ready(OwnedRwLockReadGuard::read(StdArc::clone(&lock), &cx))
+            .expect("owned read should accept cap::None Cx");
+
+        crate::assert_with_log!(*guard == 42, "owned read guard value", 42u32, *guard);
+        crate::test_complete!("owned_read_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn owned_write_accepts_detached_no_cap_context() {
+        init_test("owned_write_accepts_detached_no_cap_context");
+        let cx = Cx::<cap::None>::detached_cancel_context();
+        let lock = StdArc::new(RwLock::new(5_u32));
+
+        let mut guard = poll_until_ready(OwnedRwLockWriteGuard::write(StdArc::clone(&lock), &cx))
+            .expect("owned write should accept cap::None Cx");
+        *guard = 7;
+
+        crate::assert_with_log!(*guard == 7, "owned write guard value", 7u32, *guard);
+        crate::test_complete!("owned_write_accepts_detached_no_cap_context");
     }
 
     #[test]
@@ -2659,7 +2712,7 @@ mod tests {
         let read_guard = read_blocking(&lock, &cx);
 
         // Create a write waiter with a cancellable context.
-        let cancel_cx = Cx::new(
+        let cancel_cx: Cx = Cx::new(
             crate::types::RegionId::from_arena(ArenaIndex::new(0, 10)),
             crate::types::TaskId::from_arena(ArenaIndex::new(0, 10)),
             crate::types::Budget::INFINITE,

@@ -26,7 +26,7 @@ use crate::{
         jetstream::{
             BackpressureSignal, ConsumerConfig, ConsumerGroup, ConsumerGroupConfig, ConsumerInfo,
             ConsumerLag, JetStreamAck, JetStreamConfig, JetStreamConsumer, JetStreamError,
-            JetStreamMessage, JetStreamProducer, LagMetrics, RebalanceEvent, StreamInfo,
+            JetStreamMessage, JetStreamProducer, LagMetrics, RebalanceEvent,
         },
     },
     obligation::{

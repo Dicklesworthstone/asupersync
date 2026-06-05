@@ -1,0 +1,6 @@
+---
+source: src/plan/certificate.rs
+assertion_line: 2390
+expression: fingerprint2.to_hex()
+---
+a230bb3fe6cba0ed3b893ec7b92d857ed667bda628095a9bdec9519caf0cf6c7

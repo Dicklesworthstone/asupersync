@@ -227,8 +227,8 @@ impl CancellationTracker {
         if !self.contexts.contains_key(&id) {
             let cancelled = Arc::new(AtomicBool::new(false));
             let cx = Cx::new(
-                RegionId::from_arena(ArenaIndex::new(0, id as usize)),
-                TaskId::from_arena(ArenaIndex::new(0, id as usize)),
+                RegionId::from_arena(ArenaIndex::new(0, u32::from(id))),
+                TaskId::from_arena(ArenaIndex::new(0, u32::from(id))),
                 Budget::INFINITE,
             );
             self.contexts.insert(id, (cx, cancelled));
@@ -648,11 +648,14 @@ fn execute_and_verify_cancellation_correctness(operations: Vec<OneshotOperation>
 
                 if let Some(mut receiver) = receivers.remove(&channel_key) {
                     let (cx, _cancelled) = tracker.create_context(channel_key).clone();
-                    let mut future = std::pin::Pin::new(receiver.recv(&cx));
                     let waker = create_noop_waker();
                     let mut context = Context::from_waker(&waker);
+                    let poll_result = {
+                        let mut future = Box::pin(receiver.recv(&cx));
+                        future.as_mut().poll(&mut context)
+                    };
 
-                    match future.as_mut().poll(&mut context) {
+                    match poll_result {
                         Poll::Ready(Ok(value)) => {
                             tracker
                                 .record_poll_receive(channel_key, &format!("Ready(Ok({}))", value));

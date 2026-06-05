@@ -230,7 +230,11 @@ fn evidence_quality_gate_allows_live_with_blocked_followups() {
 
 #[test]
 fn cli_filters_select_registered_tests() {
-    let cases: &[(&[&str], (usize, usize, usize), &str)] = &[
+    type CliArgs<'a> = &'a [&'a str];
+    type ExpectedCounts = (usize, usize, usize);
+    type FilterCase<'a> = (CliArgs<'a>, ExpectedCounts, &'a str);
+
+    let cases: &[FilterCase<'_>] = &[
         (
             &["--section", "5.3", "--ci-mode"],
             (2, 1, 1),

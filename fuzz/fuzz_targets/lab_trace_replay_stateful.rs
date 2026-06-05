@@ -1064,8 +1064,15 @@ fn verify_trace_replay_invariants(trace: &ReplayTrace, shadow: &TraceReplayShado
         })
     });
 
-    // Verify no excessive violations in event sequence
-    if shadow.event_sequence.len() > shadow.stats.total_events / 2 {
+    // Verify no excessive violations in event sequence.
+    // Require an absolute floor before applying the ratio: the harness
+    // deliberately feeds invalid arbitrary events to test robustness, so a
+    // single legitimately-rejected event (1 violation / 1 event) trivially
+    // exceeds `total_events / 2` and is NOT a defect (gauntlet FUZZ-R6).
+    const MIN_EVENTS_FOR_RATIO_CHECK: usize = 8;
+    if shadow.stats.total_events >= MIN_EVENTS_FOR_RATIO_CHECK
+        && shadow.event_sequence.len() > shadow.stats.total_events / 2
+    {
         panic!(
             "Too many event sequence violations: {} violations out of {} events",
             shadow.event_sequence.len(),

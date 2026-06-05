@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_broadcast_channel_stream_basic_integration() -> Result<()> {
+    fn test_broadcast_channel_stream_basic_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_broadcast_stream_backpressure_handling() -> Result<()> {
+    fn test_broadcast_stream_backpressure_handling() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_broadcast_stream_error_propagation() -> Result<()> {
+    fn test_broadcast_stream_error_propagation() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -845,7 +845,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_broadcast_stream_combinators() -> Result<()> {
+    fn test_broadcast_stream_combinators() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_broadcast_stream_multiple_consumers() -> Result<()> {
+    fn test_broadcast_stream_multiple_consumers() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_broadcast_stream_lagged_message_recovery() -> Result<()> {
+    fn test_broadcast_stream_lagged_message_recovery() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {

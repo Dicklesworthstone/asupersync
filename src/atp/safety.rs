@@ -123,9 +123,13 @@ impl DestinationPolicy {
             Self::Deny => false,
             Self::InboxOnly { inbox_root } => root.starts_with(inbox_root),
             Self::QuarantineOnly { quarantine_root } => root.starts_with(quarantine_root),
-            Self::AllowListed { allowed_roots, .. } => allowed_roots
+            Self::AllowListed {
+                allowed_roots,
+                case_sensitive,
+                ..
+            } => allowed_roots
                 .iter()
-                .any(|allowed| root.starts_with(allowed)),
+                .any(|allowed| path_starts_with_policy(root, allowed, *case_sensitive)),
         }
     }
 
@@ -1094,6 +1098,28 @@ fn fold_path_key(path: &str, case_sensitive: bool) -> String {
     }
 }
 
+fn path_starts_with_policy(root: &Path, allowed: &Path, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        return root.starts_with(allowed);
+    }
+
+    let mut root_components = root.components();
+    for allowed_component in allowed.components() {
+        let Some(root_component) = root_components.next() else {
+            return false;
+        };
+        if !path_component_eq_policy(root_component, allowed_component) {
+            return false;
+        }
+    }
+    true
+}
+
+fn path_component_eq_policy(left: Component<'_>, right: Component<'_>) -> bool {
+    fold_path_key(&left.as_os_str().to_string_lossy(), false)
+        == fold_path_key(&right.as_os_str().to_string_lossy(), false)
+}
+
 fn plan_digest(plan: &ReceivePlan) -> String {
     let mut hasher = Sha256::new();
     hasher.update(PLAN_DIGEST_DOMAIN);
@@ -1260,6 +1286,42 @@ mod tests {
         assert_eq!(
             plan.object_graph_summary.kind_counts[&ObjectKind::FileObject.to_string()],
             1
+        );
+    }
+
+    #[test]
+    fn case_insensitive_allowlist_matches_destination_root_case() {
+        let (graph, root) = graph_with_file("ok.txt", b"hello");
+        let plan =
+            build_receive_plan(input(&graph, &root, allow_policy("/SAFE"))).expect("plan builds");
+
+        assert_eq!(plan.decision, ReceiveDecision::AllowFinalCommit);
+        assert!(
+            !plan
+                .rejected_reasons
+                .contains(&ReceiveRejectReason::DestinationPolicyDenied)
+        );
+    }
+
+    #[test]
+    fn case_sensitive_allowlist_rejects_destination_root_case_mismatch() {
+        let (graph, root) = graph_with_file("ok.txt", b"hello");
+        let policy = DestinationPolicy::AllowListed {
+            allowed_roots: BTreeSet::from([PathBuf::from("/SAFE")]),
+            require_quarantine: true,
+            allow_overwrite: false,
+            allow_symlinks: false,
+            allow_executables: false,
+            allow_special_files: false,
+            case_sensitive: true,
+            max_bytes: Some(1_000),
+        };
+        let plan = build_receive_plan(input(&graph, &root, policy)).expect("plan builds");
+
+        assert_eq!(plan.decision, ReceiveDecision::Deny);
+        assert!(
+            plan.rejected_reasons
+                .contains(&ReceiveRejectReason::DestinationPolicyDenied)
         );
     }
 

@@ -152,7 +152,7 @@ fn test_binary_verbose_flag() {
     // but should still produce the main results
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("CONFORMANCE RESULTS") || stderr.len() > 0,
+        stderr.contains("CONFORMANCE RESULTS") || !stderr.is_empty(),
         "Verbose mode should produce output"
     );
 }

@@ -12,8 +12,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::database::postgres::{PgColumn, PgError, oid};
-use std::collections::BTreeMap;
+use asupersync::database::postgres::{PgColumn, oid};
 
 /// Maximum fuzz input size to prevent timeouts.
 const MAX_FUZZ_INPUT_SIZE: usize = 16_384;
@@ -62,7 +61,7 @@ enum PostgresTypeOid {
 }
 
 impl PostgresTypeOid {
-    fn to_oid(self) -> u32 {
+    fn to_oid(&self) -> u32 {
         match self {
             Self::Int4 => oid::INT4,
             Self::Varchar => oid::VARCHAR,
@@ -83,7 +82,7 @@ enum FormatCode {
 }
 
 impl FormatCode {
-    fn to_code(self) -> i16 {
+    fn to_code(&self) -> i16 {
         match self {
             Self::Text => 0,
             Self::Binary => 1,
@@ -278,7 +277,7 @@ fn create_pg_columns(columns: &[PostgresColumnSpec]) -> Vec<PgColumn> {
 
 /// Test the 5 PostgreSQL DataRow parsing assertions.
 fn test_postgres_row_assertions(input: PostgresRowFuzzInput) -> Result<(), String> {
-    let row_desc_data = build_row_description(&input.columns);
+    let _row_desc_data = build_row_description(&input.columns);
     let pg_columns = create_pg_columns(&input.columns);
     let data_row_data = build_data_row(&input.row_data, input.malformed_type.as_ref());
 

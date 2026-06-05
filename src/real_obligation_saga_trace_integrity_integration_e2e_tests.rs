@@ -739,13 +739,13 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_saga_compensation_extends_hash_chain_correctly() -> Result<()> {
-        init_test_runtime().await;
-
+    fn test_saga_compensation_extends_hash_chain_correctly() -> Result<()> {
         let runtime = Runtime::new()?;
         let lab_runtime = LabRuntime::new()?;
 
         runtime.block_on(async {
+            init_test_runtime().await;
+
             let cx = Cx::root(&runtime)?;
 
             // Create a saga with multiple steps that will require compensation
@@ -805,12 +805,12 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_compensation_ordering_preserved_in_hash_chain() -> Result<()> {
-        init_test_runtime().await;
-
+    fn test_compensation_ordering_preserved_in_hash_chain() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
+            init_test_runtime().await;
+
             let cx = Cx::root(&runtime)?;
 
             // Create saga with many steps to test LIFO compensation ordering
@@ -849,12 +849,12 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_hash_chain_integrity_after_partial_compensation() -> Result<()> {
-        init_test_runtime().await;
-
+    fn test_hash_chain_integrity_after_partial_compensation() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
+            init_test_runtime().await;
+
             let cx = Cx::root(&runtime)?;
 
             // Test partial compensation scenario

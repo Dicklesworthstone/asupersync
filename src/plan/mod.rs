@@ -819,7 +819,11 @@ mod tests {
                 }
                 acc
             }
-            PlanNode::Timeout { child, .. } => outcome_sets_inner(dag, *child, memo),
+            PlanNode::Timeout { child, .. } => {
+                let mut outcomes = outcome_sets_inner(dag, *child, memo);
+                outcomes.insert(Vec::new());
+                outcomes
+            }
         };
 
         memo.insert(id, result.clone());

@@ -284,7 +284,7 @@ fn run_histogram_basic_test(verbose: bool) -> ConformanceTestResult {
     // Reference implementation
     let mut registry = PrometheusRegistry::default();
     let buckets = vec![0.01, 0.1, 1.0, 10.0];
-    let reference_hist = PrometheusHistogram::new(buckets.into_iter());
+    let reference_hist = PrometheusHistogram::new(buckets);
 
     registry.register(
         "request_latency_seconds",
@@ -397,9 +397,9 @@ fn run_comprehensive_test(verbose: bool) -> ConformanceTestResult {
     closures_counter.inc_by(u64::MAX);
 
     // Histograms
-    let req_hist = PrometheusHistogram::new(vec![0.001, 0.01, 0.1, 1.0].into_iter());
-    let mem_hist = PrometheusHistogram::new(vec![1024.0, 4096.0, 16384.0, 65536.0].into_iter());
-    let task_hist = PrometheusHistogram::new(vec![1.0, 5.0, 10.0, 50.0, 100.0].into_iter());
+    let req_hist = PrometheusHistogram::new(vec![0.001, 0.01, 0.1, 1.0]);
+    let mem_hist = PrometheusHistogram::new(vec![1024.0, 4096.0, 16384.0, 65536.0]);
+    let task_hist = PrometheusHistogram::new(vec![1.0, 5.0, 10.0, 50.0, 100.0]);
 
     registry.register("request_latency_seconds", "", req_hist.clone());
     registry.register("memory_allocation_bytes", "", mem_hist.clone());

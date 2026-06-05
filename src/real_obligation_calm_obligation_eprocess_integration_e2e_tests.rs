@@ -23,7 +23,6 @@ mod tests {
                 MonotonicityViolation,
             },
         },
-        sync::{Arc, Mutex},
         types::{Budget, Outcome, TaskId, Time},
     };
     use std::{

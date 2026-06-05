@@ -1,5 +1,6 @@
 {
   "agent": "TopazGoose",
+  "agent_mail_summary": "Proof receipt closeout summary: 1 total; 0 citeable; 0 rerun-required; 1 suppressed.\n- artifacts/proof/missing-touched-files.json | classification=unverifiable-surface | decision=suppress-as-unverifiable | safe_to_cite=false\n  command: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_touched_files cargo clippy -p asupersync --lib -- -D warnings\n  top_remediation: Artifact lacks enough provenance to support a green claim.",
   "artifact_errors": [],
   "current_branch": "main",
   "current_date": "2026-05-08",
@@ -18,7 +19,10 @@
         "current_branch": "main",
         "current_head_sha": "2222222222222222222222222222222222222222",
         "dirty_overlap_count": 0,
-        "dirty_overlaps": []
+        "dirty_overlaps": [],
+        "proof_output_byte_count": 0,
+        "proof_output_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "proof_output_segment_count": 0
       },
       "generated_at": "2026-05-08T05:18:00Z",
       "reason": "artifact does not declare touched files",

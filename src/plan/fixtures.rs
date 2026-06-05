@@ -434,12 +434,37 @@ impl LabEquivalenceReport {
 ///
 /// For Join: cartesian product of children.
 /// For Race: union of children.
-/// For Timeout: same as child.
+/// For Timeout: child outcomes plus the empty timeout outcome.
 /// For Leaf: singleton set containing the label.
 #[must_use]
 pub fn outcome_sets(dag: &PlanDag, id: PlanId) -> BTreeSet<Vec<String>> {
     let mut memo = HashMap::new();
     outcome_sets_inner(dag, id, &mut memo)
+}
+
+fn labels_as_outcome(labels: &BTreeSet<String>) -> Vec<String> {
+    labels.iter().cloned().collect()
+}
+
+fn dynamic_labels_satisfy_static_oracle(
+    original_labels: &BTreeSet<String>,
+    optimized_labels: &BTreeSet<String>,
+    original_static: &BTreeSet<Vec<String>>,
+    optimized_static: &BTreeSet<Vec<String>>,
+) -> bool {
+    if original_static != optimized_static {
+        return false;
+    }
+
+    let original_outcome = labels_as_outcome(original_labels);
+    let optimized_outcome = labels_as_outcome(optimized_labels);
+    if !original_static.contains(&original_outcome)
+        || !optimized_static.contains(&optimized_outcome)
+    {
+        return false;
+    }
+
+    original_static.len() > 1 || original_labels == optimized_labels
 }
 
 fn outcome_sets_inner(
@@ -488,7 +513,11 @@ fn outcome_sets_inner(
             }
             acc
         }
-        PlanNode::Timeout { child, .. } => outcome_sets_inner(dag, *child, memo),
+        PlanNode::Timeout { child, .. } => {
+            let mut outcomes = outcome_sets_inner(dag, *child, memo);
+            outcomes.insert(Vec::new());
+            outcomes
+        }
     };
 
     memo.insert(id, result.clone());
@@ -612,77 +641,71 @@ impl SharedLabHandle {
 
     async fn join(&self) -> BTreeSet<String> {
         let cx = crate::cx::Cx::current().expect("cx set");
-        let i_am_joiner;
-        {
-            let mut state = self.inner.state.lock();
-            match &*state {
-                LabJoinState::Ready(result) => return result.clone(),
-                LabJoinState::InFlight => {
-                    i_am_joiner = false;
-                }
-                LabJoinState::Empty => {
-                    *state = LabJoinState::InFlight;
-                    drop(state);
-                    i_am_joiner = true;
-                }
-            }
-        }
-
-        if i_am_joiner {
-            struct Guard<'a> {
-                inner: &'a SharedLabInner,
-                handle: Option<TaskHandle<BTreeSet<String>>>,
-            }
-            impl Drop for Guard<'_> {
-                fn drop(&mut self) {
-                    if let Some(h) = self.handle.take() {
-                        *self.inner.handle.lock() = Some(h);
-                        // If we didn't finish, revert state to Empty so someone else can join
-                        let mut state = self.inner.state.lock();
-                        if matches!(*state, LabJoinState::InFlight) {
-                            *state = LabJoinState::Empty;
-                        }
+        loop {
+            let i_am_joiner = {
+                let mut state = self.inner.state.lock();
+                match &*state {
+                    LabJoinState::Ready(result) => return result.clone(),
+                    LabJoinState::InFlight => false,
+                    LabJoinState::Empty => {
+                        *state = LabJoinState::InFlight;
+                        true
                     }
                 }
-            }
-
-            let mut guard = Guard {
-                inner: &self.inner,
-                handle: Some(
-                    self.inner
-                        .handle
-                        .lock()
-                        .take()
-                        .expect("join handle available"),
-                ),
             };
 
-            let result = guard
-                .handle
-                .as_mut()
-                .expect("handle must exist")
-                .join(&cx)
-                .await
-                .unwrap_or_default();
-            *self.inner.state.lock() = LabJoinState::Ready(result.clone());
-            result
-        } else {
-            loop {
-                {
-                    let state = self.inner.state.lock();
-                    if let LabJoinState::Ready(result) = &*state {
-                        return result.clone();
+            if i_am_joiner {
+                return self.join_claimed(&cx).await;
+            }
+
+            if cx.checkpoint().is_err() {
+                return BTreeSet::new();
+            }
+            let now = cx
+                .timer_driver()
+                .map_or_else(crate::time::wall_now, |driver| driver.now());
+            crate::time::sleep(now, std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn join_claimed(&self, cx: &crate::cx::Cx) -> BTreeSet<String> {
+        struct Guard<'a> {
+            inner: &'a SharedLabInner,
+            handle: Option<TaskHandle<BTreeSet<String>>>,
+        }
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                if let Some(h) = self.handle.take() {
+                    *self.inner.handle.lock() = Some(h);
+                    let mut state = self.inner.state.lock();
+                    if matches!(*state, LabJoinState::InFlight) {
+                        *state = LabJoinState::Empty;
                     }
                 }
-                if cx.checkpoint().is_err() {
-                    return BTreeSet::new();
-                }
-                let now = cx
-                    .timer_driver()
-                    .map_or_else(crate::time::wall_now, |driver| driver.now());
-                crate::time::sleep(now, std::time::Duration::from_millis(10)).await;
             }
         }
+
+        let mut guard = Guard {
+            inner: &self.inner,
+            handle: Some(
+                self.inner
+                    .handle
+                    .lock()
+                    .take()
+                    .expect("join handle available"),
+            ),
+        };
+
+        let result = guard
+            .handle
+            .as_mut()
+            .expect("handle must exist")
+            .join(cx)
+            .await
+            .unwrap_or_default();
+        *self.inner.state.lock() = LabJoinState::Ready(result.clone());
+        guard.handle = None;
+        result
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -816,56 +839,20 @@ fn execute_plan_in_lab_core(
     seed: u64,
     dag: &PlanDag,
 ) -> BTreeSet<String> {
-    use super::PlanNode;
-
     let root = dag.root().expect("dag has root");
     let region = runtime.state.create_root_region(Budget::INFINITE);
 
-    let mut handles: Vec<Option<SharedLabHandle>> = Vec::new();
+    let mut handles: Vec<Option<SharedLabHandle>> = vec![None; dag.nodes.len()];
     let mut task_ids: Vec<TaskId> = Vec::new();
-
-    for (idx, node) in dag.nodes.iter().enumerate() {
-        let (tid, raw_handle) = match node.clone() {
-            PlanNode::Leaf { label } => {
-                let yield_count = (seed as usize).wrapping_add(idx) % 4 + 1;
-                spawn_lab_leaf(runtime, region, label, yield_count)
-            }
-            PlanNode::Join { children } => {
-                let child_handles: Vec<_> = children
-                    .iter()
-                    .map(|c| {
-                        handles[c.index()]
-                            .as_ref()
-                            .expect("child handle available")
-                            .clone()
-                    })
-                    .collect();
-                spawn_lab_join(runtime, region, child_handles)
-            }
-            PlanNode::Race { children } => {
-                let child_handles: Vec<_> = children
-                    .iter()
-                    .map(|c| {
-                        handles[c.index()]
-                            .as_ref()
-                            .expect("child handle available")
-                            .clone()
-                    })
-                    .collect();
-                spawn_lab_race(runtime, region, child_handles)
-            }
-            PlanNode::Timeout { child, duration } => {
-                let child_handle = handles[child.index()]
-                    .as_ref()
-                    .expect("child handle available")
-                    .clone();
-                spawn_lab_timeout(runtime, region, child_handle, duration)
-            }
-        };
-
-        task_ids.push(tid);
-        handles.push(Some(SharedLabHandle::new(raw_handle)));
-    }
+    spawn_lab_node(
+        runtime,
+        region,
+        seed,
+        dag,
+        root,
+        &mut handles,
+        &mut task_ids,
+    );
 
     // Schedule all tasks.
     {
@@ -930,6 +917,51 @@ fn execute_plan_in_lab_core(
         .expect("root handle")
         .try_join_probe()
         .expect("root should be ready")
+}
+
+fn spawn_lab_node(
+    runtime: &mut LabRuntime,
+    region: crate::types::RegionId,
+    seed: u64,
+    dag: &PlanDag,
+    id: PlanId,
+    handles: &mut [Option<SharedLabHandle>],
+    task_ids: &mut Vec<TaskId>,
+) -> SharedLabHandle {
+    if let Some(existing) = handles.get(id.index()).and_then(Option::as_ref) {
+        return existing.clone();
+    }
+
+    let node = dag.node(id).expect("valid plan node").clone();
+    let (tid, raw_handle) = match node {
+        PlanNode::Leaf { label } => {
+            let yield_count = (seed as usize).wrapping_add(id.index()) % 4 + 1;
+            spawn_lab_leaf(runtime, region, label, yield_count)
+        }
+        PlanNode::Join { children } => {
+            let child_handles: Vec<_> = children
+                .iter()
+                .map(|child| spawn_lab_node(runtime, region, seed, dag, *child, handles, task_ids))
+                .collect();
+            spawn_lab_join(runtime, region, child_handles)
+        }
+        PlanNode::Race { children } => {
+            let child_handles: Vec<_> = children
+                .iter()
+                .map(|child| spawn_lab_node(runtime, region, seed, dag, *child, handles, task_ids))
+                .collect();
+            spawn_lab_race(runtime, region, child_handles)
+        }
+        PlanNode::Timeout { child, duration } => {
+            let child_handle = spawn_lab_node(runtime, region, seed, dag, child, handles, task_ids);
+            spawn_lab_timeout(runtime, region, child_handle, duration)
+        }
+    };
+
+    let handle = SharedLabHandle::new(raw_handle);
+    task_ids.push(tid);
+    handles[id.index()] = Some(handle.clone());
+    handle
 }
 
 fn spawn_lab_leaf(
@@ -1075,15 +1107,15 @@ pub struct LabDynamicEquivalenceReport {
     pub static_outcomes_equivalent: bool,
     /// Seeds used for dynamic execution.
     pub seeds: Vec<u64>,
-    /// Per-seed results: (original_labels, optimized_labels, match).
+    /// Per-seed results: (original_labels, optimized_labels, accepted_by_oracle).
     pub per_seed_results: Vec<(BTreeSet<String>, BTreeSet<String>, bool)>,
-    /// Whether all per-seed dynamic runs matched.
+    /// Whether all per-seed dynamic runs satisfied the static outcome oracle.
     pub dynamic_outcomes_equivalent: bool,
     /// Observed original outcome sets across all seeds.
     pub original_outcome_universe: BTreeSet<Vec<String>>,
     /// Observed optimized outcome sets across all seeds.
     pub optimized_outcome_universe: BTreeSet<Vec<String>>,
-    /// Whether the observed universes match (same set of possible outcomes).
+    /// Whether finite observed universes satisfy the static outcome contract.
     pub universes_match: bool,
 }
 
@@ -1115,7 +1147,7 @@ impl LabDynamicEquivalenceReport {
             out.push_str("  STATIC OUTCOME MISMATCH\n");
         }
         if !self.dynamic_outcomes_equivalent {
-            out.push_str("  DYNAMIC OUTCOME MISMATCH (per-seed):\n");
+            out.push_str("  DYNAMIC OUTCOME OUTSIDE STATIC CONTRACT (per-seed):\n");
             for (i, (orig, opt, ok)) in self.per_seed_results.iter().enumerate() {
                 if !ok {
                     let _ = writeln!(
@@ -1176,16 +1208,30 @@ pub fn run_lab_dynamic_equivalence(
     for &seed in seeds {
         let orig_labels = execute_plan_in_lab(seed, &original_dag);
         let opt_labels = execute_plan_in_lab(seed, &optimized_dag);
-        let ok = orig_labels == opt_labels;
+        let ok = dynamic_labels_satisfy_static_oracle(
+            &orig_labels,
+            &opt_labels,
+            &original_static,
+            &optimized_static,
+        );
         if !ok {
             all_dynamic_ok = false;
         }
-        original_universe.insert(orig_labels.iter().cloned().collect::<Vec<_>>());
-        optimized_universe.insert(opt_labels.iter().cloned().collect::<Vec<_>>());
+        original_universe.insert(labels_as_outcome(&orig_labels));
+        optimized_universe.insert(labels_as_outcome(&opt_labels));
         per_seed_results.push((orig_labels, opt_labels, ok));
     }
 
-    let universes_match = original_universe == optimized_universe;
+    let universes_match = if original_static.len() > 1 && original_static == optimized_static {
+        original_universe
+            .iter()
+            .all(|outcome| original_static.contains(outcome))
+            && optimized_universe
+                .iter()
+                .all(|outcome| optimized_static.contains(outcome))
+    } else {
+        original_universe == optimized_universe
+    };
 
     LabDynamicEquivalenceReport {
         fixture_name: fixture.name,
@@ -1446,7 +1492,12 @@ pub fn run_e2e_pipeline(
         execute_plan_in_lab_traced(42, &original_dag);
     let (dynamic_optimized_labels, optimized_trace_fingerprint) =
         execute_plan_in_lab_traced(42, &optimized_dag);
-    let dynamic_outcomes_equivalent = dynamic_original_labels == dynamic_optimized_labels;
+    let dynamic_outcomes_equivalent = dynamic_labels_satisfy_static_oracle(
+        &dynamic_original_labels,
+        &dynamic_optimized_labels,
+        &original_static,
+        &optimized_static,
+    );
 
     E2ePipelineReport {
         fixture_name: fixture.name,

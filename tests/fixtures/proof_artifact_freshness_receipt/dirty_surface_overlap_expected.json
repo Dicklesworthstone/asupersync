@@ -1,5 +1,6 @@
 {
   "agent": "TopazGoose",
+  "agent_mail_summary": "Proof receipt closeout summary: 1 total; 0 citeable; 1 rerun-required; 0 suppressed.\n- artifacts/proof/proof-status-marker.json | classification=dirty-surface-overlap | decision=rerun-required | safe_to_cite=false\n  command: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_status_snapshot cargo test -p asupersync --test proof_status_snapshot_contract -- --nocapture\n  top_remediation: Do not cite stale green output across dirty shared-main work.",
   "artifact_errors": [],
   "current_branch": "main",
   "current_date": "2026-05-08",
@@ -25,6 +26,13 @@
             "path": "tests/proof_status_snapshot_contract.rs",
             "status": " M"
           }
+        ],
+        "proof_output_byte_count": 47,
+        "proof_output_digest": "sha256:e706ebf1b7ffdb7244db46226a6d39a56629ea9f83a39bf2f60c834baa66b53c",
+        "proof_output_segment_count": 1,
+        "rch_remote_route_required": true,
+        "rch_remote_route_segments": [
+          "[RCH] remote rch-worker-proof-status-01 (13.6s)"
         ]
       },
       "generated_at": "2026-05-08T05:16:00Z",

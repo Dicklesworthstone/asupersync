@@ -3344,6 +3344,12 @@ impl SwarmPressureGovernor {
 
     fn get_default_pressure_snapshot(&self) -> PressureSnapshot {
         // Create a default snapshot when pressure governance is disabled
+        let signal_availability =
+            crate::observability::pressure_governor::PressureSignalAvailability::NONE;
+        let fallback_verdict =
+            crate::observability::pressure_governor::PressureFallbackVerdict::from_availability(
+                signal_availability,
+            );
         PressureSnapshot {
             timestamp: Instant::now(),
             runnable_queue_pressure: 0.0,
@@ -3352,10 +3358,8 @@ impl SwarmPressureGovernor {
             cleanup_debt_pressure: 0.0,
             memory_budget_pressure: 0.0,
             overall_pressure: 0.0,
-            signal_availability:
-                crate::observability::pressure_governor::PressureSignalAvailability::NONE,
-            fallback_verdict:
-                crate::observability::pressure_governor::PressureFallbackVerdict::Complete,
+            signal_availability,
+            fallback_verdict,
         }
     }
 
@@ -3873,6 +3877,37 @@ mod tests {
         assert_eq!(metrics.total_admission_checks, 1);
         assert_eq!(metrics.regions_admitted, 1);
         assert_eq!(metrics.regions_rejected, 0);
+    }
+
+    #[test]
+    fn test_no_pressure_governor_default_snapshot_reports_no_win_fallback() {
+        let config = SwarmPressureGovernorConfig::default();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let governor = SwarmPressureGovernor::new_without_pressure_governor(
+            config,
+            runtime.resource_monitor(),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let decision = governor
+            .check_region_admission(&cx, RegionPriority::Normal, None)
+            .expect("no-pressure-governor admission should still produce a decision");
+
+        assert!(matches!(decision.decision, AdmissionDecision::Admit));
+        assert_eq!(
+            decision.pressure_snapshot.signal_availability,
+            crate::observability::pressure_governor::PressureSignalAvailability::NONE
+        );
+        assert_eq!(
+            decision.pressure_snapshot.fallback_verdict,
+            crate::observability::pressure_governor::PressureFallbackVerdict::NoWinNoLiveSignals,
+            "a snapshot with no live runtime-local signals must not claim complete pressure evidence"
+        );
     }
 
     #[test]

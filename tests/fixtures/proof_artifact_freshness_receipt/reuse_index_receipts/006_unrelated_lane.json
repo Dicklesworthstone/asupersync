@@ -1,0 +1,39 @@
+{
+  "repo": {
+    "head_sha": "4444444444444444444444444444444444444444",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "proof_id": "proof:reuse-index-unrelated-lane",
+      "artifact_path": "artifacts/proof/reuse-index/unrelated-lane.json",
+      "git_sha": "4444444444444444444444444444444444444444",
+      "git_branch": "main",
+      "manifest_lane_id": "all-targets-check",
+      "manifest_guarantee_ids": [
+        "all-targets"
+      ],
+      "claim_scope": "proof-reuse-cache-schema",
+      "allowed_cache_hit_claims": [
+        "proof-reuse-cache-schema"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture",
+      "command_fingerprint": "sha256:proof-reuse-cache-command",
+      "source_fingerprint": "sha256:source-index-current",
+      "tree_fingerprint": "git-tree:index-current",
+      "toolchain_fingerprint": "sha256:toolchain-index-current",
+      "env_fingerprint": "sha256:env-index-current",
+      "feature_flags": [],
+      "stdout": "[RCH] remote rch-worker-index-other (8.8s)",
+      "touched_files": [
+        "artifacts/proof_reuse_cache_contract_v1.json",
+        "tests/proof_reuse_cache_contract.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-06-04T02:05:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

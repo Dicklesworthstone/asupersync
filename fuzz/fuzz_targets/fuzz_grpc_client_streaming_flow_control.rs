@@ -11,9 +11,11 @@
 
 use arbitrary::Arbitrary;
 use asupersync::grpc::{
-    Code, GrpcError, Status,
-    streaming::{RequestSink, Streaming, StreamingRequest},
+    Code, Status,
+    client::RequestSink,
+    streaming::{Streaming, StreamingRequest},
 };
+use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -175,7 +177,6 @@ fn exercise_streaming_request(mut scenario: StreamScenario) {
 
     if !closed {
         stream.close();
-        closed = true;
         assert_after_close_pushes(&mut stream, &scenario.after_close_values);
     }
 
@@ -198,7 +199,7 @@ fn exercise_streaming_request(mut scenario: StreamScenario) {
 fn exercise_request_sink(mut scenario: SinkScenario) {
     scenario.ops.truncate(MAX_SINK_OPS);
 
-    futures_lite::future::block_on(async move {
+    block_on(async move {
         let mut sink = RequestSink::<u16>::new();
         let mut expected_sent = 0usize;
         let mut closed = false;
@@ -209,22 +210,37 @@ fn exercise_request_sink(mut scenario: SinkScenario) {
                     let result = sink.send(value).await;
                     if closed {
                         let err = result.expect_err("send after close must fail");
-                        assert!(
-                            matches!(err, GrpcError::Protocol(_)),
-                            "closed sink must reject sends with protocol error"
+                        assert_eq!(
+                            err.code(),
+                            Code::FailedPrecondition,
+                            "closed sink must reject sends with failed-precondition status"
                         );
                         assert_eq!(
                             sink.sent_count(),
                             expected_sent,
                             "failed send must not advance sent_count"
                         );
-                    } else {
+                    } else if expected_sent == 0 {
                         result.expect("open sink send must succeed");
                         expected_sent += 1;
                         assert_eq!(
                             sink.sent_count(),
                             expected_sent,
                             "successful send must advance sent_count"
+                        );
+                    } else {
+                        let err = result.expect_err(
+                            "loopback request sink must reject multiple request messages",
+                        );
+                        assert_eq!(
+                            err.code(),
+                            Code::FailedPrecondition,
+                            "extra loopback sends must fail with failed-precondition status"
+                        );
+                        assert_eq!(
+                            sink.sent_count(),
+                            expected_sent,
+                            "failed extra send must not advance sent_count"
                         );
                     }
                 }
@@ -248,8 +264,9 @@ fn exercise_request_sink(mut scenario: SinkScenario) {
             .send(u16::MAX)
             .await
             .expect_err("post-close send must fail");
-        assert!(
-            matches!(err, GrpcError::Protocol(_)),
+        assert_eq!(
+            err.code(),
+            Code::FailedPrecondition,
             "post-close send must stay fail-closed"
         );
         assert_eq!(

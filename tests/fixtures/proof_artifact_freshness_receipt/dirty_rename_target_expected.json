@@ -1,5 +1,6 @@
 {
   "agent": "TopazGoose",
+  "agent_mail_summary": "Proof receipt closeout summary: 1 total; 0 citeable; 1 rerun-required; 0 suppressed.\n- target/proof-artifacts/dirty-rename-target.json | classification=dirty-surface-overlap | decision=rerun-required | safe_to_cite=false\n  command: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract\n  top_remediation: Do not cite stale green output across dirty shared-main work.",
   "artifact_errors": [],
   "current_branch": "main",
   "current_date": "2026-05-08",
@@ -25,6 +26,13 @@
             "path": "tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json",
             "status": "R "
           }
+        ],
+        "proof_output_byte_count": 40,
+        "proof_output_digest": "sha256:4a5254da5fa9c1fbde843bcc35c60df9ec62af235103b91e61d94aac921b0266",
+        "proof_output_segment_count": 1,
+        "rch_remote_route_required": true,
+        "rch_remote_route_segments": [
+          "[RCH] remote rch-worker-rename-01 (8.8s)"
         ]
       },
       "generated_at": "2026-05-08T05:00:00Z",

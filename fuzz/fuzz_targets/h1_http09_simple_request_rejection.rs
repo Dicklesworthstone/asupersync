@@ -410,7 +410,7 @@ fuzz_target!(|scenario: Http09RejectionScenario| {
 
 /// Test specific HTTP/0.9 patterns that should always be rejected
 fn test_known_http09_patterns(codec: &mut MockHttp11Codec) {
-    let http09_patterns = [
+    let http09_patterns: &[&[u8]] = &[
         b"GET /\r\n",
         b"GET /index.html\r\n",
         b"GET /path/to/file\r\n",
@@ -423,7 +423,7 @@ fn test_known_http09_patterns(codec: &mut MockHttp11Codec) {
         b"GET /\r\nSome body data",
     ];
 
-    for (i, pattern) in http09_patterns.iter().enumerate() {
+    for (i, pattern) in http09_patterns.iter().copied().enumerate() {
         codec.clear();
         codec.feed_bytes(pattern);
 

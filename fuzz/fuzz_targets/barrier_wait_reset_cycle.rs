@@ -14,7 +14,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::cx::Cx;
-use asupersync::sync::barrier::{Barrier, BarrierWaitError};
+use asupersync::sync::{Barrier, BarrierWaitError, BarrierWaitResult};
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
 use futures::task::noop_waker;
@@ -23,7 +23,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct BarrierCycle {
@@ -63,21 +63,16 @@ impl CycleSequence {
     }
 }
 
-// Helper to poll a future once without blocking
-fn poll_once<F: Future>(mut future: Pin<&mut F>, cx: &mut Context<'_>) -> Poll<F::Output> {
-    future.as_mut().poll(cx)
-}
-
 // Simple future wrapper for easier polling
 struct BarrierWaitWrapper<'a> {
-    future: asupersync::sync::barrier::BarrierWaitFuture<'a>,
+    future: Pin<Box<dyn Future<Output = Result<BarrierWaitResult, BarrierWaitError>> + 'a>>,
     completed: bool,
 }
 
 impl<'a> BarrierWaitWrapper<'a> {
     fn new(barrier: &'a Barrier, cx: &'a Cx) -> Self {
         Self {
-            future: barrier.wait(cx),
+            future: Box::pin(barrier.wait(cx)),
             completed: false,
         }
     }
@@ -85,12 +80,12 @@ impl<'a> BarrierWaitWrapper<'a> {
     fn poll_once(
         &mut self,
         ctx: &mut Context<'_>,
-    ) -> Poll<Result<asupersync::sync::barrier::BarrierWaitResult, BarrierWaitError>> {
+    ) -> Poll<Result<BarrierWaitResult, BarrierWaitError>> {
         if self.completed {
             return Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion));
         }
 
-        let result = Pin::new(&mut self.future).poll(ctx);
+        let result = self.future.as_mut().poll(ctx);
         if result.is_ready() {
             self.completed = true;
         }
@@ -128,9 +123,7 @@ fuzz_target!(|data: &[u8]| {
         let barrier = Arc::new(Barrier::new(cycle.parties as usize));
         let parties = cycle.parties as usize;
 
-        // Track per-cycle state
-        let mut waiters: Vec<Option<BarrierWaitWrapper>> = vec![None; parties];
-        let mut party_cxs: Vec<Cx> = (0..parties)
+        let party_cxs: Vec<Cx> = (0..parties)
             .map(|i| {
                 Cx::new(
                     RegionId::from_arena(ArenaIndex::new(cycle_idx as u32, i as u32)),
@@ -140,16 +133,19 @@ fuzz_target!(|data: &[u8]| {
             })
             .collect();
 
-        let mut arrived_count = 0;
-        let mut completed_count = 0;
+        // Track per-cycle state. Declare waiters after their borrowed context
+        // storage so waiter futures are dropped before `party_cxs`.
+        let mut waiters: Vec<Option<BarrierWaitWrapper>> = (0..parties).map(|_| None).collect();
+        let mut arrived_count: usize = 0;
+        let mut completed_count: usize = 0;
         let cycle_leaders = AtomicUsize::new(0);
 
         // Get initial state
         #[cfg(test)]
-        let (initial_arrived, initial_generation, initial_waiters) =
+        let (initial_arrived, _initial_generation, initial_waiters) =
             barrier.state_snapshot_for_test();
         #[cfg(not(test))]
-        let (initial_arrived, initial_generation, initial_waiters) = (0, expected_generation, 0);
+        let (initial_arrived, _initial_generation, initial_waiters) = (0, expected_generation, 0);
 
         // Initial state should be clean
         assert_eq!(
@@ -212,10 +208,10 @@ fuzz_target!(|data: &[u8]| {
 
                 CycleOp::CheckState => {
                     #[cfg(test)]
-                    let (current_arrived, current_generation, current_waiters) =
+                    let (current_arrived, _current_generation, current_waiters) =
                         barrier.state_snapshot_for_test();
                     #[cfg(not(test))]
-                    let (current_arrived, current_generation, current_waiters) = (
+                    let (current_arrived, _current_generation, current_waiters) = (
                         arrived_count,
                         expected_generation,
                         waiters.iter().filter(|w| w.is_some()).count(),
@@ -247,7 +243,7 @@ fuzz_target!(|data: &[u8]| {
 
                 CycleOp::Yield => {
                     // Poll all active waiters to advance their state
-                    for (i, waiter_opt) in waiters.iter_mut().enumerate() {
+                    for waiter_opt in waiters.iter_mut() {
                         if let Some(waiter) = waiter_opt {
                             match waiter.poll_once(&mut ctx) {
                                 Poll::Ready(Ok(result)) => {

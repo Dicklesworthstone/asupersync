@@ -18,6 +18,12 @@ fn init_test(name: &str) {
     crate::test_phase!(name);
 }
 
+fn install_remote_reflection_cx() -> crate::cx::cx::CurrentCxGuard {
+    crate::cx::Cx::set_current(Some(crate::cx::Cx::for_testing_with_remote(
+        crate::remote::RemoteCap::new(),
+    )))
+}
+
 fn method_fingerprint(methods: &[super::reflection::ReflectedMethod]) -> String {
     methods
         .iter()
@@ -67,6 +73,7 @@ impl ServiceHandler for AuditTestService {
 #[test]
 fn audit_reflection_returns_real_method_list_for_known_service() {
     init_test("audit_reflection_returns_real_method_list_for_known_service");
+    let _current = install_remote_reflection_cx();
 
     // Create reflection service and register test service
     let reflection = ReflectionService::new().allow_anonymous(); // Allow access for testing
@@ -215,6 +222,7 @@ fn audit_reflection_returns_real_method_list_for_known_service() {
 #[test]
 fn audit_reflection_returns_not_found_for_unknown_service() {
     init_test("audit_reflection_returns_not_found_for_unknown_service");
+    let _current = install_remote_reflection_cx();
 
     let reflection = ReflectionService::new().allow_anonymous();
 
@@ -262,6 +270,7 @@ fn audit_reflection_returns_not_found_for_unknown_service() {
 #[test]
 fn audit_reflection_isolates_methods_across_multiple_services() {
     init_test("audit_reflection_isolates_methods_across_multiple_services");
+    let _current = install_remote_reflection_cx();
 
     let reflection = ReflectionService::new().allow_anonymous();
 
@@ -384,6 +393,7 @@ fn audit_reflection_isolates_methods_across_multiple_services() {
 #[test]
 fn audit_reflection_async_method_returns_identical_data() {
     init_test("audit_reflection_async_method_returns_identical_data");
+    let _current = install_remote_reflection_cx();
 
     let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&AuditTestService);
@@ -451,6 +461,7 @@ fn audit_reflection_async_method_returns_identical_data() {
 #[test]
 fn audit_reflection_empty_registry_lists_no_services() {
     init_test("audit_reflection_empty_registry_lists_no_services");
+    let _current = install_remote_reflection_cx();
 
     let reflection = ReflectionService::new().allow_anonymous();
     let list = futures_lite::future::block_on(
@@ -476,6 +487,7 @@ fn audit_reflection_empty_registry_lists_no_services() {
 #[test]
 fn audit_reflection_malformed_describe_request_is_not_found() {
     init_test("audit_reflection_malformed_describe_request_is_not_found");
+    let _current = install_remote_reflection_cx();
 
     let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&AuditTestService);

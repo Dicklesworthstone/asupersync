@@ -2233,7 +2233,9 @@ mod tests {
         let reflection = ReflectionService::new()
             .with_auth(|_cx, method| Err(Status::permission_denied(format!("denied: {method}"))));
 
-        let _current = Cx::set_current(Some(Cx::for_testing()));
+        let _current = Cx::set_current(Some(Cx::for_testing_with_remote(
+            crate::remote::RemoteCap::new(),
+        )));
 
         // Should be denied by auth callback once a request Cx is in scope.
         let result = reflection.list_services();
@@ -2271,6 +2273,9 @@ mod tests {
 
         let reflection = ReflectionService::new().allow_anonymous();
         reflection.register_handler(&TestService);
+        let _current = Cx::set_current(Some(Cx::for_testing_with_remote(
+            crate::remote::RemoteCap::new(),
+        )));
 
         // Should be allowed in anonymous mode
         let result = reflection.list_services();
@@ -4820,7 +4825,7 @@ mod tests {
                 *handler_request_ref.lock() = Some(req);
 
                 // Simulate work that will exceed the deadline
-                crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(100)).await;
+                crate::time::sleep(crate::time::wall_now(), Duration::from_millis(100)).await;
 
                 Ok::<Response<Bytes>, Status>(Response::new(Bytes::new()))
             }

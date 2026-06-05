@@ -236,13 +236,13 @@ impl<T: Clone> FaultSender<T> {
     /// - Duplicated (sent twice)
     /// - Sent normally
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
+        if cx.checkpoint().is_err() {
+            return Err(SendError::Cancelled(value));
+        }
         // Preserve base sender semantics: if the receiver side is already gone,
         // fail immediately instead of buffering and reporting a false success.
         if self.inner.is_closed() {
             return Err(SendError::Disconnected(value));
-        }
-        if cx.checkpoint().is_err() {
-            return Err(SendError::Cancelled(value));
         }
 
         let (should_reorder, should_duplicate) = {
@@ -1084,6 +1084,34 @@ mod tests {
         drop(rx);
         let result = block_on(fault_tx.send(&cx, 1));
         assert!(matches!(result, Err(SendError::Disconnected(_))));
+    }
+
+    #[test]
+    fn cancelled_send_precedence_matches_mpsc_when_receiver_dropped() {
+        let base_cx = test_cx();
+        base_cx.set_cancel_requested(true);
+        let (base_tx, base_rx) = mpsc::channel::<u32>(1);
+        drop(base_rx);
+
+        let base_result = block_on(base_tx.send(&base_cx, 7));
+        assert!(
+            matches!(base_result, Err(SendError::Cancelled(7))),
+            "base mpsc sender should report cancellation before receiver drop"
+        );
+
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, 4);
+        let (fault_tx, fault_rx) = fault_channel::<u32>(1, config, sink);
+        let fault_cx = test_cx();
+        fault_cx.set_cancel_requested(true);
+        drop(fault_rx);
+
+        let fault_result = block_on(fault_tx.send(&fault_cx, 7));
+        assert!(
+            matches!(fault_result, Err(SendError::Cancelled(7))),
+            "fault sender should preserve base mpsc cancellation precedence"
+        );
+        assert_eq!(fault_tx.buffered_count(), 0);
     }
 
     #[test]

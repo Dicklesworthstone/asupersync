@@ -432,7 +432,13 @@ fn check_snapshot_invariants(result: &Result<RegionSnapshot, SnapshotError>) {
                 | SnapshotError::InvalidString
                 | SnapshotError::InvalidPresenceFlag(_)
                 | SnapshotError::TrailingBytes(_)
-                | SnapshotError::MetadataTooLarge { .. } => {
+                | SnapshotError::MetadataTooLarge { .. }
+                | SnapshotError::AuthenticationFailed
+                | SnapshotError::UnauthenticatedSnapshot
+                | SnapshotError::InvalidRegionId { .. }
+                | SnapshotError::InvalidTaskId { .. }
+                | SnapshotError::InvalidVectorClock
+                | SnapshotError::VectorClockTooLarge { .. } => {
                     // These are all expected error types
                 }
             }

@@ -351,7 +351,7 @@ fn test_edge_cases(config: &SpanConformanceConfig, failed_tests: &mut Vec<(Strin
     span.set_float_attribute("nan_value", f64::NAN);
 
     let otlp_attributes = span.to_otlp_attributes();
-    if let Some(attr) = otlp_attributes.get(0) {
+    if let Some(attr) = otlp_attributes.first() {
         if let Some(AnyValue {
             value: Some(ProtoValue::DoubleValue(val)),
         }) = &attr.value
@@ -371,19 +371,18 @@ fn test_edge_cases(config: &SpanConformanceConfig, failed_tests: &mut Vec<(Strin
     span2.set_float_attribute("neg_infinity", f64::NEG_INFINITY);
 
     let otlp_attributes2 = span2.to_otlp_attributes();
-    if let Some(attr) = otlp_attributes2.get(0) {
-        if let Some(AnyValue {
+    if let Some(attr) = otlp_attributes2.first()
+        && let Some(AnyValue {
             value: Some(ProtoValue::DoubleValue(val)),
         }) = &attr.value
-        {
-            if val != &f64::NEG_INFINITY {
-                failed_tests.push((
-                    "float_neg_infinity".to_string(),
-                    "Negative infinity not preserved".to_string(),
-                ));
-            } else {
-                println!("    ✅ float_neg_infinity");
-            }
+    {
+        if val != &f64::NEG_INFINITY {
+            failed_tests.push((
+                "float_neg_infinity".to_string(),
+                "Negative infinity not preserved".to_string(),
+            ));
+        } else {
+            println!("    ✅ float_neg_infinity");
         }
     }
 }

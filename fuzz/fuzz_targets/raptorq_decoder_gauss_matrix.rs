@@ -77,6 +77,10 @@ enum FailureKind {
     SourceEsiOutOfRange,
     InvalidSourceSymbolEquation,
     CorruptDecodedOutput,
+    /// br-asupersync-ju2k01 amplification-DoS budget guard (added in 4463a9682).
+    ComputeBudgetExhausted,
+    /// br-asupersync-ju2k01 per-object ESI rate limit (added in 4463a9682).
+    EsiRateLimitExceeded,
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -397,6 +401,8 @@ fn failure_kind(error: &DecodeError) -> FailureKind {
         DecodeError::SourceEsiOutOfRange { .. } => FailureKind::SourceEsiOutOfRange,
         DecodeError::InvalidSourceSymbolEquation { .. } => FailureKind::InvalidSourceSymbolEquation,
         DecodeError::CorruptDecodedOutput { .. } => FailureKind::CorruptDecodedOutput,
+        DecodeError::ComputeBudgetExhausted { .. } => FailureKind::ComputeBudgetExhausted,
+        DecodeError::EsiRateLimitExceeded { .. } => FailureKind::EsiRateLimitExceeded,
     }
 }
 
@@ -440,10 +446,49 @@ fn assert_failure_consensus(
         .decode_with_proof(received, ObjectId::new_for_test(9002), 0)
         .expect_err("proof decode should fail");
 
-    assert_eq!(failure_kind(&direct), expected);
-    assert_eq!(failure_kind(&wavefront), expected);
-    assert_eq!(failure_kind(&proof), expected);
-    assert_eq!(direct.is_recoverable(), recoverable);
-    assert_eq!(wavefront.is_recoverable(), recoverable);
-    assert_eq!(proof.is_recoverable(), recoverable);
+    let direct_kind = failure_kind(&direct);
+    let wavefront_kind = failure_kind(&wavefront);
+    let proof_kind = failure_kind(&proof);
+
+    if expected == FailureKind::CorruptDecodedOutput {
+        // Corruption can legitimately surface EITHER as CorruptDecodedOutput
+        // (caught by verify_decoded_output) OR as SingularMatrix (when the
+        // corrupted equation is chosen as a pivot and induces rank deficiency).
+        // The decoder's own unit tests (src/raptorq/decoder.rs
+        // decode_*_corrupted_repair_symbol_*) sanction both. Crucially, the
+        // three decode strategies (direct / wavefront / proof) may detect the
+        // same corruption at DIFFERENT stages, so they are NOT required to agree
+        // on which of the two kinds they report (and is_recoverable differs by
+        // kind). We only require that EACH path fails with one of the two valid
+        // corruption kinds — asserting cross-path kind equality here would be an
+        // over-constraint the decoder does not guarantee (gauntlet FUZZ-R6).
+        for (label, kind) in [
+            ("direct", direct_kind),
+            ("wavefront", wavefront_kind),
+            ("proof", proof_kind),
+        ] {
+            assert!(
+                matches!(
+                    kind,
+                    FailureKind::CorruptDecodedOutput | FailureKind::SingularMatrix
+                ),
+                "{label} corruption decode should report CorruptDecodedOutput or SingularMatrix, got {kind:?}"
+            );
+        }
+    } else {
+        // Deterministic structural faults (arity / column / esi / size /
+        // equation) are detected at input-validation time, before strategy
+        // divergence, so all three paths classify identically AND match the
+        // expected kind. Asserting each == expected implies cross-path consensus.
+        assert_eq!(direct_kind, expected, "direct kind != expected");
+        assert_eq!(wavefront_kind, expected, "wavefront kind != expected");
+        assert_eq!(proof_kind, expected, "proof kind != expected");
+        assert_eq!(direct.is_recoverable(), recoverable, "direct recoverable");
+        assert_eq!(
+            wavefront.is_recoverable(),
+            recoverable,
+            "wavefront recoverable"
+        );
+        assert_eq!(proof.is_recoverable(), recoverable, "proof recoverable");
+    }
 }

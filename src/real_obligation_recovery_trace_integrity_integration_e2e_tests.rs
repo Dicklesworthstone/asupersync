@@ -13,8 +13,8 @@ mod tests {
         obligation::{
             ObligationId, ObligationLease, ObligationPermit, ObligationStatus,
             recovery::{
-                ObligationRecovery, PartialSnapshot, RecoveryConfig, RecoveryError,
-                RecoverySnapshot, RecoveryState, SnapshotMetadata,
+                ObligationRecovery, PartialSnapshot, RecoveryError, RecoverySnapshot,
+                RecoveryState, SnapshotMetadata,
             },
         },
         trace::{

@@ -100,8 +100,8 @@ mod imp {
             libc::S_IFIFO => Ok(()),  // Pipes are generally safe
             libc::S_IFCHR => {
                 // Character devices: check for dangerous ones
-                let major = unsafe { libc::major(stat_buf.st_rdev) };
-                let minor = unsafe { libc::minor(stat_buf.st_rdev) };
+                let major = libc::major(stat_buf.st_rdev);
+                let minor = libc::minor(stat_buf.st_rdev);
 
                 match major {
                     1 => {

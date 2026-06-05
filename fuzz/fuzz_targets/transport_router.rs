@@ -1538,7 +1538,7 @@ fn fuzz_fallback_routing(
     let symbol = Symbol::new(symbol_id, vec![42u8; 10], symbol_config.kind.into());
 
     // Test routing
-    let route_result = router.route(&symbol);
+    let route_result = router.route(&symbol, Time::from_secs(0));
 
     if has_default_route {
         // ASSERTION: Should successfully route to default
@@ -1766,7 +1766,7 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
 
             assert!(
                 matches!(
-                    router.route(&symbol),
+                    router.route(&symbol, Time::from_secs(0)),
                     Err(asupersync::transport::router::RoutingError::NoRoute { .. })
                 ),
                 "Routing without matching keys or a default route should report NoRoute"
@@ -1807,7 +1807,7 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
             );
 
             let pre_prune = table
-                .lookup_without_default(&key)
+                .lookup_without_default(&key, created_at)
                 .expect("freshly inserted route should be discoverable");
             assert_eq!(
                 pre_prune.endpoints.len(),
@@ -1829,7 +1829,7 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
                 "route count should drop after eviction"
             );
             assert!(
-                table.lookup_without_default(&key).is_none(),
+                table.lookup_without_default(&key, expire_at).is_none(),
                 "expired route should not survive lookup after pruning"
             );
 
@@ -1842,11 +1842,9 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
                 .iter()
                 .map(|endpoint| endpoint.id)
                 .collect::<Vec<_>>();
-            let reinserted_entry = RoutingEntry::new(
-                reinserted_endpoints.clone(),
-                expire_at.saturating_add_nanos(1),
-            )
-            .with_ttl(ttl);
+            let reinserted_at = expire_at.saturating_add_nanos(1);
+            let reinserted_entry =
+                RoutingEntry::new(reinserted_endpoints.clone(), reinserted_at).with_ttl(ttl);
             table.add_route(key.clone(), reinserted_entry);
 
             assert_eq!(
@@ -1856,7 +1854,7 @@ fn fuzz_edge_cases(edge_case: EdgeCaseScenario) {
             );
 
             let post_reinsert = table
-                .lookup_without_default(&key)
+                .lookup_without_default(&key, reinserted_at)
                 .expect("reinserted route should be discoverable");
             assert_eq!(
                 post_reinsert.endpoints.len(),

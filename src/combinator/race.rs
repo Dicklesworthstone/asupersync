@@ -1948,7 +1948,7 @@ mod tests {
                     let shifted = *index;
                     ((prefix_cancelled.len()..prefix_cancelled.len() + branch_count)
                         .contains(&shifted))
-                    .then_some((
+                    .then(|| (
                         shifted - prefix_cancelled.len(),
                         race_outcome_signature(outcome),
                     ))

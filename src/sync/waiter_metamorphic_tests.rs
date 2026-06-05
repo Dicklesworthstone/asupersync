@@ -352,9 +352,9 @@ mod metamorphic_tests {
     /// clone_wakers() should return wakers in the same order as pop_front sequence
     proptest! {
         #[test]
-        fn mr_clone_wakers_consistency(tags: Vec<String>) {
-            prop_assume!(tags.len() <= 20); // Reasonable bound
-
+        fn mr_clone_wakers_consistency(
+            tags in prop::collection::vec(any::<String>(), 0..=20),
+        ) {
             let mut chain = WaiterChain::new();
 
             // Push items

@@ -2418,6 +2418,33 @@ mod tests {
             raw_bytes: Vec<u8>,
             description: String,
             expect_error: bool,
+            coverage: ReferenceCoverage,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ReferenceCoverage {
+            HttparseRequestHead,
+            CodecOnly,
+        }
+
+        impl CanonicalRequest {
+            fn httparse_head(raw_bytes: &[u8], description: &str, expect_error: bool) -> Self {
+                Self {
+                    raw_bytes: raw_bytes.to_vec(),
+                    description: description.to_string(),
+                    expect_error,
+                    coverage: ReferenceCoverage::HttparseRequestHead,
+                }
+            }
+
+            fn codec_only_error(raw_bytes: &[u8], description: &str) -> Self {
+                Self {
+                    raw_bytes: raw_bytes.to_vec(),
+                    description: description.to_string(),
+                    expect_error: true,
+                    coverage: ReferenceCoverage::CodecOnly,
+                }
+            }
         }
 
         /// Parsed request tuple for comparison.
@@ -2432,81 +2459,77 @@ mod tests {
         // Test cases covering various HTTP/1.1 scenarios including chunked encoding edge cases
         let test_cases = vec![
             // Basic GET request
-            CanonicalRequest {
-                raw_bytes: b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
-                description: "Basic GET request".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                "Basic GET request",
+                false,
+            ),
 
             // POST with Content-Length
-            CanonicalRequest {
-                raw_bytes: b"POST /api/v1/data HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"test\":\"data\"}".to_vec(),
-                description: "POST with Content-Length body".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"POST /api/v1/data HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"test\":\"data\"}",
+                "POST with Content-Length body",
+                false,
+            ),
 
             // Chunked encoding - basic
-            CanonicalRequest {
-                raw_bytes: b"POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n".to_vec(),
-                description: "Basic chunked encoding".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+                "Basic chunked encoding",
+                false,
+            ),
 
             // Chunked encoding edge case: chunk extensions
-            CanonicalRequest {
-                raw_bytes: b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=value\r\nhello\r\n0\r\n\r\n".to_vec(),
-                description: "Chunked encoding with extensions".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=value\r\nhello\r\n0\r\n\r\n",
+                "Chunked encoding with extensions",
+                false,
+            ),
 
             // Chunked encoding edge case: zero-length chunks in middle
-            CanonicalRequest {
-                raw_bytes: b"POST /stream HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n0\r\n\r\n3\r\nbar\r\n0\r\n\r\n".to_vec(),
-                description: "Chunked encoding with zero-length chunks".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"POST /stream HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n0\r\n\r\n3\r\nbar\r\n0\r\n\r\n",
+                "Chunked encoding with zero-length chunks",
+                false,
+            ),
 
             // Complex headers with multiple values
-            CanonicalRequest {
-                raw_bytes: b"PUT /resource HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test-client/1.0\r\nAccept: application/json, text/plain\r\nAuthorization: Bearer token123\r\nContent-Length: 0\r\n\r\n".to_vec(),
-                description: "Complex headers with multiple values".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"PUT /resource HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test-client/1.0\r\nAccept: application/json, text/plain\r\nAuthorization: Bearer token123\r\nContent-Length: 0\r\n\r\n",
+                "Complex headers with multiple values",
+                false,
+            ),
 
             // HTTP/1.0 version
-            CanonicalRequest {
-                raw_bytes: b"GET /legacy HTTP/1.0\r\nHost: old.example.com\r\n\r\n".to_vec(),
-                description: "HTTP/1.0 request".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"GET /legacy HTTP/1.0\r\nHost: old.example.com\r\n\r\n",
+                "HTTP/1.0 request",
+                false,
+            ),
 
             // Edge case: method with unusual but valid characters
-            CanonicalRequest {
-                raw_bytes: b"OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
-                description: "OPTIONS with asterisk URI".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                "OPTIONS with asterisk URI",
+                false,
+            ),
 
             // Edge case: chunked with trailers
-            CanonicalRequest {
-                raw_bytes: b"POST /data HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\nX-Checksum: abc123\r\n\r\n".to_vec(),
-                description: "Chunked encoding with trailers".to_string(),
-                expect_error: false,
-            },
+            CanonicalRequest::httparse_head(
+                b"POST /data HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\nX-Checksum: abc123\r\n\r\n",
+                "Chunked encoding with trailers",
+                false,
+            ),
 
             // Error case: malformed request line
-            CanonicalRequest {
-                raw_bytes: b"GET\r\n\r\n".to_vec(),
-                description: "Malformed request line".to_string(),
-                expect_error: true,
-            },
+            CanonicalRequest::httparse_head(b"GET\r\n\r\n", "Malformed request line", true),
 
-            // Error case: chunked encoding with invalid chunk size
-            CanonicalRequest {
-                raw_bytes: b"POST /bad HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\ndata\r\n".to_vec(),
-                description: "Invalid chunk size".to_string(),
-                expect_error: true,
-            },
+            // Body-semantic error: httparse only validates the request head, so this
+            // stays as a direct codec assertion instead of a differential verdict.
+            CanonicalRequest::codec_only_error(
+                b"POST /bad HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\ndata\r\n",
+                "Invalid chunk size",
+            ),
         ];
 
         /// Parse request with our implementation.
@@ -2579,6 +2602,39 @@ mod tests {
 
         for test_case in &test_cases {
             let our_result = parse_with_our_codec(&test_case.raw_bytes);
+
+            if test_case.coverage == ReferenceCoverage::CodecOnly {
+                match (&our_result, test_case.expect_error) {
+                    (Err(_), true) => {
+                        both_error_count += 1;
+                    }
+                    (Ok(parsed), true) => {
+                        conformance_failures.push(format!(
+                            "EXPECTED CODEC ERROR but our implementation succeeded: {}\n\
+                             Our result: {:?}\n\
+                             Raw bytes:  {:?}",
+                            test_case.description,
+                            parsed,
+                            String::from_utf8_lossy(&test_case.raw_bytes)
+                        ));
+                    }
+                    (Ok(_), false) => {
+                        both_success_count += 1;
+                    }
+                    (Err(err), false) => {
+                        conformance_failures.push(format!(
+                            "CODEC ERROR but expected success: {}\n\
+                             Our error:  {}\n\
+                             Raw bytes:  {:?}",
+                            test_case.description,
+                            err,
+                            String::from_utf8_lossy(&test_case.raw_bytes)
+                        ));
+                    }
+                }
+                continue;
+            }
+
             let ref_result = parse_with_httparse_reference(&test_case.raw_bytes);
 
             match (&our_result, &ref_result, test_case.expect_error) {

@@ -29,9 +29,7 @@ mod tests {
     use crate::{
         cx::{Cx, Scope},
         error::{Error, Result},
-        obligation::marking::{
-            MarkingAnalyzer, MarkingDimension, MarkingEvent, MarkingEventKind, MarkingResult,
-        },
+        obligation::marking::{MarkingEventKind, MarkingResult},
         record::ObligationKind,
         runtime::{Runtime, spawn},
         sync::{Arc, Mutex, RwLock},
@@ -945,7 +943,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_cx_obligation_marking_basic_integration() -> Result<()> {
+    fn test_cx_obligation_marking_basic_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1009,7 +1007,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_cx_checkpoint_obligation_marking() -> Result<()> {
+    fn test_cx_checkpoint_obligation_marking() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1033,7 +1031,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_cx_cancel_propagation_marking_consistency() -> Result<()> {
+    fn test_cx_cancel_propagation_marking_consistency() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1058,7 +1056,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_nested_scope_obligation_marking() -> Result<()> {
+    fn test_nested_scope_obligation_marking() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1085,7 +1083,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_obligation_leak_detection_integration() -> Result<()> {
+    fn test_obligation_leak_detection_integration() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {
@@ -1106,7 +1104,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    async fn test_scope_exit_marking_cleanup() -> Result<()> {
+    fn test_scope_exit_marking_cleanup() -> Result<()> {
         let runtime = Runtime::new()?;
 
         runtime.block_on(async {

@@ -171,8 +171,8 @@ impl ReflectionService {
     /// method name (`"ListServices"` or `"DescribeService"`). Returning
     /// `Ok(())` permits the call; returning `Err(Status)` rejects it with
     /// the supplied status. If `Cx::current()` returns `None` while a
-    /// callback is installed, the RPC is rejected with
-    /// `Status::unauthenticated` because the capability boundary is missing.
+    /// callback is installed, the RPC is rejected with `PermissionDenied`
+    /// because reflection always requires an explicit REMOTE capability.
     ///
     /// # Example
     ///
@@ -199,9 +199,10 @@ impl ReflectionService {
     /// CI tooling, and debug consoles (br-asupersync-mi4hzh).
     ///
     /// **Do not use in production.** Reflection RPCs called against
-    /// an `allow_anonymous()` service expose the full service catalog
-    /// — every method name, streaming kind, descriptor file — to any
-    /// caller who can reach the gRPC port.
+    /// an `allow_anonymous()` service still require an ambient REMOTE
+    /// capability, but skip the production auth callback and expose the
+    /// full service catalog — every method name, streaming kind, descriptor
+    /// file — to any remote-capable caller who can reach the gRPC port.
     ///
     /// Calling this method is the auditable, grep-able way to ship a
     /// dev / test endpoint. CI deployments and security reviewers can
@@ -216,8 +217,9 @@ impl ReflectionService {
     /// Returns whether an auth callback is currently installed.
     /// Useful in tests and operator dashboards to confirm production
     /// hardening is in place. Returns false for both `Locked` (which
-    /// rejects everything) and `Anonymous` (which allows everything)
-    /// — only `Required(_)` reports `true`. (br-asupersync-3tzd9v /
+    /// rejects everything) and `Anonymous` (which skips the callback but
+    /// still requires REMOTE) — only `Required(_)` reports `true`.
+    /// (br-asupersync-3tzd9v /
     /// br-asupersync-mi4hzh)
     #[must_use]
     pub fn auth_installed(&self) -> bool {
@@ -229,24 +231,36 @@ impl ReflectionService {
     /// Returns:
     /// * `Locked` → `Status::permission_denied` with a message that
     ///   names both opt-ins so operators understand the fix.
-    /// * `Required(cb)` → run the callback. If `Cx::current()` is
-    ///   missing, fail-closed with `Status::unauthenticated`.
-    /// * `Anonymous` → `Ok(())`.
+    /// * `Required(cb)` → require a REMOTE `Cx`, then run the callback.
+    /// * `Anonymous` → require a REMOTE `Cx`, then permit the call.
     #[allow(dead_code)]
     fn check_auth(&self, method: &str) -> Result<(), Status> {
+        fn current_remote_cx(method: &str) -> Result<Cx, Status> {
+            let Some(cx) = Cx::current() else {
+                return Err(Status::permission_denied(format!(
+                    "reflection.{method}: requires REMOTE capability"
+                )));
+            };
+            if !cx.has_remote() {
+                return Err(Status::permission_denied(format!(
+                    "reflection.{method}: requires REMOTE capability"
+                )));
+            }
+            Ok(cx)
+        }
+
         match &self.auth {
             ReflectionAuthMode::Locked => Err(Status::permission_denied(format!(
                 "reflection.{method}: service is in Locked mode — call \
                  .with_auth(...) for production or .allow_anonymous() for \
                  dev/test before serving reflection RPCs"
             ))),
-            ReflectionAuthMode::Anonymous => Ok(()),
+            ReflectionAuthMode::Anonymous => {
+                current_remote_cx(method)?;
+                Ok(())
+            }
             ReflectionAuthMode::Required(auth) => {
-                let Some(cx) = Cx::current() else {
-                    return Err(Status::unauthenticated(
-                        "reflection: no Cx in scope for auth callback",
-                    ));
-                };
+                let cx = current_remote_cx(method)?;
                 auth(&cx, method)
             }
         }
@@ -442,12 +456,19 @@ mod tests {
         })
     }
 
+    fn install_remote_reflection_cx() -> crate::cx::cx::CurrentCxGuard {
+        Cx::set_current(Some(Cx::for_testing_with_remote(
+            crate::remote::RemoteCap::new(),
+        )))
+    }
+
     #[test]
     fn reflection_register_list_and_describe() {
         init_test("reflection_register_list_and_describe");
         let reflection = ReflectionService::new().allow_anonymous();
         let echo = EchoService;
         reflection.register_handler(&echo);
+        let _remote_cx = install_remote_reflection_cx();
 
         // Anonymous mode is an explicit dev/test opt-in; `new()` itself is locked.
         let services = reflection
@@ -488,6 +509,7 @@ mod tests {
     fn reflection_describe_missing_service() {
         init_test("reflection_describe_missing_service");
         let reflection = ReflectionService::new().allow_anonymous();
+        let _remote_cx = install_remote_reflection_cx();
         let err = reflection
             .describe_service("pkg.Missing")
             .expect_err("missing service should fail");
@@ -506,6 +528,7 @@ mod tests {
         let reflection = ReflectionService::new().allow_anonymous();
         let echo = EchoService;
         reflection.register_handler(&echo);
+        let _remote_cx = install_remote_reflection_cx();
 
         let list = futures_lite::future::block_on(
             reflection.list_services_async(&Request::new(ReflectionListServicesRequest)),
@@ -564,6 +587,7 @@ mod tests {
         let reflection = ReflectionService::new().allow_anonymous();
         let enum_shape = EnumShapeService;
         reflection.register_handler(&enum_shape);
+        let _remote_cx = install_remote_reflection_cx();
 
         let described = reflection
             .describe_service("pkg.EnumShape")
@@ -587,8 +611,9 @@ mod tests {
             !reflection.auth_installed(),
             "anonymous mode must not report a production auth callback",
         );
-        // Both entry points succeed without an ambient Cx because anonymous
-        // mode was explicitly selected.
+        let _remote_cx = install_remote_reflection_cx();
+        // Both entry points succeed in anonymous mode once the caller has the
+        // explicit REMOTE capability required for reflection.
         assert!(reflection.list_services().is_ok());
         assert!(reflection.describe_service("pkg.Echo").is_ok());
         crate::test_complete!("auth_allow_anonymous_is_open");
@@ -601,16 +626,21 @@ mod tests {
             .register_for_test()
             .with_auth(|_cx, method| Err(Status::permission_denied(format!("denied: {method}"))));
         assert!(reflection.auth_installed());
-        // No ambient Cx → check_auth short-circuits on the missing-Cx
-        // branch and returns Unauthenticated. That's still a rejection
-        // (which is what we want: defense in depth — auth-required
-        // service must run inside a Cx).
+        let _remote_cx = install_remote_reflection_cx();
         let err_list = reflection.list_services().expect_err("auth must reject");
-        assert_eq!(err_list.code(), super::super::status::Code::Unauthenticated);
+        assert_eq!(
+            err_list.code(),
+            super::super::status::Code::PermissionDenied
+        );
+        assert!(err_list.message().contains("denied: ListServices"));
         let err_desc = reflection
             .describe_service("pkg.Echo")
             .expect_err("auth must reject");
-        assert_eq!(err_desc.code(), super::super::status::Code::Unauthenticated);
+        assert_eq!(
+            err_desc.code(),
+            super::super::status::Code::PermissionDenied
+        );
+        assert!(err_desc.message().contains("denied: DescribeService"));
         crate::test_complete!("auth_callback_can_reject");
     }
 
@@ -639,11 +669,7 @@ mod tests {
                     }
                     Ok(())
                 });
-        let cx = Cx::for_testing();
-        // Install cx as the ambient Cx for the duration of the calls so
-        // check_auth's Cx::current() finds it (instead of returning the
-        // missing-Cx Unauthenticated error).
-        let _guard = Cx::set_current(Some(cx));
+        let _guard = install_remote_reflection_cx();
         let _ = reflection.list_services();
         let _ = reflection.describe_service("pkg.Echo");
         drop(_guard);
@@ -711,6 +737,7 @@ mod tests {
             .register_for_test()
             .allow_anonymous();
         // Locked → Anonymous → both RPCs succeed.
+        let _remote_cx = install_remote_reflection_cx();
         assert!(reflection.list_services().is_ok());
         assert!(reflection.describe_service("pkg.Echo").is_ok());
         // auth_installed() reports false for both Locked and Anonymous —
@@ -746,6 +773,11 @@ mod tests {
         let cx = crate::cx::Cx::for_testing();
         let _current = crate::cx::Cx::set_current(Some(cx));
         let _restricted = crate::cx::Cx::push_restriction(crate::cx::cap::CapMask::none());
+        let observed_cx = crate::cx::Cx::current().expect("restricted cx should be current");
+        assert!(
+            !observed_cx.has_remote(),
+            "test precondition: restricted current cx must not expose REMOTE"
+        );
         let result = reflection.list_services();
 
         // Should be denied due to missing REMOTE capability

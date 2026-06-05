@@ -158,6 +158,10 @@ fn execute_operation(
                         // Cancellation can happen, not an error
                         Ok(())
                     }
+                    Err(LockError::TimedOut(_)) => {
+                        // Timeout is a possible non-success result for lock acquisition.
+                        Ok(())
+                    }
                     Err(LockError::PolledAfterCompletion) => {
                         Err("Unexpected PolledAfterCompletion error".to_string())
                     }
@@ -214,7 +218,8 @@ fn execute_operation(
             // This should never panic regardless of poison state
         }
 
-        MutexOperation::GetMut { new_value: _ } => {
+        MutexOperation::GetMut { new_value } => {
+            let _exclusive_value_probe = *new_value;
             // get_mut should panic if poisoned, succeed if not poisoned and we have exclusive access
             let result = catch_unwind(AssertUnwindSafe(|| {
                 // This requires exclusive access, so clone the mutex for this test
@@ -380,6 +385,9 @@ fuzz_target!(|data: &[u8]| {
                             }
                             Err(LockError::Cancelled) => {
                                 // Cancellation can occur
+                            }
+                            Err(LockError::TimedOut(_)) => {
+                                // Timeout can occur; the invariant is that poisoning never permits success.
                             }
                             Err(LockError::PolledAfterCompletion) => {
                                 panic!(

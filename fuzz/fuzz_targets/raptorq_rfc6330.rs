@@ -518,6 +518,12 @@ fn test_duplicate_esi_tolerance(
                 DecodeError::SingularMatrix { .. } => {
                     // Expected with insufficient or inconsistent symbols
                 }
+                DecodeError::ComputeBudgetExhausted { .. } => {
+                    // Expected when malformed symbols trip amplification guards
+                }
+                DecodeError::EsiRateLimitExceeded { .. } => {
+                    // Expected when fuzzed ESI values exceed bounded decode policy
+                }
                 DecodeError::CorruptDecodedOutput { .. } => {
                     // Should not happen with duplicate ESI handling
                     return Err(format!(

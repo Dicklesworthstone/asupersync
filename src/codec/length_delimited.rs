@@ -1582,13 +1582,23 @@ followup.decode.error: none\n",
         count: usize,
     ) -> Vec<MetamorphicTestConfig> {
         (0..count)
-            .map(|_| MetamorphicTestConfig {
-                length_field_offset: rng.gen_range(0..3),
-                length_field_length: rng.gen_range_inclusive(1..=4),
-                length_adjustment: (rng.next_u64() % 21) as isize - 10,
-                num_skip: rng.gen_range(0..8),
-                max_frame_length: rng.gen_range_inclusive(100..=1024),
-                big_endian: (rng.next_u64() % 2) == 0,
+            .map(|_| {
+                let length_field_length = rng.gen_range_inclusive(1..=4);
+                MetamorphicTestConfig {
+                    // `length_field_offset` is a decode-only knob. The encoder
+                    // intentionally emits only the length field plus payload, so
+                    // encoder/decoder round-trip configs must keep the length
+                    // field at the start of the generated wire frame.
+                    length_field_offset: 0,
+                    length_field_length,
+                    length_adjustment: (rng.next_u64() % 21) as isize - 10,
+                    // `num_skip` is also decode-only. For a true encoder ->
+                    // decoder payload round-trip it must consume exactly the
+                    // emitted length field and no payload bytes.
+                    num_skip: length_field_length,
+                    max_frame_length: rng.gen_range_inclusive(100..=1024),
+                    big_endian: (rng.next_u64() % 2) == 0,
+                }
             })
             .collect()
     }
@@ -1964,8 +1974,8 @@ followup.decode.error: none\n",
             );
             assert_eq!(
                 exact_boundary.as_ref(),
-                &[] as &[u8],
-                "exact-max header should be consumed once the decoder enters payload-wait state for {:?}",
+                exact_header.as_slice(),
+                "exact-max header should be retained while waiting for a valid partial frame payload for {:?}",
                 config
             );
 
@@ -2252,6 +2262,13 @@ followup.decode.error: none\n",
 
             let mut encoded = BytesMut::new();
             encoder.encode(payload.clone(), &mut encoded).unwrap();
+            if config.length_field_offset > 0 {
+                let mut with_decode_offset =
+                    BytesMut::with_capacity(config.length_field_offset + encoded.len());
+                with_decode_offset.resize(config.length_field_offset, 0);
+                with_decode_offset.extend_from_slice(&encoded);
+                encoded = with_decode_offset;
+            }
 
             let decoded = decoder.decode(&mut encoded).unwrap().unwrap();
 

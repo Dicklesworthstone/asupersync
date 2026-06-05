@@ -244,11 +244,17 @@ fuzz_target!(|input: OracleIntegrationFuzzInput| {
             break; // Safety limit
         }
 
-        // Determine timing scenario for this event
-        let timing_scenario = input
-            .timing_scenarios
-            .get(event_idx % input.timing_scenarios.len())
-            .unwrap_or(&TimingScenario::Normal);
+        // Determine timing scenario for this event.
+        // Guard against an empty `timing_scenarios` vec: `% 0` panics, and an
+        // empty arbitrary Vec is a legal fuzz input (gauntlet FUZZ-R6).
+        let timing_scenario = if input.timing_scenarios.is_empty() {
+            &TimingScenario::Normal
+        } else {
+            input
+                .timing_scenarios
+                .get(event_idx % input.timing_scenarios.len())
+                .unwrap_or(&TimingScenario::Normal)
+        };
 
         match event {
             OracleEvent::TaskSpawn {

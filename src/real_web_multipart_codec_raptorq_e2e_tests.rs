@@ -31,7 +31,7 @@
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::length_delimited::{LengthDelimitedCodec, LengthDelimitedCodecBuilder};
 use crate::codec::{Decoder, Encoder};
-use crate::raptorq::systematic::{SystematicDecoder, SystematicEncoder, SystematicParams};
+use crate::raptorq::systematic::SystematicDecoder;
 use crate::web::multipart::{Multipart, MultipartField, MultipartLimits};
 use std::collections::HashMap;
 use std::io;

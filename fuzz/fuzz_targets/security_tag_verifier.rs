@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use asupersync::security::key::{AUTH_KEY_SIZE, AuthKey};
 use asupersync::security::tag::{AuthenticationTag, TAG_SIZE};
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use libfuzzer_sys::fuzz_target;
 use sha2::Sha256;
 
@@ -108,14 +108,18 @@ fn apply_mutation(
     mutation: &Mutation,
 ) -> (AuthenticationTag, AuthKey, Symbol) {
     match mutation {
-        Mutation::None => (*computed, *key, symbol.clone()),
+        Mutation::None => (*computed, key.clone(), symbol.clone()),
         Mutation::FlipTagBit { bit } => {
             let mut bytes = *computed.as_bytes();
             let bit = *bit as usize;
             let byte_index = (bit / 8) % TAG_SIZE;
             let mask = 1u8 << ((bit % 8) as u8);
             bytes[byte_index] ^= mask;
-            (AuthenticationTag::from_bytes(bytes), *key, symbol.clone())
+            (
+                AuthenticationTag::from_bytes(bytes),
+                key.clone(),
+                symbol.clone(),
+            )
         }
         Mutation::WrongKey {
             byte_index,
@@ -131,7 +135,7 @@ fn apply_mutation(
             // fall back to the original `key` so the wrong-key mutation
             // degenerates into a same-key no-op (still safe; just less
             // discriminating for that specific input).
-            let mutated_key = AuthKey::from_bytes(key_bytes).unwrap_or_else(|_| *key);
+            let mutated_key = AuthKey::from_bytes(key_bytes).unwrap_or_else(|_| key.clone());
             (*computed, mutated_key, symbol.clone())
         }
         Mutation::MutatePayload {
@@ -146,7 +150,7 @@ fn apply_mutation(
                 payload[idx] = *new_value;
             }
             let mutated = Symbol::new(symbol.id(), payload, symbol.kind());
-            (*computed, *key, mutated)
+            (*computed, key.clone(), mutated)
         }
         Mutation::MutateObjectId { xor_mask } => {
             let current = symbol.id().object_id().as_u128();
@@ -157,7 +161,7 @@ fn apply_mutation(
                 symbol.esi(),
             );
             let mutated = Symbol::new(mutated_id, symbol.data().to_vec(), symbol.kind());
-            (*computed, *key, mutated)
+            (*computed, key.clone(), mutated)
         }
         Mutation::MutateSbn { delta } => {
             let delta = if *delta == 0 { 1 } else { *delta };
@@ -167,7 +171,7 @@ fn apply_mutation(
                 symbol.esi(),
             );
             let mutated = Symbol::new(mutated_id, symbol.data().to_vec(), symbol.kind());
-            (*computed, *key, mutated)
+            (*computed, key.clone(), mutated)
         }
         Mutation::MutateEsi { delta } => {
             let delta = if *delta == 0 { 1 } else { *delta };
@@ -177,7 +181,7 @@ fn apply_mutation(
                 symbol.esi().wrapping_add(delta),
             );
             let mutated = Symbol::new(mutated_id, symbol.data().to_vec(), symbol.kind());
-            (*computed, *key, mutated)
+            (*computed, key.clone(), mutated)
         }
         Mutation::ToggleKind => {
             let kind = match symbol.kind() {
@@ -185,9 +189,9 @@ fn apply_mutation(
                 SymbolKind::Repair => SymbolKind::Source,
             };
             let mutated = Symbol::new(symbol.id(), symbol.data().to_vec(), kind);
-            (*computed, *key, mutated)
+            (*computed, key.clone(), mutated)
         }
-        Mutation::ZeroTag => (AuthenticationTag::zero(), *key, symbol.clone()),
+        Mutation::ZeroTag => (AuthenticationTag::zero(), key.clone(), symbol.clone()),
     }
 }
 

@@ -33,7 +33,12 @@ type PositionMap = HashMap<WaiterId, usize, BuildHasherDefault<DefaultHasher>>;
 /// slot as soon as the head waiter is popped for a handoff. Futures can still
 /// hold their old identity until they observe that handoff, so a bare index
 /// would allow a stale future to remove or update an unrelated newer waiter.
-pub type WaiterId = usize;
+///
+/// Keep this wider than `usize` so 32-bit targets do not re-enter the same
+/// identity space after only `usize::MAX + 1` enqueue operations. A stale
+/// future can outlive its queue slot after a handoff, so the identity must not
+/// be tied to pointer width.
+pub type WaiterId = u64;
 
 /// Slab-backed doubly-linked FIFO of waiters
 /// (br-asupersync-wlf0xh). Each slot carries the task's `Waker` plus
@@ -255,7 +260,7 @@ impl<T> WaiterChain<T> {
 
 impl WaiterChain<()> {
     #[allow(dead_code)]
-    pub(crate) fn push_back(&mut self, waker: Waker) -> usize {
+    pub(crate) fn push_back(&mut self, waker: Waker) -> WaiterId {
         self.push_back_tagged(waker, ())
     }
 
@@ -349,6 +354,34 @@ mod tests {
             Some((live_id, ()))
         );
         assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn waiter_ids_are_stable_across_32_bit_boundary() {
+        let mut chain = WaiterChain::new();
+        chain.next_id = u64::from(u32::MAX) - 1;
+
+        let stale_id = chain.push_back(noop_waker());
+        assert_eq!(stale_id, u64::from(u32::MAX) - 1);
+        assert_eq!(
+            chain.pop_front().map(|(id, _, tag)| (id, tag)),
+            Some((stale_id, ()))
+        );
+
+        let boundary_id = chain.push_back(noop_waker());
+        let after_boundary_id = chain.push_back(noop_waker());
+
+        assert_eq!(boundary_id, u64::from(u32::MAX));
+        assert_eq!(after_boundary_id, u64::from(u32::MAX) + 1);
+        assert_ne!(stale_id, after_boundary_id);
+    }
+
+    #[test]
+    fn waiter_id_width_is_not_pointer_width_limited() {
+        assert!(
+            std::mem::size_of::<super::WaiterId>() >= std::mem::size_of::<u64>(),
+            "waiter ids must remain wide enough for 32-bit targets"
+        );
     }
 }
 

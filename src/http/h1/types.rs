@@ -1373,13 +1373,14 @@ mod tests {
             peer_addr: None,
         };
         let dbg = format!("{req:?}");
-        assert!(dbg.contains("Get"));
+        assert!(dbg.contains("GET"));
         assert!(dbg.contains("/path"));
 
-        let cloned = req;
+        let cloned = req.clone();
         assert_eq!(cloned.method, Method::Get);
         assert_eq!(cloned.uri, "/path");
         assert_eq!(cloned.headers.len(), 1);
+        assert_eq!(req.uri, cloned.uri);
     }
 
     #[test]

@@ -71,7 +71,21 @@
       "rch_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_phase6_flamegraph cargo flamegraph --package asupersync --freq 997 --bench methodology_baselines -o artifacts/flamegraphs/main-<bead-or-short-sha>.svg",
       "artifact_locations": [
         "artifacts/flamegraphs/main-<bead-or-short-sha>.svg"
-      ]
+      ],
+      "pressure_control_attribution": {
+        "contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+        "contract_test": "tests/runtime_pressure_control_evidence_contract.rs",
+        "operator_runbook": "docs/runtime_pressure_triage_runbook.md",
+        "signal": "scheduler_tail_pressure",
+        "lab_scenario_family": "cpu_lane_pressure",
+        "benchmark_surface": "methodology_baselines",
+        "benchmark_rows": [
+          "methodology/task_spawn/inject_ready_global_queue",
+          "methodology/task_spawn/local_queue_push",
+          "methodology/task_spawn/local_queue_spawn_batch/1000"
+        ],
+        "non_claim": "Attribution links scheduler pressure evidence to a required direct-main profiling artifact; it does not prove throughput, performance improvement, or scheduler regression closure."
+      }
     },
     {
       "gate_id": "proof-note",

@@ -2,7 +2,7 @@
 name = "frankenlab"
 version = "0.3.3"
 edition = "2024"
-license-file = "../LICENSE"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Deterministic testing harness for async Rust: record, replay, and minimize concurrency bugs."
 repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["testing", "deterministic", "async", "concurrency", "replay"]

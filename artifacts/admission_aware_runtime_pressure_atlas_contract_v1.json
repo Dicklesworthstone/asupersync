@@ -1,0 +1,634 @@
+{
+  "contract_version": "admission-aware-runtime-pressure-atlas-contract-v1",
+  "schema_version": "admission-aware-runtime-pressure-atlas-v1",
+  "bead_id": "asupersync-bt63nr.2",
+  "created_date": "2026-06-02",
+  "description": "Schema-only contract for a unified admission-aware runtime pressure atlas. The atlas composes existing lock contention, runtime pressure, spectral, proof-lane, dirty-tree, Agent Mail reservation, and swarm proof-planner evidence into one deterministic operator-facing report without changing runtime behavior or starting proof lanes.",
+  "source_of_truth": {
+    "contract": "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+    "contract_test": "tests/admission_aware_runtime_pressure_atlas_contract.rs",
+    "lock_contention_contract": "artifacts/lock_contention_atlas_contract_v1.json",
+    "lock_contention_test": "tests/lock_contention_atlas_contract.rs",
+    "lock_ordering_source": "src/sync/lock_ordering.rs",
+    "contended_mutex_source": "src/sync/contended_mutex.rs",
+    "runtime_pressure_contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+    "runtime_pressure_test": "tests/runtime_pressure_control_evidence_contract.rs",
+    "runtime_pressure_source": "src/runtime/resource_monitor.rs",
+    "rch_health_source": "src/runtime/rch_health/mod.rs",
+    "spectral_health_source": "src/observability/spectral_health.rs",
+    "diagnostics_source": "src/observability/diagnostics.rs",
+    "proof_lane_input_schema": "artifacts/proof_lane_admission_input_schema_v1.json",
+    "proof_lane_input_test": "tests/proof_lane_admission_input_schema_contract.rs",
+    "proof_lane_decision_script": "scripts/proof_lane_admission_decision.py",
+    "proof_lane_decision_test": "tests/proof_lane_admission_decision_contract.rs",
+    "reservation_work_finder_script": "scripts/reservation_aware_work_finder.py",
+    "reservation_work_finder_test": "tests/reservation_aware_work_finder_contract.rs",
+    "swarm_proof_lane_contract": "artifacts/swarm_proof_lane_planner_contract_v1.json",
+    "swarm_proof_lane_test": "tests/swarm_proof_lane_planner_contract.rs",
+    "swarm_proof_lane_source": "src/lab/swarm_replay.rs",
+    "operator_runbook": "docs/runtime_pressure_triage_runbook.md",
+    "tracker_inventory_bead": "asupersync-bt63nr.1"
+  },
+  "scope_boundary": {
+    "defines_schema_only": true,
+    "builds_runtime_snapshot": false,
+    "starts_proof_lanes": false,
+    "runs_cargo": false,
+    "runs_rch": false,
+    "mutates_beads": false,
+    "sends_agent_mail": false,
+    "changes_runtime_policy": false,
+    "production_admission_default_enabled": false,
+    "future_builder_bead": "asupersync-bt63nr.3",
+    "future_planner_bead": "asupersync-bt63nr.4",
+    "future_witness_bead": "asupersync-bt63nr.5",
+    "future_renderer_bead": "asupersync-bt63nr.10",
+    "non_coverage": [
+      "does not prove real-host throughput",
+      "does not prove RCH fleet availability",
+      "does not start or schedule proof lanes",
+      "does not make production admission or backpressure on by default",
+      "does not prove scheduler regression closure",
+      "does not prove per-region allocator enforcement",
+      "does not prove deadlock from spectral warnings alone"
+    ]
+  },
+  "required_sections": [
+    "lock_contention",
+    "scheduler_pressure",
+    "region_memory_budget_pressure",
+    "spectral_wait_graph",
+    "trapped_cycle_witness",
+    "rch_proof_lane_admission",
+    "dirty_tree_peer_ownership",
+    "agent_mail_reservations",
+    "br_tracker_status",
+    "large_host_worker_warmth",
+    "claim_boundary_labels",
+    "operator_closeout_receipt"
+  ],
+  "sections": [
+    {
+      "section_id": "lock_contention",
+      "description": "Lock-order and contention rows projected from the existing lock-order atlas and ContendedMutex metrics.",
+      "owner_source": "artifacts/lock_contention_atlas_contract_v1.json",
+      "implementation_source": "src/sync/lock_ordering.rs",
+      "required_fields": [
+        "lock_name",
+        "lock_rank",
+        "lock_module",
+        "p95_wait_ns",
+        "p999_wait_ns",
+        "p95_hold_ns",
+        "p999_hold_ns",
+        "order_edges_exercised",
+        "order_violations",
+        "instrumentation_mode",
+        "sample_freshness"
+      ],
+      "claim_boundary": "advisory unless paired with deterministic replay or trapped-cycle witness evidence"
+    },
+    {
+      "section_id": "scheduler_pressure",
+      "description": "Scheduler pressure labels and flamegraph attribution pointers folded from runtime pressure evidence.",
+      "owner_source": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "implementation_source": "src/runtime/resource_monitor.rs",
+      "required_fields": [
+        "scheduler_tail_pressure_label",
+        "methodology_baseline_rows",
+        "flamegraph_artifact_path",
+        "phase6_gate_triggered",
+        "attribution_claim_only",
+        "sample_freshness"
+      ],
+      "claim_boundary": "attribution only; not throughput or regression-closure proof"
+    },
+    {
+      "section_id": "region_memory_budget_pressure",
+      "description": "Advisory region memory-envelope pressure rows folded from runtime pressure snapshots.",
+      "owner_source": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "implementation_source": "src/runtime/resource_monitor.rs",
+      "required_fields": [
+        "region_id",
+        "budget_schema_version",
+        "declared_budget_bytes",
+        "observed_usage_bytes",
+        "pressure_level",
+        "optional_work_action",
+        "required_cleanup_admitted",
+        "sample_freshness"
+      ],
+      "claim_boundary": "advisory memory-envelope pressure, not allocator enforcement"
+    },
+    {
+      "section_id": "spectral_wait_graph",
+      "description": "Advisory spectral health rows over the live task wait graph.",
+      "owner_source": "src/observability/spectral_health.rs",
+      "implementation_source": "src/observability/diagnostics.rs",
+      "required_fields": [
+        "early_warning_severity",
+        "health_classification",
+        "fiedler_trend",
+        "recommendations",
+        "deadlock_proven",
+        "requires_trapped_cycle_detection",
+        "sample_freshness"
+      ],
+      "claim_boundary": "advisory only while deadlock_proven is false"
+    },
+    {
+      "section_id": "trapped_cycle_witness",
+      "description": "Explicit witness required before any deadlock-proven claim can be emitted.",
+      "owner_source": "asupersync-bt63nr.5",
+      "implementation_source": "src/observability/diagnostics.rs",
+      "required_fields": [
+        "witness_id",
+        "participants",
+        "held_resources",
+        "wait_edges",
+        "source_step_or_timestamp",
+        "replay_command",
+        "proof_status",
+        "witness_freshness"
+      ],
+      "claim_boundary": "required evidence for trapped_cycle_proven and deadlock_proven labels"
+    },
+    {
+      "section_id": "rch_proof_lane_admission",
+      "description": "Dry-run proof-lane admission rows, no-local-RCH fallback status, target-dir isolation, and worker decision context.",
+      "owner_source": "artifacts/proof_lane_admission_input_schema_v1.json",
+      "implementation_source": "scripts/proof_lane_admission_decision.py",
+      "required_fields": [
+        "lane_id",
+        "admission_decision",
+        "reason_codes",
+        "remote_required",
+        "local_fallback_allowed",
+        "target_dir_isolated",
+        "recommended_worker_id",
+        "cover_claims",
+        "does_not_cover_claims",
+        "suggested_command",
+        "sample_freshness"
+      ],
+      "claim_boundary": "planner receipt only; actual RCH proof command still required"
+    },
+    {
+      "section_id": "dirty_tree_peer_ownership",
+      "description": "Dirty worktree rows that distinguish clean state, peer-owned source overlap, tracker-only dirt, and unattributed dirty paths.",
+      "owner_source": "tests/reservation_aware_work_finder_contract.rs",
+      "implementation_source": "scripts/reservation_aware_work_finder.py",
+      "required_fields": [
+        "path",
+        "dirty_classification",
+        "holder",
+        "bead_id",
+        "source",
+        "overlap_classification",
+        "coordination_decision",
+        "blocks_admission",
+        "handoff_required",
+        "sample_freshness"
+      ],
+      "claim_boundary": "coordination evidence only; never permission to mutate peer work"
+    },
+    {
+      "section_id": "agent_mail_reservations",
+      "description": "Read-only reservation rows supplied by Agent Mail or fixtures for path-overlap decisions.",
+      "owner_source": "mcp-agent-mail:file_reservation_paths",
+      "implementation_source": "scripts/reservation_aware_work_finder.py",
+      "required_fields": [
+        "path_pattern",
+        "holder",
+        "exclusive",
+        "reason",
+        "expires_ts",
+        "bead_id",
+        "overlap_classification",
+        "coordination_decision",
+        "sample_freshness"
+      ],
+      "claim_boundary": "read-only coordination input; planner must not send mail or change reservations"
+    },
+    {
+      "section_id": "br_tracker_status",
+      "description": "Read-only tracker rows for bead status, dependency readiness, and stale-evidence boundaries.",
+      "owner_source": ".beads/issues.jsonl",
+      "implementation_source": "br ready --json",
+      "required_fields": [
+        "bead_id",
+        "status",
+        "priority",
+        "blocked_by",
+        "ready",
+        "assignee",
+        "updated_at",
+        "overlap_classification",
+        "coordination_decision",
+        "sample_freshness"
+      ],
+      "claim_boundary": "read-only planning input; planner must not mutate Beads"
+    },
+    {
+      "section_id": "large_host_worker_warmth",
+      "description": "64-core/256GiB host profile, RCH worker capacity, NUMA, disk, cache-warmth, active-project exclusion, and advisory batching hints.",
+      "owner_source": "artifacts/proof_lane_admission_input_schema_v1.json",
+      "implementation_source": "src/runtime/resource_monitor.rs",
+      "required_fields": [
+        "worker_id",
+        "cpu_cores",
+        "memory_bytes",
+        "numa_nodes",
+        "disk_headroom_bytes",
+        "worker_queue_state",
+        "worker_available_cores",
+        "worker_available_memory_bytes",
+        "cache_warmth",
+        "target_dir_isolated",
+        "active_project_excluded",
+        "proof_lane_cost_estimate",
+        "worker_saturation",
+        "advisory_batching_decision",
+        "advisory_batching_reason_codes",
+        "advisory_batch_size_hint",
+        "advisory_non_claims",
+        "advisory_only",
+        "sample_freshness"
+      ],
+      "claim_boundary": "advisory placement and batching hint only"
+    },
+    {
+      "section_id": "claim_boundary_labels",
+      "description": "Stable closeout labels that prevent advisory data from being overclaimed.",
+      "owner_source": "docs/runtime_pressure_triage_runbook.md",
+      "implementation_source": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "required_fields": [
+        "label",
+        "required_evidence",
+        "forbidden_overclaims",
+        "closeout_text",
+        "sample_freshness"
+      ],
+      "claim_boundary": "label controls how the report may be cited"
+    },
+    {
+      "section_id": "operator_closeout_receipt",
+      "description": "Agent-Mail-ready receipt that composes the atlas verdict, source rows, proof command, non-claims, and recommended next action.",
+      "owner_source": "asupersync-bt63nr.10",
+      "implementation_source": "src/lab/swarm_replay.rs",
+      "required_fields": [
+        "schema_version",
+        "overall_label",
+        "decision",
+        "reason_codes",
+        "source_rows",
+        "proof_command",
+        "cover_claims",
+        "does_not_cover_claims",
+        "freshness_summary",
+        "recommended_next_action"
+      ],
+      "claim_boundary": "reporting layer only; does not itself validate proof success"
+    }
+  ],
+  "field_ownership": [
+    {
+      "field": "sample_freshness",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "All externally supplied rows must declare freshness so stale snapshots fail closed."
+    },
+    {
+      "field": "deadlock_proven",
+      "owner_source": "trapped_cycle_witness",
+      "description": "May be true only when a validated trapped-cycle witness row is present."
+    },
+    {
+      "field": "production_admission_default_enabled",
+      "owner_source": "scope_boundary",
+      "description": "Must remain false for this schema-only contract."
+    },
+    {
+      "field": "local_fallback_allowed",
+      "owner_source": "runtime_pressure_control_evidence_contract_v1",
+      "description": "Remote-required proof lanes must preserve local fallback refusal evidence."
+    },
+    {
+      "field": "overlap_classification",
+      "owner_source": "agent-mail-reservations+dirty-tree+br-tracker",
+      "description": "Caller-supplied read-only overlap class that distinguishes owned work, peer conflicts, expired reservations, tracker-only changes, unrelated peer work, and malformed coordination rows."
+    },
+    {
+      "field": "coordination_decision",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "Builder-derived conservative proceed, defer, handoff_required, or blocked decision for read-only coordination rows."
+    },
+    {
+      "field": "worker_saturation",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "Builder-derived large-host saturation class from queue state, available cores, available memory, disk headroom, and host shape."
+    },
+    {
+      "field": "advisory_batching_decision",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "Builder-derived advisory-only batching decision; never allocator enforcement, throughput proof, or production admission policy."
+    },
+    {
+      "field": "advisory_non_claims",
+      "owner_source": "admission-aware-runtime-pressure-atlas-v1",
+      "description": "Explicit row-level non-claims that must include allocator_enforcement, throughput_improvement, and production_admission_default."
+    }
+  ],
+  "large_host_advisory_profile": {
+    "target_cpu_cores": 64,
+    "target_memory_gib": 256,
+    "minimum_numa_nodes": 2,
+    "batch_core_floor": 8,
+    "batch_memory_floor_gib": 64,
+    "disk_headroom_floor_gib": 128,
+    "planner_boundary": "advisory_batching_only",
+    "non_claims": [
+      "allocator_enforcement",
+      "production_admission_default",
+      "throughput_improvement"
+    ],
+    "deterministic_fixture_cases": [
+      {
+        "case_id": "large_host_admission",
+        "worker_saturation": "available",
+        "expected_decision": "prefer_warm_worker",
+        "required_reason_codes": [
+          "large_host_shape_64_core_256_gib",
+          "target_dir_isolated",
+          "active_project_excluded",
+          "proof_lane_cost_estimate_present",
+          "worker_cache_warm",
+          "advisory_batching_only"
+        ]
+      },
+      {
+        "case_id": "large_host_low_memory_queueing",
+        "worker_saturation": "low_memory",
+        "expected_decision": "queue_low_memory",
+        "required_reason_codes": [
+          "worker_memory_low",
+          "advisory_batching_only"
+        ]
+      },
+      {
+        "case_id": "large_host_worker_saturation",
+        "worker_saturation": "worker_saturated",
+        "expected_decision": "defer_worker_saturated",
+        "required_reason_codes": [
+          "worker_queue_saturated",
+          "worker_core_saturation",
+          "advisory_batching_only"
+        ]
+      },
+      {
+        "case_id": "large_host_cold_cache_batching",
+        "worker_saturation": "available",
+        "expected_decision": "admit_batch",
+        "required_reason_codes": [
+          "worker_cache_cold",
+          "advisory_batching_only"
+        ]
+      }
+    ]
+  },
+  "freshness_policy": {
+    "required_for_all_external_rows": true,
+    "freshness_statuses": [
+      "fresh",
+      "stale",
+      "missing",
+      "unsupported",
+      "malformed"
+    ],
+    "stale_or_missing_default_outcome": "stale_evidence",
+    "malformed_default_outcome": "validation_blocked",
+    "unsupported_default_outcome": "validation_blocked",
+    "clock_source_policy": "Rows may use wall-clock timestamps only as provenance. Deterministic lab rows should prefer fixed step or scenario identifiers."
+  },
+  "claim_labels": [
+    {
+      "label": "advisory",
+      "description": "Evidence is useful for triage but does not prove runtime throughput, production policy safety, or deadlock.",
+      "required_evidence": [
+        "source_row",
+        "sample_freshness"
+      ],
+      "forbidden_overclaims": [
+        "real-host throughput",
+        "production admission enabled",
+        "deadlock proven"
+      ]
+    },
+    {
+      "label": "replay_backed",
+      "description": "A deterministic lab or replay scenario supports the cited diagnosis for fixed inputs.",
+      "required_evidence": [
+        "source_row",
+        "sample_freshness",
+        "replay_command"
+      ],
+      "forbidden_overclaims": [
+        "real-host throughput beyond the replayed scenario"
+      ]
+    },
+    {
+      "label": "trapped_cycle_proven",
+      "description": "A trapped-cycle witness validates the deadlock-style claim.",
+      "required_evidence": [
+        "trapped_cycle_witness",
+        "wait_edges",
+        "held_resources",
+        "replay_command"
+      ],
+      "forbidden_overclaims": [
+        "global deadlock beyond the witnessed cycle"
+      ]
+    },
+    {
+      "label": "deadlock_proven",
+      "description": "Alias label for closeouts that need the word deadlock; only valid with the same trapped-cycle witness requirements.",
+      "required_evidence": [
+        "trapped_cycle_witness",
+        "wait_edges",
+        "held_resources",
+        "replay_command"
+      ],
+      "forbidden_overclaims": [
+        "spectral-only deadlock proof"
+      ]
+    },
+    {
+      "label": "validation_blocked",
+      "description": "The lane could not produce a green proof and must name the first blocker.",
+      "required_evidence": [
+        "source_row",
+        "blocker_code"
+      ],
+      "forbidden_overclaims": [
+        "green validation"
+      ]
+    },
+    {
+      "label": "stale_evidence",
+      "description": "A required snapshot, reservation, tracker row, or worker receipt is too old or missing.",
+      "required_evidence": [
+        "freshness_status",
+        "source_row"
+      ],
+      "forbidden_overclaims": [
+        "current admission decision"
+      ]
+    }
+  ],
+  "negative_cases": [
+    {
+      "case_id": "deadlock_proven_without_trapped_cycle_witness",
+      "input_pattern": {
+        "claim_label": "deadlock_proven",
+        "trapped_cycle_witness": null
+      },
+      "expected_outcome": "validation_blocked",
+      "required_reason_code": "missing_trapped_cycle_witness"
+    },
+    {
+      "case_id": "spectral_warning_overclaimed_as_deadlock",
+      "input_pattern": {
+        "section": "spectral_wait_graph",
+        "early_warning_severity": "critical",
+        "deadlock_proven": false
+      },
+      "expected_outcome": "advisory",
+      "required_reason_code": "trapped_cycle_detection_required"
+    },
+    {
+      "case_id": "production_admission_implied_by_default",
+      "input_pattern": {
+        "production_admission_default_enabled": true
+      },
+      "expected_outcome": "validation_blocked",
+      "required_reason_code": "production_admission_must_remain_opt_in"
+    },
+    {
+      "case_id": "remote_required_with_local_fallback_allowed",
+      "input_pattern": {
+        "remote_required": true,
+        "local_fallback_allowed": true
+      },
+      "expected_outcome": "validation_blocked",
+      "required_reason_code": "local_fallback_refusal_required"
+    },
+    {
+      "case_id": "stale_agent_mail_reservation_snapshot",
+      "input_pattern": {
+        "section": "agent_mail_reservations",
+        "sample_freshness": "stale"
+      },
+      "expected_outcome": "stale_evidence",
+      "required_reason_code": "reservation_snapshot_stale"
+    },
+    {
+      "case_id": "active_exclusive_agent_mail_conflict",
+      "input_pattern": {
+        "section": "agent_mail_reservations",
+        "exclusive": true,
+        "overlap_classification": "active_exclusive_conflict"
+      },
+      "expected_outcome": "defer",
+      "required_reason_code": "active_exclusive_agent_mail_conflict"
+    },
+    {
+      "case_id": "peer_owned_dirty_tree_overlap",
+      "input_pattern": {
+        "section": "dirty_tree_peer_ownership",
+        "overlap_classification": "peer_exact",
+        "handoff_required": true
+      },
+      "expected_outcome": "handoff_required",
+      "required_reason_code": "peer_dirty_tree_overlap"
+    },
+    {
+      "case_id": "expired_agent_mail_reservation",
+      "input_pattern": {
+        "section": "agent_mail_reservations",
+        "overlap_classification": "expired_reservation"
+      },
+      "expected_outcome": "proceed",
+      "required_reason_code": "expired_agent_mail_reservation"
+    },
+    {
+      "case_id": "tracker_only_dirty_tree_change",
+      "input_pattern": {
+        "section": "dirty_tree_peer_ownership",
+        "overlap_classification": "tracker_only"
+      },
+      "expected_outcome": "proceed",
+      "required_reason_code": "tracker_only_dirty_tree_change"
+    },
+    {
+      "case_id": "large_host_low_memory_queueing",
+      "input_pattern": {
+        "section": "large_host_worker_warmth",
+        "worker_saturation": "low_memory"
+      },
+      "expected_outcome": "queue_low_memory",
+      "required_reason_code": "worker_memory_low"
+    },
+    {
+      "case_id": "large_host_worker_saturation_defer",
+      "input_pattern": {
+        "section": "large_host_worker_warmth",
+        "worker_saturation": "worker_saturated"
+      },
+      "expected_outcome": "defer_worker_saturated",
+      "required_reason_code": "worker_queue_saturated"
+    },
+    {
+      "case_id": "large_host_warm_worker_preference",
+      "input_pattern": {
+        "section": "large_host_worker_warmth",
+        "cache_warmth": "warm",
+        "active_project_excluded": true
+      },
+      "expected_outcome": "prefer_warm_worker",
+      "required_reason_code": "worker_cache_warm"
+    },
+    {
+      "case_id": "large_host_advisory_overclaim_guard",
+      "input_pattern": {
+        "section": "large_host_worker_warmth",
+        "advisory_only": true,
+        "advisory_non_claims": [
+          "allocator_enforcement",
+          "production_admission_default",
+          "throughput_improvement"
+        ]
+      },
+      "expected_outcome": "advisory",
+      "required_reason_code": "advisory_batching_only"
+    },
+    {
+      "case_id": "unrelated_peer_work",
+      "input_pattern": {
+        "section": "dirty_tree_peer_ownership",
+        "overlap_classification": "unrelated_peer_work"
+      },
+      "expected_outcome": "proceed",
+      "required_reason_code": "unrelated_peer_work"
+    }
+  ],
+  "validation": {
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_admission_aware_runtime_pressure_atlas_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test admission_aware_runtime_pressure_atlas_contract -- --nocapture",
+    "expected_signal": "admission_aware_runtime_pressure_atlas_contract tests pass",
+    "does_not_cover": [
+      "runtime snapshot builder implementation",
+      "proof-lane admission planner implementation",
+      "renderer implementation",
+      "RCH fleet availability",
+      "production runtime throughput"
+    ]
+  }
+}

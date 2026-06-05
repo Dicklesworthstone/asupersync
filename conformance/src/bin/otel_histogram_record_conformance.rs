@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_bucket_assignment_logic() {
-        let boundaries = vec![1.0, 5.0, 10.0];
+        let boundaries = [1.0, 5.0, 10.0];
 
         // Test boundary assignment logic
         let test_cases = vec![
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_empty_observations() {
-        let boundaries = vec![1.0, 5.0, 10.0];
+        let boundaries = [1.0, 5.0, 10.0];
         let observations: Vec<f64> = vec![];
 
         // Should result in all zero counts

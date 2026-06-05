@@ -10,12 +10,7 @@
 //! 5. Close code 1000 (Normal Closure) correctly handled
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::Decoder;
-use asupersync::net::websocket::{
-    close::{CloseCode, CloseReason},
-    frame::{Frame, FrameCodec, Opcode, WsError},
-};
+use asupersync::net::websocket::{CloseCode, CloseReason, Frame, Message, Opcode, WsError};
 use libfuzzer_sys::fuzz_target;
 
 /// Structured input for controlled WebSocket close frame fuzzing scenarios.
@@ -262,7 +257,9 @@ fn fuzz_raw_close_payload(payload: &[u8]) {
                 parse_result.is_ok(),
                 "Empty close payload should parse successfully"
             );
-            let reason = parse_result.unwrap();
+            let reason = parse_result
+                .as_ref()
+                .expect("empty close payload should parse successfully");
             assert!(reason.code.is_none(), "Empty payload should have no code");
             assert!(
                 reason.raw_code.is_none(),
@@ -287,7 +284,7 @@ fn fuzz_raw_close_payload(payload: &[u8]) {
             // 2+ bytes: status code + optional reason
             let code_raw = u16::from_be_bytes([payload[0], payload[1]]);
 
-            match parse_result {
+            match &parse_result {
                 Ok(reason) => {
                     // ASSERTION 1: Status code must be in valid range
                     assert!(
@@ -368,7 +365,7 @@ fn fuzz_raw_close_payload(payload: &[u8]) {
     }
 
     // Test round-trip encoding if parsing succeeded
-    if let Ok(reason) = parse_result {
+    if let Ok(reason) = &parse_result {
         let encoded = reason.encode();
 
         // ASSERTION 4: Close code + reason length bounds
@@ -536,7 +533,7 @@ fn generate_invalid_utf8(pattern: InvalidUtf8Pattern) -> Vec<u8> {
 }
 
 fn fuzz_forbidden_codes(forbidden: ForbiddenCodeTest) {
-    let code = match forbidden {
+    let code: u16 = match forbidden {
         ForbiddenCodeTest::Reserved1004 => 1004,
         ForbiddenCodeTest::NoStatusReceived1005 => 1005,
         ForbiddenCodeTest::AbnormalClosure1006 => 1006,
@@ -601,7 +598,7 @@ fn fuzz_forbidden_codes(forbidden: ForbiddenCodeTest) {
 }
 
 fn fuzz_boundary_codes(boundary: BoundaryCodeTest) {
-    let code = match boundary {
+    let code: u16 = match boundary {
         BoundaryCodeTest::ExactlyNormal => 1000,
         BoundaryCodeTest::ExactlyBeforeReserved => 1003,
         BoundaryCodeTest::ExactlyAfterReserved => 1007,
@@ -672,6 +669,13 @@ fn fuzz_boundary_codes(boundary: BoundaryCodeTest) {
 }
 
 fn fuzz_full_frame(payload: Vec<u8>, fin: bool, rsv1: bool, rsv2: bool, rsv3: bool) {
+    // ASSERTION 4: Close code + reason length bounds
+    // Control frames must have payload ≤ 125 bytes
+    if payload.len() > 125 {
+        // Should be rejected during frame validation
+        return;
+    }
+
     // Test full frame decoding with close opcode
     let frame = Frame {
         fin,
@@ -681,25 +685,18 @@ fn fuzz_full_frame(payload: Vec<u8>, fin: bool, rsv1: bool, rsv2: bool, rsv3: bo
         opcode: Opcode::Close,
         masked: false,
         mask_key: None,
-        payload: payload.into(),
+        payload: payload.clone().into(),
     };
-
-    // ASSERTION 4: Close code + reason length bounds
-    // Control frames must have payload ≤ 125 bytes
-    if payload.len() > 125 {
-        // Should be rejected during frame validation
-        return;
-    }
 
     // Try to extract close reason from frame
     let reason_result = CloseReason::parse(&frame.payload);
 
     // Test frame-to-message conversion
-    let message_result = crate::net::websocket::client::Message::try_from(frame);
+    let message_result = Message::try_from(frame);
 
     match message_result {
         Ok(message) => {
-            if let crate::net::websocket::client::Message::Close(reason_opt) = message {
+            if let Message::Close(reason_opt) = message {
                 match reason_result {
                     Ok(expected_reason) => {
                         match reason_opt {

@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeMap, BTreeSet};
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 10 {
+    if data.len() < 11 {
         return;
     }
 
@@ -13,10 +13,13 @@ fuzz_target!(|data: &[u8]| {
     let vnodes_per_node = ((data[0] as usize) % 128) + 1; // 1-128 vnodes
     let max_nodes = ((data[1] as usize) % 64) + 1; // 1-64 max nodes
     let operation_count = ((data[2] as usize) % 100) + 1; // 1-100 operations
+    let seed = u64::from_le_bytes([
+        data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10],
+    ]);
 
-    let mut ring = HashRing::new(vnodes_per_node);
+    let mut ring = HashRing::new(vnodes_per_node, seed);
     let mut expected_nodes = BTreeSet::new();
-    let mut operation_idx = 3;
+    let mut operation_idx = 11;
 
     // Generate a stable set of test keys for consistency checking
     let test_keys: Vec<u64> = (0..100).map(|i| i as u64 * 31 + 17).collect();

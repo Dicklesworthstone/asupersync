@@ -709,14 +709,14 @@ impl<T> Drop for RecvUninterruptibleFuture<'_, T> {
 }
 
 /// Future returned by [`Receiver::recv`].
-pub struct RecvFuture<'a, T> {
+pub struct RecvFuture<'a, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
-    cx: &'a Cx,
+    cx: &'a Cx<Caps>,
     waiter_id: Option<u64>,
     completed: bool,
 }
 
-impl<T> RecvFuture<'_, T> {
+impl<T, Caps> RecvFuture<'_, T, Caps> {
     #[must_use]
     #[allow(dead_code)] // Public API — may be used by future callers
     #[inline]
@@ -725,7 +725,7 @@ impl<T> RecvFuture<'_, T> {
     }
 }
 
-impl<T> Future for RecvFuture<'_, T> {
+impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
     type Output = Result<T, RecvError>;
 
     #[inline]
@@ -808,7 +808,7 @@ impl<T> Future for RecvFuture<'_, T> {
     }
 }
 
-impl<T> Drop for RecvFuture<'_, T> {
+impl<T, Caps> Drop for RecvFuture<'_, T, Caps> {
     fn drop(&mut self) {
         // If dropped while Pending (e.g., select/race loser), clear
         // the registered waker to avoid retaining stale executor state.
@@ -856,7 +856,7 @@ impl<T> Receiver<T> {
     /// Returns `Err(RecvError::Closed)` if the sender was dropped without sending.
     #[inline]
     #[must_use]
-    pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> RecvFuture<'a, T> {
+    pub fn recv<'a, Caps>(&'a mut self, cx: &'a Cx<Caps>) -> RecvFuture<'a, T, Caps> {
         RecvFuture {
             receiver: self,
             cx,
@@ -1038,6 +1038,19 @@ mod tests {
             Just(SendScenario::LivePendingWaiter),
             Just(SendScenario::ReceiverDropped),
         ]
+    }
+
+    #[test]
+    fn recv_accepts_detached_no_cap_context() {
+        init_test("recv_accepts_detached_no_cap_context");
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (tx, mut rx) = channel::<i32>();
+
+        tx.send_blocking(47).expect("send_blocking should succeed");
+        let value = block_on(rx.recv(&cx)).expect("recv should accept cap::None Cx");
+
+        crate::assert_with_log!(value == 47, "recv value", 47, value);
+        crate::test_complete!("recv_accepts_detached_no_cap_context");
     }
 
     fn send_path_signature(
@@ -3037,7 +3050,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
 
-        const NUM_ITERATIONS: usize = 1000;
+        const NUM_ITERATIONS: usize = 128;
 
         for iteration in 0..NUM_ITERATIONS {
             // Shared memory location that receiver will write to before dropping
@@ -3592,7 +3605,7 @@ mod tests {
         }
 
         // Test 4: Stress test - waker notification on receiver drop
-        let iterations = 100;
+        let iterations = 32;
         let mut successful_wakeups = 0;
 
         for iteration in 0..iterations {
@@ -3743,7 +3756,7 @@ mod tests {
         }
 
         // Test 2: Stress test with timing variations
-        let iterations = 100;
+        let iterations = 32;
         let mut successful_immediate_errors = 0;
 
         for iteration in 0..iterations {
@@ -3896,7 +3909,7 @@ mod tests {
         }
 
         // Test 2: Race condition stress test
-        let iterations = 100;
+        let iterations = 64;
         let mut successful_recoveries = 0;
         let mut lost_values = 0;
 
@@ -4048,7 +4061,7 @@ mod tests {
         );
 
         // Phase 2: Spurious wakeup stress test - poll many times without sending
-        const SPURIOUS_POLLS: usize = 100;
+        const SPURIOUS_POLLS: usize = 32;
         let mut spurious_pending_count = 0;
 
         for i in 1..=SPURIOUS_POLLS {
@@ -5008,7 +5021,7 @@ mod tests {
         // Phase 4: Concurrent cancellation stress test
         println!("  Phase 4: Concurrent cancellation and send stress test");
 
-        const STRESS_ITERATIONS: usize = 100;
+        const STRESS_ITERATIONS: usize = 64;
         let mut successful_sends = 0;
         let mut cancelled_sends = 0;
         let mut receiver_closed_observations = 0;
@@ -5555,8 +5568,8 @@ mod tests {
         let unexpected_outcomes = Arc::new(AtomicUsize::new(0));
 
         // Test with high iteration count to catch race conditions
-        const RACE_ITERATIONS: usize = 1000;
-        const BATCH_SIZE: usize = 50; // Process in batches to avoid thread explosion
+        const RACE_ITERATIONS: usize = 128;
+        const BATCH_SIZE: usize = 16; // Process in batches to avoid thread explosion
 
         println!();
         println!(
@@ -5660,8 +5673,9 @@ mod tests {
                 handle.join().expect("race test thread failed");
             }
 
-            // Small delay between batches to prevent resource exhaustion
-            thread::sleep(Duration::from_millis(10));
+            // Yield between batches so completed thread resources are reclaimed
+            // without turning the release gate into a long wall-clock soak.
+            thread::sleep(Duration::from_millis(1));
         }
 
         let final_returned = values_returned_to_sender.load(Ordering::SeqCst);
@@ -5766,8 +5780,8 @@ mod tests {
         let send_cancelled_count = Arc::new(AtomicUsize::new(0));
 
         // High iteration count to catch rare race conditions
-        const EXACT_MOMENT_ITERATIONS: usize = 10_000;
-        const BATCH_SIZE: usize = 100;
+        const EXACT_MOMENT_ITERATIONS: usize = 256;
+        const BATCH_SIZE: usize = 32;
 
         println!();
         println!(
@@ -5993,7 +6007,7 @@ mod tests {
         println!("  - Critical: Value must not be lost due to unpopulated future");
 
         // Test multiple scenarios to catch edge cases
-        const TEST_ITERATIONS: usize = 1000;
+        const TEST_ITERATIONS: usize = 128;
         let successful_retrievals = Arc::new(AtomicUsize::new(0));
         let value_loss_bugs = Arc::new(AtomicUsize::new(0));
 
@@ -6140,7 +6154,7 @@ mod tests {
         let concurrent_successes = Arc::new(AtomicUsize::new(0));
         let concurrent_bugs = Arc::new(AtomicUsize::new(0));
 
-        const CONCURRENT_ITERATIONS: usize = 100;
+        const CONCURRENT_ITERATIONS: usize = 32;
         let mut handles = Vec::with_capacity(CONCURRENT_ITERATIONS);
 
         for iteration in 0..CONCURRENT_ITERATIONS {

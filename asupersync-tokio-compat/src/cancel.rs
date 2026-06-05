@@ -83,7 +83,11 @@ impl<F: Future> CancelAware<F> {
     }
 
     /// Create a cancel-aware wrapper with an externally owned signal.
-    pub fn with_signal(future: F, mode: CancellationMode, cancel_signal: CancelSignal) -> Self {
+    pub const fn with_signal(
+        future: F,
+        mode: CancellationMode,
+        cancel_signal: CancelSignal,
+    ) -> Self {
         Self {
             future,
             cancel_signal,
