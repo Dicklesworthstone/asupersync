@@ -61,9 +61,24 @@
     {
       "accepted_count": 1,
       "candidate_count": 6,
+      "candidate_pruned_count": 5,
       "miss_count": 1,
+      "pruning_reason_counts": {
+        "dirty-frontier-overlap": 1,
+        "failed-proof-status": 1,
+        "lane-mismatch": 1,
+        "local-fallback-marker": 1,
+        "stale-head": 1
+      },
       "refused_count": 4,
       "stage": "classify"
+    },
+    {
+      "row_limit": 100,
+      "rows_emitted_count": 6,
+      "rows_omission_reason": "",
+      "rows_omitted_count": 0,
+      "stage": "project"
     },
     {
       "chosen_proof_id": "proof:reuse-index-reusable",
@@ -336,9 +351,18 @@
       "stale-head": 1
     },
     "candidate_count": 6,
+    "candidate_pruned_count": 5,
     "chosen_proof_id": "proof:reuse-index-reusable",
+    "elapsed_time": {
+      "measured": false,
+      "reason": "deterministic CLI output omits wall-clock timing; contract tests log elapsed_ms"
+    },
     "miss_count": 1,
     "refused_count": 4,
+    "row_limit": 100,
+    "rows_emitted_count": 6,
+    "rows_omission_reason": "",
+    "rows_omitted_count": 0,
     "top_rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
   }
 }

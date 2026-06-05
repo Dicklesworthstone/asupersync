@@ -24,6 +24,8 @@ SCHEMA_VERSION = "proof-artifact-freshness-receipt-v1"
 PROOF_REUSE_SCHEMA_VERSION = "proof-reuse-classifier-v1"
 PROOF_REUSE_INDEX_SCHEMA_VERSION = "proof-reuse-index-v1"
 PROOF_REUSE_QUERY_SCHEMA_VERSION = "proof-reuse-query-result-v1"
+DEFAULT_PROOF_REUSE_QUERY_ROW_LIMIT = 100
+MAX_PROOF_REUSE_QUERY_ROW_LIMIT = 1000
 MAIN_BRANCH = "main"
 APPROVED_PROOF_REUSE_INDEX_ROOTS = (
     "artifacts",
@@ -1651,18 +1653,37 @@ def sort_proof_reuse_query_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
     return rows
 
 
+def bounded_proof_reuse_query_row_limit(raw_limit: Any) -> int:
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_PROOF_REUSE_QUERY_ROW_LIMIT
+    return max(0, min(limit, MAX_PROOF_REUSE_QUERY_ROW_LIMIT))
+
+
 def summarize_proof_reuse_query(
     rows: list[dict[str, Any]],
     request: dict[str, Any],
+    emitted_count: int,
+    row_limit: int,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "candidate_count": len(rows),
         "accepted_count": 0,
         "refused_count": 0,
         "miss_count": 0,
+        "candidate_pruned_count": 0,
+        "row_limit": row_limit,
+        "rows_emitted_count": emitted_count,
+        "rows_omitted_count": max(0, len(rows) - emitted_count),
+        "rows_omission_reason": "bounded-query-output" if len(rows) > emitted_count else "",
         "chosen_proof_id": "",
         "top_rerun_command": request.get("command", ""),
         "by_reason_code": {},
+        "elapsed_time": {
+            "measured": False,
+            "reason": "deterministic CLI output omits wall-clock timing; contract tests log elapsed_ms",
+        },
     }
     for row in rows:
         if row["decision"] == "reusable":
@@ -1676,6 +1697,7 @@ def summarize_proof_reuse_query(
         for reason in row.get("reason_codes", []):
             summary["by_reason_code"][reason] = summary["by_reason_code"].get(reason, 0) + 1
     summary["by_reason_code"] = dict(sorted(summary["by_reason_code"].items()))
+    summary["candidate_pruned_count"] = summary["refused_count"] + summary["miss_count"]
     if not summary["top_rerun_command"]:
         for row in rows:
             rerun = row.get("remediation", {}).get("rerun_command", "")
@@ -1692,7 +1714,7 @@ def build_proof_reuse_query(args: argparse.Namespace) -> dict[str, Any]:
         Path(args.repo_path).resolve(),
     )
     request = normalize_reuse_request(load_json(request_path))
-    rows = sort_proof_reuse_query_rows(
+    all_rows = sort_proof_reuse_query_rows(
         [
             compact_proof_reuse_query_row(
                 item,
@@ -1705,8 +1727,12 @@ def build_proof_reuse_query(args: argparse.Namespace) -> dict[str, Any]:
             for item in corpus
         ]
     )
-    summary = summarize_proof_reuse_query(rows, request)
-    best_candidate = next((row for row in rows if row["decision"] == "reusable"), None)
+    row_limit = bounded_proof_reuse_query_row_limit(
+        getattr(args, "max_query_rows", DEFAULT_PROOF_REUSE_QUERY_ROW_LIMIT)
+    )
+    rows = all_rows[:row_limit]
+    summary = summarize_proof_reuse_query(all_rows, request, len(rows), row_limit)
+    best_candidate = next((row for row in all_rows if row["decision"] == "reusable"), None)
     result = {
         "schema_version": PROOF_REUSE_QUERY_SCHEMA_VERSION,
         "generated_at": index["generated_at"],
@@ -1723,6 +1749,15 @@ def build_proof_reuse_query(args: argparse.Namespace) -> dict[str, Any]:
                 "accepted_count": summary["accepted_count"],
                 "refused_count": summary["refused_count"],
                 "miss_count": summary["miss_count"],
+                "candidate_pruned_count": summary["candidate_pruned_count"],
+                "pruning_reason_counts": summary["by_reason_code"],
+            },
+            {
+                "stage": "project",
+                "row_limit": summary["row_limit"],
+                "rows_emitted_count": summary["rows_emitted_count"],
+                "rows_omitted_count": summary["rows_omitted_count"],
+                "rows_omission_reason": summary["rows_omission_reason"],
             },
             {
                 "stage": "choose",
@@ -1756,6 +1791,9 @@ def render_proof_reuse_query_markdown(result: dict[str, Any]) -> str:
         f"- accepted: {summary['accepted_count']}",
         f"- refused: {summary['refused_count']}",
         f"- misses: {summary['miss_count']}",
+        f"- candidate_pruned: {summary['candidate_pruned_count']}",
+        f"- detailed_rows_emitted: {summary['rows_emitted_count']}",
+        f"- detailed_rows_omitted: {summary['rows_omitted_count']}",
         f"- chosen_proof_id: {chosen}",
         f"- top_rerun_command: {summary['top_rerun_command'] or '<missing>'}",
         "",
@@ -1992,6 +2030,15 @@ def main() -> int:
         dest="reuse_request_path",
         default="",
         help="Desired proof lane JSON envelope for proof reuse query mode",
+    )
+    parser.add_argument(
+        "--max-query-rows",
+        type=int,
+        default=DEFAULT_PROOF_REUSE_QUERY_ROW_LIMIT,
+        help=(
+            "Maximum detailed rows to emit for proof reuse query results "
+            f"(0-{MAX_PROOF_REUSE_QUERY_ROW_LIMIT}; full summary counts are preserved)"
+        ),
     )
     parser.add_argument("--output", choices=["json", "markdown"], default="json")
     args = parser.parse_args()

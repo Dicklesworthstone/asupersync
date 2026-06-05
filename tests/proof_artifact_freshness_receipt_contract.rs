@@ -2,14 +2,16 @@
 
 #![allow(missing_docs)]
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const SCRIPT_PATH: &str = "scripts/proof_artifact_freshness_receipt.py";
 const FIXTURE_ROOT: &str = "tests/fixtures/proof_artifact_freshness_receipt";
+const LARGE_CORPUS_CONTRACT_PATH: &str = "artifacts/proof_reuse_large_corpus_contract_v1.json";
 const GENERATED_AT: &str = "2026-05-08T05:20:00Z";
 
 fn repo_root() -> PathBuf {
@@ -98,6 +100,12 @@ fn reuse_query_json() -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("proof reuse query output must be JSON")
+}
+
+fn large_corpus_contract_json() -> Value {
+    let text = fs::read_to_string(repo_root().join(LARGE_CORPUS_CONTRACT_PATH))
+        .expect("read large-corpus proof reuse contract");
+    serde_json::from_str(&text).expect("large-corpus proof reuse contract JSON")
 }
 
 fn fixture_text(fixture: &str) -> String {
@@ -1264,6 +1272,11 @@ fn proof_reuse_query_selects_only_classifier_approved_candidate() {
     assert_eq!(query["summary"]["accepted_count"].as_u64(), Some(1));
     assert_eq!(query["summary"]["refused_count"].as_u64(), Some(4));
     assert_eq!(query["summary"]["miss_count"].as_u64(), Some(1));
+    assert_eq!(query["summary"]["candidate_pruned_count"].as_u64(), Some(5));
+    assert_eq!(query["summary"]["row_limit"].as_u64(), Some(100));
+    assert_eq!(query["summary"]["rows_emitted_count"].as_u64(), Some(6));
+    assert_eq!(query["summary"]["rows_omitted_count"].as_u64(), Some(0));
+    assert_eq!(query["summary"]["rows_omission_reason"].as_str(), Some(""));
     assert_eq!(
         query["summary"]["chosen_proof_id"].as_str(),
         Some("proof:reuse-index-reusable")
@@ -1312,16 +1325,344 @@ fn proof_reuse_query_selects_only_classifier_approved_candidate() {
     assert_eq!(query["logs"][0]["stage"].as_str(), Some("scan"));
     assert_eq!(query["logs"][1]["stage"].as_str(), Some("classify"));
     assert_eq!(query["logs"][1]["accepted_count"].as_u64(), Some(1));
-    assert_eq!(query["logs"][2]["stage"].as_str(), Some("choose"));
+    assert_eq!(query["logs"][1]["candidate_pruned_count"].as_u64(), Some(5));
     assert_eq!(
-        query["logs"][2]["chosen_proof_id"].as_str(),
+        query["logs"][1]["pruning_reason_counts"]["lane-mismatch"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(query["logs"][2]["stage"].as_str(), Some("project"));
+    assert_eq!(query["logs"][2]["row_limit"].as_u64(), Some(100));
+    assert_eq!(query["logs"][2]["rows_emitted_count"].as_u64(), Some(6));
+    assert_eq!(query["logs"][2]["rows_omitted_count"].as_u64(), Some(0));
+    assert_eq!(query["logs"][3]["stage"].as_str(), Some("choose"));
+    assert_eq!(
+        query["logs"][3]["chosen_proof_id"].as_str(),
         Some("proof:reuse-index-reusable")
     );
     assert!(
-        query["logs"][2]["top_rerun_command"]
+        query["logs"][3]["top_rerun_command"]
             .as_str()
             .expect("top rerun command")
             .starts_with("RCH_REQUIRE_REMOTE=1 rch exec --")
+    );
+}
+
+fn proof_reuse_large_corpus_artifact(
+    index: usize,
+    manifest_lane_id: &str,
+    source_fingerprint: &str,
+    toolchain_fingerprint: &str,
+    local_fallback: bool,
+) -> Value {
+    let mut artifact = json!({
+        "proof_id": format!("proof:large-corpus-{index:05}"),
+        "artifact_path": format!("artifacts/proof/large-corpus-{index:05}.json"),
+        "git_sha": "3333333333333333333333333333333333333333",
+        "git_branch": "main",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_large_corpus cargo test -p asupersync --test proof_artifact_freshness_receipt_contract proof_reuse_large_corpus",
+        "command_fingerprint": "sha256:large-corpus-command",
+        "manifest_lane_id": manifest_lane_id,
+        "manifest_guarantee_ids": ["proof-reuse-large-corpus"],
+        "allowed_cache_hit_claims": ["proof-reuse-large-corpus"],
+        "source_fingerprint": source_fingerprint,
+        "tree_fingerprint": "git-tree:large-corpus-current",
+        "toolchain_fingerprint": toolchain_fingerprint,
+        "env_fingerprint": "sha256:large-corpus-env",
+        "feature_flags": ["test-internals"],
+        "touched_files": [
+            "scripts/proof_artifact_freshness_receipt.py",
+            "tests/proof_artifact_freshness_receipt_contract.rs",
+            "artifacts/proof_reuse_large_corpus_contract_v1.json"
+        ],
+        "status": "pass",
+        "generated_at": format!("2026-05-08T05:{:02}:00Z", index % 60),
+        "stdout": "[RCH] remote rch-worker-large-corpus (1.0s)"
+    });
+    if local_fallback {
+        artifact["local_fallback_markers"] = json!(["falling back to local execution"]);
+    }
+    artifact
+}
+
+fn write_large_corpus_fixture(contract: &Value) -> (PathBuf, PathBuf, PathBuf) {
+    let corpus = &contract["synthetic_corpus"];
+    let candidate_count =
+        usize::try_from(corpus["candidate_count"].as_u64().expect("candidate_count"))
+            .expect("candidate_count fits usize");
+    let accepted_count =
+        usize::try_from(corpus["accepted_count"].as_u64().expect("accepted_count"))
+            .expect("accepted_count fits usize");
+    let source_mismatch_count = usize::try_from(
+        corpus["source_mismatch_count"]
+            .as_u64()
+            .expect("source_mismatch_count"),
+    )
+    .expect("source_mismatch_count fits usize");
+    let toolchain_mismatch_count = usize::try_from(
+        corpus["toolchain_mismatch_count"]
+            .as_u64()
+            .expect("toolchain_mismatch_count"),
+    )
+    .expect("toolchain_mismatch_count fits usize");
+    let local_fallback_count = usize::try_from(
+        corpus["local_fallback_count"]
+            .as_u64()
+            .expect("local_fallback_count"),
+    )
+    .expect("local_fallback_count fits usize");
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time after unix epoch")
+        .as_nanos();
+    let temp_repo = std::env::temp_dir().join(format!(
+        "asupersync-proof-reuse-large-corpus-{}-{nonce}",
+        std::process::id()
+    ));
+    let reuse_root = temp_repo
+        .join(FIXTURE_ROOT)
+        .join("large_reuse_index_receipts");
+    fs::create_dir_all(&reuse_root).expect("create large-corpus approved root");
+
+    let mut artifacts = Vec::with_capacity(candidate_count);
+    for index in 0..candidate_count {
+        let source_mismatch_end = accepted_count + source_mismatch_count;
+        let toolchain_mismatch_end = source_mismatch_end + toolchain_mismatch_count;
+        let local_fallback_end = toolchain_mismatch_end + local_fallback_count;
+        let (manifest_lane_id, source_fingerprint, toolchain_fingerprint, local_fallback) =
+            if index < accepted_count {
+                (
+                    "proof-reuse-large-corpus",
+                    "sha256:large-corpus-source",
+                    "sha256:large-corpus-toolchain",
+                    false,
+                )
+            } else if index < source_mismatch_end {
+                (
+                    "proof-reuse-large-corpus",
+                    "sha256:large-corpus-source-mismatch",
+                    "sha256:large-corpus-toolchain",
+                    false,
+                )
+            } else if index < toolchain_mismatch_end {
+                (
+                    "proof-reuse-large-corpus",
+                    "sha256:large-corpus-source",
+                    "sha256:large-corpus-toolchain-mismatch",
+                    false,
+                )
+            } else if index < local_fallback_end {
+                (
+                    "proof-reuse-large-corpus",
+                    "sha256:large-corpus-source",
+                    "sha256:large-corpus-toolchain",
+                    true,
+                )
+            } else {
+                (
+                    "proof-reuse-unrelated-lane",
+                    "sha256:large-corpus-source",
+                    "sha256:large-corpus-toolchain",
+                    false,
+                )
+            };
+        artifacts.push(proof_reuse_large_corpus_artifact(
+            index,
+            manifest_lane_id,
+            source_fingerprint,
+            toolchain_fingerprint,
+            local_fallback,
+        ));
+    }
+
+    let corpus_path = reuse_root.join("corpus.json");
+    let corpus_json = json!({
+        "repo": {
+            "head_sha": "3333333333333333333333333333333333333333",
+            "branch": "main"
+        },
+        "artifacts": artifacts
+    });
+    let corpus_file = fs::File::create(&corpus_path).expect("create large-corpus JSON");
+    serde_json::to_writer(corpus_file, &corpus_json).expect("write large-corpus JSON");
+
+    let request_path = temp_repo
+        .join(FIXTURE_ROOT)
+        .join("large_reuse_request.json");
+    let request_json = json!({
+        "request_id": "proof-reuse-large-corpus-query",
+        "manifest_lane_id": "proof-reuse-large-corpus",
+        "claim_scope": "proof-reuse-large-corpus",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_large_corpus cargo test -p asupersync --test proof_artifact_freshness_receipt_contract proof_reuse_large_corpus",
+        "command_fingerprint": "sha256:large-corpus-command",
+        "source_fingerprint": "sha256:large-corpus-source",
+        "tree_fingerprint": "git-tree:large-corpus-current",
+        "toolchain_fingerprint": "sha256:large-corpus-toolchain",
+        "env_fingerprint": "sha256:large-corpus-env",
+        "feature_flags": ["test-internals"],
+        "touched_files": [
+            "scripts/proof_artifact_freshness_receipt.py",
+            "tests/proof_artifact_freshness_receipt_contract.rs",
+            "artifacts/proof_reuse_large_corpus_contract_v1.json"
+        ],
+        "dirty_frontier_status": "clean"
+    });
+    let request_file = fs::File::create(&request_path).expect("create large-corpus request JSON");
+    serde_json::to_writer(request_file, &request_json).expect("write large-corpus request JSON");
+
+    (temp_repo, reuse_root, request_path)
+}
+
+#[test]
+fn proof_reuse_large_corpus_query_is_bounded_and_logged() {
+    let contract = large_corpus_contract_json();
+    let (temp_repo, reuse_root, request_path) = write_large_corpus_fixture(&contract);
+    let row_limit = contract["query"]["row_limit"]
+        .as_u64()
+        .expect("row_limit")
+        .to_string();
+
+    let started_at = Instant::now();
+    let output = Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--repo-path")
+        .arg(&temp_repo)
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--reuse-index-root")
+        .arg(&reuse_root)
+        .arg("--request")
+        .arg(&request_path)
+        .arg("--max-query-rows")
+        .arg(&row_limit)
+        .arg("--output")
+        .arg("json")
+        .current_dir(repo_root())
+        .output()
+        .expect("run large-corpus proof reuse query");
+    let elapsed = started_at.elapsed();
+
+    assert!(
+        output.status.success(),
+        "large-corpus proof reuse query failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let query: Value =
+        serde_json::from_slice(&output.stdout).expect("large-corpus query output JSON");
+    let summary = &query["summary"];
+    eprintln!(
+        "[proof-reuse-large-corpus] corpus_size={} indexed_receipt_count={} \
+         candidate_pruned_count={} accepted_count={} refused_count={} miss_count={} \
+         rows_emitted_count={} rows_omitted_count={} chosen_proof_id={} elapsed_ms={}",
+        contract["synthetic_corpus"]["candidate_count"],
+        query["index_summary"]["candidate_count"],
+        summary["candidate_pruned_count"],
+        summary["accepted_count"],
+        summary["refused_count"],
+        summary["miss_count"],
+        summary["rows_emitted_count"],
+        summary["rows_omitted_count"],
+        summary["chosen_proof_id"],
+        elapsed.as_millis()
+    );
+    eprintln!(
+        "[proof-reuse-large-corpus] pruning_reason_counts={}",
+        summary["by_reason_code"]
+    );
+
+    assert_eq!(
+        query["index_summary"]["candidate_count"].as_u64(),
+        contract["synthetic_corpus"]["candidate_count"].as_u64()
+    );
+    assert_eq!(
+        summary["candidate_count"].as_u64(),
+        contract["synthetic_corpus"]["candidate_count"].as_u64()
+    );
+    assert_eq!(
+        summary["accepted_count"].as_u64(),
+        contract["synthetic_corpus"]["accepted_count"].as_u64()
+    );
+    assert_eq!(
+        summary["refused_count"].as_u64(),
+        contract["synthetic_corpus"]["refused_count"].as_u64()
+    );
+    assert_eq!(
+        summary["miss_count"].as_u64(),
+        contract["synthetic_corpus"]["miss_count"].as_u64()
+    );
+    assert_eq!(
+        summary["candidate_pruned_count"].as_u64(),
+        contract["query"]["expected_candidate_pruned_count"].as_u64()
+    );
+    assert_eq!(
+        summary["rows_emitted_count"].as_u64(),
+        contract["query"]["expected_rows_emitted_count"].as_u64()
+    );
+    assert_eq!(
+        summary["rows_omitted_count"].as_u64(),
+        contract["query"]["expected_rows_omitted_count"].as_u64()
+    );
+    assert_eq!(
+        summary["chosen_proof_id"].as_str(),
+        contract["query"]["chosen_proof_id"].as_str()
+    );
+    assert_eq!(
+        summary["by_reason_code"]["source-hash-mismatch"].as_u64(),
+        contract["synthetic_corpus"]["source_mismatch_count"].as_u64()
+    );
+    assert_eq!(
+        summary["by_reason_code"]["toolchain-mismatch"].as_u64(),
+        contract["synthetic_corpus"]["toolchain_mismatch_count"].as_u64()
+    );
+    assert_eq!(
+        summary["by_reason_code"]["local-fallback-marker"].as_u64(),
+        contract["synthetic_corpus"]["local_fallback_count"].as_u64()
+    );
+    assert_eq!(
+        summary["by_reason_code"]["lane-mismatch"].as_u64(),
+        contract["synthetic_corpus"]["lane_mismatch_count"].as_u64()
+    );
+    assert_eq!(query["logs"][2]["stage"].as_str(), Some("project"));
+    assert_eq!(
+        query["logs"][2]["rows_omission_reason"].as_str(),
+        Some("bounded-query-output")
+    );
+    assert_eq!(
+        query["safety"]["raw_proof_logs_embedded"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        query["summary"]["elapsed_time"]["measured"].as_bool(),
+        Some(false)
+    );
+
+    let rows = query["rows"].as_array().expect("large-corpus rows array");
+    assert_eq!(
+        u64::try_from(rows.len()).expect("row count fits u64"),
+        contract["query"]["row_limit"].as_u64().expect("row_limit")
+    );
+    assert!(
+        rows.iter().all(|row| row.get("proof_text").is_none()
+            && row.get("stdout").is_none()
+            && row.get("stderr").is_none()),
+        "large-corpus query rows must not embed raw proof logs"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("rch-worker-large-corpus"),
+        "large-corpus query output must not dump raw RCH route log text"
+    );
+    assert!(
+        elapsed.as_millis()
+            <= u128::from(
+                contract["resource_envelope"]["max_query_elapsed_ms"]
+                    .as_u64()
+                    .expect("max_query_elapsed_ms")
+            ),
+        "large-corpus proof reuse query exceeded coarse elapsed-time envelope: {:?}",
+        elapsed
     );
 }
 

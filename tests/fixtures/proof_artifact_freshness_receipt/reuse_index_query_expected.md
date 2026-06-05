@@ -6,6 +6,9 @@
 - accepted: 1
 - refused: 4
 - misses: 1
+- candidate_pruned: 5
+- detailed_rows_emitted: 6
+- detailed_rows_omitted: 0
 - chosen_proof_id: proof:reuse-index-reusable
 - top_rerun_command: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture
 
