@@ -58,6 +58,16 @@ fn string<'a>(value: &'a Value, key: &str) -> &'a str {
     text
 }
 
+fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    let Some(text) = value.get(key).and_then(Value::as_str) else {
+        return Err(format!("{key} must be a string"));
+    };
+    if text.trim().is_empty() {
+        return Err(format!("{key} must be nonempty"));
+    }
+    Ok(text)
+}
+
 fn optional_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     match value.get(key) {
         Some(Value::Null) | None => None,
@@ -103,6 +113,20 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
     string_vec(value, key).into_iter().collect()
 }
 
+fn array_mut<'a>(value: &'a mut Value, key: &str) -> &'a mut Vec<Value> {
+    value
+        .get_mut(key)
+        .and_then(Value::as_array_mut)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+}
+
+fn command_mut<'a>(contract: &'a mut Value, command_id: &str) -> &'a mut Value {
+    array_mut(contract, "required_validation_commands")
+        .iter_mut()
+        .find(|command| command.get("command_id").and_then(Value::as_str) == Some(command_id))
+        .unwrap_or_else(|| panic!("missing mutable command {command_id}"))
+}
+
 fn command_map(contract: &Value) -> BTreeMap<String, Value> {
     array(contract, "required_validation_commands")
         .iter()
@@ -140,7 +164,104 @@ fn source_paths(contract: &Value) -> BTreeSet<String> {
     paths
 }
 
+fn validate_signoff_schema(contract: &Value) -> Result<(), String> {
+    if required_string(contract, "schema_version")? != SCHEMA_VERSION {
+        return Err("signoff schema version drifted".to_string());
+    }
+    if required_string(contract, "bead_id")? != "asupersync-5pziae.8" {
+        return Err("unexpected signoff bead id".to_string());
+    }
+    if required_string(contract, "epic_id")? != "asupersync-5pziae" {
+        return Err("unexpected signoff epic id".to_string());
+    }
+    Ok(())
+}
+
+fn validate_source_artifact_hashes(contract: &Value) -> Result<(), String> {
+    for artifact in array(contract, "source_artifact_hashes") {
+        let path = string(artifact, "path");
+        let expected = string(artifact, "sha256");
+        if expected.len() != 64
+            || !expected
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+        {
+            return Err(format!("{path}: sha256 must be a lowercase hex digest"));
+        }
+        if sha256_file(path) != expected {
+            return Err(format!("source hash mismatch for {path}"));
+        }
+        string(artifact, "covers");
+    }
+    Ok(())
+}
+
+fn validate_validation_commands(contract: &Value) -> Result<(), String> {
+    let commands = command_map(contract);
+    let gate_command_ids = array(contract, "required_child_gates")
+        .iter()
+        .map(|gate| string(gate, "command_id").to_string())
+        .collect::<BTreeSet<_>>();
+    for command_id in &gate_command_ids {
+        if !commands.contains_key(command_id) {
+            return Err(format!("missing command for child gate {command_id}"));
+        }
+    }
+    for required in ["signoff-contract-test", "signoff-contract-clippy"] {
+        if !commands.contains_key(required) {
+            return Err(format!("missing {required}"));
+        }
+    }
+
+    for command in commands.values() {
+        let command_id = string(command, "command_id");
+        let text = string(command, "command");
+        if !text.starts_with(REQUIRED_RCH_PREFIX) {
+            return Err(format!("{command_id}: command is not remote-required RCH"));
+        }
+        if !text.contains(" CARGO_TARGET_DIR=") {
+            return Err(format!(
+                "{command_id}: command must isolate CARGO_TARGET_DIR"
+            ));
+        }
+        if !(text.contains(" cargo test ") || text.contains(" cargo clippy ")) {
+            return Err(format!("{command_id}: command must be Cargo validation"));
+        }
+        if text.contains("RCH_ALLOW_LOCAL=1") || text.contains("RCH_REQUIRE_REMOTE=0") {
+            return Err(format!(
+                "{command_id}: command contains local fallback marker"
+            ));
+        }
+        string(command, "bead_id");
+        string(command, "exact_output_must_report");
+    }
+
+    Ok(())
+}
+
+fn validate_first_blocker_policy(output: &Value) -> Result<(), String> {
+    let final_verdict = output
+        .get("final_verdict")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let blocked = output
+        .get("blocked")
+        .and_then(Value::as_bool)
+        .unwrap_or_default();
+    let blocker_present = output
+        .get("first_blocker_line")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty());
+
+    if (blocked || matches!(final_verdict, "blocked" | "no-win")) && !blocker_present {
+        return Err("missing first blocker line".to_string());
+    }
+    Ok(())
+}
+
 fn validate_output_fixture(output: &Value, contract: &Value) -> Result<(), String> {
+    validate_first_blocker_policy(output)?;
+
     if string(output, "scenario_id") != "final-proof-reuse-signoff-v1" {
         return Err("unexpected final scenario id".to_string());
     }
@@ -202,6 +323,16 @@ fn validate_output_fixture(output: &Value, contract: &Value) -> Result<(), Strin
             return Err(format!("operator closeout text missing {required}"));
         }
     }
+    for forbidden in [
+        "cache evidence proves workspace-health",
+        "cache evidence proves release-readiness",
+        "approved cache hits prove workspace-health",
+        "approved cache hits prove release-readiness",
+    ] {
+        if text.contains(forbidden) {
+            return Err(format!("unsupported broad claim: {forbidden}"));
+        }
+    }
 
     Ok(())
 }
@@ -241,12 +372,20 @@ fn validate_negative_fixture(fixture: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn expect_rejection(result: Result<(), String>, expected: &str) {
+    match result {
+        Ok(()) => panic!("expected rejection containing {expected}"),
+        Err(actual) => assert!(
+            actual.contains(expected),
+            "expected rejection containing {expected}, got {actual}"
+        ),
+    }
+}
+
 #[test]
 fn signoff_sources_exist_and_hashes_match_current_child_artifacts() {
     let contract = contract();
-    assert_eq!(string(&contract, "schema_version"), SCHEMA_VERSION);
-    assert_eq!(string(&contract, "bead_id"), "asupersync-5pziae.8");
-    assert_eq!(string(&contract, "epic_id"), "asupersync-5pziae");
+    validate_signoff_schema(&contract).expect("signoff schema should be current");
 
     let sources = source_paths(&contract);
     for required in [
@@ -271,17 +410,7 @@ fn signoff_sources_exist_and_hashes_match_current_child_artifacts() {
         );
     }
 
-    for artifact in array(&contract, "source_artifact_hashes") {
-        let path = string(artifact, "path");
-        let expected = string(artifact, "sha256");
-        assert_eq!(
-            expected.len(),
-            64,
-            "{path}: sha256 must be a lowercase hex digest"
-        );
-        assert_eq!(sha256_file(path), expected, "{path}: hash drifted");
-        string(artifact, "covers");
-    }
+    validate_source_artifact_hashes(&contract).expect("source artifact hashes should be current");
 }
 
 #[test]
@@ -353,43 +482,7 @@ fn child_gates_are_closed_and_artifact_versions_are_current() {
 #[test]
 fn validation_commands_are_remote_required_exact_and_cover_every_gate() {
     let contract = contract();
-    let commands = command_map(&contract);
-    let gate_command_ids = array(&contract, "required_child_gates")
-        .iter()
-        .map(|gate| string(gate, "command_id").to_string())
-        .collect::<BTreeSet<_>>();
-    for command_id in &gate_command_ids {
-        assert!(
-            commands.contains_key(command_id),
-            "missing command for child gate {command_id}"
-        );
-    }
-    for required in ["signoff-contract-test", "signoff-contract-clippy"] {
-        assert!(commands.contains_key(required), "missing {required}");
-    }
-
-    for command in commands.values() {
-        let command_id = string(command, "command_id");
-        let text = string(command, "command");
-        assert!(
-            text.starts_with(REQUIRED_RCH_PREFIX),
-            "{command_id}: command must be remote-required RCH"
-        );
-        assert!(
-            text.contains(" CARGO_TARGET_DIR="),
-            "{command_id}: command must isolate CARGO_TARGET_DIR"
-        );
-        assert!(
-            text.contains(" cargo test ") || text.contains(" cargo clippy "),
-            "{command_id}: command must be a Cargo validation command"
-        );
-        assert!(
-            !text.contains("RCH_ALLOW_LOCAL=1") && !text.contains("RCH_REQUIRE_REMOTE=0"),
-            "{command_id}: local fallback markers are forbidden"
-        );
-        string(command, "bead_id");
-        string(command, "exact_output_must_report");
-    }
+    validate_validation_commands(&contract).expect("validation commands should be exact RCH");
 
     let closeout_policy = object(&contract, "closeout_policy");
     assert!(bool_field(
@@ -476,4 +569,86 @@ fn negative_fixtures_cover_fail_closed_signoff_paths() {
     for fixture in fixtures {
         validate_negative_fixture(fixture).expect("negative fixture must fail closed");
     }
+}
+
+#[test]
+fn synthetic_bad_signoff_scenarios_are_rejected() {
+    let contract = contract();
+
+    let mut missing_schema = contract.clone();
+    missing_schema
+        .as_object_mut()
+        .expect("contract must be an object")
+        .remove("schema_version");
+    expect_rejection(
+        validate_signoff_schema(&missing_schema),
+        "schema_version must be a string",
+    );
+
+    let mut stale_cache_hit = contract.clone();
+    let first_hash = array_mut(&mut stale_cache_hit, "source_artifact_hashes")
+        .first_mut()
+        .expect("source artifact hash fixture exists");
+    first_hash
+        .as_object_mut()
+        .expect("source artifact hash must be an object")
+        .insert("sha256".to_string(), Value::String("0".repeat(64)));
+    expect_rejection(
+        validate_source_artifact_hashes(&stale_cache_hit),
+        "source hash mismatch",
+    );
+
+    let mut local_fallback = contract.clone();
+    let signoff_test = command_mut(&mut local_fallback, "signoff-contract-test");
+    let local_command = string(signoff_test, "command")
+        .strip_prefix(REQUIRED_RCH_PREFIX)
+        .expect("fixture command should start with remote-required prefix")
+        .to_string();
+    signoff_test
+        .as_object_mut()
+        .expect("command must be an object")
+        .insert("command".to_string(), Value::String(local_command));
+    expect_rejection(
+        validate_validation_commands(&local_fallback),
+        "not remote-required RCH",
+    );
+
+    let mut missing_command = object(&contract, "final_output_fixture").clone();
+    array_mut(&mut missing_command, "exact_command_ids")
+        .retain(|command_id| command_id.as_str() != Some("large-corpus-contract"));
+    expect_rejection(
+        validate_output_fixture(&missing_command, &contract),
+        "cite every exact validation command",
+    );
+
+    let mut broad_claim = object(&contract, "final_output_fixture").clone();
+    broad_claim
+        .as_object_mut()
+        .expect("final output fixture must be an object")
+        .insert(
+            "operator_closeout_text".to_string(),
+            Value::String(
+                "Final proof reuse signoff passed. Fresh RCH passes: signoff-contract-test and signoff-contract-clippy. Approved cache hits: cache-schema-contract, classifier-contract, index-query-contract, manifest-status-contract, handoff-receipt-contract, e2e-scenarios-contract, and large-corpus-contract. Approved cache hit evidence is not a fresh RCH pass. No workspace-health or release-readiness claim is made from cache evidence. Cache evidence proves workspace-health. After committing, push main and mirror with git push origin main:master."
+                    .to_string(),
+            ),
+        );
+    expect_rejection(
+        validate_output_fixture(&broad_claim, &contract),
+        "unsupported broad claim",
+    );
+
+    let mut missing_blocker = object(&contract, "final_output_fixture").clone();
+    let output = missing_blocker
+        .as_object_mut()
+        .expect("final output fixture must be an object");
+    output.insert(
+        "final_verdict".to_string(),
+        Value::String("blocked".to_string()),
+    );
+    output.insert("blocked".to_string(), Value::Bool(true));
+    output.insert("first_blocker_line".to_string(), Value::Null);
+    expect_rejection(
+        validate_first_blocker_policy(&missing_blocker),
+        "missing first blocker line",
+    );
 }
