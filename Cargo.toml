@@ -30,6 +30,12 @@ include = [
     "assets/dashboard.html",
     "src/**",
     "!**/*.out",
+    "!**/*.snap.new",
+    "!**/.insta.pending-snap",
+    "!**/.*.pending-snap",
+    "!**/*.bak",
+    "!**/*.bak_*",
+    "!**/*.bak-*",
 ]
 
 [features]
