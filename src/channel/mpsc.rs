@@ -3701,90 +3701,65 @@ pub mod backpressure_metamorphic {
                     return Ok(()); // Skip if cancellation not meaningful
                 }
 
-                crate::lab::runtime::test(config.seed, |lab| {
-                    let root = lab.state.create_root_region(Budget::INFINITE);
-                    let (test_task, _) = lab
-                        .state
-                        .create_task(root, Budget::INFINITE, async move {
-                            let cx = crate::cx::Cx::for_testing();
-                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
-                                async {
-                                    let (sender, mut receiver) = channel::<u32>(config.capacity);
+                let cx = crate::cx::Cx::for_testing();
+                let (sender, _receiver) = channel::<u32>(config.capacity);
 
-                                    // Fill channel to force reserves to block
-                                    for i in 0..config.capacity {
-                                        sender.try_send(i as u32).expect("Fill channel");
-                                    }
+                for i in 0..config.capacity {
+                    sender.try_send(i as u32).expect("Fill channel");
+                }
 
-                                    let initial_state = observe_channel_state(&sender);
+                let initial_state = observe_channel_state(&sender);
+                assert_eq!(
+                    initial_state,
+                    (config.capacity, 0, 0, 0),
+                    "full channel should start with no reservations or waiters"
+                );
 
-                                    // Create multiple reserves that will block
-                                    let cancelled_count = Arc::new(AtomicUsize::new(0));
-                                    let mut reserve_handles = Vec::new();
-                                    for i in 0..config.sender_count {
-                                        let sender_clone = sender.clone();
-                                        let cancelled_clone = Arc::clone(&cancelled_count);
-                                        let reserve_cx = cx.clone();
-                                        let handle = std::thread::spawn(move || {
-                                            futures_lite::future::block_on(async move {
-                                                match sender_clone.reserve(&reserve_cx).await {
-                                                    Err(SendError::Cancelled(_)) => {
-                                                        cancelled_clone.fetch_add(1, Ordering::SeqCst);
-                                                    }
-                                                    Ok(permit) => {
-                                                        let outcome = permit.send(i as u32);
-                                                        crate::assert_with_log!(
-                                                            matches!(outcome, Outcome::Ok(())),
-                                                            "send outcome in stress test",
-                                                            "Ok(())",
-                                                            format!("{:?}", outcome)
-                                                        );
-                                                    }
-                                                    Err(other) => {
-                                                        panic!(
-                                                            "reserve observed unexpected outcome after cancellation: {other:?}"
-                                                        );
-                                                    }
-                                                }
-                                            })
-                                        });
-                                        reserve_handles.push(handle);
-                                    }
+                let reserve_senders: Vec<_> =
+                    (0..config.sender_count).map(|_| sender.clone()).collect();
+                let mut reserve_futures: Vec<_> = reserve_senders
+                    .iter()
+                    .map(|sender| Box::pin(sender.reserve(&cx)))
+                    .collect();
+                let waker = metamorphic_noop_waker();
+                let mut task_cx = Context::from_waker(&waker);
 
-                                    // Reserve futures observe cancellation via the shared Cx, but
-                                    // blocked senders need one capacity transition to be re-polled.
-                                    cx.set_cancel_reason(CancelReason::user("test cancellation"));
-                                    let _ = receiver.try_recv();
+                for reserve_fut in &mut reserve_futures {
+                    assert!(
+                        matches!(reserve_fut.as_mut().poll(&mut task_cx), Poll::Pending),
+                        "full channel should make every reserve wait"
+                    );
+                }
 
-                                    // Collect results
-                                    for handle in reserve_handles {
-                                        handle.join().unwrap();
-                                    }
+                assert_eq!(
+                    observe_channel_state(&sender),
+                    (config.capacity, 0, 0, config.sender_count),
+                    "pending reserves should register one waiter each"
+                );
 
-                                    let final_state = observe_channel_state(&sender);
+                cx.set_cancel_reason(CancelReason::user("test cancellation"));
 
-                                    // Capacity conservation must hold despite cancellation
-                                    assert_eq!(
-                                        initial_state.0 + initial_state.1 + initial_state.2,
-                                        final_state.0 + final_state.1 + final_state.2,
-                                        "Cancellation leaked capacity: initial {:?} vs final {:?}",
-                                        initial_state,
-                                        final_state
-                                    );
-                                    assert!(
-                                        cancelled_count.load(Ordering::SeqCst) > 0,
-                                        "cancellation MR failed to observe any cancelled reserves"
-                                    );
+                let mut cancelled_count = 0usize;
+                for reserve_fut in &mut reserve_futures {
+                    match reserve_fut.as_mut().poll(&mut task_cx) {
+                        Poll::Ready(Err(SendError::Cancelled(()))) => {
+                            cancelled_count += 1;
+                        }
+                        other => panic!(
+                            "cancelled reserve should complete with Cancelled, got {other:?}"
+                        ),
+                    }
+                }
 
-                                    Ok(())
-                                }
-                                .await;
-                        })
-                        .unwrap();
-                    lab.scheduler.lock().schedule(test_task, 0);
-                    let report = lab.run_until_quiescent_with_report();
-                    assert_lab_report_success(report);
-                });
+                assert_eq!(
+                    cancelled_count, config.sender_count,
+                    "every pending reserve should observe cancellation"
+                );
+                assert_eq!(
+                    observe_channel_state(&sender),
+                    initial_state,
+                    "Cancellation leaked capacity or waiter state"
+                );
                 Ok(())
             })
             .expect("Property test failed");

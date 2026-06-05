@@ -314,10 +314,14 @@ impl CancelStateMachine for RegionStateMachine {
                     pending_finalizers,
                 },
                 RegionEvent::Cancel { reason },
-            ) => RegionState::Cancelling {
-                draining_tasks: *active_tasks,
-                pending_finalizers: *pending_finalizers,
-                cancel_reason: reason.clone(),
+            ) => match (*active_tasks, *pending_finalizers) {
+                (0, 0) => RegionState::Finalized,
+                (0, running_finalizers) => RegionState::Finalizing { running_finalizers },
+                (draining_tasks, pending_finalizers) => RegionState::Cancelling {
+                    draining_tasks,
+                    pending_finalizers,
+                    cancel_reason: reason.clone(),
+                },
             },
             (
                 RegionState::Active {
@@ -2346,6 +2350,47 @@ mod tests {
         );
         assert!(matches!(machine.current_state(), RegionState::Finalized));
         assert!(machine.is_terminal());
+    }
+
+    #[test]
+    fn region_cancel_with_only_pending_finalizers_enters_finalizing() {
+        let region_id = RegionId::new_for_test(12, 0);
+        let mut machine = RegionStateMachine::new(region_id, ValidationLevel::Full);
+        let context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        assert_eq!(
+            machine.transition(RegionEvent::Activate, &context),
+            TransitionResult::Valid
+        );
+        assert_eq!(
+            machine.transition(RegionEvent::FinalizerRegistered, &context),
+            TransitionResult::Valid
+        );
+        assert_eq!(
+            machine.transition(
+                RegionEvent::Cancel {
+                    reason: "test".to_owned(),
+                },
+                &context,
+            ),
+            TransitionResult::Valid
+        );
+        assert!(matches!(
+            machine.current_state(),
+            RegionState::Finalizing {
+                running_finalizers: 1
+            }
+        ));
+        assert_eq!(
+            machine.transition(RegionEvent::FinalizerCompleted, &context),
+            TransitionResult::Valid
+        );
+        assert!(matches!(machine.current_state(), RegionState::Finalized));
     }
 
     #[test]

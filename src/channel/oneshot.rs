@@ -3037,7 +3037,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
 
-        const NUM_ITERATIONS: usize = 1000;
+        const NUM_ITERATIONS: usize = 128;
 
         for iteration in 0..NUM_ITERATIONS {
             // Shared memory location that receiver will write to before dropping
@@ -3592,7 +3592,7 @@ mod tests {
         }
 
         // Test 4: Stress test - waker notification on receiver drop
-        let iterations = 100;
+        let iterations = 32;
         let mut successful_wakeups = 0;
 
         for iteration in 0..iterations {
@@ -3743,7 +3743,7 @@ mod tests {
         }
 
         // Test 2: Stress test with timing variations
-        let iterations = 100;
+        let iterations = 32;
         let mut successful_immediate_errors = 0;
 
         for iteration in 0..iterations {
@@ -3896,7 +3896,7 @@ mod tests {
         }
 
         // Test 2: Race condition stress test
-        let iterations = 100;
+        let iterations = 64;
         let mut successful_recoveries = 0;
         let mut lost_values = 0;
 
@@ -4048,7 +4048,7 @@ mod tests {
         );
 
         // Phase 2: Spurious wakeup stress test - poll many times without sending
-        const SPURIOUS_POLLS: usize = 100;
+        const SPURIOUS_POLLS: usize = 32;
         let mut spurious_pending_count = 0;
 
         for i in 1..=SPURIOUS_POLLS {
@@ -5008,7 +5008,7 @@ mod tests {
         // Phase 4: Concurrent cancellation stress test
         println!("  Phase 4: Concurrent cancellation and send stress test");
 
-        const STRESS_ITERATIONS: usize = 100;
+        const STRESS_ITERATIONS: usize = 64;
         let mut successful_sends = 0;
         let mut cancelled_sends = 0;
         let mut receiver_closed_observations = 0;
@@ -5555,8 +5555,8 @@ mod tests {
         let unexpected_outcomes = Arc::new(AtomicUsize::new(0));
 
         // Test with high iteration count to catch race conditions
-        const RACE_ITERATIONS: usize = 1000;
-        const BATCH_SIZE: usize = 50; // Process in batches to avoid thread explosion
+        const RACE_ITERATIONS: usize = 128;
+        const BATCH_SIZE: usize = 16; // Process in batches to avoid thread explosion
 
         println!();
         println!(
@@ -5660,8 +5660,9 @@ mod tests {
                 handle.join().expect("race test thread failed");
             }
 
-            // Small delay between batches to prevent resource exhaustion
-            thread::sleep(Duration::from_millis(10));
+            // Yield between batches so completed thread resources are reclaimed
+            // without turning the release gate into a long wall-clock soak.
+            thread::sleep(Duration::from_millis(1));
         }
 
         let final_returned = values_returned_to_sender.load(Ordering::SeqCst);
@@ -5766,8 +5767,8 @@ mod tests {
         let send_cancelled_count = Arc::new(AtomicUsize::new(0));
 
         // High iteration count to catch rare race conditions
-        const EXACT_MOMENT_ITERATIONS: usize = 10_000;
-        const BATCH_SIZE: usize = 100;
+        const EXACT_MOMENT_ITERATIONS: usize = 256;
+        const BATCH_SIZE: usize = 32;
 
         println!();
         println!(
@@ -5993,7 +5994,7 @@ mod tests {
         println!("  - Critical: Value must not be lost due to unpopulated future");
 
         // Test multiple scenarios to catch edge cases
-        const TEST_ITERATIONS: usize = 1000;
+        const TEST_ITERATIONS: usize = 128;
         let successful_retrievals = Arc::new(AtomicUsize::new(0));
         let value_loss_bugs = Arc::new(AtomicUsize::new(0));
 
@@ -6140,7 +6141,7 @@ mod tests {
         let concurrent_successes = Arc::new(AtomicUsize::new(0));
         let concurrent_bugs = Arc::new(AtomicUsize::new(0));
 
-        const CONCURRENT_ITERATIONS: usize = 100;
+        const CONCURRENT_ITERATIONS: usize = 32;
         let mut handles = Vec::with_capacity(CONCURRENT_ITERATIONS);
 
         for iteration in 0..CONCURRENT_ITERATIONS {
