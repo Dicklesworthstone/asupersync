@@ -8,8 +8,11 @@ use asupersync::lab::swarm_replay::{
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::process::Command;
 
 const CONTRACT_PATH: &str = "artifacts/chaos_scenario_dsl_contract_v1.json";
+const PROOF_PRESSURE_FIXTURE_PATH: &str =
+    "tests/fixtures/proof_lane_pressure_chaos/proof_lane_pressure_scenarios.json";
 
 fn repo_path(relative: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -21,11 +24,28 @@ fn contract() -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {CONTRACT_PATH}: {error}"))
 }
 
+fn json_file(relative: &str) -> Value {
+    json_path(&repo_path(relative))
+}
+
+fn json_path(path: &Path) -> Value {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+}
+
 fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
     value
         .get(key)
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("{key} must be an array"))
+}
+
+fn object<'a>(value: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{key} must be an object"))
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -80,6 +100,156 @@ fn markdown_projection(contract: &Value) -> String {
         ));
     }
     lines.join("\n") + "\n"
+}
+
+fn validate_proof_lane_pressure_fixture(fixture: &Value, profile: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    let expected_schema = string(profile, "schema_version");
+    let expected_profile = string(profile, "profile_id");
+    let required_fields = string_set(profile, "required_scenario_fields");
+    let required_dimensions = string_set(profile, "required_pressure_dimensions");
+    let expected_decisions = string_set(profile, "expected_decisions");
+
+    if fixture.get("schema_version").and_then(Value::as_str) != Some(expected_schema) {
+        errors.push(format!("schema_version must be {expected_schema}"));
+    }
+    if fixture.get("profile_id").and_then(Value::as_str) != Some(expected_profile) {
+        errors.push(format!("profile_id must be {expected_profile}"));
+    }
+
+    let Some(scenarios) = fixture.get("scenarios").and_then(Value::as_array) else {
+        errors.push("scenarios must be an array".to_string());
+        return errors;
+    };
+    if scenarios.is_empty() {
+        errors.push("scenarios must not be empty".to_string());
+    }
+
+    for (index, scenario) in scenarios.iter().enumerate() {
+        let Some(fields) = scenario.as_object() else {
+            errors.push(format!("scenario[{index}] must be an object"));
+            continue;
+        };
+        for key in fields.keys() {
+            if !required_fields.contains(key) {
+                errors.push(format!("scenario[{index}] unknown field {key}"));
+            }
+        }
+        for field in &required_fields {
+            if !fields.contains_key(field) {
+                errors.push(format!("scenario[{index}] missing required field {field}"));
+            }
+        }
+
+        let scenario_id = scenario
+            .get("scenario_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if scenario_id.trim().is_empty() {
+            errors.push(format!("scenario[{index}] scenario_id must be nonempty"));
+        }
+        let description = scenario
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if description.trim().is_empty() {
+            errors.push(format!("{scenario_id} description must be nonempty"));
+        }
+
+        let dimensions = match scenario
+            .get("pressure_dimensions")
+            .and_then(Value::as_array)
+        {
+            Some(dimensions) => dimensions,
+            None => {
+                errors.push(format!(
+                    "{scenario_id} pressure_dimensions must be an array"
+                ));
+                continue;
+            }
+        };
+        if dimensions.is_empty() {
+            errors.push(format!(
+                "{scenario_id} pressure_dimensions must not be empty"
+            ));
+        }
+        for dimension in dimensions {
+            let Some(dimension) = dimension.as_str() else {
+                errors.push(format!(
+                    "{scenario_id} pressure_dimensions entries must be strings"
+                ));
+                continue;
+            };
+            if !required_dimensions.contains(dimension) {
+                errors.push(format!(
+                    "{scenario_id} unknown pressure dimension {dimension}"
+                ));
+            }
+        }
+
+        if scenario
+            .get("injected_pressure_facts")
+            .and_then(Value::as_object)
+            .is_none_or(|facts| facts.is_empty())
+        {
+            errors.push(format!(
+                "{scenario_id} injected_pressure_facts must be a nonempty object"
+            ));
+        }
+
+        let decision = scenario
+            .get("expected_decision")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !expected_decisions.contains(decision) {
+            errors.push(format!(
+                "{scenario_id} expected_decision {decision:?} is not allowed"
+            ));
+        }
+
+        for key in ["expected_blocker_kinds", "expected_warning_kinds"] {
+            if !scenario
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .all(|item| item.as_str().is_some_and(|text| !text.trim().is_empty()))
+                })
+            {
+                errors.push(format!(
+                    "{scenario_id} {key} must be an array of nonempty strings"
+                ));
+            }
+        }
+
+        let Some(preflight_input) = scenario.get("preflight_input").and_then(Value::as_object)
+        else {
+            errors.push(format!("{scenario_id} preflight_input must be an object"));
+            continue;
+        };
+        let preflight_schema = string(profile, "preflight_input_schema_version");
+        if preflight_input
+            .get("schema_version")
+            .and_then(Value::as_str)
+            != Some(preflight_schema)
+        {
+            errors.push(format!(
+                "{scenario_id} preflight_input.schema_version must be {preflight_schema}"
+            ));
+        }
+        if preflight_input
+            .get("sources")
+            .and_then(Value::as_object)
+            .is_none_or(|sources| sources.is_empty())
+        {
+            errors.push(format!(
+                "{scenario_id} preflight_input.sources must be nonempty"
+            ));
+        }
+    }
+
+    errors
 }
 
 fn action_name(action: &FaultAction) -> &'static str {
@@ -216,6 +386,13 @@ fn required_dimensions_cover_the_bead_scope() {
         "process_stall",
         "delayed_cleanup",
         "cancellation_storm",
+        "memory_envelope_exceeded",
+        "time_envelope_exceeded",
+        "stale_exact_filter_zero_tests",
+        "remote_admission_denied",
+        "local_fallback_attempted",
+        "dirty_peer_owned_release_blocker",
+        "cancellation_obligation_pressure_warning",
         "resource_caps",
         "expected_invariants",
         "minimized_counterexample",
@@ -1032,6 +1209,261 @@ fn live_process_stall_minimized_counterexample_is_source_backed() {
             !rendered_counterexample.contains(&forbidden),
             "counterexample projection must not expose raw coordination marker {forbidden}"
         );
+    }
+}
+
+#[test]
+fn proof_lane_pressure_profile_declares_deterministic_preflight_surface() {
+    let contract = contract();
+    let profile = contract
+        .get("proof_lane_pressure_profile")
+        .expect("proof_lane_pressure_profile object");
+    assert_eq!(string(profile, "profile_id"), "proof-lane-pressure-chaos");
+    assert_eq!(string(profile, "bead_id"), "asupersync-dneu1w");
+    assert_eq!(
+        string(profile, "schema_version"),
+        "proof-lane-pressure-chaos-scenarios-v1"
+    );
+    assert_eq!(
+        string(profile, "preflight_input_schema_version"),
+        "swarm-pressure-preflight-input-v1"
+    );
+
+    for key in ["fixture_path", "e2e_script", "report_surface"] {
+        let path = string(profile, key);
+        assert!(
+            repo_path(path).exists(),
+            "proof lane pressure profile {key} must point to a live file: {path}"
+        );
+    }
+    assert_eq!(string(profile, "fixture_path"), PROOF_PRESSURE_FIXTURE_PATH);
+
+    for key in [
+        "deterministic",
+        "dry_run_only",
+        "no_real_resource_exhaustion",
+    ] {
+        assert_eq!(profile[key].as_bool(), Some(true), "{key} must be true");
+    }
+
+    let required_fields = string_set(profile, "required_scenario_fields");
+    for field in [
+        "scenario_id",
+        "description",
+        "pressure_dimensions",
+        "injected_pressure_facts",
+        "expected_decision",
+        "expected_blocker_kinds",
+        "expected_warning_kinds",
+        "preflight_input",
+    ] {
+        assert!(
+            required_fields.contains(field),
+            "proof pressure scenario field set must include {field}"
+        );
+    }
+
+    let global_dimensions = string_set(&contract, "required_chaos_dimensions");
+    for dimension in string_set(profile, "required_pressure_dimensions") {
+        assert!(
+            global_dimensions.contains(&dimension),
+            "proof pressure dimension must be globally declared: {dimension}"
+        );
+    }
+
+    let report_flags = object(profile, "required_preflight_report_flags");
+    assert_eq!(report_flags["dry_run_only"].as_bool(), Some(true));
+    assert_eq!(report_flags["non_mutating"].as_bool(), Some(true));
+    for key in [
+        "runs_cargo",
+        "runs_rch",
+        "runs_git_mutation",
+        "runs_beads_mutation",
+        "sends_agent_mail",
+        "writes_cache",
+        "deletes_files",
+    ] {
+        assert_eq!(
+            report_flags[key].as_bool(),
+            Some(false),
+            "preflight report flag {key} must remain false"
+        );
+    }
+
+    for (key, value) in object(profile, "forbidden_test_behaviors") {
+        assert_eq!(
+            value.as_bool(),
+            Some(false),
+            "forbidden test behavior {key} must remain false"
+        );
+    }
+}
+
+#[test]
+fn proof_lane_pressure_fixture_covers_required_scenarios_and_dimensions() {
+    let contract = contract();
+    let profile = contract
+        .get("proof_lane_pressure_profile")
+        .expect("proof_lane_pressure_profile object");
+    let fixture = json_file(PROOF_PRESSURE_FIXTURE_PATH);
+    let errors = validate_proof_lane_pressure_fixture(&fixture, profile);
+    assert!(
+        errors.is_empty(),
+        "proof pressure fixture must validate: {errors:?}"
+    );
+
+    let scenario_ids = array(&fixture, "scenarios")
+        .iter()
+        .map(|scenario| string(scenario, "scenario_id").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        scenario_ids,
+        string_set(profile, "scenario_ids"),
+        "fixture scenario ids must exactly match the profile"
+    );
+
+    let mut covered_dimensions = BTreeSet::new();
+    let mut covered_blockers = BTreeSet::new();
+    let mut covered_warnings = BTreeSet::new();
+    for scenario in array(&fixture, "scenarios") {
+        covered_dimensions.extend(string_set(scenario, "pressure_dimensions"));
+        covered_blockers.extend(string_set(scenario, "expected_blocker_kinds"));
+        covered_warnings.extend(string_set(scenario, "expected_warning_kinds"));
+    }
+    assert_eq!(
+        covered_dimensions,
+        string_set(profile, "required_pressure_dimensions"),
+        "fixture must cover every required pressure dimension exactly"
+    );
+    assert_eq!(
+        covered_blockers,
+        string_set(profile, "expected_blocker_kinds"),
+        "fixture blocker kinds must match the profile"
+    );
+    assert_eq!(
+        covered_warnings,
+        string_set(profile, "expected_warning_kinds"),
+        "fixture warning kinds must match the profile"
+    );
+
+    let rows = rows_by_scenario(&contract);
+    for scenario_id in string_set(profile, "scenario_ids") {
+        let row = rows
+            .get(&scenario_id)
+            .unwrap_or_else(|| panic!("scenario row for proof pressure scenario {scenario_id}"));
+        assert_eq!(string(row, "report_status"), "LIVE");
+        assert_eq!(
+            row["live_runner_wired"].as_bool(),
+            Some(true),
+            "{scenario_id} must be wired through the deterministic preflight report"
+        );
+    }
+}
+
+#[test]
+fn proof_lane_pressure_negative_cases_fail_closed() {
+    let contract = contract();
+    let profile = contract
+        .get("proof_lane_pressure_profile")
+        .expect("proof_lane_pressure_profile object");
+    let fixture = json_file(PROOF_PRESSURE_FIXTURE_PATH);
+
+    for case in array(&fixture, "negative_cases") {
+        let case_id = string(case, "case_id");
+        let input = case
+            .get("input")
+            .unwrap_or_else(|| panic!("{case_id} must include input"));
+        let errors = validate_proof_lane_pressure_fixture(input, profile);
+        assert!(
+            !errors.is_empty(),
+            "{case_id} must fail validation instead of normalizing silently"
+        );
+        let joined = errors.join("\n");
+        for fragment in string_list(case, "expected_error_fragments") {
+            assert!(
+                joined.contains(&fragment),
+                "{case_id} errors must contain {fragment:?}: {joined}"
+            );
+        }
+    }
+}
+
+#[test]
+fn proof_lane_pressure_e2e_script_runs_every_scenario() {
+    let contract = contract();
+    let profile = contract
+        .get("proof_lane_pressure_profile")
+        .expect("proof_lane_pressure_profile object");
+    let script = repo_path(string(profile, "e2e_script"));
+    let output_dir = repo_path(&format!(
+        "target/proof-lane-pressure-chaos-e2e-test-{}",
+        std::process::id()
+    ));
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--repo-path")
+        .arg(repo_path(""))
+        .arg("--fixture")
+        .arg(repo_path(PROOF_PRESSURE_FIXTURE_PATH))
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--generated-at")
+        .arg("2026-06-05T08:55:00Z")
+        .output()
+        .unwrap_or_else(|error| panic!("run {}: {error}", script.display()));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "proof lane pressure e2e script failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    for marker in string_list(profile, "required_e2e_log_markers") {
+        assert!(
+            stdout.contains(&marker),
+            "e2e stdout must include marker {marker:?}\nstdout:\n{stdout}"
+        );
+    }
+
+    let report_flags = object(profile, "required_preflight_report_flags");
+    for scenario_id in string_set(profile, "scenario_ids") {
+        assert!(
+            stdout.contains(&format!("scenario_id={scenario_id}")),
+            "e2e stdout must log scenario id {scenario_id}"
+        );
+        assert!(
+            stdout.contains(&format!("scenario_id={scenario_id} result=pass")),
+            "e2e stdout must log pass result for {scenario_id}"
+        );
+
+        let report_path = output_dir.join(&scenario_id).join("preflight_report.json");
+        let report = json_path(&report_path);
+        assert_eq!(
+            report["dry_run_only"].as_bool(),
+            report_flags["dry_run_only"].as_bool(),
+            "{scenario_id} report dry_run_only flag drifted"
+        );
+        assert_eq!(
+            report["non_mutating"].as_bool(),
+            report_flags["non_mutating"].as_bool(),
+            "{scenario_id} report non_mutating flag drifted"
+        );
+        let forbidden_actions = object(&report, "forbidden_actions");
+        for key in [
+            "runs_cargo",
+            "runs_rch",
+            "runs_git_mutation",
+            "runs_beads_mutation",
+            "sends_agent_mail",
+            "writes_cache",
+            "deletes_files",
+        ] {
+            assert_eq!(
+                forbidden_actions[key].as_bool(),
+                report_flags[key].as_bool(),
+                "{scenario_id} report forbidden action {key} drifted"
+            );
+        }
     }
 }
 
