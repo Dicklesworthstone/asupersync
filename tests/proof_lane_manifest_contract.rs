@@ -10,6 +10,7 @@ const CARGO_PATH: &str = "Cargo.toml";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const MANIFEST_PROJECTION_GOLDEN_PATH: &str =
     "tests/fixtures/proof_lane_manifest/manifest_projection.json";
+const PROOF_REUSE_CONTRACT_PATH: &str = "artifacts/proof_reuse_cache_contract_v1.json";
 const README_PATH: &str = "README.md";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -208,6 +209,143 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    let text = value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{key} must be a string"))?;
+    if text.trim().is_empty() {
+        return Err(format!("{key} must be nonempty"));
+    }
+    Ok(text)
+}
+
+fn required_bool(value: &Value, key: &str) -> Result<bool, String> {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("{key} must be a boolean"))
+}
+
+fn string_set_result(value: &Value, key: &str) -> Result<BTreeSet<String>, String> {
+    let items = value
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{key} must be an array"))?;
+    let mut set = BTreeSet::new();
+    for item in items {
+        let text = item
+            .as_str()
+            .ok_or_else(|| format!("{key} entries must be strings"))?;
+        if text.trim().is_empty() {
+            return Err(format!("{key} entries must be nonempty"));
+        }
+        set.insert(text.to_string());
+    }
+    Ok(set)
+}
+
+fn string_set_from_value(value: &Value, context: &str) -> Result<BTreeSet<String>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| format!("{context} must be an array"))?;
+    let mut set = BTreeSet::new();
+    for item in items {
+        let text = item
+            .as_str()
+            .ok_or_else(|| format!("{context} entries must be strings"))?;
+        if text.trim().is_empty() {
+            return Err(format!("{context} entries must be nonempty"));
+        }
+        set.insert(text.to_string());
+    }
+    Ok(set)
+}
+
+fn validate_lane_proof_reuse_policy(lane: &Value, manifest: &Value) -> Result<(), String> {
+    let lane_id = required_string(lane, "lane_id")?;
+    let guarantee_ids = string_set_result(lane, "guarantee_ids")?;
+    let lane_kind = required_string(lane, "kind")?;
+    let top_policy = manifest
+        .get("proof_reuse_policy")
+        .ok_or_else(|| "manifest missing proof_reuse_policy".to_string())?;
+    let field_sets = top_policy
+        .get("required_match_field_sets")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "proof_reuse_policy.required_match_field_sets must be an object".to_string()
+        })?;
+    let lane_policy = lane
+        .get("proof_reuse_policy")
+        .ok_or_else(|| format!("{lane_id}: missing proof_reuse_policy"))?;
+    let cache_hits_allowed = required_bool(lane_policy, "cache_hits_allowed")?;
+    let required_field_set = required_string(lane_policy, "required_match_field_set")?;
+    let required_fields = field_sets
+        .get(required_field_set)
+        .ok_or_else(|| format!("{lane_id}: unknown required match field set {required_field_set}"))
+        .and_then(|value| string_set_from_value(value, required_field_set))?;
+    let allowed_scopes = string_set_result(lane_policy, "allowed_claim_scopes")?;
+    let non_citeable_scopes = string_set_result(lane_policy, "non_citeable_claim_scopes")?;
+    let requires_dirty_rerun =
+        required_bool(lane_policy, "requires_fresh_rerun_when_dirty_overlap")?;
+
+    for required in [
+        "manifest_lane_id",
+        "command_fingerprint",
+        "source_tree_fingerprint",
+        "toolchain_fingerprint",
+        "head_commit",
+        "dirty_frontier_status",
+        "touched_file_hashes",
+        "status",
+        "rch_remote_worker",
+        "local_fallback_markers",
+    ] {
+        if !required_fields.contains(required) {
+            return Err(format!(
+                "{lane_id}: required match field set must include {required}"
+            ));
+        }
+    }
+
+    for scope in ["fresh-rch-pass", "release-readiness", "workspace-health"] {
+        if !non_citeable_scopes.contains(scope) {
+            return Err(format!("{lane_id}: missing non-citeable scope {scope}"));
+        }
+        if allowed_scopes.contains(scope) {
+            return Err(format!(
+                "{lane_id}: broad cache-hit scope {scope} is citeable"
+            ));
+        }
+    }
+
+    if cache_hits_allowed {
+        if allowed_scopes.is_empty() {
+            return Err(format!(
+                "{lane_id}: cache-hit-enabled lanes need allowed claim scopes"
+            ));
+        }
+        if !allowed_scopes.is_subset(&guarantee_ids) {
+            return Err(format!(
+                "{lane_id}: cache-hit claim scopes must be explicit lane guarantee ids"
+            ));
+        }
+        if !requires_dirty_rerun {
+            return Err(format!(
+                "{lane_id}: cache-hit-enabled lanes must rerun on dirty overlap"
+            ));
+        }
+    }
+
+    if lane_kind.ends_with("_frontier") && !requires_dirty_rerun {
+        return Err(format!(
+            "{lane_id}: frontier lanes must require fresh rerun on dirty overlap"
+        ));
+    }
+
+    Ok(())
+}
+
 fn cargo_feature_names() -> BTreeSet<String> {
     let cargo = read_repo_file(CARGO_PATH);
     let mut in_features = false;
@@ -389,6 +527,107 @@ fn every_lane_has_rch_command_scope_limits_and_live_paths() {
             );
         }
     }
+}
+
+#[test]
+fn every_lane_declares_fail_closed_proof_reuse_policy() {
+    let manifest = manifest();
+    let policy = manifest
+        .get("proof_reuse_policy")
+        .expect("manifest proof_reuse_policy");
+    assert_eq!(
+        policy.get("policy_id").and_then(Value::as_str),
+        Some("strict-rch-proof-reuse-policy-v1")
+    );
+    assert_eq!(
+        policy
+            .get("proof_reuse_cache_contract")
+            .and_then(Value::as_str),
+        Some(PROOF_REUSE_CONTRACT_PATH)
+    );
+    assert_eq!(
+        policy
+            .get("cache_hit_is_never_fresh_rch_pass")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        repo_path(PROOF_REUSE_CONTRACT_PATH).exists(),
+        "proof reuse cache contract source must exist"
+    );
+
+    let lanes = array(&manifest, "lanes");
+    for lane in lanes {
+        validate_lane_proof_reuse_policy(lane, &manifest).unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    let proof_manifest_lane = lanes
+        .iter()
+        .find(|lane| lane["lane_id"].as_str() == Some("proof-lane-manifest-contract"))
+        .expect("proof manifest lane");
+    assert!(
+        string_set(
+            &proof_manifest_lane["proof_reuse_policy"],
+            "allowed_claim_scopes"
+        )
+        .contains("proof-lane-manifest-verifier"),
+        "focused manifest verifier lane must be cache-citeable by guarantee id"
+    );
+
+    let all_targets = lanes
+        .iter()
+        .find(|lane| lane["lane_id"].as_str() == Some("all-targets-check"))
+        .expect("all targets lane");
+    assert_eq!(
+        all_targets["proof_reuse_policy"]["requires_fresh_rerun_when_dirty_overlap"].as_bool(),
+        Some(true),
+        "all-target frontier cache hits must force rerun on dirty overlap"
+    );
+}
+
+#[test]
+fn synthetic_cache_policy_overclaims_are_rejected() {
+    let manifest = manifest();
+    let lanes = array(&manifest, "lanes");
+    let base = lanes
+        .iter()
+        .find(|lane| lane["lane_id"].as_str() == Some("proof-lane-manifest-contract"))
+        .expect("proof manifest lane");
+
+    let mut missing_policy = base.clone();
+    missing_policy
+        .as_object_mut()
+        .expect("lane object")
+        .remove("proof_reuse_policy");
+    let error = validate_lane_proof_reuse_policy(&missing_policy, &manifest).unwrap_err();
+    assert!(
+        error.contains("missing proof_reuse_policy"),
+        "unexpected missing-policy error: {error}"
+    );
+
+    let mut broad_claim = base.clone();
+    broad_claim["proof_reuse_policy"]["allowed_claim_scopes"]
+        .as_array_mut()
+        .expect("allowed scopes")
+        .push(json!("workspace-health"));
+    let error = validate_lane_proof_reuse_policy(&broad_claim, &manifest).unwrap_err();
+    assert!(
+        error.contains("workspace-health"),
+        "unexpected broad-claim error: {error}"
+    );
+
+    let mut dirty_overlap_unsafe = lanes
+        .iter()
+        .find(|lane| lane["lane_id"].as_str() == Some("all-targets-check"))
+        .expect("all targets lane")
+        .clone();
+    dirty_overlap_unsafe["proof_reuse_policy"]["requires_fresh_rerun_when_dirty_overlap"] =
+        Value::Bool(false);
+    let error = validate_lane_proof_reuse_policy(&dirty_overlap_unsafe, &manifest).unwrap_err();
+    assert!(
+        error.contains("dirty overlap") || error.contains("frontier"),
+        "unexpected dirty-overlap error: {error}"
+    );
 }
 
 #[test]

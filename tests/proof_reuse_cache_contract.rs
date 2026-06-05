@@ -81,6 +81,13 @@ fn manifest_lane_ids() -> BTreeSet<String> {
         .collect()
 }
 
+fn manifest_lane_map() -> BTreeMap<String, Value> {
+    array(&json(MANIFEST_PATH), "lanes")
+        .iter()
+        .map(|lane| (string(lane, "lane_id").to_string(), lane.clone()))
+        .collect()
+}
+
 fn validate_contract_shape(contract: &Value) -> Result<(), String> {
     if contract.get("contract_version").and_then(Value::as_str)
         != Some("proof-reuse-cache-contract-v1")
@@ -282,6 +289,7 @@ fn fingerprint_sections_cover_the_reuse_trust_boundary() {
 fn manifest_policy_examples_reference_real_lanes_and_forbid_overclaiming() {
     let contract = contract();
     let lane_ids = manifest_lane_ids();
+    let lanes = manifest_lane_map();
     let examples = array(&contract, "manifest_lane_policy_examples");
     assert!(
         examples.len() >= 3,
@@ -294,9 +302,35 @@ fn manifest_policy_examples_reference_real_lanes_and_forbid_overclaiming() {
             lane_ids.contains(lane_id),
             "policy example references unknown lane {lane_id}"
         );
+        let lane = lanes
+            .get(lane_id)
+            .unwrap_or_else(|| panic!("missing manifest lane {lane_id}"));
+        let lane_policy = lane
+            .get("proof_reuse_policy")
+            .unwrap_or_else(|| panic!("{lane_id}: missing manifest proof_reuse_policy"));
+        assert_eq!(
+            string(example, "lane_kind"),
+            string(lane, "kind"),
+            "{lane_id}: policy example kind must match manifest lane kind"
+        );
+        assert_eq!(
+            bool_field(example, "cache_reuse_allowed"),
+            bool_field(lane_policy, "cache_hits_allowed"),
+            "{lane_id}: policy example cache flag must match manifest lane policy"
+        );
+        assert_eq!(
+            string_set(example, "allowed_claim_scopes"),
+            string_set(lane_policy, "allowed_claim_scopes"),
+            "{lane_id}: policy example claim scopes must match manifest lane policy"
+        );
         assert!(
             bool_field(example, "requires_fresh_rerun_when_dirty_overlap"),
             "{lane_id}: dirty overlap must force rerun"
+        );
+        assert_eq!(
+            bool_field(example, "requires_fresh_rerun_when_dirty_overlap"),
+            bool_field(lane_policy, "requires_fresh_rerun_when_dirty_overlap"),
+            "{lane_id}: dirty-overlap policy must match manifest lane policy"
         );
         let prohibited = string_set(example, "prohibited_claim_scopes");
         for scope in ["fresh-rch-pass", "release-readiness", "workspace-health"] {
@@ -375,12 +409,30 @@ fn decision_examples_cover_required_hit_miss_and_refusal_cases() {
 #[test]
 fn reusable_example_keeps_rch_remote_command_and_touched_surface() {
     let contract = contract();
+    let lanes = manifest_lane_map();
     let reusable = array(&contract, "decision_examples")
         .iter()
         .find(|example| string(example, "example_id") == "focused-contract-cache-hit")
         .expect("reusable example present");
+    let request = reusable.get("request").expect("request object");
     let candidate = reusable.get("candidate").expect("candidate object");
+    let lane_id = string(request, "manifest_lane_id");
+    let lane = lanes
+        .get(lane_id)
+        .unwrap_or_else(|| panic!("missing manifest lane {lane_id}"));
+    let lane_policy = lane
+        .get("proof_reuse_policy")
+        .unwrap_or_else(|| panic!("{lane_id}: missing proof_reuse_policy"));
     let command = string(candidate, "command");
+    assert_eq!(
+        command,
+        string(lane, "command"),
+        "reusable example command must match the manifest lane command"
+    );
+    assert!(
+        string_set(lane_policy, "allowed_claim_scopes").contains(string(request, "claim_scope")),
+        "reusable example claim scope must be citeable by the manifest lane policy"
+    );
     assert!(
         command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
         "reusable proof command must require remote RCH: {command}"

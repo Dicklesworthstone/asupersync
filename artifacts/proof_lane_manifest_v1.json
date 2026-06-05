@@ -17,6 +17,39 @@
     "formal_lean_build_must_not_shell_wrap": true,
     "broad_validation_is_frontier_evidence_not_local_change_proof": true
   },
+  "proof_reuse_policy": {
+    "policy_id": "strict-rch-proof-reuse-policy-v1",
+    "proof_reuse_cache_contract": "artifacts/proof_reuse_cache_contract_v1.json",
+    "cache_hit_is_never_fresh_rch_pass": true,
+    "default_required_match_field_set": "strict-rch-proof-reuse-v1",
+    "required_match_field_sets": {
+      "strict-rch-proof-reuse-v1": [
+        "manifest_lane_id",
+        "manifest_guarantee_ids",
+        "command_fingerprint",
+        "source_tree_fingerprint",
+        "toolchain_fingerprint",
+        "head_commit",
+        "branch",
+        "dirty_frontier_status",
+        "touched_files",
+        "touched_file_hashes",
+        "feature_flags",
+        "cargo_lock_hash",
+        "rust_toolchain_toml_hash",
+        "status",
+        "proof_output_digest",
+        "rch_remote_worker",
+        "rch_remote_route_segments",
+        "local_fallback_markers"
+      ]
+    },
+    "default_non_citeable_claim_scopes": [
+      "fresh-rch-pass",
+      "release-readiness",
+      "workspace-health"
+    ]
+  },
   "required_guarantee_ids": [
     "default-production-tokio-free",
     "metrics-production-tokio-free",
@@ -59,7 +92,20 @@
       "common_unrelated_blockers": [
         "Cargo.lock or dependency graph drift from unrelated feature work"
       ],
-      "escalation_notes": "Any tokio path here is a production regression; file or update a blocker bead with the full cargo-tree path."
+      "escalation_notes": "Any tokio path here is a production regression; file or update a blocker bead with the full cargo-tree path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "default-production-tokio-free"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "metrics-production-tokio-tree",
@@ -85,7 +131,20 @@
         "opentelemetry or opentelemetry_sdk feature drift",
         "accidental metrics dependency on opentelemetry-proto"
       ],
-      "escalation_notes": "Treat any tokio edge as a metrics production regression and capture the feature path."
+      "escalation_notes": "Treat any tokio edge as a metrics production regression and capture the feature path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "metrics-production-tokio-free"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "fuzz-tokio-quarantine-tree",
@@ -109,7 +168,20 @@
       "common_unrelated_blockers": [
         "fuzz feature dependency churn"
       ],
-      "escalation_notes": "If the path disappears, update the quarantine contract; if it appears in default or metrics lanes, file a production blocker."
+      "escalation_notes": "If the path disappears, update the quarantine contract; if it appears in default or metrics lanes, file a production blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fuzz-tokio-quarantine"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "workspace-normal-tokio-audit",
@@ -131,7 +203,20 @@
       "common_unrelated_blockers": [
         "new workspace member enables tokio without documentation"
       ],
-      "escalation_notes": "Compare output against AGENTS documented carve-outs before filing a regression."
+      "escalation_notes": "Compare output against AGENTS documented carve-outs before filing a regression.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "workspace-tokio-audit"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "full-feature-tokio-audit",
@@ -156,7 +241,20 @@
         "new dev-dependency enables tokio without documentation",
         "new optional feature unifies into a production graph accidentally"
       ],
-      "escalation_notes": "Classify every tokio path before citing this lane; any default or metrics overlap remains a production blocker."
+      "escalation_notes": "Classify every tokio path before citing this lane; any default or metrics overlap remains a production blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "full-graph-tokio-audit"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "native-feature-smoke",
@@ -187,7 +285,20 @@
         "feature-specific compile drift",
         "native dependency availability on remote workers"
       ],
-      "escalation_notes": "If this fails before touched files compile, capture the first file/error as a validation frontier blocker."
+      "escalation_notes": "If this fails before touched files compile, capture the first file/error as a validation frontier blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "feature-gated-native-surfaces"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "fuzz-manifest-smoke",
@@ -209,7 +320,20 @@
         "peer-dirty fuzz target",
         "shared fuzz/Cargo.toml registration conflict"
       ],
-      "escalation_notes": "For one-target work, pair this broad lane with a narrower --bin target proof if the manifest is blocked elsewhere."
+      "escalation_notes": "For one-target work, pair this broad lane with a narrower --bin target proof if the manifest is blocked elsewhere.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fuzz-manifest-smoke"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "lib-tests",
@@ -234,7 +358,20 @@
         "peer-dirty lib module",
         "warning wall promoted by RUSTFLAGS"
       ],
-      "escalation_notes": "Do not claim all-target health from this lane; use it as scoped lib-frontier evidence."
+      "escalation_notes": "Do not claim all-target health from this lane; use it as scoped lib-frontier evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "lib-test-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "all-targets-check",
@@ -258,7 +395,20 @@
         "peer-staged conformance or audit files",
         "feature-gated test missing cfg"
       ],
-      "escalation_notes": "If blocked outside touched files, cite exact file/error and use a narrower supplemental proof for local changes."
+      "escalation_notes": "If blocked outside touched files, cite exact file/error and use a narrower supplemental proof for local changes.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "all-target-compile-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "clippy-all-targets",
@@ -281,7 +431,20 @@
         "warning debt in unrelated audit modules",
         "peer-dirty tests"
       ],
-      "escalation_notes": "Preserve first lint file/error in Beads or validation-frontier records; avoid widening from unrelated lint debt."
+      "escalation_notes": "Preserve first lint file/error in Beads or validation-frontier records; avoid widening from unrelated lint debt.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "clippy-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "rustfmt-check",
@@ -301,7 +464,20 @@
       "common_unrelated_blockers": [
         "peer-dirty formatting changes"
       ],
-      "escalation_notes": "For narrow standalone files, include an explicit rustfmt --edition 2024 supplemental proof."
+      "escalation_notes": "For narrow standalone files, include an explicit rustfmt --edition 2024 supplemental proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rustfmt-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "rustdoc-api",
@@ -325,7 +501,20 @@
         "rustdoc warning in unrelated public API",
         "feature-gated doc cfg drift"
       ],
-      "escalation_notes": "For method-level rustdoc work, cite the method-specific proof separately if this broad lane is blocked."
+      "escalation_notes": "For method-level rustdoc work, cite the method-specific proof separately if this broad lane is blocked.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rustdoc-api-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "formal-lean-build",
@@ -348,7 +537,20 @@
       "common_unrelated_blockers": [
         "Lean toolchain or lake cache availability on worker"
       ],
-      "escalation_notes": "Keep this command direct; do not shell-wrap through bash or cd."
+      "escalation_notes": "Keep this command direct; do not shell-wrap through bash or cd.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "formal-lean-core-invariants"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "runtime-pressure-control-evidence-contract",
@@ -378,7 +580,20 @@
         "documentation marker drift",
         "proof lane command drift"
       ],
-      "escalation_notes": "If this fails, update the artifact, docs, manifest lane, and verifier together before citing pressure-control evidence."
+      "escalation_notes": "If this fails, update the artifact, docs, manifest lane, and verifier together before citing pressure-control evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "runtime-pressure-control-evidence-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "dirty-tree-ownership-receipt-contract",
@@ -402,7 +617,20 @@
         "offline reservation artifact shape drift",
         "dirty-tree golden fixture drift"
       ],
-      "escalation_notes": "Use this lane for ASW-7 guard changes; if it fails, do not commit from a shared dirty checkout until the first failing scenario is understood."
+      "escalation_notes": "Use this lane for ASW-7 guard changes; if it fails, do not commit from a shared dirty checkout until the first failing scenario is understood.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "shared-main-commit-guard"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "swarm-proof-lane-planner-contract",
@@ -432,7 +660,20 @@
         "docs marker drift",
         "manifest or proof-status snapshot mapping drift"
       ],
-      "escalation_notes": "Use this lane for admission-aware atlas/planner/renderer changes; do not cite it as broad release, conformance, or performance proof."
+      "escalation_notes": "Use this lane for admission-aware atlas/planner/renderer changes; do not cite it as broad release, conformance, or performance proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "admission-aware-proof-lane-atlas"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "proof-lane-manifest-contract",
@@ -457,7 +698,20 @@
         "manifest references a removed file",
         "feature name drift in Cargo.toml"
       ],
-      "escalation_notes": "This is the minimum proof for edits to the manifest itself."
+      "escalation_notes": "This is the minimum proof for edits to the manifest itself.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "proof-lane-manifest-verifier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     },
     {
       "lane_id": "atp-native-quic-dependency-audit",
@@ -482,7 +736,20 @@
         "new feature accidentally pulls external QUIC stack",
         "Tokio dependency creep in production profiles"
       ],
-      "escalation_notes": "Any forbidden QUIC stack (quinn, s2n-quic, quiche) or Tokio dependency in ATP production profiles is a blocker. File immediately with dependency path."
+      "escalation_notes": "Any forbidden QUIC stack (quinn, s2n-quic, quiche) or Tokio dependency in ATP production profiles is a blocker. File immediately with dependency path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "atp-native-self-contained"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     }
   ],
   "guarantees": [

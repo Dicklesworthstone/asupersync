@@ -66,6 +66,13 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
     string_vec(value, key).into_iter().collect()
 }
 
+fn bool_field(value: &Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} must be a boolean"))
+}
+
 fn manifest_lanes(manifest: &Value) -> BTreeMap<String, Value> {
     array(manifest, "lanes")
         .iter()
@@ -105,6 +112,114 @@ fn proof_commands_for_lanes(
             string(lane, "command").to_string()
         })
         .collect()
+}
+
+fn lane_reuse_policy<'a>(lane: &'a Value, lane_id: &str) -> Result<&'a Value, String> {
+    lane.get("proof_reuse_policy")
+        .ok_or_else(|| format!("{lane_id}: missing proof_reuse_policy"))
+}
+
+fn validate_proof_reuse_status_row(
+    row: &Value,
+    lanes: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    let row_id = string(row, "row_id");
+    let status = string(row, "proof_evidence_status");
+    let lane_id = string(row, "manifest_lane_id");
+    let claim_scope = string(row, "claim_scope");
+    let dirty_status = string(row, "dirty_frontier_status");
+    let reason_codes = string_set(row, "reason_codes");
+    let rerun_command = string(row, "rerun_command");
+    let lane = lanes
+        .get(lane_id)
+        .ok_or_else(|| format!("{row_id}: unknown lane {lane_id}"))?;
+    let lane_command = string(lane, "command");
+    let reuse_policy = lane_reuse_policy(lane, lane_id)?;
+    let allowed_scopes = string_set(reuse_policy, "allowed_claim_scopes");
+    let non_citeable_scopes = string_set(reuse_policy, "non_citeable_claim_scopes");
+
+    if rerun_command != lane_command {
+        return Err(format!(
+            "{row_id}: rerun command must match manifest lane command"
+        ));
+    }
+    if bool_field(row, "cache_hit_is_fresh_rch_pass") {
+        return Err(format!("{row_id}: cache hit cannot be a fresh RCH pass"));
+    }
+
+    match status {
+        "fresh-rch-pass" => {
+            if dirty_status != "clean" || !reason_codes.is_empty() {
+                return Err(format!(
+                    "{row_id}: fresh pass rows must be clean and reason-free"
+                ));
+            }
+        }
+        "approved-cache-hit" => {
+            if !bool_field(reuse_policy, "cache_hits_allowed") {
+                return Err(format!("{row_id}: lane does not allow cache hits"));
+            }
+            if !allowed_scopes.contains(claim_scope) {
+                return Err(format!(
+                    "{row_id}: claim scope {claim_scope} is not allowed for lane {lane_id}"
+                ));
+            }
+            if non_citeable_scopes.contains(claim_scope) {
+                return Err(format!(
+                    "{row_id}: claim scope {claim_scope} is explicitly non-citeable"
+                ));
+            }
+            if dirty_status != "clean" || !reason_codes.is_empty() {
+                return Err(format!(
+                    "{row_id}: approved cache hits must be clean and reason-free"
+                ));
+            }
+        }
+        "rerun-required" => {
+            if dirty_status == "dirty-overlap"
+                && !bool_field(reuse_policy, "requires_fresh_rerun_when_dirty_overlap")
+            {
+                return Err(format!(
+                    "{row_id}: dirty-overlap rerun requires manifest policy support"
+                ));
+            }
+            if dirty_status == "dirty-overlap" && !reason_codes.contains("dirty-frontier-overlap") {
+                return Err(format!(
+                    "{row_id}: dirty-overlap rerun rows must include dirty-frontier-overlap"
+                ));
+            }
+        }
+        "stale-evidence" => {
+            if !reason_codes.contains("stale-head") {
+                return Err(format!("{row_id}: stale rows must carry stale-head"));
+            }
+        }
+        "blocked" => {
+            if reason_codes.is_empty() {
+                return Err(format!("{row_id}: blocked rows need reason codes"));
+            }
+        }
+        "no-win" => {
+            if reason_codes.iter().all(|reason| !reason.contains("no-win")) {
+                return Err(format!("{row_id}: no-win rows need a no-win reason"));
+            }
+        }
+        "unsupported" => {
+            if !reason_codes.contains("broad-claim-unsupported") {
+                return Err(format!(
+                    "{row_id}: unsupported rows need broad-claim-unsupported"
+                ));
+            }
+            if allowed_scopes.contains(claim_scope) && !non_citeable_scopes.contains(claim_scope) {
+                return Err(format!(
+                    "{row_id}: unsupported claim scope unexpectedly allowed by manifest"
+                ));
+            }
+        }
+        other => return Err(format!("{row_id}: unknown proof evidence status {other}")),
+    }
+
+    Ok(())
 }
 
 fn validate_claim_lane_mapping(
@@ -341,6 +456,34 @@ fn statuses_are_known_and_include_live_green_and_frontier_rows() {
             "dashboard must contain at least one {required} row"
         );
     }
+
+    let evidence_allowed = array(&snapshot, "proof_evidence_status_catalog")
+        .iter()
+        .map(|entry| string(entry, "status").to_string())
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "fresh-rch-pass",
+        "approved-cache-hit",
+        "rerun-required",
+        "stale-evidence",
+        "blocked",
+        "no-win",
+        "unsupported",
+    ] {
+        assert!(
+            evidence_allowed.contains(expected),
+            "missing proof evidence status {expected}"
+        );
+    }
+
+    for entry in array(&snapshot, "claim_categories") {
+        let proof_status = string(entry, "proof_evidence_status");
+        assert!(
+            evidence_allowed.contains(proof_status),
+            "{}: unknown proof evidence status {proof_status}",
+            string(entry, "claim_id")
+        );
+    }
 }
 
 #[test]
@@ -382,6 +525,76 @@ fn status_rows_do_not_overstate_frontier_or_scoped_claims() {
     for entry in array(&snapshot, "claim_categories") {
         validate_status_support(entry, &lanes).unwrap_or_else(|error| panic!("{error}"));
     }
+}
+
+#[test]
+fn proof_reuse_status_rows_preserve_cache_hit_and_rerun_distinctions() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let rows = array(&snapshot, "proof_reuse_status_rows");
+    let statuses = rows
+        .iter()
+        .map(|row| string(row, "proof_evidence_status").to_string())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        statuses,
+        BTreeSet::from([
+            "approved-cache-hit".to_string(),
+            "blocked".to_string(),
+            "fresh-rch-pass".to_string(),
+            "no-win".to_string(),
+            "rerun-required".to_string(),
+            "stale-evidence".to_string(),
+            "unsupported".to_string(),
+        ]),
+        "proof reuse status rows must keep every operator outcome distinct"
+    );
+
+    for row in rows {
+        validate_proof_reuse_status_row(row, &lanes).unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[test]
+fn synthetic_cache_hit_overclaims_are_rejected() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let reusable = array(&snapshot, "proof_reuse_status_rows")
+        .iter()
+        .find(|row| row["row_id"].as_str() == Some("focused-contract-approved-cache-hit"))
+        .expect("approved cache hit row");
+
+    let mut broad_cache_hit = reusable.clone();
+    broad_cache_hit["claim_scope"] = Value::String("workspace-health".to_string());
+    let error = validate_proof_reuse_status_row(&broad_cache_hit, &lanes).unwrap_err();
+    assert!(
+        error.contains("not allowed") || error.contains("non-citeable"),
+        "unexpected broad-cache-hit error: {error}"
+    );
+
+    let mut dirty_cache_hit = reusable.clone();
+    dirty_cache_hit["dirty_frontier_status"] = Value::String("dirty-overlap".to_string());
+    dirty_cache_hit["reason_codes"] = serde_json::json!(["dirty-frontier-overlap"]);
+    let error = validate_proof_reuse_status_row(&dirty_cache_hit, &lanes).unwrap_err();
+    assert!(
+        error.contains("clean and reason-free"),
+        "unexpected dirty-cache-hit error: {error}"
+    );
+
+    let mut stale_without_reason = array(&snapshot, "proof_reuse_status_rows")
+        .iter()
+        .find(|row| row["proof_evidence_status"].as_str() == Some("stale-evidence"))
+        .expect("stale row")
+        .clone();
+    stale_without_reason["reason_codes"] = serde_json::json!([]);
+    let error = validate_proof_reuse_status_row(&stale_without_reason, &lanes).unwrap_err();
+    assert!(
+        error.contains("stale-head"),
+        "unexpected stale-cache-hit error: {error}"
+    );
 }
 
 #[test]

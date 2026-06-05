@@ -130,10 +130,10 @@
   "manifest_lane_policy_examples": [
     {
       "lane_id": "proof-lane-manifest-contract",
-      "lane_kind": "contract",
+      "lane_kind": "artifact_contract",
       "cache_reuse_allowed": true,
       "allowed_claim_scopes": [
-        "proof-lane-manifest-schema"
+        "proof-lane-manifest-verifier"
       ],
       "requires_fresh_rerun_when_dirty_overlap": true,
       "prohibited_claim_scopes": [
@@ -147,7 +147,7 @@
       "lane_kind": "compile_frontier",
       "cache_reuse_allowed": true,
       "allowed_claim_scopes": [
-        "same-source-all-target-compile-frontier"
+        "all-target-compile-frontier"
       ],
       "requires_fresh_rerun_when_dirty_overlap": true,
       "prohibited_claim_scopes": [
@@ -161,7 +161,7 @@
       "lane_kind": "lint_frontier",
       "cache_reuse_allowed": true,
       "allowed_claim_scopes": [
-        "same-source-clippy-frontier"
+        "clippy-frontier"
       ],
       "requires_fresh_rerun_when_dirty_overlap": true,
       "prohibited_claim_scopes": [
@@ -179,12 +179,12 @@
       "cache_hit_is_fresh_rch_pass": false,
       "request": {
         "manifest_lane_id": "proof-lane-manifest-contract",
-        "claim_scope": "proof-lane-manifest-schema",
+        "claim_scope": "proof-lane-manifest-verifier",
         "head_commit": "5417ddb5d",
         "dirty_frontier_status": "clean"
       },
       "candidate": {
-        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
         "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
         "source_tree_fingerprint": "git-tree:5417ddb5d",
         "toolchain_fingerprint": "sha256:rust-toolchain-cargo-lock-profile",
