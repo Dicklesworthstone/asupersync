@@ -1,429 +1,402 @@
-# ATP Architecture: Design and Implementation Reality
+# ATP Architecture
 
-*Generated from shipped implementation as of 2026-05-26*
+ATP is the Asupersync Transfer Protocol. It is the repo-owned data movement
+layer for verified object-graph transfer over native Asupersync transport
+surfaces. The current implementation is intentionally split into testable model
+layers before daemon, relay, mailbox, and SDK wiring depend on them.
 
-This document describes the actual architecture of ATP (Asupersync Transfer Protocol) as implemented in the codebase, not aspirational design. It serves as the canonical reference for understanding how ATP components interact and why they are designed as they are.
+## Current Status
 
-## Executive Summary
+The live source of truth is the code under `src/atp/` and `src/net/atp/`.
+This document records the current implementation boundary; it is not a
+replacement for Beads.
 
-ATP is a verified data movement layer built on native Asupersync QUIC that provides:
-- **Verified object graph transfer** with cryptographic integrity
-- **Crash-safe journaling** with deterministic replay
-- **Swarm/cache coordination** for multi-peer collaboration  
-- **Capability-scoped operations** with explicit trust boundaries
-- **Observable, auditable transfers** with proof artifacts
+Implemented model surfaces:
 
-ATP integrates deeply with Asupersync's structured concurrency model and provides both CLI and programmatic interfaces for data movement operations.
+- Object graph model, metadata policy, object ids, and graph validation:
+  `src/atp/object.rs`.
+- Manifest schema, chunking/compression/encryption policy records, Merkle roots,
+  and graph commit semantics: `src/atp/manifest.rs`.
+- Path graph candidate model, security properties, budgets, racing, snapshots,
+  and terminal outcome taxonomy: `src/atp/path.rs`.
+- Committed validation surfaces for object graphs, manifests, Merkle roots, and
+  graph commits: `src/atp/object.rs` and `src/atp/manifest.rs`.
+- Binary ATP frame definitions and codec: `src/net/atp/protocol/frames.rs`,
+  `src/net/atp/protocol/codec.rs`, and `src/net/atp/protocol/varint.rs`.
+- QUIC-frame model, packet assembly, transport parameters, and session
+  negotiation state machine: `src/net/atp/protocol/quic_frames.rs`,
+  `src/net/atp/protocol/packet_assembly.rs`,
+  `src/net/atp/protocol/transport_params.rs`, and
+  `src/net/atp/protocol/session.rs`.
+- Native UDP endpoint contract for the QUIC path:
+  `src/net/quic_native/endpoint.rs`.
+- Native QUIC packet-protection provider boundary and deterministic/TLS-backed
+  proof lanes: `src/net/quic_native/tls.rs`.
+- Platform capability diagnostics for disk and packaging policy:
+  `src/atp/platform/mod.rs`, `src/atp/doctor/mod.rs`, and
+  `asupersync atp doctor --platform`.
 
-## Core Principles
+## Non-Negotiable Boundaries
 
-### 1. Verification-First Design
-Every ATP transfer generates cryptographic proof artifacts that enable:
-- Independent verification of transfer integrity
-- Deterministic replay for debugging and forensics
-- Audit trails that satisfy compliance requirements
+ATP must preserve the core Asupersync invariants:
 
-### 2. Capability Security Model
-ATP operations require explicit capabilities:
-- No ambient authority - all effects flow through `Cx`
-- Scoped access control for cache, seeding, and relay operations
-- Trust boundaries enforced at compilation boundaries
+- Every transfer task is region-owned; daemon and SDK integration must not
+  introduce detached transfer work.
+- Cancellation is a protocol. Transfer writers, relays, and mailbox workers
+  must drain or emit fail-closed proof evidence before exposing data.
+- Effects flow through explicit `Cx` capability boundaries. ATP code must not
+  add ambient runtime, filesystem, network, or clock authority.
+- Permits, leases, acknowledgements, sparse-file reservations, and relay grants
+  are obligations. They must commit or abort.
+- Lab and replay tests must remain deterministic for the model layers.
+- Core ATP must not depend on Tokio, Hyper, Reqwest, Axum, async-std, smol, or
+  external QUIC endpoint stacks. The QUIC path is native Asupersync code.
 
-### 3. Structured Concurrency Integration  
-ATP leverages Asupersync's structured concurrency:
-- All transfers are owned by explicit regions
-- Cancellation is protocol-aware, not silent drops
-- Resource cleanup follows structured teardown
+## ATP-M4 Implementation Ownership Contract
 
-### 4. Native QUIC Foundation
-ATP builds on Asupersync's native QUIC implementation:
-- No external QUIC dependencies (no quinn, no s2n-quic)
-- Direct integration with Asupersync runtime and cancellation
-- Custom congestion control and path management
+This section is the self-contained module-map contract for
+`asupersync-w9xymh`. Its job is to keep ATP implementation work compatible
+while multiple agents land independent slices on `main`. If a future change
+adds, removes, or renames an ATP module family, update this section, the
+contributor guide, and `tests/atp_module_map_contract.rs` in the same bead.
 
-## Architecture Overview
+Status vocabulary:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    ATP CLI & Applications                   │
-├─────────────────────────────────────────────────────────────┤
-│  ATP Workflows  │  ATP SDK   │  ATPD Daemon  │  CLI Tools  │
-├─────────────────────────────────────────────────────────────┤
-│                      ATP Core Protocol                     │
-├─────────────────────────────────────────────────────────────┤
-│  Object Graph  │   Manifest  │   Transfer    │    Proof    │
-│   Management   │   Handling  │   Oracles     │  Artifacts  │
-├─────────────────────────────────────────────────────────────┤
-│                    ATP Data Movement                       │
-├─────────────────────────────────────────────────────────────┤
-│  Chunk Store  │   RaptorQ    │   Swarm      │   Cache     │
-│   & Journal   │   Repair     │   Protocol   │  Management │
-├─────────────────────────────────────────────────────────────┤
-│                    ATP Network Layer                      │
-├─────────────────────────────────────────────────────────────┤
-│    Native     │   Path       │   Session    │    Relay    │
-│    QUIC       │  Discovery   │  Management  │  Protocol   │
-├─────────────────────────────────────────────────────────────┤
-│                 Asupersync Runtime Foundation              │
-└─────────────────────────────────────────────────────────────┘
-```
+- `committed`: tracked source exists on `main` and has a focused proof lane.
+- `active`: a bead is in progress and may have dirty shared-main work; docs may
+  describe the intended boundary but must not claim completion.
+- `planned`: the module family is part of the ATP design but should not be used
+  by callers until an implementation bead lands it with tests and proof logs.
 
-## Component Breakdown
+Primary owner rule:
 
-### ATP CLI & Applications Layer
-
-#### ATP Workflows (`src/cli/atp_workflows.rs`)
-Implements high-level workflows for common use cases:
-
-- **CI Workflows**: Build artifact push/pull with cache integration
-- **Dataset Workflows**: Research data seeding and distribution
-- **Fuzz Workflows**: Corpus synchronization and sharing
-- **Release Workflows**: Bundle distribution with verification
-- **Archive Workflows**: Long-term storage with retention policies
-
-```rust
-pub struct AtpWorkflowCoordinator {
-    cache: AtpCache,
-    seeding_service: AtpSeedingService,
-    output: Output,
-}
+```text
+one bead owns the semantic boundary for one module family
++ one exact file reservation set
++ one focused proof lane
++ one closeout note that names blockers or validation commands
 ```
 
-#### ATP Command Tree (`src/cli/atp_command_tree.rs`)
-Complete CLI command architecture with:
+This is the replacement for feature branches in ATP work. It gives future
+agents a stable write boundary without violating the project rule that all work
+happens on `main`.
 
-- **Core Commands**: send, get, sync, mirror, share, watch
-- **Daemon Commands**: serve, inbox, resume, cancel, status
-- **Workflow Commands**: ci, dataset, fuzz, release, archive
-- **Diagnostic Commands**: doctor, verify, replay, proof
+### Current committed module inventory
 
-**Key Design Decision**: Commands map directly to ATP protocol operations, not filesystem abstractions.
+| Boundary | Owner workstream | Committed files | Proof expectation | Why this belongs here |
+| --- | --- | --- | --- | --- |
+| ATP root and public model surface | `asupersync-l21xmv`, `asupersync-w9xymh` | `src/atp/mod.rs`, `src/net/atp/mod.rs` | module-map contract plus focused model tests | Keeps object, protocol, path, and proof surfaces discoverable without making callers depend on internal layout. |
+| Object graph | `ATP-C`, `asupersync-bg83ig` | `src/atp/object.rs` | inline unit tests and manifest E2E | ATP moves verified object graphs; files and streams are front ends, not the primitive. |
+| Manifest, Merkle, transform policy, graph commit | `ATP-C`, `asupersync-1iuqyc`, `asupersync-w5j10z` | `src/atp/manifest.rs` | `scripts/run_atp_manifest_e2e.sh` | Verification truth must be explicit about chunking, compression, encryption, repair, and proof semantics. |
+| Verifier boundary | `ATP-D4`, `asupersync-fw1eg1` | `src/atp/verifier.rs` | verifier unit tests and future crash/finalizer lab scripts | The verifier is the gate that prevents corrupt chunks, lying relays, or bad repairs from becoming visible data. |
+| Proof bundle and FrankenSuite projection | `ATP-C5`, `ATP-M6`, `asupersync-w5j10z`, `asupersync-fv459o` | `src/atp/proof/`, `franken_evidence/`, `franken_decision/` | proof-bundle unit tests, FrankenEvidence validation, rch lib check | ATP keeps transfer-specific proof artifacts while exporting generic decision/evidence rows for project-wide audit. |
+| Path candidate model | `ATP-F`, `asupersync-6cokae` | `src/atp/path.rs`, `src/net/atp/path/mod.rs` | path model tests and future NAT/path lab scripts | Connectivity is a graph of typed candidate edges, not direct-or-relay branching. |
+| Platform capability facade and doctor output | `ATP-D1`, `asupersync-1tgbxe` | `src/atp/platform/mod.rs`, `src/atp/doctor/mod.rs`, `src/bin/asupersync.rs` | platform doctor tests and host capability probes | Disk, socket, service-manager, IPv6, and filesystem policy must be measured and explainable. |
+| ATP binary protocol frames and codec | `ATP-B`, `asupersync-1ar9mg` | `src/net/atp/protocol/frames.rs`, `src/net/atp/protocol/codec.rs`, `src/net/atp/protocol/varint.rs` | codec round-trip, partial-frame, size-limit, and malformed-input tests | ATP application framing stays separate from QUIC packet mechanics and remains replayable in memory. |
+| Protocol transcript, outcomes, and session negotiation | `ATP-B`, `asupersync-wvjjnz` | `src/net/atp/protocol/transcript.rs`, `src/net/atp/protocol/outcome.rs`, `src/net/atp/protocol/session.rs` | `tests/atp_session_negotiation.rs` and session E2E script | Authentication, capability grants, replay rejection, and downgrade policy happen before storage or relay authority. |
+| QUIC frame and packet assembly model | `ATP-A`, `asupersync-zquziu` | `src/net/atp/protocol/quic_frames.rs`, `src/net/atp/protocol/packet_assembly.rs`, `src/net/atp/protocol/transport_params.rs` | frame/packet/transport-parameter unit tests | QUIC protocol state is internally owned; ATP must not delegate this to an external endpoint crate. |
+| Native QUIC endpoint and UDP boundary | `ATP-A1`, `ATP-A11`, `asupersync-crscmn` | `src/net/quic_native/endpoint.rs` | `tests/atp_native_quic_endpoint_contract.rs` | Socket batching, cancellation-aware receive, shutdown, and endpoint metrics must stay Cx/region compatible. |
+| Native QUIC packet protection and TLS provider boundary | `ATP-A3`, `asupersync-e8hst6` | `src/net/quic_native/tls.rs` | `tests/atp_quic_packet_protection.rs`, `scripts/run_atp_quic_packet_protection_e2e.sh` | QUIC owns state transitions; crypto providers own primitive operations without becoming external QUIC stacks. |
+| Native QUIC connection, transport, streams, and forensic log | `ATP-A4`, `ATP-A6`, `ATP-A7`, `ATP-A10` | `src/net/quic_native/connection.rs`, `src/net/quic_native/transport.rs`, `src/net/quic_native/streams.rs`, `src/net/quic_native/forensic_log.rs` | QUIC transport/stream/loss tests, qlog-style replay artifacts | ATP needs flow control, ACK/loss, migration, key update, close/drain, and replay evidence as reusable transport assets. |
+| Rendezvous and endpoint observation | `ATP-F3`, `asupersync-uh6u63` | `src/net/atp/rendezvous/mod.rs`, `src/net/atp/stun/mod.rs` | NAT classifier, signed-candidate, replay, quota, and cancellation tests | Peers behind routers need privacy-preserving candidate exchange before path racing can be honest. |
+| Optional Tailscale path candidates | `ATP-F6`, `asupersync-92vqmc` | `src/net/atp/path/mod.rs`, `tailscale-path-provider` Cargo feature | fake-provider unit tests for prefer, disabled, provider failure, metrics, and proof summary | Tailnet reachability is an optional candidate source; it must not add a hard Tailscale dependency or block direct/relay/mailbox paths. |
 
-#### ATPD Daemon (`src/bin/atpd.rs`)
-Always-on ATP service providing:
+### Planned module families and write boundaries
 
-- **Identity Management**: Peer identity and grant handling
-- **Inbox Processing**: Asynchronous transfer handling
-- **Cache Management**: Background seeding and eviction
-- **Service Discovery**: Peer directory integration
-- **Diagnostics**: Health monitoring and metrics
+The design intentionally reserves the following module families even when their
+full implementations are not committed yet. A bead may create one of these
+modules only when it also lands unit tests, e2e or lab proof where applicable,
+and a contributor-guide row.
 
-### ATP Core Protocol Layer
+| Planned boundary | Owner workstream | Intended modules | Required proof shape |
+| --- | --- | --- | --- |
+| Transfer actor and per-transfer ownership | `ATP-E1`, `asupersync-9yjgrz` | `src/atp/actor/`, `src/atp/transfer/` | state-machine tests for offer, accept, pause, cancel, resume, commit, restart, and no obligation leaks; actor e2e script with structured state-transition logs |
+| ATP Transfer Brain and scheduler feedback | `ATP-E`, `ATP-E8` | `src/net/atp/quic/transfer_brain.rs`, scheduler/autotune adapters | deterministic scheduling tests for priority, hedging, backpressure, relay cost, disk pressure, repair ROI, and cancellation drain |
+| ACK, loss, PTO, congestion, and anti-amplification | `ATP-A6`, `asupersync-51uf70` | `src/net/atp/loss/`, `src/net/atp/quic/recovery.rs`, `src/net/atp/quic/metrics.rs` | ACK range, RTT, PTO, persistent-congestion, anti-amplification, migration, and replay tests under deterministic network models |
+| Chunking profiles | `ATP-C3`, `asupersync-9jgb8r` | `src/net/atp/chunk/` | fixed-size bulk, content-defined sync-tree, media prefix, sparse-image hole, artifact reproducibility, and rolling-stream manifest tests |
+| Crash-safe disk writer and journal | `ATP-D2`, `ATP-D3`, `ATP-D5` | `src/atp/disk/`, `src/atp/journal/` | sparse/prealloc/fsync/atomic-rename tests plus crash injection around write, journal append, bitmap update, repair decode, and final rename |
+| RaptorQ repair coordinator | `ATP-G2`, `asupersync-3ui2zb` | `src/atp/repair/` with existing `src/raptorq/` primitives | manifest-bound repair group tests, symbol authentication, K/K-prime boundaries, malicious peer rejection, decode proof entries, lossy/resume/swarm e2e |
+| Path graph engine and relay adapters | `ATP-F`, `ATP-F5`, `ATP-F10` | `src/atp/path/`, `src/atp/relay/`, Tailscale candidate provider adapters, MASQUE-compatible relay adapter | direct/relay/Tailscale/mailbox path racing, loser drain, signed candidates, relay opacity, TCP/TLS 443 fallback, and path doctor logs |
+| SDK facade | `ATP-B4`, `asupersync-sbk7th` | `src/net/atp/sdk/` or stable `src/atp/sdk/` facade | Cx-first send/receive/sync/stream tests, idempotent resume/cancel, backpressure, diagnostics, and docs examples |
+| Daemon and identity | `ATP-H1`, `ATP-H2`, `ATP-H5`, `ATP-H6`, `ATP-H7` | `src/atp/daemon/`, `src/atp/identity/`, key store and peer directory modules | AppSpec lifecycle tests, stable PeerId/TransferId derivation, key rotation/revocation, receive preflight, quota, consent, and quarantine e2e |
+| CLI and first-run UX | `ATP-I5`, `ATP-I6`, `ATP-B5` | `src/bin/asupersync.rs` ATP commands and packaging scripts | deterministic CLI output tests, share/pairing flows, service integration smoke, shell completions, and upgrade diagnostics |
+| Offline mailbox | `ATP-J4` and mailbox follow-up beads | `src/atp/mailbox/` and relay storage policy modules | encrypted store-and-forward tests, tamper evidence, quota/retention, abuse resistance, privacy redaction, sender-offline and receiver-offline e2e |
+| Swarm and cache-assisted transfer | swarm follow-up beads under ATP-H/ATP-G | `src/atp/swarm/`, cache and piece-picker modules | multi-source verified transfer tests, rarest/usefulness picking, malicious cache rejection, peer churn, relay cache, and repair-symbol usefulness logs |
+| Lab, replay, benchmark cartel, and crashpacks | `ATP-L`, `ATP-N` | `src/atp/lab/`, replay/minimizer/crashpack modules, bench adapters | deterministic NAT/network/disk/adversary models, transfer oracle tests, replay minimization, scp/rsync/rclone/curl/http3 comparator scripts |
+| Governance and dependency gates | `ATP-M`, `ATP-N`, `asupersync-jaghjr`, `asupersync-xvaftm` | docs, artifacts, dependency audit tests, no-external-QUIC gates | module-map contract, no-Tokio/default-graph checks, proof-lane manifest updates, and per-module Definition of Done enforcement |
 
-#### Object Graph Management
-ATP operates on object graphs, not individual files:
+### Boundary rules for new ATP modules
 
-```rust
-pub struct ObjectGraph {
-    manifest: Manifest,
-    chunks: BTreeMap<ChunkId, ChunkMetadata>,
-    dependencies: Vec<ObjectId>,
-}
-```
+- New ATP modules must be introduced under the owner workstream named above or
+  a bead that explicitly updates this contract first.
+- Public effectful APIs must take `&Cx` first and preserve capability flow.
+- Long-lived workers belong under supervised daemon/AppSpec topology; one
+  transfer's mutable state belongs to one transfer actor or equivalent owned
+  region.
+- Protocol parsing, manifest validation, verification, repair, disk commit,
+  and final exposure must remain separate stages with redaction-safe evidence.
+- Native QUIC modules may use TLS primitives through the provider boundary, but
+  may not import an external QUIC endpoint stack.
+- Planned module names are reservations for architecture coherence, not claims
+  that the implementation is complete.
 
-**Manifest Structure**: Merkle-tree organized with deterministic canonicalization
-**Chunking Strategy**: Content-defined with deduplication across transfers
-**Dependency Tracking**: Explicit object dependencies for incremental transfers
+## Layer Map
 
-#### Transfer Oracles (`src/atp/transfer_oracles.rs`)
-Verification and validation during transfers:
+### Data Model
 
-- **Integrity Oracles**: Cryptographic verification of chunks and manifests
-- **Progress Oracles**: Transfer completion and resume capability validation  
-- **Performance Oracles**: Throughput and latency monitoring
-- **Security Oracles**: Trust boundary and capability enforcement
+`src/atp/object.rs` models ATP as object-graph movement, not file copying.
+The core ids are `ContentId`, `ManifestId`, and `ObjectId`. Object kinds include
+files, directories, streams, symlinks, and application-defined records.
+`ObjectGraph::validate` checks child existence and cycles before manifest,
+session, or transfer code trusts a graph.
 
-#### Proof Artifacts
-Every ATP operation generates structured proof artifacts:
+`src/atp/manifest.rs` turns object graphs into versioned, canonical manifest
+state. It records chunk plans, RaptorQ repair layout, compression policy,
+encryption policy, capability policy, and graph commits. `MerkleRoot` is derived
+from the graph and is the stable integrity anchor passed into session policy and
+verification.
 
-```json
-{
-  "proof_version": "1.0",
-  "operation_type": "transfer|seed|cache|archive",
-  "session_id": "session_correlation_id",
-  "integrity_verification": {
-    "algorithm": "blake3",
-    "manifest_hash": "blake3:...",
-    "chunk_hashes": [...],
-    "verification_status": "verified|failed"
-  },
-  "performance_metrics": {
-    "duration_ms": 1234,
-    "throughput_mbps": 56.7,
-    "compression_ratio": 0.73,
-    "deduplication_ratio": 0.12
-  },
-  "replay_artifacts": {
-    "structured_log": "path/to/replay.jsonl",
-    "state_snapshots": [...],
-    "decision_trace": [...]
-  }
-}
-```
+The committed manifest proof lane is `scripts/run_atp_manifest_e2e.sh`. It
+exercises canonical serialization, SHA-256 Merkle roots, policy validation,
+unknown-field handling, and graph commit semantics while routing every Cargo
+call through `rch`.
 
-### ATP Data Movement Layer
+### Verification
 
-#### Chunk Store and Journal (`src/atp/chunk/store.rs`, `src/atp/journal.rs`)
-Crash-safe storage with:
+The committed exposure boundary is currently the object and manifest validation
+surface. `ObjectGraph::validate`, `Manifest::validate`, and
+`GraphCommit::validate` reject missing graph edges, cycles, unsupported manifest
+versions, dangling roots or children, and commit-id mismatches before higher
+transfer layers may expose data.
 
-- **Append-Only Journal**: All operations journaled for crash recovery
-- **Content-Defined Chunks**: Efficient deduplication across transfers
-- **Bitmap Tracking**: Chunk availability and transfer progress
-- **Compaction**: Background cleanup preserving essential state
+The tracker reserves the following verifier-stage taxonomy for chunk writers,
+relays, mailbox consumers, proof bundles, and finalizers as those surfaces land:
 
-**Critical Property**: Crash safety guaranteed by sync ordering and journal replay
+- `chunk_hash`
+- `object_content`
+- `graph_merkle`
+- `manifest`
+- `commit`
+- `repair_symbol`
+- `proof_bundle`
+- `finalizer`
 
-#### RaptorQ Repair (`src/raptorq/`)
-Forward error correction for reliable transfer:
+Sparse writers, cache readers, relays, mailbox consumers, and SDK import paths
+must use the committed validation surface now and the dedicated verifier stages
+before exposing committed ATP data once those stages are part of `main`.
 
-- **Symbol Generation**: Configurable repair symbol overhead
-- **Manifest Integration**: Repair groups bound to object manifests
-- **Authentication**: Cryptographic binding of repair symbols to source data
-- **Systematic Decoding**: Optimized for common case of no loss
+`src/atp/proof/` keeps the ATP-specific proof material: manifest roots, object
+roots, chunk bitmap state, verification stages, repair metadata, peer identity,
+path summary, journal digest, final commit record, replay pointers, and
+extensions. The FrankenSuite-generic projection is
+`AtpProofBundle::to_franken_proof_export()`: it derives stable `TraceId` and
+`DecisionId` values from the canonical proof-bundle hash, emits a
+`DecisionAuditEntry`, converts that entry to an `EvidenceLedger`, and returns
+`AtpAuditArtifactRef` values that project-wide audit records can attach. A
+bundle that fails ATP validation still emits evidence, but the proof-bundle gate
+chooses `quarantine_proof_bundle` instead of `accept_proof_bundle`.
 
-#### Swarm Protocol (`src/atp/swarm/`)
-Multi-peer collaboration:
+### Path Graph
 
-- **Piece Selection**: Rarest-first with usefulness weighting
-- **Peer Quality**: Path quality, budget, and trust scoring
-- **Coordination**: Distributed piece assignment without central coordination
-- **Incentives**: Contribution tracking and reciprocity
+`src/atp/path.rs` models routes as explicit candidates:
 
-#### Cache Management (`src/atp/cache/`)
-Intelligent caching with capability scoping:
+- LAN multicast
+- Explicit public UDP
+- Public IPv6
+- NAT-punched UDP
+- Tailscale/private-network path
+- ATP relay over UDP
+- ATP relay over TCP/TLS on port 443
+- MASQUE/CONNECT-UDP-style relay
+- Offline mailbox
 
-- **Capability-Scoped**: Cache access controlled by explicit capabilities
-- **Retention Policies**: TTL-based with LRU eviction
-- **Seeding Integration**: Automatic population from trusted sources
-- **Quota Management**: Per-scope resource limits
+Each candidate carries `PathSecurity`, `PathBudget`, evidence, and a terminal
+`PathOutcome`. Direct, relay, and mailbox paths are comparable through the same
+candidate/race model instead of ad hoc branch logic.
 
-### ATP Network Layer
+The Tailscale candidate provider is feature-discoverable through the
+dependency-free `tailscale-path-provider` Cargo feature. `--prefer tailscale`
+selects the preference that ranks Tailscale candidates ahead of other non-relay
+paths when provider output exists. `--no-tailscale` maps to the disabled policy
+and ignores provider output. Both modes still use the same candidate metrics and
+proof-summary surface as other paths; provider failure records a non-fatal
+caveat instead of suppressing direct, NAT, relay, or mailbox candidates.
 
-#### Native QUIC (`src/net/quic_native/`)
-Custom QUIC implementation providing:
+### Binary Protocol
 
-- **Zero External Dependencies**: Built on Asupersync primitives
-- **Runtime Integration**: Direct Cx/cancellation integration
-- **Custom Congestion Control**: ATP-aware flow control
-- **Path Management**: Multi-path with quality-aware selection
+`src/net/atp/protocol/frames.rs` defines ATP frame types and headers.
+`src/net/atp/protocol/codec.rs` is the frame boundary codec. It uses ATP varints
+from `src/net/atp/protocol/varint.rs`, validates version and frame size, and
+preserves decoder state for partial frames.
 
-**Dependency Compliance**: Zero external QUIC crates - all implemented natively
+Frame families are:
 
-#### Session Management (`src/atp/session/`)
-Connection lifecycle and state management:
+- Session establishment: handshake and capability exchange.
+- Object transfer: manifest, request, data, complete, and object error.
+- Path management: path update, challenge, response, and keep-alive.
+- Control: cancel, protocol error, and close.
 
-- **Session Negotiation**: Capability exchange and trust establishment
-- **State Machines**: Deterministic session lifecycle
-- **Error Handling**: Graceful degradation and recovery
-- **Multiplexing**: Multiple transfers over single session
+### Native QUIC Surface
 
-#### Relay Protocol (`src/atp/relay/`)
-Relay-assisted transfers:
+ATP uses native Asupersync QUIC surfaces. It must not pull in external QUIC
+endpoint crates. The current model layers are:
 
-- **Encrypted Storage**: Relays cannot decrypt content
-- **Tamper Evidence**: Cryptographic detection of relay misbehavior
-- **Quota Management**: Resource limits and abuse prevention
-- **Audit Trails**: Complete logging of relay operations
+- QUIC frame encode/decode: `src/net/atp/protocol/quic_frames.rs`.
+- Packet budget, packet-number-space filtering, frame prioritization, and packet
+  assembly: `src/net/atp/protocol/packet_assembly.rs`.
+- Transport parameter validation: `src/net/atp/protocol/transport_params.rs`.
+- UDP endpoint batching, cancellation-aware receive, metrics, and shutdown:
+  `src/net/quic_native/endpoint.rs`.
+- Packet protection, header protection, key lifecycle, key update, and TLS
+  provider boundary: `src/net/quic_native/tls.rs`.
 
-## Implementation Patterns
+The endpoint contract is guarded by
+`tests/atp_native_quic_endpoint_contract.rs` and
+`artifacts/atp_native_quic_endpoint_contract_v1.json`.
 
-### 1. Cx-First APIs
-All ATP operations require explicit `Cx` for capabilities:
+The packet-protection contract is guarded by
+`tests/atp_quic_packet_protection.rs` and
+`scripts/run_atp_quic_packet_protection_e2e.sh`.
 
-```rust
-pub async fn transfer_object(
-    cx: &Cx,
-    object_id: ObjectId,
-    destination: PeerId,
-) -> AtpOutcome<TransferProof>
-```
+### Session Negotiation
 
-### 2. Structured Error Handling
-ATP errors provide actionable context:
+`src/net/atp/protocol/session.rs` is a deterministic state-machine model before
+socket or daemon wiring. It validates peer identity, transfer nonces, manifest
+binding, path scopes, capability grants, feature selection, replay rejection,
+and downgrade warnings.
 
-```rust
-pub enum AtpError {
-    ManifestIntegrityViolation {
-        object_id: ObjectId,
-        expected_hash: Hash,
-        actual_hash: Hash,
-        chunk_evidence: Vec<ChunkId>,
-    },
-    // ... other structured variants
-}
-```
+Session contexts are direct, relay, mailbox, and swarm. Feature negotiation uses
+`FeatureSet` over repair, datagrams, compression, encryption policy, swarm,
+mailbox, relay, H3 adapter, WebTransport adapter, MASQUE adapter, proof bundles,
+and resume.
 
-### 3. Observable State Machines
-State transitions emit structured events:
+`tests/atp_session_negotiation.rs` is the public E2E contract for CLI, daemon,
+SDK, relay, mailbox, swarm, and replay consumers. The script
+`scripts/run_atp_session_negotiation_e2e.sh` wraps that lane and writes a
+deterministic run directory under `target/atp-session-negotiation-e2e/`.
 
-```rust
-#[derive(Serialize)]
-pub enum TransferEvent {
-    ChunkRequested { chunk_id: ChunkId, peer: PeerId },
-    ChunkReceived { chunk_id: ChunkId, verification: IntegrityResult },
-    RepairSymbolGenerated { group_id: RepairGroupId, symbol_count: u32 },
-}
-```
+### Adapter Parity Matrix
 
-### 4. Proof-Driven Development
-Implementation follows proof requirements:
+`src/net/atp/protocol/session.rs` exposes `ATP_ADAPTER_PARITY_MATRIX` as the
+checked source for ATP adapter parity and downgrade summaries. The matrix keeps
+compatibility adapters explicit: unsupported features must either fail closed or
+emit stable downgrade reasons during session negotiation.
 
-- Unit tests cover individual component correctness
-- Integration tests verify cross-component behavior  
-- Lab scenarios test complex fault injection
-- E2E scripts validate user-facing workflows
+| Adapter | Supported first slice | Explicit downgrade surface | Proof summary label |
+|---|---|---|---|
+| `native_quic` | encryption policy, proof bundles, resume, repair, datagrams, compression, swarm, mailbox, relay | H3, WebTransport, and MASQUE adapter feature bits are unnecessary on the native path | `native_quic_full_atp` |
+| `h3_adapter` | encryption policy, proof bundles, resume, repair, compression, H3 adapter | datagrams, WebTransport, MASQUE, swarm, mailbox | `h3_adapter_stream` |
+| `webtransport_adapter` | encryption policy, proof bundles, resume, repair, datagrams, WebTransport adapter | H3, MASQUE, mailbox, swarm | `webtransport_adapter_browser` |
+| `masque_connect_udp` | encryption policy, proof bundles, resume, repair, datagrams, relay, MASQUE adapter | H3, WebTransport, mailbox, swarm | `masque_connect_udp_proxy` |
+| `tcp_tls_443_fallback` | encryption policy, proof bundles, resume, repair, compression, relay | datagrams, H3, WebTransport, MASQUE, mailbox, swarm | `tcp_tls_443_fallback_relay` |
 
-## Dogfooding Integration
+`tests/atp_session_negotiation.rs` verifies that this matrix covers native
+QUIC, H3, WebTransport, MASQUE/CONNECT-UDP, and TCP/TLS 443 fallback, and that
+offered-but-unselected adapter features produce stable downgrade reason codes
+instead of generic peer-policy text.
 
-ATP dogfooding (ATP-M2) demonstrates real-world usage:
+### Platform and Policy Feedback
 
-### Build Artifact Flows
+`src/atp/platform/mod.rs` reports host capabilities that ATP disk and packaging
+code must account for: sparse files, preallocation, atomic rename, fsync
+durability, path length, case sensitivity, symlink behavior, socket buffers,
+IPv6, router assist, and service manager support.
+
+`src/runtime/scheduler/autotuner.rs` is a pressure-feedback surface. ATP should
+feed transfer hot-path observations into scheduler tuning through explicit
+metrics rather than adding transfer-local scheduling heuristics.
+
+## User-Facing Examples
+
+CLI diagnostic:
+
 ```bash
-# Traditional approach
-cp target/release/* /shared/artifacts/
-
-# ATP dogfooding approach  
-scripts/atp_dogfood_coordinator.sh build-artifacts
+asupersync atp doctor --platform
 ```
 
-**Benefits**: 
-- Cryptographic verification of build artifacts
-- Audit trail for compliance and forensics
-- Deduplication across builds
-- Proof artifacts for debugging
+Daemon receive path:
 
-### CI Integration Patterns
+```text
+accept session -> validate grant -> validate manifest -> write quarantine data
+-> validate graph/commit/finalizer evidence -> expose committed output
+```
+
+SDK send path:
+
+```text
+build ObjectGraph -> derive Manifest -> negotiate direct/relay/mailbox session
+-> stream frames -> emit verification and replay evidence
+```
+
+Relay path:
+
+```text
+SessionContextKind::Relay requires AtpFeature::Relay, relay-safe capability
+scope, and end-to-end encrypted payload bytes. Relay metadata is visible; object
+bytes are not plaintext relay authority.
+```
+
+Mailbox path:
+
+```text
+SessionContextKind::Mailbox requires AtpFeature::Mailbox and uses the same
+object, manifest, validation, and proof-bundle model. It may complete without
+both peers being online at once.
+```
+
+Swarm path:
+
+```text
+SessionContextKind::Swarm requires AtpFeature::Swarm. Swarm workers may receive
+object shards or repair symbols, but validation evidence remains the exposure
+gate.
+```
+
+Replay path:
+
+```text
+session transcript hash + proof artifact + path trace id + verification
+evidence -> deterministic replay/forensics bundle
+```
+
+## Proof Lanes
+
+Use `rch` for every Cargo command in this repository.
+
+Current ATP-focused proof commands:
+
 ```bash
-# Optional ATP usage in CI
-export ATP_DOGFOOD_ENABLED=true
-export ATP_DOGFOOD_CI_MODE=optional
-scripts/ci/atp_dogfood_ci_integration.sh post-build
+rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_all cargo check --all-targets
 ```
 
-**Fallback Behavior**: Graceful degradation to traditional methods when ATP unavailable
-
-### Evidence Generation
-Every dogfood operation produces:
-- Transfer proof with integrity verification
-- Performance metrics and telemetry
-- Structured replay logs for forensic analysis
-- Session correlation for cross-operation tracking
-
-## Governance and Compliance
-
-### Release Gates
-ATP release qualification requires:
-
-1. **Dependency Audit**: No external QUIC or runtime dependencies
-2. **Cross-Platform Testing**: Verified behavior on Linux, macOS, Windows, WASM
-3. **Proof Lane Validation**: Complete execution of proof command matrix
-4. **Performance Validation**: Regression testing with benchmark thresholds
-5. **Documentation Sync**: Architecture docs reflect implementation reality
-
-### Proof Lane Matrix
-Each ATP component maps to specific test commands:
-
-| Component | Test Command | Guarantee |
-|-----------|-------------|-----------|
-| QUIC Conformance | `cargo test --test quic_conformance` | RFC 9000/9001/9002 compliance |
-| ATP Protocol | `cargo test --test atp_protocol_codec` | Wire format compatibility |
-| Manifest Integrity | `cargo test --test manifest_merkle` | Tamper-evident manifests |
-| Crash Safety | `cargo test --test crash_safety` | Data corruption resistance |
-| Resume Capability | `cargo test --test resume_transfer` | Interrupted transfer recovery |
-
-### Security Model
-ATP security relies on:
-
-- **Cryptographic Verification**: Blake3 content hashing with Merkle trees
-- **Capability Security**: Explicit trust boundaries and access control
-- **Tamper Evidence**: Relay and peer misbehavior detection
-- **Audit Trails**: Complete operation logging for forensics
-
-## Evolution and Maintenance
-
-### Documentation Sync Process
-1. **Implementation-First**: Code changes precede documentation updates
-2. **Automated Validation**: CI checks for architecture/implementation drift
-3. **Regular Audits**: Quarterly reviews of documentation accuracy
-4. **Bead-Driven Updates**: All changes tracked through bead system
-
-### Future Architecture Evolution
-Planned architectural developments:
-
-- **Adaptive Protocols**: Dynamic protocol negotiation based on path conditions
-- **Cross-Region Coordination**: Global cache coherency and seeding strategies
-- **Policy-Driven Behavior**: User-configurable transfer and caching policies
-- **Integration Expansion**: Additional protocol adapters and transport layers
-
-## Performance Characteristics
-
-### Throughput Benchmarks
-Target performance (measured via ATP dogfooding):
-
-- **Local Network**: 95% of available bandwidth utilization
-- **WAN Transfer**: 85% of theoretical TCP throughput  
-- **Multi-Peer**: Linear scaling up to 8 peers
-- **Compression**: 70-85% reduction for code artifacts
-
-### Latency Characteristics
-- **Session Establishment**: <100ms for cached paths
-- **First Chunk Time**: <50ms after session establishment
-- **Resume Latency**: <10ms for interrupted transfers
-- **Cache Hit**: <5ms for local cache retrieval
-
-### Resource Utilization
-- **Memory**: <100MB baseline, +10MB per active transfer
-- **CPU**: <15% of single core for typical transfers
-- **Disk I/O**: Sequential writes, fsync on boundaries only
-- **Network**: Configurable congestion control, fair queuing
-
-## Debugging and Diagnostics
-
-### Structured Logging
-ATP generates structured logs for operational visibility:
-
-```jsonl
-{"timestamp":"2026-05-26T01:52:00Z","event":"transfer_start","object_id":"obj123","peer":"peer456"}
-{"timestamp":"2026-05-26T01:52:01Z","event":"chunk_received","chunk_id":"chunk789","verification":"verified"}
-{"timestamp":"2026-05-26T01:52:05Z","event":"transfer_complete","status":"success","duration_ms":5000}
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_session cargo test --test atp_session_negotiation -- --nocapture
 ```
 
-### Proof Artifact Analysis
-Debugging workflow:
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_endpoint cargo test --test atp_native_quic_endpoint_contract -- --nocapture
+```
 
-1. **Identify Session**: Extract session ID from user report
-2. **Locate Artifacts**: Find proof and replay artifacts for session
-3. **Replay Transfer**: Use deterministic replay for exact reproduction
-4. **Analyze Metrics**: Examine performance and error telemetry
-5. **Generate Fix**: Create focused reproduction and solution
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_quic_protection cargo test -p asupersync --test atp_quic_packet_protection -- --nocapture
+```
 
-### Common Debugging Scenarios
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_module_map cargo test -p asupersync --test atp_module_map_contract -- --nocapture
+```
 
-#### Transfer Hangs
-- **Symptoms**: Transfer progress stops, no timeout
-- **Investigation**: Check path quality metrics, peer responsiveness
-- **Common Causes**: Network partition, peer resource exhaustion
-- **Tools**: `atp doctor`, path diagnostics, peer health checks
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_fmt cargo fmt --check
+```
 
-#### Integrity Failures
-- **Symptoms**: Verification failures, corrupt data detection
-- **Investigation**: Trace chunk sources, validate Merkle trees
-- **Common Causes**: Disk corruption, network errors, malicious peers
-- **Tools**: Cryptographic verification, chunk provenance tracking
+Manifest E2E:
 
-#### Performance Degradation
-- **Symptoms**: Slower than expected transfer rates
-- **Investigation**: Analyze congestion control, path selection
-- **Common Causes**: Poor path choice, inadequate repair symbols
-- **Tools**: Performance profiling, transfer telemetry analysis
+```bash
+bash scripts/run_atp_manifest_e2e.sh
+```
 
-## Conclusion
+Session negotiation E2E:
 
-ATP represents a mature, production-ready data movement protocol built on solid foundations of verification, capability security, and structured concurrency. The architecture emphasizes correctness and observability over raw performance, making it suitable for mission-critical data movement scenarios.
-
-This document will be updated to reflect implementation reality as ATP continues to evolve. All architectural changes must be validated through the proof lane matrix and dogfooding workflows before acceptance.
-
----
-
-*Last updated: 2026-05-26 from commit 5a1df9e81*  
-*Next review: 2026-08-26*
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_atp_session_e2e bash scripts/run_atp_session_negotiation_e2e.sh
+```
