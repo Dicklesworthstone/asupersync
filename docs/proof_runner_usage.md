@@ -401,6 +401,34 @@ provenance evidence only: it helps route a blocker to a recent slice, but the
 `decision` and `green_proof_claimed` fields remain authoritative for whether a
 closeout may claim a green proof.
 
+## Proof-Lane Resource Envelopes
+
+The proof runner reads resource-envelope metadata from
+`artifacts/proof_lane_manifest_v1.json`, verified by
+`tests/proof_lane_manifest_contract.rs`. Every lane declares a
+`resource_envelope_class` whose class records:
+
+- `timeout_seconds`
+- `memory_mb`
+- `remote_required`
+- `local_fallback_allowed`
+- `resource_pressure`
+- admitted lane kinds
+
+The contract rejects missing classes, unknown classes, zero or negative budgets,
+lane-kind mismatches, missing remote-required semantics, and any
+remote-required class that permits local fallback. Bad-envelope diagnostics must
+carry the lane id, required command prefix, envelope class, timeout, memory,
+remote-required decision, local-fallback decision, and the exact fail-closed
+reason so an operator can route the blocker without guessing.
+
+This metadata hardens proof admission and closeout evidence only. It does not
+implement, replace, or prove OS-level RCH worker controls such as systemd
+`MemoryMax`, cgroup CPU quotas, scheduler backpressure, or fleet-level admission
+limits. A manifest envelope makes an expensive lane visible and rejectable
+before dispatch; worker-enforced resource limits remain a separate operations
+control.
+
 ## Available Proof Lanes
 
 The proof runner reads from `artifacts/proof_lane_manifest_v1.json`. Common lanes:

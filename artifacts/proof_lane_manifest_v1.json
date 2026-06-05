@@ -17,6 +17,131 @@
     "formal_lean_build_must_not_shell_wrap": true,
     "broad_validation_is_frontier_evidence_not_local_change_proof": true
   },
+  "resource_envelope_policy": {
+    "policy_id": "proof-lane-resource-envelope-policy-v1",
+    "schema_version": "proof-lane-resource-envelope-v1",
+    "scope_note": "Proof metadata only: these envelopes classify expected remote proof-lane resource pressure and fail-closed admission semantics. They do not implement, replace, or prove OS-level worker cgroup MemoryMax/CPU quota enforcement.",
+    "operator_log_fields": [
+      "lane_id",
+      "command_prefix",
+      "resource_envelope_class",
+      "timeout_seconds",
+      "memory_mb",
+      "remote_required",
+      "local_fallback_allowed",
+      "fail_closed_reason"
+    ],
+    "classes": [
+      {
+        "class_id": "dependency-graph-light",
+        "lane_kinds": [
+          "dependency_graph"
+        ],
+        "timeout_seconds": 900,
+        "memory_mb": 4096,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Cargo dependency graph audits should be remote-routed but are expected to consume modest memory and wall time."
+      },
+      {
+        "class_id": "compile-frontier-heavy",
+        "lane_kinds": [
+          "compile_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 49152,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Broad cargo check/build frontiers may compile large feature graphs and need explicit remote time and memory envelopes."
+      },
+      {
+        "class_id": "test-frontier-heavy",
+        "lane_kinds": [
+          "test_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 65536,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Broad lib/integration test frontiers can run large deterministic suites and must never silently fall back to local execution."
+      },
+      {
+        "class_id": "lint-frontier-heavy",
+        "lane_kinds": [
+          "lint_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 49152,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Workspace clippy frontiers are expensive compile-like proof lanes with strict remote-only routing."
+      },
+      {
+        "class_id": "format-frontier-light",
+        "lane_kinds": [
+          "format_frontier"
+        ],
+        "timeout_seconds": 600,
+        "memory_mb": 2048,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Formatting checks are cheap but still inherit the manifest's remote-required proof-command policy."
+      },
+      {
+        "class_id": "documentation-frontier-medium",
+        "lane_kinds": [
+          "documentation_frontier"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Rustdoc/API proof lanes are compile-adjacent and require a bounded remote envelope without being treated as broad workspace health."
+      },
+      {
+        "class_id": "formal-frontier-medium",
+        "lane_kinds": [
+          "formal_frontier"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Lean/formal proof builds are remote-required proof lanes with explicit finite wall-clock and memory envelopes."
+      },
+      {
+        "class_id": "artifact-contract-medium",
+        "lane_kinds": [
+          "artifact_contract"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Contract-only lanes run focused Rust verifier tests or artifact checks and should stay bounded without inheriting broad-suite pressure."
+      },
+      {
+        "class_id": "dependency-audit-light",
+        "lane_kinds": [
+          "dependency_audit"
+        ],
+        "timeout_seconds": 900,
+        "memory_mb": 2048,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Shell dependency audits are lightweight remote-required proof lanes with explicit no-local-fallback semantics."
+      }
+    ]
+  },
   "proof_reuse_policy": {
     "policy_id": "strict-rch-proof-reuse-policy-v1",
     "proof_reuse_cache_contract": "artifacts/proof_reuse_cache_contract_v1.json",
@@ -74,6 +199,7 @@
     {
       "lane_id": "default-production-tokio-tree",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
       "package": "asupersync",
       "feature_flags": [],
@@ -110,6 +236,7 @@
     {
       "lane_id": "metrics-production-tokio-tree",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
       "package": "asupersync",
       "feature_flags": [
@@ -149,6 +276,7 @@
     {
       "lane_id": "fuzz-tokio-quarantine-tree",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
       "package": "asupersync",
       "feature_flags": [
@@ -186,6 +314,7 @@
     {
       "lane_id": "workspace-normal-tokio-audit",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
       "package": "workspace",
       "feature_flags": [],
@@ -221,6 +350,7 @@
     {
       "lane_id": "full-feature-tokio-audit",
       "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_full_tokio_tree cargo tree -e features --workspace --invert tokio",
       "package": "workspace",
       "feature_flags": [],
@@ -259,6 +389,7 @@
     {
       "lane_id": "native-feature-smoke",
       "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
       "package": "asupersync",
       "feature_flags": [
@@ -303,6 +434,7 @@
     {
       "lane_id": "fuzz-manifest-smoke",
       "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
       "package": "fuzz",
       "feature_flags": [],
@@ -338,6 +470,7 @@
     {
       "lane_id": "lib-tests",
       "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
       "package": "asupersync",
       "feature_flags": [
@@ -376,6 +509,7 @@
     {
       "lane_id": "all-targets-check",
       "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
       "package": "asupersync",
       "feature_flags": [],
@@ -413,6 +547,7 @@
     {
       "lane_id": "clippy-all-targets",
       "kind": "lint_frontier",
+      "resource_envelope_class": "lint-frontier-heavy",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
       "package": "asupersync",
       "feature_flags": [],
@@ -449,6 +584,7 @@
     {
       "lane_id": "rustfmt-check",
       "kind": "format_frontier",
+      "resource_envelope_class": "format-frontier-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
       "package": "workspace",
       "feature_flags": [],
@@ -482,6 +618,7 @@
     {
       "lane_id": "rustdoc-api",
       "kind": "documentation_frontier",
+      "resource_envelope_class": "documentation-frontier-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
       "package": "asupersync",
       "feature_flags": [
@@ -519,6 +656,7 @@
     {
       "lane_id": "formal-lean-build",
       "kind": "formal_frontier",
+      "resource_envelope_class": "formal-frontier-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build",
       "package": "formal/lean",
       "feature_flags": [],
@@ -555,6 +693,7 @@
     {
       "lane_id": "runtime-pressure-control-evidence-contract",
       "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
@@ -598,6 +737,7 @@
     {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dirty_tree_ownership_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test dirty_tree_ownership_receipt_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
@@ -635,6 +775,7 @@
     {
       "lane_id": "swarm-proof-lane-planner-contract",
       "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
@@ -678,6 +819,7 @@
     {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "package": "asupersync",
       "feature_flags": [],
@@ -716,6 +858,7 @@
     {
       "lane_id": "atp-native-quic-dependency-audit",
       "kind": "dependency_audit",
+      "resource_envelope_class": "dependency-audit-light",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
       "package": "asupersync",
       "feature_flags": [],
