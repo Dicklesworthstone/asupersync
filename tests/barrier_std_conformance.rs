@@ -95,7 +95,7 @@ impl BarrierConformanceContext {
                         }
 
                         // Create Cx for this party
-                        let cx = Cx::new(
+                        let cx: Cx = Cx::new(
                             RegionId::from_arena(ArenaIndex::new(
                                 generation as u32,
                                 party_id as u32,

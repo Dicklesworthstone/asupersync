@@ -599,7 +599,7 @@ impl<T: Clone> Receiver<T> {
     /// - `RecvError::Closed`: All senders dropped.
     /// - `RecvError::PolledAfterCompletion`: This specific future was already resolved.
     #[inline]
-    pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> Recv<'a, T> {
+    pub fn recv<'a, Caps>(&'a mut self, cx: &'a Cx<Caps>) -> Recv<'a, T, Caps> {
         Recv {
             receiver: self,
             cx,
@@ -609,9 +609,9 @@ impl<T: Clone> Receiver<T> {
     }
 
     #[inline]
-    pub(crate) fn poll_recv_with_waiter(
+    pub(crate) fn poll_recv_with_waiter<Caps>(
         &mut self,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         task_cx: &Context<'_>,
         waiter: &mut Option<ArenaIndex>,
     ) -> Poll<Result<T, RecvError>> {
@@ -698,21 +698,21 @@ impl<T: Clone> Receiver<T> {
 }
 
 /// Future returned by [`Receiver::recv`].
-pub struct Recv<'a, T> {
+pub struct Recv<'a, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
-    cx: &'a Cx,
+    cx: &'a Cx<Caps>,
     /// Token for the registered waiter in the arena.
     waiter: Option<ArenaIndex>,
     completed: bool,
 }
 
-impl<T> Recv<'_, T> {
+impl<T, Caps> Recv<'_, T, Caps> {
     fn clear_waiter_registration(&mut self) {
         self.receiver.clear_waiter_registration(&mut self.waiter);
     }
 }
 
-impl<T: Clone> Future for Recv<'_, T> {
+impl<T: Clone, Caps> Future for Recv<'_, T, Caps> {
     type Output = Result<T, RecvError>;
 
     #[inline]
@@ -732,7 +732,7 @@ impl<T: Clone> Future for Recv<'_, T> {
     }
 }
 
-impl<T> Drop for Recv<'_, T> {
+impl<T, Caps> Drop for Recv<'_, T, Caps> {
     fn drop(&mut self) {
         // If the future is dropped while Pending (e.g. select/race loser),
         // ensure we don't leave stale waiters behind.
@@ -911,6 +911,20 @@ mod tests {
                 let _ = rx.recv();
             }
         }
+    }
+
+    #[test]
+    fn recv_accepts_detached_no_cap_context() {
+        init_test("recv_accepts_detached_no_cap_context");
+        let send_cx = test_cx();
+        let recv_cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (tx, mut rx) = channel::<i32>(4);
+
+        tx.send(&send_cx, 47).expect("send should succeed");
+        let value = block_on(rx.recv(&recv_cx)).expect("recv should accept cap::None Cx");
+
+        crate::assert_with_log!(value == 47, "recv value", 47, value);
+        crate::test_complete!("recv_accepts_detached_no_cap_context");
     }
 
     #[test]

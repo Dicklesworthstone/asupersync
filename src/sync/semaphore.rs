@@ -656,9 +656,9 @@ pub struct OwnedSemaphorePermit {
 
 impl OwnedSemaphorePermit {
     /// Acquires an owned permit asynchronously.
-    pub async fn acquire(
+    pub async fn acquire<Caps>(
         semaphore: std::sync::Arc<Semaphore>,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         count: usize,
     ) -> Result<Self, AcquireError> {
         // Acquiring 0 permits succeeds immediately (no resources needed)
@@ -762,20 +762,20 @@ impl Drop for OwnedSemaphorePermit {
 }
 
 /// Future returned by `OwnedSemaphorePermit::acquire`.
-pub struct OwnedAcquireFuture {
+pub struct OwnedAcquireFuture<Caps = crate::cx::cap::All> {
     semaphore: Arc<Semaphore>,
-    cx: Option<Cx>,
+    cx: Option<Cx<Caps>>,
     count: usize,
     waiter: Option<WaiterHandle>,
     completed: bool,
 }
 
-impl OwnedAcquireFuture {
+impl<Caps> OwnedAcquireFuture<Caps> {
     /// Construct a new acquire future with an owned `Cx`.
     ///
     /// This avoids the lifetime issue with the `async fn acquire` signature
     /// which borrows `&Cx` (and thus ties the future's lifetime to the borrow).
-    pub(crate) fn new(semaphore: Arc<Semaphore>, cx: Cx, count: usize) -> Self {
+    pub(crate) fn new(semaphore: Arc<Semaphore>, cx: Cx<Caps>, count: usize) -> Self {
         // Note: count=0 is handled at the future poll level
         Self {
             semaphore,
@@ -785,7 +785,9 @@ impl OwnedAcquireFuture {
             completed: false,
         }
     }
+}
 
+impl OwnedAcquireFuture {
     /// Construct a new acquire future that waits without cancellation support.
     ///
     /// This is used by `Service::poll_ready` middleware paths that must still
@@ -803,7 +805,7 @@ impl OwnedAcquireFuture {
     }
 }
 
-impl Drop for OwnedAcquireFuture {
+impl<Caps> Drop for OwnedAcquireFuture<Caps> {
     fn drop(&mut self) {
         if let Some(waiter) = self.waiter {
             let next_waker = {
@@ -819,7 +821,7 @@ impl Drop for OwnedAcquireFuture {
     }
 }
 
-impl Future for OwnedAcquireFuture {
+impl<Caps> Future for OwnedAcquireFuture<Caps> {
     type Output = Result<OwnedSemaphorePermit, AcquireError>;
 
     #[inline]
@@ -1185,6 +1187,31 @@ mod tests {
         );
         crate::assert_with_log!(!sem.is_closed(), "not closed", false, sem.is_closed());
         crate::test_complete!("new_semaphore_has_correct_permits");
+    }
+
+    #[test]
+    fn acquire_accepts_detached_no_cap_context() {
+        init_test("acquire_accepts_detached_no_cap_context");
+        let cx = Cx::<cap::None>::detached_cancel_context();
+        let sem = Semaphore::new(2);
+
+        let permit = block_on(sem.acquire(&cx, 1)).expect("acquire should accept cap::None Cx");
+
+        crate::assert_with_log!(permit.count() == 1, "permit count", 1usize, permit.count());
+        crate::test_complete!("acquire_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn owned_acquire_accepts_detached_no_cap_context() {
+        init_test("owned_acquire_accepts_detached_no_cap_context");
+        let cx = Cx::<cap::None>::detached_cancel_context();
+        let sem = Arc::new(Semaphore::new(2));
+
+        let permit = block_on(OwnedSemaphorePermit::acquire(Arc::clone(&sem), &cx, 1))
+            .expect("owned acquire should accept cap::None Cx");
+
+        crate::assert_with_log!(permit.count() == 1, "permit count", 1usize, permit.count());
+        crate::test_complete!("owned_acquire_accepts_detached_no_cap_context");
     }
 
     #[test]

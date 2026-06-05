@@ -709,14 +709,14 @@ impl<T> Drop for RecvUninterruptibleFuture<'_, T> {
 }
 
 /// Future returned by [`Receiver::recv`].
-pub struct RecvFuture<'a, T> {
+pub struct RecvFuture<'a, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
-    cx: &'a Cx,
+    cx: &'a Cx<Caps>,
     waiter_id: Option<u64>,
     completed: bool,
 }
 
-impl<T> RecvFuture<'_, T> {
+impl<T, Caps> RecvFuture<'_, T, Caps> {
     #[must_use]
     #[allow(dead_code)] // Public API — may be used by future callers
     #[inline]
@@ -725,7 +725,7 @@ impl<T> RecvFuture<'_, T> {
     }
 }
 
-impl<T> Future for RecvFuture<'_, T> {
+impl<T, Caps> Future for RecvFuture<'_, T, Caps> {
     type Output = Result<T, RecvError>;
 
     #[inline]
@@ -808,7 +808,7 @@ impl<T> Future for RecvFuture<'_, T> {
     }
 }
 
-impl<T> Drop for RecvFuture<'_, T> {
+impl<T, Caps> Drop for RecvFuture<'_, T, Caps> {
     fn drop(&mut self) {
         // If dropped while Pending (e.g., select/race loser), clear
         // the registered waker to avoid retaining stale executor state.
@@ -856,7 +856,7 @@ impl<T> Receiver<T> {
     /// Returns `Err(RecvError::Closed)` if the sender was dropped without sending.
     #[inline]
     #[must_use]
-    pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> RecvFuture<'a, T> {
+    pub fn recv<'a, Caps>(&'a mut self, cx: &'a Cx<Caps>) -> RecvFuture<'a, T, Caps> {
         RecvFuture {
             receiver: self,
             cx,
@@ -1038,6 +1038,19 @@ mod tests {
             Just(SendScenario::LivePendingWaiter),
             Just(SendScenario::ReceiverDropped),
         ]
+    }
+
+    #[test]
+    fn recv_accepts_detached_no_cap_context() {
+        init_test("recv_accepts_detached_no_cap_context");
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (tx, mut rx) = channel::<i32>();
+
+        tx.send_blocking(47).expect("send_blocking should succeed");
+        let value = block_on(rx.recv(&cx)).expect("recv should accept cap::None Cx");
+
+        crate::assert_with_log!(value == 47, "recv value", 47, value);
+        crate::test_complete!("recv_accepts_detached_no_cap_context");
     }
 
     fn send_path_signature(

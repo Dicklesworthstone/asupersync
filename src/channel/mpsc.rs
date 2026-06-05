@@ -978,7 +978,7 @@ impl<T> Receiver<T> {
     /// Creates a receive future for the next value.
     #[inline]
     #[must_use]
-    pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> Recv<'a, T> {
+    pub fn recv<'a, Caps>(&'a mut self, cx: &'a Cx<Caps>) -> Recv<'a, T, Caps> {
         Recv {
             receiver: self,
             cx,
@@ -991,7 +991,11 @@ impl<T> Receiver<T> {
     /// This is useful in manual `poll_*` implementations that need to avoid
     /// creating-and-dropping transient `Recv` futures each poll cycle.
     #[inline]
-    pub fn poll_recv(&mut self, cx: &Cx, task_cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
+    pub fn poll_recv<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<Result<T, RecvError>> {
         if cx.checkpoint().is_err() {
             cx.trace("mpsc::recv cancelled");
             let mut inner = self.shared.inner.lock();
@@ -1098,13 +1102,13 @@ impl<T> Receiver<T> {
 }
 
 /// Future returned by [`Receiver::recv`].
-pub struct Recv<'a, T> {
+pub struct Recv<'a, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
-    cx: &'a Cx,
+    cx: &'a Cx<Caps>,
     polled: bool,
 }
 
-impl<T> Future for Recv<'_, T> {
+impl<T, Caps> Future for Recv<'_, T, Caps> {
     type Output = Result<T, RecvError>;
 
     #[inline]
@@ -1115,7 +1119,7 @@ impl<T> Future for Recv<'_, T> {
     }
 }
 
-impl<T> Drop for Recv<'_, T> {
+impl<T, Caps> Drop for Recv<'_, T, Caps> {
     fn drop(&mut self) {
         // Clear the registered waker to avoid retaining stale executor state
         // if this future is dropped (e.g., cancelled by select!).
@@ -1209,6 +1213,19 @@ mod tests {
         let value = block_on(rx.recv(&cx)).expect("recv failed");
         crate::assert_with_log!(value == 42, "recv value", 42, value);
         crate::test_complete!("basic_send_recv");
+    }
+
+    #[test]
+    fn recv_accepts_detached_no_cap_context() {
+        init_test("recv_accepts_detached_no_cap_context");
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (tx, mut rx) = channel::<i32>(1);
+
+        tx.try_send(47).expect("try_send should succeed");
+        let value = block_on(rx.recv(&cx)).expect("recv should accept cap::None Cx");
+
+        crate::assert_with_log!(value == 47, "recv value", 47, value);
+        crate::test_complete!("recv_accepts_detached_no_cap_context");
     }
 
     #[test]

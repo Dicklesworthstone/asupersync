@@ -443,7 +443,7 @@ impl<T> OnceCell<T> {
     /// cancelled before initialization completes.
     #[inline]
     #[allow(clippy::future_not_send)]
-    pub async fn wait(&self, cx: &crate::cx::Cx) -> Result<(), OnceCellError> {
+    pub async fn wait<Caps>(&self, cx: &crate::cx::Cx<Caps>) -> Result<(), OnceCellError> {
         // Fast path: already initialized
         if self.is_initialized() {
             return Ok(());
@@ -631,14 +631,14 @@ impl<T> Drop for WaitInit<'_, T> {
 }
 
 /// Cancel-aware future that waits for initialization to complete.
-struct CancelAwareWaitInit<'a, T> {
+struct CancelAwareWaitInit<'a, T, Caps = crate::cx::cap::All> {
     cell: &'a OnceCell<T>,
-    cx: &'a crate::cx::Cx,
+    cx: &'a crate::cx::Cx<Caps>,
     /// Tracks registered waiter identity to prevent unbounded queue growth.
     waiter_id: Option<u64>,
 }
 
-impl<T> std::future::Future for CancelAwareWaitInit<'_, T> {
+impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
     type Output = Result<(), OnceCellError>;
 
     fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -670,7 +670,7 @@ impl<T> std::future::Future for CancelAwareWaitInit<'_, T> {
     }
 }
 
-impl<T> Drop for CancelAwareWaitInit<'_, T> {
+impl<T, Caps> Drop for CancelAwareWaitInit<'_, T, Caps> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately
@@ -766,6 +766,24 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.wakes.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn wait_accepts_detached_no_cap_context() {
+        init_test("wait_accepts_detached_no_cap_context");
+        let cell = OnceCell::new();
+        let cx = crate::cx::Cx::<crate::cx::cap::None>::detached_cancel_context();
+
+        cell.set(47).expect("set should succeed");
+        block_on(cell.wait(&cx)).expect("wait should accept cap::None Cx");
+
+        crate::assert_with_log!(
+            cell.get() == Some(&47),
+            "cell value",
+            Some(47),
+            cell.get().copied()
+        );
+        crate::test_complete!("wait_accepts_detached_no_cap_context");
     }
 
     #[test]

@@ -179,8 +179,14 @@ impl<T> Mutex<T> {
 
     /// Acquires the mutex asynchronously.
     #[inline]
-    pub fn lock<'a, 'b>(&'a self, cx: &'b Cx) -> LockFuture<'a, 'b, T> {
-        Self::lock_future(self, cx, None)
+    pub fn lock<'a, 'b, Caps>(&'a self, cx: &'b Cx<Caps>) -> LockFuture<'a, 'b, T, Caps> {
+        LockFuture {
+            mutex: self,
+            cx,
+            waiter_id: None,
+            deadline_sleep: None,
+            completed: false,
+        }
     }
 
     /// Acquires the mutex asynchronously until the given deadline.
@@ -188,26 +194,22 @@ impl<T> Mutex<T> {
     /// Returns [`LockError::TimedOut`] if the deadline elapses before the lock
     /// can be acquired.
     #[inline]
-    pub fn lock_until<'a, 'b>(&'a self, cx: &'b Cx, deadline: Time) -> LockFuture<'a, 'b, T> {
-        Self::lock_future(self, cx, Some(deadline))
-    }
-
-    #[inline]
-    fn lock_future<'a, 'b>(
-        mutex: &'a Self,
-        cx: &'b Cx,
-        deadline: Option<Time>,
-    ) -> LockFuture<'a, 'b, T> {
+    pub fn lock_until<'a, 'b, Caps>(
+        &'a self,
+        cx: &'b Cx<Caps>,
+        deadline: Time,
+    ) -> LockFuture<'a, 'b, T, Caps>
+    where
+        Caps: crate::cx::cap::HasTime,
+    {
         LockFuture {
-            mutex,
+            mutex: self,
             cx,
             waiter_id: None,
-            deadline_sleep: deadline.map(|deadline| {
-                cx.timer_driver().map_or_else(
-                    || Sleep::new(deadline),
-                    |timer| Sleep::with_timer_driver(deadline, timer),
-                )
-            }),
+            deadline_sleep: Some(cx.timer_driver().map_or_else(
+                || Sleep::new(deadline),
+                |timer| Sleep::with_timer_driver(deadline, timer),
+            )),
             completed: false,
         }
     }
@@ -353,9 +355,9 @@ impl<T: Default> Default for Mutex<T> {
 }
 
 /// Future returned by `Mutex::lock`.
-pub struct LockFuture<'a, 'b, T> {
+pub struct LockFuture<'a, 'b, T, Caps = crate::cx::cap::All> {
     mutex: &'a Mutex<T>,
-    cx: &'b Cx,
+    cx: &'b Cx<Caps>,
     /// Slab index of this waiter's slot in the parent mutex's
     /// `WaiterChain` (br-asupersync-wlf0xh).
     waiter_id: Option<crate::sync::waiter::WaiterId>,
@@ -363,14 +365,7 @@ pub struct LockFuture<'a, 'b, T> {
     completed: bool,
 }
 
-impl<T> LockFuture<'_, '_, T> {
-    #[inline]
-    fn deadline_elapsed(&self) -> Option<Time> {
-        let sleep = self.deadline_sleep.as_ref()?;
-        let now = self.cx.now();
-        sleep.is_elapsed(now).then(|| sleep.deadline())
-    }
-
+impl<T, Caps> LockFuture<'_, '_, T, Caps> {
     #[inline]
     fn poll_deadline_sleep(&mut self, context: &mut Context<'_>) -> Option<Time> {
         let sleep = self.deadline_sleep.as_mut()?;
@@ -432,7 +427,7 @@ impl<T> LockFuture<'_, '_, T> {
     }
 }
 
-impl<'a, T> Future for LockFuture<'a, '_, T> {
+impl<'a, T, Caps> Future for LockFuture<'a, '_, T, Caps> {
     type Output = Result<MutexGuard<'a, T>, LockError>;
 
     #[inline]
@@ -449,7 +444,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Err(LockError::Cancelled));
         }
 
-        if let Some(deadline) = self.deadline_elapsed() {
+        if let Some(deadline) = self.poll_deadline_sleep(context) {
             self.completed = true;
             self.cleanup_waiter();
             return Poll::Ready(Err(LockError::TimedOut(deadline)));
@@ -546,7 +541,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
     }
 }
 
-impl<T> Drop for LockFuture<'_, '_, T> {
+impl<T, Caps> Drop for LockFuture<'_, '_, T, Caps> {
     fn drop(&mut self) {
         self.cleanup_waiter();
     }
@@ -739,7 +734,7 @@ unsafe impl<T: Sync> Sync for OwnedMutexGuard<T> {}
 
 impl<T> OwnedMutexGuard<T> {
     /// Acquires the mutex asynchronously (owned).
-    pub async fn lock(mutex: Arc<Mutex<T>>, cx: &Cx) -> Result<Self, LockError> {
+    pub async fn lock<Caps>(mutex: Arc<Mutex<T>>, cx: &Cx<Caps>) -> Result<Self, LockError> {
         // Acquire through the borrowed-guard path, then suppress that guard's
         // Drop so the held lock transfers to the returned owned guard.
         let _borrowed_guard = std::mem::ManuallyDrop::new(mutex.as_ref().lock(cx).await?);
@@ -1038,6 +1033,31 @@ mod tests {
     }
 
     #[test]
+    fn lock_accepts_detached_no_cap_context() {
+        init_test("lock_accepts_detached_no_cap_context");
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let mutex = Mutex::new(42);
+
+        let guard = block_on(mutex.lock(&cx)).expect("lock should accept cap::None Cx");
+
+        crate::assert_with_log!(*guard == 42, "guard value", 42, *guard);
+        crate::test_complete!("lock_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn owned_lock_accepts_detached_no_cap_context() {
+        init_test("owned_lock_accepts_detached_no_cap_context");
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let mutex = Arc::new(Mutex::new(42));
+
+        let guard = block_on(OwnedMutexGuard::lock(Arc::clone(&mutex), &cx))
+            .expect("owned lock should accept cap::None Cx");
+
+        crate::assert_with_log!(*guard == 42, "guard value", 42, *guard);
+        crate::test_complete!("owned_lock_accepts_detached_no_cap_context");
+    }
+
+    #[test]
     fn test_mutex_try_lock_success() {
         init_test("test_mutex_try_lock_success");
         let mutex = Mutex::new(42);
@@ -1076,7 +1096,7 @@ mod tests {
         let _guard = poll_once(&mut fut1).expect("immediate").expect("lock");
 
         // Create a cancellable context
-        let cancel_cx = Cx::new(
+        let cancel_cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 1)),
             TaskId::from_arena(ArenaIndex::new(0, 1)),
             Budget::INFINITE,
@@ -1627,7 +1647,7 @@ mod tests {
     fn mutex_fifo_cancel_middle_preserves_order() {
         init_test("mutex_fifo_cancel_middle_preserves_order");
         let cx1 = test_cx();
-        let cx2 = Cx::new(
+        let cx2: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 2)),
             TaskId::from_arena(ArenaIndex::new(0, 2)),
             Budget::INFINITE,
@@ -1979,7 +1999,7 @@ mod tests {
     fn cancel_head_waiter_does_not_skip_granted_predecessor() {
         init_test("cancel_head_waiter_does_not_skip_granted_predecessor");
         let cx1 = test_cx();
-        let cx2 = Cx::new(
+        let cx2: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 6)),
             TaskId::from_arena(ArenaIndex::new(0, 6)),
             Budget::INFINITE,
@@ -2032,7 +2052,7 @@ mod tests {
         fn run(cancel_head_waiter: bool) -> (u32, usize, usize, bool, u32) {
             let holder_cx = test_cx();
             let successor_cx = test_cx();
-            let removable_waiter_cx = Cx::new(
+            let removable_waiter_cx: Cx = Cx::new(
                 RegionId::from_arena(ArenaIndex::new(0, if cancel_head_waiter { 26 } else { 25 })),
                 TaskId::from_arena(ArenaIndex::new(0, if cancel_head_waiter { 26 } else { 25 })),
                 Budget::INFINITE,
@@ -2399,12 +2419,12 @@ mod tests {
         }
 
         let holder_cx = test_cx();
-        let waiter_cx = Cx::new(
+        let waiter_cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 1)),
             TaskId::from_arena(ArenaIndex::new(0, 1)),
             Budget::INFINITE,
         );
-        let cancelled_cx = Cx::new(
+        let cancelled_cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 2)),
             TaskId::from_arena(ArenaIndex::new(0, 2)),
             Budget::INFINITE,
@@ -2598,7 +2618,7 @@ mod tests {
         let _guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
 
         // Create a waiter with a cancellable context.
-        let cancel_cx = Cx::new(
+        let cancel_cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 5)),
             TaskId::from_arena(ArenaIndex::new(0, 5)),
             Budget::INFINITE,
@@ -2738,17 +2758,17 @@ mod tests {
         init_test("audit_mutex_fifo_fairness_with_cancellation");
 
         let holder_cx = test_cx();
-        let cancelled_cx = Cx::new(
+        let cancelled_cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 101)),
             TaskId::from_arena(ArenaIndex::new(0, 101)),
             Budget::INFINITE,
         );
-        let third_cx = Cx::new(
+        let third_cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 102)),
             TaskId::from_arena(ArenaIndex::new(0, 102)),
             Budget::INFINITE,
         );
-        let fourth_cx = Cx::new(
+        let fourth_cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 103)),
             TaskId::from_arena(ArenaIndex::new(0, 103)),
             Budget::INFINITE,

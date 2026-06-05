@@ -90,7 +90,7 @@ impl PoisonConformanceContext {
         let panic_message = self.config.panic_message.clone();
 
         let handle = thread::spawn(move || {
-            let cx = Cx::new(
+            let cx: Cx = Cx::new(
                 RegionId::from_arena(ArenaIndex::new(0, 0)),
                 TaskId::from_arena(ArenaIndex::new(0, 0)),
                 Budget::INFINITE,
@@ -130,7 +130,7 @@ impl PoisonConformanceContext {
 
         // Test next lock attempt
         let next_lock_fails = {
-            let cx = Cx::new(
+            let cx: Cx = Cx::new(
                 RegionId::from_arena(ArenaIndex::new(0, 1)),
                 TaskId::from_arena(ArenaIndex::new(0, 1)),
                 Budget::INFINITE,
