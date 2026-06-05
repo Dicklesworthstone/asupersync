@@ -9,6 +9,16 @@ const E2E_SCRIPT_PATH: &str = "scripts/run_swarm_pressure_preflight_report_e2e.s
 const FIXTURE_DIR: &str = "tests/fixtures/swarm_pressure_preflight_report";
 const GENERATED_AT: &str = "2026-06-05T08:10:00Z";
 
+#[derive(serde::Serialize)]
+struct GoldenMachineDecision<'a> {
+    case_id: &'a str,
+    decision: &'a str,
+    ready_for_release_gate: bool,
+    ready_to_dispatch_proof_lanes: bool,
+    blocker_kinds: Vec<&'a str>,
+    warning_kinds: Vec<&'a str>,
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
@@ -88,6 +98,108 @@ fn expectation_case_id(value: &Value) -> &str {
     value["e2e_expectations"]["case_id"]
         .as_str()
         .expect("expectation case_id")
+}
+
+fn issue_kinds<'a>(value: &'a Value, section: &str) -> Vec<&'a str> {
+    value[section]
+        .as_array()
+        .expect("issue array")
+        .iter()
+        .map(|issue| issue["kind"].as_str().expect("issue kind"))
+        .collect()
+}
+
+fn json_strings(values: Vec<&str>) -> String {
+    serde_json::to_string(&values).expect("serialize strings")
+}
+
+fn golden_machine_decision_line(value: &Value) -> String {
+    let summary = &value["operator_summary"];
+    let decision = GoldenMachineDecision {
+        case_id: expectation_case_id(value),
+        decision: summary["decision"].as_str().expect("decision"),
+        ready_for_release_gate: summary["ready_for_release_gate"]
+            .as_bool()
+            .expect("release gate"),
+        ready_to_dispatch_proof_lanes: summary["ready_to_dispatch_proof_lanes"]
+            .as_bool()
+            .expect("proof dispatch"),
+        blocker_kinds: issue_kinds(value, "blockers"),
+        warning_kinds: issue_kinds(value, "warnings"),
+    };
+    serde_json::to_string(&decision).expect("serialize machine decision")
+}
+
+fn golden_decision_table_row(value: &Value) -> String {
+    let summary = &value["operator_summary"];
+    format!(
+        "| {} | {} | {} | {} | {} | {} |",
+        expectation_case_id(value),
+        summary["decision"].as_str().expect("decision"),
+        summary["ready_for_release_gate"]
+            .as_bool()
+            .expect("release gate"),
+        summary["ready_to_dispatch_proof_lanes"]
+            .as_bool()
+            .expect("proof dispatch"),
+        json_strings(issue_kinds(value, "blockers")),
+        json_strings(issue_kinds(value, "warnings"))
+    )
+}
+
+fn golden_final_log_line(value: &Value) -> String {
+    let summary = &value["operator_summary"];
+    format!(
+        "[swarm-pressure-preflight:e2e] case={} final decision={} ready_for_release_gate={} ready_to_dispatch_proof_lanes={} blockers={} warnings={} sources={}",
+        expectation_case_id(value),
+        summary["decision"].as_str().expect("decision"),
+        summary["ready_for_release_gate"]
+            .as_bool()
+            .expect("release gate"),
+        summary["ready_to_dispatch_proof_lanes"]
+            .as_bool()
+            .expect("proof dispatch"),
+        summary["blocker_count"].as_i64().expect("blocker count"),
+        summary["warning_count"].as_i64().expect("warning count"),
+        summary["source_count"].as_i64().expect("source count")
+    )
+}
+
+fn blocker_log_line(value: &Value, kind: &str) -> String {
+    let blocker = value["blockers"]
+        .as_array()
+        .expect("blockers")
+        .iter()
+        .find(|issue| issue["kind"].as_str() == Some(kind))
+        .unwrap_or_else(|| panic!("blocker {kind}"));
+    format!(
+        "[swarm-pressure-preflight:e2e] case={} blocker kind={} source={} lane={} claim={} path={} reason={}",
+        expectation_case_id(value),
+        blocker["kind"].as_str().expect("kind"),
+        blocker["source_kind"].as_str().expect("source kind"),
+        blocker["lane_id"].as_str().unwrap_or_default(),
+        blocker["claim_id"].as_str().unwrap_or_default(),
+        blocker["path"].as_str().unwrap_or_default(),
+        blocker["reason"].as_str().expect("reason")
+    )
+}
+
+fn warning_log_line(value: &Value, kind: &str) -> String {
+    let warning = value["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .find(|issue| issue["kind"].as_str() == Some(kind))
+        .unwrap_or_else(|| panic!("warning {kind}"));
+    format!(
+        "[swarm-pressure-preflight:e2e] case={} warning kind={} source={} lane={} claim={} reason={}",
+        expectation_case_id(value),
+        warning["kind"].as_str().expect("kind"),
+        warning["source_kind"].as_str().expect("source kind"),
+        warning["lane_id"].as_str().unwrap_or_default(),
+        warning["claim_id"].as_str().unwrap_or_default(),
+        warning["reason"].as_str().expect("reason")
+    )
 }
 
 #[test]
@@ -470,4 +582,132 @@ fn e2e_suite_logs_all_acceptance_cases_with_expectation_checks() {
     assert_eq!(summary["case_count"].as_i64(), Some(7));
     assert_eq!(summary["pass_count"].as_i64(), Some(7));
     assert_eq!(summary["fail_count"].as_i64(), Some(0));
+}
+
+#[test]
+fn docs_golden_examples_match_fixture_reports() {
+    let docs_path = repo_root().join("docs/swarm_pressure_preflight_report.md");
+    let docs = std::fs::read_to_string(&docs_path)
+        .unwrap_or_else(|error| panic!("read docs {docs_path:?}: {error}"));
+
+    for fixture in [
+        "green.json",
+        "stale_exact_filter.json",
+        "missing_envelope.json",
+        "local_fallback_attempt.json",
+        "peer_dirty_tree.json",
+        "chaos_pressure.json",
+        "blocked.json",
+    ] {
+        let value = report(fixture);
+        let machine_line = golden_machine_decision_line(&value);
+        assert!(
+            docs.contains(&machine_line),
+            "docs missing machine-readable golden for {fixture}: {machine_line}"
+        );
+        let table_row = golden_decision_table_row(&value);
+        assert!(
+            docs.contains(&table_row),
+            "docs missing decision table row for {fixture}: {table_row}"
+        );
+    }
+
+    let green = report("green.json");
+    assert!(
+        docs.contains(&golden_final_log_line(&green)),
+        "docs missing green final e2e line"
+    );
+
+    let stale_exact = report("stale_exact_filter.json");
+    let exact_row = &stale_exact["sections"]["proof_freshness"]["rows"][0];
+    let exact_line = format!(
+        "[swarm-pressure-preflight:e2e] case={} parsed_tests lane={} exact_filter={} executed={}",
+        expectation_case_id(&stale_exact),
+        exact_row["lane_id"].as_str().expect("lane id"),
+        exact_row["exact_filter"].as_str().expect("exact filter"),
+        exact_row["exact_filter_executed_tests"]
+            .as_i64()
+            .expect("executed tests")
+    );
+    assert!(
+        docs.contains(&exact_line),
+        "docs missing stale exact-filter parsed-tests line: {exact_line}"
+    );
+    let stale_blocker = blocker_log_line(&stale_exact, "stale-exact-filter-zero-tests");
+    assert!(
+        docs.contains(&stale_blocker),
+        "docs missing stale exact-filter blocker line: {stale_blocker}"
+    );
+
+    let missing = report("missing_envelope.json");
+    let envelope = &missing["sections"]["proof_lane_envelope_health"];
+    let missing_line = format!(
+        "[swarm-pressure-preflight:e2e] case={} envelope lane_count={} class_count={} states={} pressure={}",
+        expectation_case_id(&missing),
+        envelope["lane_count"].as_i64().expect("lane count"),
+        envelope["resource_envelope_class_count"]
+            .as_i64()
+            .expect("class count"),
+        serde_json::to_string(&envelope["lane_states"]).expect("lane states"),
+        serde_json::to_string(&envelope["resource_pressure_counts"]).expect("pressure counts")
+    );
+    assert!(
+        docs.contains(&missing_line),
+        "docs missing missing-envelope health line: {missing_line}"
+    );
+
+    let local_fallback = report("local_fallback_attempt.json");
+    let local_blocker = blocker_log_line(&local_fallback, "unsafe-proof-command-prefix");
+    assert!(
+        docs.contains(&local_blocker),
+        "docs missing local-fallback blocker line: {local_blocker}"
+    );
+
+    let dirty = report("peer_dirty_tree.json");
+    let dirty_row = &dirty["sections"]["dirty_tree"]["rows"][0];
+    let dirty_line = format!(
+        "[swarm-pressure-preflight:e2e] case={} dirty_path path={} classification={} owner={} release_blocker={} reason={}",
+        expectation_case_id(&dirty),
+        dirty_row["path"].as_str().expect("dirty path"),
+        dirty_row["classification"]
+            .as_str()
+            .expect("classification"),
+        dirty_row["owner"].as_str().expect("owner"),
+        dirty_row["release_blocker"]
+            .as_bool()
+            .expect("release blocker"),
+        dirty_row["reason"].as_str().expect("reason")
+    );
+    assert!(
+        docs.contains(&dirty_line),
+        "docs missing dirty-tree line: {dirty_line}"
+    );
+
+    let chaos = report("chaos_pressure.json");
+    let admission = &chaos["sections"]["proof_admission"];
+    let admission_line = format!(
+        "[swarm-pressure-preflight:e2e] case={} admission receipts={} admissible={} blocked={} decisions={}",
+        expectation_case_id(&chaos),
+        admission["receipt_count"].as_i64().expect("receipt count"),
+        admission["admissible_count"]
+            .as_i64()
+            .expect("admissible count"),
+        admission["blocked_count"].as_i64().expect("blocked count"),
+        serde_json::to_string(&admission["by_decision"]).expect("admission decisions")
+    );
+    assert!(
+        docs.contains(&admission_line),
+        "docs missing chaos admission line: {admission_line}"
+    );
+    let pressure_warning = warning_log_line(&chaos, "runtime-pressure-high");
+    assert!(
+        docs.contains(&pressure_warning),
+        "docs missing chaos pressure warning line: {pressure_warning}"
+    );
+
+    let blocked = report("blocked.json");
+    assert!(
+        docs.contains(&golden_final_log_line(&blocked)),
+        "docs missing combined-blocker final e2e line"
+    );
 }
