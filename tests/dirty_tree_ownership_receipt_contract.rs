@@ -9,8 +9,10 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCRIPT_PATH: &str = "scripts/dirty_tree_ownership_receipt.py";
+const E2E_SCRIPT_PATH: &str = "scripts/run_dirty_tree_ownership_receipt_e2e.sh";
 const FIXTURE_ROOT: &str = "tests/fixtures/dirty_tree_ownership_receipt";
 const GENERATED_AT: &str = "2026-05-08T05:10:00Z";
+const RELEASE_PREP_GENERATED_AT: &str = "2026-06-05T06:05:00Z";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -266,6 +268,15 @@ fn row<'a>(receipt: &'a Value, path: &str) -> &'a Value {
         .iter()
         .find(|row| row["path"].as_str() == Some(path))
         .expect("fixture row should exist")
+}
+
+fn release_prep_row<'a>(receipt: &'a Value, path: &str) -> &'a Value {
+    receipt["release_prep_report"]["rows"]
+        .as_array()
+        .expect("release prep rows must be array")
+        .iter()
+        .find(|row| row["path"].as_str() == Some(path))
+        .expect("release prep fixture row should exist")
 }
 
 #[test]
@@ -1305,6 +1316,202 @@ fn conflicting_owner_signals_are_explicit() {
 #[test]
 fn owner_conflict_matches_full_output_golden() {
     assert_receipt_output_matches_golden("owner_conflict.json", "owner_conflict_expected.json");
+}
+
+#[test]
+fn release_prep_report_classifies_dirty_tree_owner_states() {
+    let output = run_receipt_with_args(
+        "release_prep_shared_main.json",
+        &[
+            "--generated-at",
+            RELEASE_PREP_GENERATED_AT,
+            "--release-prep-report",
+        ],
+    );
+    assert_success(&output, "release-prep report fixture");
+    let receipt = json_from_output(&output);
+    let report = &receipt["release_prep_report"];
+
+    assert_eq!(
+        report["schema_version"].as_str(),
+        Some("dirty-tree-release-prep-report-v1")
+    );
+    assert_eq!(
+        report["input_files"].as_array().expect("input files").len(),
+        7
+    );
+    assert_eq!(
+        report["release_blocker_summary"]["decision"].as_str(),
+        Some("release-blocked")
+    );
+    assert_eq!(
+        report["release_blocker_summary"]["release_blocker_count"].as_u64(),
+        Some(5)
+    );
+    assert_eq!(
+        report["release_blocker_summary"]["by_classification"]["owned"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        report["release_blocker_summary"]["by_classification"]["release-blocker"].as_u64(),
+        Some(3)
+    );
+    assert_eq!(
+        report["release_blocker_summary"]["by_classification"]["stale-reservation"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        report["release_blocker_summary"]["by_classification"]["ignored-artifact"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        report["release_blocker_summary"]["by_classification"]["unowned"].as_u64(),
+        Some(1)
+    );
+
+    let owned = release_prep_row(&receipt, "scripts/dirty_tree_ownership_receipt.py");
+    assert_eq!(owned["classification"].as_str(), Some("owned"));
+    assert_eq!(owned["release_blocker"].as_bool(), Some(false));
+
+    let overlap = release_prep_row(&receipt, "src/sync/mutex.rs");
+    assert_eq!(overlap["classification"].as_str(), Some("release-blocker"));
+    assert_eq!(overlap["release_blocker"].as_bool(), Some(true));
+    assert_eq!(
+        overlap["reason"].as_str(),
+        Some("overlapping active reservations disagree on owner")
+    );
+    assert_eq!(
+        overlap["matched_lane_subjects"][0]["subject"].as_str(),
+        Some("Issue #47 fixed and pushed")
+    );
+    assert_eq!(
+        overlap["matching_reservations"]
+            .as_array()
+            .expect("matching reservations")
+            .len(),
+        2
+    );
+
+    let stale = release_prep_row(&receipt, "src/stale_owner.rs");
+    assert_eq!(stale["classification"].as_str(), Some("stale-reservation"));
+    assert_eq!(
+        stale["matching_reservations"][0]["holder"].as_str(),
+        Some("DormantAgent")
+    );
+    assert_eq!(
+        stale["matching_reservations"][0]["state"].as_str(),
+        Some("stale")
+    );
+
+    let ignored = release_prep_row(&receipt, "target/release-prep/run.log");
+    assert_eq!(ignored["classification"].as_str(), Some("ignored-artifact"));
+    assert_eq!(ignored["release_blocker"].as_bool(), Some(false));
+
+    let unowned = release_prep_row(&receipt, "src/unowned.rs");
+    assert_eq!(unowned["classification"].as_str(), Some("unowned"));
+    assert_eq!(unowned["owner"].as_str(), Some("unknown"));
+
+    let tracker = release_prep_row(&receipt, ".beads/issues.jsonl");
+    assert_eq!(tracker["classification"].as_str(), Some("release-blocker"));
+    assert_eq!(
+        tracker["base_classification"].as_str(),
+        Some("tracker-state")
+    );
+}
+
+#[test]
+fn release_prep_report_never_recommends_peer_edits_staging_or_cleanup() {
+    let output = run_receipt_with_args(
+        "release_prep_shared_main.json",
+        &[
+            "--generated-at",
+            RELEASE_PREP_GENERATED_AT,
+            "--release-prep-report",
+        ],
+    );
+    assert_success(&output, "release-prep report fixture");
+    let receipt = json_from_output(&output);
+    let report = &receipt["release_prep_report"];
+
+    assert_eq!(
+        report["safety"]["mutating_commands_executed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        report["safety"]["destructive_cleanup_recommended"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        report["safety"]["peer_owned_edit_or_stage_recommended"].as_bool(),
+        Some(false)
+    );
+
+    let serialized = serde_json::to_string(report).expect("serialize release-prep report");
+    for forbidden in [
+        "rm -rf",
+        "git reset",
+        "git clean",
+        "git checkout -b",
+        "git switch -c",
+        "git worktree",
+        "stage-peer-owned",
+        "edit-peer-owned",
+        "revert-peer-owned",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "release-prep report must not contain forbidden guidance {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn release_prep_e2e_script_logs_operator_diagnostics() {
+    let output_dir = unique_temp_dir("release-prep-e2e-log");
+    let output = Command::new(repo_root().join(E2E_SCRIPT_PATH))
+        .arg("--fixture")
+        .arg(
+            repo_root()
+                .join(FIXTURE_ROOT)
+                .join("release_prep_shared_main.json"),
+        )
+        .arg("--repo-path")
+        .arg(repo_root())
+        .arg("--agent")
+        .arg("TopazGoose")
+        .arg("--generated-at")
+        .arg("2026-06-05T06:05:00Z")
+        .arg("--output-dir")
+        .arg(output_dir)
+        .current_dir(repo_root())
+        .output()
+        .expect("run dirty-tree ownership E2E script");
+    assert_success(&output, "dirty-tree ownership E2E script");
+
+    let stdout = String::from_utf8(output.stdout).expect("E2E stdout must be UTF-8");
+    for expected in [
+        "DIRTY_TREE_OWNERSHIP_E2E start",
+        "input_files count=7",
+        "reservation_holder holder=SageWolf pattern=src/sync/mutex.rs state=active",
+        "reservation_holder holder=DormantAgent pattern=src/stale_owner.rs state=stale",
+        "matched_lane_subject path=src/sync/mutex.rs from=SageWolf thread=asupersync-issue-47 subject=Issue #47 fixed and pushed",
+        "classification path=target/release-prep/run.log class=ignored-artifact",
+        "classification path=src/unowned.rs class=unowned",
+        "release_blocker_summary decision=release-blocked total=7 blockers=5",
+        "safety mutating_commands_executed=false destructive_cleanup_recommended=false peer_owned_edit_or_stage_recommended=false",
+        "DIRTY_TREE_OWNERSHIP_E2E done",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "E2E log missing {expected:?}\nstdout:\n{stdout}"
+        );
+    }
+    for forbidden in ["rm -rf", "git reset", "git clean", "git worktree"] {
+        assert!(
+            !stdout.contains(forbidden),
+            "E2E log must not contain forbidden command {forbidden:?}"
+        );
+    }
 }
 
 #[test]
