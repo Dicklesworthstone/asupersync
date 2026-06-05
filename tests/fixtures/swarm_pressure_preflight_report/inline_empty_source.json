@@ -1,0 +1,83 @@
+{
+  "schema_version": "swarm-pressure-preflight-input-v1",
+  "profile_id": "inline-empty-source",
+  "generated_at": "2026-06-05T08:00:00Z",
+  "sources": {
+    "proof_lane_manifest": {
+      "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+      "data": {
+        "contract_version": "proof-lane-manifest-v1",
+        "command_policy": {
+          "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+        },
+        "resource_envelope_policy": {
+          "classes": [
+            {
+              "class_id": "artifact-contract-medium",
+              "lane_kinds": ["artifact_contract"],
+              "timeout_seconds": 3600,
+              "memory_mb": 16384,
+              "remote_required": true,
+              "local_fallback_allowed": false,
+              "resource_pressure": "medium"
+            }
+          ]
+        },
+        "required_guarantee_ids": ["swarm-pressure-preflight-report"],
+        "lanes": [
+          {
+            "lane_id": "swarm-pressure-preflight-report-contract",
+            "kind": "artifact_contract",
+            "resource_envelope_class": "artifact-contract-medium",
+            "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_pressure_preflight_report cargo test -p asupersync --test swarm_pressure_preflight_report_contract -- --nocapture",
+            "guarantee_ids": ["swarm-pressure-preflight-report"],
+            "source_paths": ["scripts/swarm_pressure_preflight_report.py"]
+          }
+        ]
+      }
+    },
+    "proof_status_snapshot": {
+      "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+      "data": {
+        "contract_version": "proof-status-snapshot-v1",
+        "claim_categories": [
+          {
+            "claim_id": "swarm-pressure-preflight-report",
+            "status": "green",
+            "proof_evidence_status": "fresh-rch-pass",
+            "manifest_lane_ids": ["swarm-pressure-preflight-report-contract"]
+          }
+        ]
+      }
+    },
+    "runtime_pressure_contract": {
+      "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "data": {
+        "contract_version": "runtime-pressure-control-evidence-contract-v1",
+        "schema_versions": {
+          "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+          "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+          "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+          "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+        },
+        "proof_lanes": [
+          {
+            "lane_id": "runtime-pressure-control-evidence-contract"
+          }
+        ],
+        "evidence_claims": [],
+        "operator_policy": {
+          "production_signals_are_advisory_without_lab_or_replay_evidence": true,
+          "adaptive_controls_remain_opt_in_until_stronger_evidence": true,
+          "deadlock_claims_require_explicit_trapped_cycle_proof": true
+        }
+      }
+    },
+    "proof_freshness_receipts": [
+      {
+        "artifact_path": "tests/fixtures/swarm_pressure_preflight_report/does-not-exist.json",
+        "data": {}
+      }
+    ]
+  }
+}

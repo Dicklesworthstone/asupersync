@@ -1,0 +1,135 @@
+{
+  "schema_version": "swarm-pressure-preflight-input-v1",
+  "profile_id": "mixed-pressure",
+  "generated_at": "2026-06-05T08:00:00Z",
+  "sources": {
+    "proof_lane_manifest": {
+      "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+      "data": {
+        "contract_version": "proof-lane-manifest-v1",
+        "command_policy": {
+          "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+        },
+        "resource_envelope_policy": {
+          "classes": [
+            {
+              "class_id": "compile-frontier-heavy",
+              "lane_kinds": ["compile_frontier"],
+              "timeout_seconds": 7200,
+              "memory_mb": 49152,
+              "remote_required": true,
+              "local_fallback_allowed": false,
+              "resource_pressure": "high"
+            },
+            {
+              "class_id": "artifact-contract-medium",
+              "lane_kinds": ["artifact_contract"],
+              "timeout_seconds": 3600,
+              "memory_mb": 16384,
+              "remote_required": true,
+              "local_fallback_allowed": false,
+              "resource_pressure": "medium"
+            }
+          ]
+        },
+        "required_guarantee_ids": ["all-target-compile-frontier", "swarm-pressure-preflight-report"],
+        "lanes": [
+          {
+            "lane_id": "all-targets-check",
+            "kind": "compile_frontier",
+            "resource_envelope_class": "compile-frontier-heavy",
+            "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_check cargo check -p asupersync --all-targets",
+            "guarantee_ids": ["all-target-compile-frontier"],
+            "source_paths": ["src/lib.rs"]
+          },
+          {
+            "lane_id": "swarm-pressure-preflight-report-contract",
+            "kind": "artifact_contract",
+            "resource_envelope_class": "artifact-contract-medium",
+            "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_preflight cargo test -p asupersync --test swarm_pressure_preflight_report_contract -- --nocapture",
+            "guarantee_ids": ["swarm-pressure-preflight-report"],
+            "source_paths": ["scripts/swarm_pressure_preflight_report.py"]
+          }
+        ]
+      }
+    },
+    "proof_status_snapshot": {
+      "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+      "data": {
+        "contract_version": "proof-status-snapshot-v1",
+        "claim_categories": [
+          {
+            "claim_id": "all-target-compile-frontier",
+            "status": "yellow_frontier",
+            "proof_evidence_status": "rerun-required",
+            "manifest_lane_ids": ["all-targets-check"]
+          }
+        ]
+      }
+    },
+    "runtime_pressure_contract": {
+      "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "data": {
+        "contract_version": "runtime-pressure-control-evidence-contract-v1",
+        "schema_versions": {
+          "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+          "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+          "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+          "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+        },
+        "proof_lanes": [
+          {
+            "lane_id": "all-targets-check"
+          }
+        ],
+        "evidence_claims": [],
+        "operator_policy": {
+          "production_signals_are_advisory_without_lab_or_replay_evidence": true
+        }
+      }
+    },
+    "proof_admission_receipts": [
+      {
+        "artifact_path": "artifacts/proof/admission/all-targets-high-pressure.json",
+        "data": {
+          "schema_version": "proof-lane-admission-decision-receipt-v1",
+          "lane_id": "all-targets-check",
+          "decision": {
+            "admission_decision": "queue",
+            "proof_may_run_now": false,
+            "reason_codes": ["local-resource-pressure"]
+          },
+          "integrated_operator_receipt": {
+            "admission_decision": "admit_now",
+            "proof_may_run_now": true,
+            "reason_codes": ["stale-optimistic-secondary-view"]
+          },
+          "resource_pressure_summary": {
+            "class": "high"
+          },
+          "disk_summary": {
+            "sufficient_for_lane": true
+          }
+        }
+      },
+      {
+        "artifact_path": "artifacts/proof/admission/preflight-healthy.json",
+        "data": {
+          "schema_version": "proof-lane-admission-decision-receipt-v1",
+          "lane_id": "swarm-pressure-preflight-report-contract",
+          "decision": {
+            "admission_decision": "admit_now",
+            "proof_may_run_now": true,
+            "reason_codes": ["worker-admissible"]
+          },
+          "resource_pressure_summary": {
+            "class": "healthy"
+          },
+          "disk_summary": {
+            "sufficient_for_lane": true
+          }
+        }
+      }
+    ]
+  }
+}

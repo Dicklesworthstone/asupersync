@@ -1,0 +1,52 @@
+{
+  "schema_version": "swarm-pressure-preflight-input-v1",
+  "profile_id": "missing-envelope",
+  "generated_at": "2026-06-05T08:00:00Z",
+  "sources": {
+    "proof_lane_manifest": {
+      "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+      "data": {
+        "contract_version": "proof-lane-manifest-v1",
+        "command_policy": {
+          "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+        },
+        "resource_envelope_policy": {
+          "classes": []
+        },
+        "required_guarantee_ids": ["clippy-frontier"],
+        "lanes": [
+          {
+            "lane_id": "clippy-all-targets",
+            "kind": "lint_frontier",
+            "resource_envelope_class": "lint-frontier-heavy",
+            "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_clippy cargo clippy -p asupersync --all-targets -- -D warnings",
+            "guarantee_ids": ["clippy-frontier"],
+            "source_paths": ["src/lib.rs"]
+          }
+        ]
+      }
+    },
+    "proof_status_snapshot": {
+      "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+      "data": {
+        "contract_version": "proof-status-snapshot-v1",
+        "claim_categories": []
+      }
+    },
+    "runtime_pressure_contract": {
+      "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "data": {
+        "contract_version": "runtime-pressure-control-evidence-contract-v1",
+        "schema_versions": {
+          "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+          "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+          "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+          "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+        },
+        "proof_lanes": [],
+        "evidence_claims": [],
+        "operator_policy": {}
+      }
+    }
+  }
+}
