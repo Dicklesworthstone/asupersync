@@ -2,6 +2,13 @@
   "schema_version": "swarm-pressure-preflight-input-v1",
   "profile_id": "green",
   "generated_at": "2026-06-05T08:00:00Z",
+  "e2e_expectations": {
+    "case_id": "green-workflow",
+    "expected_decision": "preflight-pass",
+    "expected_blocker_kinds": [],
+    "expected_warning_kinds": [],
+    "notes": ["all source artifacts load and no blocker or warning is emitted"]
+  },
   "sources": {
     "proof_lane_manifest": {
       "artifact_path": "artifacts/proof_lane_manifest_v1.json",

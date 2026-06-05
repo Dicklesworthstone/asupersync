@@ -84,6 +84,12 @@ fn assert_has_kind(kinds: &[&str], expected: &str) {
     );
 }
 
+fn expectation_case_id(value: &Value) -> &str {
+    value["e2e_expectations"]["case_id"]
+        .as_str()
+        .expect("expectation case_id")
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -236,6 +242,39 @@ fn missing_envelope_fixture_reports_lane_envelope_health() {
 }
 
 #[test]
+fn local_fallback_fixture_refuses_remote_required_policy_violations() {
+    let value = report("local_fallback_attempt.json");
+    assert_eq!(
+        expectation_case_id(&value),
+        "remote-required-lane-attempted-locally"
+    );
+    assert_eq!(
+        value["operator_summary"]["decision"].as_str(),
+        Some("preflight-blocked")
+    );
+    let blockers = blocker_kinds(&value);
+    assert_has_kind(&blockers, "unsafe-resource-envelope-policy");
+    assert_has_kind(&blockers, "unsafe-proof-command-prefix");
+
+    let lane = &value["sections"]["proof_lane_envelope_health"]["lanes"][0];
+    assert_eq!(lane["state"].as_str(), Some("bad-command-prefix"));
+    assert_eq!(
+        lane["command"].as_str(),
+        Some(
+            "cargo test -p asupersync --test swarm_pressure_preflight_report_contract -- --nocapture"
+        )
+    );
+    assert_eq!(
+        lane["resource_envelope"]["remote_required"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        lane["resource_envelope"]["local_fallback_allowed"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
 fn peer_dirty_tree_fixture_blocks_release_and_preserves_owner_context() {
     let value = report("peer_dirty_tree.json");
     let blockers = blocker_kinds(&value);
@@ -285,9 +324,42 @@ fn mixed_pressure_fixture_preserves_pressure_classes_and_rerun_warning() {
 }
 
 #[test]
+fn chaos_pressure_fixture_queues_e2e_lane_with_explicit_pressure_warning() {
+    let value = report("chaos_pressure.json");
+    assert_eq!(expectation_case_id(&value), "chaos-pressure-scenario");
+    assert_eq!(
+        value["operator_summary"]["decision"].as_str(),
+        Some("preflight-blocked")
+    );
+    assert_eq!(
+        value["sections"]["pressure_summary"]["classes"][0].as_str(),
+        Some("critical")
+    );
+    assert_eq!(
+        value["sections"]["proof_admission"]["rows"][0]["lane_id"].as_str(),
+        Some("proof-lane-pressure-chaos-e2e")
+    );
+    assert_eq!(
+        value["sections"]["proof_admission"]["rows"][0]["proof_may_run_now"].as_bool(),
+        Some(false)
+    );
+    let blockers = blocker_kinds(&value);
+    assert_has_kind(&blockers, "proof-admission-blocked");
+    let warnings = warning_kinds(&value);
+    assert_has_kind(&warnings, "proof-rerun-required");
+    assert_has_kind(&warnings, "runtime-pressure-high");
+    assert!(
+        value["sections"]["proof_lane_envelope_health"]["lanes"][0]["command"]
+            .as_str()
+            .expect("chaos command")
+            .contains("scripts/run_proof_lane_pressure_chaos_e2e.sh")
+    );
+}
+
+#[test]
 fn e2e_script_logs_operator_diagnostics() {
     let output_dir = std::env::temp_dir().join(format!(
-        "asupersync-swarm-pressure-preflight-e2e-{}",
+        "asupersync-swarm-pressure-preflight-e2e-mixed-{}",
         std::process::id()
     ));
     let output = Command::new("bash")
@@ -333,4 +405,69 @@ fn e2e_script_logs_operator_diagnostics() {
 
     let receipt = output_dir.join("swarm_pressure_preflight_report.json");
     assert!(receipt.exists(), "e2e should write {receipt:?}");
+}
+
+#[test]
+fn e2e_suite_logs_all_acceptance_cases_with_expectation_checks() {
+    let output_dir = std::env::temp_dir().join(format!(
+        "asupersync-swarm-pressure-preflight-e2e-suite-{}",
+        std::process::id()
+    ));
+    let output = Command::new("bash")
+        .current_dir(repo_root())
+        .arg(E2E_SCRIPT_PATH)
+        .arg("--suite")
+        .arg("--repo-path")
+        .arg(repo_root())
+        .arg("--output-dir")
+        .arg(&output_dir)
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .output()
+        .expect("run swarm pressure preflight e2e suite");
+
+    assert!(
+        output.status.success(),
+        "e2e suite failed\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "case_begin id=green-workflow",
+        "case_begin id=stale-exact-filter-zero-tests",
+        "case_begin id=missing-resource-envelope",
+        "case_begin id=remote-required-lane-attempted-locally",
+        "case_begin id=peer-owned-dirty-tree",
+        "case_begin id=chaos-pressure-scenario",
+        "case_begin id=combined-multi-blocker",
+        "command lane=proof-lane-pressure-chaos-e2e",
+        "envelope_values lane=swarm-pressure-preflight-report-contract class=artifact-contract-local-fallback timeout_seconds=3600 memory_mb=16384 remote_required=false local_fallback_allowed=true",
+        "parsed_tests lane=lib-tests exact_filter=default_policy_no_csp_or_permissions executed=0",
+        "dirty_path path=src/net/tcp/stream.rs classification=peer-owned",
+        "expected_decision=preflight-blocked actual_decision=preflight-blocked",
+        "actual_blockers=[\"stale-exact-filter-zero-tests\"]",
+        "final_blocker_list=",
+        "suite case_count=7 pass_count=7 fail_count=0 unchecked_count=0",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "e2e suite log missing {expected:?}\nstdout:\n{stdout}"
+        );
+    }
+
+    let summary_path = output_dir.join("swarm_pressure_preflight_e2e_summary.json");
+    let summary: Value = serde_json::from_slice(
+        &std::fs::read(&summary_path)
+            .unwrap_or_else(|error| panic!("read e2e suite summary {summary_path:?}: {error}")),
+    )
+    .expect("parse e2e suite summary");
+    assert_eq!(
+        summary["schema_version"].as_str(),
+        Some("swarm-pressure-preflight-e2e-summary-v1")
+    );
+    assert_eq!(summary["case_count"].as_i64(), Some(7));
+    assert_eq!(summary["pass_count"].as_i64(), Some(7));
+    assert_eq!(summary["fail_count"].as_i64(), Some(0));
 }

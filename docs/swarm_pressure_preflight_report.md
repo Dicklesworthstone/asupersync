@@ -40,6 +40,28 @@ envelope states, proof-status decisions, proof-freshness classifications,
 admission decisions, pressure classes, dirty-tree blockers, aggregated blockers,
 warnings, and the final operator decision.
 
+For the full no-mock acceptance suite, run:
+
+```bash
+scripts/run_swarm_pressure_preflight_report_e2e.sh \
+  --suite \
+  --repo-path /data/projects/asupersync \
+  --generated-at 2026-06-05T08:10:00Z \
+  --output-dir "${TMPDIR:-/tmp}/asupersync-swarm-pressure-preflight-e2e"
+```
+
+The suite covers green workflow, stale exact-filter Cargo proofs that execute
+zero tests, missing proof-lane resource envelopes, remote-required lanes
+attempted through local fallback, peer-owned dirty-tree blockers, chaos
+proof-lane pressure admission queueing, and combined multi-blocker output.
+
+Each case logs its case id, fixture path, source artifact paths, proof-lane
+commands, normalized resource envelope values, parsed exact-filter test counts,
+dirty-path classifications, expected decision, actual decision, expected and
+actual blocker/warning kinds, and the final blocker list. The wrapper also
+writes `swarm_pressure_preflight_e2e_summary.json`, a stable JSON summary with
+case-level pass/fail rows suitable for CI artifacts.
+
 ## Decisions
 
 `preflight-pass` means all configured source artifacts loaded and no blockers or

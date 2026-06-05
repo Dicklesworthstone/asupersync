@@ -1,0 +1,82 @@
+{
+  "schema_version": "swarm-pressure-preflight-input-v1",
+  "profile_id": "local-fallback-attempt",
+  "generated_at": "2026-06-05T08:00:00Z",
+  "e2e_expectations": {
+    "case_id": "remote-required-lane-attempted-locally",
+    "expected_decision": "preflight-blocked",
+    "expected_blocker_kinds": [
+      "unsafe-proof-command-prefix",
+      "unsafe-resource-envelope-policy"
+    ],
+    "expected_warning_kinds": [],
+    "notes": ["command omits RCH_REQUIRE_REMOTE=1 rch exec prefix and envelope allows local fallback"]
+  },
+  "sources": {
+    "proof_lane_manifest": {
+      "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+      "data": {
+        "contract_version": "proof-lane-manifest-v1",
+        "command_policy": {
+          "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+        },
+        "resource_envelope_policy": {
+          "classes": [
+            {
+              "class_id": "artifact-contract-local-fallback",
+              "lane_kinds": ["artifact_contract"],
+              "timeout_seconds": 3600,
+              "memory_mb": 16384,
+              "remote_required": false,
+              "local_fallback_allowed": true,
+              "resource_pressure": "medium"
+            }
+          ]
+        },
+        "required_guarantee_ids": ["swarm-pressure-preflight-report"],
+        "lanes": [
+          {
+            "lane_id": "swarm-pressure-preflight-report-contract",
+            "kind": "artifact_contract",
+            "resource_envelope_class": "artifact-contract-local-fallback",
+            "command": "cargo test -p asupersync --test swarm_pressure_preflight_report_contract -- --nocapture",
+            "guarantee_ids": ["swarm-pressure-preflight-report"],
+            "source_paths": [
+              "scripts/swarm_pressure_preflight_report.py",
+              "tests/swarm_pressure_preflight_report_contract.rs"
+            ]
+          }
+        ]
+      }
+    },
+    "proof_status_snapshot": {
+      "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+      "data": {
+        "contract_version": "proof-status-snapshot-v1",
+        "claim_categories": [
+          {
+            "claim_id": "swarm-pressure-preflight-report",
+            "status": "green",
+            "proof_evidence_status": "fresh-rch-pass",
+            "manifest_lane_ids": ["swarm-pressure-preflight-report-contract"]
+          }
+        ]
+      }
+    },
+    "runtime_pressure_contract": {
+      "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "data": {
+        "contract_version": "runtime-pressure-control-evidence-contract-v1",
+        "schema_versions": {
+          "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+          "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+          "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+          "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+        },
+        "proof_lanes": [],
+        "evidence_claims": [],
+        "operator_policy": {}
+      }
+    }
+  }
+}

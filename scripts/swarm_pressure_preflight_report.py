@@ -165,6 +165,31 @@ def source_summary(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def envelope_summary(envelope: dict[str, Any] | None) -> dict[str, Any]:
+    if not envelope:
+        return {}
+    return {
+        "class_id": string_value(envelope.get("class_id")),
+        "lane_kinds": stable_strings(envelope.get("lane_kinds")),
+        "timeout_seconds": int_value(envelope.get("timeout_seconds")),
+        "memory_mb": int_value(envelope.get("memory_mb")),
+        "remote_required": bool_value(envelope.get("remote_required")),
+        "local_fallback_allowed": bool_value(envelope.get("local_fallback_allowed")),
+        "resource_pressure": string_value(envelope.get("resource_pressure")) or "unknown",
+    }
+
+
+def e2e_expectations(config: dict[str, Any], profile_id: str) -> dict[str, Any]:
+    expectations = as_dict(config.get("e2e_expectations"))
+    return {
+        "case_id": string_value(expectations.get("case_id")) or profile_id,
+        "expected_decision": string_value(expectations.get("expected_decision")),
+        "expected_blocker_kinds": stable_strings(expectations.get("expected_blocker_kinds")),
+        "expected_warning_kinds": stable_strings(expectations.get("expected_warning_kinds")),
+        "notes": stable_strings(expectations.get("notes")),
+    }
+
+
 def issue(
     *,
     kind: str,
@@ -290,8 +315,10 @@ def summarize_manifest(source: dict[str, Any]) -> tuple[dict[str, Any], list[dic
                 "lane_id": lane_id,
                 "kind": lane_kind,
                 "resource_envelope_class": class_id,
+                "command": command,
                 "state": state,
                 "reasons": reasons,
+                "resource_envelope": envelope_summary(envelope),
                 "guarantee_ids": stable_strings(lane.get("guarantee_ids")),
                 "source_paths": stable_strings(lane.get("source_paths")),
             }
@@ -710,6 +737,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         config = loaded
 
     generated_at = args.generated_at or string_value(config.get("generated_at")) or utc_now()
+    profile_id = string_value(config.get("profile_id")) or "live-default"
     manifest = load_source(repo_path, "proof_lane_manifest", source_spec(config, "proof_lane_manifest"))
     status = load_source(repo_path, "proof_status_snapshot", source_spec(config, "proof_status_snapshot"))
     pressure_contract = load_source(
@@ -782,7 +810,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "input_schema_version": string_value(config.get("schema_version")) or INPUT_SCHEMA_VERSION,
         "generated_at": generated_at,
-        "profile_id": string_value(config.get("profile_id")) or "live-default",
+        "profile_id": profile_id,
+        "e2e_expectations": e2e_expectations(config, profile_id),
         "dry_run_only": True,
         "non_mutating": True,
         "forbidden_actions": {

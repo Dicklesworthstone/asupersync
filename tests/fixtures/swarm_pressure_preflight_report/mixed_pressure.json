@@ -2,6 +2,13 @@
   "schema_version": "swarm-pressure-preflight-input-v1",
   "profile_id": "mixed-pressure",
   "generated_at": "2026-06-05T08:00:00Z",
+  "e2e_expectations": {
+    "case_id": "mixed-pressure",
+    "expected_decision": "preflight-blocked",
+    "expected_blocker_kinds": ["proof-admission-blocked"],
+    "expected_warning_kinds": ["proof-rerun-required", "runtime-pressure-high"],
+    "notes": ["mixed pressure keeps admission blockers separate from warnings"]
+  },
   "sources": {
     "proof_lane_manifest": {
       "artifact_path": "artifacts/proof_lane_manifest_v1.json",

@@ -2,6 +2,13 @@
   "schema_version": "swarm-pressure-preflight-input-v1",
   "profile_id": "stale-exact-filter",
   "generated_at": "2026-06-05T08:00:00Z",
+  "e2e_expectations": {
+    "case_id": "stale-exact-filter-zero-tests",
+    "expected_decision": "preflight-blocked",
+    "expected_blocker_kinds": ["stale-exact-filter-zero-tests"],
+    "expected_warning_kinds": [],
+    "notes": ["exact Cargo filter parsed as zero executed tests"]
+  },
   "sources": {
     "proof_lane_manifest": {
       "artifact_path": "artifacts/proof_lane_manifest_v1.json",

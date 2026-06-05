@@ -2,6 +2,13 @@
   "schema_version": "swarm-pressure-preflight-input-v1",
   "profile_id": "peer-dirty-tree",
   "generated_at": "2026-06-05T08:00:00Z",
+  "e2e_expectations": {
+    "case_id": "peer-owned-dirty-tree",
+    "expected_decision": "preflight-blocked",
+    "expected_blocker_kinds": ["dirty-tree-release-blocker"],
+    "expected_warning_kinds": [],
+    "notes": ["peer-owned dirty path blocks release gate"]
+  },
   "sources": {
     "proof_lane_manifest": {
       "artifact_path": "artifacts/proof_lane_manifest_v1.json",

@@ -2,6 +2,13 @@
   "schema_version": "swarm-pressure-preflight-input-v1",
   "profile_id": "missing-envelope",
   "generated_at": "2026-06-05T08:00:00Z",
+  "e2e_expectations": {
+    "case_id": "missing-resource-envelope",
+    "expected_decision": "preflight-blocked",
+    "expected_blocker_kinds": ["missing-resource-envelope"],
+    "expected_warning_kinds": [],
+    "notes": ["manifest lane references a resource envelope class that is absent"]
+  },
   "sources": {
     "proof_lane_manifest": {
       "artifact_path": "artifacts/proof_lane_manifest_v1.json",
