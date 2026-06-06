@@ -1,0 +1,334 @@
+{
+  "schema_version": "scheduler-resource-pressure-profiling-receipts-v1",
+  "bead_id": "asupersync-94pz70",
+  "created_date": "2026-06-06",
+  "description": "Deterministic profiling receipt contract for scheduler and resource-pressure hot paths. The receipts identify bounded scenarios, static source evidence, expected hot-path attribution, memory observations, operator interpretation, and RCH-routed commands for refreshing real benchmark evidence.",
+  "source_of_truth": {
+    "contract": "artifacts/scheduler_resource_pressure_profiling_receipts_v1.json",
+    "script": "scripts/scheduler_resource_pressure_profiling_receipts.py",
+    "e2e_script": "scripts/run_scheduler_resource_pressure_profiling_receipts_e2e.sh",
+    "contract_test": "tests/scheduler_resource_pressure_profiling_receipts_contract.rs",
+    "docs": "docs/scheduler_resource_pressure_profiling_receipts.md",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "runtime_pressure_contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+    "pressure_runbook": "docs/runtime_pressure_triage_runbook.md"
+  },
+  "proof_boundary": {
+    "contract_receipts_are_fresh_benchmarks": false,
+    "proves_receipt_schema_and_refresh_plan": true,
+    "proves_real_host_throughput": false,
+    "proves_scheduler_regression_closed": false,
+    "proves_rch_fleet_health": false,
+    "requires_rch_for_refresh_commands": true,
+    "local_cargo_fallback_allowed": false,
+    "core_runtime_stdout_stderr_added": false,
+    "bounded_fixture_only": true
+  },
+  "required_receipt_fields": [
+    "scenario_id",
+    "scenario_family",
+    "command",
+    "environment",
+    "data_hash",
+    "top_hot_paths",
+    "memory_observations",
+    "operator_interpretation",
+    "proof_boundary",
+    "rch_refresh_command",
+    "source_refs"
+  ],
+  "required_scenario_ids": [
+    "scheduler-spawn-storm",
+    "obligation-cleanup-drain",
+    "proof-lane-report-generation",
+    "dirty-tree-correlation"
+  ],
+  "required_log_fields": [
+    "bead_id",
+    "scenario_id",
+    "scenario_family",
+    "status",
+    "data_hash",
+    "top_hot_path",
+    "memory_ceiling_mb",
+    "operator_action",
+    "artifact_path",
+    "first_failure"
+  ],
+  "scenario_catalog": [
+    {
+      "scenario_id": "scheduler-spawn-storm",
+      "scenario_family": "scheduler_spawn_storm",
+      "title": "Scheduler spawn storm and local/global queue pressure",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_profile_scheduler_spawn_storm CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 cargo bench -p asupersync --bench methodology_baselines --features test-internals -- methodology/task_spawn --noplot",
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_profile_scheduler_spawn_storm CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 cargo bench -p asupersync --bench methodology_baselines --features test-internals -- methodology/task_spawn --noplot",
+      "environment": {
+        "host_profile": "large-swarm-64c-256gb",
+        "resource_envelope_class": "benchmark-refresh-heavy",
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "bounded_fixture_iterations": 1000,
+        "wall_clock_is_provenance_only": true
+      },
+      "data_hash": "sha256:c97b861e2007b8dce690709eb0f8930efffbe0f43f8e21754813d339311b8cee",
+      "top_hot_paths": [
+        {
+          "rank": 1,
+          "path": "src/runtime/scheduler/three_lane.rs",
+          "symbol": "ThreeLaneScheduler::inject_ready",
+          "expected_pressure": "global-ready injection lock and wake coordination",
+          "source_ref": "README.md#how-we-made-it-fast"
+        },
+        {
+          "rank": 2,
+          "path": "src/runtime/scheduler/local_queue.rs",
+          "symbol": "LocalQueue::push",
+          "expected_pressure": "owner-local queue push/pop locality under batch spawn"
+        },
+        {
+          "rank": 3,
+          "path": "src/runtime/scheduler/worker.rs",
+          "symbol": "Parker::park",
+          "expected_pressure": "idle-worker permit recheck and targeted wakeup cost"
+        }
+      ],
+      "memory_observations": [
+        {
+          "metric": "receipt_fixture_bytes",
+          "value": 7168,
+          "unit": "bytes",
+          "interpretation": "Contract fixture stays bounded; real Criterion artifacts are generated only by the RCH refresh command."
+        },
+        {
+          "metric": "refresh_memory_ceiling_mb",
+          "value": 65536,
+          "unit": "MiB",
+          "interpretation": "Large-host profiling refresh should run on a remote worker with enough memory for debug-stripped Criterion artifacts."
+        }
+      ],
+      "operator_interpretation": {
+        "status": "contract-receipt",
+        "recommended_action": "Refresh the RCH benchmark before making throughput or regression-closure claims; use this receipt to route analysis to scheduler queue and wake paths.",
+        "claim_boundary": "This row is not a fresh benchmark result."
+      },
+      "proof_boundary": {
+        "fresh_benchmark": false,
+        "deterministic_fixture": true,
+        "real_host_throughput_proof": false,
+        "requires_refresh_for_numbers": true
+      },
+      "source_refs": [
+        "benches/methodology_baselines.rs",
+        "benches/scheduler_benchmark.rs",
+        "README.md"
+      ]
+    },
+    {
+      "scenario_id": "obligation-cleanup-drain",
+      "scenario_family": "obligation_cleanup",
+      "title": "Cancellation drain and obligation cleanup pressure",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_profile_obligation_cleanup CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 cargo bench -p asupersync --bench methodology_baselines --features test-internals -- methodology/task_cancellation --noplot",
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_profile_obligation_cleanup CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 cargo bench -p asupersync --bench methodology_baselines --features test-internals -- methodology/task_cancellation --noplot",
+      "environment": {
+        "host_profile": "large-swarm-64c-256gb",
+        "resource_envelope_class": "benchmark-refresh-medium",
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "bounded_fixture_iterations": 100,
+        "wall_clock_is_provenance_only": true
+      },
+      "data_hash": "sha256:deb3657f66392cf72d7125ac08f5fac466f1d5de8f2cd7f7999c129ac25b4eec",
+      "top_hot_paths": [
+        {
+          "rank": 1,
+          "path": "src/runtime/state.rs",
+          "symbol": "RuntimeState::cancel_request",
+          "expected_pressure": "region cancellation fan-out and task collection"
+        },
+        {
+          "rank": 2,
+          "path": "src/runtime/obligation_table.rs",
+          "symbol": "ObligationTable::abort_orphaned",
+          "expected_pressure": "orphan obligation scan and terminal-state accounting"
+        },
+        {
+          "rank": 3,
+          "path": "src/cancel/progress_certificate.rs",
+          "symbol": "ProgressCertificate::record_delta",
+          "expected_pressure": "drain-progress certificate update cost"
+        }
+      ],
+      "memory_observations": [
+        {
+          "metric": "receipt_fixture_bytes",
+          "value": 6144,
+          "unit": "bytes",
+          "interpretation": "The contract records expected attribution without retaining full benchmark samples."
+        },
+        {
+          "metric": "refresh_memory_ceiling_mb",
+          "value": 32768,
+          "unit": "MiB",
+          "interpretation": "Cancellation and obligation refresh lanes should remain below broad test-frontier memory."
+        }
+      ],
+      "operator_interpretation": {
+        "status": "contract-receipt",
+        "recommended_action": "If drain or shutdown latency is suspected, refresh this lane and compare top paths before changing cancellation policy.",
+        "claim_boundary": "This row does not prove no obligation leaks; it points at profiling surfaces for cleanup cost."
+      },
+      "proof_boundary": {
+        "fresh_benchmark": false,
+        "deterministic_fixture": true,
+        "real_host_throughput_proof": false,
+        "requires_refresh_for_numbers": true
+      },
+      "source_refs": [
+        "benches/methodology_baselines.rs",
+        "src/runtime/state.rs",
+        "src/runtime/obligation_table.rs",
+        "src/cancel/progress_certificate.rs"
+      ]
+    },
+    {
+      "scenario_id": "proof-lane-report-generation",
+      "scenario_family": "proof_lane_reporting",
+      "title": "Proof-lane parsing and report generation pressure",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_profile_proof_lane_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 bash scripts/run_swarm_pressure_preflight_report_e2e.sh --run-id profile-proof-lane-report",
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_profile_proof_lane_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 bash scripts/run_swarm_pressure_preflight_report_e2e.sh --run-id profile-proof-lane-report",
+      "environment": {
+        "host_profile": "large-swarm-64c-256gb",
+        "resource_envelope_class": "artifact-contract-medium",
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "bounded_fixture_iterations": 9,
+        "wall_clock_is_provenance_only": true
+      },
+      "data_hash": "sha256:31aa9614eee44df96e23417a3869c067f6a86bb05c8d926130a2234cec216cea",
+      "top_hot_paths": [
+        {
+          "rank": 1,
+          "path": "scripts/swarm_pressure_preflight_report.py",
+          "symbol": "summarize_manifest",
+          "expected_pressure": "proof-lane manifest projection and resource envelope analysis"
+        },
+        {
+          "rank": 2,
+          "path": "scripts/swarm_pressure_preflight_report.py",
+          "symbol": "summarize_proof_status",
+          "expected_pressure": "proof-status row classification and dirty-frontier reasons"
+        },
+        {
+          "rank": 3,
+          "path": "tests/swarm_pressure_preflight_report_contract.rs",
+          "symbol": "docs_golden_examples_match_fixture_reports",
+          "expected_pressure": "golden docs/report projection stability"
+        }
+      ],
+      "memory_observations": [
+        {
+          "metric": "receipt_fixture_bytes",
+          "value": 8192,
+          "unit": "bytes",
+          "interpretation": "Fixture rows are bounded and deterministic; the helper does not invoke Cargo or RCH by itself."
+        },
+        {
+          "metric": "refresh_memory_ceiling_mb",
+          "value": 16384,
+          "unit": "MiB",
+          "interpretation": "Report refresh is artifact-contract sized, not a broad workspace proof."
+        }
+      ],
+      "operator_interpretation": {
+        "status": "contract-receipt",
+        "recommended_action": "Use this receipt when report-generation overhead or proof-lane parsing churn is suspected; do not cite it as broad workspace health.",
+        "claim_boundary": "This row is report-contract attribution only."
+      },
+      "proof_boundary": {
+        "fresh_benchmark": false,
+        "deterministic_fixture": true,
+        "real_host_throughput_proof": false,
+        "requires_refresh_for_numbers": true
+      },
+      "source_refs": [
+        "scripts/swarm_pressure_preflight_report.py",
+        "scripts/run_swarm_pressure_preflight_report_e2e.sh",
+        "tests/swarm_pressure_preflight_report_contract.rs"
+      ]
+    },
+    {
+      "scenario_id": "dirty-tree-correlation",
+      "scenario_family": "dirty_tree_correlation",
+      "title": "Dirty-tree ownership and reservation correlation pressure",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_profile_dirty_tree_correlation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 bash scripts/run_dirty_tree_ownership_receipt_e2e.sh --run-id profile-dirty-tree-correlation",
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_profile_dirty_tree_correlation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 bash scripts/run_dirty_tree_ownership_receipt_e2e.sh --run-id profile-dirty-tree-correlation",
+      "environment": {
+        "host_profile": "large-swarm-64c-256gb",
+        "resource_envelope_class": "artifact-contract-medium",
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "bounded_fixture_iterations": 10,
+        "wall_clock_is_provenance_only": true
+      },
+      "data_hash": "sha256:0cac289176d850737f555bebd788319907482da02da0be191c0ba026e88ecdad",
+      "top_hot_paths": [
+        {
+          "rank": 1,
+          "path": "scripts/dirty_tree_ownership_receipt.py",
+          "symbol": "classify_dirty_paths",
+          "expected_pressure": "git status parsing and dirty path ownership classification"
+        },
+        {
+          "rank": 2,
+          "path": "scripts/claim_reservation_receipt.py",
+          "symbol": "reservation_conflicts",
+          "expected_pressure": "reservation glob matching and implementation conflict detection"
+        },
+        {
+          "rank": 3,
+          "path": "tests/dirty_tree_ownership_receipt_contract.rs",
+          "symbol": "dirty_peer_owned_tree_matches_golden",
+          "expected_pressure": "golden drift detection for peer dirty-tree handoff rows"
+        }
+      ],
+      "memory_observations": [
+        {
+          "metric": "receipt_fixture_bytes",
+          "value": 9216,
+          "unit": "bytes",
+          "interpretation": "Dirty-tree correlation fixtures stay bounded even when they model many active reservations."
+        },
+        {
+          "metric": "refresh_memory_ceiling_mb",
+          "value": 16384,
+          "unit": "MiB",
+          "interpretation": "Ownership receipt refresh is artifact-contract sized; broad git history analysis is outside this lane."
+        }
+      ],
+      "operator_interpretation": {
+        "status": "contract-receipt",
+        "recommended_action": "Refresh this lane when dirty-tree ownership checks dominate operator handoff time or conflict explanations look stale.",
+        "claim_boundary": "This row does not prove reservation freshness or active peer liveness."
+      },
+      "proof_boundary": {
+        "fresh_benchmark": false,
+        "deterministic_fixture": true,
+        "real_host_throughput_proof": false,
+        "requires_refresh_for_numbers": true
+      },
+      "source_refs": [
+        "scripts/dirty_tree_ownership_receipt.py",
+        "scripts/run_dirty_tree_ownership_receipt_e2e.sh",
+        "scripts/claim_reservation_receipt.py",
+        "tests/dirty_tree_ownership_receipt_contract.rs"
+      ]
+    }
+  ],
+  "documentation_contract": {
+    "doc_path": "docs/scheduler_resource_pressure_profiling_receipts.md",
+    "required_marker": "scheduler-resource-pressure-profiling-receipts-v1",
+    "must_distinguish_contract_from_benchmark": true,
+    "must_list_rch_refresh_commands": true,
+    "must_name_no_local_fallback_policy": true
+  }
+}
