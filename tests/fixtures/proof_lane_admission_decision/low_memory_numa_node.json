@@ -1,0 +1,92 @@
+{
+  "schema_version": "proof-lane-admission-input-v1",
+  "profile_id": "low-memory-numa-node",
+  "generated_at_utc": "2026-06-06T05:30:00Z",
+  "host_profile": {
+    "cpu_cores": 64,
+    "memory_bytes": 274877906944,
+    "numa_nodes": 2,
+    "profile_class": "large_core_swarm"
+  },
+  "resource_pressure": {
+    "telemetry_sampled_at_utc": "2026-06-06T05:29:30Z",
+    "telemetry_age_seconds": 30,
+    "cpu_busy_bps": 3200,
+    "memory_used_bytes": 96636764160,
+    "memory_available_bytes": 178241142784,
+    "io_some_avg10_bps": 200,
+    "memory_some_avg10_bps": 100
+  },
+  "disk_headroom": {
+    "root_free_bytes": 858993459200,
+    "tmp_free_bytes": 536870912000,
+    "target_parent_free_bytes": 858993459200,
+    "pressure_class": "healthy"
+  },
+  "rch_workers": {
+    "remote_required": true,
+    "telemetry_sampled_at_utc": "2026-06-06T05:29:35Z",
+    "telemetry_age_seconds": 25,
+    "workers": [
+      {
+        "worker_id": "rchw-memory-a",
+        "queue_state": "open",
+        "available_cores": 32,
+        "available_memory_bytes": 137438953472,
+        "active_project_excluded": false,
+        "cache_warmth": {
+          "proof_lane_family": "memory-heavy-e2e",
+          "target_dir_family": "rch_target_memory_e2e",
+          "warmth_class": "cold",
+          "confidence_bps": 6000
+        }
+      }
+    ]
+  },
+  "active_project_exclusion": {
+    "local_project_active": true,
+    "same_project_workers_excluded": [],
+    "remote_worker_required": true
+  },
+  "cargo_target_isolation": {
+    "target_dir_template": "${TMPDIR:-/tmp}/rch_target_{agent}_{bead}_{lane}",
+    "agent_scoped": true,
+    "bead_scoped": true,
+    "lane_scoped": true,
+    "forbid_shared_target_dir": true
+  },
+  "agent_mail_reservations": {
+    "telemetry_age_seconds": 20,
+    "tracker_reserved": false,
+    "active_peer_source_reservations": [],
+    "active_self_reservations": []
+  },
+  "dirty_tree": {
+    "classification": "clean",
+    "dirty_paths": [],
+    "peer_owned_paths": [],
+    "unreserved_source_paths": []
+  },
+  "topology_guidance": {
+    "artifact_path": "artifacts/large_host_topology_corpus_v1.json",
+    "profile_id": "memory-pressure-degraded-64c",
+    "telemetry_sampled_at_utc": "2026-06-06T05:29:40Z",
+    "telemetry_age_seconds": 20,
+    "requested_lane_class": "memory-heavy-e2e",
+    "requested_contention_domain": "socket1-l3",
+    "active_contention_domains": [],
+    "topology_guidance_is_correctness_evidence": false
+  },
+  "proof_lane": {
+    "lane_id": "memory-heavy-e2e",
+    "workspace_package": "asupersync",
+    "lane_family": "memory-heavy-e2e",
+    "estimated_cost": {
+      "cpu_core_seconds": 18000,
+      "memory_bytes_peak": 68719476736,
+      "io_bytes": 8589934592,
+      "proof_weight": "heavy"
+    },
+    "command_template": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_PinkStream_asupersync_ol11aa_2_memory_heavy cargo test -p asupersync --test proof_lane_admission_decision_contract -- --nocapture"
+  }
+}

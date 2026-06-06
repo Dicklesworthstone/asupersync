@@ -82,6 +82,16 @@
     "peer_owned_paths": [],
     "unreserved_source_paths": []
   },
+  "topology_guidance": {
+    "artifact_path": "artifacts/large_host_topology_corpus_v1.json",
+    "profile_id": "remote-worker-queue-contention-64c-256g",
+    "telemetry_sampled_at_utc": "2026-05-29T02:17:45Z",
+    "telemetry_age_seconds": 15,
+    "requested_lane_class": "focused-contract",
+    "requested_contention_domain": "socket0-l3",
+    "active_contention_domains": [],
+    "topology_guidance_is_correctness_evidence": false
+  },
   "proof_lane": {
     "lane_id": "proof-lane-admission-decision-contract",
     "workspace_package": "asupersync",

@@ -20,6 +20,7 @@ from typing import Any
 SCHEMA_VERSION = "proof-lane-admission-decision-receipt-v1"
 INPUT_SCHEMA_VERSION = "proof-lane-admission-input-v1"
 DEFAULT_SCHEMA_CONTRACT = "artifacts/proof_lane_admission_input_schema_v1.json"
+DEFAULT_TOPOLOGY_CORPUS_PATH = "artifacts/large_host_topology_corpus_v1.json"
 MAX_TELEMETRY_AGE_SECONDS = 900
 GIB = 1024 * 1024 * 1024
 
@@ -343,6 +344,226 @@ def proof_cache_warmth_summary(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def infer_lane_class(data: dict[str, Any]) -> str:
+    lane_family = string_value(section(data, "proof_lane").get("lane_family"))
+    proof_weight = string_value(estimated_cost(data).get("proof_weight"))
+    if proof_weight in {"heavy", "oversized"}:
+        return "broad-lane"
+    if lane_family in {"admission-decision-contract", "topology-admission-contract"}:
+        return "focused-contract"
+    if "clippy" in lane_family:
+        return "full-workspace-clippy"
+    if "check" in lane_family:
+        return "cargo-check"
+    return lane_family or "unknown"
+
+
+def load_topology_corpus(path: str) -> dict[str, Any]:
+    corpus = load_json(path or DEFAULT_TOPOLOGY_CORPUS_PATH)
+    return corpus if isinstance(corpus, dict) else {}
+
+
+def topology_profile(corpus: dict[str, Any], profile_id: str) -> dict[str, Any]:
+    for row in as_list(corpus.get("profile_catalog")):
+        if isinstance(row, dict) and string_value(row.get("profile_id")) == profile_id:
+            return row
+    return {}
+
+
+def topology_guidance_summary(data: dict[str, Any]) -> dict[str, Any]:
+    payload = as_dict(data.get("topology_guidance"))
+    lane_id = string_value(section(data, "proof_lane").get("lane_id"))
+    if not payload:
+        return {
+            "schema_version": "proof-lane-topology-guidance-summary-v1",
+            "classification": "no-data",
+            "artifact_path": "",
+            "artifact_schema_version": "",
+            "profile_id": "",
+            "profile_family": "",
+            "lane_id": lane_id,
+            "requested_lane_class": infer_lane_class(data),
+            "requested_contention_domain": "",
+            "active_contention_domains": [],
+            "recommended_policy": "fall_back_to_scalar_capacity",
+            "recommended_slots": None,
+            "max_parallel_heavy_lanes": None,
+            "topology_reason_codes": ["topology-missing", "scalar-capacity-only"],
+            "blocks_admission": False,
+            "decision_hint": "none",
+            "operator_action": "continue_with_scalar_capacity_only",
+            "source_refs": [],
+            "refresh_command": "",
+            "corpus_is_live_host_measurement": False,
+            "corpus_is_fresh_benchmark": False,
+            "operator_guidance_only": True,
+            "topology_guidance_is_correctness_evidence": False,
+        }
+
+    artifact_path = string_value(payload.get("artifact_path")) or DEFAULT_TOPOLOGY_CORPUS_PATH
+    profile_id = string_value(payload.get("profile_id"))
+    age = payload.get("telemetry_age_seconds")
+    requested_lane_class = string_value(payload.get("requested_lane_class")) or infer_lane_class(data)
+    requested_domain = string_value(payload.get("requested_contention_domain"))
+    active_domains = stable_strings(payload.get("active_contention_domains"))
+
+    base = {
+        "schema_version": "proof-lane-topology-guidance-summary-v1",
+        "classification": "unknown",
+        "artifact_path": artifact_path,
+        "artifact_schema_version": "",
+        "profile_id": profile_id,
+        "profile_family": "",
+        "lane_id": lane_id,
+        "requested_lane_class": requested_lane_class,
+        "requested_contention_domain": requested_domain,
+        "active_contention_domains": active_domains,
+        "recommended_policy": "",
+        "recommended_slots": None,
+        "max_parallel_heavy_lanes": None,
+        "topology_reason_codes": [],
+        "blocks_admission": False,
+        "decision_hint": "none",
+        "operator_action": "inspect_topology_guidance",
+        "source_refs": [],
+        "refresh_command": "",
+        "corpus_is_live_host_measurement": False,
+        "corpus_is_fresh_benchmark": False,
+        "operator_guidance_only": True,
+        "topology_guidance_is_correctness_evidence": False,
+    }
+
+    if not isinstance(age, int) or age < 0:
+        return {
+            **base,
+            "classification": "malformed",
+            "blocks_admission": True,
+            "decision_hint": "wait_for_telemetry",
+            "operator_action": "refresh_topology_receipt_before_retry",
+            "topology_reason_codes": ["missing-topology-telemetry-age"],
+        }
+    if age > MAX_TELEMETRY_AGE_SECONDS:
+        return {
+            **base,
+            "classification": "stale",
+            "blocks_admission": True,
+            "decision_hint": "wait_for_telemetry",
+            "operator_action": "refresh_topology_receipt_before_retry",
+            "topology_reason_codes": ["stale-topology-evidence"],
+        }
+
+    try:
+        corpus = load_topology_corpus(artifact_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {
+            **base,
+            "classification": "malformed",
+            "blocks_admission": True,
+            "decision_hint": "wait_for_telemetry",
+            "operator_action": "repair_topology_corpus_before_retry",
+            "topology_reason_codes": ["topology-corpus-unreadable"],
+        }
+
+    profile = topology_profile(corpus, profile_id)
+    if not profile:
+        return {
+            **base,
+            "classification": "malformed",
+            "artifact_schema_version": string_value(corpus.get("schema_version")),
+            "blocks_admission": True,
+            "decision_hint": "wait_for_telemetry",
+            "operator_action": "select_known_topology_profile",
+            "topology_reason_codes": ["topology-profile-not-found"],
+        }
+
+    memory = section(profile, "memory")
+    topology = section(profile, "topology")
+    slot_model = section(profile, "rch_slot_model")
+    fallback = section(profile, "fallback_policy")
+    proof_boundary = section(profile, "proof_boundary")
+    preferred_classes = set(stable_strings(slot_model.get("preferred_lane_classes")))
+    avoid_classes = set(stable_strings(slot_model.get("avoid_lane_classes")))
+    cache_domains = {
+        string_value(row.get("domain_id"))
+        for row in as_list(topology.get("cache_domains"))
+        if isinstance(row, dict)
+    }
+
+    reasons = ["topology-fit"]
+    classification = "fit"
+    decision_hint = "none"
+    blocks_admission = False
+    operator_action = string_value(fallback.get("operator_action")) or "use_topology_guidance_as_advice"
+
+    if profile_id.startswith("remote-worker-queue-contention"):
+        reasons.append("remote-worker-preferred")
+    if requested_lane_class in preferred_classes:
+        reasons.append("topology-preferred-lane-class")
+    if requested_domain and requested_domain not in cache_domains:
+        reasons.append("topology-domain-not-in-profile")
+        classification = "malformed"
+        decision_hint = "wait_for_telemetry"
+        blocks_admission = True
+        operator_action = "repair_topology_domain_before_retry"
+    elif requested_domain and requested_domain in active_domains:
+        reasons.extend(["same-domain-contention", "split-lane-recommended"])
+        classification = "contention"
+        decision_hint = "queue"
+        operator_action = "queue_or_split_by_topology_domain"
+
+    memory_state = string_value(memory.get("memory_pressure_state"))
+    if memory_state == "degraded" and requested_lane_class not in {"focused-contract", "short-e2e"}:
+        reasons.extend(["low-memory-numa-node", "split-lane-recommended"])
+        classification = "memory-constrained"
+        decision_hint = "queue"
+        operator_action = "queue_until_per_node_memory_headroom_is_fresh"
+    if requested_lane_class in avoid_classes:
+        reasons.append("topology-avoid-lane-class")
+        if decision_hint == "none":
+            decision_hint = "queue"
+            classification = "contention"
+
+    return {
+        **base,
+        "classification": classification,
+        "artifact_schema_version": string_value(corpus.get("schema_version")),
+        "profile_family": string_value(profile.get("profile_family")),
+        "recommended_policy": operator_action,
+        "recommended_slots": slot_model.get("recommended_slots"),
+        "max_parallel_heavy_lanes": slot_model.get("max_parallel_heavy_lanes"),
+        "topology_reason_codes": sorted(set(reasons)),
+        "blocks_admission": blocks_admission,
+        "decision_hint": decision_hint,
+        "operator_action": operator_action,
+        "source_refs": stable_strings(profile.get("source_refs")),
+        "refresh_command": string_value(profile.get("rch_refresh_command")),
+        "corpus_is_live_host_measurement": bool_value(
+            proof_boundary.get("corpus_is_live_host_measurement")
+        ),
+        "corpus_is_fresh_benchmark": bool_value(
+            proof_boundary.get("corpus_is_fresh_benchmark")
+        ),
+        "operator_guidance_only": bool_value(proof_boundary.get("operator_guidance_only")),
+        "topology_guidance_is_correctness_evidence": False,
+    }
+
+
+def topology_admission_reasons(topology: dict[str, Any]) -> list[str]:
+    return [
+        reason
+        for reason in stable_strings(topology.get("topology_reason_codes"))
+        if reason
+        in {
+            "topology-fit",
+            "topology-missing",
+            "same-domain-contention",
+            "split-lane-recommended",
+            "remote-worker-preferred",
+            "low-memory-numa-node",
+        }
+    ]
+
+
 def suggested_command(data: dict[str, Any], worker: dict[str, Any] | None) -> str:
     command = string_value(section(data, "proof_lane").get("command_template"))
     if worker is None:
@@ -438,6 +659,25 @@ def choose_decision(data: dict[str, Any], schema_contract: dict[str, Any]) -> di
     if resource["class"] == "high":
         return decision_row(data, "queue", False, ["local-resource-pressure"], precondition="queue-for-host")
 
+    topology = topology_guidance_summary(data)
+    topology_reasons = topology_admission_reasons(topology)
+    if bool_value(topology.get("blocks_admission")):
+        return decision_row(
+            data,
+            "wait_for_telemetry",
+            False,
+            topology_reasons or stable_strings(topology.get("topology_reason_codes")),
+            precondition="wait-for-topology-telemetry",
+        )
+    if topology["decision_hint"] == "queue":
+        return decision_row(
+            data,
+            "queue",
+            False,
+            topology_reasons,
+            precondition="queue-for-topology",
+        )
+
     workers = worker_rows(data)
     cost = estimated_cost(data)
     proof_weight = string_value(cost.get("proof_weight"))
@@ -446,7 +686,7 @@ def choose_decision(data: dict[str, Any], schema_contract: dict[str, Any]) -> di
             data,
             "split_lane",
             False,
-            ["oversized-proof-pack", "split-lane-recommended"],
+            ["oversized-proof-pack", "split-lane-recommended", *topology_reasons],
             precondition="split-before-admission",
             split=split_plan(data, workers),
         )
@@ -461,7 +701,9 @@ def choose_decision(data: dict[str, Any], schema_contract: dict[str, Any]) -> di
         key=lambda worker: (-worker["warmth_confidence_bps"], worker["worker_id"]),
     )
     if warm:
-        reasons.extend(["host-large-core", "warm-worker-preferred", "target-dir-isolated"])
+        reasons.extend(
+            ["host-large-core", "warm-worker-preferred", "target-dir-isolated", *topology_reasons]
+        )
         return decision_row(
             data,
             "use_warmed_worker",
@@ -471,7 +713,7 @@ def choose_decision(data: dict[str, Any], schema_contract: dict[str, Any]) -> di
             worker=warm[0],
         )
 
-    reasons.extend(["host-large-core", "worker-admissible", "target-dir-isolated"])
+    reasons.extend(["host-large-core", "worker-admissible", "target-dir-isolated", *topology_reasons])
     return decision_row(data, "admit_now", True, reasons, precondition="admit-now", worker=admissible[0])
 
 
@@ -523,6 +765,7 @@ def integrated_operator_receipt(
     resource: dict[str, Any],
     disk: dict[str, Any],
     proof_cache: dict[str, Any],
+    topology: dict[str, Any],
     non_coverage: list[str],
 ) -> dict[str, Any]:
     cache_overridden = (
@@ -549,6 +792,7 @@ def integrated_operator_receipt(
             **proof_cache,
             "overridden_by_admission_blockers": cache_overridden,
         },
+        "topology_guidance": topology,
         "dirty_tree_gate": dirty_gate,
         "reservation_holders": holders,
         "resource_pressure_summary": resource,
@@ -573,6 +817,7 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     resource = resource_pressure_summary(data)
     disk = disk_summary(data)
     proof_cache = proof_cache_warmth_summary(data)
+    topology = topology_guidance_summary(data)
     proof_lane = section(data, "proof_lane")
     target = section(data, "cargo_target_isolation")
     non_coverage = [
@@ -581,6 +826,8 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         "does not mutate Beads",
         "does not prove Cargo/test success",
         "does not make cache warmth correctness evidence",
+        "does not make topology guidance correctness evidence",
+        "does not prove live host topology or throughput",
     ]
 
     return {
@@ -605,6 +852,7 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         "dirty_tree_gate": gate,
         "reservation_holders": holders,
         "proof_cache_warmth": proof_cache,
+        "topology_guidance": topology,
         "resource_pressure_summary": resource,
         "disk_summary": disk,
         "worker_summary": {
@@ -635,10 +883,50 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             resource=resource,
             disk=disk,
             proof_cache=proof_cache,
+            topology=topology,
             non_coverage=non_coverage,
         ),
         "non_coverage": non_coverage,
     }
+
+
+def format_markdown(receipt: dict[str, Any]) -> str:
+    decision = as_dict(receipt.get("decision"))
+    topology = as_dict(receipt.get("topology_guidance"))
+    integrated = as_dict(receipt.get("integrated_operator_receipt"))
+    lines = [
+        "# Proof Lane Admission Decision",
+        "",
+        f"- profile_id: `{string_value(receipt.get('profile_id'))}`",
+        f"- lane_id: `{string_value(receipt.get('lane_id'))}`",
+        f"- admission_decision: `{string_value(decision.get('admission_decision'))}`",
+        f"- proof_may_run_now: `{str(bool_value(decision.get('proof_may_run_now'))).lower()}`",
+        f"- admission_precondition: `{string_value(decision.get('admission_precondition'))}`",
+        f"- operator_action: `{string_value(integrated.get('operator_action'))}`",
+        f"- suggested_next_command: `{string_value(decision.get('suggested_next_command'))}`",
+        "",
+        "## Reason Codes",
+    ]
+    for reason in stable_strings(decision.get("reason_codes")):
+        lines.append(f"- `{reason}`")
+    lines.extend(
+        [
+            "",
+            "## Topology Guidance",
+            f"- classification: `{string_value(topology.get('classification'))}`",
+            f"- artifact_path: `{string_value(topology.get('artifact_path'))}`",
+            f"- profile_id: `{string_value(topology.get('profile_id'))}`",
+            f"- requested_lane_class: `{string_value(topology.get('requested_lane_class'))}`",
+            f"- requested_contention_domain: `{string_value(topology.get('requested_contention_domain'))}`",
+            f"- operator_guidance_only: `{str(bool_value(topology.get('operator_guidance_only'))).lower()}`",
+            f"- topology_guidance_is_correctness_evidence: `{str(bool_value(topology.get('topology_guidance_is_correctness_evidence'))).lower()}`",
+            "",
+            "## Non Coverage",
+        ]
+    )
+    for item in stable_strings(receipt.get("non_coverage")):
+        lines.append(f"- {item}")
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
@@ -650,7 +938,7 @@ def main() -> int:
         help="Admission input schema contract JSON",
     )
     parser.add_argument("--generated-at", default="", help="Stable UTC timestamp")
-    parser.add_argument("--output", choices=["json"], default="json")
+    parser.add_argument("--output", choices=["json", "markdown"], default="json")
     args = parser.parse_args()
 
     try:
@@ -659,7 +947,10 @@ def main() -> int:
         print(json.dumps({"error": str(error)}, indent=2, sort_keys=True), file=sys.stderr)
         return 2
 
-    print(json.dumps(receipt, indent=2, sort_keys=True))
+    if args.output == "markdown":
+        print(format_markdown(receipt), end="")
+    else:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0
 
 
