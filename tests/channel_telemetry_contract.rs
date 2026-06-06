@@ -2,6 +2,7 @@
 
 use asupersync::channel::{broadcast, mpsc, oneshot, session, watch};
 use asupersync::cx::Cx;
+use asupersync::sync::{Barrier, OnceCell, Semaphore};
 use asupersync::types::{Budget, CancelKind};
 use asupersync::util::ArenaIndex;
 use asupersync::{RegionId, TaskId};
@@ -15,8 +16,8 @@ const CONTRACT_PATH: &str = "artifacts/channel_telemetry_contract_v1.json";
 
 fn telemetry_test_cx() -> Cx {
     Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
+        RegionId::from_arena(ArenaIndex::new(0, 1)),
+        TaskId::from_arena(ArenaIndex::new(0, 1)),
         Budget::INFINITE,
     )
 }
@@ -29,6 +30,18 @@ fn contract() -> Value {
     let raw = std::fs::read_to_string(repo_path(CONTRACT_PATH))
         .unwrap_or_else(|error| panic!("read {CONTRACT_PATH}: {error}"));
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {CONTRACT_PATH}: {error}"))
+}
+
+fn assert_pending<T>(poll: Poll<T>, label: &str) {
+    assert!(matches!(poll, Poll::Pending), "{label} must be pending");
+}
+
+fn ready_ok<T, E: std::fmt::Debug>(poll: Poll<Result<T, E>>, label: &str) -> T {
+    match poll {
+        Poll::Ready(Ok(value)) => value,
+        Poll::Ready(Err(error)) => panic!("{label} failed: {error:?}"),
+        Poll::Pending => panic!("{label} must be ready"),
+    }
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
@@ -65,6 +78,13 @@ fn rows_by_kind(contract: &Value) -> BTreeMap<String, &Value> {
         .collect()
 }
 
+fn sync_rows_by_kind(contract: &Value) -> BTreeMap<String, &Value> {
+    array(contract, "sync_rows")
+        .iter()
+        .map(|row| (string(row, "sync_kind").to_string(), row))
+        .collect()
+}
+
 fn pressure_fields(row: &Value) -> Vec<String> {
     let fields = string_set(row, "metric_fields");
     [
@@ -74,6 +94,22 @@ fn pressure_fields(row: &Value) -> Vec<String> {
         "recv_waiter_count",
         "receiver_health",
         "lagged_receiver_count",
+        "cancellation_count",
+    ]
+    .iter()
+    .filter(|field| fields.contains(**field))
+    .map(|field| (*field).to_string())
+    .collect()
+}
+
+fn sync_pressure_fields(row: &Value) -> Vec<String> {
+    let fields = string_set(row, "metric_fields");
+    [
+        "occupied_units",
+        "available_units",
+        "waiter_count",
+        "generation",
+        "state",
         "cancellation_count",
     ]
     .iter()
@@ -113,6 +149,7 @@ fn contract_declares_channel_telemetry_policy_and_sources() {
         "contract",
         "contract_test",
         "channel_module",
+        "sync_module",
         "flow_control_monitor",
     ] {
         let path = string(source, key);
@@ -148,6 +185,37 @@ fn contract_covers_all_required_channel_kinds_with_live_source_paths() {
         assert!(
             repo_path(path).exists(),
             "{kind} implementation path must exist: {path}"
+        );
+        assert!(
+            !array(row, "core_invariants").is_empty(),
+            "{kind} must name core invariants"
+        );
+    }
+}
+
+#[test]
+fn contract_covers_all_required_sync_kinds_with_live_source_paths() {
+    let contract = contract();
+    let required = string_set(&contract, "required_sync_kinds");
+    let rows = sync_rows_by_kind(&contract);
+    let actual = rows.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(actual, required);
+
+    for (kind, row) in rows {
+        let path = string(row, "implementation_path");
+        assert!(
+            repo_path(path).exists(),
+            "{kind} implementation path must exist: {path}"
+        );
+        assert_eq!(
+            row["live_telemetry_wired"].as_bool(),
+            Some(true),
+            "{kind} must be live wired"
+        );
+        assert_eq!(
+            row["report_status"].as_str(),
+            Some("LIVE"),
+            "{kind} must report LIVE"
         );
         assert!(
             !array(row, "core_invariants").is_empty(),
@@ -217,6 +285,50 @@ fn metric_fields_keep_reservation_pressure_separate_from_backlog() {
 }
 
 #[test]
+fn sync_metric_fields_keep_wait_pressure_and_state_explicit() {
+    let contract = contract();
+    let required_fields = string_set(&contract, "required_sync_metric_fields");
+    for required in [
+        "primitive_id",
+        "primitive_kind",
+        "capacity",
+        "occupied_units",
+        "available_units",
+        "waiter_count",
+        "generation",
+        "state",
+        "cancellation_count",
+        "closed",
+    ] {
+        assert!(
+            required_fields.contains(required),
+            "required_sync_metric_fields must include {required}"
+        );
+    }
+
+    for (kind, row) in sync_rows_by_kind(&contract) {
+        let fields = string_set(row, "metric_fields");
+        for required in [
+            "primitive_id",
+            "primitive_kind",
+            "capacity",
+            "occupied_units",
+            "available_units",
+            "waiter_count",
+            "state",
+            "cancellation_count",
+            "closed",
+        ] {
+            assert!(fields.contains(required), "{kind} must include {required}");
+        }
+        assert!(
+            !sync_pressure_fields(row).is_empty(),
+            "{kind} must expose pressure fields"
+        );
+    }
+}
+
+#[test]
 fn unwired_channel_rows_fail_closed_until_live_metrics_exist() {
     let contract = contract();
     let allowed_statuses = string_set(&contract, "allowed_report_statuses");
@@ -237,6 +349,199 @@ fn unwired_channel_rows_fail_closed_until_live_metrics_exist() {
             );
         }
     }
+}
+
+#[test]
+fn live_sync_snapshot_reports_semaphore_pressure() {
+    let contract = contract();
+    let rows = sync_rows_by_kind(&contract);
+    let semaphore_row = rows.get("semaphore").expect("semaphore row exists");
+    assert_eq!(semaphore_row["live_telemetry_wired"].as_bool(), Some(true));
+    assert_eq!(semaphore_row["report_status"].as_str(), Some("LIVE"));
+
+    let cx = telemetry_test_cx();
+    let semaphore = Semaphore::new(2);
+    let waker = Waker::noop().clone();
+    let mut task_cx = Context::from_waker(&waker);
+
+    let initial = semaphore.telemetry_snapshot(601);
+    assert_eq!(initial.primitive_id, 601);
+    assert_eq!(initial.primitive_kind, "semaphore");
+    assert_eq!(initial.capacity, 2);
+    assert_eq!(initial.occupied_units, 0);
+    assert_eq!(initial.available_units, 2);
+    assert_eq!(initial.waiter_count, 0);
+    assert_eq!(initial.state, "open");
+    assert_eq!(initial.cancellation_count, 0);
+    assert!(!initial.closed);
+
+    let mut first = Box::pin(semaphore.acquire(&cx, 1));
+    let first_permit = ready_ok(first.as_mut().poll(&mut task_cx), "first permit");
+    drop(first);
+    let after_first = semaphore.telemetry_snapshot(601);
+    assert_eq!(after_first.occupied_units, 1);
+    assert_eq!(after_first.available_units, 1);
+
+    let mut second = Box::pin(semaphore.acquire(&cx, 1));
+    let second_permit = ready_ok(second.as_mut().poll(&mut task_cx), "second permit");
+    drop(second);
+    let saturated = semaphore.telemetry_snapshot(601);
+    assert_eq!(saturated.occupied_units, 2);
+    assert_eq!(saturated.available_units, 0);
+    assert_eq!(saturated.state, "saturated");
+
+    let mut waiter = Box::pin(semaphore.acquire(&cx, 1));
+    assert_pending(waiter.as_mut().poll(&mut task_cx), "semaphore waiter");
+    let waiting = semaphore.telemetry_snapshot(601);
+    assert_eq!(waiting.waiter_count, 1);
+    assert_eq!(waiting.state, "waiting");
+    drop(waiter);
+    let cancelled = semaphore.telemetry_snapshot(601);
+    assert_eq!(cancelled.waiter_count, 0);
+    assert_eq!(cancelled.cancellation_count, 1);
+
+    drop(first_permit);
+    drop(second_permit);
+    let reopened = semaphore.telemetry_snapshot(601);
+    assert_eq!(reopened.occupied_units, 0);
+    assert_eq!(reopened.available_units, 2);
+    assert_eq!(reopened.state, "open");
+
+    semaphore.close();
+    let closed = semaphore.telemetry_snapshot(601);
+    assert!(closed.closed);
+    assert_eq!(closed.available_units, 0);
+    assert_eq!(closed.state, "closed");
+}
+
+#[test]
+fn live_sync_snapshot_reports_barrier_waiters_and_cancellation() {
+    let contract = contract();
+    let rows = sync_rows_by_kind(&contract);
+    let barrier_row = rows.get("barrier").expect("barrier row exists");
+    assert_eq!(barrier_row["live_telemetry_wired"].as_bool(), Some(true));
+    assert_eq!(barrier_row["report_status"].as_str(), Some("LIVE"));
+
+    let cx = telemetry_test_cx();
+    let barrier = Barrier::new(3);
+    let waker = Waker::noop().clone();
+    let mut task_cx = Context::from_waker(&waker);
+
+    let initial = barrier.telemetry_snapshot(602);
+    assert_eq!(initial.primitive_id, 602);
+    assert_eq!(initial.primitive_kind, "barrier");
+    assert_eq!(initial.capacity, 3);
+    assert_eq!(initial.occupied_units, 0);
+    assert_eq!(initial.available_units, 3);
+    assert_eq!(initial.waiter_count, 0);
+    assert_eq!(initial.generation, 0);
+    assert_eq!(initial.state, "open");
+    assert!(!initial.closed);
+
+    let mut first = Box::pin(barrier.wait(&cx));
+    assert_pending(first.as_mut().poll(&mut task_cx), "first barrier waiter");
+    let one_waiter = barrier.telemetry_snapshot(602);
+    assert_eq!(one_waiter.occupied_units, 1);
+    assert_eq!(one_waiter.available_units, 2);
+    assert_eq!(one_waiter.waiter_count, 1);
+    assert_eq!(one_waiter.state, "waiting");
+
+    let mut second = Box::pin(barrier.wait(&cx));
+    assert_pending(second.as_mut().poll(&mut task_cx), "second barrier waiter");
+    let two_waiters = barrier.telemetry_snapshot(602);
+    assert_eq!(two_waiters.occupied_units, 2);
+    assert_eq!(two_waiters.waiter_count, 2);
+
+    drop(first);
+    let after_drop = barrier.telemetry_snapshot(602);
+    assert_eq!(after_drop.occupied_units, 1);
+    assert_eq!(after_drop.waiter_count, 1);
+    assert_eq!(after_drop.cancellation_count, 1);
+
+    let mut replacement = Box::pin(barrier.wait(&cx));
+    assert_pending(
+        replacement.as_mut().poll(&mut task_cx),
+        "replacement barrier waiter",
+    );
+    let mut leader = Box::pin(barrier.wait(&cx));
+    let leader_result = ready_ok(leader.as_mut().poll(&mut task_cx), "barrier leader");
+    assert!(leader_result.is_leader());
+
+    let tripped = barrier.telemetry_snapshot(602);
+    assert_eq!(tripped.generation, 1);
+    assert_eq!(tripped.occupied_units, 0);
+    assert_eq!(tripped.waiter_count, 0);
+    assert_eq!(tripped.state, "open");
+
+    assert!(!ready_ok(second.as_mut().poll(&mut task_cx), "second release").is_leader());
+    assert!(
+        !ready_ok(
+            replacement.as_mut().poll(&mut task_cx),
+            "replacement release"
+        )
+        .is_leader()
+    );
+}
+
+#[test]
+fn live_sync_snapshot_reports_once_cell_state_and_waiters() {
+    let contract = contract();
+    let rows = sync_rows_by_kind(&contract);
+    let once_cell_row = rows.get("once_cell").expect("once_cell row exists");
+    assert_eq!(once_cell_row["live_telemetry_wired"].as_bool(), Some(true));
+    assert_eq!(once_cell_row["report_status"].as_str(), Some("LIVE"));
+
+    let cell = OnceCell::<u32>::new();
+    let waker = Waker::noop().clone();
+    let mut task_cx = Context::from_waker(&waker);
+
+    let initial = cell.telemetry_snapshot(603);
+    assert_eq!(initial.primitive_id, 603);
+    assert_eq!(initial.primitive_kind, "once_cell");
+    assert_eq!(initial.capacity, 1);
+    assert_eq!(initial.occupied_units, 0);
+    assert_eq!(initial.available_units, 1);
+    assert_eq!(initial.waiter_count, 0);
+    assert_eq!(initial.state, "uninitialized");
+    assert_eq!(initial.cancellation_count, 0);
+    assert!(!initial.closed);
+
+    let mut initializer = Box::pin(cell.get_or_init(std::future::pending::<u32>));
+    assert_pending(
+        initializer.as_mut().poll(&mut task_cx),
+        "once_cell initializer",
+    );
+    let initializing = cell.telemetry_snapshot(603);
+    assert_eq!(initializing.occupied_units, 1);
+    assert_eq!(initializing.available_units, 0);
+    assert_eq!(initializing.waiter_count, 0);
+    assert_eq!(initializing.state, "initializing");
+
+    let mut waiter = Box::pin(cell.get_or_init(|| async { 7_u32 }));
+    assert_pending(waiter.as_mut().poll(&mut task_cx), "once_cell waiter");
+    let with_waiter = cell.telemetry_snapshot(603);
+    assert_eq!(with_waiter.waiter_count, 1);
+    assert_eq!(with_waiter.state, "initializing");
+
+    drop(waiter);
+    let after_waiter_drop = cell.telemetry_snapshot(603);
+    assert_eq!(after_waiter_drop.waiter_count, 0);
+    assert_eq!(after_waiter_drop.cancellation_count, 1);
+    assert_eq!(after_waiter_drop.state, "initializing");
+
+    drop(initializer);
+    let reset = cell.telemetry_snapshot(603);
+    assert_eq!(reset.occupied_units, 0);
+    assert_eq!(reset.available_units, 1);
+    assert_eq!(reset.state, "uninitialized");
+    assert_eq!(reset.cancellation_count, 1);
+
+    cell.set(9).expect("set succeeds");
+    let initialized = cell.telemetry_snapshot(603);
+    assert_eq!(initialized.occupied_units, 1);
+    assert_eq!(initialized.available_units, 0);
+    assert_eq!(initialized.state, "initialized");
+    assert!(initialized.closed);
 }
 
 #[test]
@@ -722,8 +1027,8 @@ fn proof_commands_are_rch_routed_and_target_this_contract() {
     );
     for command in commands {
         assert!(
-            command.starts_with("rch exec -- "),
-            "proof command must be rch-routed: {command}"
+            command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+            "proof command must be remote-required and rch-routed: {command}"
         );
     }
 }

@@ -28,6 +28,36 @@
 //! - Cancellation while holding: Guard dropped, resource released
 //! - Panic while holding: Guard dropped via unwind (unwind safety)
 
+/// Redacted, deterministic pressure telemetry for synchronization primitives.
+///
+/// The caller supplies `primitive_id` so the runtime does not need ambient
+/// global registration. Snapshots intentionally report only aggregate pressure,
+/// waiters, lifecycle state, and cancellation counts, never protected values or
+/// task-local payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncTelemetrySnapshot {
+    /// Caller-provided stable primitive identifier.
+    pub primitive_id: u64,
+    /// Primitive kind, for example `semaphore`, `barrier`, or `once_cell`.
+    pub primitive_kind: &'static str,
+    /// Maximum useful units for the primitive.
+    pub capacity: usize,
+    /// Units currently occupied by holders, arrivals, or initialization state.
+    pub occupied_units: usize,
+    /// Units immediately available for new work.
+    pub available_units: usize,
+    /// Number of registered waiters.
+    pub waiter_count: usize,
+    /// Deterministic generation counter when the primitive has one.
+    pub generation: u64,
+    /// Redacted lifecycle or pressure state.
+    pub state: &'static str,
+    /// Number of cancelled or dropped wait operations observed by the primitive.
+    pub cancellation_count: u64,
+    /// Whether the primitive has reached a terminal closed or initialized state.
+    pub closed: bool,
+}
+
 mod barrier;
 mod contended_mutex;
 #[cfg(test)]

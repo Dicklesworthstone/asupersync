@@ -44,6 +44,7 @@ struct BarrierState {
     generation: u64,
     next_waiter_id: u64,
     waiters: SmallVec<[(u64, Waker); 7]>,
+    cancellation_count: u64,
 }
 
 /// Barrier for N-way rendezvous.
@@ -69,6 +70,7 @@ impl Barrier {
                 generation: 0,
                 next_waiter_id: 0,
                 waiters: SmallVec::new(),
+                cancellation_count: 0,
             }),
         }
     }
@@ -78,6 +80,29 @@ impl Barrier {
     #[must_use]
     pub fn parties(&self) -> usize {
         self.parties
+    }
+
+    /// Returns a deterministic, redacted snapshot of barrier pressure.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, primitive_id: u64) -> crate::sync::SyncTelemetrySnapshot {
+        let state = self.state.lock();
+        crate::sync::SyncTelemetrySnapshot {
+            primitive_id,
+            primitive_kind: "barrier",
+            capacity: self.parties,
+            occupied_units: state.arrived,
+            available_units: self.parties.saturating_sub(state.arrived),
+            waiter_count: state.waiters.len(),
+            generation: state.generation,
+            state: if state.waiters.is_empty() && state.arrived == 0 {
+                "open"
+            } else {
+                "waiting"
+            },
+            cancellation_count: state.cancellation_count,
+            closed: false,
+        }
     }
 
     #[cfg(test)]
@@ -144,6 +169,7 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
 
                 // Only decrement if the generation hasn't changed (barrier hasn't tripped).
                 if state.generation == generation {
+                    state.cancellation_count = state.cancellation_count.saturating_add(1);
                     if state.arrived > 0 {
                         state.arrived -= 1;
                     }
@@ -177,6 +203,10 @@ impl<Caps> Future for BarrierWaitFuture<'_, Caps> {
                 return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
             }
             // Cancelled before even registering.
+            {
+                let mut state = self.barrier.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
+            }
             self.state = WaitState::Done;
             return Poll::Ready(Err(BarrierWaitError::Cancelled));
         }
@@ -287,6 +317,7 @@ impl<Caps> Drop for BarrierWaitFuture<'_, Caps> {
 
             // Only clean up if the generation hasn't changed (barrier hasn't tripped).
             if state.generation == generation {
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
                 if state.arrived > 0 {
                     state.arrived -= 1;
                 }

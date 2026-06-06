@@ -1,11 +1,12 @@
 {
   "contract_version": "channel-telemetry-contract-v1",
   "bead_id": "asupersync-97wkp1",
-  "description": "Fail-closed contract for opt-in, deterministic, backpressure-aware channel telemetry across asupersync channel primitives.",
+  "description": "Fail-closed contract for opt-in, deterministic, backpressure-aware telemetry across asupersync channel and synchronization primitives.",
   "source_of_truth": {
     "contract": "artifacts/channel_telemetry_contract_v1.json",
     "contract_test": "tests/channel_telemetry_contract.rs",
     "channel_module": "src/channel/mod.rs",
+    "sync_module": "src/sync/mod.rs",
     "flow_control_monitor": "src/channel/flow_control_monitor.rs"
   },
   "telemetry_policy": {
@@ -33,6 +34,23 @@
     "recv_waiter_count",
     "receiver_health",
     "lagged_receiver_count",
+    "cancellation_count",
+    "closed"
+  ],
+  "required_sync_kinds": [
+    "semaphore",
+    "barrier",
+    "once_cell"
+  ],
+  "required_sync_metric_fields": [
+    "primitive_id",
+    "primitive_kind",
+    "capacity",
+    "occupied_units",
+    "available_units",
+    "waiter_count",
+    "generation",
+    "state",
     "cancellation_count",
     "closed"
   ],
@@ -190,8 +208,85 @@
       ]
     }
   ],
+  "sync_rows": [
+    {
+      "sync_kind": "semaphore",
+      "implementation_path": "src/sync/semaphore.rs",
+      "live_telemetry_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "opt-in redacted semaphore telemetry snapshot is wired",
+      "metric_fields": [
+        "primitive_id",
+        "primitive_kind",
+        "capacity",
+        "occupied_units",
+        "available_units",
+        "waiter_count",
+        "generation",
+        "state",
+        "cancellation_count",
+        "closed"
+      ],
+      "core_invariants": [
+        "occupied_units and available_units are derived from locked permit state",
+        "waiter_count reports queued acquire futures without task identity",
+        "state distinguishes open, saturated, waiting, and closed",
+        "cancellation_count increments on cancelled or dropped acquire waiters"
+      ]
+    },
+    {
+      "sync_kind": "barrier",
+      "implementation_path": "src/sync/barrier.rs",
+      "live_telemetry_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "opt-in redacted barrier telemetry snapshot is wired",
+      "metric_fields": [
+        "primitive_id",
+        "primitive_kind",
+        "capacity",
+        "occupied_units",
+        "available_units",
+        "waiter_count",
+        "generation",
+        "state",
+        "cancellation_count",
+        "closed"
+      ],
+      "core_invariants": [
+        "occupied_units reports arrived parties in the current generation",
+        "waiter_count reports registered waiters without task identity",
+        "generation advances only when the barrier trips",
+        "cancellation_count increments on cancelled or dropped same-generation waiters"
+      ]
+    },
+    {
+      "sync_kind": "once_cell",
+      "implementation_path": "src/sync/once_cell.rs",
+      "live_telemetry_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "opt-in redacted once_cell telemetry snapshot is wired",
+      "metric_fields": [
+        "primitive_id",
+        "primitive_kind",
+        "capacity",
+        "occupied_units",
+        "available_units",
+        "waiter_count",
+        "generation",
+        "state",
+        "cancellation_count",
+        "closed"
+      ],
+      "core_invariants": [
+        "state distinguishes uninitialized, initializing, and initialized",
+        "waiter_count reports initialization waiters without protected value data",
+        "occupied_units reports the initialization slot as occupied while initializing or initialized",
+        "cancellation_count increments when queued initialization waiters are cancelled or dropped"
+      ]
+    }
+  ],
   "golden_markdown": "| channel_kind | status | required_pressure_fields |\n| --- | --- | --- |\n| broadcast | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n| mpsc | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, cancellation_count |\n| oneshot | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, cancellation_count |\n| session | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n| watch | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n",
   "proof_commands": [
-    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_telemetry_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test channel_telemetry_contract -- --nocapture"
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_telemetry_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test channel_telemetry_contract -- --nocapture"
   ]
 }

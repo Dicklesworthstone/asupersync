@@ -106,6 +106,8 @@ struct SemaphoreState {
     waiter_tail: Option<usize>,
     /// Next waiter id for de-duplication.
     next_waiter_id: u64,
+    /// Cancelled or dropped acquire waiters observed by telemetry.
+    cancellation_count: u64,
 }
 
 #[derive(Debug)]
@@ -239,6 +241,7 @@ impl Semaphore {
                 waiter_head: None,
                 waiter_tail: None,
                 next_waiter_id: 0,
+                cancellation_count: 0,
             }),
             permits_shadow: AtomicUsize::new(permits),
             closed_shadow: AtomicBool::new(false),
@@ -278,6 +281,34 @@ impl Semaphore {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed_shadow.load(Ordering::Acquire)
+    }
+
+    /// Returns a deterministic, redacted snapshot of semaphore pressure.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, primitive_id: u64) -> crate::sync::SyncTelemetrySnapshot {
+        let state = self.state.lock();
+        let state_label = if state.closed {
+            "closed"
+        } else if state.waiter_head.is_some() {
+            "waiting"
+        } else if state.permits == 0 {
+            "saturated"
+        } else {
+            "open"
+        };
+        crate::sync::SyncTelemetrySnapshot {
+            primitive_id,
+            primitive_kind: "semaphore",
+            capacity: self.max_permits,
+            occupied_units: self.max_permits.saturating_sub(state.permits),
+            available_units: state.permits,
+            waiter_count: state.waiters.len(),
+            generation: 0,
+            state: state_label,
+            cancellation_count: state.cancellation_count,
+            closed: state.closed,
+        }
     }
 
     /// Closes the semaphore.
@@ -423,6 +454,7 @@ impl<Caps> Drop for AcquireFuture<'_, '_, Caps> {
         if let Some(waiter) = self.waiter {
             let next_waker = {
                 let mut state = self.semaphore.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
                 remove_waiter_and_take_next_waker(&mut state, waiter)
@@ -455,18 +487,20 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
         }
 
         if self.cx.checkpoint().is_err() {
-            if let Some(waiter) = self.waiter {
-                let next_waker = {
-                    let mut state = self.semaphore.state.lock();
+            let waiter = self.waiter.take();
+            let next_waker = {
+                let mut state = self.semaphore.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
+                if let Some(waiter) = waiter {
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
                     remove_waiter_and_take_next_waker(&mut state, waiter)
-                };
-                // Clear waiter so Drop doesn't try to remove it again
-                self.waiter = None;
-                if let Some(next) = next_waker {
-                    next.wake();
+                } else {
+                    None
                 }
+            };
+            if let Some(next) = next_waker {
+                next.wake();
             }
             self.completed = true;
             return Poll::Ready(Err(AcquireError::Cancelled));
@@ -810,6 +844,7 @@ impl<Caps> Drop for OwnedAcquireFuture<Caps> {
         if let Some(waiter) = self.waiter {
             let next_waker = {
                 let mut state = self.semaphore.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
                 remove_waiter_and_take_next_waker(&mut state, waiter)
@@ -842,17 +877,20 @@ impl<Caps> Future for OwnedAcquireFuture<Caps> {
         }
 
         if this.cx.as_ref().is_some_and(|cx| cx.checkpoint().is_err()) {
-            if let Some(waiter) = this.waiter {
-                let next_waker = {
-                    let mut state = this.semaphore.state.lock();
+            let waiter = this.waiter.take();
+            let next_waker = {
+                let mut state = this.semaphore.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
+                if let Some(waiter) = waiter {
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
                     remove_waiter_and_take_next_waker(&mut state, waiter)
-                };
-                this.waiter = None;
-                if let Some(next) = next_waker {
-                    next.wake();
+                } else {
+                    None
                 }
+            };
+            if let Some(next) = next_waker {
+                next.wake();
             }
             this.completed = true;
             return Poll::Ready(Err(AcquireError::Cancelled));

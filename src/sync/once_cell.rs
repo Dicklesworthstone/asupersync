@@ -56,6 +56,7 @@ struct InitWaiter {
 struct WaiterState {
     waiters: SmallVec<[InitWaiter; 4]>,
     next_waiter_id: u64,
+    cancellation_count: u64,
 }
 
 #[cfg(test)]
@@ -133,6 +134,7 @@ impl<T> OnceCell<T> {
             waiters: StdMutex::new(WaiterState {
                 waiters: SmallVec::new(),
                 next_waiter_id: 0,
+                cancellation_count: 0,
             }),
             cvar: Condvar::new(),
         }
@@ -165,6 +167,35 @@ impl<T> OnceCell<T> {
             self.value.get()
         } else {
             None
+        }
+    }
+
+    /// Returns a deterministic, redacted snapshot of cell initialization pressure.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, primitive_id: u64) -> crate::sync::SyncTelemetrySnapshot {
+        let state_value = self.state.load(Ordering::Acquire);
+        let waiters = match self.waiters.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let state_label = match state_value {
+            UNINIT => "uninitialized",
+            INITIALIZING => "initializing",
+            INITIALIZED => "initialized",
+            _ => "unknown",
+        };
+        crate::sync::SyncTelemetrySnapshot {
+            primitive_id,
+            primitive_kind: "once_cell",
+            capacity: 1,
+            occupied_units: usize::from(state_value != UNINIT),
+            available_units: usize::from(state_value == UNINIT),
+            waiter_count: waiters.waiters.len(),
+            generation: 0,
+            state: state_label,
+            cancellation_count: waiters.cancellation_count,
+            closed: state_value == INITIALIZED,
         }
     }
 
@@ -526,6 +557,17 @@ impl<T> OnceCell<T> {
         }
         drop(guard);
     }
+
+    fn remove_waiter_for_cancellation(&self, waiter_id: u64) {
+        let mut guard = match self.waiters.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
+            guard.waiters.swap_remove(pos);
+            guard.cancellation_count = guard.cancellation_count.saturating_add(1);
+        }
+    }
 }
 
 impl<T> Default for OnceCell<T> {
@@ -619,13 +661,7 @@ impl<T> Drop for WaitInit<'_, T> {
         if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately so repeated
             // cancel/drop cycles don't accumulate until transition_out_of_initializing() drains.
-            let mut guard = match self.cell.waiters.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
-                guard.waiters.swap_remove(pos);
-            }
+            self.cell.remove_waiter_for_cancellation(waiter_id);
         }
     }
 }
@@ -674,13 +710,7 @@ impl<T, Caps> Drop for CancelAwareWaitInit<'_, T, Caps> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately
-            let mut guard = match self.cell.waiters.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
-                guard.waiters.swap_remove(pos);
-            }
+            self.cell.remove_waiter_for_cancellation(waiter_id);
         }
     }
 }

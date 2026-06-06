@@ -1,4 +1,5 @@
 #![allow(unused)]
+#![allow(unknown_lints)]
 #![allow(clippy::unused_async_trait_impl)]
 
 //! ATP Mailbox & Swarm E2E Test Matrix
