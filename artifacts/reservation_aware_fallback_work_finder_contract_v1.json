@@ -1,0 +1,169 @@
+{
+  "schema_version": "reservation-aware-fallback-work-finder-contract-v1",
+  "contract_id": "reservation-aware-fallback-work-finder-contract",
+  "required_classifications": [
+    "claimable-ready-task",
+    "epic-only-ready-queue",
+    "blocked-by-active-reservation",
+    "stale-in-progress-candidate",
+    "tracker-only-dirt",
+    "source-peer-dirt",
+    "no-useful-bead",
+    "planning-fallback-recommended"
+  ],
+  "expected_summary": {
+    "scenario_count": 8,
+    "safe_to_start_work": 4,
+    "create_new_bead": 2,
+    "claimable_ready_tasks": 1,
+    "reopen_candidates": 1,
+    "blocked_actions": 4,
+    "highest_ranked_scenario": "blocked-ready-by-reservation"
+  },
+  "fixture": {
+    "schema_version": "reservation-aware-fallback-work-finder-fixture-v1",
+    "fixture_id": "reservation-aware-fallback-work-finder-contract-fixture",
+    "self_agent": "PinkStream",
+    "stale_threshold_hours": 24,
+    "scenarios": [
+      {
+        "scenario_id": "claimable-ready-proof-helper",
+        "description": "A concrete ready helper bead has no active peer reservation overlap.",
+        "ready_issues": [
+          {
+            "id": "asupersync-ol11aa.7",
+            "title": "Add reservation-aware fallback work finder for blocked or epic-only ready queues",
+            "issue_type": "feature",
+            "touched_paths": [
+              "scripts/reservation_aware_fallback_work_finder.py",
+              "tests/reservation_aware_fallback_work_finder_contract.rs",
+              "artifacts/reservation_aware_fallback_work_finder_contract_v1.json",
+              "docs/reservation_aware_fallback_work_finder.md",
+              "README.md"
+            ]
+          }
+        ],
+        "active_reservations": [],
+        "dirty_paths": []
+      },
+      {
+        "scenario_id": "epic-only-ready-queue",
+        "description": "The ready queue contains only an epic, so source work needs a concrete child bead first.",
+        "ready_issues": [
+          {
+            "id": "asupersync-ol11aa",
+            "title": "Second-wave swarm control-loop program",
+            "issue_type": "epic",
+            "labels": [
+              "epic",
+              "swarm-pressure"
+            ],
+            "touched_paths": []
+          }
+        ],
+        "active_reservations": [],
+        "dirty_paths": []
+      },
+      {
+        "scenario_id": "blocked-ready-by-reservation",
+        "description": "A ready source bead overlaps an active Agent Mail reservation held by another lane.",
+        "ready_issues": [
+          {
+            "id": "asupersync-channel-telemetry",
+            "title": "Standardize channel and sync pressure telemetry snapshots",
+            "issue_type": "feature",
+            "touched_paths": [
+              "src/channel/mpsc.rs",
+              "src/sync/semaphore.rs"
+            ]
+          }
+        ],
+        "active_reservations": [
+          {
+            "agent": "SageWolf",
+            "status": "active",
+            "paths": [
+              "src/channel/*.rs"
+            ],
+            "reason": "channel telemetry lane"
+          }
+        ],
+        "dirty_paths": []
+      },
+      {
+        "scenario_id": "stale-in-progress-reopen",
+        "description": "An in-progress docs/test bead is idle past the threshold and has no active peer reservation overlap.",
+        "ready_issues": [],
+        "in_progress_issues": [
+          {
+            "id": "asupersync-stale-docs-lane",
+            "status": "in_progress",
+            "agent": "OldTrail",
+            "idle_hours": 96,
+            "touched_paths": [
+              "docs/stale-proof-runbook.md",
+              "tests/stale_proof_runbook_contract.rs"
+            ]
+          }
+        ],
+        "active_reservations": [],
+        "dirty_paths": []
+      },
+      {
+        "scenario_id": "tracker-only-dirty-tree",
+        "description": "Only tracker metadata is dirty, so closeout can proceed without staging source dirt.",
+        "ready_issues": [],
+        "active_reservations": [],
+        "dirty_paths": [
+          {
+            "path": ".beads/issues.jsonl",
+            "owner": "PinkStream",
+            "kind": "tracker"
+          },
+          {
+            "path": ".beads/graph.json",
+            "owner": "PinkStream",
+            "kind": "tracker"
+          }
+        ]
+      },
+      {
+        "scenario_id": "source-peer-dirty-tree",
+        "description": "A peer owns source dirt in the tree, so the finder must avoid those paths.",
+        "ready_issues": [],
+        "active_reservations": [],
+        "dirty_paths": [
+          {
+            "path": "src/atp/journal/sparse_writer.rs",
+            "owner": "NobleDeer",
+            "kind": "source"
+          },
+          {
+            "path": "tests/atp/multi_peer/harness.rs",
+            "owner": "NobleDeer",
+            "kind": "test"
+          }
+        ]
+      },
+      {
+        "scenario_id": "no-useful-work",
+        "description": "There is no ready task, stale candidate, tracker-only lane, or approved fallback surface.",
+        "ready_issues": [],
+        "active_reservations": [],
+        "dirty_paths": []
+      },
+      {
+        "scenario_id": "planning-fallback-surface",
+        "description": "No source task is claimable, but approved planning and contract surfaces are safe to turn into a bead.",
+        "ready_issues": [],
+        "active_reservations": [],
+        "dirty_paths": [],
+        "approved_fallback_surfaces": [
+          "docs/*.md",
+          "scripts/*_finder.py",
+          "tests/*_contract.rs"
+        ]
+      }
+    ]
+  }
+}
