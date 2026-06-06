@@ -73,6 +73,26 @@ fn proof_command_ids(report: &Value) -> Vec<&str> {
         .collect()
 }
 
+fn semantic_recommendations(report: &Value) -> &[Value] {
+    report["semantic_map"]["recommendations"]
+        .as_array()
+        .expect("semantic recommendations array")
+}
+
+fn semantic_row_with_class<'a>(report: &'a Value, recommendation_class: &str) -> &'a Value {
+    semantic_recommendations(report)
+        .iter()
+        .find(|row| row["recommendation_class"].as_str() == Some(recommendation_class))
+        .unwrap_or_else(|| panic!("missing semantic recommendation class {recommendation_class}"))
+}
+
+fn semantic_row_with_marker<'a>(report: &'a Value, marker: &str) -> &'a Value {
+    semantic_recommendations(report)
+        .iter()
+        .find(|row| row["source_row"]["name"].as_str() == Some(marker))
+        .unwrap_or_else(|| panic!("missing semantic recommendation for marker {marker}"))
+}
+
 #[test]
 fn native_fixture_reports_already_native_without_mutating_project() {
     let fixture_path = repo_path(&format!("{FIXTURE_ROOT}/native"));
@@ -91,6 +111,21 @@ fn native_fixture_reports_already_native_without_mutating_project() {
         report["proof_pack"]["summary"]["status"],
         "native_proof_ready"
     );
+    assert_eq!(
+        report["semantic_map"]["schema_version"],
+        "migration-readiness-semantic-map-v1"
+    );
+    assert_eq!(
+        report["semantic_map"]["summary"]["status"],
+        "semantic_plan_ready"
+    );
+    assert_eq!(
+        report["semantic_map"]["summary"]["recommendation_class_counts"]["compat_boundary_ok"],
+        2
+    );
+    let cx_signature = semantic_row_with_marker(&report, "async fn");
+    assert_eq!(cx_signature["recommendation_class"], "compat_boundary_ok");
+    assert_eq!(cx_signature["target_asupersync_surface"], "Cx");
     let proof_command_ids = proof_command_ids(&report);
     assert!(proof_command_ids.contains(&"default-production-tokio-tree"));
     assert!(proof_command_ids.contains(&"metrics-production-tokio-tree"));
@@ -149,6 +184,70 @@ fn tokio_fixture_classifies_dependency_and_source_markers() {
         "tokio::spawn marker should be mapped to region-owned work guidance"
     );
 
+    assert_eq!(
+        report["semantic_map"]["summary"]["status"],
+        "manual_design_required"
+    );
+    assert!(
+        report["semantic_map"]["summary"]["source_match_count"]
+            .as_u64()
+            .expect("source match count")
+            > 0
+    );
+    assert!(
+        report["semantic_map"]["summary"]["residual_manual_design_count"]
+            .as_u64()
+            .expect("manual design count")
+            > 0
+    );
+    for expected in [
+        "cx_threading_required",
+        "region_ownership_required",
+        "cancel_checkpoint_required",
+        "capability_narrowing_required",
+        "compat_boundary_ok",
+        "manual_design_required",
+    ] {
+        assert!(
+            report["semantic_map"]["summary"]["recommendation_class_counts"][expected]
+                .as_u64()
+                .unwrap_or_default()
+                > 0,
+            "missing semantic recommendation class {expected}"
+        );
+    }
+    let spawn = semantic_row_with_marker(&report, "tokio::spawn");
+    assert_eq!(spawn["recommendation_class"], "region_ownership_required");
+    assert_eq!(spawn["target_asupersync_surface"], "Scope");
+    assert!(
+        spawn["scenario_id"]
+            .as_str()
+            .expect("scenario id")
+            .contains("tokio::spawn")
+    );
+    assert!(
+        spawn["ordered_step"]
+            .as_u64()
+            .expect("ordered semantic step")
+            > 0
+    );
+    assert_eq!(
+        semantic_row_with_marker(&report, "tokio::time::sleep")["recommendation_class"],
+        "cancel_checkpoint_required"
+    );
+    assert_eq!(
+        semantic_row_with_marker(&report, "reqwest::Client")["recommendation_class"],
+        "capability_narrowing_required"
+    );
+    assert_eq!(
+        semantic_row_with_marker(&report, "axum::Router")["recommendation_class"],
+        "compat_boundary_ok"
+    );
+    assert_eq!(
+        semantic_row_with_class(&report, "manual_design_required")["residual_manual_design"],
+        true
+    );
+
     let tokio_proof = proof_row_with_name(&report, "tokio");
     assert_eq!(
         tokio_proof["boundary_type"],
@@ -188,10 +287,18 @@ fn malformed_manifest_fails_closed_and_can_exit_nonzero() {
             .any(|reason| reason == "manifest-parse-error")
     );
     assert_eq!(report["proof_pack"]["summary"]["status"], "blocked");
+    assert_eq!(report["semantic_map"]["summary"]["status"], "blocked");
     assert!(
         report["proof_pack"]["fail_closed_reasons"]
             .as_array()
             .expect("proof fail_closed_reasons array")
+            .iter()
+            .any(|reason| reason == "inventory-report-blocked")
+    );
+    assert!(
+        report["semantic_map"]["fail_closed_reasons"]
+            .as_array()
+            .expect("semantic fail_closed_reasons array")
             .iter()
             .any(|reason| reason == "inventory-report-blocked")
     );
@@ -226,6 +333,18 @@ fn workspace_fixture_records_feature_gated_and_transitive_rows() {
         "transitive_lockfile_package"
     );
     assert_eq!(hyper_proof["boundary_type"], "compat_quarantine");
+    assert!(
+        report["semantic_map"]["summary"]["recommendation_count"]
+            .as_u64()
+            .expect("semantic recommendation count")
+            > 0
+    );
+    assert!(
+        report["semantic_map"]["summary"]["confidence_distribution"]
+            .as_object()
+            .expect("confidence distribution")
+            .contains_key("high")
+    );
 }
 
 #[test]
@@ -248,6 +367,8 @@ fn output_root_writes_json_and_summary_artifacts() {
     let summary = std::fs::read_to_string(summary_path).expect("read summary");
     assert!(summary.contains("Migration Readiness Inventory"));
     assert!(summary.contains("Proof Pack"));
+    assert!(summary.contains("Semantic Map"));
     assert!(summary.contains("needs_quarantine"));
+    assert!(summary.contains("manual_design_required"));
     assert!(summary.contains("default-production-tokio-tree"));
 }

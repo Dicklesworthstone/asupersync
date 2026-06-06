@@ -67,6 +67,135 @@ SOURCE_MARKERS = [
     ("Scope", "already_native", "structured-concurrency scope marker found"),
 ]
 
+SEMANTIC_SOURCE_MARKERS = [
+    {
+        "marker": "async fn",
+        "recommendation_class": "cx_threading_required",
+        "target_surface": "Cx",
+        "invariant": "No ambient authority: effects flow through explicit capabilities.",
+        "rationale": "async entry points should accept `&Cx` so effects, budgets, and tracing flow through the capability context",
+        "operator_action": "thread `&Cx` through the async entry point and its callees",
+        "confidence": "medium",
+    },
+    {
+        "marker": "tokio::spawn",
+        "recommendation_class": "region_ownership_required",
+        "target_surface": "Scope",
+        "invariant": "Structured concurrency: every task is owned by exactly one region.",
+        "rationale": "detached Tokio spawn sites need region-owned work so close implies quiescence",
+        "operator_action": "replace detached spawn with Scope-owned work and explicit loser/drain handling",
+        "confidence": "high",
+    },
+    {
+        "marker": "tokio::time::sleep",
+        "recommendation_class": "cancel_checkpoint_required",
+        "target_surface": "Cx time and budget",
+        "invariant": "Cancellation is a protocol: request, drain, finalize.",
+        "rationale": "Tokio timers must become cancel-aware Cx time/budget checkpoints",
+        "operator_action": "route sleeps, deadlines, and retry delays through Cx time/budget surfaces",
+        "confidence": "high",
+    },
+    {
+        "marker": "tokio::select!",
+        "recommendation_class": "cancel_checkpoint_required",
+        "target_surface": "race/select combinators",
+        "invariant": "Losers are drained after races.",
+        "rationale": "select-style races need explicit loser cancellation and drain semantics",
+        "operator_action": "map each branch to native race/join semantics with loser drain evidence",
+        "confidence": "high",
+    },
+    {
+        "marker": "tokio::sync::mpsc",
+        "recommendation_class": "capability_narrowing_required",
+        "target_surface": "asupersync::channel",
+        "invariant": "No obligation leaks: reservations must commit or abort.",
+        "rationale": "queue ownership and backpressure should use cancel-correct channel reservations",
+        "operator_action": "replace queue surfaces with two-phase reserve/send channels and explicit ownership",
+        "confidence": "high",
+    },
+    {
+        "marker": "tokio::sync::",
+        "recommendation_class": "capability_narrowing_required",
+        "target_surface": "asupersync::sync",
+        "invariant": "Sync primitives are cancel-aware.",
+        "rationale": "Tokio sync primitives hide cancellation and capability boundaries",
+        "operator_action": "replace sync primitives with asupersync sync types and document wait/hold ownership",
+        "confidence": "medium",
+    },
+    {
+        "marker": "loop {",
+        "recommendation_class": "cancel_checkpoint_required",
+        "target_surface": "Cx cancellation checkpoints",
+        "invariant": "Region close implies quiescence.",
+        "rationale": "long-running loops need explicit cancellation checkpoints and shutdown ownership",
+        "operator_action": "add Cx-aware cancellation checks and finalizer/drain behavior for the loop",
+        "confidence": "medium",
+    },
+    {
+        "marker": "axum::Router",
+        "recommendation_class": "compat_boundary_ok",
+        "target_surface": "HTTP adapter boundary",
+        "invariant": "Compat code stays outside the default production runtime graph.",
+        "rationale": "axum router construction can remain at an explicit HTTP adapter boundary while handlers migrate",
+        "operator_action": "pin the HTTP boundary, migrate handlers to Cx, and keep proof-pack no-Tokio lanes clean",
+        "confidence": "high",
+    },
+    {
+        "marker": "tower::",
+        "recommendation_class": "compat_boundary_ok",
+        "target_surface": "Tower adapter boundary",
+        "invariant": "Adapters cannot hide region or Cx ownership.",
+        "rationale": "Tower middleware can be bridged only when the boundary is explicit and audited",
+        "operator_action": "keep tower adapters quarantined and expose Cx-owned handler internals",
+        "confidence": "medium",
+    },
+    {
+        "marker": "reqwest::Client",
+        "recommendation_class": "capability_narrowing_required",
+        "target_surface": "HTTP client capability",
+        "invariant": "No ambient authority: network effects flow through explicit capabilities.",
+        "rationale": "HTTP clients should be created through explicit capability ownership rather than ambient constructors",
+        "operator_action": "move outbound HTTP authority behind a Cx-provided client or native HTTP capability",
+        "confidence": "high",
+    },
+    {
+        "marker": "std::env::",
+        "recommendation_class": "capability_narrowing_required",
+        "target_surface": "configuration capability",
+        "invariant": "No ambient authority: config reads are explicit effects.",
+        "rationale": "ambient environment reads should be narrowed to explicit configuration capabilities",
+        "operator_action": "load configuration through RuntimeBuilder/AppSpec and pass narrowed access through Cx",
+        "confidence": "medium",
+    },
+    {
+        "marker": "std::fs::",
+        "recommendation_class": "capability_narrowing_required",
+        "target_surface": "filesystem capability",
+        "invariant": "No ambient authority: filesystem effects are explicit capabilities.",
+        "rationale": "filesystem access needs an explicit capability boundary and deterministic test strategy",
+        "operator_action": "route file I/O through a Cx-owned fs capability or deterministic test adapter",
+        "confidence": "medium",
+    },
+    {
+        "marker": "std::thread::spawn",
+        "recommendation_class": "manual_design_required",
+        "target_surface": "blocking/thread boundary",
+        "invariant": "Region close implies quiescence.",
+        "rationale": "OS threads need a manual ownership, shutdown, and capability-flow design before rewrite",
+        "operator_action": "design the blocking boundary and join/abort semantics before migration",
+        "confidence": "high",
+    },
+]
+
+SEMANTIC_RECOMMENDATION_ORDER = {
+    "cx_threading_required": 10,
+    "region_ownership_required": 20,
+    "cancel_checkpoint_required": 30,
+    "capability_narrowing_required": 40,
+    "compat_boundary_ok": 50,
+    "manual_design_required": 90,
+}
+
 PROOF_COMMAND_PREFIX = "RCH_REQUIRE_REMOTE=1 rch exec -- "
 
 PROOF_COMMANDS = [
@@ -428,6 +557,59 @@ def source_marker_rows(root: Path, warnings: list[dict[str, str]]) -> list[dict[
     return sorted(rows, key=lambda row: (row["path"], row.get("line", 0), row["marker"]))
 
 
+def semantic_signal_for_line(spec: dict[str, str], line_text: str) -> dict[str, str]:
+    if spec["marker"] == "async fn" and "&Cx" in line_text:
+        return {
+            "recommendation_class": "compat_boundary_ok",
+            "target_surface": "Cx",
+            "invariant": "No ambient authority: effects flow through explicit capabilities.",
+            "rationale": "async entry point already accepts `&Cx`; verify callees preserve the explicit capability flow",
+            "operator_action": "keep the Cx signature and verify downstream effects do not escape it",
+            "confidence": "high",
+        }
+    return spec
+
+
+def semantic_source_marker_rows(root: Path, warnings: list[dict[str, str]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in source_files(root):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        lines = text.splitlines()
+        for spec in SEMANTIC_SOURCE_MARKERS:
+            marker = spec["marker"]
+            start = 0
+            while True:
+                index = text.find(marker, start)
+                if index < 0:
+                    break
+                line = text.count("\n", 0, index) + 1
+                line_text = lines[line - 1].strip() if line <= len(lines) else ""
+                signal = semantic_signal_for_line(spec, line_text)
+                rows.append(
+                    {
+                        "row_type": "semantic_source_marker",
+                        "path": posix_rel(path, root),
+                        "line": line,
+                        "marker": marker,
+                        "name": marker,
+                        "classification": "semantic_signal",
+                        "severity": "info",
+                        "confidence": signal["confidence"],
+                        "recommendation_class": signal["recommendation_class"],
+                        "target_asupersync_surface": signal["target_surface"],
+                        "invariant_preserved": signal["invariant"],
+                        "rationale": signal["rationale"],
+                        "operator_action": signal["operator_action"],
+                        "suggested_next_probe": "derive ordered semantic migration recommendation for this source pattern",
+                    }
+                )
+                start = index + len(marker)
+    return sorted(rows, key=lambda row: (row["path"], row.get("line", 0), row["marker"]))
+
+
 def manifest_summary(root: Path, manifest_path: Path, manifest: dict[str, Any] | None, error: str | None) -> dict[str, Any]:
     if error or manifest is None:
         return {
@@ -657,6 +839,223 @@ def build_proof_pack(
     }
 
 
+def semantic_source_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "row_type": string_value(row.get("row_type")),
+        "path": string_value(row.get("path")),
+        "line": int(row.get("line", 0)),
+        "name": string_value(row.get("name")),
+        "classification": string_value(row.get("classification")),
+        "section": string_value(row.get("section")),
+    }
+
+
+def semantic_scenario_id(row: dict[str, Any], recommendation_class: str) -> str:
+    source = semantic_source_row(row)
+    parts = [
+        recommendation_class,
+        source["path"] or "root",
+        source["name"] or "unknown",
+        str(source["line"]),
+    ]
+    return ":".join(part.replace("/", ".").replace(" ", "_") for part in parts)
+
+
+def semantic_recommendation(
+    row: dict[str, Any],
+    recommendation_class: str,
+    target_surface: str,
+    invariant: str,
+    rationale: str,
+    operator_action: str,
+    confidence: str,
+) -> dict[str, Any]:
+    return {
+        "row_type": "semantic_recommendation",
+        "scenario_id": semantic_scenario_id(row, recommendation_class),
+        "source_row": semantic_source_row(row),
+        "recommendation_class": recommendation_class,
+        "ordered_step": SEMANTIC_RECOMMENDATION_ORDER[recommendation_class],
+        "target_asupersync_surface": target_surface,
+        "confidence": confidence,
+        "rationale": rationale,
+        "operator_action": operator_action,
+        "invariant_preserved": invariant,
+        "residual_manual_design": recommendation_class == "manual_design_required",
+    }
+
+
+def semantic_recommendations_for_dependency(row: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized = normalize_crate_name(string_value(row.get("name")))
+    if normalized in {"tokio", "tokio-util", "tokio-stream"}:
+        return [
+            semantic_recommendation(
+                row,
+                "cx_threading_required",
+                "Cx",
+                "No ambient authority: effects flow through explicit capabilities.",
+                "Tokio-shaped dependencies usually expose async entry points that need explicit Cx threading",
+                "inventory every public async entry point and add a Cx-first signature before replacing call sites",
+                "high",
+            ),
+            semantic_recommendation(
+                row,
+                "region_ownership_required",
+                "Scope",
+                "Structured concurrency: every task is owned by exactly one region.",
+                "runtime dependencies are only safe when task ownership is explicit at the boundary",
+                "move spawned work under Scope or quarantine it behind a documented compat adapter",
+                "high",
+            ),
+        ]
+    if normalized in {"hyper", "hyper-util", "axum", "tower", "tower-http"}:
+        return [
+            semantic_recommendation(
+                row,
+                "compat_boundary_ok",
+                "HTTP/Tower adapter boundary",
+                "Compat code stays outside the default production runtime graph.",
+                "HTTP service stacks can be migrated incrementally when the adapter boundary is explicit",
+                "keep the adapter thin, pass Cx into handlers, and cite the proof-pack no-Tokio lanes",
+                "high",
+            )
+        ]
+    if normalized in {"reqwest", "sqlx", "quinn", "h3", "rdkafka", "tonic"}:
+        return [
+            semantic_recommendation(
+                row,
+                "capability_narrowing_required",
+                owning_module_recommendation(row),
+                "No ambient authority: external effects flow through explicit capabilities.",
+                "client, database, transport, and messaging crates carry effect authority that should not be ambient",
+                "wrap the effect in a Cx-owned capability or keep it at a quarantined adapter boundary",
+                "high",
+            )
+        ]
+    if normalized in {"async-std", "smol"}:
+        return [
+            semantic_recommendation(
+                row,
+                "manual_design_required",
+                "runtime removal plan",
+                "Only one native runtime owns the core execution model.",
+                "alternate async runtimes are hard blockers for a native Asupersync migration",
+                "remove the runtime from native paths before semantic migration signoff",
+                "high",
+            )
+        ]
+    if normalized in NATIVE_CRATES:
+        return [
+            semantic_recommendation(
+                row,
+                "compat_boundary_ok",
+                "native Asupersync surface",
+                "No ambient authority: effects flow through explicit capabilities.",
+                "native Asupersync dependency is already present and can anchor the migration plan",
+                "verify Cx/Scope usage around this native surface and keep deterministic tests",
+                "high",
+            )
+        ]
+    return []
+
+
+def semantic_recommendations_for_row(row: dict[str, Any]) -> list[dict[str, Any]]:
+    if row["row_type"] == "semantic_source_marker":
+        return [
+            semantic_recommendation(
+                row,
+                string_value(row.get("recommendation_class")),
+                string_value(row.get("target_asupersync_surface")),
+                string_value(row.get("invariant_preserved")),
+                string_value(row.get("rationale")),
+                string_value(row.get("operator_action")),
+                string_value(row.get("confidence")) or "medium",
+            )
+        ]
+    if row["row_type"] in {"dependency", "lockfile_package"}:
+        return semantic_recommendations_for_dependency(row)
+    if row["row_type"] == "source_marker" and row["classification"] == "manual_design_required":
+        return [
+            semantic_recommendation(
+                row,
+                "manual_design_required",
+                "ownership and shutdown design",
+                "Region close implies quiescence.",
+                string_value(row.get("rationale")),
+                "write a manual ownership, shutdown, and capability-flow design before rewriting this source pattern",
+                string_value(row.get("confidence")) or "medium",
+            )
+        ]
+    return []
+
+
+def dedupe_semantic_recommendations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        by_id.setdefault(row["scenario_id"], row)
+    return sorted(
+        by_id.values(),
+        key=lambda row: (
+            row["ordered_step"],
+            row["source_row"]["path"],
+            row["source_row"]["line"],
+            row["source_row"]["name"],
+            row["recommendation_class"],
+        ),
+    )
+
+
+def build_semantic_map(
+    inventory_rows: list[dict[str, Any]],
+    parse_errors: list[str],
+    manifest_count: int,
+) -> dict[str, Any]:
+    source_match_count = len([row for row in inventory_rows if row["row_type"] == "semantic_source_marker"])
+    recommendations = dedupe_semantic_recommendations(
+        [
+            recommendation
+            for row in inventory_rows
+            for recommendation in semantic_recommendations_for_row(row)
+        ]
+    )
+    fail_closed_reasons: list[str] = []
+    if manifest_count == 0 or parse_errors:
+        fail_closed_reasons.append("inventory-report-blocked")
+    if not recommendations and not fail_closed_reasons:
+        fail_closed_reasons.append("zero-semantic-recommendations")
+
+    manual_design_count = len([row for row in recommendations if row["residual_manual_design"]])
+    if fail_closed_reasons:
+        status = "blocked"
+    elif manual_design_count:
+        status = "manual_design_required"
+    elif any(row["recommendation_class"] != "compat_boundary_ok" for row in recommendations):
+        status = "semantic_plan_required"
+    else:
+        status = "semantic_plan_ready"
+
+    return {
+        "schema_version": "migration-readiness-semantic-map-v1",
+        "source_schema": SCHEMA_VERSION,
+        "source_contracts": [
+            "AGENTS.md",
+            "README.md",
+            "scripts/migration_readiness_planner.py",
+        ],
+        "summary": {
+            "status": status,
+            "source_match_count": source_match_count,
+            "recommendation_count": len(recommendations),
+            "residual_manual_design_count": manual_design_count,
+            "fail_closed_reason_count": len(set(fail_closed_reasons)),
+            "recommendation_class_counts": counts_by(recommendations, "recommendation_class"),
+            "confidence_distribution": counts_by(recommendations, "confidence"),
+        },
+        "fail_closed_reasons": sorted(set(fail_closed_reasons)),
+        "recommendations": recommendations,
+    }
+
+
 def final_verdict(rows: list[dict[str, Any]], parse_errors: list[str], manifest_count: int) -> tuple[str, list[str]]:
     reasons: list[str] = []
     if manifest_count == 0:
@@ -706,6 +1105,7 @@ def build_report(project_root: Path) -> dict[str, Any]:
     lockfile, lock_rows = lockfile_inventory_rows(root, direct_names)
     inventory_rows.extend(lock_rows)
     inventory_rows.extend(source_marker_rows(root, warnings))
+    inventory_rows.extend(semantic_source_marker_rows(root, warnings))
     inventory_rows = sorted(
         inventory_rows,
         key=lambda row: (
@@ -735,10 +1135,14 @@ def build_report(project_root: Path) -> dict[str, Any]:
         )
 
     proof_pack = build_proof_pack(inventory_rows, parse_errors, len(manifests))
+    semantic_map = build_semantic_map(inventory_rows, parse_errors, len(manifests))
     verdict, fail_closed_reasons = final_verdict(inventory_rows, parse_errors, len(manifests))
     if proof_pack["fail_closed_reasons"]:
         verdict = "blocked"
         fail_closed_reasons = sorted(set(fail_closed_reasons + proof_pack["fail_closed_reasons"]))
+    if semantic_map["fail_closed_reasons"]:
+        verdict = "blocked"
+        fail_closed_reasons = sorted(set(fail_closed_reasons + semantic_map["fail_closed_reasons"]))
     return {
         "schema_version": SCHEMA_VERSION,
         "project_root": root.as_posix(),
@@ -760,6 +1164,7 @@ def build_report(project_root: Path) -> dict[str, Any]:
         "warnings": sorted(warnings, key=lambda row: (row.get("kind", ""), row.get("path", ""), row.get("member", ""))),
         "inventory_rows": inventory_rows,
         "proof_pack": proof_pack,
+        "semantic_map": semantic_map,
     }
 
 
@@ -795,6 +1200,21 @@ def summary_markdown(report: dict[str, Any]) -> str:
         )
         for command in proof_pack["proof_commands"]:
             lines.append(f"- `{command['command_id']}`: {command['expected_oracle']}")
+    semantic_map = report.get("semantic_map")
+    if isinstance(semantic_map, dict):
+        semantic_summary = semantic_map["summary"]
+        lines.extend(
+            [
+                "",
+                "## Semantic Map",
+                f"- status: `{semantic_summary['status']}`",
+                f"- source_match_count: `{semantic_summary['source_match_count']}`",
+                f"- recommendation_count: `{semantic_summary['recommendation_count']}`",
+                f"- residual_manual_design_count: `{semantic_summary['residual_manual_design_count']}`",
+            ]
+        )
+        for key, value in semantic_summary["recommendation_class_counts"].items():
+            lines.append(f"- `{key}`: {value}")
     lines.extend(["", "## Next Probes"])
     seen: set[str] = set()
     for row in report["inventory_rows"]:
