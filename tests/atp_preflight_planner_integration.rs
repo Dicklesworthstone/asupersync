@@ -15,7 +15,7 @@ struct TestRuntime {
 }
 
 impl TestRuntime {
-    async fn new() -> Result<Self, String> {
+    fn new() -> Result<Self, String> {
         Ok(Self {
             cx: Cx::for_testing(),
         })
@@ -28,7 +28,7 @@ impl TestRuntime {
 
 #[tokio::test]
 async fn test_planner_input_validation() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -55,7 +55,7 @@ async fn test_planner_input_validation() {
 
 #[tokio::test]
 async fn test_cache_hit_scenario() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -89,7 +89,7 @@ async fn test_cache_hit_scenario() {
 
 #[tokio::test]
 async fn test_relay_only_scenario() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -117,7 +117,7 @@ async fn test_relay_only_scenario() {
 
 #[tokio::test]
 async fn test_mailbox_scenario() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -145,7 +145,7 @@ async fn test_mailbox_scenario() {
 
 #[tokio::test]
 async fn test_swarm_scenario() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -176,7 +176,7 @@ async fn test_swarm_scenario() {
 
 #[tokio::test]
 async fn test_sparse_image_scenario() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -202,7 +202,7 @@ async fn test_sparse_image_scenario() {
 
 #[tokio::test]
 async fn test_governance_profile() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -239,7 +239,7 @@ async fn test_governance_profile() {
 
 #[tokio::test]
 async fn test_proof_outputs_configuration() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -271,7 +271,7 @@ async fn test_proof_outputs_configuration() {
 
 #[tokio::test]
 async fn test_plan_validation_success() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -295,7 +295,7 @@ async fn test_plan_validation_success() {
 
 #[tokio::test]
 async fn test_plan_validation_disk_space_error() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
 
     let config = PlannerConfig::default();
@@ -371,7 +371,7 @@ async fn test_execution_tracker() {
 
 #[tokio::test]
 async fn test_directory_sync_scenario() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -399,7 +399,7 @@ async fn test_directory_sync_scenario() {
 
 #[tokio::test]
 async fn test_mirror_with_deletes_scenario() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -423,7 +423,7 @@ async fn test_mirror_with_deletes_scenario() {
 
 #[tokio::test]
 async fn test_resume_scenario() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -454,7 +454,7 @@ async fn test_resume_scenario() {
 async fn test_plan_schema_versions() {
     use asupersync::atp::{ATP_PLAN_EXECUTION_REPORT_SCHEMA, ATP_TRANSFER_PLAN_SCHEMA};
 
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -481,7 +481,7 @@ async fn test_plan_schema_versions() {
 
 #[tokio::test]
 async fn test_uncertainty_tracking() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 
@@ -509,7 +509,7 @@ async fn test_uncertainty_tracking() {
 
 #[tokio::test]
 async fn test_redacted_output() {
-    let runtime = TestRuntime::new().await.unwrap();
+    let runtime = TestRuntime::new().unwrap();
     let cx = runtime.root_cx();
     let planner = AtpTransferPlanner::new_default();
 

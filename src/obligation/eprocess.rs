@@ -767,7 +767,7 @@ mod tests {
         crate::assert_with_log!(
             must_score >= 95.0,
             "MUST requirements pass rate ≥ 95%",
-            format!("≥95%"),
+            "≥95%".to_string(),
             format!("{:.1}% ({}/{})", must_score, must_pass, must_total)
         );
 
@@ -781,7 +781,7 @@ mod tests {
         crate::assert_with_log!(
             should_score >= 80.0,
             "SHOULD requirements pass rate ≥ 80%",
-            format!("≥80%"),
+            "≥80%".to_string(),
             format!("{:.1}% ({}/{})", should_score, should_pass, should_total)
         );
 
@@ -918,7 +918,7 @@ mod tests {
         crate::assert_with_log!(
             mean_final <= 2.0, // Allow generous slack for sampling variance
             "mean e-value bounded under H0",
-            format!("≤2.0"),
+            "≤2.0".to_string(),
             format!("{:.4}", mean_final)
         );
 
@@ -941,7 +941,7 @@ mod tests {
         crate::assert_with_log!(
             max_e_value < 1000.0,
             "no extreme e-value outliers",
-            format!("<1000"),
+            "<1000".to_string(),
             format!("{:.2}", max_e_value)
         );
 

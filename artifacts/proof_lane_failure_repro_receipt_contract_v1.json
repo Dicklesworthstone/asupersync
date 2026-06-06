@@ -1,0 +1,249 @@
+{
+  "schema_version": "proof-lane-failure-repro-contract-v1",
+  "bead_id": "asupersync-ol11aa.6",
+  "created_date": "2026-06-06",
+  "description": "Deterministic contract for generating minimal repro receipts from failed RCH proof-lane transcripts without running Cargo or mutating repo state.",
+  "source_of_truth": {
+    "helper": "scripts/proof_lane_failure_repro_receipt.py",
+    "contract_test": "tests/proof_lane_failure_repro_receipt_contract.rs",
+    "operator_docs": "docs/proof_lane_failure_repro_receipt.md",
+    "contract_artifact": "artifacts/proof_lane_failure_repro_receipt_contract_v1.json",
+    "related_crashpack_helper": "scripts/crashpack_to_repro.py",
+    "related_proof_runner": "scripts/proof_runner.py",
+    "proof_evidence_debt_graph": "artifacts/proof_evidence_debt_graph_contract_v1.json"
+  },
+  "policy": {
+    "helper_is_read_only": true,
+    "network_access_required": false,
+    "tracker_mutation_allowed": false,
+    "git_mutation_allowed": false,
+    "cargo_execution_allowed": false,
+    "required_rch_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "non_claims": [
+      "The receipt chooses minimal repro commands; it does not certify workspace health.",
+      "A repro command is not a fresh proof until it is rerun through RCH.",
+      "Local fallback evidence remains rejected for remote-required proof lanes."
+    ]
+  },
+  "required_classifications": [
+    "rustc-compile-error",
+    "test-assertion-failure",
+    "timeout-after-first-failure",
+    "worker-disk-pressure",
+    "ssh-transport-failure",
+    "retrieval-timeout-after-pass",
+    "zero-test-proof",
+    "local-fallback-refused"
+  ],
+  "expected_summary": {
+    "total_failures": 8,
+    "cargo_repro_commands": 7,
+    "envelope_ok": 8,
+    "blocked_external": 5,
+    "failed_local": 3,
+    "proof_admissible": 0,
+    "highest_ranked_failure": "compile-error-lane",
+    "classification_counts": {
+      "rustc-compile-error": 1,
+      "test-assertion-failure": 1,
+      "timeout-after-first-failure": 1,
+      "worker-disk-pressure": 1,
+      "ssh-transport-failure": 1,
+      "retrieval-timeout-after-pass": 1,
+      "zero-test-proof": 1,
+      "local-fallback-refused": 1
+    }
+  },
+  "fixture": {
+    "schema_version": "proof-lane-failure-repro-fixture-v1",
+    "fixture_id": "proof-lane-failure-repro-contract-fixture",
+    "repo": {
+      "head_sha": "2222222222222222222222222222222222222222",
+      "branch": "main"
+    },
+    "reservations": [
+      {
+        "holder": "SapphireHill",
+        "path_pattern": "tests/swarm_pressure_preflight_report_contract.rs",
+        "status": "active"
+      },
+      {
+        "holder": "PinkStream",
+        "path_pattern": "scripts/proof_lane_failure_repro_receipt.py",
+        "status": "active"
+      }
+    ],
+    "failures": [
+      {
+        "failure_id": "compile-error-lane",
+        "lane_id": "proof-console-contract",
+        "source_log_path": "artifacts/proof/logs/compile-error-lane.log",
+        "source_log_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "minimal_repro_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_compile_error CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_console_report_contract -- --nocapture",
+        "command_kind": "cargo-test-rerun",
+        "why_minimal": "The first hard blocker is in one integration contract test; rerunning the whole workspace is unnecessary.",
+        "touched_files": [
+          "tests/proof_console_report_contract.rs",
+          "scripts/proof_runner.py"
+        ],
+        "suspected_owner": "proof-console-lane",
+        "required_env": [
+          "RCH_REQUIRE_REMOTE=1",
+          "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_compile_error"
+        ],
+        "evidence_proves": [
+          "first rustc compile blocker"
+        ],
+        "evidence_does_not_prove": [
+          "workspace health",
+          "release readiness"
+        ],
+        "log_excerpt": "error[E0106]: missing lifetime specifier\n  --> tests/proof_console_report_contract.rs:67:40\n   |\n67 | fn field(value: &Value, key: &str) -> &str {\n   |                  ------       ----     ^ expected named lifetime parameter\nerror: could not compile `asupersync` (test \"proof_console_report_contract\") due to 1 previous error\n[RCH] remote vmi1149989 failed (exit 101)"
+      },
+      {
+        "failure_id": "test-assertion-lane",
+        "lane_id": "brownout-e2e-contract",
+        "source_log_path": "artifacts/proof/logs/test-assertion-lane.log",
+        "source_log_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "minimal_repro_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_test_assertion CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test brownout_no_win_lab_e2e optional_brownout_drains -- --exact --nocapture",
+        "command_kind": "cargo-test-exact-rerun",
+        "why_minimal": "The failing assertion names one exact test; keep the exact filter and nocapture output.",
+        "touched_files": [
+          "tests/brownout_no_win_lab_e2e.rs"
+        ],
+        "suspected_owner": "slo-brownout-lane",
+        "required_env": [
+          "RCH_REQUIRE_REMOTE=1",
+          "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_test_assertion"
+        ],
+        "evidence_proves": [
+          "first failing test assertion"
+        ],
+        "log_excerpt": "running 1 test\nthread 'optional_brownout_drains' panicked at tests/brownout_no_win_lab_e2e.rs:214:9:\nassertion `left == right` failed: finalizer drain receipt missing\nfailures:\n    optional_brownout_drains\ntest result: FAILED. 0 passed; 1 failed; finished in 0.02s"
+      },
+      {
+        "failure_id": "timeout-after-first-failure-lane",
+        "lane_id": "swarm-proof-planner-contract",
+        "source_log_path": "artifacts/proof/logs/timeout-after-first-failure.log",
+        "source_log_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "minimal_repro_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_timeout_first_failure CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract admission_rows_cover_dirty_tree -- --exact --nocapture",
+        "command_kind": "cargo-test-exact-rerun",
+        "why_minimal": "The timeout log already contains a first rustc blocker; rerun the named contract test first.",
+        "touched_files": [
+          "tests/swarm_proof_lane_planner_contract.rs"
+        ],
+        "suspected_owner": "swarm-planner-lane",
+        "required_env": [
+          "RCH_REQUIRE_REMOTE=1",
+          "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_timeout_first_failure"
+        ],
+        "evidence_proves": [
+          "first blocker before timeout"
+        ],
+        "log_excerpt": "error[E0277]: the trait bound `PlannerRow: Clone` is not satisfied\n  --> tests/swarm_proof_lane_planner_contract.rs:142:18\n   |\n142 |     rows.clone();\n   |          ^^^^^ the trait `Clone` is not implemented for `PlannerRow`\nwarning: build failed, waiting for other jobs to finish...\nremote command timed out after 3600s\n[RCH] remote vmi1149989 failed (exit 124)"
+      },
+      {
+        "failure_id": "worker-enospc-lane",
+        "lane_id": "all-targets-check",
+        "source_log_path": "artifacts/proof/logs/worker-enospc-lane.log",
+        "source_log_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "minimal_repro_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_enospc CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --all-targets",
+        "command_kind": "cargo-check-rerun",
+        "why_minimal": "The command is already the failing all-target compile frontier; the next action is worker health, not a broader local retry.",
+        "touched_files": [],
+        "suspected_owner": "rch-worker-health",
+        "required_env": [
+          "RCH_REQUIRE_REMOTE=1",
+          "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_enospc"
+        ],
+        "evidence_proves": [
+          "worker disk blocker"
+        ],
+        "log_excerpt": "error: failed to write /data/projects/asupersync/.rch-target-vmi1149989-job/tmp\nCaused by: No space left on device (os error 28)\n[RCH] remote vmi1149989 failed (exit 101)"
+      },
+      {
+        "failure_id": "ssh-transport-lane",
+        "lane_id": "formal-lean-build",
+        "source_log_path": "artifacts/proof/logs/ssh-transport-lane.log",
+        "source_log_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "minimal_repro_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_ssh_transport CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test formal_proof_posture_contract -- --nocapture",
+        "command_kind": "cargo-test-rerun",
+        "why_minimal": "The proof did not reach Cargo; keep the same smallest proof contract after RCH transport recovers.",
+        "touched_files": [
+          "tests/formal_proof_posture_contract.rs"
+        ],
+        "suspected_owner": "rch-control-plane",
+        "required_env": [
+          "RCH_REQUIRE_REMOTE=1",
+          "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_ssh_transport"
+        ],
+        "evidence_proves": [
+          "transport blocker before proof execution"
+        ],
+        "log_excerpt": "Selected worker: vmi0000000\nssh: connect to host 10.0.0.5 port 22: Connection timed out\n[RCH] remote worker transport failed before command execution"
+      },
+      {
+        "failure_id": "retrieval-timeout-pass-lane",
+        "lane_id": "proof-lane-manifest-contract",
+        "source_log_path": "artifacts/proof/logs/retrieval-timeout-pass-lane.log",
+        "source_log_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "minimal_repro_command": "python3 scripts/rch_retrieval_receipt.py --log artifacts/proof/logs/retrieval-timeout-pass-lane.log --wrapper-exit-code 124 --output json",
+        "command_kind": "rch-retrieval-diagnostic",
+        "why_minimal": "The remote proof already exited 0; classify retrieval separately before rerunning Cargo.",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "suspected_owner": "rch-retrieval",
+        "required_env": [],
+        "evidence_proves": [
+          "remote pass preceded retrieval timeout"
+        ],
+        "log_excerpt": "test result: ok. 8 passed; 0 failed; finished in 0.04s\nRemote command finished: exit=0 in 4021ms\nRetrieving build artifacts...\nartifact retrieval timed out after remote exit=0\n[RCH] wrapper failed (exit 124)"
+      },
+      {
+        "failure_id": "zero-test-lane",
+        "lane_id": "lib-exact-filter",
+        "source_log_path": "artifacts/proof/logs/zero-test-lane.log",
+        "source_log_sha256": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "minimal_repro_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_zero_test CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib corrected_filter_name -- --exact --nocapture",
+        "command_kind": "cargo-test-filter-repair",
+        "why_minimal": "The original exact filter ran zero tests; keep the lib target but require a corrected filter before citation.",
+        "touched_files": [
+          "src/web/security.rs"
+        ],
+        "suspected_owner": "filter-owner",
+        "required_env": [
+          "RCH_REQUIRE_REMOTE=1",
+          "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_zero_test"
+        ],
+        "executed_tests": 0,
+        "evidence_proves": [
+          "zero-test proof is invalid"
+        ],
+        "log_excerpt": "running 0 tests\ntest result: ok. 0 passed; 0 failed; 1427 filtered out; finished in 0.00s\n[RCH] remote vmi1149989 (12.0s)"
+      },
+      {
+        "failure_id": "local-fallback-refusal-lane",
+        "lane_id": "clippy-all-targets",
+        "source_log_path": "artifacts/proof/logs/local-fallback-refusal-lane.log",
+        "source_log_sha256": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+        "minimal_repro_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_local_fallback CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy --all-targets -- -D warnings",
+        "command_kind": "cargo-clippy-rerun",
+        "why_minimal": "Remote-required clippy should be retried remotely; no local fallback evidence is admissible.",
+        "touched_files": [
+          "tests/swarm_pressure_preflight_report_contract.rs"
+        ],
+        "suspected_owner": "rch-admission",
+        "required_env": [
+          "RCH_REQUIRE_REMOTE=1",
+          "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_local_fallback"
+        ],
+        "evidence_proves": [
+          "local fallback was refused"
+        ],
+        "log_excerpt": "[RCH] remote required; refusing local fallback (no worker available)\ncommand not executed locally\nremote required; refusing local fallback"
+      }
+    ]
+  }
+}
