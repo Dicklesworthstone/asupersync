@@ -1,0 +1,405 @@
+{
+  "schema_version": "second-wave-swarm-control-loop-certification-contract-v1",
+  "contract_test": "tests/second_wave_swarm_control_loop_certification_contract.rs",
+  "helper": "scripts/second_wave_swarm_control_loop_certification.py",
+  "e2e_script": "scripts/run_second_wave_swarm_control_loop_certification_e2e.sh",
+  "docs": "docs/second_wave_swarm_control_loop_certification.md",
+  "fixture": {
+    "schema_version": "second-wave-swarm-control-loop-certification-fixture-v1",
+    "fixture_id": "second-wave-swarm-control-loop-certification-contract-fixture",
+    "bundle_id": "asupersync-ol11aa.8-second-wave-certification",
+    "parent_bead_id": "asupersync-ol11aa",
+    "parent_epic_close_allowed": false,
+    "repo": {
+      "source_head": "second-wave-current-main",
+      "branch_policy": "main-only"
+    },
+    "required_child_beads": [
+      "asupersync-ol11aa.1",
+      "asupersync-ol11aa.2",
+      "asupersync-ol11aa.3",
+      "asupersync-ol11aa.4",
+      "asupersync-ol11aa.5",
+      "asupersync-ol11aa.6",
+      "asupersync-ol11aa.7"
+    ],
+    "child_evidence": [
+      {
+        "evidence_id": "large-host-topology-corpus",
+        "child_bead_id": "asupersync-ol11aa.1",
+        "child_title": "Add deterministic large-host topology corpus for swarm pressure planning",
+        "child_status": "closed",
+        "artifact_path": "artifacts/large_host_topology_corpus_v1.json",
+        "script_path": "scripts/large_host_topology_corpus.py",
+        "contract_test": "tests/large_host_topology_corpus_contract.rs",
+        "doc_path": "docs/large_host_topology_corpus.md",
+        "additional_receipts": [
+          "scripts/run_large_host_topology_corpus_e2e.sh"
+        ],
+        "receipt_schema_version": "large-host-topology-corpus-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 7,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_large_host_topology_corpus_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test large_host_topology_corpus_contract -- --nocapture",
+        "refresh_command": "bash scripts/run_large_host_topology_corpus_e2e.sh --run-id release-refresh"
+      },
+      {
+        "evidence_id": "topology-aware-proof-admission",
+        "child_bead_id": "asupersync-ol11aa.2",
+        "child_title": "Teach proof admission to account for topology-aware worker and lane placement",
+        "child_status": "closed",
+        "artifact_path": "tests/fixtures/proof_lane_admission_decision/high_core_admit.json",
+        "script_path": "scripts/proof_lane_admission_decision.py",
+        "contract_test": "tests/proof_lane_admission_decision_contract.rs",
+        "doc_path": "docs/proof_lane_admission_decision.md",
+        "additional_receipts": [
+          "scripts/run_proof_lane_admission_decision_e2e.sh",
+          "tests/fixtures/proof_lane_admission_decision/same_socket_contention_queue.json",
+          "tests/fixtures/proof_lane_admission_decision/low_memory_numa_node.json",
+          "tests/fixtures/proof_lane_admission_decision/stale_topology_input.json",
+          "tests/fixtures/proof_lane_admission_decision/unrelated_dirty_tree_blocker.json"
+        ],
+        "receipt_schema_version": "proof-lane-admission-decision-receipt-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 6,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_admission_decision_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_admission_decision_contract -- --nocapture",
+        "refresh_command": "bash scripts/run_proof_lane_admission_decision_e2e.sh --run-id release-refresh"
+      },
+      {
+        "evidence_id": "slo-brownout-runtime-bridge",
+        "child_bead_id": "asupersync-ol11aa.3",
+        "child_title": "Bridge SLO policy brownout decisions into runtime pressure seams",
+        "child_status": "closed",
+        "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+        "script_path": "scripts/validate_slo_policy_bundle.sh",
+        "contract_test": "tests/slo_policy_bundle_contract.rs",
+        "doc_path": "docs/ci_proof_gates_contract.md",
+        "additional_receipts": [
+          "README.md"
+        ],
+        "receipt_schema_version": "slo-runtime-policy-application-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 5,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 1200,
+          "memory_mb": 8192
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_bridge -- --nocapture",
+        "refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id second-wave-refresh"
+      },
+      {
+        "evidence_id": "slo-brownout-lab-e2e",
+        "child_bead_id": "asupersync-ol11aa.4",
+        "child_title": "Build brownout and no-win lab E2E scenarios for structured-concurrency pressure",
+        "child_status": "closed",
+        "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+        "script_path": "scripts/validate_slo_policy_bundle.sh",
+        "contract_test": "tests/slo_policy_bundle_contract.rs",
+        "doc_path": "docs/ci_proof_gates_contract.md",
+        "additional_receipts": [
+          "README.md"
+        ],
+        "receipt_schema_version": "slo-lab-brownout-e2e-receipt-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 5,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 1200,
+          "memory_mb": 8192
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_brownout_lab_e2e -- --nocapture",
+        "refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id second-wave-brownout-refresh"
+      },
+      {
+        "evidence_id": "proof-evidence-debt-graph",
+        "child_bead_id": "asupersync-ol11aa.5",
+        "child_title": "Build stale proof evidence debt graph and supersession report",
+        "child_status": "closed",
+        "artifact_path": "artifacts/proof_evidence_debt_graph_contract_v1.json",
+        "script_path": "scripts/proof_evidence_debt_graph.py",
+        "contract_test": "tests/proof_evidence_debt_graph_contract.rs",
+        "doc_path": "docs/proof_evidence_debt_graph.md",
+        "additional_receipts": [],
+        "receipt_schema_version": "proof-evidence-debt-graph-contract-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 8,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_evidence_debt_graph CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_evidence_debt_graph_contract -- --nocapture",
+        "refresh_command": "python3 scripts/proof_evidence_debt_graph.py --fixture artifacts/proof_evidence_debt_graph_contract_v1.json --output json"
+      },
+      {
+        "evidence_id": "proof-lane-failure-repro-receipts",
+        "child_bead_id": "asupersync-ol11aa.6",
+        "child_title": "Generate minimal crashpack repro receipts from failed RCH proof lanes",
+        "child_status": "closed",
+        "artifact_path": "artifacts/proof_lane_failure_repro_receipt_contract_v1.json",
+        "script_path": "scripts/proof_lane_failure_repro_receipt.py",
+        "contract_test": "tests/proof_lane_failure_repro_receipt_contract.rs",
+        "doc_path": "docs/proof_lane_failure_repro_receipt.md",
+        "additional_receipts": [],
+        "receipt_schema_version": "proof-lane-failure-repro-contract-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 9,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_failure_repro_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_failure_repro_receipt_contract -- --nocapture",
+        "refresh_command": "python3 scripts/proof_lane_failure_repro_receipt.py --fixture artifacts/proof_lane_failure_repro_receipt_contract_v1.json --output json"
+      },
+      {
+        "evidence_id": "reservation-aware-fallback-work-finder",
+        "child_bead_id": "asupersync-ol11aa.7",
+        "child_title": "Add reservation-aware fallback work finder for blocked or epic-only ready queues",
+        "child_status": "closed",
+        "artifact_path": "artifacts/reservation_aware_fallback_work_finder_contract_v1.json",
+        "script_path": "scripts/reservation_aware_fallback_work_finder.py",
+        "contract_test": "tests/reservation_aware_fallback_work_finder_contract.rs",
+        "doc_path": "docs/reservation_aware_fallback_work_finder.md",
+        "additional_receipts": [],
+        "receipt_schema_version": "reservation-aware-fallback-work-finder-contract-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 7,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reservation_aware_fallback_work_finder CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test reservation_aware_fallback_work_finder_contract -- --nocapture",
+        "refresh_command": "python3 scripts/reservation_aware_fallback_work_finder.py --fixture artifacts/reservation_aware_fallback_work_finder_contract_v1.json --output json"
+      }
+    ],
+    "rejection_fixtures": [
+      {
+        "evidence_id": "reject-stale-head",
+        "child_bead_id": "asupersync-ol11aa.1",
+        "child_title": "Stale topology corpus must not certify",
+        "child_status": "closed",
+        "artifact_path": "artifacts/large_host_topology_corpus_v1.json",
+        "script_path": "scripts/large_host_topology_corpus.py",
+        "contract_test": "tests/large_host_topology_corpus_contract.rs",
+        "doc_path": "docs/large_host_topology_corpus.md",
+        "receipt_schema_version": "large-host-topology-corpus-v1",
+        "current_receipt": true,
+        "artifact_head": "old-main",
+        "executed_tests": 7,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_large_host_topology_corpus_contract cargo test -p asupersync --test large_host_topology_corpus_contract -- --nocapture"
+      },
+      {
+        "evidence_id": "reject-local-fallback",
+        "child_bead_id": "asupersync-ol11aa.2",
+        "child_title": "Local fallback must not certify",
+        "child_status": "closed",
+        "artifact_path": "tests/fixtures/proof_lane_admission_decision/high_core_admit.json",
+        "script_path": "scripts/proof_lane_admission_decision.py",
+        "contract_test": "tests/proof_lane_admission_decision_contract.rs",
+        "doc_path": "docs/proof_lane_admission_decision.md",
+        "receipt_schema_version": "proof-lane-admission-decision-receipt-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 6,
+        "advisory_only": false,
+        "local_fallback_observed": true,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_admission_decision_contract cargo test -p asupersync --test proof_lane_admission_decision_contract -- --nocapture"
+      },
+      {
+        "evidence_id": "reject-zero-test",
+        "child_bead_id": "asupersync-ol11aa.3",
+        "child_title": "Zero-test SLO bridge proof must not certify",
+        "child_status": "closed",
+        "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+        "script_path": "scripts/validate_slo_policy_bundle.sh",
+        "contract_test": "tests/slo_policy_bundle_contract.rs",
+        "doc_path": "docs/ci_proof_gates_contract.md",
+        "receipt_schema_version": "slo-runtime-policy-application-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 0,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 1200,
+          "memory_mb": 8192
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_bridge cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge --features test-internals -- --nocapture"
+      },
+      {
+        "evidence_id": "reject-advisory-only",
+        "child_bead_id": "asupersync-ol11aa.5",
+        "child_title": "Advisory debt graph alone must not certify",
+        "child_status": "closed",
+        "artifact_path": "artifacts/proof_evidence_debt_graph_contract_v1.json",
+        "script_path": "scripts/proof_evidence_debt_graph.py",
+        "contract_test": "tests/proof_evidence_debt_graph_contract.rs",
+        "doc_path": "docs/proof_evidence_debt_graph.md",
+        "receipt_schema_version": "proof-evidence-debt-graph-contract-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 8,
+        "advisory_only": true,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_evidence_debt_graph cargo test -p asupersync --test proof_evidence_debt_graph_contract -- --nocapture"
+      },
+      {
+        "evidence_id": "reject-missing-rch-envelope",
+        "child_bead_id": "asupersync-ol11aa.6",
+        "child_title": "Missing remote envelope must not certify",
+        "child_status": "closed",
+        "artifact_path": "artifacts/proof_lane_failure_repro_receipt_contract_v1.json",
+        "script_path": "scripts/proof_lane_failure_repro_receipt.py",
+        "contract_test": "tests/proof_lane_failure_repro_receipt_contract.rs",
+        "doc_path": "docs/proof_lane_failure_repro_receipt.md",
+        "receipt_schema_version": "proof-lane-failure-repro-contract-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 9,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": false,
+          "local_fallback_allowed": true,
+          "target_dir_isolated": false,
+          "timeout_seconds": 0,
+          "memory_mb": 0
+        },
+        "rerun_command": "cargo test -p asupersync --test proof_lane_failure_repro_receipt_contract"
+      },
+      {
+        "evidence_id": "reject-missing-artifact",
+        "child_bead_id": "asupersync-ol11aa.7",
+        "child_title": "Missing fallback finder artifact must not certify",
+        "child_status": "closed",
+        "artifact_path": "artifacts/missing_second_wave_fallback_receipt.json",
+        "script_path": "scripts/reservation_aware_fallback_work_finder.py",
+        "contract_test": "tests/reservation_aware_fallback_work_finder_contract.rs",
+        "doc_path": "docs/reservation_aware_fallback_work_finder.md",
+        "receipt_schema_version": "reservation-aware-fallback-work-finder-contract-v1",
+        "current_receipt": true,
+        "artifact_head": "second-wave-current-main",
+        "executed_tests": 7,
+        "advisory_only": false,
+        "local_fallback_observed": false,
+        "command_envelope": {
+          "remote_required": true,
+          "local_fallback_allowed": false,
+          "target_dir_isolated": true,
+          "timeout_seconds": 900,
+          "memory_mb": 4096
+        },
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reservation_aware_fallback_work_finder cargo test -p asupersync --test reservation_aware_fallback_work_finder_contract -- --nocapture"
+      }
+    ],
+    "open_blockers": [
+      {
+        "id": "asupersync-tuag6e",
+        "status": "open",
+        "relation": "parent-program-open-dependency",
+        "reason": "Channel and sync pressure telemetry snapshots remain outside this second-wave bundle.",
+        "blocks_parent_epic_close": true,
+        "blocks_bundle_scope": false
+      }
+    ],
+    "non_claims": [
+      "not a performance benchmark",
+      "not a release publish proof",
+      "not a substitute for broad check/clippy/test gates",
+      "not evidence for unrelated source surfaces",
+      "not proof of RCH fleet availability",
+      "not a parent epic closure while open dependencies remain"
+    ],
+    "operator_refresh": {
+      "json_report": "python3 scripts/second_wave_swarm_control_loop_certification.py --fixture artifacts/second_wave_swarm_control_loop_certification_v1.json --generated-at <utc> --output json",
+      "markdown_report": "python3 scripts/second_wave_swarm_control_loop_certification.py --fixture artifacts/second_wave_swarm_control_loop_certification_v1.json --generated-at <utc> --output markdown",
+      "e2e": "bash scripts/run_second_wave_swarm_control_loop_certification_e2e.sh --run-id <id>",
+      "contract_proof": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_second_wave_swarm_control_loop_certification CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test second_wave_swarm_control_loop_certification_contract -- --nocapture"
+    },
+    "expected_summary": {
+      "required_children": 7,
+      "accepted_rows": 7,
+      "rejected_rows": 6,
+      "missing_required_children": 0,
+      "operator_workflow_certified": true,
+      "certification_verdict": "pass",
+      "parent_epic_close_allowed": false,
+      "release_ready": false,
+      "broad_workspace_health": false,
+      "performance_benchmark": false
+    }
+  }
+}
