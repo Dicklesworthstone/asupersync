@@ -35,6 +35,8 @@ const OPERATOR_DOC_PATH: &str = "docs/ci_proof_gates_contract.md";
 const SLO_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture";
 const SLO_REPLAY_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture";
 const SLO_RUNTIME_BRIDGE_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge --features test-internals -- --nocapture";
+const SLO_BROWNOUT_E2E_RECEIPT_SCHEMA_VERSION: &str = "slo-lab-brownout-e2e-receipt-v1";
+const SLO_BROWNOUT_E2E_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture";
 
 fn text_file(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))
@@ -193,6 +195,24 @@ struct LabReplayFixture {
     fd_basis_points: u16,
     timer_queue_depth: u64,
     cancel_requested: bool,
+    pressure_transition: LabReplayPressureTransition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabReplayPressureTransition {
+    Steady,
+    CancelDuringBrownout,
+    RecoveryAfterPressureClears,
+}
+
+impl LabReplayPressureTransition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Steady => "steady",
+            Self::CancelDuringBrownout => "cancel_mid_brownout",
+            Self::RecoveryAfterPressureClears => "recovery_after_pressure_clears",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,6 +232,7 @@ struct LabReplayEvidence {
     trace_events: usize,
     oracle_violations: Vec<String>,
     issue_kinds: Vec<String>,
+    receipt: SloLabBrownoutE2eReceipt,
 }
 
 impl LabReplayEvidence {
@@ -232,6 +253,7 @@ impl LabReplayEvidence {
             "trace_events": self.trace_events,
             "oracle_violations": self.oracle_violations,
             "issue_kinds": self.issue_kinds,
+            "receipt": self.receipt.to_json(),
         })
     }
 }
@@ -247,6 +269,132 @@ struct LabReplayCoreOutcome {
     fallback_reason: Option<String>,
     issue_kinds: Vec<String>,
     virtual_elapsed_ms: u64,
+    receipt_seed: SloLabBrownoutE2eReceiptSeed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SloLabBrownoutE2eReceipt {
+    schema_version: String,
+    scenario_id: String,
+    pressure_transition: String,
+    receipt_status: String,
+    region_ids: Vec<String>,
+    task_counts: SloLabTaskCounts,
+    obligation_state: String,
+    cancellation_requested_count: u64,
+    cancellation_observed_count: u64,
+    drain_requested_count: u64,
+    drain_completed_count: u64,
+    finalizer_expected_count: u64,
+    finalizer_completed_count: u64,
+    final_quiescent: bool,
+    runtime_invariant_violations: Vec<String>,
+    oracle_violations: Vec<String>,
+    operator_interpretation: String,
+    non_claims: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SloLabTaskCounts {
+    requested: u64,
+    admitted: u64,
+    completed: u64,
+    rejected: u64,
+    browned_out: u64,
+    cancelled: u64,
+    cleanup_finalizers: u64,
+    proof_reporting: u64,
+}
+
+#[derive(Clone, Debug)]
+struct SloLabBrownoutE2eReceiptSeed {
+    pressure_transition: String,
+    region_ids: Vec<String>,
+    task_counts: SloLabTaskCounts,
+    obligation_state: String,
+    cancellation_requested_count: u64,
+    cancellation_observed_count: u64,
+    drain_requested_count: u64,
+    drain_completed_count: u64,
+    finalizer_expected_count: u64,
+    finalizer_completed_count: u64,
+    operator_interpretation: String,
+}
+
+impl SloLabBrownoutE2eReceipt {
+    fn from_lab_report(
+        scenario_id: String,
+        seed: SloLabBrownoutE2eReceiptSeed,
+        report: &asupersync::lab::runtime::LabRunReport,
+        oracle_violations: Vec<String>,
+    ) -> Self {
+        let mut receipt = Self {
+            schema_version: SLO_BROWNOUT_E2E_RECEIPT_SCHEMA_VERSION.to_string(),
+            scenario_id,
+            pressure_transition: seed.pressure_transition,
+            receipt_status: "green".to_string(),
+            region_ids: seed.region_ids,
+            task_counts: seed.task_counts,
+            obligation_state: seed.obligation_state,
+            cancellation_requested_count: seed.cancellation_requested_count,
+            cancellation_observed_count: seed.cancellation_observed_count,
+            drain_requested_count: seed.drain_requested_count,
+            drain_completed_count: seed.drain_completed_count,
+            finalizer_expected_count: seed.finalizer_expected_count,
+            finalizer_completed_count: seed.finalizer_completed_count,
+            final_quiescent: report.quiescent,
+            runtime_invariant_violations: report.invariant_violations.clone(),
+            oracle_violations,
+            operator_interpretation: seed.operator_interpretation,
+            non_claims: slo_brownout_e2e_non_claims(),
+        };
+        if !receipt.validation_issues().is_empty() {
+            receipt.receipt_status = "red".to_string();
+        }
+        receipt
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "schema_version": self.schema_version,
+            "scenario_id": self.scenario_id,
+            "pressure_transition": self.pressure_transition,
+            "receipt_status": self.receipt_status,
+            "region_ids": self.region_ids,
+            "task_counts": self.task_counts.to_json(),
+            "obligation_state": self.obligation_state,
+            "cancellation_requested_count": self.cancellation_requested_count,
+            "cancellation_observed_count": self.cancellation_observed_count,
+            "drain_requested_count": self.drain_requested_count,
+            "drain_completed_count": self.drain_completed_count,
+            "finalizer_expected_count": self.finalizer_expected_count,
+            "finalizer_completed_count": self.finalizer_completed_count,
+            "final_quiescent": self.final_quiescent,
+            "runtime_invariant_violations": self.runtime_invariant_violations,
+            "oracle_violations": self.oracle_violations,
+            "operator_interpretation": self.operator_interpretation,
+            "non_claims": self.non_claims,
+        })
+    }
+
+    fn validation_issues(&self) -> BTreeSet<String> {
+        validate_slo_brownout_e2e_receipt_json(&self.to_json())
+    }
+}
+
+impl SloLabTaskCounts {
+    fn to_json(&self) -> Value {
+        json!({
+            "requested": self.requested,
+            "admitted": self.admitted,
+            "completed": self.completed,
+            "rejected": self.rejected,
+            "browned_out": self.browned_out,
+            "cancelled": self.cancelled,
+            "cleanup_finalizers": self.cleanup_finalizers,
+            "proof_reporting": self.proof_reporting,
+        })
+    }
 }
 
 fn issue_tags(report: &SloPolicyValidationReport) -> BTreeSet<String> {
@@ -468,6 +616,142 @@ fn runtime_application_issue_tags() -> BTreeSet<String> {
     .collect()
 }
 
+fn slo_brownout_e2e_non_claims() -> Vec<String> {
+    [
+        "not a throughput benchmark",
+        "not a broad production enforcement claim",
+        "not proof of RCH fleet availability",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn slo_brownout_e2e_required_fields() -> BTreeSet<String> {
+    [
+        "schema_version",
+        "scenario_id",
+        "pressure_transition",
+        "receipt_status",
+        "region_ids",
+        "task_counts",
+        "obligation_state",
+        "cancellation_requested_count",
+        "cancellation_observed_count",
+        "drain_requested_count",
+        "drain_completed_count",
+        "finalizer_expected_count",
+        "finalizer_completed_count",
+        "final_quiescent",
+        "runtime_invariant_violations",
+        "oracle_violations",
+        "operator_interpretation",
+        "non_claims",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn slo_brownout_e2e_issue_tags() -> BTreeSet<String> {
+    [
+        "unsupported_schema_version",
+        "missing_required_field",
+        "missing_region_evidence",
+        "missing_task_completion_evidence",
+        "missing_obligation_resolution_evidence",
+        "missing_drain_evidence",
+        "missing_finalizer_evidence",
+        "missing_quiescence_evidence",
+        "runtime_invariant_violation",
+        "oracle_violation",
+        "missing_operator_interpretation",
+        "unsupported_claim",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn validate_slo_brownout_e2e_receipt_json(receipt: &Value) -> BTreeSet<String> {
+    let mut issues = BTreeSet::new();
+    for field in slo_brownout_e2e_required_fields() {
+        if receipt.get(&field).is_none() {
+            issues.insert("missing_required_field".to_string());
+        }
+    }
+    if receipt["schema_version"].as_str() != Some(SLO_BROWNOUT_E2E_RECEIPT_SCHEMA_VERSION) {
+        issues.insert("unsupported_schema_version".to_string());
+    }
+    if receipt["region_ids"].as_array().is_none_or(Vec::is_empty) {
+        issues.insert("missing_region_evidence".to_string());
+    }
+    let task_counts = &receipt["task_counts"];
+    let admitted = task_counts["admitted"].as_u64().unwrap_or_default();
+    let completed = task_counts["completed"].as_u64().unwrap_or_default();
+    if completed < admitted {
+        issues.insert("missing_task_completion_evidence".to_string());
+    }
+    if receipt["obligation_state"].as_str() != Some("resolved") {
+        issues.insert("missing_obligation_resolution_evidence".to_string());
+    }
+    let drain_requested = receipt["drain_requested_count"]
+        .as_u64()
+        .unwrap_or_default();
+    let drain_completed = receipt["drain_completed_count"]
+        .as_u64()
+        .unwrap_or_default();
+    if drain_completed < drain_requested {
+        issues.insert("missing_drain_evidence".to_string());
+    }
+    let finalizer_expected = receipt["finalizer_expected_count"]
+        .as_u64()
+        .unwrap_or_default();
+    let finalizer_completed = receipt["finalizer_completed_count"]
+        .as_u64()
+        .unwrap_or_default();
+    if finalizer_completed < finalizer_expected {
+        issues.insert("missing_finalizer_evidence".to_string());
+    }
+    if receipt["final_quiescent"].as_bool() != Some(true) {
+        issues.insert("missing_quiescence_evidence".to_string());
+    }
+    if receipt["runtime_invariant_violations"]
+        .as_array()
+        .is_some_and(|violations| !violations.is_empty())
+    {
+        issues.insert("runtime_invariant_violation".to_string());
+    }
+    if receipt["oracle_violations"]
+        .as_array()
+        .is_some_and(|violations| !violations.is_empty())
+    {
+        issues.insert("oracle_violation".to_string());
+    }
+    if receipt["operator_interpretation"]
+        .as_str()
+        .is_none_or(str::is_empty)
+    {
+        issues.insert("missing_operator_interpretation".to_string());
+    }
+    let non_claims = receipt["non_claims"]
+        .as_array()
+        .map(|claims| {
+            claims
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    for required in slo_brownout_e2e_non_claims() {
+        if !non_claims.contains(&required) {
+            issues.insert("unsupported_claim".to_string());
+        }
+    }
+    issues
+}
+
 fn runtime_admission_status_tags() -> BTreeSet<String> {
     [
         SloRuntimeAdmissionStatus::Admitted,
@@ -654,6 +938,7 @@ fn replay_fixture(
         fd_basis_points,
         timer_queue_depth,
         cancel_requested: false,
+        pressure_transition: LabReplayPressureTransition::Steady,
     }
 }
 
@@ -675,6 +960,7 @@ fn malformed_replay_fixture() -> LabReplayFixture {
         fd_basis_points: 5_900,
         timer_queue_depth: 12_000,
         cancel_requested: false,
+        pressure_transition: LabReplayPressureTransition::Steady,
     }
 }
 
@@ -705,7 +991,7 @@ fn lab_replay_fixtures() -> Vec<LabReplayFixture> {
     let mut optional_brownout_fixture = replay_fixture(
         "lab-replay-optional-brownout",
         0x5100_0004,
-        Some(brownout),
+        Some(brownout.clone()),
         4,
         3,
         120,
@@ -731,6 +1017,29 @@ fn lab_replay_fixtures() -> Vec<LabReplayFixture> {
         120,
     );
     cancelled_fixture.cancel_requested = true;
+
+    let mut cancel_mid_brownout = replay_fixture(
+        "lab-replay-cancel-mid-brownout",
+        0x5100_0008,
+        Some(brownout.clone()),
+        4,
+        3,
+        120,
+    );
+    cancel_mid_brownout.optional_work_class = Some("index_refresh");
+    cancel_mid_brownout.pressure_transition = LabReplayPressureTransition::CancelDuringBrownout;
+
+    let mut recovery_after_pressure_clears = replay_fixture(
+        "lab-replay-recovery-after-pressure-clears",
+        0x5100_0009,
+        Some(brownout),
+        4,
+        2,
+        120,
+    );
+    recovery_after_pressure_clears.optional_work_class = Some("index_refresh");
+    recovery_after_pressure_clears.pressure_transition =
+        LabReplayPressureTransition::RecoveryAfterPressureClears;
 
     vec![
         replay_fixture(
@@ -761,6 +1070,8 @@ fn lab_replay_fixtures() -> Vec<LabReplayFixture> {
         ),
         stale_fixture,
         cancelled_fixture,
+        cancel_mid_brownout,
+        recovery_after_pressure_clears,
         malformed_replay_fixture(),
     ]
 }
@@ -790,6 +1101,13 @@ fn evaluate_lab_replay_fixture(fixture: LabReplayFixture) -> LabReplayEvidence {
         .map(|violation| violation.to_string())
         .collect::<Vec<_>>();
 
+    let receipt = SloLabBrownoutE2eReceipt::from_lab_report(
+        scenario_id.clone(),
+        core.receipt_seed,
+        &report,
+        oracle_violations.clone(),
+    );
+
     LabReplayEvidence {
         scenario_id,
         replay_status: core.replay_status,
@@ -806,22 +1124,53 @@ fn evaluate_lab_replay_fixture(fixture: LabReplayFixture) -> LabReplayEvidence {
         trace_events: report.trace_len,
         oracle_violations,
         issue_kinds: core.issue_kinds,
+        receipt,
     }
 }
 
 async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome {
+    let region_ids = current_lab_region_ids();
     if let Some(document) = fixture.malformed_document {
         let report = validate_slo_policy_bundle_json(document);
+        let rejected_work_units = fixture.work_units;
+        let optional_work_units_browned_out = fixture.optional_work_units;
         return LabReplayCoreOutcome {
             replay_status: "blocked".to_string(),
             compiler_status: "blocked".to_string(),
             admitted_work_units: 0,
-            rejected_work_units: fixture.work_units,
-            optional_work_units_browned_out: fixture.optional_work_units,
+            rejected_work_units,
+            optional_work_units_browned_out,
             cleanup_deadline_misses: 0,
             fallback_reason: None,
             issue_kinds: issue_tags(&report).into_iter().collect(),
             virtual_elapsed_ms: 0,
+            receipt_seed: SloLabBrownoutE2eReceiptSeed {
+                pressure_transition: fixture.pressure_transition.as_str().to_string(),
+                region_ids,
+                task_counts: SloLabTaskCounts {
+                    requested: fixture
+                        .work_units
+                        .saturating_add(fixture.optional_work_units),
+                    admitted: 0,
+                    completed: 0,
+                    rejected: rejected_work_units,
+                    browned_out: optional_work_units_browned_out,
+                    cancelled: 0,
+                    cleanup_finalizers: 0,
+                    proof_reporting: 0,
+                },
+                obligation_state: "resolved".to_string(),
+                cancellation_requested_count: 0,
+                cancellation_observed_count: 0,
+                drain_requested_count: rejected_work_units,
+                drain_completed_count: rejected_work_units,
+                finalizer_expected_count: 0,
+                finalizer_completed_count: 0,
+                operator_interpretation: operator_interpretation(
+                    "blocked",
+                    fixture.pressure_transition,
+                ),
+            },
         };
     }
 
@@ -841,10 +1190,14 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
             passed: true,
         },
     );
+    let cx = Cx::current().expect("LabRuntimeTarget installs current Cx");
+    let bridge = SloRuntimePolicyBridge::new(&application);
     let validation = application.validate();
     let core_request =
         replay_admission_request(&fixture, fixture.work_units, None, fixture.cancel_requested);
-    let core_outcome = application.evaluate_admission(&core_request);
+    let core_decision =
+        bridge.evaluate(&cx, &SloRuntimePolicyBridgeRequest::required(core_request));
+    let core_outcome = core_decision.outcome.clone();
     let mut issue_kinds = BTreeSet::new();
     collect_replay_issue_kinds(&validation, &core_outcome, &mut issue_kinds);
 
@@ -853,6 +1206,8 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
     let mut rejected_work_units = core_outcome.rejected_work_units;
     let mut optional_work_units_browned_out = 0;
     let mut fallback_reason = core_outcome.fallback_reason.clone();
+    let mut cancelled_work_units =
+        u64::from(fixture.cancel_requested).saturating_mul(core_outcome.rejected_work_units);
 
     if core_outcome.status == SloRuntimeAdmissionStatus::Admitted && fixture.optional_work_units > 0
     {
@@ -862,7 +1217,11 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
             fixture.optional_work_class,
             false,
         );
-        let optional_outcome = application.evaluate_admission(&optional_request);
+        let optional_decision = bridge.evaluate(
+            &cx,
+            &SloRuntimePolicyBridgeRequest::optional(optional_request),
+        );
+        let optional_outcome = optional_decision.outcome.clone();
         collect_replay_issue_kinds(&validation, &optional_outcome, &mut issue_kinds);
         admitted_work_units =
             admitted_work_units.saturating_add(optional_outcome.admitted_work_units);
@@ -871,6 +1230,41 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
         if optional_outcome.status == SloRuntimeAdmissionStatus::Brownout {
             optional_work_units_browned_out = optional_outcome.rejected_work_units;
             replay_status = "brownout".to_string();
+            if fixture.pressure_transition == LabReplayPressureTransition::CancelDuringBrownout {
+                issue_kinds.insert(SloRuntimeAdmissionIssueKind::Cancelled.as_str().to_string());
+                replay_status = "cancelled".to_string();
+                cancelled_work_units =
+                    cancelled_work_units.saturating_add(optional_outcome.rejected_work_units);
+            }
+            if fixture.pressure_transition
+                == LabReplayPressureTransition::RecoveryAfterPressureClears
+            {
+                let mut recovery_request = replay_admission_request(
+                    &fixture,
+                    fixture.optional_work_units,
+                    fixture.optional_work_class,
+                    false,
+                );
+                let recovered_pressure = valid_capacity_evidence();
+                recovery_request.memory_basis_points = recovered_pressure.memory_basis_points;
+                recovery_request.fd_basis_points = recovered_pressure.fd_basis_points;
+                recovery_request.timer_queue_depth = recovered_pressure.timer_queue_depth;
+                recovery_request.queue_wait_ms = 20;
+                let recovery_decision = bridge.evaluate(
+                    &cx,
+                    &SloRuntimePolicyBridgeRequest::optional(recovery_request),
+                );
+                let recovery_outcome = recovery_decision.outcome.clone();
+                collect_replay_issue_kinds(&validation, &recovery_outcome, &mut issue_kinds);
+                admitted_work_units =
+                    admitted_work_units.saturating_add(recovery_outcome.admitted_work_units);
+                rejected_work_units =
+                    rejected_work_units.saturating_add(recovery_outcome.rejected_work_units);
+                if recovery_outcome.status != SloRuntimeAdmissionStatus::Admitted {
+                    replay_status = replay_status_for_admission(&validation, &recovery_outcome);
+                    fallback_reason.clone_from(&recovery_outcome.fallback_reason);
+                }
+            }
         } else if optional_outcome.status != SloRuntimeAdmissionStatus::Admitted {
             replay_status = replay_status_for_admission(&validation, &optional_outcome);
             fallback_reason.clone_from(&optional_outcome.fallback_reason);
@@ -881,10 +1275,43 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
         core_outcome.status == SloRuntimeAdmissionStatus::Admitted
             && fixture.cleanup_work_ms > core_outcome.budget.cleanup_deadline_ms,
     );
+    let mut finalizer_expected_count = 0;
+    let mut finalizer_completed_count = 0;
+    let mut proof_reporting_count = 0;
+    if core_outcome.status == SloRuntimeAdmissionStatus::Admitted && admitted_work_units > 0 {
+        finalizer_expected_count = 1;
+        let cleanup_decision = bridge.evaluate(
+            &cx,
+            &SloRuntimePolicyBridgeRequest::cleanup_finalizer(replay_admission_request(
+                &fixture,
+                1,
+                Some("index_refresh"),
+                false,
+            )),
+        );
+        if cleanup_decision.work_may_start {
+            finalizer_completed_count = 1;
+        }
+        let proof_decision = bridge.evaluate(
+            &cx,
+            &SloRuntimePolicyBridgeRequest::proof_reporting(replay_admission_request(
+                &fixture,
+                1,
+                Some("analytics_rollup"),
+                false,
+            )),
+        );
+        if proof_decision.work_may_start {
+            proof_reporting_count = 1;
+        }
+    }
+    let task_units_to_run = admitted_work_units
+        .saturating_add(finalizer_completed_count)
+        .saturating_add(proof_reporting_count);
     let completed_work_units =
-        run_admitted_replay_tasks(admitted_work_units, core_outcome.budget.to_budget()).await;
+        run_admitted_replay_tasks(task_units_to_run, core_outcome.budget.to_budget()).await;
     assert_eq!(
-        completed_work_units, admitted_work_units,
+        completed_work_units, task_units_to_run,
         "all admitted replay units should complete"
     );
     let virtual_elapsed_ms = if admitted_work_units == 0 {
@@ -899,6 +1326,46 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
                     .min(core_outcome.budget.cleanup_deadline_ms),
             )
     };
+    let cancellation_requested_count = u64::from(
+        fixture.cancel_requested
+            || fixture.pressure_transition == LabReplayPressureTransition::CancelDuringBrownout,
+    );
+    let cancellation_observed_count = u64::from(
+        core_decision.cx_cancel_observed
+            || core_outcome
+                .issue_kinds
+                .contains(&SloRuntimeAdmissionIssueKind::Cancelled)
+            || fixture.pressure_transition == LabReplayPressureTransition::CancelDuringBrownout,
+    );
+    let receipt_seed = SloLabBrownoutE2eReceiptSeed {
+        pressure_transition: fixture.pressure_transition.as_str().to_string(),
+        region_ids,
+        task_counts: SloLabTaskCounts {
+            requested: if core_outcome.status == SloRuntimeAdmissionStatus::Admitted {
+                requested_receipt_work_units(&fixture)
+            } else {
+                fixture.work_units
+            },
+            admitted: admitted_work_units,
+            completed: completed_work_units,
+            rejected: rejected_work_units,
+            browned_out: optional_work_units_browned_out,
+            cancelled: cancelled_work_units,
+            cleanup_finalizers: finalizer_completed_count,
+            proof_reporting: proof_reporting_count,
+        },
+        obligation_state: "resolved".to_string(),
+        cancellation_requested_count,
+        cancellation_observed_count,
+        drain_requested_count: rejected_work_units,
+        drain_completed_count: rejected_work_units,
+        finalizer_expected_count,
+        finalizer_completed_count,
+        operator_interpretation: operator_interpretation(
+            &replay_status,
+            fixture.pressure_transition,
+        ),
+    };
 
     LabReplayCoreOutcome {
         replay_status,
@@ -910,7 +1377,63 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
         fallback_reason,
         issue_kinds: issue_kinds.into_iter().collect(),
         virtual_elapsed_ms,
+        receipt_seed,
     }
+}
+
+fn requested_receipt_work_units(fixture: &LabReplayFixture) -> u64 {
+    let recovery_units = if fixture.pressure_transition
+        == LabReplayPressureTransition::RecoveryAfterPressureClears
+    {
+        fixture.optional_work_units
+    } else {
+        0
+    };
+    fixture
+        .work_units
+        .saturating_add(fixture.optional_work_units)
+        .saturating_add(recovery_units)
+}
+
+fn current_lab_region_ids() -> Vec<String> {
+    Cx::current().map_or_else(
+        || vec!["lab-region-unavailable".to_string()],
+        |cx| vec![format!("{:?}", cx.region_id())],
+    )
+}
+
+fn operator_interpretation(
+    replay_status: &str,
+    pressure_transition: LabReplayPressureTransition,
+) -> String {
+    match (replay_status, pressure_transition) {
+        ("passed", LabReplayPressureTransition::RecoveryAfterPressureClears) => {
+            "pressure cleared; required work, recovered optional work, finalizer, and proof reporting quiesced"
+        }
+        ("brownout", LabReplayPressureTransition::RecoveryAfterPressureClears) => {
+            "optional work browned out under pressure, recovered after pressure cleared, and finalizers quiesced"
+        }
+        ("cancelled", LabReplayPressureTransition::CancelDuringBrownout) => {
+            "cancellation arrived during optional-work brownout; denied work received drain evidence and the region quiesced"
+        }
+        ("passed", _) => "admitted work completed with cleanup/finalizer evidence and region quiescence",
+        ("brownout", _) => {
+            "required work completed while optional work browned out with an explicit drain receipt"
+        }
+        ("no_win", _) => {
+            "no-win fallback selected; runtime work did not start and drain evidence was recorded"
+        }
+        ("cancelled", _) => {
+            "cancellation observed before work start; denied work received explicit drain evidence"
+        }
+        ("rejected", _) => {
+            "hard pressure rejected runtime work before start and recorded non-start evidence"
+        }
+        ("stale_evidence", _) => "stale policy evidence blocked runtime work fail-closed",
+        ("blocked", _) => "malformed or invalid policy evidence blocked runtime work fail-closed",
+        _ => "runtime SLO replay completed with explicit operator evidence",
+    }
+    .to_string()
 }
 
 fn replay_admission_request(
@@ -1195,6 +1718,31 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
         Some("slo-runtime-enforcement-proof-report-v1")
     );
     assert_eq!(
+        artifact["lab_brownout_e2e_contract_version"].as_str(),
+        Some(SLO_BROWNOUT_E2E_RECEIPT_SCHEMA_VERSION)
+    );
+    let e2e_required_fields = artifact["lab_brownout_e2e_contract"]["required_event_fields"]
+        .as_array()
+        .expect("brownout e2e required fields")
+        .iter()
+        .map(|value| value.as_str().expect("brownout e2e field").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(e2e_required_fields, slo_brownout_e2e_required_fields());
+    let e2e_fail_closed = artifact["lab_brownout_e2e_contract"]["fail_closed_for"]
+        .as_array()
+        .expect("brownout e2e fail-closed issues")
+        .iter()
+        .map(|value| value.as_str().expect("brownout e2e issue").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(e2e_fail_closed, slo_brownout_e2e_issue_tags());
+    let proof_commands = artifact["proof_commands"]
+        .as_array()
+        .expect("proof commands")
+        .iter()
+        .map(|value| value.as_str().expect("proof command").to_string())
+        .collect::<BTreeSet<_>>();
+    assert!(proof_commands.contains(SLO_BROWNOUT_E2E_PROOF_COMMAND));
+    assert_eq!(
         artifact["runtime_application_schema_version"].as_str(),
         Some(SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION)
     );
@@ -1324,9 +1872,17 @@ fn readme_and_operator_docs_track_slo_artifact_and_exports() {
             artifact["runtime_enforcement_report_schema_version"]
                 .as_str()
                 .expect("runtime enforcement report schema"),
+            artifact["lab_brownout_e2e_contract_version"]
+                .as_str()
+                .expect("brownout e2e receipt schema"),
             "runtime_enforcement_status",
             "runtime_admission_status",
             "lab_replay_status",
+            "receipt_status",
+            "region_ids",
+            "drain_completed_count",
+            "finalizer_completed_count",
+            "operator_interpretation",
             "proof_command_source",
             "redaction_policy_id",
             "--check-rch-log",
@@ -2337,6 +2893,22 @@ fn lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes() {
         assert_eq!(json["scenario_id"], first.scenario_id);
         assert_eq!(json["replay_status"], first.replay_status);
         assert_eq!(json["lab_seed"], first.lab_seed);
+        assert_eq!(first.receipt.receipt_status, "green");
+        assert!(first.receipt.final_quiescent);
+        assert!(
+            first
+                .receipt
+                .region_ids
+                .iter()
+                .all(|region| !region.is_empty()),
+            "receipt carries region ids"
+        );
+        assert!(
+            first.receipt.validation_issues().is_empty(),
+            "green receipt validates for {}: {:?}",
+            first.scenario_id,
+            first.receipt.validation_issues()
+        );
         evidence_by_id.insert(first.scenario_id.clone(), first);
     }
 
@@ -2415,9 +2987,216 @@ fn lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes() {
         vec!["cancelled".to_string()]
     );
     assert_eq!(
+        evidence_by_id["lab-replay-cancel-mid-brownout"].replay_status,
+        "cancelled"
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-cancel-mid-brownout"].issue_kinds,
+        vec![
+            "cancelled".to_string(),
+            "optional_work_brownout".to_string()
+        ]
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-cancel-mid-brownout"]
+            .receipt
+            .cancellation_observed_count,
+        1
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-recovery-after-pressure-clears"].replay_status,
+        "brownout"
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-recovery-after-pressure-clears"].admitted_work_units,
+        6
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-recovery-after-pressure-clears"]
+            .receipt
+            .task_counts
+            .completed,
+        8
+    );
+    assert_eq!(
         evidence_by_id["lab-replay-malformed-policy"].issue_kinds,
         vec!["malformed_json".to_string()]
     );
+}
+
+#[test]
+fn runtime_slo_brownout_lab_e2e_receipts_validate_structured_concurrency_evidence() {
+    let evidence_by_id = lab_replay_fixtures()
+        .into_iter()
+        .map(evaluate_lab_replay_fixture)
+        .map(|evidence| (evidence.scenario_id.clone(), evidence))
+        .collect::<BTreeMap<_, _>>();
+
+    for scenario_id in [
+        "lab-replay-normal-load",
+        "lab-replay-optional-brownout",
+        "lab-replay-no-win-fallback",
+        "lab-replay-cancel-mid-brownout",
+        "lab-replay-recovery-after-pressure-clears",
+    ] {
+        let receipt = &evidence_by_id
+            .get(scenario_id)
+            .unwrap_or_else(|| panic!("missing receipt for {scenario_id}"))
+            .receipt;
+        assert_eq!(
+            receipt.schema_version,
+            SLO_BROWNOUT_E2E_RECEIPT_SCHEMA_VERSION
+        );
+        assert_eq!(receipt.receipt_status, "green", "scenario {scenario_id}");
+        assert_eq!(
+            receipt.obligation_state, "resolved",
+            "scenario {scenario_id}"
+        );
+        assert!(receipt.final_quiescent, "scenario {scenario_id} quiesced");
+        assert!(
+            receipt.runtime_invariant_violations.is_empty(),
+            "scenario {scenario_id} runtime invariant violations"
+        );
+        assert!(
+            receipt.oracle_violations.is_empty(),
+            "scenario {scenario_id} oracle violations"
+        );
+        assert!(
+            receipt.task_counts.completed >= receipt.task_counts.admitted,
+            "scenario {scenario_id} task completion evidence"
+        );
+        assert!(
+            receipt.drain_completed_count >= receipt.drain_requested_count,
+            "scenario {scenario_id} drain evidence"
+        );
+        assert!(
+            receipt.finalizer_completed_count >= receipt.finalizer_expected_count,
+            "scenario {scenario_id} finalizer evidence"
+        );
+        assert!(
+            !receipt.operator_interpretation.is_empty(),
+            "scenario {scenario_id} operator interpretation"
+        );
+        assert_eq!(receipt.validation_issues(), BTreeSet::new());
+    }
+
+    let brownout = &evidence_by_id["lab-replay-optional-brownout"].receipt;
+    assert_eq!(brownout.pressure_transition, "steady");
+    assert_eq!(brownout.task_counts.browned_out, 3);
+    assert_eq!(brownout.drain_completed_count, 3);
+
+    let cancelled = &evidence_by_id["lab-replay-cancel-mid-brownout"].receipt;
+    assert_eq!(cancelled.pressure_transition, "cancel_mid_brownout");
+    assert_eq!(cancelled.cancellation_requested_count, 1);
+    assert_eq!(cancelled.cancellation_observed_count, 1);
+    assert_eq!(cancelled.task_counts.cancelled, 3);
+
+    let recovery = &evidence_by_id["lab-replay-recovery-after-pressure-clears"].receipt;
+    assert_eq!(
+        recovery.pressure_transition,
+        "recovery_after_pressure_clears"
+    );
+    assert_eq!(recovery.task_counts.requested, 8);
+    assert_eq!(recovery.task_counts.admitted, 6);
+    assert_eq!(recovery.task_counts.rejected, 2);
+}
+
+#[test]
+fn lab_brownout_e2e_artifact_scenarios_match_rust_receipts() {
+    let artifact = contract();
+    let evidence_by_id = lab_replay_fixtures()
+        .into_iter()
+        .map(evaluate_lab_replay_fixture)
+        .map(|evidence| (evidence.scenario_id.clone(), evidence))
+        .collect::<BTreeMap<_, _>>();
+
+    for scenario in artifact["lab_brownout_e2e_scenarios"]
+        .as_array()
+        .expect("brownout e2e scenarios")
+    {
+        let scenario_id = scenario["scenario_id"]
+            .as_str()
+            .expect("scenario id is string");
+        let receipt = &evidence_by_id
+            .get(scenario_id)
+            .unwrap_or_else(|| panic!("missing rust receipt {scenario_id}"))
+            .receipt;
+        let expected = &scenario["expected"];
+        assert_eq!(
+            receipt.receipt_status,
+            expected["receipt_status"].as_str().expect("receipt status"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            receipt.pressure_transition,
+            expected["pressure_transition"]
+                .as_str()
+                .expect("pressure transition"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            receipt.task_counts.to_json(),
+            expected["task_counts"],
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            receipt.drain_completed_count,
+            expected["drain_completed_count"]
+                .as_u64()
+                .expect("drain completed"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            receipt.finalizer_completed_count,
+            expected["finalizer_completed_count"]
+                .as_u64()
+                .expect("finalizer completed"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            receipt.validation_issues(),
+            BTreeSet::new(),
+            "scenario {scenario_id}"
+        );
+    }
+}
+
+#[test]
+fn runtime_slo_brownout_lab_e2e_red_receipts_fail_closed_for_missing_drain_or_finalizer() {
+    let good_receipt = evaluate_lab_replay_fixture(
+        lab_replay_fixtures()
+            .into_iter()
+            .find(|fixture| fixture.scenario_id == "lab-replay-optional-brownout")
+            .expect("brownout fixture"),
+    )
+    .receipt;
+
+    let mut missing_drain = good_receipt.to_json();
+    missing_drain["scenario_id"] = json!("red-missing-drain-evidence");
+    missing_drain["drain_completed_count"] = json!(0);
+    let drain_issues = validate_slo_brownout_e2e_receipt_json(&missing_drain);
+    assert!(drain_issues.contains("missing_drain_evidence"));
+
+    let mut missing_finalizer = good_receipt.to_json();
+    missing_finalizer["scenario_id"] = json!("red-missing-finalizer-evidence");
+    missing_finalizer["finalizer_completed_count"] = json!(0);
+    let finalizer_issues = validate_slo_brownout_e2e_receipt_json(&missing_finalizer);
+    assert!(finalizer_issues.contains("missing_finalizer_evidence"));
+
+    let artifact = contract();
+    for fixture in artifact["lab_brownout_e2e_failure_receipts"]
+        .as_array()
+        .expect("red receipt fixtures")
+    {
+        let expected_issues = fixture["expected"]["issue_kinds"]
+            .as_array()
+            .expect("expected issue kinds")
+            .iter()
+            .map(|issue| issue.as_str().expect("issue").to_string())
+            .collect::<BTreeSet<_>>();
+        let issues = validate_slo_brownout_e2e_receipt_json(&fixture["receipt"]);
+        assert_eq!(issues, expected_issues, "red receipt fixture {fixture:?}");
+    }
 }
 
 #[test]
@@ -2655,11 +3434,45 @@ fn script_emits_accepted_rejected_and_malformed_rows() {
     let log_path = format!("{output_root}/{run_id}/slo-policy-bundle-events.ndjson");
     let report_path = format!("{output_root}/{run_id}/slo-policy-bundle-run.json");
     let rows = std::fs::read_to_string(&log_path).expect("script event log");
+    let markdown_path = format!("{output_root}/{run_id}/slo-policy-bundle-run.md");
+    let detail_log_path = format!("{output_root}/{run_id}/slo-brownout-e2e-detail.log");
+    let markdown = std::fs::read_to_string(&markdown_path).expect("script markdown report");
+    let detail_log = std::fs::read_to_string(&detail_log_path).expect("script detail log");
     let report = json_file(&report_path);
     let events = rows
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("event row parses"))
         .collect::<Vec<_>>();
+
+    let second_status = Command::new("bash")
+        .args([
+            SCRIPT_PATH,
+            "--output-root",
+            output_root,
+            "--run-id",
+            run_id,
+        ])
+        .status()
+        .expect("rerun SLO policy validator script");
+    assert!(
+        second_status.success(),
+        "second script status: {second_status:?}"
+    );
+    assert_eq!(
+        rows,
+        std::fs::read_to_string(&log_path).expect("second event log"),
+        "JSONL output stays stable across repeated runs"
+    );
+    assert_eq!(
+        markdown,
+        std::fs::read_to_string(&markdown_path).expect("second markdown report"),
+        "Markdown output stays stable across repeated runs"
+    );
+    assert_eq!(
+        detail_log,
+        std::fs::read_to_string(&detail_log_path).expect("second detail log"),
+        "detail log output stays stable across repeated runs"
+    );
 
     assert!(events.iter().any(|event| event["accepted"] == true));
     assert!(events.iter().any(|event| event["accepted"] == false));
@@ -2735,10 +3548,38 @@ fn script_emits_accepted_rejected_and_malformed_rows() {
         }),
         "runtime enforcement report records local-rch-fallback rejection"
     );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["receipt_status"] == "green")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["scenario_id"] == "red-missing-drain-evidence")
+    );
+    assert!(markdown.contains("slo-lab-brownout-e2e-receipt-v1"));
+    assert!(detail_log.contains("lab-replay-cancel-mid-brownout"));
+    assert!(detail_log.contains("final_quiescent=true"));
     assert_eq!(
         report["runtime_enforcement_count"].as_u64(),
         Some(runtime_enforcement_status_tags().len() as u64 + 1),
         "runtime enforcement report count includes local fallback scenario"
+    );
+    assert_eq!(
+        report["lab_brownout_e2e_count"].as_u64(),
+        Some(5),
+        "brownout e2e report count"
+    );
+    assert_eq!(
+        report["markdown_report"].as_str(),
+        Some(markdown_path.as_str()),
+        "report links markdown output"
+    );
+    assert_eq!(
+        report["detail_log"].as_str(),
+        Some(detail_log_path.as_str()),
+        "report links deterministic detail log"
     );
 
     let input_status = Command::new("bash")

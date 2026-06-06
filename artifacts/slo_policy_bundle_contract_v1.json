@@ -144,6 +144,51 @@
       "secret_like_material"
     ]
   },
+  "lab_brownout_e2e_bead_id": "asupersync-ol11aa.4",
+  "lab_brownout_e2e_contract_version": "slo-lab-brownout-e2e-receipt-v1",
+  "lab_brownout_e2e_contract": {
+    "mode": "deterministic LabRuntime brownout/no-win E2E receipt runner",
+    "source": "tests/slo_policy_bundle_contract.rs runtime_slo_brownout_lab_e2e_receipts_validate_structured_concurrency_evidence",
+    "required_event_fields": [
+      "schema_version",
+      "scenario_id",
+      "pressure_transition",
+      "receipt_status",
+      "region_ids",
+      "task_counts",
+      "obligation_state",
+      "cancellation_requested_count",
+      "cancellation_observed_count",
+      "drain_requested_count",
+      "drain_completed_count",
+      "finalizer_expected_count",
+      "finalizer_completed_count",
+      "final_quiescent",
+      "runtime_invariant_violations",
+      "oracle_violations",
+      "operator_interpretation",
+      "non_claims"
+    ],
+    "fail_closed_for": [
+      "unsupported_schema_version",
+      "missing_required_field",
+      "missing_region_evidence",
+      "missing_task_completion_evidence",
+      "missing_obligation_resolution_evidence",
+      "missing_drain_evidence",
+      "missing_finalizer_evidence",
+      "missing_quiescence_evidence",
+      "runtime_invariant_violation",
+      "oracle_violation",
+      "missing_operator_interpretation",
+      "unsupported_claim"
+    ],
+    "non_claims": [
+      "not a throughput benchmark",
+      "not a broad production enforcement claim",
+      "not proof of RCH fleet availability"
+    ]
+  },
   "runtime_application_bead_id": "asupersync-w5n9qp.1",
   "runtime_application_schema_version": "slo-runtime-policy-application-v1",
   "runtime_application_decisions": [
@@ -996,6 +1041,41 @@
       }
     },
     {
+      "scenario_id": "lab-replay-cancel-mid-brownout",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954504,
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "expected": {
+        "replay_status": "cancelled",
+        "admitted_work_units": 4,
+        "rejected_work_units": 3,
+        "optional_work_units_browned_out": 3,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "cancelled",
+          "optional_work_brownout"
+        ]
+      }
+    },
+    {
+      "scenario_id": "lab-replay-recovery-after-pressure-clears",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954505,
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "expected": {
+        "replay_status": "brownout",
+        "admitted_work_units": 6,
+        "rejected_work_units": 2,
+        "optional_work_units_browned_out": 2,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "optional_work_brownout"
+        ]
+      }
+    },
+    {
       "scenario_id": "lab-replay-malformed-policy",
       "policy_id": "",
       "seed": 1359015949,
@@ -1550,6 +1630,302 @@
       }
     }
   ],
+  "lab_brownout_e2e_scenarios": [
+    {
+      "scenario_id": "lab-replay-normal-load",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture",
+      "expected": {
+        "schema_version": "slo-lab-brownout-e2e-receipt-v1",
+        "receipt_status": "green",
+        "pressure_transition": "steady",
+        "region_ids": [
+          "lab-runtime-root-region"
+        ],
+        "task_counts": {
+          "requested": 4,
+          "admitted": 4,
+          "completed": 6,
+          "rejected": 0,
+          "browned_out": 0,
+          "cancelled": 0,
+          "cleanup_finalizers": 1,
+          "proof_reporting": 1
+        },
+        "obligation_state": "resolved",
+        "cancellation_requested_count": 0,
+        "cancellation_observed_count": 0,
+        "drain_requested_count": 0,
+        "drain_completed_count": 0,
+        "finalizer_expected_count": 1,
+        "finalizer_completed_count": 1,
+        "final_quiescent": true,
+        "runtime_invariant_violations": [],
+        "oracle_violations": [],
+        "operator_interpretation": "admitted work completed with cleanup/finalizer evidence and region quiescence",
+        "non_claims": [
+          "not a throughput benchmark",
+          "not a broad production enforcement claim",
+          "not proof of RCH fleet availability"
+        ],
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-optional-brownout",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture",
+      "expected": {
+        "schema_version": "slo-lab-brownout-e2e-receipt-v1",
+        "receipt_status": "green",
+        "pressure_transition": "steady",
+        "region_ids": [
+          "lab-runtime-root-region"
+        ],
+        "task_counts": {
+          "requested": 7,
+          "admitted": 4,
+          "completed": 6,
+          "rejected": 3,
+          "browned_out": 3,
+          "cancelled": 0,
+          "cleanup_finalizers": 1,
+          "proof_reporting": 1
+        },
+        "obligation_state": "resolved",
+        "cancellation_requested_count": 0,
+        "cancellation_observed_count": 0,
+        "drain_requested_count": 3,
+        "drain_completed_count": 3,
+        "finalizer_expected_count": 1,
+        "finalizer_completed_count": 1,
+        "final_quiescent": true,
+        "runtime_invariant_violations": [],
+        "oracle_violations": [],
+        "operator_interpretation": "required work completed while optional work browned out with an explicit drain receipt",
+        "non_claims": [
+          "not a throughput benchmark",
+          "not a broad production enforcement claim",
+          "not proof of RCH fleet availability"
+        ],
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-no-win-fallback",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture",
+      "expected": {
+        "schema_version": "slo-lab-brownout-e2e-receipt-v1",
+        "receipt_status": "green",
+        "pressure_transition": "steady",
+        "region_ids": [
+          "lab-runtime-root-region"
+        ],
+        "task_counts": {
+          "requested": 4,
+          "admitted": 0,
+          "completed": 0,
+          "rejected": 4,
+          "browned_out": 0,
+          "cancelled": 0,
+          "cleanup_finalizers": 0,
+          "proof_reporting": 0
+        },
+        "obligation_state": "resolved",
+        "cancellation_requested_count": 0,
+        "cancellation_observed_count": 0,
+        "drain_requested_count": 4,
+        "drain_completed_count": 4,
+        "finalizer_expected_count": 0,
+        "finalizer_completed_count": 0,
+        "final_quiescent": true,
+        "runtime_invariant_violations": [],
+        "oracle_violations": [],
+        "operator_interpretation": "no-win fallback selected; runtime work did not start and drain evidence was recorded",
+        "non_claims": [
+          "not a throughput benchmark",
+          "not a broad production enforcement claim",
+          "not proof of RCH fleet availability"
+        ],
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-cancel-mid-brownout",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture",
+      "expected": {
+        "schema_version": "slo-lab-brownout-e2e-receipt-v1",
+        "receipt_status": "green",
+        "pressure_transition": "cancel_mid_brownout",
+        "region_ids": [
+          "lab-runtime-root-region"
+        ],
+        "task_counts": {
+          "requested": 7,
+          "admitted": 4,
+          "completed": 6,
+          "rejected": 3,
+          "browned_out": 3,
+          "cancelled": 3,
+          "cleanup_finalizers": 1,
+          "proof_reporting": 1
+        },
+        "obligation_state": "resolved",
+        "cancellation_requested_count": 1,
+        "cancellation_observed_count": 1,
+        "drain_requested_count": 3,
+        "drain_completed_count": 3,
+        "finalizer_expected_count": 1,
+        "finalizer_completed_count": 1,
+        "final_quiescent": true,
+        "runtime_invariant_violations": [],
+        "oracle_violations": [],
+        "operator_interpretation": "cancellation arrived during optional-work brownout; denied work received drain evidence and the region quiesced",
+        "non_claims": [
+          "not a throughput benchmark",
+          "not a broad production enforcement claim",
+          "not proof of RCH fleet availability"
+        ],
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-recovery-after-pressure-clears",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture",
+      "expected": {
+        "schema_version": "slo-lab-brownout-e2e-receipt-v1",
+        "receipt_status": "green",
+        "pressure_transition": "recovery_after_pressure_clears",
+        "region_ids": [
+          "lab-runtime-root-region"
+        ],
+        "task_counts": {
+          "requested": 8,
+          "admitted": 6,
+          "completed": 8,
+          "rejected": 2,
+          "browned_out": 2,
+          "cancelled": 0,
+          "cleanup_finalizers": 1,
+          "proof_reporting": 1
+        },
+        "obligation_state": "resolved",
+        "cancellation_requested_count": 0,
+        "cancellation_observed_count": 0,
+        "drain_requested_count": 2,
+        "drain_completed_count": 2,
+        "finalizer_expected_count": 1,
+        "finalizer_completed_count": 1,
+        "final_quiescent": true,
+        "runtime_invariant_violations": [],
+        "oracle_violations": [],
+        "operator_interpretation": "optional work browned out under pressure, recovered after pressure cleared, and finalizers quiesced",
+        "non_claims": [
+          "not a throughput benchmark",
+          "not a broad production enforcement claim",
+          "not proof of RCH fleet availability"
+        ],
+        "issue_kinds": []
+      }
+    }
+  ],
+  "lab_brownout_e2e_failure_receipts": [
+    {
+      "scenario_id": "red-missing-drain-evidence",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture",
+      "receipt": {
+        "schema_version": "slo-lab-brownout-e2e-receipt-v1",
+        "scenario_id": "red-missing-drain-evidence",
+        "pressure_transition": "steady",
+        "receipt_status": "red",
+        "region_ids": [
+          "lab-runtime-root-region"
+        ],
+        "task_counts": {
+          "requested": 7,
+          "admitted": 4,
+          "completed": 6,
+          "rejected": 3,
+          "browned_out": 3,
+          "cancelled": 0,
+          "cleanup_finalizers": 1,
+          "proof_reporting": 1
+        },
+        "obligation_state": "resolved",
+        "cancellation_requested_count": 0,
+        "cancellation_observed_count": 0,
+        "drain_requested_count": 3,
+        "drain_completed_count": 0,
+        "finalizer_expected_count": 1,
+        "finalizer_completed_count": 1,
+        "final_quiescent": true,
+        "runtime_invariant_violations": [],
+        "oracle_violations": [],
+        "operator_interpretation": "required work completed while optional work browned out with an explicit drain receipt",
+        "non_claims": [
+          "not a throughput benchmark",
+          "not a broad production enforcement claim",
+          "not proof of RCH fleet availability"
+        ]
+      },
+      "expected": {
+        "receipt_status": "red",
+        "issue_kinds": [
+          "missing_drain_evidence"
+        ]
+      }
+    },
+    {
+      "scenario_id": "red-missing-finalizer-evidence",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture",
+      "receipt": {
+        "schema_version": "slo-lab-brownout-e2e-receipt-v1",
+        "scenario_id": "red-missing-finalizer-evidence",
+        "pressure_transition": "steady",
+        "receipt_status": "red",
+        "region_ids": [
+          "lab-runtime-root-region"
+        ],
+        "task_counts": {
+          "requested": 7,
+          "admitted": 4,
+          "completed": 6,
+          "rejected": 3,
+          "browned_out": 3,
+          "cancelled": 0,
+          "cleanup_finalizers": 0,
+          "proof_reporting": 1
+        },
+        "obligation_state": "resolved",
+        "cancellation_requested_count": 0,
+        "cancellation_observed_count": 0,
+        "drain_requested_count": 3,
+        "drain_completed_count": 3,
+        "finalizer_expected_count": 1,
+        "finalizer_completed_count": 0,
+        "final_quiescent": true,
+        "runtime_invariant_violations": [],
+        "oracle_violations": [],
+        "operator_interpretation": "required work completed while optional work browned out with an explicit drain receipt",
+        "non_claims": [
+          "not a throughput benchmark",
+          "not a broad production enforcement claim",
+          "not proof of RCH fleet availability"
+        ]
+      },
+      "expected": {
+        "receipt_status": "red",
+        "issue_kinds": [
+          "missing_finalizer_evidence"
+        ]
+      }
+    }
+  ],
   "e2e_script": "scripts/validate_slo_policy_bundle.sh",
   "required_log_fields": [
     "scenario_id",
@@ -1566,6 +1942,7 @@
     "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-w5n9qp.4 --check-rch-log target/slo-policy-bundle/rch.log",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_application cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_application cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_admission_evaluation -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture",
     "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",

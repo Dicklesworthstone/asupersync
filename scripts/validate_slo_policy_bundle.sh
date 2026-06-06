@@ -65,7 +65,9 @@ done
 
 OUTDIR="${OUTPUT_ROOT}/${RUN_ID}"
 REPORT="${OUTDIR}/slo-policy-bundle-run.json"
+MARKDOWN="${OUTDIR}/slo-policy-bundle-run.md"
 LOG="${OUTDIR}/slo-policy-bundle-events.ndjson"
+DETAIL_LOG="${OUTDIR}/slo-brownout-e2e-detail.log"
 RCH_LOG="${OUTDIR}/slo-policy-bundle-rch.log"
 mkdir -p "$OUTDIR"
 
@@ -117,14 +119,16 @@ PY
   exit $?
 fi
 
-python3 - "$ARTIFACT" "$REPORT" "$LOG" <<'PY'
+python3 - "$ARTIFACT" "$REPORT" "$MARKDOWN" "$LOG" "$DETAIL_LOG" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 artifact_path = Path(sys.argv[1])
 report_path = Path(sys.argv[2])
-log_path = Path(sys.argv[3])
+markdown_path = Path(sys.argv[3])
+log_path = Path(sys.argv[4])
+detail_log_path = Path(sys.argv[5])
 
 try:
     artifact = json.loads(artifact_path.read_text())
@@ -160,6 +164,11 @@ required = {
     "runtime_enforcement_statuses",
     "runtime_enforcement_issue_kinds",
     "runtime_enforcement_contract",
+    "lab_brownout_e2e_bead_id",
+    "lab_brownout_e2e_contract_version",
+    "lab_brownout_e2e_contract",
+    "lab_brownout_e2e_scenarios",
+    "lab_brownout_e2e_failure_receipts",
     "required_bundle_fields",
     "gate_contract",
     "scenarios",
@@ -254,12 +263,38 @@ expected_runtime_enforcement_issue_kinds = {
     "malformed_report",
     "local_rch_fallback",
 }
+expected_brownout_e2e_issue_kinds = {
+    "unsupported_schema_version",
+    "missing_required_field",
+    "missing_region_evidence",
+    "missing_task_completion_evidence",
+    "missing_obligation_resolution_evidence",
+    "missing_drain_evidence",
+    "missing_finalizer_evidence",
+    "missing_quiescence_evidence",
+    "runtime_invariant_violation",
+    "oracle_violation",
+    "missing_operator_interpretation",
+    "unsupported_claim",
+}
+expected_brownout_non_claims = {
+    "not a throughput benchmark",
+    "not a broad production enforcement claim",
+    "not proof of RCH fleet availability",
+}
 
 
 def cargo_command_has_target_dir(command):
     return "cargo " not in command or (
         "rch exec -- env " in command and "CARGO_TARGET_DIR=" in command
     )
+
+def bool_token(value):
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "null"
 
 
 required_bundle_fields = {
@@ -311,6 +346,13 @@ if set(artifact.get("runtime_enforcement_statuses") or []) != expected_runtime_e
     validation_errors.append({"kind": "missing_required_field", "field": "runtime_enforcement_statuses"})
 if set(artifact.get("runtime_enforcement_issue_kinds") or []) != expected_runtime_enforcement_issue_kinds:
     validation_errors.append({"kind": "missing_required_field", "field": "runtime_enforcement_issue_kinds"})
+if artifact.get("lab_brownout_e2e_contract_version") != "slo-lab-brownout-e2e-receipt-v1":
+    validation_errors.append({"kind": "unsupported_schema_version", "field": "lab_brownout_e2e_contract_version"})
+e2e_contract = artifact.get("lab_brownout_e2e_contract") or {}
+if set(e2e_contract.get("fail_closed_for") or []) != expected_brownout_e2e_issue_kinds:
+    validation_errors.append({"kind": "missing_required_field", "field": "lab_brownout_e2e_contract.fail_closed_for"})
+if set(e2e_contract.get("non_claims") or []) != expected_brownout_non_claims:
+    validation_errors.append({"kind": "missing_required_field", "field": "lab_brownout_e2e_contract.non_claims"})
 proof_report_gate = artifact.get("proof_report_gate") or {}
 if set(proof_report_gate.get("accepted_statuses") or []) != {"pass", "degraded", "no_win"}:
     validation_errors.append({"kind": "missing_required_field", "field": "proof_report_gate.accepted_statuses"})
@@ -635,7 +677,137 @@ if missing_runtime_enforcement_statuses:
         "missing": missing_runtime_enforcement_statuses,
     })
 
+lab_brownout_e2e_count = 0
+for e2e_scenario in artifact.get("lab_brownout_e2e_scenarios") or []:
+    scenario_id = e2e_scenario.get("scenario_id")
+    if not scenario_id:
+        validation_errors.append({"kind": "missing_required_field", "field": "lab_brownout_e2e_scenario_id"})
+        continue
+    expected = e2e_scenario.get("expected") or {}
+    proof_command = e2e_scenario.get("proof_command") or ""
+    issue_kinds = list(expected.get("issue_kinds") or [])
+    lab_brownout_e2e_count += 1
+    if expected.get("receipt_status") != "green":
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.receipt_status"})
+    if "rch exec" not in proof_command or not cargo_command_has_target_dir(proof_command):
+        validation_errors.append({"kind": "missing_rch_command", "field": f"{scenario_id}.proof_command"})
+    if set(expected.get("non_claims") or []) != expected_brownout_non_claims:
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.non_claims"})
+    if expected.get("final_quiescent") is not True:
+        validation_errors.append({"kind": "missing_quiescence_evidence", "field": scenario_id})
+    if expected.get("obligation_state") != "resolved":
+        validation_errors.append({"kind": "missing_obligation_resolution_evidence", "field": scenario_id})
+    if (expected.get("drain_completed_count") or 0) < (expected.get("drain_requested_count") or 0):
+        validation_errors.append({"kind": "missing_drain_evidence", "field": scenario_id})
+    if (expected.get("finalizer_completed_count") or 0) < (expected.get("finalizer_expected_count") or 0):
+        validation_errors.append({"kind": "missing_finalizer_evidence", "field": scenario_id})
+    if not expected.get("operator_interpretation"):
+        validation_errors.append({"kind": "missing_operator_interpretation", "field": scenario_id})
+    unknown_issues = sorted(set(issue_kinds) - expected_brownout_e2e_issue_kinds)
+    if unknown_issues:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_issues": unknown_issues})
+    event = {
+        "scenario_id": scenario_id,
+        "bead_id": artifact.get("lab_brownout_e2e_bead_id", artifact.get("bead_id", "")),
+        "accepted": True,
+        "issue_kinds": issue_kinds,
+        "policy_id": e2e_scenario.get("policy_id", ""),
+        "artifact_path": str(artifact_path),
+        "schema_version": artifact.get("lab_brownout_e2e_contract_version"),
+        "receipt_status": expected.get("receipt_status"),
+        "pressure_transition": expected.get("pressure_transition"),
+        "region_ids": expected.get("region_ids", []),
+        "task_counts": expected.get("task_counts", {}),
+        "obligation_state": expected.get("obligation_state"),
+        "cancellation_requested_count": expected.get("cancellation_requested_count", 0),
+        "cancellation_observed_count": expected.get("cancellation_observed_count", 0),
+        "drain_requested_count": expected.get("drain_requested_count", 0),
+        "drain_completed_count": expected.get("drain_completed_count", 0),
+        "finalizer_expected_count": expected.get("finalizer_expected_count", 0),
+        "finalizer_completed_count": expected.get("finalizer_completed_count", 0),
+        "final_quiescent": expected.get("final_quiescent"),
+        "runtime_invariant_violations": expected.get("runtime_invariant_violations", []),
+        "oracle_violations": expected.get("oracle_violations", []),
+        "operator_interpretation": expected.get("operator_interpretation"),
+        "non_claims": expected.get("non_claims", []),
+        "proof_command": proof_command,
+    }
+    event_missing = sorted(field for field in e2e_contract.get("required_event_fields", []) if field not in event)
+    if event_missing:
+        validation_errors.append({"kind": "missing_required_field", "field": scenario_id, "missing": event_missing})
+    events.append(event)
+
+red_receipt_count = 0
+for fixture in artifact.get("lab_brownout_e2e_failure_receipts") or []:
+    scenario_id = fixture.get("scenario_id")
+    expected = fixture.get("expected") or {}
+    issue_kinds = list(expected.get("issue_kinds") or [])
+    red_receipt_count += 1
+    unknown_issues = sorted(set(issue_kinds) - expected_brownout_e2e_issue_kinds)
+    if unknown_issues:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_issues": unknown_issues})
+    if expected.get("receipt_status") != "red":
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.receipt_status"})
+    if "missing_drain_evidence" not in issue_kinds and "missing_finalizer_evidence" not in issue_kinds:
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.red_issue"})
+    receipt = fixture.get("receipt") or {}
+    event = {
+        "scenario_id": scenario_id,
+        "bead_id": artifact.get("lab_brownout_e2e_bead_id", artifact.get("bead_id", "")),
+        "accepted": False,
+        "issue_kinds": issue_kinds,
+        "policy_id": fixture.get("policy_id", ""),
+        "artifact_path": str(artifact_path),
+        "schema_version": receipt.get("schema_version"),
+        "receipt_status": expected.get("receipt_status"),
+        "pressure_transition": receipt.get("pressure_transition"),
+        "region_ids": receipt.get("region_ids", []),
+        "task_counts": receipt.get("task_counts", {}),
+        "obligation_state": receipt.get("obligation_state"),
+        "cancellation_requested_count": receipt.get("cancellation_requested_count", 0),
+        "cancellation_observed_count": receipt.get("cancellation_observed_count", 0),
+        "drain_requested_count": receipt.get("drain_requested_count", 0),
+        "drain_completed_count": receipt.get("drain_completed_count", 0),
+        "finalizer_expected_count": receipt.get("finalizer_expected_count", 0),
+        "finalizer_completed_count": receipt.get("finalizer_completed_count", 0),
+        "final_quiescent": receipt.get("final_quiescent"),
+        "runtime_invariant_violations": receipt.get("runtime_invariant_violations", []),
+        "oracle_violations": receipt.get("oracle_violations", []),
+        "operator_interpretation": receipt.get("operator_interpretation"),
+        "non_claims": receipt.get("non_claims", []),
+        "proof_command": fixture.get("proof_command", ""),
+    }
+    events.append(event)
+
 log_path.write_text("".join(json.dumps(event, sort_keys=True) + "\n" for event in events))
+markdown_lines = [
+    "# SLO Policy Bundle Run",
+    "",
+    f"- artifact: {artifact_path}",
+    f"- schema: {artifact.get('schema_version')}",
+    f"- brownout_e2e_schema: {artifact.get('lab_brownout_e2e_contract_version')}",
+    f"- validation_errors: {len(validation_errors)}",
+    "",
+    "| scenario | receipt_status | transition | quiescent | drain | finalizer |",
+    "|---|---:|---|---:|---:|---:|",
+]
+for event in events:
+    if "receipt_status" not in event:
+        continue
+    markdown_lines.append(
+        "| {scenario_id} | {receipt_status} | {pressure_transition} | {final_quiescent} | {drain_completed_count}/{drain_requested_count} | {finalizer_completed_count}/{finalizer_expected_count} |".format(**event)
+    )
+markdown_path.write_text("\n".join(markdown_lines) + "\n")
+detail_lines = []
+for event in events:
+    if "receipt_status" not in event:
+        continue
+    detail_event = dict(event)
+    detail_event["final_quiescent"] = bool_token(event.get("final_quiescent"))
+    detail_lines.append(
+        "scenario={scenario_id} receipt_status={receipt_status} pressure_transition={pressure_transition} final_quiescent={final_quiescent} drain={drain_completed_count}/{drain_requested_count} finalizer={finalizer_completed_count}/{finalizer_expected_count}".format(**detail_event)
+    )
+detail_log_path.write_text("\n".join(detail_lines) + "\n")
 
 report = {
     "accepted": not validation_errors,
@@ -648,7 +820,11 @@ report = {
     "malformed_count": malformed_count,
     "proof_report_count": proof_report_count,
     "runtime_enforcement_count": runtime_enforcement_count,
+    "lab_brownout_e2e_count": lab_brownout_e2e_count,
+    "lab_brownout_e2e_red_receipt_count": red_receipt_count,
     "events_log": str(log_path),
+    "markdown_report": str(markdown_path),
+    "detail_log": str(detail_log_path),
     "validation_errors": validation_errors,
 }
 report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
