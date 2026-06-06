@@ -1,0 +1,181 @@
+{
+  "schema_version": "rch-quiet-phase-contract-v1",
+  "contract_id": "rch-quiet-phase-receipt-contract",
+  "bead_id": "asupersync-ol11aa.9.5",
+  "helper": "scripts/rch_quiet_phase_receipt.py",
+  "required_classifications": [
+    "remote-success-with-quiet-progress",
+    "remote-command-failed",
+    "artifact-retrieval-stall",
+    "local-fallback-refused",
+    "envelope-timeout-risk",
+    "missing-remote-required-evidence"
+  ],
+  "expected_summary": {
+    "scenario_count": 6,
+    "proof_success_citable_count": 1,
+    "progress_evidence_count": 4,
+    "warning_count": 3,
+    "blocker_count": 10,
+    "local_fallback_count": 1,
+    "artifact_stall_count": 1,
+    "highest_severity_scenario": "local-fallback-refusal"
+  },
+  "validation": {
+    "focused_rch_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_rch_quiet_phase_receipt\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_quiet_phase_receipt_contract -- --nocapture",
+    "script_self_check": "python3 scripts/rch_quiet_phase_receipt.py --fixture artifacts/rch_quiet_phase_receipt_contract_v1.json --generated-at 2026-06-06T16:50:00Z --output json"
+  },
+  "fixture": {
+    "schema_version": "rch-quiet-phase-fixture-v1",
+    "fixture_id": "rch-quiet-phase-contract-fixture",
+    "scenario_defaults": {
+      "description": "A cold remote clippy lane emits long quiet phases but completes with remote exit zero and artifact retrieval.",
+      "lane": {
+        "bead_id": "asupersync-ol11aa.9.5",
+        "command_id": "all-target-clippy-rch",
+        "proof_envelope": {
+          "class_id": "lint-frontier-heavy",
+          "timeout_seconds": 7200,
+          "memory_mb": 49152,
+          "remote_required": true,
+          "no_local_fallback": true,
+          "quiet_warning_seconds": 600,
+          "artifact_retrieval_timeout_seconds": 120
+        },
+        "command_provenance": {
+          "argv": [
+            "rch",
+            "exec",
+            "--",
+            "env",
+            "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets",
+            "cargo",
+            "clippy",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "env": {
+            "RCH_REQUIRE_REMOTE": "1"
+          },
+          "source_fingerprint": "git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "log_excerpt": "2026-06-06T16:13:17Z INFO Selected worker: ts2 at ubuntu@100.96.111.98\n2026-06-06T16:13:20Z INFO Syncing project to worker ts2...\n2026-06-06T16:13:28Z INFO Sync complete: 18624 files, 873461 bytes in 8477ms\n2026-06-06T16:13:41Z INFO Executing command remotely: env cargo clippy --all-targets -- -D warnings\n2026-06-06T16:14:10Z Checking asupersync v0.3.3 (/data/projects/asupersync)\n2026-06-06T16:26:35Z Checking asupersync-conformance v0.3.3 (/data/projects/asupersync/conformance)\n2026-06-06T16:27:05Z INFO Remote command finished: exit=0 in 803201ms\n2026-06-06T16:27:05Z INFO Retrieving build artifacts...\n2026-06-06T16:28:26Z INFO Artifacts retrieved in 81047ms (17269 files, 2601801 bytes)\n2026-06-06T16:28:26Z [RCH] remote ts2 (909.3s)"
+    },
+    "scenarios": [
+      {
+        "scenario_id": "successful-cold-clippy"
+      },
+      {
+        "scenario_id": "failed-cargo-test",
+        "description": "A remote cargo test lane makes progress but exits nonzero.",
+        "lane": {
+          "command_id": "focused-contract-test-rch",
+          "proof_envelope": {
+            "class_id": "artifact-contract-medium",
+            "timeout_seconds": 3600,
+            "memory_mb": 16384,
+            "remote_required": true,
+            "no_local_fallback": true,
+            "quiet_warning_seconds": 300,
+            "artifact_retrieval_timeout_seconds": 120
+          },
+          "command_provenance": {
+            "argv": [
+              "rch",
+              "exec",
+              "--",
+              "env",
+              "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_contract",
+              "cargo",
+              "test",
+              "-p",
+              "asupersync",
+              "--test",
+              "some_contract"
+            ],
+            "env": {
+              "RCH_REQUIRE_REMOTE": "1"
+            },
+            "source_fingerprint": "git:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        },
+        "log_excerpt": "2026-06-06T10:00:00Z INFO Selected worker: ts4 at ubuntu@100.96.0.4\n2026-06-06T10:00:02Z INFO Syncing project to worker ts4...\n2026-06-06T10:00:10Z INFO Sync complete: 1000 files, 100 bytes in 8000ms\n2026-06-06T10:00:12Z INFO Executing command remotely: env cargo test -p asupersync --test some_contract\n2026-06-06T10:00:35Z Compiling asupersync v0.3.3 (/data/projects/asupersync)\n2026-06-06T10:06:20Z Running tests/some_contract.rs\nthread 'contract' panicked at tests/some_contract.rs:42:9\n2026-06-06T10:06:30Z INFO Remote command finished: exit=101 in 378000ms\n2026-06-06T10:06:31Z [RCH] remote ts4 failed (exit 101)"
+      },
+      {
+        "scenario_id": "artifact-retrieval-stall",
+        "description": "The remote command passed, but artifact retrieval started and never completed.",
+        "log_excerpt": "2026-06-06T11:00:00Z INFO Selected worker: ts5 at ubuntu@100.96.0.5\n2026-06-06T11:00:05Z INFO Sync complete: 1200 files, 400 bytes in 5000ms\n2026-06-06T11:00:08Z INFO Executing command remotely: env cargo test -p asupersync --test rch_quiet_phase_receipt_contract\n2026-06-06T11:01:00Z Checking asupersync v0.3.3 (/data/projects/asupersync)\n2026-06-06T11:06:00Z INFO Remote command finished: exit=0 in 352000ms\n2026-06-06T11:06:01Z INFO Retrieving build artifacts...\n2026-06-06T11:10:10Z ERROR retrieval stalled after remote exit=0"
+      },
+      {
+        "scenario_id": "local-fallback-refusal",
+        "description": "Remote-required proof cannot admit a worker and local fallback is refused.",
+        "log_excerpt": "2026-06-06T12:00:00Z WARN RCH_REQUIRE_REMOTE=1 remote required; refusing local fallback because no healthy remote worker admitted\n2026-06-06T12:00:01Z [RCH] local fallback refused (remote required)"
+      },
+      {
+        "scenario_id": "timeout-forecast-risk",
+        "description": "The lane shows remote progress but the quiet phase exceeds its envelope and has no remote exit yet.",
+        "lane": {
+          "command_id": "focused-contract-test-rch",
+          "proof_envelope": {
+            "class_id": "artifact-contract-medium",
+            "timeout_seconds": 600,
+            "memory_mb": 16384,
+            "remote_required": true,
+            "no_local_fallback": true,
+            "quiet_warning_seconds": 120,
+            "artifact_retrieval_timeout_seconds": 120
+          },
+          "command_provenance": {
+            "argv": [
+              "rch",
+              "exec",
+              "--",
+              "env",
+              "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_contract",
+              "cargo",
+              "test",
+              "-p",
+              "asupersync",
+              "--test",
+              "long_contract"
+            ],
+            "env": {
+              "RCH_REQUIRE_REMOTE": "1"
+            },
+            "source_fingerprint": "git:cccccccccccccccccccccccccccccccccccccccc"
+          }
+        },
+        "log_excerpt": "2026-06-06T13:00:00Z INFO Selected worker: ts6 at ubuntu@100.96.0.6\n2026-06-06T13:00:06Z INFO Sync complete: 1400 files, 500 bytes in 6000ms\n2026-06-06T13:00:08Z INFO Executing command remotely: env cargo test -p asupersync --test long_contract\n2026-06-06T13:00:40Z Checking asupersync v0.3.3 (/data/projects/asupersync)\n2026-06-06T13:12:10Z Checking asupersync-conformance v0.3.3 (/data/projects/asupersync/conformance)"
+      },
+      {
+        "scenario_id": "missing-remote-evidence",
+        "description": "The log lacks worker and remote command evidence, and the command provenance does not require remote execution.",
+        "lane": {
+          "command_id": "bare-local-check",
+          "proof_envelope": {
+            "class_id": "compile-frontier-heavy",
+            "timeout_seconds": 7200,
+            "memory_mb": 49152,
+            "remote_required": false,
+            "no_local_fallback": false,
+            "quiet_warning_seconds": 600,
+            "artifact_retrieval_timeout_seconds": 120
+          },
+          "command_provenance": {
+            "argv": [
+              "cargo",
+              "check",
+              "--all-targets"
+            ],
+            "env": {},
+            "source_fingerprint": "git:dddddddddddddddddddddddddddddddddddddddd"
+          }
+        },
+        "log_excerpt": "2026-06-06T14:00:00Z Checking asupersync v0.3.3 (/data/projects/asupersync)\n2026-06-06T14:10:00Z Finished dev profile"
+      }
+    ]
+  }
+}
