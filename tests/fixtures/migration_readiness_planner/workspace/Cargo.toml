@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/api"]
+resolver = "3"
+
+[workspace.dependencies]
+asupersync = { path = "../../../.." }
+tokio = { version = "1", optional = true, features = ["macros"] }

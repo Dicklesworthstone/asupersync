@@ -1,0 +1,14 @@
+# This is a minimal lockfile fixture for inventory classification, not a build lock.
+version = 3
+
+[[package]]
+name = "api-fixture"
+version = "0.1.0"
+
+[[package]]
+name = "hyper"
+version = "1.0.0"
+
+[[package]]
+name = "tokio"
+version = "1.0.0"
