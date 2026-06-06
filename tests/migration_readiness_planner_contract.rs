@@ -93,6 +93,19 @@ fn semantic_row_with_marker<'a>(report: &'a Value, marker: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing semantic recommendation for marker {marker}"))
 }
 
+fn operator_report(report: &Value) -> &Value {
+    &report["operator_report"]
+}
+
+fn operator_phase_with_id<'a>(report: &'a Value, phase_id: &str) -> &'a Value {
+    operator_report(report)["phase_plan"]
+        .as_array()
+        .expect("operator phase plan array")
+        .iter()
+        .find(|row| row["phase_id"].as_str() == Some(phase_id))
+        .unwrap_or_else(|| panic!("missing operator phase {phase_id}"))
+}
+
 #[test]
 fn native_fixture_reports_already_native_without_mutating_project() {
     let fixture_path = repo_path(&format!("{FIXTURE_ROOT}/native"));
@@ -123,6 +136,29 @@ fn native_fixture_reports_already_native_without_mutating_project() {
         report["semantic_map"]["summary"]["recommendation_class_counts"]["compat_boundary_ok"],
         2
     );
+    assert_eq!(
+        operator_report(&report)["schema_version"],
+        "migration-readiness-operator-report-v1"
+    );
+    assert_eq!(
+        operator_report(&report)["summary"]["status"],
+        "native_signoff_ready"
+    );
+    assert_eq!(operator_report(&report)["summary"]["phase_count"], 6);
+    assert_eq!(
+        operator_report(&report)["summary"]["residual_risk_count"],
+        0
+    );
+    assert_eq!(operator_report(&report)["summary"]["confidence_score"], 100);
+    assert_eq!(
+        operator_phase_with_id(&report, "native-signoff-and-next-beads")["status"],
+        "ready"
+    );
+    let summary_hash =
+        operator_report(&report)["generation_log"]["input_artifact_hashes"]["summary"]
+            .as_str()
+            .expect("summary hash");
+    assert_eq!(summary_hash.len(), 64, "hash should be hex sha256 length");
     let cx_signature = semantic_row_with_marker(&report, "async fn");
     assert_eq!(cx_signature["recommendation_class"], "compat_boundary_ok");
     assert_eq!(cx_signature["target_asupersync_surface"], "Cx");
@@ -247,6 +283,48 @@ fn tokio_fixture_classifies_dependency_and_source_markers() {
         semantic_row_with_class(&report, "manual_design_required")["residual_manual_design"],
         true
     );
+    assert_eq!(
+        operator_report(&report)["summary"]["status"],
+        "manual_design_required"
+    );
+    assert!(
+        operator_report(&report)["summary"]["highest_risk_score"]
+            .as_u64()
+            .expect("highest risk")
+            >= 90
+    );
+    assert!(
+        operator_report(&report)["summary"]["residual_risk_count"]
+            .as_u64()
+            .expect("risk count")
+            > 0
+    );
+    assert_eq!(
+        operator_report(&report)["executive_summary"]["recommended_next_action"],
+        "follow-up:thread-cx-region-and-capabilities"
+    );
+    let cx_phase = operator_phase_with_id(&report, "thread-cx-region-and-capabilities");
+    assert_eq!(cx_phase["status"], "pending");
+    assert_eq!(cx_phase["risk_score"], 80);
+    assert!(
+        cx_phase["recommendation_classes"]
+            .as_array()
+            .expect("recommendation classes")
+            .iter()
+            .any(|class| class == "region_ownership_required")
+    );
+    let manual_phase = operator_phase_with_id(&report, "manual-ownership-design");
+    assert_eq!(manual_phase["status"], "pending");
+    assert_eq!(manual_phase["risk_score"], 90);
+    let compat_phase = operator_phase_with_id(&report, "compat-quarantine-and-proof-pack");
+    assert_eq!(compat_phase["status"], "pending");
+    assert!(
+        compat_phase["proof_command_ids"]
+            .as_array()
+            .expect("compat proof command ids")
+            .iter()
+            .any(|id| id == "default-production-tokio-tree")
+    );
 
     let tokio_proof = proof_row_with_name(&report, "tokio");
     assert_eq!(
@@ -288,6 +366,17 @@ fn malformed_manifest_fails_closed_and_can_exit_nonzero() {
     );
     assert_eq!(report["proof_pack"]["summary"]["status"], "blocked");
     assert_eq!(report["semantic_map"]["summary"]["status"], "blocked");
+    assert_eq!(operator_report(&report)["summary"]["status"], "blocked");
+    let preflight = operator_phase_with_id(&report, "preflight-and-input-integrity");
+    assert_eq!(preflight["status"], "blocked");
+    assert_eq!(preflight["risk_score"], 100);
+    assert!(
+        operator_report(&report)["residual_risk_rows"]
+            .as_array()
+            .expect("operator residual risks")
+            .iter()
+            .any(|row| row["risk_id"] == "fail-closed:manifest-parse-error")
+    );
     assert!(
         report["proof_pack"]["fail_closed_reasons"]
             .as_array()
@@ -345,6 +434,12 @@ fn workspace_fixture_records_feature_gated_and_transitive_rows() {
             .expect("confidence distribution")
             .contains_key("high")
     );
+    assert!(
+        operator_report(&report)["summary"]["proof_command_count"]
+            .as_u64()
+            .expect("proof command count")
+            >= 5
+    );
 }
 
 #[test]
@@ -361,11 +456,23 @@ fn output_root_writes_json_and_summary_artifacts() {
     assert!(json_path.exists(), "json artifact missing");
     assert!(summary_path.exists(), "summary artifact missing");
     let artifact_report: Value =
-        serde_json::from_str(&std::fs::read_to_string(json_path).expect("read json artifact"))
+        serde_json::from_str(&std::fs::read_to_string(&json_path).expect("read json artifact"))
             .expect("artifact json");
     assert_eq!(artifact_report["summary"], report["summary"]);
+    assert_eq!(
+        artifact_report["operator_report"],
+        report["operator_report"]
+    );
+    assert_eq!(
+        report["operator_report"]["generation_log"]["generated_output_paths"]["json"],
+        json_path.to_string_lossy().as_ref()
+    );
     let summary = std::fs::read_to_string(summary_path).expect("read summary");
     assert!(summary.contains("Migration Readiness Inventory"));
+    assert!(summary.contains("Operator Report"));
+    assert!(summary.contains("Phase Plan"));
+    assert!(summary.contains("risk_score=`90`"));
+    assert!(summary.contains("Residual Risks"));
     assert!(summary.contains("Proof Pack"));
     assert!(summary.contains("Semantic Map"));
     assert!(summary.contains("needs_quarantine"));

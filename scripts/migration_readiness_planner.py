@@ -9,6 +9,7 @@ JSON plus an optional summary in a caller-provided output directory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tomllib
@@ -17,6 +18,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "migration-readiness-inventory-v1"
+OPERATOR_REPORT_SCHEMA_VERSION = "migration-readiness-operator-report-v1"
 DEFAULT_JSON_NAME = "migration_readiness_inventory.json"
 DEFAULT_SUMMARY_NAME = "migration_readiness_summary.md"
 IGNORED_SOURCE_DIRS = {".git", "target", ".cargo", ".direnv", "node_modules"}
@@ -285,6 +287,10 @@ PROOF_ROW_CLASSIFICATIONS = {
 
 def stable_json(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True) + "\n"
+
+
+def stable_hash(data: Any) -> str:
+    return hashlib.sha256(stable_json(data).encode("utf-8")).hexdigest()
 
 
 def posix_rel(path: Path, root: Path) -> str:
@@ -1056,6 +1062,419 @@ def build_semantic_map(
     }
 
 
+def int_count(mapping: dict[str, Any], key: str) -> int:
+    value = mapping.get(key)
+    return value if isinstance(value, int) else 0
+
+
+def confidence_score(confidence_distribution: dict[str, Any]) -> int:
+    weights = {"high": 100, "medium": 70, "low": 40, "unknown": 50}
+    total = 0
+    weighted = 0
+    for key, value in confidence_distribution.items():
+        if not isinstance(value, int):
+            continue
+        total += value
+        weighted += weights.get(key, 50) * value
+    if total == 0:
+        return 100
+    return round(weighted / total)
+
+
+def risk_score_for_classification(classification: str) -> int:
+    if classification == "hard_blocker":
+        return 100
+    if classification == "runtime_boundary_required":
+        return 80
+    if classification == "compat_quarantine_candidate":
+        return 65
+    if classification == "manual_design_required":
+        return 85
+    if classification == "semantic_signal":
+        return 50
+    return 20
+
+
+def risk_score_for_recommendation(recommendation_class: str) -> int:
+    if recommendation_class == "manual_design_required":
+        return 90
+    if recommendation_class == "region_ownership_required":
+        return 80
+    if recommendation_class == "cx_threading_required":
+        return 75
+    if recommendation_class == "cancel_checkpoint_required":
+        return 75
+    if recommendation_class == "capability_narrowing_required":
+        return 70
+    if recommendation_class == "compat_boundary_ok":
+        return 35
+    return 50
+
+
+def blast_radius_for_count(count: int) -> str:
+    if count == 0:
+        return "none"
+    if count <= 2:
+        return "narrow"
+    if count <= 8:
+        return "bounded"
+    return "broad"
+
+
+def source_row_key(row: dict[str, Any]) -> str:
+    return ":".join(
+        [
+            string_value(row.get("row_type")) or "row",
+            string_value(row.get("path")) or "root",
+            string_value(row.get("section")),
+            string_value(row.get("name")) or "unknown",
+            str(int(row.get("line", 0))),
+        ]
+    )
+
+
+def compact_source_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "row_type": string_value(row.get("row_type")),
+        "path": string_value(row.get("path")),
+        "line": int(row.get("line", 0)),
+        "name": string_value(row.get("name")),
+        "classification": string_value(row.get("classification")),
+        "section": string_value(row.get("section")),
+    }
+
+
+def residual_risk_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    risks: dict[str, dict[str, Any]] = {}
+    for reason in report["summary"]["fail_closed_reasons"]:
+        risk_id = f"fail-closed:{reason}"
+        risks[risk_id] = {
+            "risk_id": risk_id,
+            "risk_class": "fail_closed",
+            "severity": "blocker",
+            "risk_score": 100,
+            "owner": "operator-preflight",
+            "source_row": {},
+            "mitigation": "fix the blocked inventory/proof input before using the migration plan for signoff",
+            "proof_handles": [],
+            "reason": reason,
+        }
+
+    for row in report["proof_pack"]["quarantine_rows"]:
+        source = row["source_row"]
+        classification = string_value(source.get("classification"))
+        risk_id = f"proof:{source_row_key(source)}"
+        risks.setdefault(
+            risk_id,
+            {
+                "risk_id": risk_id,
+                "risk_class": "proof_holdout",
+                "severity": "blocker" if classification == "hard_blocker" else "warning",
+                "risk_score": risk_score_for_classification(classification),
+                "owner": string_value(row.get("owning_module_recommendation")),
+                "source_row": compact_source_row(source),
+                "mitigation": string_value(row.get("removal_trigger")),
+                "proof_handles": list_strings(row.get("proof_command_ids")),
+                "reason": string_value(row.get("residual_risk")),
+            },
+        )
+
+    for row in report["semantic_map"]["recommendations"]:
+        recommendation_class = string_value(row.get("recommendation_class"))
+        if recommendation_class == "compat_boundary_ok":
+            continue
+        source = row["source_row"]
+        risk_id = f"semantic:{row['scenario_id']}"
+        risks.setdefault(
+            risk_id,
+            {
+                "risk_id": risk_id,
+                "risk_class": recommendation_class,
+                "severity": "blocker" if recommendation_class == "manual_design_required" else "warning",
+                "risk_score": risk_score_for_recommendation(recommendation_class),
+                "owner": string_value(row.get("target_asupersync_surface")),
+                "source_row": compact_source_row(source),
+                "mitigation": string_value(row.get("operator_action")),
+                "proof_handles": [],
+                "reason": string_value(row.get("rationale")),
+            },
+        )
+
+    return sorted(
+        risks.values(),
+        key=lambda row: (
+            -row["risk_score"],
+            row["risk_class"],
+            string_value(row.get("risk_id")),
+        ),
+    )
+
+
+def phase_status(item_count: int, blocked: bool = False) -> str:
+    if blocked:
+        return "blocked"
+    if item_count == 0:
+        return "ready"
+    return "pending"
+
+
+def unique_nonempty(values: list[str]) -> list[str]:
+    return sorted({value for value in values if value})
+
+
+def phase_entry(
+    phase_id: str,
+    order: int,
+    title: str,
+    rows: list[dict[str, Any]],
+    risk_score: int,
+    status: str,
+    operator_actions: list[str],
+    raw_artifact_pointers: list[str],
+    proof_command_ids: list[str] | None = None,
+    recommendation_classes: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "phase_id": phase_id,
+        "phase_order": order,
+        "title": title,
+        "status": status,
+        "risk_score": risk_score,
+        "expected_blast_radius": blast_radius_for_count(len(rows)),
+        "source_count": len(rows),
+        "source_counts": counts_by(rows, "classification") if rows else {},
+        "recommendation_classes": sorted(recommendation_classes or []),
+        "proof_command_ids": sorted(proof_command_ids or []),
+        "operator_actions": unique_nonempty(operator_actions),
+        "raw_artifact_pointers": raw_artifact_pointers,
+    }
+
+
+def build_phase_plan(report: dict[str, Any], risks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary = report["summary"]
+    inventory_rows = report["inventory_rows"]
+    proof_pack = report["proof_pack"]
+    semantic_map = report["semantic_map"]
+    recommendations = semantic_map["recommendations"]
+
+    fail_blocked = bool(summary["fail_closed_reasons"])
+    hard_rows = [row for row in inventory_rows if row["classification"] == "hard_blocker"]
+    rewrite_recs = [
+        row
+        for row in recommendations
+        if row["recommendation_class"]
+        in {
+            "cx_threading_required",
+            "region_ownership_required",
+            "cancel_checkpoint_required",
+            "capability_narrowing_required",
+        }
+    ]
+    manual_recs = [
+        row
+        for row in recommendations
+        if row["recommendation_class"] == "manual_design_required"
+    ]
+    compat_rows = [
+        row
+        for row in proof_pack["quarantine_rows"]
+        if row["source_row"]["classification"] in {"runtime_boundary_required", "compat_quarantine_candidate"}
+    ]
+    native_rows = [row for row in inventory_rows if row["classification"] == "already_native"]
+
+    return [
+        phase_entry(
+            "preflight-and-input-integrity",
+            0,
+            "Preflight and input integrity",
+            [{"classification": "fail_closed", "reason": reason} for reason in summary["fail_closed_reasons"]],
+            100 if fail_blocked else 10,
+            phase_status(len(summary["fail_closed_reasons"]), fail_blocked),
+            ["repair manifest, lockfile, or proof-pack inputs before using the report for signoff"]
+            if fail_blocked
+            else ["inputs are parseable; keep planner output read-only and deterministic"],
+            ["summary.fail_closed_reasons", "manifests", "warnings", "proof_pack.fail_closed_reasons"],
+            PROOF_REQUIRED_IDS,
+        ),
+        phase_entry(
+            "remove-hard-runtime-blockers",
+            10,
+            "Remove hard runtime blockers",
+            hard_rows,
+            100 if hard_rows else 15,
+            phase_status(len(hard_rows)),
+            [string_value(row.get("suggested_next_probe")) for row in hard_rows]
+            or ["no alternate-runtime hard blockers were detected"],
+            ["inventory_rows", "proof_pack.quarantine_rows"],
+        ),
+        phase_entry(
+            "thread-cx-region-and-capabilities",
+            20,
+            "Thread Cx, Scope, cancellation, and capabilities",
+            [row["source_row"] for row in rewrite_recs],
+            max([risk_score_for_recommendation(row["recommendation_class"]) for row in rewrite_recs] or [20]),
+            phase_status(len(rewrite_recs)),
+            [string_value(row.get("operator_action")) for row in rewrite_recs],
+            ["semantic_map.recommendations"],
+            recommendation_classes=unique_nonempty([row["recommendation_class"] for row in rewrite_recs]),
+        ),
+        phase_entry(
+            "manual-ownership-design",
+            30,
+            "Manual ownership and shutdown design",
+            [row["source_row"] for row in manual_recs],
+            90 if manual_recs else 15,
+            phase_status(len(manual_recs)),
+            [string_value(row.get("operator_action")) for row in manual_recs]
+            or ["no manual design rows remain"],
+            ["semantic_map.recommendations"],
+            recommendation_classes=["manual_design_required"] if manual_recs else [],
+        ),
+        phase_entry(
+            "compat-quarantine-and-proof-pack",
+            40,
+            "Compat quarantine and proof-pack validation",
+            [row["source_row"] for row in compat_rows],
+            max([risk_score_for_classification(row["source_row"]["classification"]) for row in compat_rows] or [25]),
+            phase_status(len(compat_rows), proof_pack["summary"]["status"] == "blocked"),
+            [string_value(row.get("removal_trigger")) for row in compat_rows]
+            or ["native and production proof-pack lanes can proceed without compat holdouts"],
+            ["proof_pack.quarantine_rows", "proof_pack.proof_commands"],
+            unique_nonempty(
+                [
+                    command_id
+                    for row in compat_rows
+                    for command_id in list_strings(row.get("proof_command_ids"))
+                ]
+                or PRODUCTION_PROOF_IDS
+            ),
+        ),
+        phase_entry(
+            "native-signoff-and-next-beads",
+            50,
+            "Native signoff and next beads",
+            native_rows + risks,
+            max([int(row.get("risk_score", 0)) for row in risks] or [10]),
+            "ready" if summary["final_verdict"] == "ready" and not risks else "pending",
+            [
+                "run the remote-required proof commands before citing production no-Tokio or migration-complete claims",
+                "create or claim follow-up beads for any remaining residual-risk owners",
+            ],
+            ["operator_report.residual_risk_rows", "proof_pack.proof_commands", "semantic_map.summary"],
+            PROOF_REQUIRED_IDS,
+        ),
+    ]
+
+
+def next_recommended_tasks(status: str, phase_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pending = [phase for phase in phase_plan if phase["status"] in {"blocked", "pending"}]
+    if not pending:
+        return [
+            {
+                "task_id": "run-proof-pack-signoff",
+                "priority": 3,
+                "reason": "all report phases are ready; remote proof-pack execution is the remaining signoff action",
+            }
+        ]
+    tasks: list[dict[str, Any]] = []
+    for phase in pending[:4]:
+        tasks.append(
+            {
+                "task_id": f"follow-up:{phase['phase_id']}",
+                "priority": 1 if phase["status"] == "blocked" else 2,
+                "reason": phase["title"],
+                "source_count": phase["source_count"],
+                "risk_score": phase["risk_score"],
+            }
+        )
+    if status == "quarantine_plan_ready":
+        tasks.append(
+            {
+                "task_id": "run-default-and-metrics-no-tokio-proof-lanes",
+                "priority": 2,
+                "reason": "compat quarantine rows need production graph proof handles before signoff",
+            }
+        )
+    return tasks
+
+
+def operator_report_status(summary: dict[str, Any], semantic_map: dict[str, Any]) -> str:
+    if summary["final_verdict"] == "blocked":
+        return "blocked"
+    if semantic_map["summary"]["residual_manual_design_count"]:
+        return "manual_design_required"
+    if summary["final_verdict"] == "needs_quarantine":
+        return "quarantine_plan_ready"
+    if summary["final_verdict"] == "ready":
+        return "native_signoff_ready"
+    return summary["final_verdict"]
+
+
+def build_operator_report(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report["summary"]
+    proof_pack = report["proof_pack"]
+    semantic_map = report["semantic_map"]
+    risks = residual_risk_rows(report)
+    phase_plan = build_phase_plan(report, risks)
+    status = operator_report_status(summary, semantic_map)
+    highest_risk = max([phase["risk_score"] for phase in phase_plan] + [0])
+    classification_counts = summary["classification_counts"]
+    semantic_summary = semantic_map["summary"]
+
+    return {
+        "schema_version": OPERATOR_REPORT_SCHEMA_VERSION,
+        "source_schema": SCHEMA_VERSION,
+        "source_contracts": [
+            "AGENTS.md",
+            "README.md",
+            "scripts/migration_readiness_planner.py",
+        ],
+        "executive_summary": {
+            "headline": f"{status}: {summary['final_verdict']}",
+            "operator_interpretation": {
+                "blocked": "Do not start migration work until fail-closed inputs are repaired.",
+                "manual_design_required": "Manual ownership or shutdown design remains before mechanical rewrite work is safe.",
+                "quarantine_plan_ready": "Proceed with ordered migration phases while keeping compat boundaries proof-backed.",
+                "native_signoff_ready": "Native surfaces are present; run proof-pack lanes before final signoff claims.",
+            }.get(status, "Review the phase plan before starting migration work."),
+            "recommended_next_action": next_recommended_tasks(status, phase_plan)[0]["task_id"],
+            "evidence_level": "remote-proof-handles-ready"
+            if proof_pack["summary"]["proof_command_count"] == len(PROOF_COMMANDS)
+            else "proof-handle-gap",
+        },
+        "summary": {
+            "status": status,
+            "final_verdict": summary["final_verdict"],
+            "phase_count": len(phase_plan),
+            "highest_risk_score": highest_risk,
+            "confidence_score": confidence_score(semantic_summary["confidence_distribution"]),
+            "native_count": int_count(classification_counts, "already_native"),
+            "compat_or_runtime_count": int_count(classification_counts, "runtime_boundary_required")
+            + int_count(classification_counts, "compat_quarantine_candidate"),
+            "hard_blocker_count": int_count(classification_counts, "hard_blocker"),
+            "residual_risk_count": len(risks),
+            "recommendation_count": semantic_summary["recommendation_count"],
+            "proof_command_count": proof_pack["summary"]["proof_command_count"],
+        },
+        "phase_plan": phase_plan,
+        "residual_risk_rows": risks,
+        "next_recommended_tasks": next_recommended_tasks(status, phase_plan),
+        "generation_log": {
+            "report_version": OPERATOR_REPORT_SCHEMA_VERSION,
+            "input_artifact_hashes": {
+                "summary": stable_hash(report["summary"]),
+                "inventory_rows": stable_hash(report["inventory_rows"]),
+                "proof_pack": stable_hash(report["proof_pack"]),
+                "semantic_map": stable_hash(report["semantic_map"]),
+            },
+            "generated_output_paths": {},
+            "recommendation_count": semantic_summary["recommendation_count"],
+            "residual_risk_count": len(risks),
+            "final_verdict": summary["final_verdict"],
+        },
+    }
+
+
 def final_verdict(rows: list[dict[str, Any]], parse_errors: list[str], manifest_count: int) -> tuple[str, list[str]]:
     reasons: list[str] = []
     if manifest_count == 0:
@@ -1143,7 +1562,7 @@ def build_report(project_root: Path) -> dict[str, Any]:
     if semantic_map["fail_closed_reasons"]:
         verdict = "blocked"
         fail_closed_reasons = sorted(set(fail_closed_reasons + semantic_map["fail_closed_reasons"]))
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "project_root": root.as_posix(),
         "read_only_contract": {
@@ -1166,6 +1585,8 @@ def build_report(project_root: Path) -> dict[str, Any]:
         "proof_pack": proof_pack,
         "semantic_map": semantic_map,
     }
+    report["operator_report"] = build_operator_report(report)
+    return report
 
 
 def summary_markdown(report: dict[str, Any]) -> str:
@@ -1186,6 +1607,36 @@ def summary_markdown(report: dict[str, Any]) -> str:
         lines.extend(["", "## Fail-Closed Reasons"])
         for reason in summary["fail_closed_reasons"]:
             lines.append(f"- `{reason}`")
+    operator_report = report.get("operator_report")
+    if isinstance(operator_report, dict):
+        operator_summary = operator_report["summary"]
+        executive = operator_report["executive_summary"]
+        lines.extend(
+            [
+                "",
+                "## Operator Report",
+                f"- status: `{operator_summary['status']}`",
+                f"- headline: {executive['headline']}",
+                f"- recommended_next_action: `{executive['recommended_next_action']}`",
+                f"- highest_risk_score: `{operator_summary['highest_risk_score']}`",
+                f"- confidence_score: `{operator_summary['confidence_score']}`",
+                f"- residual_risk_count: `{operator_summary['residual_risk_count']}`",
+                "",
+                "## Phase Plan",
+            ]
+        )
+        for phase in operator_report["phase_plan"]:
+            lines.append(
+                f"- `{phase['phase_id']}`: status=`{phase['status']}` "
+                f"risk_score=`{phase['risk_score']}` source_count=`{phase['source_count']}`"
+            )
+        if operator_report["residual_risk_rows"]:
+            lines.extend(["", "## Residual Risks"])
+            for row in operator_report["residual_risk_rows"][:10]:
+                lines.append(
+                    f"- `{row['risk_id']}`: severity=`{row['severity']}` "
+                    f"risk_score=`{row['risk_score']}` owner=`{row['owner']}`"
+                )
     proof_pack = report.get("proof_pack")
     if isinstance(proof_pack, dict):
         proof_summary = proof_pack["summary"]
@@ -1229,12 +1680,17 @@ def write_outputs(report: dict[str, Any], output_root: Path) -> dict[str, str]:
     output_root.mkdir(parents=True, exist_ok=True)
     json_path = output_root / DEFAULT_JSON_NAME
     summary_path = output_root / DEFAULT_SUMMARY_NAME
-    json_path.write_text(stable_json(report), encoding="utf-8")
-    summary_path.write_text(summary_markdown(report), encoding="utf-8")
-    return {
+    paths = {
         "json": json_path.as_posix(),
         "summary": summary_path.as_posix(),
     }
+    report["output_artifacts"] = paths
+    operator_report = report.get("operator_report")
+    if isinstance(operator_report, dict):
+        operator_report["generation_log"]["generated_output_paths"] = paths
+    json_path.write_text(stable_json(report), encoding="utf-8")
+    summary_path.write_text(summary_markdown(report), encoding="utf-8")
+    return paths
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -1254,7 +1710,7 @@ def main(argv: list[str]) -> int:
     project_root = Path(args.project_root)
     report = build_report(project_root)
     if args.output_root:
-        report["output_artifacts"] = write_outputs(report, Path(args.output_root))
+        write_outputs(report, Path(args.output_root))
 
     sys.stdout.write(stable_json(report))
     if args.fail_on_blocked and report["summary"]["final_verdict"] == "blocked":
