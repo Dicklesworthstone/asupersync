@@ -310,12 +310,23 @@ impl ShutdownSignal {
     /// This method is race-free: it guarantees that it will not miss a phase
     /// transition that occurs concurrently.
     pub async fn wait_for_phase(&self, target: ShutdownPhase) {
+        let state = Arc::clone(&self.state);
         loop {
-            let notified = self.state.phase_notify.notified();
-            if self.phase() as u8 >= target as u8 {
+            if ShutdownPhase::from_u8(state.phase.load(Ordering::Acquire)) as u8 >= target as u8 {
                 return;
             }
-            notified.await;
+
+            let mut notified = std::pin::pin!(state.phase_notify.notified());
+            std::future::poll_fn(|cx| {
+                if std::future::Future::poll(notified.as_mut(), cx).is_ready()
+                    || ShutdownPhase::from_u8(state.phase.load(Ordering::Acquire)) as u8
+                        >= target as u8
+                {
+                    return std::task::Poll::Ready(());
+                }
+                std::task::Poll::Pending
+            })
+            .await;
         }
     }
 

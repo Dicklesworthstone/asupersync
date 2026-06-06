@@ -402,11 +402,15 @@ impl ConnectionManager {
             if self.is_empty() {
                 return;
             }
-            let notified = self.all_closed.notified();
-            if self.is_empty() {
-                return;
-            }
-            notified.await;
+
+            let mut notified = std::pin::pin!(self.all_closed.notified());
+            poll_fn(|cx| {
+                if std::future::Future::poll(notified.as_mut(), cx).is_ready() || self.is_empty() {
+                    return std::task::Poll::Ready(());
+                }
+                std::task::Poll::Pending
+            })
+            .await;
         }
     }
 
