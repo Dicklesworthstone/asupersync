@@ -1656,11 +1656,11 @@ The checked signoff for this split is [`artifacts/phase6_methodology_gate_enforc
 The SLO-to-runtime lane is an opt-in direct-main proof loop for operator policy changes. It is grounded in the live schema, runtime application seam, deterministic replay evidence, and proof runner; it is not a separate docs-only process and it is not a blanket production enforcement claim outside the explicit SLO application/admission seam.
 
 - Canonical artifact: [`artifacts/slo_policy_bundle_contract_v1.json`](./artifacts/slo_policy_bundle_contract_v1.json)
-- Runtime API surface: [`src/types/slo_policy.rs`](./src/types/slo_policy.rs), exported through `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION`, `validate_slo_policy_bundle_json`, `validate_slo_proof_report_json`, and `validate_slo_runtime_policy_application_json`
+- Runtime API surface: [`src/types/slo_policy.rs`](./src/types/slo_policy.rs) defines the artifact/application contract, and [`src/runtime/slo_policy.rs`](./src/runtime/slo_policy.rs) provides the explicit `Cx`-scoped bridge through `SloRuntimePolicyBridge`, `SloRuntimePolicyBridgeRequest`, `SloRuntimePolicyBridgeDecision`, and `SloRuntimeWorkKind`. The artifact layer is exported through `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION`, `validate_slo_policy_bundle_json`, `validate_slo_proof_report_json`, and `validate_slo_runtime_policy_application_json`
 - Contract test: [`tests/slo_policy_bundle_contract.rs`](./tests/slo_policy_bundle_contract.rs)
 - Operator script: [`scripts/validate_slo_policy_bundle.sh`](./scripts/validate_slo_policy_bundle.sh)
 
-The artifact covers the policy bundle schema, compiler output, runtime application contract, LabRuntime replay evidence, proof-report gate, and runtime enforcement report in one JSON contract. The compiler schema is `slo-budget-admission-compiler-v1`, the runtime application schema is `slo-runtime-policy-application-v1`, the replay contract is `slo-lab-replay-contract-v1`, the proof-report schema is `slo-proof-report-v1`, and the runtime enforcement report schema is `slo-runtime-enforcement-proof-report-v1`.
+The artifact covers the policy bundle schema, compiler output, runtime application contract, LabRuntime replay evidence, proof-report gate, and runtime enforcement report in one JSON contract. The runtime bridge is intentionally narrower than a policy engine: callers pass an explicit `Cx`, work kind, and admission request, and the bridge records admitted, browned-out, cancelled, no-win, or blocked decisions while preserving region-close quiescence and explicit non-start/drain receipts. The compiler schema is `slo-budget-admission-compiler-v1`, the runtime application schema is `slo-runtime-policy-application-v1`, the replay contract is `slo-lab-replay-contract-v1`, the proof-report schema is `slo-proof-report-v1`, and the runtime enforcement report schema is `slo-runtime-enforcement-proof-report-v1`.
 
 The runtime enforcement report preserves `pass`, `degraded`, `no_win`, `blocked`, `stale_evidence`, `unsupported`, and `malformed` as separate outcomes. `pass` means admitted runtime work completed under the compiled policy. `degraded` means optional work browned out before violating the objective. `no_win` means the explicit no-win fallback receipt was selected. `blocked`, `stale_evidence`, `unsupported`, and `malformed` are fail-closed operator outcomes. Runtime JSONL rows emitted by `scripts/validate_slo_policy_bundle.sh` include `runtime_enforcement_status`, `runtime_admission_status`, `lab_replay_status`, admitted/rejected work counts, optional work browned out, cleanup deadline misses, `fallback_reason`, `issue_kinds`, `proof_command`, `proof_command_source`, and `redaction_policy_id`.
 
@@ -1676,6 +1676,20 @@ Rust proof for artifact/API/doc consistency stays scoped to the touched crate:
 
 ```bash
 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_docs CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture
+```
+
+Focused runtime bridge proof:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge --features test-internals -- --nocapture
+```
+
+Closeout validation for runtime bridge changes keeps the broad lanes explicit:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_check_all_targets_ol11aa3 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets_ol11aa3 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check_ol11aa3 cargo fmt --check
 ```
 
 ### Gate matrix

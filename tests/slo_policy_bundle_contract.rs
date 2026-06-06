@@ -1,7 +1,11 @@
 //! Contract tests for operator SLO policy bundles.
 
+use asupersync::Cx;
 use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
-use asupersync::runtime::yield_now;
+use asupersync::runtime::{
+    SloRuntimePolicyBridge, SloRuntimePolicyBridgeDecision, SloRuntimePolicyBridgeRequest,
+    SloRuntimeWorkKind, yield_now,
+};
 use asupersync::types::{
     Budget, Outcome, SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
     SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION, SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION,
@@ -30,6 +34,7 @@ const README_PATH: &str = "README.md";
 const OPERATOR_DOC_PATH: &str = "docs/ci_proof_gates_contract.md";
 const SLO_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_contract cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture";
 const SLO_REPLAY_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_replay_fixtures cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture";
+const SLO_RUNTIME_BRIDGE_PROOF_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge --features test-internals -- --nocapture";
 
 fn text_file(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))
@@ -594,6 +599,16 @@ fn runtime_request(
         timer_queue_depth: 12_000,
         cancel_requested: false,
     }
+}
+
+fn runtime_bridge_request(
+    request_id: &str,
+    work_units: u64,
+    work_kind: SloRuntimeWorkKind,
+    optional_work_class: Option<&str>,
+) -> SloRuntimePolicyBridgeRequest {
+    let request = runtime_request(request_id, work_units, optional_work_class);
+    SloRuntimePolicyBridgeRequest::new(work_kind, request)
 }
 
 fn expected_issue_tags(scenario_value: &Value) -> BTreeSet<String> {
@@ -1836,6 +1851,188 @@ fn runtime_slo_admission_evaluation_blocks_stale_or_cancelled_requests() {
         cancelled_outcome.issue_kinds,
         vec![SloRuntimeAdmissionIssueKind::Cancelled]
     );
+}
+
+#[test]
+fn runtime_slo_policy_bridge_lab_smoke_covers_explicit_pressure_seams() {
+    let application = valid_runtime_application();
+    assert_eq!(application.policy_id, "agent-swarm-standard");
+    let expected_priority = application.budget.to_budget().priority;
+    let config = TestConfig::new()
+        .with_seed(0x5100_0B03)
+        .with_tracing(true)
+        .with_max_steps(20_000);
+    let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+    let decisions = LabRuntimeTarget::block_on(&mut runtime, async move {
+        yield_now().await;
+        let cx = Cx::for_testing();
+        let bridge = SloRuntimePolicyBridge::new(&application);
+        let required = bridge.evaluate(
+            &cx,
+            &SloRuntimePolicyBridgeRequest::required(runtime_request("bridge-required", 4, None)),
+        );
+
+        let mut optional = runtime_request("bridge-optional-brownout", 3, Some("index_refresh"));
+        optional.memory_basis_points = application.admission.memory_soft_basis_points;
+        let optional = bridge.evaluate(&cx, &SloRuntimePolicyBridgeRequest::optional(optional));
+
+        let cleanup = bridge.evaluate(
+            &cx,
+            &SloRuntimePolicyBridgeRequest::cleanup_finalizer(runtime_request(
+                "bridge-cleanup-finalizer",
+                1,
+                Some("index_refresh"),
+            )),
+        );
+
+        let proof_reporting = bridge.evaluate(
+            &cx,
+            &SloRuntimePolicyBridgeRequest::proof_reporting(runtime_request(
+                "bridge-proof-reporting",
+                1,
+                Some("analytics_rollup"),
+            )),
+        );
+
+        vec![required, optional, cleanup, proof_reporting]
+    });
+    let report = runtime.run_until_quiescent_with_report();
+
+    assert!(report.quiescent, "bridge lab smoke should quiesce");
+    assert!(
+        report.trace_len > 0,
+        "bridge lab smoke should record deterministic trace events"
+    );
+    assert_eq!(
+        decisions
+            .iter()
+            .map(|decision| decision.work_kind.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "required",
+            "optional",
+            "cleanup_finalizer",
+            "proof_reporting"
+        ]
+    );
+
+    let required = decision_for_kind(&decisions, SloRuntimeWorkKind::Required);
+    assert_eq!(required.outcome.status, SloRuntimeAdmissionStatus::Admitted);
+    assert!(required.work_may_start);
+    assert_eq!(required.outcome.admitted_work_units, 4);
+
+    let optional = decision_for_kind(&decisions, SloRuntimeWorkKind::Optional);
+    assert_eq!(optional.outcome.status, SloRuntimeAdmissionStatus::Brownout);
+    assert!(optional.optional_work_browned_out());
+    assert!(!optional.work_may_start);
+    assert!(optional.explicit_receipt_required);
+    assert_eq!(
+        optional.outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::OptionalWorkBrownout]
+    );
+
+    let cleanup = decision_for_kind(&decisions, SloRuntimeWorkKind::CleanupFinalizer);
+    assert_eq!(cleanup.outcome.status, SloRuntimeAdmissionStatus::Admitted);
+    assert!(cleanup.work_may_start);
+    assert_eq!(cleanup.outcome.optional_work_class, None);
+    assert_eq!(cleanup.runtime_budget.priority, expected_priority);
+
+    let proof_reporting = decision_for_kind(&decisions, SloRuntimeWorkKind::ProofReporting);
+    assert_eq!(
+        proof_reporting.outcome.status,
+        SloRuntimeAdmissionStatus::Admitted
+    );
+    assert!(proof_reporting.work_may_start);
+    assert_eq!(proof_reporting.outcome.optional_work_class, None);
+
+    for decision in decisions {
+        assert!(decision.region_close_requires_quiescence);
+    }
+}
+
+#[test]
+fn runtime_slo_policy_bridge_observes_cx_cancellation_and_requires_receipts() {
+    let application = valid_runtime_application();
+    let bridge = SloRuntimePolicyBridge::new(&application);
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+
+    let decision = bridge.evaluate(
+        &cx,
+        &runtime_bridge_request(
+            "bridge-cancelled-before-admission",
+            2,
+            SloRuntimeWorkKind::Required,
+            None,
+        ),
+    );
+
+    assert!(decision.cx_cancel_observed);
+    assert_eq!(decision.outcome.status, SloRuntimeAdmissionStatus::Rejected);
+    assert!(!decision.work_may_start);
+    assert!(decision.explicit_receipt_required);
+    assert_eq!(decision.outcome.admitted_work_units, 0);
+    assert_eq!(decision.outcome.rejected_work_units, 2);
+    assert_eq!(
+        decision.outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::Cancelled]
+    );
+}
+
+#[test]
+fn runtime_slo_policy_bridge_preserves_no_win_fallback_receipt() {
+    let mut evidence = valid_capacity_evidence();
+    evidence.memory_basis_points = 9_500;
+    let compiled = valid_bundle().compile_for_budget_admission(Some(&evidence));
+    let application = SloRuntimePolicyApplication::from_compiled_policy(
+        &compiled,
+        SloWorkloadClass::AgentSwarm,
+        Some(profile_hash('a')),
+        SloProofCommand {
+            label: "runtime-slo-policy-bridge".to_string(),
+            command: SLO_RUNTIME_BRIDGE_PROOF_COMMAND.to_string(),
+        },
+        SloPolicyRedaction {
+            policy_id: "slo-runtime-bridge-redaction-v1".to_string(),
+            passed: true,
+        },
+    );
+    let bridge = SloRuntimePolicyBridge::new(&application);
+    let cx = Cx::for_testing();
+
+    let decision = bridge.evaluate(
+        &cx,
+        &runtime_bridge_request(
+            "bridge-no-win-proof-reporting",
+            1,
+            SloRuntimeWorkKind::ProofReporting,
+            None,
+        ),
+    );
+
+    assert!(decision.no_win_fallback_selected());
+    assert_eq!(decision.outcome.status, SloRuntimeAdmissionStatus::NoWin);
+    assert!(!decision.work_may_start);
+    assert!(decision.explicit_receipt_required);
+    assert_eq!(
+        decision.outcome.fallback_reason.as_deref(),
+        Some("objectives-conflict-with-pressure")
+    );
+    assert_eq!(
+        decision.outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::NoWinFallback]
+    );
+}
+
+fn decision_for_kind(
+    decisions: &[SloRuntimePolicyBridgeDecision],
+    work_kind: SloRuntimeWorkKind,
+) -> &SloRuntimePolicyBridgeDecision {
+    decisions
+        .iter()
+        .find(|decision| decision.work_kind == work_kind)
+        .unwrap_or_else(|| panic!("missing bridge decision for {}", work_kind.as_str()))
 }
 
 #[test]
