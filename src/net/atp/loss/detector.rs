@@ -410,7 +410,7 @@ impl AtpLossDetector {
         };
 
         let mut lost_packets = Vec::new();
-        let mut lost_bytes = 0;
+        let mut lost_bytes: u64 = 0;
         let mut detection_methods = Vec::new();
 
         // Calculate thresholds
