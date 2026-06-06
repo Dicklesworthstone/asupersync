@@ -2507,7 +2507,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         let result =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
@@ -2567,13 +2567,13 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Then schedule client to ensure call happens after init
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         let call_saw_initialized =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
@@ -2723,7 +2723,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         handle.stop();
         {
@@ -2816,7 +2816,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Cancel the client deterministically, then poll it again to observe the cancellation.
         let client_cx = client_cx_cell
@@ -2829,7 +2829,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         let result =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
@@ -2951,7 +2951,7 @@ mod tests {
         {
             runtime.scheduler.lock().schedule(client_task_id, 0);
         }
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Cancel the client deterministically, then poll it again to observe the cancellation.
         let client_cx = client_cx_cell

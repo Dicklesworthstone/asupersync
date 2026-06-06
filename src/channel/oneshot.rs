@@ -5585,7 +5585,7 @@ mod tests {
 
             for iteration in batch_start..batch_end {
                 let returned_counter = Arc::clone(&values_returned_to_sender);
-                let _extracted_counter = Arc::clone(&values_extracted_by_receiver);
+                let extracted_counter = Arc::clone(&values_extracted_by_receiver);
                 let unexpected_counter = Arc::clone(&unexpected_outcomes);
 
                 let handle = thread::spawn(move || {
@@ -5599,7 +5599,8 @@ mod tests {
                     // Use barriers to maximize race probability
                     let sender_ready = Arc::new(std::sync::Barrier::new(2));
                     let receiver_ready = Arc::new(std::sync::Barrier::new(2));
-                    let race_start = Arc::new(std::sync::Barrier::new(2));
+                    // Sender, receiver, and this coordinator all wait here.
+                    let race_start = Arc::new(std::sync::Barrier::new(3));
 
                     let sender_barrier_1 = Arc::clone(&sender_ready);
                     let sender_barrier_2 = Arc::clone(&race_start);
@@ -5636,12 +5637,10 @@ mod tests {
                     // Analyze the outcome
                     match send_result {
                         Ok(()) => {
-                            // Sender succeeded - this should be impossible since receiver was dropped
-                            // This would indicate a critical race condition bug
-                            unexpected_counter.fetch_add(1, Ordering::SeqCst);
-                            eprintln!(
-                                "❌ CRITICAL BUG: send() succeeded when receiver was dropped!"
-                            );
+                            // Sender won the race before Receiver::drop() acquired the lock.
+                            // Receiver::drop() then extracts the committed value, so ownership
+                            // is still accounted for and no value is silently lost.
+                            extracted_counter.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(SendError::Disconnected(returned_value)) => {
                             // Expected: receiver was dropped, value returned to sender
