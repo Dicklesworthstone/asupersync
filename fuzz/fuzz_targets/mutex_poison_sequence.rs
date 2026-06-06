@@ -278,7 +278,7 @@ fn create_poisoned_mutex() -> Arc<Mutex<u32>> {
     let m = Arc::clone(&mutex);
 
     let handle = std::thread::spawn(move || {
-        let cx = Cx::new(
+        let cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 99)),
             TaskId::from_arena(ArenaIndex::new(0, 99)),
             Budget::INFINITE,

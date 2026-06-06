@@ -175,7 +175,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             while !stats.test_complete.load(Ordering::Acquire) {
-                let cx = Cx::new(
+                let cx: Cx = Cx::new(
                     RegionId::from_arena(ArenaIndex::new(0, reader_id as u32)),
                     TaskId::from_arena(ArenaIndex::new(0, reader_id as u32)),
                     Budget::INFINITE,
@@ -262,7 +262,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             while !stats.test_complete.load(Ordering::Acquire) {
-                let cx = Cx::new(
+                let cx: Cx = Cx::new(
                     RegionId::from_arena(ArenaIndex::new(1, writer_id as u32)),
                     TaskId::from_arena(ArenaIndex::new(1, writer_id as u32)),
                     Budget::INFINITE,
