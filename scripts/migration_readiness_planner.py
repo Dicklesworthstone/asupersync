@@ -67,6 +67,92 @@ SOURCE_MARKERS = [
     ("Scope", "already_native", "structured-concurrency scope marker found"),
 ]
 
+PROOF_COMMAND_PREFIX = "RCH_REQUIRE_REMOTE=1 rch exec -- "
+
+PROOF_COMMANDS = [
+    {
+        "command_id": "default-production-tokio-tree",
+        "graph_class": "default-production",
+        "claim_scope": "default-production-tokio-free",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
+        "expected_oracle": "stdout contains `warning: nothing to print.`",
+        "covers": "Default production normal dependency graph has no tokio edge.",
+        "does_not_cover": "Workspace, dev-dependency, fuzz, conformance, and asupersync-tokio-compat graphs are outside this production proof.",
+        "source_paths": [
+            "AGENTS.md",
+            "README.md",
+            "artifacts/no_tokio_feature_boundary_contract_v1.json",
+            "artifacts/proof_lane_manifest_v1.json",
+        ],
+    },
+    {
+        "command_id": "metrics-production-tokio-tree",
+        "graph_class": "metrics-production",
+        "claim_scope": "metrics-production-tokio-free",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
+        "expected_oracle": "stdout contains `warning: nothing to print.`",
+        "covers": "Optional metrics production normal dependency graph has no tokio edge.",
+        "does_not_cover": "The fuzz feature deliberately enables OTLP generated messages through tonic/tokio and is not covered by this lane.",
+        "source_paths": [
+            "AGENTS.md",
+            "README.md",
+            "artifacts/no_tokio_feature_boundary_contract_v1.json",
+            "artifacts/proof_lane_manifest_v1.json",
+        ],
+    },
+    {
+        "command_id": "fuzz-tokio-quarantine-tree",
+        "graph_class": "fuzz-quarantine",
+        "claim_scope": "fuzz-tokio-quarantine",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
+        "expected_oracle": "dependency path contains opentelemetry-proto, tonic or tonic-prost, and tokio",
+        "covers": "The fuzz-only OTLP helper graph is expected to expose a quarantined opentelemetry-proto to tonic/tokio path.",
+        "does_not_cover": "This is not a production-consumer proof and must not be used to weaken default or metrics no-tokio claims.",
+        "source_paths": [
+            "AGENTS.md",
+            "README.md",
+            "artifacts/no_tokio_feature_boundary_contract_v1.json",
+            "artifacts/proof_lane_manifest_v1.json",
+        ],
+    },
+    {
+        "command_id": "workspace-normal-tokio-audit",
+        "graph_class": "workspace-normal-audit",
+        "claim_scope": "workspace-tokio-audit",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
+        "expected_oracle": "tokio paths are limited to documented workspace carve-outs",
+        "covers": "Workspace normal graph audit names expected scoped tokio edges in satellite crates and test/reference surfaces.",
+        "does_not_cover": "Not a default production proof; expected tokio edges are allowed when documented as scoped carve-outs.",
+        "source_paths": ["AGENTS.md", "README.md", "Cargo.toml", "artifacts/proof_lane_manifest_v1.json"],
+    },
+    {
+        "command_id": "full-feature-tokio-audit",
+        "graph_class": "full-feature-dev-audit",
+        "claim_scope": "full-graph-tokio-audit",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_full_tokio_tree cargo tree -e features --workspace --invert tokio",
+        "expected_oracle": "tokio paths are explained as scoped dev/test/fuzz/satellite audit edges",
+        "covers": "Full workspace feature/dev graph audit names expected scoped tokio edges in dev/test/reference, fuzz-helper, and satellite surfaces.",
+        "does_not_cover": "Not a default or metrics production proof; expected tokio edges are allowed only when documented as scoped non-production carve-outs.",
+        "source_paths": [
+            "AGENTS.md",
+            "README.md",
+            "Cargo.toml",
+            "artifacts/no_tokio_feature_boundary_contract_v1.json",
+            "artifacts/proof_lane_manifest_v1.json",
+        ],
+    },
+]
+
+PRODUCTION_PROOF_IDS = ["default-production-tokio-tree", "metrics-production-tokio-tree"]
+AUDIT_PROOF_IDS = ["workspace-normal-tokio-audit", "full-feature-tokio-audit"]
+QUARANTINE_PROOF_IDS = ["fuzz-tokio-quarantine-tree"]
+PROOF_REQUIRED_IDS = PRODUCTION_PROOF_IDS + QUARANTINE_PROOF_IDS + AUDIT_PROOF_IDS
+PROOF_ROW_CLASSIFICATIONS = {
+    "runtime_boundary_required",
+    "compat_quarantine_candidate",
+    "hard_blocker",
+}
+
 
 def stable_json(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True) + "\n"
@@ -371,6 +457,206 @@ def counts_by(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def proof_command_map() -> dict[str, dict[str, Any]]:
+    return {string_value(command.get("command_id")): command for command in PROOF_COMMANDS}
+
+
+def validate_proof_commands() -> list[str]:
+    reasons: list[str] = []
+    seen: set[str] = set()
+    for command in PROOF_COMMANDS:
+        command_id = string_value(command.get("command_id"))
+        if not command_id:
+            reasons.append("proof-command-missing-id")
+            continue
+        if command_id in seen:
+            reasons.append(f"{command_id}:duplicate-proof-command-id")
+        seen.add(command_id)
+
+        command_text = string_value(command.get("command"))
+        if not command_text:
+            reasons.append(f"{command_id}:proof-command-missing")
+        elif not command_text.startswith(PROOF_COMMAND_PREFIX):
+            reasons.append(f"{command_id}:proof-command-not-rch-remote-required")
+        if "cargo tree" not in command_text:
+            reasons.append(f"{command_id}:proof-command-not-cargo-tree")
+        if not string_value(command.get("expected_oracle")):
+            reasons.append(f"{command_id}:expected-oracle-missing")
+        if not list_strings(command.get("source_paths")):
+            reasons.append(f"{command_id}:source-paths-missing")
+
+    missing = sorted(set(PROOF_REQUIRED_IDS) - seen)
+    for command_id in missing:
+        reasons.append(f"{command_id}:proof-command-missing")
+    return sorted(set(reasons))
+
+
+def proof_command_ids_for_row(row: dict[str, Any]) -> list[str]:
+    classification = string_value(row.get("classification"))
+    if classification in {"runtime_boundary_required", "compat_quarantine_candidate"}:
+        return PRODUCTION_PROOF_IDS + AUDIT_PROOF_IDS
+    if classification == "hard_blocker":
+        return PRODUCTION_PROOF_IDS + AUDIT_PROOF_IDS
+    return PRODUCTION_PROOF_IDS
+
+
+def proof_boundary_type(row: dict[str, Any]) -> str:
+    classification = string_value(row.get("classification"))
+    if classification == "runtime_boundary_required":
+        return "native_rewrite_or_compat_quarantine"
+    if classification == "compat_quarantine_candidate":
+        return "compat_quarantine"
+    if classification == "hard_blocker":
+        return "remove_before_signoff"
+    return "none"
+
+
+def proof_source_kind(row: dict[str, Any]) -> str:
+    row_type = string_value(row.get("row_type"))
+    if row_type == "dependency":
+        return "direct_dependency"
+    if row_type == "lockfile_package":
+        return "transitive_lockfile_package"
+    if row_type == "source_marker":
+        return "source_marker"
+    return row_type or "unknown"
+
+
+def owning_module_recommendation(row: dict[str, Any]) -> str:
+    normalized = normalize_crate_name(string_value(row.get("name")))
+    if normalized in {"tokio", "tokio-util", "tokio-stream"}:
+        return "core async entry points must become Cx-threaded, region-owned native Asupersync code"
+    if normalized in {"hyper", "hyper-util", "axum", "tower", "tower-http"}:
+        return "HTTP/server adapter boundary owned outside the native runtime crate"
+    if normalized == "tonic":
+        return "gRPC adapter boundary or native asupersync::grpc replacement"
+    if normalized == "reqwest":
+        return "HTTP client boundary or native asupersync::http client replacement"
+    if normalized == "sqlx":
+        return "database adapter boundary or native asupersync::database replacement"
+    if normalized in {"quinn", "h3"}:
+        return "QUIC/HTTP3 adapter boundary or native transport replacement"
+    if normalized == "rdkafka":
+        return "messaging adapter boundary with explicit capability ownership"
+    if normalized in {"async-std", "smol"}:
+        return "remove alternate runtime from the native migration path"
+    return "owning module must be selected during semantic migration planning"
+
+
+def removal_trigger(row: dict[str, Any]) -> str:
+    classification = string_value(row.get("classification"))
+    if classification == "hard_blocker":
+        return "removed from every native-core path before migration signoff"
+    if classification == "runtime_boundary_required":
+        return "all call sites are native Cx/Scope code or isolated behind an explicit compat boundary"
+    if classification == "compat_quarantine_candidate":
+        return "native replacement lands or adapter is proven scoped outside default and metrics production graphs"
+    return "no removal trigger required"
+
+
+def residual_risk(row: dict[str, Any]) -> str:
+    classification = string_value(row.get("classification"))
+    if classification == "hard_blocker":
+        return "cannot be certified by a compat proof pack until the alternate runtime is removed"
+    if classification == "runtime_boundary_required":
+        return "detached runtime work can leak cancellation, timers, or task ownership if not rewritten or quarantined"
+    if classification == "compat_quarantine_candidate":
+        return "adapter can become architecture by accident unless default and metrics cargo-tree proofs stay clean"
+    return "no proof-pack residual risk"
+
+
+def proof_holdout_rows(inventory_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    command_by_id = proof_command_map()
+    rows: list[dict[str, Any]] = []
+    for row in inventory_rows:
+        classification = string_value(row.get("classification"))
+        if classification not in PROOF_ROW_CLASSIFICATIONS:
+            continue
+        command_ids = proof_command_ids_for_row(row)
+        stale_or_missing = [
+            f"{command_id}:proof-command-missing"
+            for command_id in command_ids
+            if command_id not in command_by_id
+        ]
+        rows.append(
+            {
+                "source_row": {
+                    "row_type": string_value(row.get("row_type")),
+                    "source_kind": proof_source_kind(row),
+                    "path": string_value(row.get("path")),
+                    "line": int(row.get("line", 0)),
+                    "name": string_value(row.get("name")),
+                    "classification": classification,
+                    "section": string_value(row.get("section")),
+                },
+                "boundary_type": proof_boundary_type(row),
+                "owning_module_recommendation": owning_module_recommendation(row),
+                "removal_trigger": removal_trigger(row),
+                "proof_command_ids": command_ids,
+                "expected_oracle": "default and metrics lanes must print `warning: nothing to print.`; audit lanes may show only documented scoped Tokio paths",
+                "residual_risk": residual_risk(row),
+                "stale_or_missing_proof_reasons": stale_or_missing,
+                "status": "blocked" if classification == "hard_blocker" else "proof_commands_ready",
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["source_row"]["path"],
+            row["source_row"]["source_kind"],
+            row["source_row"]["name"],
+            row["source_row"]["line"],
+        ),
+    )
+
+
+def build_proof_pack(
+    inventory_rows: list[dict[str, Any]],
+    parse_errors: list[str],
+    manifest_count: int,
+) -> dict[str, Any]:
+    holdouts = proof_holdout_rows(inventory_rows)
+    fail_closed_reasons = validate_proof_commands()
+    if manifest_count == 0 or parse_errors:
+        fail_closed_reasons.append("inventory-report-blocked")
+    if not inventory_rows and not fail_closed_reasons:
+        fail_closed_reasons.append("inventory-report-has-no-runtime-surface-evidence")
+    if any(row["status"] == "blocked" for row in holdouts):
+        fail_closed_reasons.append("hard-blocker-runtime-surface")
+    for row in holdouts:
+        fail_closed_reasons.extend(row["stale_or_missing_proof_reasons"])
+
+    if fail_closed_reasons:
+        status = "blocked"
+    elif holdouts:
+        status = "compat_quarantine_required"
+    else:
+        status = "native_proof_ready"
+
+    return {
+        "schema_version": "migration-readiness-proof-pack-v1",
+        "source_contracts": [
+            "AGENTS.md",
+            "README.md",
+            "artifacts/no_tokio_feature_boundary_contract_v1.json",
+            "artifacts/proof_lane_manifest_v1.json",
+        ],
+        "summary": {
+            "status": status,
+            "compat_holdout_count": len(holdouts),
+            "proof_command_count": len(PROOF_COMMANDS),
+            "fail_closed_reason_count": len(set(fail_closed_reasons)),
+            "holdout_classification_counts": counts_by(
+                [row["source_row"] for row in holdouts],
+                "classification",
+            ),
+        },
+        "fail_closed_reasons": sorted(set(fail_closed_reasons)),
+        "proof_commands": PROOF_COMMANDS,
+        "quarantine_rows": holdouts,
+    }
+
+
 def final_verdict(rows: list[dict[str, Any]], parse_errors: list[str], manifest_count: int) -> tuple[str, list[str]]:
     reasons: list[str] = []
     if manifest_count == 0:
@@ -448,7 +734,11 @@ def build_report(project_root: Path) -> dict[str, Any]:
             }
         )
 
+    proof_pack = build_proof_pack(inventory_rows, parse_errors, len(manifests))
     verdict, fail_closed_reasons = final_verdict(inventory_rows, parse_errors, len(manifests))
+    if proof_pack["fail_closed_reasons"]:
+        verdict = "blocked"
+        fail_closed_reasons = sorted(set(fail_closed_reasons + proof_pack["fail_closed_reasons"]))
     return {
         "schema_version": SCHEMA_VERSION,
         "project_root": root.as_posix(),
@@ -469,6 +759,7 @@ def build_report(project_root: Path) -> dict[str, Any]:
         "lockfile": lockfile,
         "warnings": sorted(warnings, key=lambda row: (row.get("kind", ""), row.get("path", ""), row.get("member", ""))),
         "inventory_rows": inventory_rows,
+        "proof_pack": proof_pack,
     }
 
 
@@ -490,6 +781,20 @@ def summary_markdown(report: dict[str, Any]) -> str:
         lines.extend(["", "## Fail-Closed Reasons"])
         for reason in summary["fail_closed_reasons"]:
             lines.append(f"- `{reason}`")
+    proof_pack = report.get("proof_pack")
+    if isinstance(proof_pack, dict):
+        proof_summary = proof_pack["summary"]
+        lines.extend(
+            [
+                "",
+                "## Proof Pack",
+                f"- status: `{proof_summary['status']}`",
+                f"- proof_command_count: `{proof_summary['proof_command_count']}`",
+                f"- compat_holdout_count: `{proof_summary['compat_holdout_count']}`",
+            ]
+        )
+        for command in proof_pack["proof_commands"]:
+            lines.append(f"- `{command['command_id']}`: {command['expected_oracle']}")
     lines.extend(["", "## Next Probes"])
     seen: set[str] = set()
     for row in report["inventory_rows"]:
