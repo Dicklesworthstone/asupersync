@@ -1,0 +1,334 @@
+{
+  "schema_version": "third-wave-swarm-guardrail-e2e-contract-v1",
+  "contract_id": "third-wave-swarm-guardrail-e2e-contract",
+  "bead_id": "asupersync-ol11aa.9.6",
+  "helper": "scripts/third_wave_swarm_guardrail_e2e.py",
+  "e2e_script": "scripts/run_third_wave_swarm_guardrail_e2e.sh",
+  "contract_test": "tests/third_wave_swarm_guardrail_e2e_contract.rs",
+  "docs": "docs/third_wave_swarm_guardrail_e2e.md",
+  "expected_summary": {
+    "component_count": 5,
+    "passed_components": 5,
+    "failed_components": 0,
+    "child_scenario_count": 35,
+    "required_classification_count": 35,
+    "required_marker_count": 15,
+    "dry_run_only": true,
+    "non_mutating": true,
+    "invokes_child_helpers": true,
+    "uses_live_external_services": false,
+    "runs_proof_commands": false,
+    "mutation_command_count": 0,
+    "proof_command_count": 0,
+    "guardrail_verdict": "pass"
+  },
+  "validation": {
+    "focused_rch_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_third_wave_swarm_guardrail_e2e\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test third_wave_swarm_guardrail_e2e_contract -- --nocapture",
+    "script_self_check": "python3 scripts/third_wave_swarm_guardrail_e2e.py --fixture artifacts/third_wave_swarm_guardrail_e2e_contract_v1.json --repo-root . --generated-at 2026-06-06T17:20:00Z --output json"
+  },
+  "fixture": {
+    "schema_version": "third-wave-swarm-guardrail-e2e-fixture-v1",
+    "fixture_id": "third-wave-swarm-guardrail-e2e-contract-fixture",
+    "bundle_id": "asupersync-ol11aa.9.6-third-wave-guardrail-e2e",
+    "parent_bead_id": "asupersync-ol11aa.9",
+    "global_forbidden_actions": [
+      "do-not-create-branches",
+      "do-not-create-worktrees",
+      "do-not-edit-peer-dirty-files",
+      "do-not-contact-live-coordination-services",
+      "do-not-run-proof-commands",
+      "do-not-rewrite-tracker-state",
+      "do-not-treat-child-helper-failure-as-green",
+      "do-not-ignore-missing-child-classifications"
+    ],
+    "non_claims": [
+      "This e2e report verifies guardrail fixture behavior; it is not a broad workspace health proof.",
+      "The aggregate invokes child helpers against checked fixtures only.",
+      "Child helper fixtures do not override live br, bv, Git, Agent Mail, reservation, or RCH state.",
+      "A passing report does not close a bead, push refs, mirror refs, or release reservations.",
+      "This e2e report is not a release publish proof and not a substitute for broad check/clippy/test gates."
+    ],
+    "components": [
+      {
+        "id": "stale-in-progress-reaper",
+        "title": "Stale in-progress bead reaper dry-run guardrail",
+        "bead_id": "asupersync-ol11aa.9.1",
+        "helper": "scripts/stale_in_progress_bead_reaper.py",
+        "fixture": "artifacts/stale_in_progress_bead_reaper_contract_v1.json",
+        "report_schema_version": "stale-in-progress-bead-reaper-report-v1",
+        "generated_at": "2026-06-06T14:30:00Z",
+        "extra_args": [
+          "--mode",
+          "report"
+        ],
+        "row_key": "issue_id",
+        "expected_summary": {
+          "issue_count": 7,
+          "candidate_count": 1,
+          "would_reopen": 1,
+          "applied_reopen": 0,
+          "refused_or_excluded": 5,
+          "ignored": 1,
+          "highest_severity_issue": ""
+        },
+        "required_classifications": [
+          "stale-reopen-candidate",
+          "live-agent-excluded",
+          "recent-update-excluded",
+          "missing-timestamp-refused",
+          "malformed-row-refused",
+          "ambiguous-ownership-refused",
+          "non-in-progress-ignored"
+        ],
+        "required_markers": [
+          {
+            "row_id": "asupersync-stale-old",
+            "classification": "stale-reopen-candidate",
+            "bool_fields": {
+              "candidate": true,
+              "applied": false
+            }
+          },
+          {
+            "row_id": "asupersync-live-agent",
+            "classification": "live-agent-excluded",
+            "bool_fields": {
+              "candidate": false,
+              "applied": false
+            }
+          },
+          {
+            "row_id": "asupersync-closed-row",
+            "classification": "non-in-progress-ignored",
+            "bool_fields": {
+              "candidate": false,
+              "applied": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "tracker-graph-drift",
+        "title": "br and bv tracker graph divergence guardrail",
+        "bead_id": "asupersync-ol11aa.9.2",
+        "helper": "scripts/tracker_graph_drift_report.py",
+        "fixture": "artifacts/tracker_graph_drift_report_contract_v1.json",
+        "report_schema_version": "tracker-graph-drift-report-v1",
+        "generated_at": "2026-06-06T13:40:00Z",
+        "extra_args": [],
+        "row_key": "scenario_id",
+        "expected_summary": {
+          "scenario_count": 8,
+          "safe_to_claim": 1,
+          "create_child_bead": 1,
+          "refresh_required": 5,
+          "blocked_or_unsafe": 7,
+          "highest_severity_scenario": "command-failure"
+        },
+        "required_classifications": [
+          "command-provenance-failure",
+          "data-hash-mismatch",
+          "stale-graph-snapshot",
+          "br-ready-bv-empty-divergence",
+          "br-bv-actionable-mismatch",
+          "parent-only-ready-queue",
+          "consistent-actionable",
+          "consistent-no-work"
+        ],
+        "required_markers": [
+          {
+            "row_id": "br-ready-bv-empty",
+            "classification": "br-ready-bv-empty-divergence",
+            "bool_fields": {
+              "safe_to_claim": false,
+              "refresh_required": true
+            }
+          },
+          {
+            "row_id": "parent-only-ready",
+            "classification": "parent-only-ready-queue",
+            "bool_fields": {
+              "safe_to_claim": false,
+              "create_child_bead": true
+            }
+          },
+          {
+            "row_id": "consistent-actionable",
+            "classification": "consistent-actionable",
+            "bool_fields": {
+              "safe_to_claim": true,
+              "refresh_required": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "reservation-lease-watchdog",
+        "title": "Reservation lease coverage and renewal guardrail",
+        "bead_id": "asupersync-ol11aa.9.3",
+        "helper": "scripts/reservation_lease_watchdog.py",
+        "fixture": "artifacts/reservation_lease_watchdog_contract_v1.json",
+        "report_schema_version": "reservation-lease-watchdog-report-v1",
+        "generated_at": "2026-06-06T16:05:00Z",
+        "extra_args": [
+          "--mode",
+          "dry-run"
+        ],
+        "row_key": "scenario_id",
+        "expected_summary": {
+          "scenario_count": 7,
+          "admissible_count": 1,
+          "non_admissible_count": 6,
+          "renew_needed_count": 1,
+          "fail_closed_count": 5,
+          "renewal_request_count": 2,
+          "missing_path_count": 1,
+          "conflict_count": 1,
+          "highest_severity_scenario": "missing-command-provenance"
+        },
+        "required_classifications": [
+          "sufficient-ttl",
+          "renew-needed",
+          "expired-reservation",
+          "missing-reservation",
+          "conflicting-reservation",
+          "renewal-failure",
+          "command-provenance-missing"
+        ],
+        "required_markers": [
+          {
+            "row_id": "sufficient-ttl",
+            "classification": "sufficient-ttl",
+            "bool_fields": {
+              "coverage_admissible": true,
+              "fail_closed": false
+            }
+          },
+          {
+            "row_id": "near-expiry-renew-needed",
+            "classification": "renew-needed",
+            "bool_fields": {
+              "coverage_admissible": false,
+              "fail_closed": false
+            }
+          },
+          {
+            "row_id": "missing-command-provenance",
+            "classification": "command-provenance-missing",
+            "bool_fields": {
+              "coverage_admissible": false,
+              "fail_closed": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "swarm-lane-closeout",
+        "title": "Lane closeout receipt guardrail",
+        "bead_id": "asupersync-ol11aa.9.4",
+        "helper": "scripts/swarm_lane_closeout_receipt.py",
+        "fixture": "artifacts/swarm_lane_closeout_receipt_contract_v1.json",
+        "report_schema_version": "swarm-lane-closeout-receipt-v1",
+        "generated_at": "2026-06-06T15:30:00Z",
+        "extra_args": [],
+        "row_key": "scenario_id",
+        "expected_summary": {
+          "scenario_count": 7,
+          "admissible_count": 2,
+          "non_admissible_count": 5,
+          "fail_closed_count": 5,
+          "peer_dirt_admissible_count": 1,
+          "proof_command_count": 7,
+          "highest_severity_scenario": "failed-rch-cited-green"
+        },
+        "required_classifications": [
+          "admissible-closeout",
+          "failed-proof-cited-green",
+          "missing-remote-worker-evidence",
+          "zero-test-exact-filter",
+          "expired-reservation-gap",
+          "unverified-pushed-refs",
+          "peer-dirt-shared-main"
+        ],
+        "required_markers": [
+          {
+            "row_id": "successful-lane",
+            "classification": "admissible-closeout",
+            "bool_fields": {
+              "admissible": true
+            }
+          },
+          {
+            "row_id": "peer-dirt-shared-main",
+            "classification": "peer-dirt-shared-main",
+            "bool_fields": {
+              "admissible": true
+            }
+          },
+          {
+            "row_id": "failed-rch-cited-green",
+            "classification": "failed-proof-cited-green",
+            "bool_fields": {
+              "admissible": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "rch-quiet-phase",
+        "title": "RCH quiet phase and local fallback guardrail",
+        "bead_id": "asupersync-ol11aa.9.5",
+        "helper": "scripts/rch_quiet_phase_receipt.py",
+        "fixture": "artifacts/rch_quiet_phase_receipt_contract_v1.json",
+        "report_schema_version": "rch-quiet-phase-receipt-v1",
+        "generated_at": "2026-06-06T16:50:00Z",
+        "extra_args": [],
+        "row_key": "scenario_id",
+        "expected_summary": {
+          "scenario_count": 6,
+          "proof_success_citable_count": 1,
+          "progress_evidence_count": 4,
+          "warning_count": 3,
+          "blocker_count": 10,
+          "local_fallback_count": 1,
+          "artifact_stall_count": 1,
+          "highest_severity_scenario": "local-fallback-refusal"
+        },
+        "required_classifications": [
+          "remote-success-with-quiet-progress",
+          "remote-command-failed",
+          "artifact-retrieval-stall",
+          "local-fallback-refused",
+          "envelope-timeout-risk",
+          "missing-remote-required-evidence"
+        ],
+        "required_markers": [
+          {
+            "row_id": "successful-cold-clippy",
+            "classification": "remote-success-with-quiet-progress",
+            "bool_fields": {
+              "proof_success_citable": true,
+              "progress_evidence": true
+            }
+          },
+          {
+            "row_id": "local-fallback-refusal",
+            "classification": "local-fallback-refused",
+            "bool_fields": {
+              "proof_success_citable": false,
+              "progress_evidence": false
+            }
+          },
+          {
+            "row_id": "missing-remote-evidence",
+            "classification": "missing-remote-required-evidence",
+            "bool_fields": {
+              "proof_success_citable": false,
+              "progress_evidence": false
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
