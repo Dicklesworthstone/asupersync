@@ -17,6 +17,7 @@ and not a substitute for broad check/clippy/test gates.
 - E2E runner: `scripts/run_third_wave_swarm_guardrail_e2e.sh`
 - Contract test: `tests/third_wave_swarm_guardrail_e2e_contract.rs`
 - Operator docs: `docs/third_wave_swarm_guardrail_e2e.md`
+- Operator runbook: `docs/third_wave_swarm_operator_runbook.md`
 
 ## Refresh Procedure
 
