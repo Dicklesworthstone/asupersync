@@ -46,6 +46,8 @@ impl MultiPeerHarness {
     }
 
     /// Execute a single multi-peer scenario
+    #[allow(unknown_lints)]
+    #[allow(clippy::unused_async_trait_impl)]
     pub async fn execute_scenario(
         &self,
         scenario: &MultiPeerScenario,

@@ -1,3 +1,4 @@
+#![allow(unknown_lints)]
 #![allow(missing_docs, clippy::items_after_statements)]
 //! Service Layer Verification Suite (bd-221m)
 //!
@@ -285,6 +286,7 @@ fn svc_verify_003_asupersync_service() {
         type Response = i32;
         type Error = std::convert::Infallible;
 
+        #[allow(clippy::unused_async_trait_impl)]
         async fn call(&self, _cx: &Cx, request: i32) -> Result<Self::Response, Self::Error> {
             Ok(request * 2)
         }
