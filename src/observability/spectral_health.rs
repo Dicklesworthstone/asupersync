@@ -1449,7 +1449,7 @@ fn spearman_rho(values: &[f64]) -> Option<f64> {
 
     let value_ranks = average_rank_f64(values);
     let n_f = n as f64;
-    let mean_time_rank = (n_f + 1.0) * 0.5;
+    let mean_time_rank = f64::midpoint(n_f, 1.0);
     let mean_value_rank = value_ranks.iter().sum::<f64>() / n_f;
 
     let mut covariance = 0.0_f64;

@@ -255,7 +255,7 @@ impl Resolver {
 
         self.timeout_future(self.config.timeout, lookup)
             .await
-            .map_or(Err(DnsError::Timeout), |result| result)
+            .unwrap_or(Err(DnsError::Timeout))
     }
 
     async fn do_lookup_ip_with_nameservers(&self, host: &str) -> Result<LookupIp, DnsError> {
@@ -282,7 +282,7 @@ impl Resolver {
 
         self.timeout_future(timeout, lookup)
             .await
-            .map_or(Err(DnsError::Timeout), |result| result)
+            .unwrap_or(Err(DnsError::Timeout))
     }
 
     /// Performs synchronous DNS lookup using std::net.
@@ -497,7 +497,7 @@ impl Resolver {
 
         self.timeout_future(timeout, lookup)
             .await
-            .map_or(Err(DnsError::Timeout), |result| result)
+            .unwrap_or(Err(DnsError::Timeout))
     }
 
     /// Looks up SRV records.
@@ -546,7 +546,7 @@ impl Resolver {
 
         self.timeout_future(timeout, lookup)
             .await
-            .map_or(Err(DnsError::Timeout), |result| result)
+            .unwrap_or(Err(DnsError::Timeout))
     }
 
     /// Looks up TXT records.
@@ -584,7 +584,7 @@ impl Resolver {
 
         self.timeout_future(timeout, lookup)
             .await
-            .map_or(Err(DnsError::Timeout), |result| result)
+            .unwrap_or(Err(DnsError::Timeout))
     }
 
     /// Clears the DNS cache.

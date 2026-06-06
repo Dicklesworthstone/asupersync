@@ -282,7 +282,7 @@ impl TimingStatistics {
         let t = 1.0 / (1.0 + p * x);
         let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x / 2.0).exp();
 
-        0.5 * (1.0 + sign * y)
+        f64::midpoint(1.0, sign * y)
     }
 }
 
