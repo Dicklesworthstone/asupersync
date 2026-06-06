@@ -1,0 +1,425 @@
+{
+  "schema_version": "reservation-lease-watchdog-contract-v1",
+  "contract_id": "reservation-lease-watchdog-contract",
+  "bead_id": "asupersync-ol11aa.9.3",
+  "helper": "scripts/reservation_lease_watchdog.py",
+  "required_classifications": [
+    "sufficient-ttl",
+    "renew-needed",
+    "expired-reservation",
+    "missing-reservation",
+    "conflicting-reservation",
+    "renewal-failure",
+    "command-provenance-missing"
+  ],
+  "expected_summary": {
+    "scenario_count": 7,
+    "admissible_count": 1,
+    "non_admissible_count": 6,
+    "renew_needed_count": 1,
+    "fail_closed_count": 5,
+    "renewal_request_count": 2,
+    "missing_path_count": 1,
+    "conflict_count": 1,
+    "highest_severity_scenario": "missing-command-provenance"
+  },
+  "validation": {
+    "focused_rch_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_reservation_lease_watchdog\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test reservation_lease_watchdog_contract -- --nocapture",
+    "script_self_check": "python3 scripts/reservation_lease_watchdog.py --fixture artifacts/reservation_lease_watchdog_contract_v1.json --generated-at 2026-06-06T16:05:00Z --mode dry-run --output json",
+    "simulated_long_rch_log": "python3 scripts/reservation_lease_watchdog.py --fixture artifacts/reservation_lease_watchdog_contract_v1.json --generated-at 2026-06-06T16:05:00Z --mode renew --output log"
+  },
+  "fixture": {
+    "schema_version": "reservation-lease-watchdog-fixture-v1",
+    "fixture_id": "reservation-lease-watchdog-contract-fixture",
+    "self_agent": "PinkStream",
+    "scenario_defaults": {
+      "description": "A long RCH proof lane has complete Agent Mail reservations with enough TTL to cover expected remaining validation plus renewal margin.",
+      "self_agent": "PinkStream",
+      "current_time": "2026-06-06T16:00:00Z",
+      "expected_remaining_seconds": 1800,
+      "renewal_threshold_seconds": 900,
+      "renewal_ttl_seconds": 7200,
+      "reservation_reason": "asupersync-ol11aa.9.3 reservation lease watchdog",
+      "expected_paths": [
+        ".beads/issues.jsonl",
+        "scripts/reservation_lease_watchdog.py",
+        "artifacts/reservation_lease_watchdog_contract_v1.json",
+        "tests/reservation_lease_watchdog_contract.rs",
+        "docs/reservation_lease_watchdog.md"
+      ],
+      "lane": {
+        "bead_id": "asupersync-ol11aa.9.3",
+        "command_id": "focused-reservation-lease-watchdog-rch",
+        "proof_envelope": {
+          "timeout_seconds": 3600,
+          "memory_mb": 4096,
+          "remote_required": true,
+          "no_local_fallback": true
+        },
+        "command_provenance": {
+          "argv": [
+            "rch",
+            "exec",
+            "--",
+            "env",
+            "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reservation_lease_watchdog",
+            "CARGO_INCREMENTAL=0",
+            "CARGO_PROFILE_TEST_DEBUG=0",
+            "RUSTFLAGS=-D warnings -C debuginfo=0",
+            "cargo",
+            "test",
+            "-p",
+            "asupersync",
+            "--test",
+            "reservation_lease_watchdog_contract",
+            "--",
+            "--nocapture"
+          ],
+          "env": {
+            "RCH_REQUIRE_REMOTE": "1"
+          },
+          "worker_identity": "rch-worker-21",
+          "target_dir_class": "focused-contract",
+          "source_fingerprint": "git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "active_reservations": [
+        {
+          "id": 32688,
+          "path": ".beads/issues.jsonl",
+          "agent": "PinkStream",
+          "exclusive": true,
+          "status": "active",
+          "granted_at": "2026-06-06T15:48:09Z",
+          "expires_at": "2026-06-06T18:00:00Z"
+        },
+        {
+          "id": 32689,
+          "path": "scripts/reservation_lease_watchdog.py",
+          "agent": "PinkStream",
+          "exclusive": true,
+          "status": "active",
+          "granted_at": "2026-06-06T15:48:09Z",
+          "expires_at": "2026-06-06T18:00:00Z"
+        },
+        {
+          "id": 32690,
+          "path": "artifacts/reservation_lease_watchdog_contract_v1.json",
+          "agent": "PinkStream",
+          "exclusive": true,
+          "status": "active",
+          "granted_at": "2026-06-06T15:48:09Z",
+          "expires_at": "2026-06-06T18:00:00Z"
+        },
+        {
+          "id": 32691,
+          "path": "tests/reservation_lease_watchdog_contract.rs",
+          "agent": "PinkStream",
+          "exclusive": true,
+          "status": "active",
+          "granted_at": "2026-06-06T15:48:09Z",
+          "expires_at": "2026-06-06T18:00:00Z"
+        },
+        {
+          "id": 32692,
+          "path": "docs/reservation_lease_watchdog.md",
+          "agent": "PinkStream",
+          "exclusive": true,
+          "status": "active",
+          "granted_at": "2026-06-06T15:48:09Z",
+          "expires_at": "2026-06-06T18:00:00Z"
+        }
+      ],
+      "renewal_attempt": {
+        "requested": false
+      }
+    },
+    "scenarios": [
+      {
+        "scenario_id": "sufficient-ttl"
+      },
+      {
+        "scenario_id": "near-expiry-renew-needed",
+        "description": "All reservations are present but one lease expires before expected remaining proof time plus safety margin.",
+        "active_reservations": [
+          {
+            "id": 32688,
+            "path": ".beads/issues.jsonl",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32689,
+            "path": "scripts/reservation_lease_watchdog.py",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32690,
+            "path": "artifacts/reservation_lease_watchdog_contract_v1.json",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32691,
+            "path": "tests/reservation_lease_watchdog_contract.rs",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32692,
+            "path": "docs/reservation_lease_watchdog.md",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T16:30:00Z"
+          }
+        ]
+      },
+      {
+        "scenario_id": "expired-owned-reservation",
+        "description": "An owned reservation expired before the watchdog check.",
+        "active_reservations": [
+          {
+            "id": 32688,
+            "path": ".beads/issues.jsonl",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32689,
+            "path": "scripts/reservation_lease_watchdog.py",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32690,
+            "path": "artifacts/reservation_lease_watchdog_contract_v1.json",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T15:59:00Z"
+          },
+          {
+            "id": 32691,
+            "path": "tests/reservation_lease_watchdog_contract.rs",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32692,
+            "path": "docs/reservation_lease_watchdog.md",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          }
+        ]
+      },
+      {
+        "scenario_id": "missing-doc-reservation",
+        "description": "One expected owned path has no active exclusive reservation.",
+        "active_reservations": [
+          {
+            "id": 32688,
+            "path": ".beads/issues.jsonl",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32689,
+            "path": "scripts/reservation_lease_watchdog.py",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32690,
+            "path": "artifacts/reservation_lease_watchdog_contract_v1.json",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32691,
+            "path": "tests/reservation_lease_watchdog_contract.rs",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          }
+        ]
+      },
+      {
+        "scenario_id": "peer-conflict-on-script",
+        "description": "A peer owns an overlapping active exclusive reservation on the script path.",
+        "active_reservations": [
+          {
+            "id": 32688,
+            "path": ".beads/issues.jsonl",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32689,
+            "path": "scripts/reservation_lease_watchdog.py",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32690,
+            "path": "artifacts/reservation_lease_watchdog_contract_v1.json",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32691,
+            "path": "tests/reservation_lease_watchdog_contract.rs",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32692,
+            "path": "docs/reservation_lease_watchdog.md",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 33001,
+            "path": "scripts/*.py",
+            "agent": "SapphireHill",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:50:00Z",
+            "expires_at": "2026-06-06T17:50:00Z"
+          }
+        ]
+      },
+      {
+        "scenario_id": "renewal-failure-after-request",
+        "description": "The lane needed renewal, an explicit renewal was attempted, and the result failed.",
+        "active_reservations": [
+          {
+            "id": 32688,
+            "path": ".beads/issues.jsonl",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32689,
+            "path": "scripts/reservation_lease_watchdog.py",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T16:20:00Z"
+          },
+          {
+            "id": 32690,
+            "path": "artifacts/reservation_lease_watchdog_contract_v1.json",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32691,
+            "path": "tests/reservation_lease_watchdog_contract.rs",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          },
+          {
+            "id": 32692,
+            "path": "docs/reservation_lease_watchdog.md",
+            "agent": "PinkStream",
+            "exclusive": true,
+            "status": "active",
+            "granted_at": "2026-06-06T15:48:09Z",
+            "expires_at": "2026-06-06T18:00:00Z"
+          }
+        ],
+        "renewal_attempt": {
+          "requested": true,
+          "status": "failed",
+          "error": "FILE_RESERVATION_CONFLICT",
+          "attempted_at": "2026-06-06T16:01:00Z"
+        }
+      },
+      {
+        "scenario_id": "missing-command-provenance",
+        "description": "The proof lane lacks command provenance and envelope evidence.",
+        "lane": {
+          "bead_id": "asupersync-ol11aa.9.3",
+          "command_id": "focused-reservation-lease-watchdog-rch",
+          "proof_envelope": {
+            "timeout_seconds": 0,
+            "memory_mb": 0,
+            "remote_required": false,
+            "no_local_fallback": false
+          },
+          "command_provenance": {
+            "argv": [],
+            "env": {},
+            "worker_identity": "",
+            "target_dir_class": "",
+            "source_fingerprint": ""
+          }
+        }
+      }
+    ]
+  }
+}
