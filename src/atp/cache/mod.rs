@@ -39,10 +39,15 @@ impl CacheKey {
     /// Get a stable string representation for indexing.
     #[must_use]
     pub fn as_index_key(&self) -> String {
+        let mut index_key = String::new();
+        index_key.push_str("v1|");
+        push_index_key_part(&mut index_key, 'm', &self.manifest_hash);
+        push_index_key_part(&mut index_key, 'c', &self.content_hash);
         match &self.grant_scope {
-            Some(scope) => format!("{}:{}:{}", self.manifest_hash, self.content_hash, scope),
-            None => format!("{}:{}", self.manifest_hash, self.content_hash),
+            Some(scope) => push_index_key_part(&mut index_key, 's', scope),
+            None => index_key.push('n'),
         }
+        index_key
     }
 
     /// Whether the grant scope declares encrypted-at-rest content.
@@ -52,6 +57,15 @@ impl CacheKey {
             .as_deref()
             .is_some_and(scope_declares_encrypted_content)
     }
+}
+
+fn push_index_key_part(index_key: &mut String, label: char, value: &str) {
+    index_key.push(label);
+    index_key.push(':');
+    index_key.push_str(&value.len().to_string());
+    index_key.push(':');
+    index_key.push_str(value);
+    index_key.push('|');
 }
 
 /// Cached content entry with metadata and access tracking.
@@ -78,7 +92,7 @@ pub struct CacheEntry {
 }
 
 /// Storage location for cached content.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageLocation {
     /// Stored in a file on disk.
     File(PathBuf),
@@ -277,19 +291,9 @@ impl AtpCache {
             // Check TTL atomically with entry access
             let elapsed = entry.created_at.elapsed().unwrap_or(Duration::MAX);
             if elapsed > entry.ttl {
-                // Entry expired - extract data before removing
-                let storage_location = entry.storage_location.clone();
-                self.entries.remove(&index_key);
-                match &storage_location {
-                    StorageLocation::File(path) => {
-                        let _ = std::fs::remove_file(path);
-                    }
-                    StorageLocation::Memory(memory_key) => {
-                        self.memory_storage.remove(memory_key);
-                    }
-                    StorageLocation::External(_) => {}
+                if let Some(entry) = self.entries.remove(&index_key) {
+                    self.remove_expired_entry(&index_key, entry);
                 }
-                self.access_order.retain(|k| k != &index_key);
                 self.metrics.record_miss();
                 return Ok(None);
             }
@@ -305,43 +309,42 @@ impl AtpCache {
         // Clone storage location to avoid borrow conflict
         let storage_location = entry.storage_location.clone();
 
-        // Update access tracking
-        self.update_access(&index_key);
-        self.metrics.record_hit();
-
         // Load content from storage
-        match &storage_location {
-            StorageLocation::File(path) => {
-                match std::fs::read(path) {
-                    Ok(content) => Ok(Some(content)),
-                    Err(_) => {
-                        // File missing, remove from cache
-                        self.remove(key)?;
-                        self.metrics.record_miss();
-                        Ok(None)
-                    }
+        let content = match &storage_location {
+            StorageLocation::File(path) => match std::fs::read(path) {
+                Ok(content) => Some(content),
+                Err(_) => {
+                    // File missing, remove from cache
+                    self.remove(key)?;
+                    self.metrics.record_miss();
+                    None
                 }
-            }
+            },
             StorageLocation::Memory(memory_key) => match self.memory_storage.get(memory_key) {
-                Some(content) => Ok(Some(content.clone())),
+                Some(content) => Some(content.clone()),
                 None => {
                     self.remove(key)?;
                     self.metrics.record_miss();
-                    Ok(None)
+                    None
                 }
             },
             StorageLocation::External(location) => {
                 let content = retrieve_external_cache_location(location)?;
-                Ok(Some(content))
+                Some(content)
             }
+        };
+
+        if let Some(content) = content {
+            self.update_access(&index_key);
+            self.metrics.record_hit();
+            Ok(Some(content))
+        } else {
+            Ok(None)
         }
     }
 
     /// Store content in cache with verification.
     pub fn put(&mut self, key: CacheKey, content: &[u8]) -> Result<(), CacheError> {
-        // Check trust policy for storage
-        self.trust_policy.check_storage(&key)?;
-
         // Verify content hash matches
         let actual_hash = self.compute_content_hash(content);
         if actual_hash != key.content_hash {
@@ -350,16 +353,24 @@ impl AtpCache {
             ));
         }
 
+        let encrypted = derive_cache_entry_encryption_status(&key, content);
+
+        // Check trust policy for storage before mutating cache state.
+        self.trust_policy.check_storage(&key, encrypted)?;
+
         let index_key = key.as_index_key();
         let size_bytes = content.len() as u64;
+        let replaced_entry = self.entries.get(&index_key).cloned();
 
         // Check if we need to evict entries
-        self.ensure_space_for(size_bytes)?;
+        if replaced_entry.is_none() {
+            self.ensure_space_for(size_bytes)?;
+        }
 
         // Choose storage location
         let storage_location = if size_bytes < 64 * 1024 {
             // Small content in memory - generate memory key from cache key
-            let memory_key = format!("{}:{}", key.manifest_hash, key.content_hash);
+            let memory_key = index_key.clone();
             self.memory_storage
                 .insert(memory_key.clone(), content.to_vec());
             StorageLocation::Memory(memory_key)
@@ -388,8 +399,8 @@ impl AtpCache {
             last_accessed: now,
             access_count: 0,
             ttl: self.config.default_ttl,
-            encrypted: derive_cache_entry_encryption_status(&key, content),
-            storage_location,
+            encrypted,
+            storage_location: storage_location.clone(),
             verification: VerificationMetadata {
                 content_verified: true,
                 manifest_verified: false,
@@ -400,11 +411,23 @@ impl AtpCache {
 
         // Store entry
         self.entries.insert(index_key.clone(), entry);
+        self.access_order.retain(|k| k != &index_key);
         self.access_order.push(index_key);
 
         // Update metrics
-        self.metrics.total_bytes += size_bytes;
-        self.metrics.entry_count += 1;
+        if let Some(replaced_entry) = replaced_entry {
+            if replaced_entry.storage_location != storage_location {
+                self.remove_storage_location(&replaced_entry.storage_location);
+            }
+            self.metrics.total_bytes = self
+                .metrics
+                .total_bytes
+                .saturating_sub(replaced_entry.size_bytes)
+                .saturating_add(size_bytes);
+        } else {
+            self.metrics.total_bytes = self.metrics.total_bytes.saturating_add(size_bytes);
+            self.metrics.entry_count = self.metrics.entry_count.saturating_add(1);
+        }
 
         Ok(())
     }
@@ -418,15 +441,7 @@ impl AtpCache {
             self.access_order.retain(|k| k != &index_key);
 
             // Remove backing data if stored in this cache instance.
-            match &entry.storage_location {
-                StorageLocation::File(path) => {
-                    let _ = std::fs::remove_file(path); // Ignore errors
-                }
-                StorageLocation::Memory(memory_key) => {
-                    self.memory_storage.remove(memory_key);
-                }
-                StorageLocation::External(_) => {}
-            }
+            self.remove_storage_location(&entry.storage_location);
 
             // Update metrics
             self.metrics.record_eviction(entry.size_bytes);
@@ -459,14 +474,14 @@ impl AtpCache {
         // Update entry access count
         if let Some(entry) = self.entries.get_mut(index_key) {
             entry.last_accessed = SystemTime::now();
-            entry.access_count += 1;
+            entry.access_count = entry.access_count.saturating_add(1);
         }
     }
 
     /// Ensure space for new content by evicting if necessary.
     fn ensure_space_for(&mut self, size_bytes: u64) -> Result<(), CacheError> {
         // Check if we need to evict
-        while (self.metrics.total_bytes + size_bytes > self.config.max_size_bytes)
+        while (self.metrics.total_bytes.saturating_add(size_bytes) > self.config.max_size_bytes)
             || (self.metrics.entry_count >= self.config.max_entries)
         {
             if self.access_order.is_empty() {
@@ -477,21 +492,31 @@ impl AtpCache {
             let to_evict = self.access_order.remove(0);
             if let Some(entry) = self.entries.remove(&to_evict) {
                 // Remove backing data if needed
-                match &entry.storage_location {
-                    StorageLocation::File(path) => {
-                        let _ = std::fs::remove_file(path);
-                    }
-                    StorageLocation::Memory(memory_key) => {
-                        self.memory_storage.remove(memory_key);
-                    }
-                    StorageLocation::External(_) => {}
-                }
+                self.remove_storage_location(&entry.storage_location);
 
                 self.metrics.record_eviction(entry.size_bytes);
             }
         }
 
         Ok(())
+    }
+
+    fn remove_expired_entry(&mut self, index_key: &str, entry: CacheEntry) {
+        self.remove_storage_location(&entry.storage_location);
+        self.access_order.retain(|k| k != index_key);
+        self.metrics.record_eviction(entry.size_bytes);
+    }
+
+    fn remove_storage_location(&mut self, storage_location: &StorageLocation) {
+        match storage_location {
+            StorageLocation::File(path) => {
+                let _ = std::fs::remove_file(path);
+            }
+            StorageLocation::Memory(memory_key) => {
+                self.memory_storage.remove(memory_key);
+            }
+            StorageLocation::External(_) => {}
+        }
     }
 }
 
@@ -548,10 +573,27 @@ mod tests {
             "content456".to_string(),
             Some("scope789".to_string()),
         );
-        assert_eq!(key.as_index_key(), "manifest123:content456:scope789");
+        assert_eq!(
+            key.as_index_key(),
+            "v1|m:11:manifest123|c:10:content456|s:8:scope789|"
+        );
 
         let key_no_scope = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
-        assert_eq!(key_no_scope.as_index_key(), "manifest123:content456");
+        assert_eq!(
+            key_no_scope.as_index_key(),
+            "v1|m:11:manifest123|c:10:content456|n"
+        );
+    }
+
+    #[test]
+    fn cache_key_index_key_is_not_delimiter_collision_prone() {
+        let scoped = CacheKey::new("a".to_string(), "b".to_string(), Some("c".to_string()));
+        let unscoped_with_delimiter = CacheKey::new("a".to_string(), "b:c".to_string(), None);
+
+        assert_ne!(
+            scoped.as_index_key(),
+            unscoped_with_delimiter.as_index_key()
+        );
     }
 
     #[test]
@@ -588,6 +630,29 @@ mod tests {
         // This will fail due to hash mismatch, but tests the interface
         let result = cache.put(key.clone(), content);
         assert!(result.is_err()); // Should fail due to hash verification
+    }
+
+    fn sha256_hex(content: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        hex::encode(Sha256::digest(content))
+    }
+
+    #[test]
+    fn cache_put_existing_key_does_not_duplicate_metrics_or_lru_entries() {
+        let mut config = CacheConfig::default();
+        config.max_entries = 1;
+        let mut cache = AtpCache::new(config);
+        let content = b"stable cache content";
+        let key = CacheKey::new("manifest123".to_string(), sha256_hex(content), None);
+
+        cache.put(key.clone(), content).unwrap();
+        cache.put(key.clone(), content).unwrap();
+
+        assert_eq!(cache.metrics().entry_count, 1);
+        assert_eq!(cache.metrics().total_bytes, content.len() as u64);
+        assert_eq!(cache.access_order.len(), 1);
+        assert_eq!(cache.get(&key).unwrap().as_deref(), Some(&content[..]));
     }
 
     #[test]
@@ -657,6 +722,11 @@ mod tests {
         // Insert expired entry directly
         cache.entries.insert(key.as_index_key(), expired_entry);
         cache.access_order.push(key.as_index_key());
+        cache
+            .memory_storage
+            .insert("test".to_string(), content.to_vec());
+        cache.metrics.total_bytes = content.len() as u64;
+        cache.metrics.entry_count = 1;
         assert_eq!(cache.entries.len(), 1);
 
         // Try to get expired entry - should be atomically removed
@@ -667,6 +737,8 @@ mod tests {
         // Entry should be removed from cache
         assert_eq!(cache.entries.len(), 0);
         assert_eq!(cache.access_order.len(), 0);
+        assert_eq!(cache.metrics().total_bytes, 0);
+        assert_eq!(cache.metrics().entry_count, 0);
     }
 
     #[test]

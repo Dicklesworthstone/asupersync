@@ -65,7 +65,7 @@ impl CachePolicyManager {
 
         // Select entries until we have enough space
         let mut selected = Vec::new();
-        let mut freed_bytes = 0;
+        let mut freed_bytes = 0_u64;
 
         for (key, entry) in candidates {
             // Check if this entry can be evicted (proof constraints)
@@ -74,7 +74,7 @@ impl CachePolicyManager {
             }
 
             selected.push(key.clone());
-            freed_bytes += entry.size_bytes;
+            freed_bytes = freed_bytes.saturating_add(entry.size_bytes);
 
             if freed_bytes >= target_bytes {
                 break;
