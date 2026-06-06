@@ -1,0 +1,267 @@
+{
+  "schema_version": "proof-evidence-debt-graph-contract-v1",
+  "bead_id": "asupersync-ol11aa.5",
+  "created_date": "2026-06-06",
+  "description": "Deterministic proof evidence debt graph contract. The fixture ranks repo-local proof artifacts by stale, superseded, blocked, zero-test, local-fallback, missing-envelope, and advisory-only debt without running Cargo or mutating Git.",
+  "source_of_truth": {
+    "artifact": "artifacts/proof_evidence_debt_graph_contract_v1.json",
+    "helper": "scripts/proof_evidence_debt_graph.py",
+    "contract_test": "tests/proof_evidence_debt_graph_contract.rs",
+    "operator_docs": "docs/proof_evidence_debt_graph.md",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "proof_reuse_e2e_contract": "artifacts/proof_reuse_e2e_contract_v1.json"
+  },
+  "policy": {
+    "helper_is_read_only": true,
+    "network_access_required": false,
+    "tracker_mutation_allowed": false,
+    "git_mutation_allowed": false,
+    "cargo_execution_allowed": false,
+    "required_rch_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "non_claims": [
+      "The graph ranks proof debt and rerun needs; it does not certify workspace health.",
+      "Advisory-only evidence remains operator guidance and is not correctness evidence.",
+      "Approved or clean cache evidence is not a fresh RCH pass."
+    ]
+  },
+  "required_reason_codes": [
+    "blocked-by-peer-reservation",
+    "dirty-overlap",
+    "local-fallback",
+    "missing-envelope",
+    "zero-tests",
+    "stale-head",
+    "superseded-by-newer-artifact",
+    "advisory-only",
+    "failed-proof-status"
+  ],
+  "expected_summary": {
+    "total_artifacts": 8,
+    "safe_to_cite": 1,
+    "proof_debt": 7,
+    "reason_counts": {
+      "blocked-by-peer-reservation": 1,
+      "dirty-overlap": 1,
+      "local-fallback": 1,
+      "missing-envelope": 1,
+      "zero-tests": 1,
+      "stale-head": 1,
+      "superseded-by-newer-artifact": 1,
+      "advisory-only": 1,
+      "failed-proof-status": 1
+    },
+    "highest_ranked_artifact": "failed-release-gate",
+    "only_safe_artifact": "current-focused-manifest"
+  },
+  "fixture": {
+    "schema_version": "proof-evidence-debt-fixture-v1",
+    "fixture_id": "proof-evidence-debt-contract-fixture",
+    "repo": {
+      "head_sha": "1111111111111111111111111111111111111111",
+      "branch": "main",
+      "dirty_paths": [
+        "src/lib.rs",
+        "tests/swarm_pressure_preflight_report_contract.rs"
+      ]
+    },
+    "reservations": [
+      {
+        "holder": "SapphireHill",
+        "path_pattern": "tests/swarm_pressure_preflight_report_contract.rs",
+        "status": "active"
+      },
+      {
+        "holder": "PinkStream",
+        "path_pattern": "artifacts/proof_evidence_debt_graph_contract_v1.json",
+        "status": "active"
+      }
+    ],
+    "lanes": [
+      {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "envelope": {
+          "remote_required": true,
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_proof_lane_manifest",
+          "timeout_seconds": 3600,
+          "memory_mb": 16384
+        },
+        "advisory_only": false
+      },
+      {
+        "lane_id": "all-targets-check",
+        "claim_scope": "all-target-compile-frontier",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --all-targets",
+        "envelope": {
+          "remote_required": true,
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_all_targets",
+          "timeout_seconds": 7200,
+          "memory_mb": 32768
+        },
+        "advisory_only": false
+      },
+      {
+        "lane_id": "lib-tests-exact-filter",
+        "claim_scope": "lib-exact-filter",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_exact CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib default_policy_no_csp_or_permissions -- --exact --nocapture",
+        "envelope": {
+          "remote_required": true,
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_lib_exact",
+          "timeout_seconds": 3600,
+          "memory_mb": 16384
+        },
+        "advisory_only": false
+      },
+      {
+        "lane_id": "scheduler-pressure-advisory",
+        "claim_scope": "scheduler-pressure-operator-guidance",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_pressure CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test scheduler_resource_pressure_profiling_receipts_contract -- --nocapture",
+        "envelope": {
+          "remote_required": true,
+          "target_dir": "${TMPDIR:-/tmp}/rch_target_scheduler_pressure",
+          "timeout_seconds": 3600,
+          "memory_mb": 16384
+        },
+        "advisory_only": true
+      },
+      {
+        "lane_id": "missing-envelope-example",
+        "claim_scope": "broken-proof-envelope",
+        "rerun_command": "cargo test -p asupersync --test missing_envelope_example",
+        "envelope": {
+          "remote_required": false,
+          "target_dir": "",
+          "timeout_seconds": 0,
+          "memory_mb": 0
+        },
+        "advisory_only": false
+      }
+    ],
+    "artifacts": [
+      {
+        "artifact_id": "current-focused-manifest",
+        "artifact_path": "artifacts/proof/current-focused-manifest.json",
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "status": "pass",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "executed_tests": 8,
+        "local_fallback": false,
+        "superseded_by": "",
+        "advisory_only": false
+      },
+      {
+        "artifact_id": "stale-narrow-lib-proof",
+        "artifact_path": "artifacts/proof/stale-narrow-lib-proof.json",
+        "lane_id": "lib-tests-exact-filter",
+        "claim_scope": "lib-exact-filter",
+        "status": "pass",
+        "head_sha": "0000000000000000000000000000000000000000",
+        "touched_files": [
+          "src/channel/mpsc.rs"
+        ],
+        "executed_tests": 1,
+        "local_fallback": false,
+        "superseded_by": "",
+        "advisory_only": false
+      },
+      {
+        "artifact_id": "superseded-raptorq-smoke",
+        "artifact_path": "artifacts/proof/superseded-raptorq-smoke.json",
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "status": "pass",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json"
+        ],
+        "executed_tests": 4,
+        "local_fallback": false,
+        "superseded_by": "current-focused-manifest",
+        "advisory_only": false
+      },
+      {
+        "artifact_id": "zero-test-exact-filter",
+        "artifact_path": "artifacts/proof/zero-test-exact-filter.json",
+        "lane_id": "lib-tests-exact-filter",
+        "claim_scope": "lib-exact-filter",
+        "status": "pass",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "touched_files": [
+          "src/web/security.rs"
+        ],
+        "executed_tests": 0,
+        "local_fallback": false,
+        "superseded_by": "",
+        "advisory_only": false
+      },
+      {
+        "artifact_id": "dirty-peer-overlap",
+        "artifact_path": "artifacts/proof/dirty-peer-overlap.json",
+        "lane_id": "all-targets-check",
+        "claim_scope": "all-target-compile-frontier",
+        "status": "pass",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "touched_files": [
+          "tests/swarm_pressure_preflight_report_contract.rs",
+          "src/lib.rs"
+        ],
+        "executed_tests": 1,
+        "local_fallback": false,
+        "superseded_by": "",
+        "advisory_only": false
+      },
+      {
+        "artifact_id": "local-fallback-proof",
+        "artifact_path": "artifacts/proof/local-fallback-proof.json",
+        "lane_id": "all-targets-check",
+        "claim_scope": "all-target-compile-frontier",
+        "status": "pass",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "touched_files": [
+          "src/runtime/state.rs"
+        ],
+        "executed_tests": 1,
+        "local_fallback": true,
+        "superseded_by": "",
+        "advisory_only": false
+      },
+      {
+        "artifact_id": "advisory-pressure-snapshot",
+        "artifact_path": "artifacts/proof/advisory-pressure-snapshot.json",
+        "lane_id": "scheduler-pressure-advisory",
+        "claim_scope": "scheduler-pressure-operator-guidance",
+        "status": "pass",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "touched_files": [
+          "artifacts/scheduler_resource_pressure_profiling_receipts_v1.json"
+        ],
+        "executed_tests": 3,
+        "local_fallback": false,
+        "superseded_by": "",
+        "advisory_only": true
+      },
+      {
+        "artifact_id": "failed-release-gate",
+        "artifact_path": "artifacts/proof/failed-release-gate.json",
+        "lane_id": "missing-envelope-example",
+        "claim_scope": "broken-proof-envelope",
+        "status": "failed",
+        "head_sha": "1111111111111111111111111111111111111111",
+        "touched_files": [
+          "tests/missing_envelope_example.rs"
+        ],
+        "executed_tests": 1,
+        "local_fallback": false,
+        "superseded_by": "",
+        "advisory_only": false
+      }
+    ]
+  }
+}
