@@ -35,6 +35,8 @@ pub struct AtpLossDetector {
     pattern_analyzer: LossPatternAnalyzer,
     /// Reordering tolerance tracker.
     reordering_tracker: ReorderingTracker,
+    /// Lost packet numbers already counted as spurious, keyed by packet number space.
+    spurious_loss_packets: HashSet<(usize, u64)>,
     /// Detection metrics for analysis.
     metrics: LossDetectionMetrics,
 }
@@ -327,6 +329,7 @@ impl AtpLossDetector {
             config,
             pattern_analyzer: LossPatternAnalyzer::new(),
             reordering_tracker: ReorderingTracker::new(),
+            spurious_loss_packets: HashSet::new(),
             metrics: LossDetectionMetrics::default(),
         }
     }
@@ -386,8 +389,10 @@ impl AtpLossDetector {
             self.update_pattern_analysis(&loss_result, transport_state);
         }
 
-        // Update reordering tracking
-        self.update_reordering_tracking(&newly_acked, &loss_result);
+        // Update reordering tracking. Newly acked packets still in the sent
+        // queue catch ordinary reordering; ACK ranges catch packets already
+        // removed after a previous loss declaration.
+        self.update_reordering_tracking(space_idx, &newly_acked, ack_ranges, &loss_result);
 
         AtpOutcome::ok(loss_result)
     }
@@ -461,7 +466,11 @@ impl AtpLossDetector {
 
             // Early retransmit
             if !is_lost && enable_early_retransmit {
-                if packet.packet_number + u64::from(early_retransmit_threshold) == largest_acked {
+                if packet
+                    .packet_number
+                    .checked_add(u64::from(early_retransmit_threshold))
+                    == Some(largest_acked)
+                {
                     is_lost = true;
                     loss_reason = Some(LossReason::EarlyRetransmit);
                     detection_methods.push(LossDetectionMethod::EarlyRetransmit);
@@ -469,7 +478,7 @@ impl AtpLossDetector {
             }
 
             if is_lost {
-                lost_bytes += packet.bytes;
+                lost_bytes = lost_bytes.saturating_add(packet.bytes);
                 if let Some(reason) = loss_reason {
                     lost_packets.push(LostPacketInfo {
                         packet_number: packet.packet_number,
@@ -497,7 +506,10 @@ impl AtpLossDetector {
         }
 
         state.sent_packets = remaining_packets;
-        self.metrics.total_lost_packets += lost_packets.len() as u64;
+        self.metrics.total_lost_packets = self
+            .metrics
+            .total_lost_packets
+            .saturating_add(lost_packets.len() as u64);
 
         // Determine primary detection method
         let detection_method = if detection_methods.contains(&LossDetectionMethod::Combined) {
@@ -545,7 +557,10 @@ impl AtpLossDetector {
 
     fn should_early_retransmit(&self, packet: &SentPacketMeta, largest_acked: u64) -> bool {
         // Early retransmit if only one packet ahead is acked
-        packet.packet_number + self.config.early_retransmit_threshold as u64 == largest_acked
+        packet
+            .packet_number
+            .checked_add(u64::from(self.config.early_retransmit_threshold))
+            == Some(largest_acked)
     }
 
     fn calculate_detection_confidence(
@@ -597,7 +612,7 @@ impl AtpLossDetector {
         if method == LossDetectionMethod::EarlyRetransmit {
             // Early retransmit might indicate reordering
             recommendations.push(LossRecommendation::IncreaseReorderingThreshold {
-                new_threshold: self.reordering_tracker.current_threshold + 1,
+                new_threshold: self.reordering_tracker.current_threshold.saturating_add(1),
             });
         }
 
@@ -754,38 +769,65 @@ impl AtpLossDetector {
 
     fn update_reordering_tracking(
         &mut self,
+        space_idx: usize,
         acked_packets: &[SentPacketMeta],
+        ack_ranges: &[AckRange],
         _loss_result: &LossDetectionResult,
     ) {
         let Some(last_loss) = self.pattern_analyzer.loss_events.back() else {
             return;
         };
 
-        let lost_packets: HashSet<u64> = last_loss.lost_packets.iter().copied().collect();
+        let canonical_ranges = canonical_ack_ranges(ack_ranges);
+        let mut reordered_packets: HashSet<u64> = HashSet::new();
+
         for acked in acked_packets {
-            if lost_packets.contains(&acked.packet_number) {
-                self.metrics.false_losses += 1;
-                let reordering_depth = last_loss
-                    .lost_packets
-                    .iter()
-                    .copied()
-                    .filter(|lost| *lost > acked.packet_number)
-                    .count()
-                    .saturating_add(1);
-                self.reordering_tracker
-                    .record_reordering(u32::try_from(reordering_depth).unwrap_or(u32::MAX));
-                if !self
-                    .pattern_analyzer
-                    .patterns
-                    .contains(&LossPattern::Reordering)
-                {
-                    self.pattern_analyzer.patterns.push(LossPattern::Reordering);
-                }
-                self.pattern_analyzer.pattern_confidence.insert(
-                    LossPattern::Reordering,
-                    self.reordering_tracker.confidence(),
-                );
+            if last_loss.lost_packets.contains(&acked.packet_number) {
+                reordered_packets.insert(acked.packet_number);
             }
+        }
+
+        for lost_packet in &last_loss.lost_packets {
+            if canonical_ranges_contain_packet(&canonical_ranges, *lost_packet) {
+                reordered_packets.insert(*lost_packet);
+            }
+        }
+
+        let mut newly_recorded_reordering = false;
+        for packet_number in reordered_packets {
+            if !self
+                .spurious_loss_packets
+                .insert((space_idx, packet_number))
+            {
+                continue;
+            }
+
+            newly_recorded_reordering = true;
+            self.metrics.false_losses = self.metrics.false_losses.saturating_add(1);
+            let reordering_depth = last_loss
+                .lost_packets
+                .iter()
+                .copied()
+                .filter(|lost| *lost > packet_number)
+                .count()
+                .saturating_add(1);
+            self.reordering_tracker
+                .record_reordering(u32::try_from(reordering_depth).unwrap_or(u32::MAX));
+        }
+
+        if !self
+            .pattern_analyzer
+            .patterns
+            .contains(&LossPattern::Reordering)
+            && newly_recorded_reordering
+        {
+            self.pattern_analyzer.patterns.push(LossPattern::Reordering);
+        }
+        if newly_recorded_reordering {
+            self.pattern_analyzer.pattern_confidence.insert(
+                LossPattern::Reordering,
+                self.reordering_tracker.confidence(),
+            );
         }
     }
 
@@ -1280,5 +1322,107 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 4]
         );
+    }
+
+    #[test]
+    fn early_retransmit_threshold_does_not_overflow_at_max_packet_number() {
+        let mut detector = AtpLossDetector::new();
+        let rtt = RttEstimator::default();
+
+        detector.on_packet_sent(create_test_packet(
+            PacketNumberSpace::ApplicationData,
+            u64::MAX - 1,
+            1_000,
+        ));
+        detector.on_packet_sent(create_test_packet(
+            PacketNumberSpace::ApplicationData,
+            u64::MAX,
+            1_100,
+        ));
+
+        let ack_ranges = [AckRange::new(u64::MAX - 1, u64::MAX - 1).unwrap()];
+        let result = detector
+            .on_ack_received(
+                PacketNumberSpace::ApplicationData,
+                &ack_ranges,
+                0,
+                2_000,
+                &test_transport_state(&rtt),
+            )
+            .expect("overflow-edge ACK should be processed");
+
+        assert!(result.lost_packets.is_empty());
+        assert_eq!(
+            detector.spaces[PacketNumberSpace::ApplicationData as usize]
+                .sent_packets
+                .iter()
+                .map(|packet| packet.packet_number)
+                .collect::<Vec<_>>(),
+            vec![u64::MAX]
+        );
+    }
+
+    #[test]
+    fn late_ack_of_declared_lost_packet_records_one_spurious_loss() {
+        let mut detector = AtpLossDetector::new();
+        let rtt = RttEstimator::default();
+
+        for pn in 0..6 {
+            detector.on_packet_sent(create_test_packet(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                pn * 1000,
+            ));
+        }
+
+        let initial_ack = [AckRange::new(5, 5).unwrap()];
+        let loss = detector
+            .on_ack_received(
+                PacketNumberSpace::ApplicationData,
+                &initial_ack,
+                0,
+                10_000,
+                &test_transport_state(&rtt),
+            )
+            .expect("initial ACK should detect losses");
+        assert_eq!(
+            loss.lost_packets
+                .iter()
+                .map(|packet| packet.packet_number)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(detector.metrics().false_losses, 0);
+
+        let late_ack = [AckRange::new(0, 0).unwrap()];
+        let late_result = detector
+            .on_ack_received(
+                PacketNumberSpace::ApplicationData,
+                &late_ack,
+                0,
+                11_000,
+                &test_transport_state(&rtt),
+            )
+            .expect("late ACK should be processed");
+        assert!(late_result.lost_packets.is_empty());
+        assert_eq!(detector.metrics().false_losses, 1);
+        assert!(
+            detector
+                .pattern_analyzer
+                .patterns
+                .contains(&LossPattern::Reordering)
+        );
+
+        let duplicate_late_result = detector
+            .on_ack_received(
+                PacketNumberSpace::ApplicationData,
+                &late_ack,
+                0,
+                12_000,
+                &test_transport_state(&rtt),
+            )
+            .expect("duplicate late ACK should be processed");
+        assert!(duplicate_late_result.lost_packets.is_empty());
+        assert_eq!(detector.metrics().false_losses, 1);
     }
 }
