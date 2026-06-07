@@ -115,7 +115,14 @@ impl QuotaManager {
 
     /// Check if operation would exceed quota.
     pub fn check_quota(&self, additional_bytes: u64) -> MailboxResult<()> {
-        let new_usage = self.current_usage.bytes_used + additional_bytes;
+        let new_usage = self
+            .current_usage
+            .bytes_used
+            .checked_add(additional_bytes)
+            .ok_or_else(|| MailboxError::QuotaExceeded {
+                usage: u64::MAX,
+                limit: self.policy.max_bytes,
+            })?;
 
         if new_usage > self.policy.max_bytes {
             return Err(MailboxError::QuotaExceeded {
@@ -137,13 +144,19 @@ impl QuotaManager {
     /// Reserve quota for a transfer.
     pub fn reserve_quota(&mut self, bytes: u64) -> MailboxResult<QuotaReservation> {
         self.check_quota(bytes)?;
+        let reservation_id = self.next_reservation_id()?;
 
-        self.current_usage.bytes_used += bytes;
+        self.current_usage.bytes_used = self
+            .current_usage
+            .bytes_used
+            .checked_add(bytes)
+            .ok_or_else(|| MailboxError::QuotaExceeded {
+                usage: u64::MAX,
+                limit: self.policy.max_bytes,
+            })?;
         self.current_usage.active_transfers += 1;
         self.current_usage.last_updated = SystemTime::now();
 
-        let reservation_id = self.next_reservation_id;
-        self.next_reservation_id = self.next_reservation_id.saturating_add(1);
         let reservation = QuotaReservation {
             manager_id: reservation_id,
             bytes_reserved: bytes,
@@ -174,7 +187,8 @@ impl QuotaManager {
                 self.current_usage.active_transfers -= 1;
             }
 
-            self.current_usage.total_transfers += 1;
+            self.current_usage.total_transfers =
+                self.current_usage.total_transfers.saturating_add(1);
             self.current_usage.last_updated = SystemTime::now();
         }
     }
@@ -195,7 +209,12 @@ impl QuotaManager {
 
     /// Check if cleanup is needed.
     pub fn needs_cleanup(&self) -> bool {
-        self.get_utilization() > 80.0 && self.policy.auto_cleanup
+        self.policy.auto_cleanup
+            && is_above_percent(
+                self.current_usage.bytes_used,
+                self.policy.max_bytes,
+                CLEANUP_TARGET_PERCENT,
+            )
     }
 
     /// Perform quota cleanup.
@@ -206,7 +225,7 @@ impl QuotaManager {
             .retention_period
             .saturating_add(self.policy.grace_period);
         let now = SystemTime::now();
-        let target_usage = self.policy.max_bytes.saturating_mul(80) / 100;
+        let target_usage = percent_floor_u64(self.policy.max_bytes, CLEANUP_TARGET_PERCENT);
         let mut candidates = self
             .active_reservations
             .iter()
@@ -256,6 +275,30 @@ impl QuotaManager {
             cleanup_duration: start.elapsed().unwrap_or(Duration::ZERO),
         }
     }
+
+    fn next_reservation_id(&mut self) -> MailboxResult<u64> {
+        let reservation_id = self.next_reservation_id;
+        self.next_reservation_id = self.next_reservation_id.checked_add(1).ok_or_else(|| {
+            MailboxError::ConfigurationError {
+                details: "mailbox quota reservation id space exhausted".to_string(),
+            }
+        })?;
+        Ok(reservation_id)
+    }
+}
+
+const CLEANUP_TARGET_PERCENT: u64 = 80;
+
+fn percent_floor_u64(value: u64, percent: u64) -> u64 {
+    ((u128::from(value) * u128::from(percent)) / 100) as u64
+}
+
+fn is_above_percent(value: u64, limit: u64, percent: u64) -> bool {
+    if limit == 0 {
+        return value > 0;
+    }
+
+    u128::from(value) * 100 > u128::from(limit) * u128::from(percent)
 }
 
 /// Quota reservation handle.
@@ -311,6 +354,42 @@ mod tests {
     }
 
     #[test]
+    fn quota_check_rejects_byte_counter_overflow() {
+        let mut manager = QuotaManager::new(u64::MAX);
+        let reservation = manager.reserve_quota(u64::MAX).unwrap();
+
+        let result = manager.check_quota(1);
+
+        assert!(matches!(
+            result,
+            Err(MailboxError::QuotaExceeded {
+                usage: u64::MAX,
+                limit: u64::MAX
+            })
+        ));
+        assert_eq!(manager.current_usage.bytes_used, u64::MAX);
+        assert_eq!(manager.current_usage.active_transfers, 1);
+
+        manager.release_quota(reservation);
+    }
+
+    #[test]
+    fn reserve_quota_rejects_exhausted_reservation_id_space_without_mutation() {
+        let mut manager = QuotaManager::new(1000);
+        manager.next_reservation_id = u64::MAX;
+
+        let result = manager.reserve_quota(10);
+
+        assert!(matches!(
+            result,
+            Err(MailboxError::ConfigurationError { details }) if details.contains("reservation id space exhausted")
+        ));
+        assert_eq!(manager.current_usage.bytes_used, 0);
+        assert_eq!(manager.current_usage.active_transfers, 0);
+        assert!(manager.active_reservations.is_empty());
+    }
+
+    #[test]
     fn test_quota_reservation() {
         let mut manager = QuotaManager::new(1000);
 
@@ -342,5 +421,34 @@ mod tests {
         let result = manager.perform_cleanup();
         assert!(result.bytes_freed > 0);
         assert!(manager.current_usage.bytes_used < 900);
+    }
+
+    #[test]
+    fn cleanup_threshold_uses_exact_integer_arithmetic_for_huge_limits() {
+        let policy = QuotaPolicy {
+            max_bytes: u64::MAX,
+            max_active_transfers: 10,
+            ..Default::default()
+        };
+        let mut manager = QuotaManager::with_policy(policy);
+        let below_or_equal_threshold = percent_floor_u64(u64::MAX, CLEANUP_TARGET_PERCENT);
+        manager.current_usage.bytes_used = below_or_equal_threshold;
+        assert!(!manager.needs_cleanup());
+
+        manager.current_usage.bytes_used = below_or_equal_threshold + 1;
+        assert!(manager.needs_cleanup());
+    }
+
+    #[test]
+    fn release_quota_saturates_historical_transfer_counter() {
+        let mut manager = QuotaManager::new(1000);
+        manager.current_usage.total_transfers = u64::MAX;
+        let reservation = manager.reserve_quota(1).unwrap();
+
+        manager.release_quota(reservation);
+
+        assert_eq!(manager.current_usage.total_transfers, u64::MAX);
+        assert_eq!(manager.current_usage.bytes_used, 0);
+        assert_eq!(manager.current_usage.active_transfers, 0);
     }
 }
