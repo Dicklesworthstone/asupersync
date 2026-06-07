@@ -303,7 +303,9 @@ impl RetentionPolicy {
             let keep = usize::try_from(max_records).unwrap_or(usize::MAX);
             let mut bucket_records: Vec<_> = records
                 .iter()
-                .filter(|record| record.bucket == *bucket)
+                .filter(|record| {
+                    record.bucket == *bucket && !expired.contains(record.record_id.as_str())
+                })
                 .collect();
             bucket_records.sort_by(|left, right| {
                 right
@@ -704,6 +706,36 @@ mod tests {
         assert_eq!(
             policy.expired_records(&records, 100),
             vec!["oldest".to_string()]
+        );
+    }
+
+    #[test]
+    fn retention_max_records_ignores_already_expired_records() {
+        let mut policy = RetentionPolicy::daemon_defaults();
+        policy.set_rule(
+            QuotaBucket::Mailbox,
+            RetentionRule {
+                max_age_secs: None,
+                max_records: Some(1),
+                honor_explicit_expiry: true,
+            },
+        );
+        let records = vec![
+            RetentionRecord {
+                record_id: "live-older".to_string(),
+                bucket: QuotaBucket::Mailbox,
+                clock: RetentionClock::new(0, 10),
+            },
+            RetentionRecord {
+                record_id: "expired-newer".to_string(),
+                bucket: QuotaBucket::Mailbox,
+                clock: RetentionClock::new(0, 30).with_expiry(100),
+            },
+        ];
+
+        assert_eq!(
+            policy.expired_records(&records, 100),
+            vec!["expired-newer".to_string()]
         );
     }
 
