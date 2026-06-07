@@ -50,10 +50,19 @@ impl MailboxClient {
         data: Vec<u8>,
     ) -> MailboxResult<MailboxTransferId> {
         let transfer_id = MailboxTransferId::new();
-        let quota_reservation = self.quota_manager.reserve_quota(data.len() as u64)?;
+        let data_len = u64::try_from(data.len()).map_err(|_| MailboxError::QuotaExceeded {
+            usage: u64::MAX,
+            limit: self.config.quota_limit,
+        })?;
+        let quota_reservation = self.quota_manager.reserve_quota(data_len)?;
 
         {
-            let mut active_transfers = self.active_transfers.lock().unwrap();
+            let mut active_transfers =
+                self.active_transfers
+                    .lock()
+                    .map_err(|_| MailboxError::ConfigurationError {
+                        details: "mailbox active transfer state lock poisoned".to_string(),
+                    })?;
             active_transfers.insert(transfer_id, TransferState::Uploading);
         }
 
@@ -89,13 +98,6 @@ impl MailboxClient {
         ));
 
         let chunks = self.encrypt_payload_chunks(data)?;
-        let encrypted_metadata = self.encrypt_transfer_metadata(data, &chunks)?;
-        let encrypted_size = chunks.iter().fold(0u64, |total, chunk| {
-            total
-                .saturating_add(chunk.data.len() as u64)
-                .saturating_add(chunk.tag.len() as u64)
-                .saturating_add(chunk.nonce.bytes.len() as u64)
-        });
         let chunk_count =
             u32::try_from(chunks.len()).map_err(|_| MailboxError::ConfigurationError {
                 details: format!(
@@ -103,6 +105,23 @@ impl MailboxClient {
                     chunks.len()
                 ),
             })?;
+        let encrypted_metadata =
+            self.encrypt_transfer_metadata(transfer_id, &peer_id, data, chunk_count)?;
+        let encrypted_size = chunks.iter().try_fold(0u64, |total, chunk| {
+            let data_len = u64::try_from(chunk.data.len()).ok()?;
+            let tag_len = u64::try_from(chunk.tag.len()).ok()?;
+            let nonce_len = u64::try_from(chunk.nonce.bytes.len()).ok()?;
+            total
+                .checked_add(data_len)?
+                .checked_add(tag_len)?
+                .checked_add(nonce_len)
+        });
+        let Some(encrypted_size) = encrypted_size else {
+            return Err(MailboxError::QuotaExceeded {
+                usage: u64::MAX,
+                limit: self.config.quota_limit,
+            });
+        };
         let created_at = mailbox_time_now();
         let metadata = MailboxTransferMetadata {
             transfer_id,
@@ -127,7 +146,7 @@ impl MailboxClient {
             RelayResponse::StoreComplete {
                 transfer_id: relay_transfer_id,
                 ..
-            } if relay_transfer_id == transfer_id => Ok(()),
+            } if mailbox_transfer_id_eq(&relay_transfer_id, &transfer_id) => Ok(()),
             RelayResponse::StoreComplete {
                 transfer_id: relay_transfer_id,
                 ..
@@ -163,20 +182,34 @@ impl MailboxClient {
 
     fn encrypt_transfer_metadata(
         &self,
+        transfer_id: MailboxTransferId,
+        destination_peer: &PeerId,
         data: &[u8],
-        chunks: &[EncryptedChunk],
+        encrypted_chunk_count: u32,
     ) -> MailboxResult<Vec<u8>> {
         use sha2::{Digest, Sha256};
 
+        let plaintext_size =
+            u64::try_from(data.len()).map_err(|_| MailboxError::QuotaExceeded {
+                usage: u64::MAX,
+                limit: self.config.quota_limit,
+            })?;
         let plaintext_chunk_sizes = data
             .chunks(self.config.max_chunk_size.max(1))
-            .map(|chunk| chunk.len() as u64)
-            .collect::<Vec<_>>();
+            .map(|chunk| {
+                u64::try_from(chunk.len()).map_err(|_| MailboxError::QuotaExceeded {
+                    usage: u64::MAX,
+                    limit: self.config.quota_limit,
+                })
+            })
+            .collect::<MailboxResult<Vec<_>>>()?;
         let metadata = ClientEncryptedMetadata {
-            plaintext_size: data.len() as u64,
+            transfer_id,
+            destination_peer: destination_peer.clone(),
+            plaintext_size,
             plaintext_sha256: hex::encode(Sha256::digest(data)),
             plaintext_chunk_sizes,
-            encrypted_chunk_count: chunks.len() as u32,
+            encrypted_chunk_count,
         };
         let metadata_bytes =
             serde_json::to_vec(&metadata).map_err(|error| MailboxError::CryptoError {
@@ -232,7 +265,9 @@ impl MailboxClient {
                 transfer_id: returned_transfer_id,
                 chunks,
                 metadata,
-            } if returned_transfer_id == transfer_id && metadata.transfer_id == transfer_id => {
+            } if mailbox_transfer_id_eq(&returned_transfer_id, &transfer_id)
+                && mailbox_transfer_id_eq(&metadata.transfer_id, &transfer_id) =>
+            {
                 self.decrypt_and_verify_transfer(transfer_id, chunks, metadata)
             }
             RelayResponse::RetrieveResult {
@@ -263,7 +298,12 @@ impl MailboxClient {
     ) -> MailboxResult<Vec<u8>> {
         use sha2::{Digest, Sha256};
 
-        if metadata.chunk_count as usize != chunks.len() {
+        let metadata_chunk_count =
+            usize::try_from(metadata.chunk_count).map_err(|_| MailboxError::TamperDetected {
+                transfer_id,
+                evidence: "metadata chunk count does not fit this platform".to_string(),
+            })?;
+        if metadata_chunk_count != chunks.len() {
             return Err(MailboxError::TamperDetected {
                 transfer_id,
                 evidence: format!(
@@ -288,22 +328,57 @@ impl MailboxClient {
                 operation: format!("failed to decode encrypted transfer metadata: {error}"),
             })?;
 
-        if expected.encrypted_chunk_count as usize != chunks.len() {
+        if !mailbox_transfer_id_eq(&expected.transfer_id, &transfer_id) {
+            return Err(MailboxError::TamperDetected {
+                transfer_id,
+                evidence: format!(
+                    "encrypted metadata transfer id {} does not match requested transfer id",
+                    expected.transfer_id
+                ),
+            });
+        }
+        if !peer_id_eq(&expected.destination_peer, &metadata.destination_peer) {
+            return Err(MailboxError::TamperDetected {
+                transfer_id,
+                evidence: "encrypted metadata destination peer mismatch".to_string(),
+            });
+        }
+
+        let encrypted_chunk_count =
+            usize::try_from(expected.encrypted_chunk_count).map_err(|_| {
+                MailboxError::TamperDetected {
+                    transfer_id,
+                    evidence: "encrypted metadata chunk count does not fit this platform"
+                        .to_string(),
+                }
+            })?;
+        if encrypted_chunk_count != chunks.len() {
             return Err(MailboxError::TamperDetected {
                 transfer_id,
                 evidence: "encrypted metadata chunk count mismatch".to_string(),
             });
         }
 
-        let mut plaintext = Vec::with_capacity(expected.plaintext_size as usize);
+        let plaintext_capacity =
+            usize::try_from(expected.plaintext_size).map_err(|_| MailboxError::TamperDetected {
+                transfer_id,
+                evidence: "encrypted metadata plaintext size does not fit this platform"
+                    .to_string(),
+            })?;
+        let mut plaintext = Vec::with_capacity(plaintext_capacity);
         for (index, chunk) in chunks.iter().enumerate() {
             let chunk_plaintext = chunk
                 .decrypt(&self.encryption_key)
                 .map_err(|operation| MailboxError::CryptoError { operation })?;
+            let chunk_plaintext_len =
+                u64::try_from(chunk_plaintext.len()).map_err(|_| MailboxError::TamperDetected {
+                    transfer_id,
+                    evidence: format!("plaintext chunk size at index {index} is too large"),
+                })?;
             if expected
                 .plaintext_chunk_sizes
                 .get(index)
-                .is_some_and(|expected_len| *expected_len != chunk_plaintext.len() as u64)
+                .is_some_and(|expected_len| *expected_len != chunk_plaintext_len)
             {
                 return Err(MailboxError::TamperDetected {
                     transfer_id,
@@ -313,14 +388,27 @@ impl MailboxClient {
             plaintext.extend_from_slice(&chunk_plaintext);
         }
 
-        if plaintext.len() as u64 != expected.plaintext_size {
+        let plaintext_len =
+            u64::try_from(plaintext.len()).map_err(|_| MailboxError::TamperDetected {
+                transfer_id,
+                evidence: "plaintext transfer size is too large".to_string(),
+            })?;
+        if plaintext_len != expected.plaintext_size {
             return Err(MailboxError::TamperDetected {
                 transfer_id,
                 evidence: "plaintext transfer size mismatch".to_string(),
             });
         }
-        let actual_hash = hex::encode(Sha256::digest(&plaintext));
-        if actual_hash != expected.plaintext_sha256 {
+        let mut expected_hash = [0u8; 32];
+        hex::decode_to_slice(&expected.plaintext_sha256, &mut expected_hash).map_err(|_| {
+            MailboxError::TamperDetected {
+                transfer_id,
+                evidence: "encrypted metadata plaintext sha256 is malformed".to_string(),
+            }
+        })?;
+        let actual_hash = Sha256::digest(&plaintext);
+        use subtle::ConstantTimeEq;
+        if !bool::from(actual_hash.as_slice().ct_eq(&expected_hash)) {
             return Err(MailboxError::TamperDetected {
                 transfer_id,
                 evidence: "plaintext sha256 mismatch".to_string(),
@@ -347,10 +435,22 @@ impl MailboxClient {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ClientEncryptedMetadata {
+    transfer_id: MailboxTransferId,
+    destination_peer: PeerId,
     plaintext_size: u64,
     plaintext_sha256: String,
     plaintext_chunk_sizes: Vec<u64>,
     encrypted_chunk_count: u32,
+}
+
+fn mailbox_transfer_id_eq(left: &MailboxTransferId, right: &MailboxTransferId) -> bool {
+    use subtle::ConstantTimeEq;
+    bool::from(left.to_bytes().ct_eq(&right.to_bytes()))
+}
+
+fn peer_id_eq(left: &PeerId, right: &PeerId) -> bool {
+    use subtle::ConstantTimeEq;
+    bool::from(left.as_str().as_bytes().ct_eq(right.as_str().as_bytes()))
 }
 
 /// Basic transfer state tracking.
@@ -368,10 +468,163 @@ pub enum TransferState {
 mod tests {
     use super::*;
 
+    async fn test_client() -> MailboxClient {
+        MailboxClient::new(MailboxConfig::default())
+            .await
+            .expect("mailbox client should initialize")
+    }
+
+    fn test_transfer_metadata(
+        transfer_id: MailboxTransferId,
+        destination_peer: PeerId,
+        chunk_count: u32,
+        encrypted_metadata: Vec<u8>,
+    ) -> MailboxTransferMetadata {
+        let created_at = mailbox_time_now();
+        MailboxTransferMetadata {
+            transfer_id,
+            destination_peer,
+            created_at,
+            expires_at: created_at + std::time::Duration::from_secs(60),
+            total_size: 0,
+            chunk_count,
+            encrypted_metadata,
+        }
+    }
+
     #[tokio::test]
     async fn test_mailbox_client_creation() {
         let config = MailboxConfig::default();
         let result = MailboxClient::new(config).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn decrypt_and_verify_accepts_bound_metadata() {
+        let client = test_client().await;
+        let transfer_id = MailboxTransferId::new();
+        let destination_peer = PeerId::new("recipient-peer");
+        let data = b"bound mailbox payload";
+        let chunks = client
+            .encrypt_payload_chunks(data)
+            .expect("payload encryption should succeed");
+        let chunk_count = u32::try_from(chunks.len()).expect("test chunk count should fit in u32");
+        let encrypted_metadata = client
+            .encrypt_transfer_metadata(transfer_id, &destination_peer, data, chunk_count)
+            .expect("metadata encryption should succeed");
+        let metadata = test_transfer_metadata(
+            transfer_id,
+            destination_peer,
+            chunk_count,
+            encrypted_metadata,
+        );
+
+        let plaintext = client
+            .decrypt_and_verify_transfer(transfer_id, chunks, metadata)
+            .expect("bound metadata should verify");
+
+        assert_eq!(plaintext, data);
+    }
+
+    #[tokio::test]
+    async fn decrypt_and_verify_rejects_replayed_transfer_id() {
+        let client = test_client().await;
+        let original_transfer_id = MailboxTransferId::new();
+        let requested_transfer_id = MailboxTransferId::new();
+        let destination_peer = PeerId::new("recipient-peer");
+        let data = b"replayed mailbox payload";
+        let chunks = client
+            .encrypt_payload_chunks(data)
+            .expect("payload encryption should succeed");
+        let chunk_count = u32::try_from(chunks.len()).expect("test chunk count should fit in u32");
+        let encrypted_metadata = client
+            .encrypt_transfer_metadata(original_transfer_id, &destination_peer, data, chunk_count)
+            .expect("metadata encryption should succeed");
+        let metadata = test_transfer_metadata(
+            requested_transfer_id,
+            destination_peer,
+            chunk_count,
+            encrypted_metadata,
+        );
+
+        let result = client.decrypt_and_verify_transfer(requested_transfer_id, chunks, metadata);
+
+        assert!(matches!(
+            result,
+            Err(MailboxError::TamperDetected { evidence, .. })
+                if evidence.contains("transfer id")
+        ));
+    }
+
+    #[tokio::test]
+    async fn decrypt_and_verify_rejects_replayed_destination_peer() {
+        let client = test_client().await;
+        let transfer_id = MailboxTransferId::new();
+        let encrypted_destination_peer = PeerId::new("original-recipient");
+        let public_destination_peer = PeerId::new("rewritten-recipient");
+        let data = b"destination-bound payload";
+        let chunks = client
+            .encrypt_payload_chunks(data)
+            .expect("payload encryption should succeed");
+        let chunk_count = u32::try_from(chunks.len()).expect("test chunk count should fit in u32");
+        let encrypted_metadata = client
+            .encrypt_transfer_metadata(transfer_id, &encrypted_destination_peer, data, chunk_count)
+            .expect("metadata encryption should succeed");
+        let metadata = test_transfer_metadata(
+            transfer_id,
+            public_destination_peer,
+            chunk_count,
+            encrypted_metadata,
+        );
+
+        let result = client.decrypt_and_verify_transfer(transfer_id, chunks, metadata);
+
+        assert!(matches!(
+            result,
+            Err(MailboxError::TamperDetected { evidence, .. })
+                if evidence.contains("destination peer")
+        ));
+    }
+
+    #[tokio::test]
+    async fn decrypt_and_verify_rejects_malformed_plaintext_hash() {
+        let client = test_client().await;
+        let transfer_id = MailboxTransferId::new();
+        let destination_peer = PeerId::new("recipient-peer");
+        let data = b"hash-bound payload";
+        let chunks = client
+            .encrypt_payload_chunks(data)
+            .expect("payload encryption should succeed");
+        let chunk_count = u32::try_from(chunks.len()).expect("test chunk count should fit in u32");
+        let metadata_plaintext = ClientEncryptedMetadata {
+            transfer_id,
+            destination_peer: destination_peer.clone(),
+            plaintext_size: u64::try_from(data.len()).expect("test payload size should fit in u64"),
+            plaintext_sha256: "not-hex".to_string(),
+            plaintext_chunk_sizes: vec![
+                u64::try_from(data.len()).expect("test payload size should fit in u64"),
+            ],
+            encrypted_chunk_count: chunk_count,
+        };
+        let metadata_bytes = serde_json::to_vec(&metadata_plaintext)
+            .expect("test encrypted metadata should serialize");
+        let metadata_envelope = EncryptedChunk::encrypt(&metadata_bytes, &client.encryption_key)
+            .expect("metadata encryption should succeed");
+        let encrypted_metadata = serde_json::to_vec(&metadata_envelope)
+            .expect("test metadata envelope should serialize");
+        let metadata = test_transfer_metadata(
+            transfer_id,
+            destination_peer,
+            chunk_count,
+            encrypted_metadata,
+        );
+
+        let result = client.decrypt_and_verify_transfer(transfer_id, chunks, metadata);
+
+        assert!(matches!(
+            result,
+            Err(MailboxError::TamperDetected { evidence, .. })
+                if evidence.contains("sha256 is malformed")
+        ));
     }
 }

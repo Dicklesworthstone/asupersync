@@ -2,9 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use zeroize::Zeroize;
+
+const MAILBOX_AEAD_AAD: &[u8] = b"atp-mailbox-v1";
 
 /// Encryption key for mailbox operations.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct MailboxKey {
     /// Key material for AES-256-GCM.
     key_material: [u8; 32],
@@ -37,6 +40,12 @@ impl fmt::Debug for MailboxKey {
         f.debug_struct("MailboxKey")
             .field("key_material", &"[redacted]")
             .finish()
+    }
+}
+
+impl Drop for MailboxKey {
+    fn drop(&mut self) {
+        self.key_material.zeroize();
     }
 }
 
@@ -83,7 +92,7 @@ impl EncryptedChunk {
         let tag = cipher
             .encrypt_in_place_detached(
                 Nonce::from_slice(&nonce.bytes),
-                b"atp-mailbox-v1",
+                MAILBOX_AEAD_AAD,
                 &mut encrypted,
             )
             .map_err(|err| format!("mailbox encryption failed: {err}"))?;
@@ -108,7 +117,7 @@ impl EncryptedChunk {
         cipher
             .decrypt_in_place_detached(
                 Nonce::from_slice(&self.nonce.bytes),
-                b"atp-mailbox-v1",
+                MAILBOX_AEAD_AAD,
                 &mut decrypted,
                 Tag::from_slice(&self.tag),
             )
@@ -125,6 +134,15 @@ mod tests {
     fn test_mailbox_key_generation() {
         let key = MailboxKey::generate();
         assert_eq!(key.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn mailbox_key_debug_redacts_key_material() {
+        let key = MailboxKey::from_bytes([0xab; 32]);
+        let debug = format!("{key:?}");
+
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("abababab"));
     }
 
     #[test]
