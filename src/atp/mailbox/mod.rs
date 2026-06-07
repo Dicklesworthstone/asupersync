@@ -60,6 +60,9 @@ pub use quota::{QuotaManager, QuotaPolicy, QuotaUsage};
 pub use relay::{RelayClient, RelayMessage, RelayProtocol, RelayResponse};
 pub use storage::{MailboxEntry, MailboxStorage, TransferState};
 
+const TRANSFER_ID_HEX_LEN: usize = 32;
+const TRANSFER_ID_CANONICAL_LEN: usize = 36;
+
 /// Unique identifier for a mailbox transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MailboxTransferId(pub [u8; 16]);
@@ -134,18 +137,87 @@ impl<'de> Deserialize<'de> for MailboxTransferId {
 }
 
 fn parse_transfer_id(raw: &str) -> Result<MailboxTransferId, String> {
-    let compact = raw.replace('-', "");
-    if compact.len() != 32 {
+    let hex = collect_transfer_id_hex(raw)?;
+    let bytes = decode_transfer_id_hex(&hex)?;
+    Ok(MailboxTransferId(bytes))
+}
+
+fn collect_transfer_id_hex(raw: &str) -> Result<[u8; TRANSFER_ID_HEX_LEN], String> {
+    let bytes = raw.as_bytes();
+    match bytes.len() {
+        TRANSFER_ID_HEX_LEN => collect_compact_transfer_id_hex(bytes),
+        TRANSFER_ID_CANONICAL_LEN => collect_canonical_transfer_id_hex(bytes),
+        len => Err(format!(
+            "mailbox transfer id must be 32 hex bytes or canonical 36-byte hyphenated text, got {len}"
+        )),
+    }
+}
+
+fn collect_compact_transfer_id_hex(bytes: &[u8]) -> Result<[u8; TRANSFER_ID_HEX_LEN], String> {
+    let mut hex = [0u8; TRANSFER_ID_HEX_LEN];
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        hex[index] = normalize_transfer_id_hex_digit(byte, index)?;
+    }
+    Ok(hex)
+}
+
+fn collect_canonical_transfer_id_hex(bytes: &[u8]) -> Result<[u8; TRANSFER_ID_HEX_LEN], String> {
+    let mut hex = [0u8; TRANSFER_ID_HEX_LEN];
+    let mut hex_index = 0usize;
+    for (source_index, byte) in bytes.iter().copied().enumerate() {
+        if is_transfer_id_hyphen_position(source_index) {
+            if byte != b'-' {
+                return Err(format!(
+                    "mailbox transfer id expected hyphen at byte {source_index}"
+                ));
+            }
+            continue;
+        }
+        hex[hex_index] = normalize_transfer_id_hex_digit(byte, source_index)?;
+        hex_index += 1;
+    }
+    Ok(hex)
+}
+
+fn is_transfer_id_hyphen_position(index: usize) -> bool {
+    matches!(index, 8 | 13 | 18 | 23)
+}
+
+fn normalize_transfer_id_hex_digit(byte: u8, source_index: usize) -> Result<u8, String> {
+    if !byte.is_ascii_hexdigit() {
         return Err(format!(
-            "mailbox transfer id must contain 32 hex digits, got {}",
-            compact.len()
+            "mailbox transfer id has non-hex byte at position {source_index}"
         ));
     }
-    let decoded =
-        hex::decode(&compact).map_err(|err| format!("invalid mailbox transfer id hex: {err}"))?;
+    Ok(byte.to_ascii_lowercase())
+}
+
+fn decode_transfer_id_hex(hex: &[u8; TRANSFER_ID_HEX_LEN]) -> Result<[u8; 16], String> {
     let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&decoded);
-    Ok(MailboxTransferId(bytes))
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        let high = transfer_id_hex_nibble(hex[index * 2]).ok_or_else(|| {
+            format!(
+                "mailbox transfer id has invalid high hex nibble at compact position {}",
+                index * 2
+            )
+        })?;
+        let low = transfer_id_hex_nibble(hex[index * 2 + 1]).ok_or_else(|| {
+            format!(
+                "mailbox transfer id has invalid low hex nibble at compact position {}",
+                index * 2 + 1
+            )
+        })?;
+        *byte = (high << 4) | low;
+    }
+    Ok(bytes)
+}
+
+fn transfer_id_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// Unique identifier for a peer in the ATP network.
@@ -389,6 +461,9 @@ pub type MailboxResult<T> = Result<T, MailboxError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
+
+    type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 
     #[test]
     fn test_mailbox_transfer_id_generation() {
@@ -419,25 +494,24 @@ mod tests {
     }
 
     #[test]
-    fn test_mailbox_event_serialization() {
+    fn test_mailbox_event_serialization() -> TestResult {
         let event = MailboxEvent::TransferUploadStarted {
             transfer_id: MailboxTransferId::new(),
             destination: PeerId::new("peer-123"),
             total_size: 1024,
         };
 
-        let serialized = serde_json::to_string(&event).unwrap();
-        let deserialized: MailboxEvent = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&event)?;
+        let deserialized: MailboxEvent = serde_json::from_str(&serialized)?;
 
-        match (event, deserialized) {
+        assert!(matches!(
+            (event, deserialized),
             (
                 MailboxEvent::TransferUploadStarted { total_size: s1, .. },
                 MailboxEvent::TransferUploadStarted { total_size: s2, .. },
-            ) => {
-                assert_eq!(s1, s2);
-            }
-            _ => panic!("Event type mismatch after serialization"),
-        }
+            ) if s1 == s2
+        ));
+        Ok(())
     }
 
     #[test]
@@ -462,6 +536,41 @@ mod tests {
             0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4,
             0x30, 0xc8,
         ])
+    }
+
+    #[test]
+    fn parse_transfer_id_accepts_canonical_compact_and_uppercase() -> TestResult {
+        let canonical = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+        let compact = canonical.replace('-', "");
+        let uppercase = canonical.to_ascii_uppercase();
+
+        assert_eq!(
+            parse_transfer_id(canonical).map_err(std::io::Error::other)?,
+            fixed_transfer_id()
+        );
+        assert_eq!(
+            parse_transfer_id(&compact).map_err(std::io::Error::other)?,
+            fixed_transfer_id()
+        );
+        assert_eq!(
+            parse_transfer_id(&uppercase).map_err(std::io::Error::other)?,
+            fixed_transfer_id()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_transfer_id_rejects_trailing_or_misplaced_hyphens() {
+        let trailing_hyphen = "6ba7b8109dad11d180b400c04fd430c8-";
+        let misplaced_hyphen = "6ba7b8109dad-11d1-80b4-00c04fd430-c8";
+
+        assert!(parse_transfer_id(trailing_hyphen).is_err());
+        assert!(parse_transfer_id(misplaced_hyphen).is_err());
+    }
+
+    #[test]
+    fn parse_transfer_id_rejects_non_hex_bytes() {
+        assert!(parse_transfer_id("6ba7b810-9dad-11d1-80b4-00c04fd430cg").is_err());
     }
 
     #[test]
