@@ -192,6 +192,7 @@
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
     "admission-aware-proof-lane-atlas",
+    "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
@@ -817,6 +818,50 @@
       }
     },
     {
+      "lane_id": "migration-readiness-planner-signoff-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_readiness_planner_signoff_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test migration_readiness_planner_contract migration_readiness_planner_signoff_artifact_is_complete -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "migration-readiness-planner-signoff"
+      ],
+      "covers": "Migration readiness planner signoff artifact, child bead evidence, fixture scenario catalog, report fields, docs markers, proof manifest mapping, and proof-status claim row stay aligned.",
+      "explicit_not_covered": "Does not prove broad workspace release health, live external repositories, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target.",
+      "expected_signal": "migration_readiness_planner_signoff_artifact_is_complete test passes",
+      "source_paths": [
+        "artifacts/migration_readiness_planner_signoff_v1.json",
+        "scripts/migration_readiness_planner.py",
+        "tests/migration_readiness_planner_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "docs/integration.md",
+        "skills/asupersync-mega-skill/SKILL.md",
+        "tests/fixtures/migration_readiness_planner"
+      ],
+      "common_unrelated_blockers": [
+        "planner fixture drift",
+        "docs marker drift",
+        "manifest or proof-status snapshot mapping drift"
+      ],
+      "escalation_notes": "Use this lane for final migration planner signoff changes; do not cite it as broad workspace, conformance, performance, or release-health proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "migration-readiness-planner-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1006,6 +1051,13 @@
       "description": "Admission-aware proof-lane planner fixtures, atlas receipts, deterministic report goldens, docs markers, manifest mapping, and proof-status claim rows stay aligned.",
       "lane_ids": [
         "swarm-proof-lane-planner-contract"
+      ]
+    },
+    {
+      "guarantee_id": "migration-readiness-planner-signoff",
+      "description": "Executable migration readiness planner signoff artifact, child evidence, report fields, validation commands, docs markers, manifest lane, and proof-status row stay aligned.",
+      "lane_ids": [
+        "migration-readiness-planner-signoff-contract"
       ]
     },
     {

@@ -1,12 +1,15 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SCRIPT_PATH: &str = "scripts/migration_readiness_planner.py";
 const FIXTURE_ROOT: &str = "tests/fixtures/migration_readiness_planner";
+const SIGNOFF_PATH: &str = "artifacts/migration_readiness_planner_signoff_v1.json";
+const PROOF_LANE_MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
+const PROOF_STATUS_SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -114,6 +117,296 @@ fn operator_phase_with_id<'a>(report: &'a Value, phase_id: &str) -> &'a Value {
         .iter()
         .find(|row| row["phase_id"].as_str() == Some(phase_id))
         .unwrap_or_else(|| panic!("missing operator phase {phase_id}"))
+}
+
+fn json_file(relative: &str) -> Value {
+    serde_json::from_str(&repo_file_text(relative))
+        .unwrap_or_else(|error| panic!("parse {relative}: {error}"))
+}
+
+fn signoff_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    let text = value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{key} must be a string"))?;
+    if text.trim().is_empty() {
+        return Err(format!("{key} must be nonempty"));
+    }
+    Ok(text)
+}
+
+fn signoff_array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{key} must be an array"))
+}
+
+fn signoff_object<'a>(value: &'a Value, key: &str) -> Result<&'a Value, String> {
+    let object = value
+        .get(key)
+        .ok_or_else(|| format!("{key} must be present"))?;
+    if !object.is_object() {
+        return Err(format!("{key} must be an object"));
+    }
+    Ok(object)
+}
+
+fn signoff_string_set(value: &Value, key: &str) -> Result<BTreeSet<String>, String> {
+    signoff_array(value, key)?
+        .iter()
+        .map(|item| {
+            let text = item
+                .as_str()
+                .ok_or_else(|| format!("{key} entries must be strings"))?;
+            if text.trim().is_empty() {
+                return Err(format!("{key} entries must be nonempty"));
+            }
+            Ok(text.to_string())
+        })
+        .collect()
+}
+
+fn signoff_rows_by_id<'a>(
+    rows: &'a [Value],
+    key: &str,
+) -> Result<BTreeMap<String, &'a Value>, String> {
+    let mut by_id = BTreeMap::new();
+    for row in rows {
+        let id = signoff_string(row, key)?.to_string();
+        if by_id.insert(id.clone(), row).is_some() {
+            return Err(format!("duplicate {key} {id}"));
+        }
+    }
+    Ok(by_id)
+}
+
+fn signoff_row_by_id<'a>(
+    rows: &'a [Value],
+    key: &str,
+    expected: &str,
+) -> Result<&'a Value, String> {
+    rows.iter()
+        .find(|row| row.get(key).and_then(Value::as_str) == Some(expected))
+        .ok_or_else(|| format!("missing {key} {expected}"))
+}
+
+fn validate_signoff_artifact(
+    signoff: &Value,
+    manifest: &Value,
+    snapshot: &Value,
+) -> Result<(), String> {
+    if signoff_string(signoff, "schema_version")? != "migration-readiness-planner-signoff-v1" {
+        return Err("unexpected signoff schema_version".to_string());
+    }
+    if signoff_string(signoff, "planner_contract_version")? != "migration-readiness-inventory-v1" {
+        return Err("unexpected planner contract version".to_string());
+    }
+
+    let source = signoff_object(signoff, "source_of_truth")?;
+    for (key, expected) in [
+        ("signoff_artifact", SIGNOFF_PATH),
+        ("planner_script", SCRIPT_PATH),
+        (
+            "planner_contract_test",
+            "tests/migration_readiness_planner_contract.rs",
+        ),
+        ("proof_lane_manifest", PROOF_LANE_MANIFEST_PATH),
+        ("proof_status_snapshot", PROOF_STATUS_SNAPSHOT_PATH),
+        ("readme", "README.md"),
+        ("integration_docs", "docs/integration.md"),
+    ] {
+        if signoff_string(source, key)? != expected {
+            return Err(format!("source_of_truth.{key} must be {expected}"));
+        }
+    }
+
+    let final_status = signoff_object(signoff, "final_status")?;
+    if signoff_string(final_status, "status")? != "signoff_ready" {
+        return Err("final status must be signoff_ready".to_string());
+    }
+    if signoff_string(final_status, "final_verdict_field")? != "summary.final_verdict" {
+        return Err("final verdict field must be summary.final_verdict".to_string());
+    }
+    let acceptable = signoff_string_set(final_status, "acceptable_final_verdicts")?;
+    if acceptable
+        != BTreeSet::from([
+            "blocked".to_string(),
+            "needs_quarantine".to_string(),
+            "ready".to_string(),
+        ])
+    {
+        return Err("acceptable final verdicts drifted".to_string());
+    }
+
+    let lane_id = signoff_string(final_status, "manifest_lane_id")?;
+    let guarantee_id = signoff_string(final_status, "manifest_guarantee_id")?;
+    let claim_id = signoff_string(final_status, "proof_status_claim_id")?;
+    let lane = signoff_row_by_id(signoff_array(manifest, "lanes")?, "lane_id", lane_id)?;
+    if signoff_string(lane, "kind")? != "artifact_contract" {
+        return Err(format!("{lane_id}: signoff lane must be artifact_contract"));
+    }
+    if !signoff_string_set(lane, "guarantee_ids")?.contains(guarantee_id) {
+        return Err(format!("{lane_id}: missing guarantee {guarantee_id}"));
+    }
+    let lane_sources = signoff_string_set(lane, "source_paths")?;
+    for required in [
+        SIGNOFF_PATH,
+        SCRIPT_PATH,
+        "tests/migration_readiness_planner_contract.rs",
+        PROOF_LANE_MANIFEST_PATH,
+        PROOF_STATUS_SNAPSHOT_PATH,
+        "README.md",
+        "docs/integration.md",
+        "skills/asupersync-mega-skill/SKILL.md",
+        FIXTURE_ROOT,
+    ] {
+        if !lane_sources.contains(required) {
+            return Err(format!("{lane_id}: missing source path {required}"));
+        }
+    }
+
+    let commands =
+        signoff_rows_by_id(signoff_array(signoff, "validation_commands")?, "command_id")?;
+    let signoff_command = commands
+        .get(lane_id)
+        .ok_or_else(|| format!("missing validation command {lane_id}"))?;
+    let lane_command = signoff_string(lane, "command")?;
+    if signoff_string(signoff_command, "command")? != lane_command {
+        return Err("signoff validation command must match manifest lane command".to_string());
+    }
+
+    for command_row in signoff_array(signoff, "validation_commands")? {
+        let command_id = signoff_string(command_row, "command_id")?;
+        let command = signoff_string(command_row, "command")?;
+        let policy = signoff_string(command_row, "execution_policy")?;
+        let cargo_or_cpu = command_row
+            .get("cargo_or_cpu_intensive")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("{command_id}: cargo_or_cpu_intensive must be a bool"))?;
+        if policy == "local-only-syntax" {
+            signoff_string(command_row, "local_only_justification")?;
+            if command.contains(" cargo ") {
+                return Err(format!(
+                    "{command_id}: local-only syntax checks cannot run cargo"
+                ));
+            }
+        }
+        if policy == "remote-required-rch" || cargo_or_cpu || command.contains(" cargo ") {
+            if !command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- ") {
+                return Err(format!(
+                    "{command_id}: remote proof command must fail closed"
+                ));
+            }
+            if command.contains(" cargo ") && !command.contains("CARGO_TARGET_DIR=") {
+                return Err(format!(
+                    "{command_id}: cargo command must isolate target dir"
+                ));
+            }
+        }
+    }
+
+    let child_ids = signoff_array(signoff, "child_evidence")?
+        .iter()
+        .map(|child| {
+            if signoff_string(child, "status")? != "closed" {
+                return Err("child evidence must be closed".to_string());
+            }
+            signoff_string(child, "commit")?;
+            if signoff_string_set(child, "evidence_surfaces")?.is_empty() {
+                return Err("child evidence surfaces must be nonempty".to_string());
+            }
+            signoff_string(child, "bead_id").map(ToString::to_string)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if child_ids
+        != BTreeSet::from([
+            "asupersync-4efh9h".to_string(),
+            "asupersync-mvoxa9".to_string(),
+            "asupersync-zlsfvc".to_string(),
+        ])
+    {
+        return Err(format!("child evidence set drifted: {child_ids:?}"));
+    }
+
+    let required_fields = signoff_string_set(signoff, "required_report_fields")?;
+    for field in [
+        "summary.final_verdict",
+        "proof_pack.proof_commands",
+        "proof_pack.quarantine_rows",
+        "semantic_map.recommendations",
+        "operator_report.phase_plan",
+        "operator_report.residual_risks",
+        "operator_report.generation_log.input_artifact_hashes",
+    ] {
+        if !required_fields.contains(field) {
+            return Err(format!("required report field missing {field}"));
+        }
+    }
+
+    let scenarios = signoff_string_set(signoff, "fixture_scenarios")?;
+    if scenarios
+        != BTreeSet::from([
+            "blocked-ambient-authority-service".to_string(),
+            "feature-gated-tokio-edge".to_string(),
+            "malformed-workspace".to_string(),
+            "mixed-compat-boundary".to_string(),
+            "native-clean".to_string(),
+            "tokio-http-service".to_string(),
+            "zero-evidence-empty".to_string(),
+        ])
+    {
+        return Err("fixture scenario set drifted".to_string());
+    }
+
+    let hash_log = signoff_object(signoff, "artifact_hash_log")?;
+    if signoff_string(hash_log, "hash_algorithm")? != "sha256" {
+        return Err("artifact hash log must use sha256".to_string());
+    }
+    let hash_fields = signoff_string_set(hash_log, "operator_log_fields")?;
+    for field in [
+        "artifact_path",
+        "artifact_sha256",
+        "command_id",
+        "child_bead_id",
+        "final_status",
+    ] {
+        if !hash_fields.contains(field) {
+            return Err(format!("artifact hash log missing {field}"));
+        }
+    }
+    for artifact in signoff_string_set(hash_log, "required_artifacts")? {
+        if !repo_path(&artifact).exists() {
+            return Err(format!("required artifact path missing {artifact}"));
+        }
+    }
+
+    for section in ["known_non_goals", "residual_limitations"] {
+        if signoff_string_set(signoff, section)?.len() < 3 {
+            return Err(format!("{section} must preserve explicit scope limits"));
+        }
+    }
+
+    let claim = signoff_row_by_id(
+        signoff_array(snapshot, "claim_categories")?,
+        "claim_id",
+        claim_id,
+    )?;
+    if !signoff_string_set(claim, "manifest_lane_ids")?.contains(lane_id) {
+        return Err(format!("{claim_id}: snapshot row missing lane {lane_id}"));
+    }
+    if !signoff_string_set(claim, "manifest_guarantee_ids")?.contains(guarantee_id) {
+        return Err(format!(
+            "{claim_id}: snapshot row missing guarantee {guarantee_id}"
+        ));
+    }
+    if signoff_string_set(claim, "proof_commands")? != BTreeSet::from([lane_command.to_string()]) {
+        return Err(format!(
+            "{claim_id}: proof command must match the manifest lane command"
+        ));
+    }
+
+    Ok(())
 }
 
 #[test]
@@ -761,4 +1054,54 @@ fn planner_docs_surfaces_keep_entrypoints_and_report_markers() {
             "mega-skill missing marker {marker}"
         );
     }
+}
+
+#[test]
+fn migration_readiness_planner_signoff_artifact_is_complete() {
+    let signoff = json_file(SIGNOFF_PATH);
+    let manifest = json_file(PROOF_LANE_MANIFEST_PATH);
+    let snapshot = json_file(PROOF_STATUS_SNAPSHOT_PATH);
+    validate_signoff_artifact(&signoff, &manifest, &snapshot)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn synthetic_signoff_missing_child_evidence_is_rejected() {
+    let mut signoff = json_file(SIGNOFF_PATH);
+    let manifest = json_file(PROOF_LANE_MANIFEST_PATH);
+    let snapshot = json_file(PROOF_STATUS_SNAPSHOT_PATH);
+    signoff["child_evidence"]
+        .as_array_mut()
+        .expect("child evidence array")
+        .pop();
+
+    let error = validate_signoff_artifact(&signoff, &manifest, &snapshot).unwrap_err();
+    assert!(
+        error.contains("child evidence set drifted"),
+        "unexpected missing-child error: {error}"
+    );
+}
+
+#[test]
+fn synthetic_signoff_stale_manifest_command_is_rejected() {
+    let mut signoff = json_file(SIGNOFF_PATH);
+    let manifest = json_file(PROOF_LANE_MANIFEST_PATH);
+    let snapshot = json_file(PROOF_STATUS_SNAPSHOT_PATH);
+    let command_row = signoff["validation_commands"]
+        .as_array_mut()
+        .expect("validation command array")
+        .iter_mut()
+        .find(|row| {
+            row["command_id"].as_str() == Some("migration-readiness-planner-signoff-contract")
+        })
+        .expect("signoff command row");
+    command_row["command"] = serde_json::json!(
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/stale cargo test -p asupersync --test stale"
+    );
+
+    let error = validate_signoff_artifact(&signoff, &manifest, &snapshot).unwrap_err();
+    assert!(
+        error.contains("must match manifest lane command"),
+        "unexpected stale-command error: {error}"
+    );
 }

@@ -696,6 +696,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "formal-lean-build",
         "dirty-tree-ownership-receipt-contract",
         "swarm-proof-lane-planner-contract",
+        "migration-readiness-planner-signoff-contract",
         "proof-lane-manifest-contract",
     ] {
         assert!(lane_ids.contains(required), "missing lane {required}");
@@ -848,6 +849,10 @@ fn every_lane_declares_fail_closed_resource_envelope() {
         ("fuzz-manifest-smoke", "compile-frontier-heavy"),
         (
             "runtime-pressure-control-evidence-contract",
+            "artifact-contract-medium",
+        ),
+        (
+            "migration-readiness-planner-signoff-contract",
             "artifact-contract-medium",
         ),
         ("rustdoc-api", "documentation-frontier-medium"),

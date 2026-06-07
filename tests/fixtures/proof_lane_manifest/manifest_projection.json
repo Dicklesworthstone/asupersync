@@ -166,6 +166,7 @@
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
     "admission-aware-proof-lane-atlas",
+    "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
     "proof-lane-manifest-verifier"
   ],
@@ -471,6 +472,29 @@
       ]
     },
     {
+      "lane_id": "migration-readiness-planner-signoff-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_readiness_planner_signoff_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test migration_readiness_planner_contract migration_readiness_planner_signoff_artifact_is_complete -- --nocapture",
+      "guarantee_ids": [
+        "migration-readiness-planner-signoff"
+      ],
+      "feature_flags": [],
+      "expected_signal": "migration_readiness_planner_signoff_artifact_is_complete test passes",
+      "source_paths": [
+        "artifacts/migration_readiness_planner_signoff_v1.json",
+        "scripts/migration_readiness_planner.py",
+        "tests/migration_readiness_planner_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "docs/integration.md",
+        "skills/asupersync-mega-skill/SKILL.md",
+        "tests/fixtures/migration_readiness_planner"
+      ]
+    },
+    {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -603,6 +627,12 @@
       "guarantee_id": "admission-aware-proof-lane-atlas",
       "lane_ids": [
         "swarm-proof-lane-planner-contract"
+      ]
+    },
+    {
+      "guarantee_id": "migration-readiness-planner-signoff",
+      "lane_ids": [
+        "migration-readiness-planner-signoff-contract"
       ]
     },
     {

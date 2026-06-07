@@ -1,0 +1,176 @@
+{
+  "schema_version": "migration-readiness-planner-signoff-v1",
+  "bead_id": "asupersync-6n19nb",
+  "created_date": "2026-06-07",
+  "description": "Final signoff contract for the executable migration readiness planner. It aggregates child evidence, report fields, proof commands, known non-goals, residual limitations, and the proof-status row that future closeouts can cite.",
+  "planner_contract_version": "migration-readiness-inventory-v1",
+  "source_of_truth": {
+    "signoff_artifact": "artifacts/migration_readiness_planner_signoff_v1.json",
+    "planner_script": "scripts/migration_readiness_planner.py",
+    "planner_contract_test": "tests/migration_readiness_planner_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "readme": "README.md",
+    "integration_docs": "docs/integration.md"
+  },
+  "final_status": {
+    "status": "signoff_ready",
+    "proof_status_claim_id": "migration-readiness-planner-signoff",
+    "manifest_lane_id": "migration-readiness-planner-signoff-contract",
+    "manifest_guarantee_id": "migration-readiness-planner-signoff",
+    "final_verdict_field": "summary.final_verdict",
+    "acceptable_final_verdicts": [
+      "ready",
+      "needs_quarantine",
+      "blocked"
+    ],
+    "closeout_rule": "A planner closeout may cite this artifact only with a fresh RCH pass for the manifest lane and a clean proof-status/manifest contract rerun. Broad workspace health still requires the exact broad lanes listed in the validation commands."
+  },
+  "child_evidence": [
+    {
+      "bead_id": "asupersync-mvoxa9",
+      "status": "closed",
+      "commit": "5f8e998847b0c99dbd353dc2fda28a951131aef6",
+      "tracker_close_commit": "40ca270fb6087f18adc478493b5a1107ab50b165",
+      "evidence_status": "trusted_child_commit",
+      "evidence_surfaces": [
+        "operator_report.phase_plan",
+        "operator_report.residual_risks",
+        "proof_pack.proof_commands",
+        "summary.final_verdict"
+      ]
+    },
+    {
+      "bead_id": "asupersync-zlsfvc",
+      "status": "closed",
+      "commit": "9dc3f2c5d0fefcf4712b3ac0b85eb9f40bd41120",
+      "evidence_status": "trusted_child_commit",
+      "evidence_surfaces": [
+        "migration_readiness_e2e_report.json",
+        "migration_readiness_e2e_summary.md",
+        "fixture scenario catalog",
+        "unknown-scenario fail-closed path"
+      ]
+    },
+    {
+      "bead_id": "asupersync-4efh9h",
+      "status": "closed",
+      "commit": "f17ca8653b73741a79ee890ae7cedb18a55fc36e",
+      "evidence_status": "trusted_child_commit",
+      "evidence_surfaces": [
+        "README planner entrypoints",
+        "docs/integration.md recipe table",
+        "skills/asupersync-mega-skill/SKILL.md entrypoints",
+        "docs marker contract test"
+      ]
+    }
+  ],
+  "required_report_fields": [
+    "summary.final_verdict",
+    "proof_pack.proof_commands",
+    "proof_pack.quarantine_rows",
+    "semantic_map.recommendations",
+    "operator_report.phase_plan",
+    "operator_report.residual_risks",
+    "operator_report.generation_log.input_artifact_hashes"
+  ],
+  "fixture_scenarios": [
+    "native-clean",
+    "tokio-http-service",
+    "mixed-compat-boundary",
+    "malformed-workspace",
+    "feature-gated-tokio-edge",
+    "blocked-ambient-authority-service",
+    "zero-evidence-empty"
+  ],
+  "artifact_hash_log": {
+    "hash_algorithm": "sha256",
+    "operator_log_fields": [
+      "artifact_path",
+      "artifact_sha256",
+      "command_id",
+      "child_bead_id",
+      "final_status"
+    ],
+    "required_artifacts": [
+      "artifacts/migration_readiness_planner_signoff_v1.json",
+      "scripts/migration_readiness_planner.py",
+      "tests/migration_readiness_planner_contract.rs",
+      "artifacts/proof_lane_manifest_v1.json",
+      "artifacts/proof_status_snapshot_v1.json",
+      "README.md",
+      "docs/integration.md"
+    ]
+  },
+  "validation_commands": [
+    {
+      "command_id": "python-syntax-local-smoke",
+      "execution_policy": "local-only-syntax",
+      "cargo_or_cpu_intensive": false,
+      "local_only_justification": "Python syntax validation is a parse-only script check and does not exercise Cargo or CPU-heavy Rust validation.",
+      "command": "python3 -m py_compile scripts/migration_readiness_planner.py",
+      "expected_signal": "exit code 0"
+    },
+    {
+      "command_id": "migration-readiness-planner-signoff-contract",
+      "execution_policy": "remote-required-rch",
+      "cargo_or_cpu_intensive": true,
+      "manifest_lane_id": "migration-readiness-planner-signoff-contract",
+      "claim_scope": "migration-readiness-planner-signoff",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_readiness_planner_signoff_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test migration_readiness_planner_contract migration_readiness_planner_signoff_artifact_is_complete -- --nocapture",
+      "expected_signal": "migration_readiness_planner_signoff_artifact_is_complete passes"
+    },
+    {
+      "command_id": "proof-lane-manifest-contract",
+      "execution_policy": "remote-required-rch",
+      "cargo_or_cpu_intensive": true,
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "expected_signal": "proof_lane_manifest_contract tests pass"
+    },
+    {
+      "command_id": "proof-status-snapshot-contract",
+      "execution_policy": "remote-required-rch",
+      "cargo_or_cpu_intensive": true,
+      "claim_scope": "proof-status-snapshot",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_status_snapshot CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_status_snapshot_contract -- --nocapture",
+      "expected_signal": "proof_status_snapshot_contract tests pass"
+    },
+    {
+      "command_id": "rustfmt-check",
+      "execution_policy": "remote-required-rch",
+      "cargo_or_cpu_intensive": true,
+      "claim_scope": "commit-format-gate",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check cargo fmt --check",
+      "expected_signal": "cargo fmt exits 0"
+    },
+    {
+      "command_id": "all-targets-check",
+      "execution_policy": "remote-required-rch",
+      "cargo_or_cpu_intensive": true,
+      "claim_scope": "commit-compile-gate",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_check_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --all-targets",
+      "expected_signal": "cargo check exits 0"
+    },
+    {
+      "command_id": "clippy-all-targets",
+      "execution_policy": "remote-required-rch",
+      "cargo_or_cpu_intensive": true,
+      "claim_scope": "commit-lint-gate",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy --all-targets -- -D warnings",
+      "expected_signal": "cargo clippy exits 0"
+    }
+  ],
+  "known_non_goals": [
+    "Does not certify broad workspace health without the exact all-target and clippy commands listed above.",
+    "Does not prove live external repositories; fixture scenarios are deterministic examples only.",
+    "Does not weaken the no-Tokio production graph guarantee or compat-boundary carve-outs.",
+    "Does not replace Agent Mail reservations, dirty-tree ownership checks, or direct-main push/mirror policy."
+  ],
+  "residual_limitations": [
+    "Planner recommendations are migration planning evidence, not automatic code edits.",
+    "Manual design review remains required for ambient authority, region ownership, and dependency holdouts classified as hard blockers.",
+    "Cache reuse is not fresh proof for this signoff unless the proof reuse classifier permits the exact claim scope and clean source frontier."
+  ]
+}

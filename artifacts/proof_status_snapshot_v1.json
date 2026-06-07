@@ -70,6 +70,7 @@
     "fuzz manifest",
     "conformance runners",
     "admission-aware proof-lane atlas",
+    "migration readiness planner signoff",
     "formal Lean posture",
     "rustdoc/API examples"
   ],
@@ -310,6 +311,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Green maps the focused atlas/planner artifact contract; it does not prove broad workspace release health, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target."
+    },
+    {
+      "claim_id": "migration-readiness-planner-signoff",
+      "category": "migration readiness planner signoff",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "migration readiness planner signoff",
+          "migration-readiness-planner-signoff"
+        ],
+        "AGENTS.md": [
+          "Canonical proof-command manifest",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "migration-readiness-planner-signoff"
+      ],
+      "manifest_lane_ids": [
+        "migration-readiness-planner-signoff-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_readiness_planner_signoff_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test migration_readiness_planner_contract migration_readiness_planner_signoff_artifact_is_complete -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the executable planner signoff artifact, child evidence, fixture E2E, report-field, docs-marker, manifest, and proof-status contract. It does not prove broad workspace health, live external projects, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target."
     },
     {
       "claim_id": "formal-lean-posture",
