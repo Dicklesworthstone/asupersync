@@ -8,7 +8,7 @@ use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 const STORAGE_CHUNK_MAGIC: &[u8; 8] = b"ASUPMBX1";
@@ -114,6 +114,12 @@ struct EncodedStorageChunk {
     encrypted: bool,
 }
 
+#[derive(Debug)]
+struct PreparedStoredChunk {
+    metadata: StoredChunk,
+    bytes: Vec<u8>,
+}
+
 /// Storage metadata and timestamps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageInfo {
@@ -204,13 +210,32 @@ impl MailboxStorage {
         data: Vec<u8>,
     ) -> MailboxResult<()> {
         let transfer_id = metadata.transfer_id;
+        if self.entries.contains_key(&transfer_id) {
+            return Err(MailboxError::ConfigurationError {
+                details: format!("mailbox transfer {transfer_id} already exists in storage"),
+            });
+        }
 
-        // Check storage capacity
-        self.check_capacity(data.len() as u64)?;
+        let prepared_chunks = self.prepare_chunks(&transfer_id, &data)?;
+        let disk_size = match prepared_chunks.iter().try_fold(0u64, |total, chunk| {
+            let chunk_size = u64::try_from(chunk.metadata.size).ok()?;
+            total.checked_add(chunk_size)
+        }) {
+            Some(disk_size) => disk_size,
+            None => {
+                return Err(MailboxError::QuotaExceeded {
+                    usage: u64::MAX,
+                    limit: self.config.max_storage_size,
+                });
+            }
+        };
 
-        // Create storage entry
-        let chunks = self.store_chunks(&transfer_id, &data).await?;
-        let disk_size = chunks.iter().map(|chunk| chunk.size as u64).sum();
+        self.check_capacity(disk_size)?;
+        let chunks = self.write_prepared_chunks(transfer_id, prepared_chunks)?;
+        let original_size = u64::try_from(data.len()).map_err(|_| MailboxError::QuotaExceeded {
+            usage: u64::MAX,
+            limit: self.config.max_storage_size,
+        })?;
 
         let entry = MailboxEntry {
             transfer_id,
@@ -222,7 +247,7 @@ impl MailboxStorage {
                 last_accessed: mailbox_time_now(),
                 last_modified: mailbox_time_now(),
                 disk_size,
-                original_size: data.len() as u64,
+                original_size,
             },
         };
 
@@ -253,13 +278,20 @@ impl MailboxStorage {
             entry.chunks.clone()
         };
 
-        let data = self.load_chunks(transfer_id, &chunks).await?;
-
-        if let Some(entry) = self.entries.get_mut(transfer_id) {
-            entry.state = TransferState::Stored;
+        match self.load_chunks(transfer_id, &chunks).await {
+            Ok(data) => {
+                if let Some(entry) = self.entries.get_mut(transfer_id) {
+                    entry.state = TransferState::Stored;
+                }
+                Ok(data)
+            }
+            Err(error) => {
+                if let Some(entry) = self.entries.get_mut(transfer_id) {
+                    entry.state = TransferState::Stored;
+                }
+                Err(error)
+            }
         }
-
-        Ok(data)
     }
 
     /// List stored transfers for a peer.
@@ -274,20 +306,18 @@ impl MailboxStorage {
     pub async fn delete_transfer(&mut self, transfer_id: &MailboxTransferId) -> MailboxResult<()> {
         let entry = self
             .entries
+            .get(transfer_id)
+            .ok_or(MailboxError::TransferNotFound {
+                transfer_id: *transfer_id,
+            })?
+            .clone();
+
+        self.delete_chunk_files(*transfer_id, &entry.chunks)?;
+        self.entries
             .remove(transfer_id)
             .ok_or(MailboxError::TransferNotFound {
                 transfer_id: *transfer_id,
             })?;
-
-        // Remove chunk files
-        for chunk in &entry.chunks {
-            let chunk_path = self.storage_root.join(&chunk.storage_path);
-            if chunk_path.exists() {
-                std::fs::remove_file(chunk_path).map_err(|e| MailboxError::NetworkError {
-                    details: format!("Failed to delete chunk: {}", e),
-                })?;
-            }
-        }
 
         Ok(())
     }
@@ -295,7 +325,13 @@ impl MailboxStorage {
     /// Check if storage has capacity for additional data.
     fn check_capacity(&self, additional_bytes: u64) -> MailboxResult<()> {
         let current_usage = self.get_storage_usage();
-        let new_usage = current_usage + additional_bytes;
+        let new_usage =
+            current_usage
+                .checked_add(additional_bytes)
+                .ok_or(MailboxError::QuotaExceeded {
+                    usage: u64::MAX,
+                    limit: self.config.max_storage_size,
+                })?;
 
         if new_usage > self.config.max_storage_size {
             return Err(MailboxError::QuotaExceeded {
@@ -312,39 +348,30 @@ impl MailboxStorage {
         self.entries
             .values()
             .map(|entry| entry.storage_info.disk_size)
-            .sum()
+            .fold(0u64, u64::saturating_add)
     }
 
-    /// Store data as chunks.
-    async fn store_chunks(
+    /// Encode data as chunks without mutating the filesystem.
+    fn prepare_chunks(
         &self,
         transfer_id: &MailboxTransferId,
         data: &[u8],
-    ) -> MailboxResult<Vec<StoredChunk>> {
+    ) -> MailboxResult<Vec<PreparedStoredChunk>> {
         let mut chunks = Vec::new();
-        let chunk_size = self.config.chunk_size;
+        let chunk_size = self.config.chunk_size.max(1);
 
         for (index, chunk_data) in data.chunks(chunk_size).enumerate() {
             let chunk_path = format!("transfers/{}/chunk_{:04}", transfer_id, index);
-            let full_path = self.storage_root.join(&chunk_path);
-
-            // Create directory if needed
-            if let Some(parent) = full_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| MailboxError::NetworkError {
-                    details: format!("Failed to create chunk directory: {}", e),
+            let chunk_index =
+                u32::try_from(index).map_err(|_| MailboxError::ConfigurationError {
+                    details: format!("mailbox transfer has too many chunks: {index}"),
                 })?;
-            }
+            self.chunk_full_path(*transfer_id, &chunk_path)?;
 
             let stored_chunk = self.encode_chunk(chunk_data)?;
 
-            std::fs::write(&full_path, &stored_chunk.bytes).map_err(|e| {
-                MailboxError::NetworkError {
-                    details: format!("Failed to write chunk: {}", e),
-                }
-            })?;
-
             let chunk = StoredChunk {
-                index: index as u32,
+                index: chunk_index,
                 size: stored_chunk.bytes.len(),
                 storage_path: chunk_path,
                 checksum: stored_chunk.plaintext_sha256,
@@ -352,10 +379,46 @@ impl MailboxStorage {
                 encrypted: stored_chunk.encrypted,
             };
 
-            chunks.push(chunk);
+            chunks.push(PreparedStoredChunk {
+                metadata: chunk,
+                bytes: stored_chunk.bytes,
+            });
         }
 
         Ok(chunks)
+    }
+
+    fn write_prepared_chunks(
+        &self,
+        transfer_id: MailboxTransferId,
+        prepared_chunks: Vec<PreparedStoredChunk>,
+    ) -> MailboxResult<Vec<StoredChunk>> {
+        let mut written_chunks = Vec::new();
+        let mut stored_chunks = Vec::new();
+
+        for prepared in prepared_chunks {
+            let full_path = self.chunk_full_path(transfer_id, &prepared.metadata.storage_path)?;
+            if let Some(parent) = full_path.parent() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    let _ = self.delete_chunk_files(transfer_id, &written_chunks);
+                    return Err(MailboxError::NetworkError {
+                        details: format!("Failed to create chunk directory: {error}"),
+                    });
+                }
+            }
+
+            if let Err(error) = std::fs::write(&full_path, &prepared.bytes) {
+                let _ = self.delete_chunk_files(transfer_id, &written_chunks);
+                return Err(MailboxError::NetworkError {
+                    details: format!("Failed to write chunk: {error}"),
+                });
+            }
+
+            written_chunks.push(prepared.metadata.clone());
+            stored_chunks.push(prepared.metadata);
+        }
+
+        Ok(stored_chunks)
     }
 
     /// Load data from chunks.
@@ -367,7 +430,7 @@ impl MailboxStorage {
         let mut data = Vec::new();
 
         for chunk in chunks {
-            let chunk_path = self.storage_root.join(&chunk.storage_path);
+            let chunk_path = self.chunk_full_path(*transfer_id, &chunk.storage_path)?;
             let chunk_data =
                 std::fs::read(&chunk_path).map_err(|e| MailboxError::NetworkError {
                     details: format!("Failed to read chunk: {}", e),
@@ -378,6 +441,51 @@ impl MailboxStorage {
         }
 
         Ok(data)
+    }
+
+    fn delete_chunk_files(
+        &self,
+        transfer_id: MailboxTransferId,
+        chunks: &[StoredChunk],
+    ) -> MailboxResult<()> {
+        for chunk in chunks {
+            let chunk_path = self.chunk_full_path(transfer_id, &chunk.storage_path)?;
+            if chunk_path.exists() {
+                std::fs::remove_file(&chunk_path).map_err(|e| MailboxError::NetworkError {
+                    details: format!("Failed to delete chunk: {}", e),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn chunk_full_path(
+        &self,
+        transfer_id: MailboxTransferId,
+        storage_path: &str,
+    ) -> MailboxResult<PathBuf> {
+        let path = Path::new(storage_path);
+        let expected_prefix = format!("transfers/{transfer_id}/");
+        if !storage_path.starts_with(&expected_prefix)
+            || storage_path.contains('\\')
+            || path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir
+                        | Component::CurDir
+                        | Component::RootDir
+                        | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(MailboxError::TamperDetected {
+                transfer_id,
+                evidence: format!("mailbox chunk path escapes storage root: {storage_path}"),
+            });
+        }
+
+        Ok(self.storage_root.join(path))
     }
 
     fn encode_chunk(&self, plaintext: &[u8]) -> MailboxResult<EncodedStorageChunk> {
@@ -478,17 +586,43 @@ impl MailboxStorage {
             });
         }
         let flags = encoded[9];
-        let original_len = u64::from_be_bytes(
+        let original_len_u64 = u64::from_be_bytes(
             encoded[10..18]
                 .try_into()
                 .expect("fixed mailbox original length field"),
-        ) as usize;
-        let payload_len = u64::from_be_bytes(
+        );
+        let original_len =
+            usize::try_from(original_len_u64).map_err(|_| MailboxError::TamperDetected {
+                transfer_id,
+                evidence: format!("mailbox chunk {} original length is too large", chunk.index),
+            })?;
+        if original_len > self.config.chunk_size.max(1) {
+            return Err(MailboxError::TamperDetected {
+                transfer_id,
+                evidence: format!(
+                    "mailbox chunk {} original length exceeds chunk size",
+                    chunk.index
+                ),
+            });
+        }
+
+        let payload_len_u64 = u64::from_be_bytes(
             encoded[18..26]
                 .try_into()
                 .expect("fixed mailbox payload length field"),
-        ) as usize;
-        if encoded.len() != STORAGE_CHUNK_HEADER_LEN + payload_len {
+        );
+        let payload_len =
+            usize::try_from(payload_len_u64).map_err(|_| MailboxError::TamperDetected {
+                transfer_id,
+                evidence: format!("mailbox chunk {} payload length is too large", chunk.index),
+            })?;
+        let expected_encoded_len = STORAGE_CHUNK_HEADER_LEN
+            .checked_add(payload_len)
+            .ok_or_else(|| MailboxError::TamperDetected {
+                transfer_id,
+                evidence: format!("mailbox chunk {} payload length overflows", chunk.index),
+            })?;
+        if encoded.len() != expected_encoded_len {
             return Err(MailboxError::TamperDetected {
                 transfer_id,
                 evidence: format!("mailbox chunk {} has invalid payload length", chunk.index),
@@ -548,8 +682,11 @@ impl MailboxStorage {
         }
 
         let actual_sha = Sha256::digest(&payload);
-        let actual_checksum = format!("sha256:{}", hex::encode(actual_sha));
-        if actual_sha.as_slice() != expected_sha || actual_checksum != chunk.checksum {
+        let metadata_sha = Self::decode_chunk_checksum(transfer_id, chunk, &chunk.checksum)?;
+        use subtle::ConstantTimeEq;
+        let envelope_checksum_matches = actual_sha.as_slice().ct_eq(expected_sha);
+        let metadata_checksum_matches = actual_sha.as_slice().ct_eq(metadata_sha.as_slice());
+        if !bool::from(envelope_checksum_matches & metadata_checksum_matches) {
             return Err(MailboxError::TamperDetected {
                 transfer_id,
                 evidence: format!("mailbox chunk {} checksum mismatch", chunk.index),
@@ -557,6 +694,31 @@ impl MailboxStorage {
         }
 
         Ok(payload)
+    }
+
+    fn decode_chunk_checksum(
+        transfer_id: MailboxTransferId,
+        chunk: &StoredChunk,
+        checksum: &str,
+    ) -> MailboxResult<[u8; 32]> {
+        let checksum_hex =
+            checksum
+                .strip_prefix("sha256:")
+                .ok_or_else(|| MailboxError::TamperDetected {
+                    transfer_id,
+                    evidence: format!("mailbox chunk {} has invalid checksum prefix", chunk.index),
+                })?;
+        let mut decoded = [0u8; 32];
+        hex::decode_to_slice(checksum_hex, &mut decoded).map_err(|_| {
+            MailboxError::TamperDetected {
+                transfer_id,
+                evidence: format!(
+                    "mailbox chunk {} has invalid checksum encoding",
+                    chunk.index
+                ),
+            }
+        })?;
+        Ok(decoded)
     }
 
     /// Perform cleanup of expired transfers.
@@ -591,7 +753,7 @@ impl MailboxStorage {
         };
 
         StorageStats {
-            total_entries: total_entries as u32,
+            total_entries: u32::try_from(total_entries).unwrap_or(u32::MAX),
             total_size_bytes: total_size,
             max_size_bytes: self.config.max_storage_size,
             utilization_percent: utilization,
@@ -624,6 +786,22 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn test_metadata(transfer_id: MailboxTransferId, total_size: u64) -> MailboxTransferMetadata {
+        MailboxTransferMetadata {
+            transfer_id,
+            destination_peer: PeerId::new("test-peer"),
+            created_at: mailbox_time_now(),
+            expires_at: Time::from_nanos(
+                mailbox_time_now()
+                    .as_nanos()
+                    .saturating_add(3_600_000_000_000),
+            ),
+            total_size,
+            chunk_count: 1,
+            encrypted_metadata: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_storage_creation() {
         let temp_dir = TempDir::new().unwrap();
@@ -638,19 +816,7 @@ mod tests {
         let mut storage = MailboxStorage::new(temp_dir.path().to_path_buf()).unwrap();
 
         let transfer_id = MailboxTransferId::new();
-        let metadata = MailboxTransferMetadata {
-            transfer_id,
-            destination_peer: PeerId::new("test-peer"),
-            created_at: mailbox_time_now(),
-            expires_at: Time::from_nanos(
-                mailbox_time_now()
-                    .as_nanos()
-                    .saturating_add(3_600_000_000_000),
-            ), // 1 hour
-            total_size: 12,
-            chunk_count: 1,
-            encrypted_metadata: Vec::new(),
-        };
+        let metadata = test_metadata(transfer_id, 12);
 
         let test_data = b"Hello, World!".to_vec();
 
@@ -676,19 +842,7 @@ mod tests {
         let mut storage = MailboxStorage::new(temp_dir.path().to_path_buf()).unwrap();
 
         let transfer_id = MailboxTransferId::new();
-        let metadata = MailboxTransferMetadata {
-            transfer_id,
-            destination_peer: PeerId::new("test-peer"),
-            created_at: mailbox_time_now(),
-            expires_at: Time::from_nanos(
-                mailbox_time_now()
-                    .as_nanos()
-                    .saturating_add(3_600_000_000_000),
-            ),
-            total_size: 5,
-            chunk_count: 1,
-            encrypted_metadata: Vec::new(),
-        };
+        let metadata = test_metadata(transfer_id, 5);
 
         storage
             .store_transfer(metadata, b"test".to_vec())
@@ -712,6 +866,192 @@ mod tests {
 
         assert!(storage.check_capacity(50).is_ok());
         assert!(storage.check_capacity(150).is_err());
+    }
+
+    #[test]
+    fn storage_capacity_check_rejects_counter_overflow() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut storage = MailboxStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let transfer_id = MailboxTransferId::new();
+        storage.entries.insert(
+            transfer_id,
+            MailboxEntry {
+                transfer_id,
+                metadata: test_metadata(transfer_id, u64::MAX),
+                chunks: Vec::new(),
+                state: TransferState::Stored,
+                storage_info: StorageInfo {
+                    created_at: mailbox_time_now(),
+                    last_accessed: mailbox_time_now(),
+                    last_modified: mailbox_time_now(),
+                    disk_size: u64::MAX,
+                    original_size: 0,
+                },
+            },
+        );
+
+        assert!(matches!(
+            storage.check_capacity(1),
+            Err(MailboxError::QuotaExceeded {
+                usage: u64::MAX,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn store_transfer_rejects_encoded_size_over_capacity_without_writing() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            max_storage_size: 1,
+            ..Default::default()
+        };
+        let mut storage =
+            MailboxStorage::with_config(temp_dir.path().to_path_buf(), config).unwrap();
+        let transfer_id = MailboxTransferId::new();
+
+        let result = storage
+            .store_transfer(test_metadata(transfer_id, 1), b"x".to_vec())
+            .await;
+
+        assert!(matches!(result, Err(MailboxError::QuotaExceeded { .. })));
+        assert!(storage.entries.is_empty());
+        assert!(!temp_dir.path().join("transfers").exists());
+    }
+
+    #[tokio::test]
+    async fn store_transfer_rejects_duplicate_transfer_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut storage = MailboxStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let transfer_id = MailboxTransferId::new();
+
+        storage
+            .store_transfer(test_metadata(transfer_id, 1), b"a".to_vec())
+            .await
+            .unwrap();
+        let result = storage
+            .store_transfer(test_metadata(transfer_id, 1), b"b".to_vec())
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(MailboxError::ConfigurationError { details }) if details.contains("already exists")
+        ));
+        assert_eq!(storage.entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn zero_chunk_size_is_treated_as_one_byte_chunks() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = StorageConfig {
+            chunk_size: 0,
+            ..Default::default()
+        };
+        let mut storage =
+            MailboxStorage::with_config(temp_dir.path().to_path_buf(), config).unwrap();
+        let transfer_id = MailboxTransferId::new();
+
+        storage
+            .store_transfer(test_metadata(transfer_id, 3), b"abc".to_vec())
+            .await
+            .unwrap();
+
+        let entry = storage.entries.get(&transfer_id).expect("stored entry");
+        assert_eq!(entry.chunks.len(), 3);
+        let retrieved = storage
+            .retrieve_transfer(&transfer_id, PeerId::new("requestor"))
+            .await
+            .unwrap();
+        assert_eq!(retrieved, b"abc");
+    }
+
+    #[tokio::test]
+    async fn retrieve_error_restores_stored_state() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut storage = MailboxStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let transfer_id = MailboxTransferId::new();
+
+        storage
+            .store_transfer(test_metadata(transfer_id, 4), b"data".to_vec())
+            .await
+            .unwrap();
+        let entry = storage.entries.get_mut(&transfer_id).expect("stored entry");
+        entry.chunks[0].storage_path = format!("transfers/{transfer_id}/missing");
+
+        let result = storage
+            .retrieve_transfer(&transfer_id, PeerId::new("requestor"))
+            .await;
+
+        assert!(matches!(result, Err(MailboxError::NetworkError { .. })));
+        assert!(matches!(
+            storage
+                .entries
+                .get(&transfer_id)
+                .expect("stored entry")
+                .state,
+            TransferState::Stored
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_transfer_rejects_escaping_chunk_path_without_removing_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut storage = MailboxStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let transfer_id = MailboxTransferId::new();
+
+        storage
+            .store_transfer(test_metadata(transfer_id, 4), b"data".to_vec())
+            .await
+            .unwrap();
+        let entry = storage.entries.get_mut(&transfer_id).expect("stored entry");
+        entry.chunks[0].storage_path = format!("transfers/{transfer_id}/../escape");
+
+        let result = storage.delete_transfer(&transfer_id).await;
+
+        assert!(matches!(result, Err(MailboxError::TamperDetected { .. })));
+        assert!(storage.entries.contains_key(&transfer_id));
+    }
+
+    #[test]
+    fn decode_chunk_rejects_unrepresentable_payload_length() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = MailboxStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let transfer_id = MailboxTransferId::new();
+        let encoded = storage.encode_chunk(b"data").unwrap();
+        let mut bytes = encoded.bytes;
+        bytes[18..26].copy_from_slice(&u64::MAX.to_be_bytes());
+        let chunk = StoredChunk {
+            index: 0,
+            size: bytes.len(),
+            storage_path: format!("transfers/{transfer_id}/chunk_0000"),
+            checksum: encoded.plaintext_sha256,
+            compressed: encoded.compressed,
+            encrypted: encoded.encrypted,
+        };
+
+        let result = storage.decode_chunk(transfer_id, &bytes, &chunk);
+
+        assert!(matches!(result, Err(MailboxError::TamperDetected { .. })));
+    }
+
+    #[test]
+    fn decode_chunk_rejects_invalid_metadata_checksum() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = MailboxStorage::new(temp_dir.path().to_path_buf()).unwrap();
+        let transfer_id = MailboxTransferId::new();
+        let encoded = storage.encode_chunk(b"data").unwrap();
+        let chunk = StoredChunk {
+            index: 0,
+            size: encoded.bytes.len(),
+            storage_path: format!("transfers/{transfer_id}/chunk_0000"),
+            checksum: "sha256:not-hex".to_string(),
+            compressed: encoded.compressed,
+            encrypted: encoded.encrypted,
+        };
+
+        let result = storage.decode_chunk(transfer_id, &encoded.bytes, &chunk);
+
+        assert!(matches!(result, Err(MailboxError::TamperDetected { .. })));
     }
 
     #[test]
