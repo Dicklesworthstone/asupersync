@@ -505,6 +505,24 @@ Tokio runtime-context or I/O shims. The intended order is native Asupersync
 first, compat adapters only where a third-party crate still requires Tokio
 traits.
 
+Start brownfield work with the read-only migration readiness planner in
+[`docs/integration.md`](./docs/integration.md#migration-readiness-planner):
+
+```bash
+python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness
+```
+
+For deterministic examples, list and execute the repo-local fixtures:
+
+```bash
+python3 scripts/migration_readiness_planner.py --list
+python3 scripts/migration_readiness_planner.py --execute --output-root "${TMPDIR:-/tmp}/asupersync_migration_planner_e2e"
+```
+
+The report links `summary.final_verdict`, `proof_pack.proof_commands`,
+`semantic_map.recommendations`, and `operator_report.phase_plan` back to the
+playbook vocabulary before any target project code is edited.
+
 The reactor export contract is narrower than the directory listing suggests: `runtime::reactor` exports `EpollReactor` on Linux, `IoUringReactor` on Linux only (real with `io-uring`, intentional `Unsupported` without it), `KqueueReactor` on BSD-family targets, `IocpReactor` on Windows, `BrowserReactor` on `wasm32`, and `LabReactor` for deterministic testing. Historical files such as `src/runtime/reactor/uring.rs` and `src/runtime/reactor/macos.rs` are not part of the live export graph.
 
 Interest-flag parity is also narrower than the shared `Interest` bitflag type suggests: Linux `EpollReactor` supports the full shipped readiness/mode surface used by the native runtime, `KqueueReactor` rejects `Interest::DISPATCH` and `Interest::PRIORITY`, and `IocpReactor` currently accepts only `READABLE` / `WRITABLE`. Treat Linux `epoll` plus optional `io_uring` as the primary production path, with BSD and Windows reactors available but intentionally narrower today.
@@ -1843,12 +1861,14 @@ If you want to install the repo's local skills into your detected global agent-s
 Use it when you want an agent to:
 
 - migrate a Tokio / axum / hyper / tonic stack to native Asupersync,
+- run the migration readiness planner and map its report rows back to the playbook,
 - design a greenfield service around `Cx`, regions, `AppSpec`, supervision, and deterministic tests,
 - debug cancellation, obligation leaks, futurelock, scheduler behavior, or replay artifacts,
 - understand which Asupersync surfaces to lead with by default versus only use when the project explicitly needs them.
 
 Typical trigger prompts:
 
+- `Run the migration readiness planner and explain the operator report.`
 - `Migrate this Tokio service to native Asupersync.`
 - `Design this service around Cx, regions, AppSpec, and deterministic tests.`
 - `Fix this cancellation / futurelock / obligation leak bug in Asupersync.`

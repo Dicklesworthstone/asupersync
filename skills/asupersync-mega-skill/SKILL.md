@@ -104,6 +104,9 @@ Macro guidance: `scope!` is useful. Manual APIs are still the safest authoritati
 
 ## Standard Workflow
 
+- For brownfield work, run the read-only planner first: `python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness`.
+- Use `python3 scripts/migration_readiness_planner.py --list`, `--dry-run`, and `--execute --output-root "${TMPDIR:-/tmp}/asupersync_migration_planner_e2e"` to inspect deterministic fixture scenarios before touching a target project.
+- Read `summary.final_verdict`, `proof_pack.proof_commands`, `semantic_map.recommendations`, and `operator_report.phase_plan` before choosing the first migration edit.
 - Inventory all `tokio::*`, `tokio-util`, `hyper`, `axum`, `tonic`, `reqwest`, `sqlx`, `quinn`, `h3`, `rdkafka`, and related dependencies.
 - Classify each dependency as: native replacement, compat holdout, or deliberate workaround.
 - Replace runtime bootstrap first.
@@ -119,6 +122,7 @@ Macro guidance: `scope!` is useful. Manual APIs are still the safest authoritati
 
 | I need to... | Read (in order) |
 |---|---|
+| Plan a brownfield migration before edits | Run `scripts/migration_readiness_planner.py` → [BROWNFIELD-MIGRATION](references/BROWNFIELD-MIGRATION.md) → [TOKIO-MAPPING](references/TOKIO-MAPPING.md) |
 | Migrate a Tokio HTTP/gRPC service | [BROWNFIELD-MIGRATION](references/BROWNFIELD-MIGRATION.md) → [TOKIO-MAPPING](references/TOKIO-MAPPING.md) → [WEB-GRPC-HTTP](references/WEB-GRPC-HTTP.md) |
 | Build a new service from scratch | [NATIVE-GREENFIELD](references/NATIVE-GREENFIELD.md) → [GREENFIELD-PATTERNS](references/GREENFIELD-PATTERNS.md) |
 | Get more than parity and maximize Asupersync leverage | [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) → [BUDGET-OUTCOME-CAPABILITIES](references/BUDGET-OUTCOME-CAPABILITIES.md) → [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [TESTING-FORENSICS](references/TESTING-FORENSICS.md) |

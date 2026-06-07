@@ -12,6 +12,11 @@ fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
+fn repo_file_text(relative: &str) -> String {
+    std::fs::read_to_string(repo_path(relative))
+        .unwrap_or_else(|error| panic!("read {relative}: {error}"))
+}
+
 fn run_script(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     let mut command = Command::new("python3");
     command.current_dir(repo_path("")).arg(SCRIPT_PATH);
@@ -691,4 +696,69 @@ fn e2e_execute_writes_artifacts_and_validates_all_scenarios() {
     assert!(summary.contains("Migration Readiness E2E Proof"));
     assert!(summary.contains("mixed-compat-boundary"));
     assert!(summary.contains("zero-evidence-empty"));
+}
+
+#[test]
+fn planner_docs_surfaces_keep_entrypoints_and_report_markers() {
+    let readme = repo_file_text("README.md");
+    let integration = repo_file_text("docs/integration.md");
+    let mega_skill = repo_file_text("skills/asupersync-mega-skill/SKILL.md");
+
+    for marker in [
+        "scripts/migration_readiness_planner.py",
+        "docs/integration.md#migration-readiness-planner",
+        "--project-root",
+        "--output-root",
+        "summary.final_verdict",
+        "proof_pack.proof_commands",
+        "semantic_map.recommendations",
+        "operator_report.phase_plan",
+    ] {
+        assert!(readme.contains(marker), "README missing marker {marker}");
+    }
+
+    for marker in [
+        "Migration Readiness Planner",
+        "scripts/migration_readiness_planner.py",
+        "--list",
+        "--dry-run",
+        "--execute",
+        "--project-root",
+        "native-clean",
+        "tokio-http-service",
+        "mixed-compat-boundary",
+        "malformed-workspace",
+        "feature-gated-tokio-edge",
+        "blocked-ambient-authority-service",
+        "zero-evidence-empty",
+        "summary.final_verdict",
+        "proof_pack.proof_commands",
+        "semantic_map.recommendations",
+        "operator_report.phase_plan",
+        "operator_report.residual_risks",
+        "default-production-tokio-tree",
+        "metrics-production-tokio-tree",
+        "fuzz-tokio-quarantine-tree",
+    ] {
+        assert!(
+            integration.contains(marker),
+            "integration docs missing marker {marker}"
+        );
+    }
+
+    for marker in [
+        "scripts/migration_readiness_planner.py",
+        "--project-root",
+        "--dry-run",
+        "--execute",
+        "summary.final_verdict",
+        "proof_pack.proof_commands",
+        "semantic_map.recommendations",
+        "operator_report.phase_plan",
+    ] {
+        assert!(
+            mega_skill.contains(marker),
+            "mega-skill missing marker {marker}"
+        );
+    }
 }
