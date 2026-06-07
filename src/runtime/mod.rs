@@ -219,8 +219,8 @@ pub use resource_cleanup_verifier::{
 pub use scheduler::Scheduler;
 pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};
 pub use slo_policy::{
-    SloRuntimePolicyBridge, SloRuntimePolicyBridgeDecision, SloRuntimePolicyBridgeRequest,
-    SloRuntimeWorkKind,
+    FourthWaveRuntimeBridgeDecision, SloRuntimePolicyBridge, SloRuntimePolicyBridgeDecision,
+    SloRuntimePolicyBridgeRequest, SloRuntimeWorkKind,
 };
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
 pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};

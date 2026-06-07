@@ -2,9 +2,13 @@
 
 use asupersync::Cx;
 use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+use asupersync::observability::swarm_pressure_governor::{
+    FourthWaveEvidenceQuality, FourthWaveGovernorAction, FourthWaveGovernorDecisionReceipt,
+    FourthWaveGovernorLogFields, FourthWaveGovernorObjective, FourthWaveRejectedAlternative,
+};
 use asupersync::runtime::{
-    SloRuntimePolicyBridge, SloRuntimePolicyBridgeDecision, SloRuntimePolicyBridgeRequest,
-    SloRuntimeWorkKind, yield_now,
+    FourthWaveRuntimeBridgeDecision, SloRuntimePolicyBridge, SloRuntimePolicyBridgeDecision,
+    SloRuntimePolicyBridgeRequest, SloRuntimeWorkKind, yield_now,
 };
 use asupersync::types::{
     Budget, Outcome, SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
@@ -2579,6 +2583,310 @@ fn runtime_slo_policy_bridge_preserves_no_win_fallback_receipt() {
         decision.outcome.issue_kinds,
         vec![SloRuntimeAdmissionIssueKind::NoWinFallback]
     );
+}
+
+#[test]
+fn runtime_slo_policy_bridge_fourth_wave_admits_required_work_explicitly() {
+    let application = valid_runtime_application();
+    let bridge = SloRuntimePolicyBridge::new(&application);
+    let cx = Cx::for_testing();
+    let receipt = fourth_wave_receipt(FourthWaveGovernorAction::AdmitRequiredWork, None);
+
+    let decision = bridge.evaluate_fourth_wave(
+        &cx,
+        &runtime_bridge_request(
+            "fourth-wave-admit-required",
+            3,
+            SloRuntimeWorkKind::Required,
+            None,
+        ),
+        &receipt,
+    );
+
+    assert!(decision.opt_in_bridge_enabled);
+    assert!(decision.work_may_start());
+    assert_eq!(
+        decision.runtime_decision.outcome.status,
+        SloRuntimeAdmissionStatus::Admitted
+    );
+    assert_eq!(decision.runtime_decision.outcome.admitted_work_units, 3);
+    assert_eq!(decision.rollback_reason, None);
+    assert_eq!(decision.fourth_wave_decision_id, receipt.decision_id);
+    assert_eq!(decision.fourth_wave_snapshot_id, receipt.snapshot_id);
+    assert_eq!(decision.fourth_wave_rule_id, "admit-required-work");
+    assert!(
+        decision
+            .non_claims
+            .contains(&"not production-on-by-default")
+    );
+    assert_fourth_wave_bridge_invariants(&decision);
+}
+
+#[test]
+fn runtime_slo_policy_bridge_fourth_wave_browns_out_optional_work_before_start() {
+    let application = valid_runtime_application();
+    let bridge = SloRuntimePolicyBridge::new(&application);
+    let cx = Cx::for_testing();
+    let receipt = fourth_wave_receipt(
+        FourthWaveGovernorAction::BrownoutOptionalWork,
+        Some("optional work exceeds memory pressure budget"),
+    );
+
+    let decision = bridge.evaluate_fourth_wave(
+        &cx,
+        &runtime_bridge_request(
+            "fourth-wave-brownout-optional",
+            5,
+            SloRuntimeWorkKind::Optional,
+            Some("index_refresh"),
+        ),
+        &receipt,
+    );
+
+    assert!(!decision.work_may_start());
+    assert!(decision.rollback_required());
+    assert!(decision.rollback_to_observe_only);
+    assert_eq!(
+        decision.runtime_decision.outcome.status,
+        SloRuntimeAdmissionStatus::Brownout
+    );
+    assert_eq!(
+        decision.runtime_decision.outcome.optional_work_decision,
+        Some(SloRuntimeOptionalWorkDecision::Brownout)
+    );
+    assert_eq!(decision.runtime_decision.outcome.admitted_work_units, 0);
+    assert_eq!(decision.runtime_decision.outcome.rejected_work_units, 5);
+    assert_eq!(
+        decision.runtime_decision.outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::OptionalWorkBrownout]
+    );
+    assert_eq!(
+        decision.rollback_reason.as_deref(),
+        Some("optional work exceeds memory pressure budget")
+    );
+    assert_fourth_wave_bridge_invariants(&decision);
+}
+
+#[test]
+fn runtime_slo_policy_bridge_fourth_wave_defers_and_fails_closed_with_receipts() {
+    let application = valid_runtime_application();
+    let bridge = SloRuntimePolicyBridge::new(&application);
+    let cx = Cx::for_testing();
+
+    let deferred = bridge.evaluate_fourth_wave(
+        &cx,
+        &runtime_bridge_request(
+            "fourth-wave-defer-no-worker",
+            2,
+            SloRuntimeWorkKind::ProofReporting,
+            None,
+        ),
+        &fourth_wave_receipt(
+            FourthWaveGovernorAction::DeferNoRemoteWorker,
+            Some("remote-required lane has no admissible remote worker; local fallback refused"),
+        ),
+    );
+    assert!(!deferred.work_may_start());
+    assert!(deferred.delay_required);
+    assert_eq!(
+        deferred.runtime_decision.outcome.status,
+        SloRuntimeAdmissionStatus::NoWin
+    );
+    assert_eq!(
+        deferred.runtime_decision.outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::NoWinFallback]
+    );
+    assert_eq!(
+        deferred.runtime_decision.outcome.fallback_reason.as_deref(),
+        Some("remote-required lane has no admissible remote worker; local fallback refused")
+    );
+    assert_fourth_wave_bridge_invariants(&deferred);
+
+    let blocked = bridge.evaluate_fourth_wave(
+        &cx,
+        &runtime_bridge_request(
+            "fourth-wave-local-fallback",
+            2,
+            SloRuntimeWorkKind::Required,
+            None,
+        ),
+        &fourth_wave_receipt(
+            FourthWaveGovernorAction::FailClosedLocalRchFallback,
+            Some("local RCH fallback marker detected"),
+        ),
+    );
+    assert!(!blocked.work_may_start());
+    assert!(blocked.fail_closed());
+    assert!(blocked.rollback_to_observe_only);
+    assert_eq!(
+        blocked.runtime_decision.outcome.status,
+        SloRuntimeAdmissionStatus::Blocked
+    );
+    assert_eq!(
+        blocked.runtime_decision.outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::ApplicationInvalid]
+    );
+    assert_eq!(
+        blocked.rollback_reason.as_deref(),
+        Some("local RCH fallback marker detected")
+    );
+    assert_fourth_wave_bridge_invariants(&blocked);
+}
+
+#[test]
+fn runtime_slo_policy_bridge_fourth_wave_cancellation_preempts_control_and_redacts_receipts() {
+    let application = valid_runtime_application();
+    let bridge = SloRuntimePolicyBridge::new(&application);
+    let cx = Cx::for_testing();
+    cx.set_cancel_requested(true);
+
+    for action in [
+        FourthWaveGovernorAction::BrownoutOptionalWork,
+        FourthWaveGovernorAction::DeferNoRemoteWorker,
+    ] {
+        let decision = bridge.evaluate_fourth_wave(
+            &cx,
+            &runtime_bridge_request(
+                "fourth-wave-cancel-preempts-control",
+                4,
+                SloRuntimeWorkKind::Optional,
+                Some("index_refresh"),
+            ),
+            &fourth_wave_receipt(action, Some("would otherwise alter runtime behavior")),
+        );
+        assert!(decision.runtime_decision.cx_cancel_observed);
+        assert!(!decision.work_may_start());
+        assert_eq!(
+            decision.runtime_decision.outcome.status,
+            SloRuntimeAdmissionStatus::Rejected
+        );
+        assert_eq!(
+            decision.runtime_decision.outcome.issue_kinds,
+            vec![SloRuntimeAdmissionIssueKind::Cancelled]
+        );
+        assert_eq!(
+            decision.rollback_reason.as_deref(),
+            Some("cx-cancelled-before-start")
+        );
+        assert_fourth_wave_bridge_invariants(&decision);
+    }
+
+    let uncancelled = Cx::for_testing();
+    let redacted = bridge.evaluate_fourth_wave(
+        &uncancelled,
+        &runtime_bridge_request(
+            "fourth-wave-redacted-fail-closed",
+            1,
+            SloRuntimeWorkKind::Required,
+            None,
+        ),
+        &fourth_wave_receipt(
+            FourthWaveGovernorAction::FailClosedMalformedInput,
+            Some("Authorization: Bearer secret-token should never enter runtime receipts"),
+        ),
+    );
+    assert_eq!(redacted.rollback_reason.as_deref(), Some("<redacted>"));
+    let debug = format!("{redacted:?}").to_ascii_lowercase();
+    assert!(!debug.contains("secret-token"));
+    assert!(!debug.contains("authorization"));
+    assert_fourth_wave_bridge_invariants(&redacted);
+}
+
+fn fourth_wave_receipt(
+    selected_action: FourthWaveGovernorAction,
+    non_action_reason: Option<&str>,
+) -> FourthWaveGovernorDecisionReceipt {
+    let action = selected_action.as_str();
+    FourthWaveGovernorDecisionReceipt {
+        schema_version: "asupersync.fourth-wave.governor-decision-receipt.v1",
+        decision_id: format!("fw-governor-decision/runtime-bridge-{action}/policy-v1"),
+        policy_version: "fourth-wave-governor-policy-v1".to_string(),
+        snapshot_id: format!("fw-runtime-bridge-snapshot-{action}"),
+        selected_action,
+        non_action_reason: non_action_reason.unwrap_or_default().to_string(),
+        fail_closed: selected_action.fail_closed(),
+        rule_id: fourth_wave_rule_id(selected_action),
+        confidence_bps: if selected_action.fail_closed() {
+            0
+        } else {
+            8_400
+        },
+        input_artifact_hashes: vec![
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        ],
+        evidence_rows: vec!["runtime-bridge-evidence-row".to_string()],
+        rejected_rows: Vec::new(),
+        rejected_alternatives: Vec::<FourthWaveRejectedAlternative>::new(),
+        objective_row: FourthWaveGovernorObjective::required("runtime-bridge-contract", 8_000),
+        evidence_quality: FourthWaveEvidenceQuality {
+            row_count: 7,
+            required_input_classes_present: 7,
+            min_confidence_bps: 8_400,
+            max_evidence_age_seconds: 120,
+            advisory_only_row_count: 0,
+            replay_backed: true,
+            local_fallback_marker_detected: selected_action
+                == FourthWaveGovernorAction::FailClosedLocalRchFallback,
+            dominant_pressure_class: non_action_reason.map(str::to_string),
+        },
+        log_fields: FourthWaveGovernorLogFields {
+            bead_id: "asupersync-86fe9v.4".to_string(),
+            scenario_id: "runtime-bridge-contract".to_string(),
+            snapshot_id: format!("fw-runtime-bridge-snapshot-{action}"),
+            decision_id: format!("fw-governor-decision/runtime-bridge-{action}/policy-v1"),
+            policy_version: "fourth-wave-governor-policy-v1".to_string(),
+            selected_action: action.to_string(),
+            input_artifact_hashes:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            rejected_row_count: 0,
+            first_rejected_row_reason: non_action_reason.unwrap_or_default().to_string(),
+            objective_id: "runtime-bridge-contract".to_string(),
+            workload_class: "required".to_string(),
+            evidence_quality:
+                "rows=7 required_present=7 min_confidence_bps=8400 max_age_seconds=120".to_string(),
+        },
+        non_claims: vec!["policy engine only", "local cargo fallback not authorized"],
+    }
+}
+
+fn fourth_wave_rule_id(selected_action: FourthWaveGovernorAction) -> &'static str {
+    match selected_action {
+        FourthWaveGovernorAction::AdmitRequiredWork => "admit-required-work",
+        FourthWaveGovernorAction::BrownoutOptionalWork => "brownout-optional-work",
+        FourthWaveGovernorAction::DeferNoRemoteWorker => "remote-required-no-worker",
+        FourthWaveGovernorAction::FailClosedAdvisoryOnly => "advisory-only-evidence",
+        FourthWaveGovernorAction::FailClosedLocalRchFallback => "local-rch-fallback",
+        FourthWaveGovernorAction::FailClosedMalformedInput => "malformed-input",
+        FourthWaveGovernorAction::FailClosedMissingEvidence => "missing-required-evidence",
+        FourthWaveGovernorAction::FailClosedStaleEvidence => "stale-evidence",
+    }
+}
+
+fn assert_fourth_wave_bridge_invariants(decision: &FourthWaveRuntimeBridgeDecision) {
+    assert!(decision.opt_in_bridge_enabled);
+    assert!(decision.obligation_cleanup_required);
+    assert!(decision.receipt_redaction_required);
+    assert!(decision.runtime_decision.region_close_requires_quiescence);
+    assert!(
+        decision
+            .non_claims
+            .contains(&"explicit opt-in runtime bridge only")
+    );
+    assert!(
+        decision
+            .non_claims
+            .contains(&"not production-on-by-default")
+    );
+    assert!(
+        decision
+            .non_claims
+            .contains(&"obligation cleanup still required")
+    );
+    if !decision.work_may_start() {
+        assert!(decision.explicit_receipt_required());
+        assert_eq!(decision.runtime_decision.outcome.admitted_work_units, 0);
+    }
 }
 
 fn decision_for_kind(
