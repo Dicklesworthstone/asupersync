@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,14 +12,10 @@ fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
-fn run_planner(fixture: &str, extra_args: &[&str]) -> (std::process::ExitStatus, String, String) {
+fn run_script(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     let mut command = Command::new("python3");
-    command
-        .current_dir(repo_path(""))
-        .arg(SCRIPT_PATH)
-        .arg("--project-root")
-        .arg(repo_path(&format!("{FIXTURE_ROOT}/{fixture}")));
-    for arg in extra_args {
+    command.current_dir(repo_path("")).arg(SCRIPT_PATH);
+    for arg in args {
         command.arg(arg);
     }
     let output = command.output().expect("run migration readiness planner");
@@ -27,6 +24,14 @@ fn run_planner(fixture: &str, extra_args: &[&str]) -> (std::process::ExitStatus,
         String::from_utf8(output.stdout).expect("stdout utf8"),
         String::from_utf8(output.stderr).expect("stderr utf8"),
     )
+}
+
+fn run_planner(fixture: &str, extra_args: &[&str]) -> (std::process::ExitStatus, String, String) {
+    let project_root = repo_path(&format!("{FIXTURE_ROOT}/{fixture}"));
+    let project_root_arg = project_root.to_string_lossy().to_string();
+    let mut args = vec!["--project-root", project_root_arg.as_str()];
+    args.extend_from_slice(extra_args);
+    run_script(&args)
 }
 
 fn json_report(fixture: &str) -> Value {
@@ -478,4 +483,212 @@ fn output_root_writes_json_and_summary_artifacts() {
     assert!(summary.contains("needs_quarantine"));
     assert!(summary.contains("manual_design_required"));
     assert!(summary.contains("default-production-tokio-tree"));
+}
+
+fn e2e_result_with_id<'a>(report: &'a Value, scenario_id: &str) -> &'a Value {
+    report["scenario_results"]
+        .as_array()
+        .expect("scenario results array")
+        .iter()
+        .find(|row| row["scenario_id"].as_str() == Some(scenario_id))
+        .unwrap_or_else(|| panic!("missing e2e scenario {scenario_id}"))
+}
+
+#[test]
+fn e2e_list_reports_expected_fixture_scenarios() {
+    let (status, stdout, stderr) = run_script(&["--list"]);
+    assert!(status.success(), "list failed: {stderr}");
+    let catalog: Value = serde_json::from_str(&stdout).expect("scenario catalog json");
+
+    assert_eq!(
+        catalog["schema_version"],
+        "migration-readiness-e2e-scenario-catalog-v1"
+    );
+    let ids: BTreeSet<&str> = catalog["scenarios"]
+        .as_array()
+        .expect("scenarios array")
+        .iter()
+        .map(|row| row["scenario_id"].as_str().expect("scenario id"))
+        .collect();
+    for expected in [
+        "native-clean",
+        "tokio-http-service",
+        "mixed-compat-boundary",
+        "malformed-workspace",
+        "feature-gated-tokio-edge",
+        "blocked-ambient-authority-service",
+        "zero-evidence-empty",
+    ] {
+        assert!(ids.contains(expected), "missing scenario {expected}");
+    }
+}
+
+#[test]
+fn e2e_dry_run_selects_scenarios_without_writing_artifacts() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let output_root = temp_dir.path().join("dry-run-output");
+    let output_arg = output_root.to_string_lossy().to_string();
+    let (status, stdout, stderr) = run_script(&[
+        "--dry-run",
+        "--scenario",
+        "native-clean",
+        "--scenario",
+        "malformed-workspace",
+        "--output-root",
+        &output_arg,
+    ]);
+    assert!(status.success(), "dry-run failed: {stderr}");
+    assert!(
+        !output_root.exists(),
+        "dry-run must not create the requested output root"
+    );
+    let report: Value = serde_json::from_str(&stdout).expect("dry-run json");
+    assert_eq!(report["schema_version"], "migration-readiness-e2e-proof-v1");
+    assert_eq!(report["mode"], "dry_run");
+    assert_eq!(report["summary"]["overall_status"], "dry_run");
+    assert_eq!(report["summary"]["scenario_count"], 2);
+    for scenario_id in ["native-clean", "malformed-workspace"] {
+        let result = e2e_result_with_id(&report, scenario_id);
+        assert_eq!(result["status"], "planned");
+        assert_eq!(result["generated_artifacts"].as_object().unwrap().len(), 0);
+        assert_eq!(
+            result["pipeline_stage_log"][1]["stage"], "dry_run",
+            "dry-run should log the skipped execution stage"
+        );
+    }
+}
+
+#[test]
+fn e2e_unknown_scenario_fails_without_traceback() {
+    let (status, stdout, stderr) = run_script(&["--list", "--scenario", "missing-scenario"]);
+
+    assert_eq!(status.code(), Some(2));
+    assert!(stdout.is_empty(), "unknown scenario should not emit stdout");
+    assert!(stderr.contains("unknown scenario id(s): missing-scenario"));
+    assert!(!stderr.contains("Traceback"));
+}
+
+#[test]
+fn e2e_execute_writes_artifacts_and_validates_all_scenarios() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let output_root = temp_dir.path().join("e2e-output");
+    let output_arg = output_root.to_string_lossy().to_string();
+    let (status, stdout, stderr) = run_script(&["--execute", "--output-root", &output_arg]);
+    assert!(status.success(), "execute failed: {stderr}");
+    let report: Value = serde_json::from_str(&stdout).expect("execute json");
+
+    assert_eq!(report["schema_version"], "migration-readiness-e2e-proof-v1");
+    assert_eq!(report["mode"], "execute");
+    assert_eq!(report["summary"]["overall_status"], "passed");
+    assert_eq!(report["summary"]["scenario_count"], 7);
+    assert_eq!(report["summary"]["failed_count"], 0);
+    assert!(
+        output_root
+            .join("migration_readiness_e2e_report.json")
+            .exists()
+    );
+    assert!(
+        output_root
+            .join("migration_readiness_e2e_summary.md")
+            .exists()
+    );
+    assert_eq!(
+        report["output_artifacts"]["json"],
+        output_root
+            .join("migration_readiness_e2e_report.json")
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    for (scenario_id, final_verdict, operator_status) in [
+        ("native-clean", "ready", "native_signoff_ready"),
+        (
+            "tokio-http-service",
+            "needs_quarantine",
+            "manual_design_required",
+        ),
+        (
+            "mixed-compat-boundary",
+            "needs_quarantine",
+            "quarantine_plan_ready",
+        ),
+        ("malformed-workspace", "blocked", "blocked"),
+        (
+            "feature-gated-tokio-edge",
+            "needs_quarantine",
+            "quarantine_plan_ready",
+        ),
+        ("blocked-ambient-authority-service", "blocked", "blocked"),
+        ("zero-evidence-empty", "blocked", "blocked"),
+    ] {
+        let result = e2e_result_with_id(&report, scenario_id);
+        assert_eq!(result["status"], "passed", "scenario {scenario_id}");
+        assert_eq!(result["final_verdict"], final_verdict);
+        assert_eq!(result["operator_status"], operator_status);
+        assert_eq!(result["proof_command_count"], 5);
+        assert_eq!(
+            result["fixture_hash"].as_str().expect("fixture hash").len(),
+            64
+        );
+        assert_eq!(
+            result["generated_artifact_hashes"]["json_sha256"]
+                .as_str()
+                .expect("json artifact hash")
+                .len(),
+            64
+        );
+        assert_eq!(
+            result["generated_artifact_hashes"]["summary_sha256"]
+                .as_str()
+                .expect("summary artifact hash")
+                .len(),
+            64
+        );
+        let artifacts = result["generated_artifacts"]
+            .as_object()
+            .expect("generated artifacts");
+        for path in artifacts.values() {
+            assert!(
+                Path::new(path.as_str().expect("artifact path")).exists(),
+                "scenario artifact should exist for {scenario_id}: {path}"
+            );
+        }
+        let stages: BTreeSet<&str> = result["pipeline_stage_log"]
+            .as_array()
+            .expect("stage log")
+            .iter()
+            .map(|row| row["stage"].as_str().expect("stage"))
+            .collect();
+        for stage in [
+            "fixture_hash",
+            "build_report",
+            "write_outputs",
+            "validate_expectations",
+        ] {
+            assert!(
+                stages.contains(stage),
+                "scenario {scenario_id} missing stage {stage}"
+            );
+        }
+    }
+
+    assert!(
+        e2e_result_with_id(&report, "zero-evidence-empty")["fail_closed_reasons"]
+            .as_array()
+            .expect("zero evidence fail reasons")
+            .iter()
+            .any(|reason| reason == "zero-runtime-surface-evidence")
+    );
+    assert!(
+        e2e_result_with_id(&report, "blocked-ambient-authority-service")["classification_counts"]
+            ["hard_blocker"]
+            .as_u64()
+            .expect("hard blocker count")
+            > 0
+    );
+    let summary = std::fs::read_to_string(output_root.join("migration_readiness_e2e_summary.md"))
+        .expect("read e2e summary");
+    assert!(summary.contains("Migration Readiness E2E Proof"));
+    assert!(summary.contains("mixed-compat-boundary"));
+    assert!(summary.contains("zero-evidence-empty"));
 }

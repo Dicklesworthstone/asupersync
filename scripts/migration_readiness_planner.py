@@ -19,8 +19,11 @@ from typing import Any
 
 SCHEMA_VERSION = "migration-readiness-inventory-v1"
 OPERATOR_REPORT_SCHEMA_VERSION = "migration-readiness-operator-report-v1"
+E2E_REPORT_SCHEMA_VERSION = "migration-readiness-e2e-proof-v1"
 DEFAULT_JSON_NAME = "migration_readiness_inventory.json"
 DEFAULT_SUMMARY_NAME = "migration_readiness_summary.md"
+E2E_JSON_NAME = "migration_readiness_e2e_report.json"
+E2E_SUMMARY_NAME = "migration_readiness_e2e_summary.md"
 IGNORED_SOURCE_DIRS = {".git", "target", ".cargo", ".direnv", "node_modules"}
 
 NATIVE_CRATES = {
@@ -284,6 +287,95 @@ PROOF_ROW_CLASSIFICATIONS = {
     "hard_blocker",
 }
 
+E2E_SCENARIOS = [
+    {
+        "scenario_id": "native-clean",
+        "fixture": "native",
+        "description": "clean native Asupersync project",
+        "expected_final_verdict": "ready",
+        "expected_operator_status": "native_signoff_ready",
+        "expected_min_inventory_rows": 1,
+        "required_classifications": ["already_native", "semantic_signal"],
+        "required_recommendation_classes": ["compat_boundary_ok"],
+        "required_fail_closed_reasons": [],
+    },
+    {
+        "scenario_id": "tokio-http-service",
+        "fixture": "tokio_service",
+        "description": "Tokio HTTP service with runtime, tower, client, and ownership markers",
+        "expected_final_verdict": "needs_quarantine",
+        "expected_operator_status": "manual_design_required",
+        "expected_min_inventory_rows": 12,
+        "required_classifications": ["runtime_boundary_required", "compat_quarantine_candidate", "semantic_signal"],
+        "required_recommendation_classes": [
+            "region_ownership_required",
+            "cancel_checkpoint_required",
+            "capability_narrowing_required",
+            "manual_design_required",
+        ],
+        "required_fail_closed_reasons": [],
+    },
+    {
+        "scenario_id": "mixed-compat-boundary",
+        "fixture": "mixed_compat_boundary",
+        "description": "mixed native handlers with explicit HTTP/Tower compat boundary rows",
+        "expected_final_verdict": "needs_quarantine",
+        "expected_operator_status": "quarantine_plan_ready",
+        "expected_min_inventory_rows": 4,
+        "required_classifications": ["already_native", "compat_quarantine_candidate", "semantic_signal"],
+        "required_recommendation_classes": ["compat_boundary_ok"],
+        "required_fail_closed_reasons": [],
+    },
+    {
+        "scenario_id": "malformed-workspace",
+        "fixture": "malformed",
+        "description": "malformed manifest fails closed before operator signoff",
+        "expected_final_verdict": "blocked",
+        "expected_operator_status": "blocked",
+        "expected_min_inventory_rows": 0,
+        "required_classifications": [],
+        "required_recommendation_classes": [],
+        "required_fail_closed_reasons": ["manifest-parse-error", "inventory-report-blocked"],
+    },
+    {
+        "scenario_id": "feature-gated-tokio-edge",
+        "fixture": "workspace",
+        "description": "workspace fixture with optional Tokio and transitive lockfile edge",
+        "expected_final_verdict": "needs_quarantine",
+        "expected_operator_status": "quarantine_plan_ready",
+        "expected_min_inventory_rows": 3,
+        "required_classifications": ["already_native", "runtime_boundary_required", "compat_quarantine_candidate"],
+        "required_recommendation_classes": ["compat_boundary_ok", "cx_threading_required", "region_ownership_required"],
+        "required_fail_closed_reasons": [],
+    },
+    {
+        "scenario_id": "blocked-ambient-authority-service",
+        "fixture": "ambient_authority_blocked",
+        "description": "ambient env/fs authority plus forbidden alternate runtime fails closed",
+        "expected_final_verdict": "blocked",
+        "expected_operator_status": "blocked",
+        "expected_min_inventory_rows": 5,
+        "required_classifications": ["hard_blocker", "semantic_signal"],
+        "required_recommendation_classes": ["capability_narrowing_required", "manual_design_required"],
+        "required_fail_closed_reasons": ["hard-blocker-runtime-surface"],
+    },
+    {
+        "scenario_id": "zero-evidence-empty",
+        "fixture": "empty_surface",
+        "description": "parseable project with no runtime or semantic evidence fails closed",
+        "expected_final_verdict": "blocked",
+        "expected_operator_status": "blocked",
+        "expected_min_inventory_rows": 0,
+        "required_classifications": [],
+        "required_recommendation_classes": [],
+        "required_fail_closed_reasons": [
+            "zero-runtime-surface-evidence",
+            "inventory-report-has-no-runtime-surface-evidence",
+            "zero-semantic-recommendations",
+        ],
+    },
+]
+
 
 def stable_json(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True) + "\n"
@@ -291,6 +383,10 @@ def stable_json(data: Any) -> str:
 
 def stable_hash(data: Any) -> str:
     return hashlib.sha256(stable_json(data).encode("utf-8")).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def posix_rel(path: Path, root: Path) -> str:
@@ -1693,20 +1789,349 @@ def write_outputs(report: dict[str, Any], output_root: Path) -> dict[str, str]:
     return paths
 
 
+def e2e_fixture_root() -> Path:
+    return Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "migration_readiness_planner"
+
+
+def scenario_by_id() -> dict[str, dict[str, Any]]:
+    return {scenario["scenario_id"]: scenario for scenario in E2E_SCENARIOS}
+
+
+def select_e2e_scenarios(requested_ids: list[str]) -> list[dict[str, Any]]:
+    by_id = scenario_by_id()
+    if not requested_ids:
+        return E2E_SCENARIOS
+    unknown = sorted(set(requested_ids) - set(by_id))
+    if unknown:
+        raise ValueError(f"unknown scenario id(s): {', '.join(unknown)}")
+    return [by_id[scenario_id] for scenario_id in requested_ids]
+
+
+def fixture_fingerprint(fixture_root: Path) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    if not fixture_root.exists():
+        return {
+            "fixture_hash": "",
+            "file_count": 0,
+            "files": [],
+            "missing": True,
+        }
+    for path in sorted(path for path in fixture_root.rglob("*") if path.is_file()):
+        data = path.read_bytes()
+        files.append(
+            {
+                "path": posix_rel(path, fixture_root),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+            }
+        )
+    return {
+        "fixture_hash": stable_hash(files),
+        "file_count": len(files),
+        "files": files,
+        "missing": False,
+    }
+
+
+def e2e_catalog(selected: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    scenarios = selected or E2E_SCENARIOS
+    fixture_root = e2e_fixture_root()
+    return {
+        "schema_version": "migration-readiness-e2e-scenario-catalog-v1",
+        "source_schema": E2E_REPORT_SCHEMA_VERSION,
+        "fixture_root": fixture_root.as_posix(),
+        "scenario_count": len(scenarios),
+        "scenarios": [
+            {
+                "scenario_id": scenario["scenario_id"],
+                "fixture": scenario["fixture"],
+                "description": scenario["description"],
+                "expected_final_verdict": scenario["expected_final_verdict"],
+                "expected_operator_status": scenario["expected_operator_status"],
+            }
+            for scenario in scenarios
+        ],
+    }
+
+
+def scenario_artifact_hashes(paths: dict[str, str]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for key, path_text in sorted(paths.items()):
+        path = Path(path_text)
+        hashes[f"{key}_sha256"] = file_sha256(path) if path.exists() else ""
+    return hashes
+
+
+def validation_contains_count(mapping: dict[str, Any], key: str) -> bool:
+    value = mapping.get(key)
+    return isinstance(value, int) and value > 0
+
+
+def validate_e2e_scenario(
+    scenario: dict[str, Any],
+    report: dict[str, Any],
+    paths: dict[str, str],
+) -> tuple[str, list[str]]:
+    failures: list[str] = []
+    summary = report["summary"]
+    operator_summary = report["operator_report"]["summary"]
+    semantic_summary = report["semantic_map"]["summary"]
+    classification_counts = summary["classification_counts"]
+    recommendation_counts = semantic_summary["recommendation_class_counts"]
+    fail_closed = set(summary["fail_closed_reasons"])
+    fail_closed.update(report["proof_pack"]["fail_closed_reasons"])
+    fail_closed.update(report["semantic_map"]["fail_closed_reasons"])
+
+    if summary["final_verdict"] != scenario["expected_final_verdict"]:
+        failures.append(
+            f"final-verdict:{summary['final_verdict']}!=expected:{scenario['expected_final_verdict']}"
+        )
+    if operator_summary["status"] != scenario["expected_operator_status"]:
+        failures.append(
+            f"operator-status:{operator_summary['status']}!=expected:{scenario['expected_operator_status']}"
+        )
+    if summary["inventory_row_count"] < int(scenario["expected_min_inventory_rows"]):
+        failures.append("inventory-row-count-below-minimum")
+    if report["proof_pack"]["summary"]["proof_command_count"] != len(PROOF_COMMANDS):
+        failures.append("proof-command-count-mismatch")
+    if operator_summary["phase_count"] != 6:
+        failures.append("operator-phase-count-mismatch")
+    if paths and report["operator_report"]["generation_log"]["generated_output_paths"] != paths:
+        failures.append("generated-output-paths-not-stamped")
+    for classification in scenario["required_classifications"]:
+        if not validation_contains_count(classification_counts, classification):
+            failures.append(f"classification-missing:{classification}")
+    for recommendation_class in scenario["required_recommendation_classes"]:
+        if not validation_contains_count(recommendation_counts, recommendation_class):
+            failures.append(f"recommendation-class-missing:{recommendation_class}")
+    for reason in scenario["required_fail_closed_reasons"]:
+        if reason not in fail_closed:
+            failures.append(f"fail-closed-reason-missing:{reason}")
+    return ("passed" if not failures else "failed"), failures
+
+
+def e2e_result_for_scenario(
+    scenario: dict[str, Any],
+    mode: str,
+    output_root: Path | None,
+) -> dict[str, Any]:
+    fixture_root = e2e_fixture_root() / scenario["fixture"]
+    fingerprint = fixture_fingerprint(fixture_root)
+    result: dict[str, Any] = {
+        "scenario_id": scenario["scenario_id"],
+        "fixture": scenario["fixture"],
+        "description": scenario["description"],
+        "fixture_path": fixture_root.as_posix(),
+        "fixture_hash": fingerprint["fixture_hash"],
+        "fixture_file_count": fingerprint["file_count"],
+        "pipeline_stage_log": [
+            {
+                "stage": "fixture_hash",
+                "scenario_id": scenario["scenario_id"],
+                "fixture_hash": fingerprint["fixture_hash"],
+                "file_count": fingerprint["file_count"],
+            }
+        ],
+    }
+    if mode == "dry_run":
+        result.update(
+            {
+                "status": "planned",
+                "final_verdict": "",
+                "operator_status": "",
+                "inventory_row_count": 0,
+                "proof_command_count": 0,
+                "generated_artifacts": {},
+                "generated_artifact_hashes": {},
+                "validation_failures": [],
+            }
+        )
+        result["pipeline_stage_log"].append(
+            {
+                "stage": "dry_run",
+                "scenario_id": scenario["scenario_id"],
+                "final_verdict": "not-executed",
+                "proof_command_count": 0,
+                "generated_artifact_paths": {},
+            }
+        )
+        return result
+
+    report = build_report(fixture_root)
+    paths: dict[str, str] = {}
+    if output_root is not None:
+        paths = write_outputs(report, output_root / scenario["scenario_id"])
+    status, failures = validate_e2e_scenario(scenario, report, paths)
+    artifact_hashes = scenario_artifact_hashes(paths)
+    result.update(
+        {
+            "status": status,
+            "final_verdict": report["summary"]["final_verdict"],
+            "operator_status": report["operator_report"]["summary"]["status"],
+            "inventory_row_count": report["summary"]["inventory_row_count"],
+            "proof_command_count": report["proof_pack"]["summary"]["proof_command_count"],
+            "residual_risk_count": report["operator_report"]["summary"]["residual_risk_count"],
+            "fail_closed_reasons": report["summary"]["fail_closed_reasons"],
+            "classification_counts": report["summary"]["classification_counts"],
+            "recommendation_class_counts": report["semantic_map"]["summary"]["recommendation_class_counts"],
+            "generated_artifacts": paths,
+            "generated_artifact_hashes": artifact_hashes,
+            "validation_failures": failures,
+        }
+    )
+    result["pipeline_stage_log"].extend(
+        [
+            {
+                "stage": "build_report",
+                "scenario_id": scenario["scenario_id"],
+                "fixture_hash": fingerprint["fixture_hash"],
+                "inventory_row_count": report["summary"]["inventory_row_count"],
+                "proof_command_count": report["proof_pack"]["summary"]["proof_command_count"],
+                "final_verdict": report["summary"]["final_verdict"],
+                "generated_artifact_paths": {},
+            },
+            {
+                "stage": "write_outputs" if paths else "stdout_only",
+                "scenario_id": scenario["scenario_id"],
+                "fixture_hash": fingerprint["fixture_hash"],
+                "inventory_row_count": report["summary"]["inventory_row_count"],
+                "proof_command_count": report["proof_pack"]["summary"]["proof_command_count"],
+                "final_verdict": report["summary"]["final_verdict"],
+                "generated_artifact_paths": paths,
+            },
+            {
+                "stage": "validate_expectations",
+                "scenario_id": scenario["scenario_id"],
+                "fixture_hash": fingerprint["fixture_hash"],
+                "inventory_row_count": report["summary"]["inventory_row_count"],
+                "proof_command_count": report["proof_pack"]["summary"]["proof_command_count"],
+                "final_verdict": report["summary"]["final_verdict"],
+                "generated_artifact_paths": paths,
+                "status": status,
+            },
+        ]
+    )
+    return result
+
+
+def build_e2e_report(
+    selected: list[dict[str, Any]],
+    mode: str,
+    output_root: Path | None,
+) -> dict[str, Any]:
+    results = [e2e_result_for_scenario(scenario, mode, output_root) for scenario in selected]
+    status_counts = counts_by(results, "status")
+    failed = int_count(status_counts, "failed")
+    return {
+        "schema_version": E2E_REPORT_SCHEMA_VERSION,
+        "source_schema": SCHEMA_VERSION,
+        "source_contracts": [
+            "scripts/migration_readiness_planner.py",
+            "tests/migration_readiness_planner_contract.rs",
+            "tests/fixtures/migration_readiness_planner",
+        ],
+        "mode": mode,
+        "summary": {
+            "overall_status": "dry_run" if mode == "dry_run" else ("passed" if failed == 0 else "failed"),
+            "scenario_count": len(results),
+            "status_counts": status_counts,
+            "failed_count": failed,
+            "proof_command_count": len(PROOF_COMMANDS),
+        },
+        "scenario_catalog": e2e_catalog(selected),
+        "scenario_results": results,
+    }
+
+
+def e2e_summary_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Migration Readiness E2E Proof",
+        "",
+        f"- schema_version: `{report['schema_version']}`",
+        f"- mode: `{report['mode']}`",
+        f"- overall_status: `{report['summary']['overall_status']}`",
+        f"- scenario_count: `{report['summary']['scenario_count']}`",
+        "",
+        "## Scenarios",
+    ]
+    for result in report["scenario_results"]:
+        lines.append(
+            f"- `{result['scenario_id']}`: status=`{result['status']}` "
+            f"final_verdict=`{result['final_verdict']}` "
+            f"operator_status=`{result['operator_status']}` "
+            f"fixture_hash=`{result['fixture_hash']}`"
+        )
+        for failure in result["validation_failures"]:
+            lines.append(f"  - failure: `{failure}`")
+    return "\n".join(lines) + "\n"
+
+
+def write_e2e_outputs(report: dict[str, Any], output_root: Path) -> dict[str, str]:
+    output_root.mkdir(parents=True, exist_ok=True)
+    json_path = output_root / E2E_JSON_NAME
+    summary_path = output_root / E2E_SUMMARY_NAME
+    paths = {
+        "json": json_path.as_posix(),
+        "summary": summary_path.as_posix(),
+    }
+    report["output_artifacts"] = paths
+    json_path.write_text(stable_json(report), encoding="utf-8")
+    summary_path.write_text(e2e_summary_markdown(report), encoding="utf-8")
+    return paths
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-root", required=True, help="Rust project root to scan")
+    parser.add_argument("--project-root", help="Rust project root to scan")
     parser.add_argument("--output-root", help="Directory where JSON and summary artifacts are written")
     parser.add_argument(
         "--fail-on-blocked",
         action="store_true",
         help="Exit 2 when the report final_verdict is blocked",
     )
-    return parser.parse_args(argv)
+    parser.add_argument("--list", action="store_true", help="List fixture-driven E2E scenarios")
+    parser.add_argument("--scenario", action="append", default=[], help="E2E scenario id to include")
+    parser.add_argument("--dry-run", action="store_true", help="Render the E2E plan without writing artifacts")
+    parser.add_argument("--execute", action="store_true", help="Run the fixture-driven E2E proof")
+    args = parser.parse_args(argv)
+    if args.dry_run and args.execute:
+        parser.error("--dry-run and --execute are mutually exclusive")
+    e2e_mode = args.list or args.dry_run or args.execute
+    if e2e_mode and args.project_root:
+        parser.error("--project-root cannot be combined with --list, --dry-run, or --execute")
+    if not e2e_mode and not args.project_root:
+        parser.error("--project-root is required unless using --list, --dry-run, or --execute")
+    if args.execute and not args.output_root:
+        parser.error("--execute requires --output-root")
+    if args.fail_on_blocked and e2e_mode:
+        parser.error("--fail-on-blocked is only valid with --project-root")
+    return args
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.list:
+        try:
+            selected = select_e2e_scenarios(args.scenario)
+        except ValueError as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
+        sys.stdout.write(stable_json(e2e_catalog(selected)))
+        return 0
+    if args.dry_run or args.execute:
+        try:
+            selected = select_e2e_scenarios(args.scenario)
+        except ValueError as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
+        mode = "execute" if args.execute else "dry_run"
+        output_root = Path(args.output_root) if args.output_root and args.execute else None
+        report = build_e2e_report(selected, mode, output_root)
+        if args.execute and output_root is not None:
+            write_e2e_outputs(report, output_root)
+        sys.stdout.write(stable_json(report))
+        return 0 if report["summary"]["overall_status"] in {"passed", "dry_run"} else 1
+
     project_root = Path(args.project_root)
     report = build_report(project_root)
     if args.output_root:
