@@ -70,6 +70,12 @@
     "fuzz manifest",
     "conformance runners",
     "admission-aware proof-lane atlas",
+    "fourth-wave governor schema proof",
+    "fourth-wave governor policy-engine proof",
+    "fourth-wave swarm replay corpus",
+    "fourth-wave runtime bridge",
+    "fourth-wave benchmark no-claim contract",
+    "fourth-wave final aggregated signoff",
     "migration readiness planner signoff",
     "formal Lean posture",
     "rustdoc/API examples"
@@ -311,6 +317,183 @@
       ],
       "blocked_frontier": null,
       "notes": "Green maps the focused atlas/planner artifact contract; it does not prove broad workspace release health, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target."
+    },
+    {
+      "claim_id": "fourth-wave-governor-schema-proof",
+      "category": "fourth-wave governor schema proof",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "fourth-wave governor proof map",
+          "fourth-wave-governor-schema-contract"
+        ],
+        "AGENTS.md": [
+          "fourth-wave governor proof map",
+          "fourth-wave-governor-schema-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "fourth-wave-governor-schema-contract"
+      ],
+      "manifest_lane_ids": [
+        "fourth-wave-governor-schema-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the schema/receipt contract, fail-closed fixture matrix, redaction checks, and explicit non-claims. It does not prove the policy engine, runtime bridge, live benchmarks, production-on-by-default control, or scheduler performance."
+    },
+    {
+      "claim_id": "fourth-wave-governor-policy-engine-proof",
+      "category": "fourth-wave governor policy-engine proof",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "fourth-wave governor proof map",
+          "fourth-wave-governor-policy-engine"
+        ],
+        "AGENTS.md": [
+          "fourth-wave governor proof map",
+          "fourth-wave-governor-policy-engine"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "fourth-wave-governor-policy-engine"
+      ],
+      "manifest_lane_ids": [
+        "fourth-wave-governor-policy-engine"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_policy_engine CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib fourth_wave_governor --features test-internals -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the pure deterministic policy-engine receipt tests. It does not prove opt-in bridge behavior, benchmark improvement, no regression, or production-on-by-default control."
+    },
+    {
+      "claim_id": "fourth-wave-swarm-replay-corpus",
+      "category": "fourth-wave swarm replay corpus",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "fourth-wave governor proof map",
+          "fourth-wave-swarm-replay-corpus"
+        ],
+        "AGENTS.md": [
+          "fourth-wave governor proof map",
+          "fourth-wave-swarm-replay-corpus"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ],
+      "manifest_lane_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the deterministic replay corpus and stable workload dimensions. It does not prove live host throughput, runtime bridge correctness, or scheduler performance."
+    },
+    {
+      "claim_id": "fourth-wave-runtime-bridge",
+      "category": "fourth-wave runtime bridge",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "fourth-wave governor proof map",
+          "fourth-wave-runtime-bridge-contract"
+        ],
+        "AGENTS.md": [
+          "fourth-wave governor proof map",
+          "fourth-wave-runtime-bridge-contract"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ],
+      "manifest_lane_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the explicit opt-in runtime bridge contract for base SLO preservation, cancellation precedence, brownout, no-worker defer, fail-closed receipts, redaction, and non-claim propagation. It does not prove production-on-by-default control, live performance improvement, or broad workspace health."
+    },
+    {
+      "claim_id": "fourth-wave-benchmark-no-claim-contract",
+      "category": "fourth-wave benchmark no-claim contract",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "fourth-wave benchmark no-claim contract",
+          "no fresh benchmark result"
+        ],
+        "AGENTS.md": [
+          "fourth-wave benchmark no-claim contract",
+          "no fresh benchmark result"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "fourth-wave-benchmark-contract"
+      ],
+      "manifest_lane_ids": [
+        "fourth-wave-benchmark-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped because this is a benchmark contract and no-claim report, not a fresh benchmark result. It does not prove p95 improvement, throughput improvement, no regression, scheduler performance, or production-on-by-default control."
+    },
+    {
+      "claim_id": "fourth-wave-final-aggregated-signoff",
+      "category": "fourth-wave final aggregated signoff",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "fourth-wave final aggregated signoff",
+          "fourth-wave-governor-signoff-runbook"
+        ],
+        "AGENTS.md": [
+          "fourth-wave final aggregated signoff",
+          "fourth-wave-governor-signoff-runbook"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "fourth-wave-governor-schema-contract",
+        "fourth-wave-governor-policy-engine",
+        "fourth-wave-swarm-replay-corpus",
+        "fourth-wave-runtime-bridge-contract",
+        "fourth-wave-benchmark-contract",
+        "fourth-wave-governor-signoff-runbook"
+      ],
+      "manifest_lane_ids": [
+        "fourth-wave-governor-schema-contract",
+        "fourth-wave-governor-policy-engine",
+        "fourth-wave-swarm-replay-corpus",
+        "fourth-wave-runtime-bridge-contract",
+        "fourth-wave-benchmark-contract",
+        "fourth-wave-governor-signoff-runbook"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_policy_engine CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib fourth_wave_governor --features test-internals -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped aggregate signoff: cite it only as an operator checklist tying child lanes together. It remains a no-claim status for production-on-by-default control, live performance improvement, no regression, broad workspace health, and RCH fleet availability until separate fresh proof artifacts exist."
     },
     {
       "claim_id": "migration-readiness-planner-signoff",

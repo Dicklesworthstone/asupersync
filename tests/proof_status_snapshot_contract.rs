@@ -423,7 +423,7 @@ fn snapshot_declares_schema_sources_and_required_categories() {
     );
     assert_eq!(
         actual.len(),
-        11,
+        17,
         "snapshot must cover the requested claim list"
     );
 }
@@ -525,6 +525,64 @@ fn status_rows_do_not_overstate_frontier_or_scoped_claims() {
     for entry in array(&snapshot, "claim_categories") {
         validate_status_support(entry, &lanes).unwrap_or_else(|error| panic!("{error}"));
     }
+}
+
+#[test]
+fn fourth_wave_status_rows_preserve_child_lane_boundaries() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+    let rows = array(&snapshot, "claim_categories");
+    let by_claim = rows
+        .iter()
+        .map(|entry| (string(entry, "claim_id").to_string(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let expected_lanes = BTreeSet::from([
+        "fourth-wave-governor-schema-contract".to_string(),
+        "fourth-wave-governor-policy-engine".to_string(),
+        "fourth-wave-swarm-replay-corpus".to_string(),
+        "fourth-wave-runtime-bridge-contract".to_string(),
+        "fourth-wave-benchmark-contract".to_string(),
+        "fourth-wave-governor-signoff-runbook".to_string(),
+    ]);
+
+    for claim_id in [
+        "fourth-wave-governor-schema-proof",
+        "fourth-wave-governor-policy-engine-proof",
+        "fourth-wave-swarm-replay-corpus",
+        "fourth-wave-runtime-bridge",
+        "fourth-wave-benchmark-no-claim-contract",
+        "fourth-wave-final-aggregated-signoff",
+    ] {
+        let entry = by_claim
+            .get(claim_id)
+            .unwrap_or_else(|| panic!("missing fourth-wave claim {claim_id}"));
+        validate_claim_lane_mapping(entry, &lanes, &guarantees)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            string(entry, "proof_evidence_status"),
+            "rerun-required",
+            "{claim_id}: fourth-wave status rows require fresh RCH reruns before proof citation"
+        );
+        assert!(
+            string(entry, "notes").contains("does not prove")
+                || string(entry, "notes").contains("no-claim"),
+            "{claim_id}: notes must preserve non-claim language"
+        );
+    }
+
+    let aggregate = by_claim
+        .get("fourth-wave-final-aggregated-signoff")
+        .expect("aggregate row");
+    assert_eq!(string(aggregate, "status"), "yellow_scoped");
+    assert_eq!(string_set(aggregate, "manifest_lane_ids"), expected_lanes);
+    assert!(
+        string(aggregate, "notes").contains("operator checklist")
+            && string(aggregate, "notes").contains("live performance improvement")
+            && string(aggregate, "notes").contains("production-on-by-default"),
+        "aggregate row must stay scoped and non-performance"
+    );
 }
 
 #[test]

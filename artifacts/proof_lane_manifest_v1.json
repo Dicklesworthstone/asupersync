@@ -191,6 +191,12 @@
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
+    "fourth-wave-governor-schema-contract",
+    "fourth-wave-governor-policy-engine",
+    "fourth-wave-swarm-replay-corpus",
+    "fourth-wave-runtime-bridge-contract",
+    "fourth-wave-benchmark-contract",
+    "fourth-wave-governor-signoff-runbook",
     "admission-aware-proof-lane-atlas",
     "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
@@ -736,6 +742,251 @@
       }
     },
     {
+      "lane_id": "fourth-wave-governor-schema-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-governor-schema-contract"
+      ],
+      "covers": "Fourth-wave pressure snapshot and decision receipt schema fields, deterministic receipt ordering, fail-closed malformed/stale/local-fallback/advisory cases, redaction, and no-claim boundaries remain aligned.",
+      "explicit_not_covered": "Does not prove the pure runtime policy engine, opt-in SLO bridge behavior, real-host throughput, scheduler regression closure, RCH fleet health, or production-on-by-default control.",
+      "expected_signal": "fourth_wave_swarm_governor_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_contract.rs",
+        "src/observability/swarm_pressure_governor.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "fourth-wave schema artifact drift",
+        "decision receipt field drift",
+        "redaction or no-claim text drift"
+      ],
+      "escalation_notes": "Use this lane for schema and receipt contract changes only; pair it with the policy, corpus, bridge, and benchmark lanes before making aggregate fourth-wave claims.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-governor-schema-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-governor-policy-engine",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_policy_engine CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib fourth_wave_governor --features test-internals -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "fourth-wave-governor-policy-engine"
+      ],
+      "covers": "The pure fourth-wave governor policy engine deterministically maps complete, stale, malformed, local-fallback, advisory-only, no-worker, pressure-spike, optional-brownout, and admit cases to explicit receipts.",
+      "explicit_not_covered": "Does not prove runtime bridge side effects, benchmark improvement, scheduler regression closure, RCH fleet availability, or production-on-by-default admission behavior.",
+      "expected_signal": "filtered fourth_wave_governor lib tests pass with nonzero test evidence",
+      "source_paths": [
+        "src/observability/swarm_pressure_governor.rs",
+        "src/observability/mod.rs",
+        "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "observability module compile drift",
+        "test-internals feature drift",
+        "policy receipt enum or action rename"
+      ],
+      "escalation_notes": "If the filter reports zero tests, treat the lane as blocked and update the command before citing policy-engine proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-governor-policy-engine"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-swarm-replay-corpus",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ],
+      "covers": "The deterministic large-host swarm workload corpus keeps fourth-wave workload dimensions, pressure scenarios, agent run scenarios, what-if scenarios, replay fields, and stable hashes aligned.",
+      "explicit_not_covered": "Does not run fresh real-host benchmarks, prove policy-engine behavior, prove opt-in runtime bridge behavior, or claim production scheduler improvement.",
+      "expected_signal": "swarm_workload_scenario_corpus_contract tests pass",
+      "source_paths": [
+        "artifacts/swarm_workload_scenario_corpus_v1.json",
+        "tests/swarm_workload_scenario_corpus_contract.rs",
+        "src/lab/swarm_replay.rs",
+        "src/lab/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "scenario hash drift",
+        "runtime replay field rename",
+        "fixture source path drift"
+      ],
+      "escalation_notes": "Use this lane for deterministic corpus evidence only; benchmark claims require the benchmark contract and a fresh RCH refresh artifact.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-swarm-replay-corpus"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-runtime-bridge-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ],
+      "covers": "The explicit opt-in runtime bridge preserves the base SLO decision, cancellation precedence, optional-work brownout, no-worker defer, fail-closed receipt handling, redaction, and non-claim propagation.",
+      "explicit_not_covered": "Does not enable production-on-by-default control, prove scheduler performance improvement, prove every SLO bundle path, or authorize local Cargo fallback.",
+      "expected_signal": "runtime_slo_policy_bridge_fourth_wave filtered tests pass with nonzero test evidence",
+      "source_paths": [
+        "src/runtime/slo_policy.rs",
+        "src/runtime/mod.rs",
+        "tests/slo_policy_bundle_contract.rs",
+        "artifacts/slo_policy_bundle_contract_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "SLO policy contract compile drift",
+        "test-internals feature drift",
+        "fourth-wave receipt enum drift"
+      ],
+      "escalation_notes": "If bridge evidence is weak, rollback by removing opt-in bridge callers and fall back to base SLO policy; do not widen the bridge from this lane alone.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-runtime-bridge-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-benchmark-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-benchmark-contract"
+      ],
+      "covers": "The large-host benchmark contract preserves scenario catalog, compare modes, metric fields, log fields, RCH-only refresh commands, flamegraph attribution targets, and no-claim report boundaries.",
+      "explicit_not_covered": "Contract receipts are not fresh benchmark results and do not prove improvement, no regression, scheduler performance, RCH fleet health, or production-on-by-default control.",
+      "expected_signal": "fourth_wave_swarm_governor_benchmark_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_swarm_governor_benchmark_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_benchmark_contract.rs",
+        "artifacts/swarm_workload_scenario_corpus_v1.json",
+        "src/observability/swarm_pressure_governor.rs",
+        "src/runtime/slo_policy.rs"
+      ],
+      "common_unrelated_blockers": [
+        "benchmark scenario source path drift",
+        "flamegraph target path drift",
+        "metric field contract drift"
+      ],
+      "escalation_notes": "Do not cite this lane as a performance pass until a fresh RCH benchmark refresh artifact is committed and classified.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-benchmark-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-governor-signoff-runbook",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-governor-signoff-runbook"
+      ],
+      "covers": "The fourth-wave operator runbook, README/AGENTS markers, proof manifest rows, proof-status rows, no-local-fallback language, decision taxonomy, rollback guidance, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not run child proof lanes, prove fresh benchmark improvement, prove broad workspace health, enable production admission control, or prove RCH fleet availability.",
+      "expected_signal": "fourth_wave_swarm_governor_runbook_contract tests pass",
+      "source_paths": [
+        "docs/fourth_wave_swarm_governor_runbook.md",
+        "tests/fourth_wave_swarm_governor_runbook_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md",
+        "docs/proof_runner_usage.md"
+      ],
+      "common_unrelated_blockers": [
+        "runbook marker drift",
+        "manifest/status row drift",
+        "README or AGENTS marker drift"
+      ],
+      "escalation_notes": "Use this lane for operator-facing fourth-wave signoff text; child lanes must still be run before any fresh proof or benchmark claim.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-governor-signoff-runbook"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1044,6 +1295,48 @@
       "description": "Pressure-control evidence claims, schema versions, docs, and scoped proof command stay aligned.",
       "lane_ids": [
         "runtime-pressure-control-evidence-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-schema-contract",
+      "description": "Fourth-wave pressure snapshot and decision receipt schema, fail-closed cases, redaction, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "fourth-wave-governor-schema-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-policy-engine",
+      "description": "The pure fourth-wave governor policy engine has a focused remote-required verifier command for deterministic decision receipts.",
+      "lane_ids": [
+        "fourth-wave-governor-policy-engine"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-swarm-replay-corpus",
+      "description": "The deterministic fourth-wave large-host swarm replay corpus has a canonical contract verifier command.",
+      "lane_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-runtime-bridge-contract",
+      "description": "The explicit opt-in fourth-wave runtime bridge has a focused verifier command for cancellation, brownout, no-worker, fail-closed, redaction, and non-claim behavior.",
+      "lane_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-benchmark-contract",
+      "description": "Fourth-wave large-host benchmark scenarios, metrics, RCH refresh commands, flamegraph targets, and no-claim report boundaries have a canonical contract verifier command.",
+      "lane_ids": [
+        "fourth-wave-benchmark-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-signoff-runbook",
+      "description": "Fourth-wave operator runbook, manifest rows, status rows, README/AGENTS markers, rollback guidance, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "fourth-wave-governor-signoff-runbook"
       ]
     },
     {

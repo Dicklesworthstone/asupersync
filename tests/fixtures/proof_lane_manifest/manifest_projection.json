@@ -165,6 +165,12 @@
     "rustdoc-api-frontier",
     "formal-lean-core-invariants",
     "runtime-pressure-control-evidence-contract",
+    "fourth-wave-governor-schema-contract",
+    "fourth-wave-governor-policy-engine",
+    "fourth-wave-swarm-replay-corpus",
+    "fourth-wave-runtime-bridge-contract",
+    "fourth-wave-benchmark-contract",
+    "fourth-wave-governor-signoff-runbook",
     "admission-aware-proof-lane-atlas",
     "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
@@ -432,6 +438,125 @@
       ]
     },
     {
+      "lane_id": "fourth-wave-governor-schema-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture",
+      "guarantee_ids": [
+        "fourth-wave-governor-schema-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "fourth_wave_swarm_governor_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_contract.rs",
+        "src/observability/swarm_pressure_governor.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "lane_id": "fourth-wave-governor-policy-engine",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_policy_engine CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib fourth_wave_governor --features test-internals -- --nocapture",
+      "guarantee_ids": [
+        "fourth-wave-governor-policy-engine"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
+      "expected_signal": "filtered fourth_wave_governor lib tests pass with nonzero test evidence",
+      "source_paths": [
+        "src/observability/swarm_pressure_governor.rs",
+        "src/observability/mod.rs",
+        "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_contract.rs"
+      ]
+    },
+    {
+      "lane_id": "fourth-wave-swarm-replay-corpus",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture",
+      "guarantee_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ],
+      "feature_flags": [],
+      "expected_signal": "swarm_workload_scenario_corpus_contract tests pass",
+      "source_paths": [
+        "artifacts/swarm_workload_scenario_corpus_v1.json",
+        "tests/swarm_workload_scenario_corpus_contract.rs",
+        "src/lab/swarm_replay.rs",
+        "src/lab/mod.rs"
+      ]
+    },
+    {
+      "lane_id": "fourth-wave-runtime-bridge-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture",
+      "guarantee_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
+      "expected_signal": "runtime_slo_policy_bridge_fourth_wave filtered tests pass with nonzero test evidence",
+      "source_paths": [
+        "src/runtime/slo_policy.rs",
+        "src/runtime/mod.rs",
+        "tests/slo_policy_bundle_contract.rs",
+        "artifacts/slo_policy_bundle_contract_v1.json"
+      ]
+    },
+    {
+      "lane_id": "fourth-wave-benchmark-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+      "guarantee_ids": [
+        "fourth-wave-benchmark-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "fourth_wave_swarm_governor_benchmark_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_swarm_governor_benchmark_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_benchmark_contract.rs",
+        "artifacts/swarm_workload_scenario_corpus_v1.json",
+        "src/observability/swarm_pressure_governor.rs",
+        "src/runtime/slo_policy.rs"
+      ]
+    },
+    {
+      "lane_id": "fourth-wave-governor-signoff-runbook",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture",
+      "guarantee_ids": [
+        "fourth-wave-governor-signoff-runbook"
+      ],
+      "feature_flags": [],
+      "expected_signal": "fourth_wave_swarm_governor_runbook_contract tests pass",
+      "source_paths": [
+        "docs/fourth_wave_swarm_governor_runbook.md",
+        "tests/fourth_wave_swarm_governor_runbook_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md",
+        "docs/proof_runner_usage.md"
+      ]
+    },
+    {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -621,6 +746,42 @@
       "guarantee_id": "runtime-pressure-control-evidence-contract",
       "lane_ids": [
         "runtime-pressure-control-evidence-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-schema-contract",
+      "lane_ids": [
+        "fourth-wave-governor-schema-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-policy-engine",
+      "lane_ids": [
+        "fourth-wave-governor-policy-engine"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-swarm-replay-corpus",
+      "lane_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-runtime-bridge-contract",
+      "lane_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-benchmark-contract",
+      "lane_ids": [
+        "fourth-wave-benchmark-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-signoff-runbook",
+      "lane_ids": [
+        "fourth-wave-governor-signoff-runbook"
       ]
     },
     {

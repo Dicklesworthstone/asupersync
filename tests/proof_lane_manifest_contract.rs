@@ -694,6 +694,13 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "clippy-all-targets",
         "rustdoc-api",
         "formal-lean-build",
+        "runtime-pressure-control-evidence-contract",
+        "fourth-wave-governor-schema-contract",
+        "fourth-wave-governor-policy-engine",
+        "fourth-wave-swarm-replay-corpus",
+        "fourth-wave-runtime-bridge-contract",
+        "fourth-wave-benchmark-contract",
+        "fourth-wave-governor-signoff-runbook",
         "dirty-tree-ownership-receipt-contract",
         "swarm-proof-lane-planner-contract",
         "migration-readiness-planner-signoff-contract",
@@ -849,6 +856,27 @@ fn every_lane_declares_fail_closed_resource_envelope() {
         ("fuzz-manifest-smoke", "compile-frontier-heavy"),
         (
             "runtime-pressure-control-evidence-contract",
+            "artifact-contract-medium",
+        ),
+        (
+            "fourth-wave-governor-schema-contract",
+            "artifact-contract-medium",
+        ),
+        (
+            "fourth-wave-governor-policy-engine",
+            "artifact-contract-medium",
+        ),
+        (
+            "fourth-wave-swarm-replay-corpus",
+            "artifact-contract-medium",
+        ),
+        (
+            "fourth-wave-runtime-bridge-contract",
+            "artifact-contract-medium",
+        ),
+        ("fourth-wave-benchmark-contract", "artifact-contract-medium"),
+        (
+            "fourth-wave-governor-signoff-runbook",
             "artifact-contract-medium",
         ),
         (

@@ -218,6 +218,19 @@ this order:
 4. Cite `source_rows` and `reason_codes` that explain the decision. If they are
    empty, the receipt is malformed for closeout purposes.
 5. Copy the exact `covers` and `does_not_cover` boundary. Never broaden the claim in prose.
+
+## Fourth-Wave Governor Signoff Runbook
+
+The fourth-wave governor proof map is `docs/fourth_wave_swarm_governor_runbook.md`, verified by `tests/fourth_wave_swarm_governor_runbook_contract.rs`, and represented in the proof manifest by `fourth-wave-governor-signoff-runbook`. Use it when an operator needs to connect fourth-wave schema, policy-engine, replay-corpus, runtime-bridge, benchmark-contract, and proof-status rows.
+
+The fourth-wave final aggregated signoff is scoped. It is a checklist that points to child lanes, not a fresh performance proof. The fourth-wave benchmark no-claim contract records no fresh benchmark result and must not be cited as p95 improvement, throughput improvement, no regression, production-on-by-default control, broad workspace health, or RCH fleet availability.
+
+When reviewing fourth-wave evidence:
+
+1. Run all Cargo proof lanes with `RCH_REQUIRE_REMOTE=1 rch exec -- env` and an isolated `CARGO_TARGET_DIR`.
+2. Reject `[RCH] local`, `Executing command locally`, `local fallback accepted`, and zero-test exact filters.
+3. Read receipt actions such as `brownout_optional_work`, `defer_no_remote_worker`, `fail_closed_local_rch_fallback`, and `admit_required_work` before writing closeout text.
+4. If evidence is stale, advisory-only, local-fallback-tainted, or contradicted by benchmark refresh results, rollback the opt-in `SloRuntimePolicyBridge::evaluate_fourth_wave` call path and leave the base SLO policy active.
 6. Keep `mutates_external_state=false`, `destructive_cleanup_required=false`,
    and `branch_or_worktree_required=false`. If any are true, stop and coordinate
    instead of running or committing.
