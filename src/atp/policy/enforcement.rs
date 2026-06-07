@@ -178,7 +178,8 @@ impl PolicyEnforcer {
 
     /// Increment usage count for a grant.
     pub fn increment_usage(&mut self, grant_id: &str) {
-        *self.usage_counts.entry(grant_id.to_string()).or_insert(0) += 1;
+        let usage_count = self.usage_counts.entry(grant_id.to_string()).or_insert(0);
+        *usage_count = usage_count.saturating_add(1);
     }
 
     /// Evaluate an access request against current capabilities.
@@ -625,6 +626,17 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn policy_enforcer_usage_count_saturates_at_u64_max() {
+        let mut enforcer = PolicyEnforcer::new();
+        let grant_id = "saturating-grant";
+
+        enforcer.usage_counts.insert(grant_id.to_string(), u64::MAX);
+        enforcer.increment_usage(grant_id);
+
+        assert_eq!(enforcer.get_usage_count(grant_id), u64::MAX);
     }
 
     #[test]
