@@ -139,10 +139,10 @@
     },
     {
       "command_id": "rustfmt-check",
-      "execution_policy": "remote-required-rch",
-      "cargo_or_cpu_intensive": true,
+      "execution_policy": "rch-routed-format-check",
+      "cargo_or_cpu_intensive": false,
       "claim_scope": "commit-format-gate",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check cargo fmt --check",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check cargo fmt --check",
       "expected_signal": "cargo fmt exits 0"
     },
     {

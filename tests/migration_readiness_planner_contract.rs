@@ -292,7 +292,22 @@ fn validate_signoff_artifact(
                 ));
             }
         }
-        if policy == "remote-required-rch" || cargo_or_cpu || command.contains(" cargo ") {
+        if policy == "rch-routed-format-check" {
+            if !command.starts_with("rch exec -- ") || !command.contains("cargo fmt --check") {
+                return Err(format!(
+                    "{command_id}: format checks must use rch exec cargo fmt --check"
+                ));
+            }
+            if !command.contains("CARGO_TARGET_DIR=") {
+                return Err(format!(
+                    "{command_id}: format command must isolate target dir"
+                ));
+            }
+        }
+        if policy == "remote-required-rch"
+            || cargo_or_cpu
+            || (command.contains(" cargo ") && policy != "rch-routed-format-check")
+        {
             if !command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- ") {
                 return Err(format!(
                     "{command_id}: remote proof command must fail closed"
