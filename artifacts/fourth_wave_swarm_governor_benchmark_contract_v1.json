@@ -1,0 +1,548 @@
+{
+  "schema_version": "fourth-wave-swarm-governor-benchmark-contract-v1",
+  "bead_id": "asupersync-86fe9v.7",
+  "generated_at_utc": "2026-06-07T21:00:00Z",
+  "source_of_truth": {
+    "governor": "src/observability/swarm_pressure_governor.rs",
+    "runtime_bridge": "src/runtime/slo_policy.rs",
+    "replay_corpus": "artifacts/swarm_workload_scenario_corpus_v1.json",
+    "replay_runner": "src/lab/swarm_replay.rs",
+    "benchmark_contract_test": "tests/fourth_wave_swarm_governor_benchmark_contract.rs"
+  },
+  "host_profile": {
+    "profile_id": "large-swarm-64c-256gb",
+    "cpu_cores": 64,
+    "memory_gib": 256,
+    "same_host_required": true,
+    "remote_required": true,
+    "local_fallback_allowed": false,
+    "frame_pointers_required": true
+  },
+  "required_scenario_ids": [
+    "cpu-heavy-cargo-rch-lanes",
+    "memory-heavy-replay-corpus",
+    "mixed-rch-build-pressure",
+    "release-quiet-phase",
+    "cancellation-drain-pressure"
+  ],
+  "required_modes": [
+    "observe_only_baseline",
+    "advisory_decision_output",
+    "opt_in_bridge_behavior"
+  ],
+  "required_metric_fields": [
+    "p50_us",
+    "p95_us",
+    "p99_us",
+    "throughput_ops_per_sec",
+    "queue_delay_p95_us",
+    "cancellation_drain_p95_us",
+    "peak_rss_mb",
+    "fairness_yield_count"
+  ],
+  "required_log_fields": [
+    "schema_version",
+    "scenario_id",
+    "run_id",
+    "git_sha",
+    "host_profile_id",
+    "worker_count",
+    "cpu_cores",
+    "memory_gib",
+    "mode",
+    "command",
+    "target_dir",
+    "flamegraph_artifact_path",
+    "p50_us",
+    "p95_us",
+    "p99_us",
+    "throughput_ops_per_sec",
+    "queue_delay_p95_us",
+    "cancellation_drain_p95_us",
+    "peak_rss_mb",
+    "fairness_yield_count",
+    "claim_status"
+  ],
+  "proof_boundary": {
+    "contract_receipts_are_fresh_benchmarks": false,
+    "proves_real_host_improvement": false,
+    "proves_no_regression": false,
+    "proves_scheduler_performance": false,
+    "requires_rch_refresh_for_claims": true,
+    "local_cargo_fallback_allowed": false,
+    "flamegraph_attribution_is_expected_target_map": true
+  },
+  "no_claim_report": {
+    "status": "no-improvement-claim",
+    "reason": "This artifact defines benchmark workloads, refresh commands, metric fields, and flamegraph attribution targets. It is not a fresh benchmark result.",
+    "allowed_claim": "A future RCH refresh can compare observe-only baseline, advisory output, and opt-in bridge behavior for the listed scenarios.",
+    "blocked_claims": [
+      "fourth-wave governor improves p95 latency",
+      "fourth-wave governor improves throughput",
+      "fourth-wave governor is production-on-by-default",
+      "fourth-wave governor closes scheduler performance regressions"
+    ]
+  },
+  "scenario_catalog": [
+    {
+      "scenario_id": "cpu-heavy-cargo-rch-lanes",
+      "title": "CPU-heavy Cargo and RCH admission lanes",
+      "workload_family": "cpu_heavy_rch",
+      "benchmark_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_bench_cpu_heavy CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C force-frame-pointers=yes -C debuginfo=line-tables-only' cargo bench -p asupersync --bench scheduler_benchmark --features test-internals -- --noplot",
+      "contract_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+      "source_refs": [
+        "benches/scheduler_benchmark.rs",
+        "src/observability/swarm_pressure_governor.rs",
+        "src/runtime/slo_policy.rs"
+      ],
+      "worker_envelope": {
+        "worker_count": 64,
+        "agent_count": 96,
+        "remote_worker_slots": 24,
+        "memory_ceiling_gib": 192
+      },
+      "measurement_modes": [
+        {
+          "mode": "observe_only_baseline",
+          "comparison_role": "baseline",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "advisory_decision_output",
+          "comparison_role": "decision_receipt_only",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "opt_in_bridge_behavior",
+          "comparison_role": "candidate",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        }
+      ],
+      "flamegraph_attribution": {
+        "expected_artifact_path": "artifacts/perf/fourth_wave/cpu-heavy-cargo-rch-lanes/flamegraph.svg",
+        "refresh_requires_frame_pointers": true,
+        "ranked_targets": [
+          {
+            "rank": 1,
+            "path": "src/observability/swarm_pressure_governor.rs",
+            "symbol": "FourthWaveGovernorInput::evaluate",
+            "expected_pressure": "governor decision priority and evidence scan"
+          },
+          {
+            "rank": 2,
+            "path": "src/runtime/slo_policy.rs",
+            "symbol": "SloRuntimePolicyBridge::evaluate_fourth_wave",
+            "expected_pressure": "opt-in bridge decision projection"
+          },
+          {
+            "rank": 3,
+            "path": "benches/scheduler_benchmark.rs",
+            "symbol": "scheduler benchmark workload driver",
+            "expected_pressure": "CPU-heavy ready queue pressure under benchmark load"
+          }
+        ]
+      }
+    },
+    {
+      "scenario_id": "memory-heavy-replay-corpus",
+      "title": "Memory-heavy large-host replay corpus",
+      "workload_family": "memory_heavy_replay",
+      "benchmark_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_bench_memory_heavy CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C force-frame-pointers=yes -C debuginfo=line-tables-only' cargo bench -p asupersync --bench spork_baseline --features test-internals -- --noplot",
+      "contract_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+      "source_refs": [
+        "artifacts/swarm_workload_scenario_corpus_v1.json",
+        "src/lab/swarm_replay.rs",
+        "src/observability/swarm_pressure_governor.rs"
+      ],
+      "worker_envelope": {
+        "worker_count": 64,
+        "agent_count": 128,
+        "remote_worker_slots": 16,
+        "memory_ceiling_gib": 224
+      },
+      "measurement_modes": [
+        {
+          "mode": "observe_only_baseline",
+          "comparison_role": "baseline",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "advisory_decision_output",
+          "comparison_role": "decision_receipt_only",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "opt_in_bridge_behavior",
+          "comparison_role": "candidate",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        }
+      ],
+      "flamegraph_attribution": {
+        "expected_artifact_path": "artifacts/perf/fourth_wave/memory-heavy-replay-corpus/flamegraph.svg",
+        "refresh_requires_frame_pointers": true,
+        "ranked_targets": [
+          {
+            "rank": 1,
+            "path": "src/lab/swarm_replay.rs",
+            "symbol": "run_swarm_replay_scenario",
+            "expected_pressure": "large replay timeline materialization"
+          },
+          {
+            "rank": 2,
+            "path": "src/observability/swarm_pressure_governor.rs",
+            "symbol": "FourthWavePressureSnapshot",
+            "expected_pressure": "snapshot evidence and envelope projection"
+          },
+          {
+            "rank": 3,
+            "path": "artifacts/swarm_workload_scenario_corpus_v1.json",
+            "symbol": "large-host fixture corpus",
+            "expected_pressure": "deterministic workload size and memory envelope"
+          }
+        ]
+      }
+    },
+    {
+      "scenario_id": "mixed-rch-build-pressure",
+      "title": "Mixed RCH, build, and governor decision pressure",
+      "workload_family": "mixed_rch_build",
+      "benchmark_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_bench_mixed_rch CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C force-frame-pointers=yes -C debuginfo=line-tables-only' cargo bench -p asupersync --bench methodology_baselines --features test-internals -- --noplot",
+      "contract_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+      "source_refs": [
+        "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_contract.rs",
+        "benches/methodology_baselines.rs"
+      ],
+      "worker_envelope": {
+        "worker_count": 64,
+        "agent_count": 80,
+        "remote_worker_slots": 8,
+        "memory_ceiling_gib": 160
+      },
+      "measurement_modes": [
+        {
+          "mode": "observe_only_baseline",
+          "comparison_role": "baseline",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "advisory_decision_output",
+          "comparison_role": "decision_receipt_only",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "opt_in_bridge_behavior",
+          "comparison_role": "candidate",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        }
+      ],
+      "flamegraph_attribution": {
+        "expected_artifact_path": "artifacts/perf/fourth_wave/mixed-rch-build-pressure/flamegraph.svg",
+        "refresh_requires_frame_pointers": true,
+        "ranked_targets": [
+          {
+            "rank": 1,
+            "path": "src/observability/swarm_pressure_governor.rs",
+            "symbol": "FourthWaveGovernorDecisionReceipt",
+            "expected_pressure": "receipt generation and evidence sorting"
+          },
+          {
+            "rank": 2,
+            "path": "benches/methodology_baselines.rs",
+            "symbol": "methodology baseline benchmark driver",
+            "expected_pressure": "mixed build and benchmark command setup"
+          },
+          {
+            "rank": 3,
+            "path": "tests/fourth_wave_swarm_governor_contract.rs",
+            "symbol": "evaluate_scenario",
+            "expected_pressure": "contract decision replay used to route benchmark hypotheses"
+          }
+        ]
+      }
+    },
+    {
+      "scenario_id": "release-quiet-phase",
+      "title": "Release quiet phase and proof-status pressure",
+      "workload_family": "release_quiet_phase",
+      "benchmark_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_bench_release_quiet CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0 -C force-frame-pointers=yes' cargo test -p asupersync --test proof_status_snapshot_contract -- --nocapture",
+      "contract_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+      "source_refs": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/proof_status_snapshot_contract.rs"
+      ],
+      "worker_envelope": {
+        "worker_count": 64,
+        "agent_count": 48,
+        "remote_worker_slots": 4,
+        "memory_ceiling_gib": 128
+      },
+      "measurement_modes": [
+        {
+          "mode": "observe_only_baseline",
+          "comparison_role": "baseline",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "advisory_decision_output",
+          "comparison_role": "decision_receipt_only",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "opt_in_bridge_behavior",
+          "comparison_role": "candidate",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        }
+      ],
+      "flamegraph_attribution": {
+        "expected_artifact_path": "artifacts/perf/fourth_wave/release-quiet-phase/flamegraph.svg",
+        "refresh_requires_frame_pointers": true,
+        "ranked_targets": [
+          {
+            "rank": 1,
+            "path": "tests/proof_status_snapshot_contract.rs",
+            "symbol": "validate_proof_reuse_status_row",
+            "expected_pressure": "release quiet-phase proof status row validation"
+          },
+          {
+            "rank": 2,
+            "path": "artifacts/proof_lane_manifest_v1.json",
+            "symbol": "proof lane manifest",
+            "expected_pressure": "manifest lane lookup and reuse policy projection"
+          },
+          {
+            "rank": 3,
+            "path": "artifacts/proof_status_snapshot_v1.json",
+            "symbol": "proof status snapshot",
+            "expected_pressure": "claim status rows for release quiet-phase decisions"
+          }
+        ]
+      }
+    },
+    {
+      "scenario_id": "cancellation-drain-pressure",
+      "title": "Cancellation drain and obligation cleanup pressure",
+      "workload_family": "cancellation_drain",
+      "benchmark_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_bench_cancel_drain CARGO_INCREMENTAL=0 CARGO_PROFILE_BENCH_DEBUG=0 RUSTFLAGS='-C force-frame-pointers=yes -C debuginfo=line-tables-only' cargo bench -p asupersync --bench cancel_drain_bench --features test-internals -- --noplot",
+      "contract_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+      "source_refs": [
+        "benches/cancel_drain_bench.rs",
+        "src/runtime/slo_policy.rs",
+        "src/observability/swarm_pressure_governor.rs"
+      ],
+      "worker_envelope": {
+        "worker_count": 64,
+        "agent_count": 72,
+        "remote_worker_slots": 12,
+        "memory_ceiling_gib": 192
+      },
+      "measurement_modes": [
+        {
+          "mode": "observe_only_baseline",
+          "comparison_role": "baseline",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "advisory_decision_output",
+          "comparison_role": "decision_receipt_only",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        },
+        {
+          "mode": "opt_in_bridge_behavior",
+          "comparison_role": "candidate",
+          "fresh_rch_benchmark": false,
+          "claim_status": "refresh_required",
+          "metric_fields": [
+            "p50_us",
+            "p95_us",
+            "p99_us",
+            "throughput_ops_per_sec",
+            "queue_delay_p95_us",
+            "cancellation_drain_p95_us",
+            "peak_rss_mb",
+            "fairness_yield_count"
+          ]
+        }
+      ],
+      "flamegraph_attribution": {
+        "expected_artifact_path": "artifacts/perf/fourth_wave/cancellation-drain-pressure/flamegraph.svg",
+        "refresh_requires_frame_pointers": true,
+        "ranked_targets": [
+          {
+            "rank": 1,
+            "path": "benches/cancel_drain_bench.rs",
+            "symbol": "cancel drain benchmark workload",
+            "expected_pressure": "loser drain and cancellation finalization pressure"
+          },
+          {
+            "rank": 2,
+            "path": "src/runtime/slo_policy.rs",
+            "symbol": "force_fourth_wave_non_start",
+            "expected_pressure": "non-start decision projection and receipt requirement"
+          },
+          {
+            "rank": 3,
+            "path": "src/observability/swarm_pressure_governor.rs",
+            "symbol": "FourthWaveGovernorAction::BrownoutOptionalWork",
+            "expected_pressure": "brownout and no-win decision routing"
+          }
+        ]
+      }
+    }
+  ]
+}
