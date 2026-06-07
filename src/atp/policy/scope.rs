@@ -361,7 +361,7 @@ impl ScopeConstraints {
         match self.allowed_hours {
             Some((start, end)) => {
                 update_digest_tag(&mut hasher, b"allowed_hours.some");
-                update_digest_bytes(&mut hasher, b"allowed_hours", &[start, end]);
+                update_digest_bytes(&mut hasher, b"allowed_hours", (start, end).into());
             }
             None => update_digest_tag(&mut hasher, b"allowed_hours.none"),
         }
@@ -482,14 +482,8 @@ fn path_pattern_match(pattern: &str, path: &str) -> bool {
 
     while path_index < path.len() {
         if pattern_index < pattern.len()
-            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == path[path_index])
-            && path[path_index] != b'/'
-        {
-            pattern_index += 1;
-            path_index += 1;
-        } else if pattern_index < pattern.len()
-            && pattern[pattern_index] == path[path_index]
-            && path[path_index] == b'/'
+            && (pattern[pattern_index] == path[path_index]
+                || (pattern[pattern_index] == b'?' && path[path_index] != b'/'))
         {
             pattern_index += 1;
             path_index += 1;

@@ -119,7 +119,7 @@ impl QuotaManager {
             .current_usage
             .bytes_used
             .checked_add(additional_bytes)
-            .ok_or_else(|| MailboxError::QuotaExceeded {
+            .ok_or(MailboxError::QuotaExceeded {
                 usage: u64::MAX,
                 limit: self.policy.max_bytes,
             })?;
@@ -146,14 +146,12 @@ impl QuotaManager {
         self.check_quota(bytes)?;
         let reservation_id = self.next_reservation_id()?;
 
-        self.current_usage.bytes_used = self
-            .current_usage
-            .bytes_used
-            .checked_add(bytes)
-            .ok_or_else(|| MailboxError::QuotaExceeded {
+        self.current_usage.bytes_used = self.current_usage.bytes_used.checked_add(bytes).ok_or(
+            MailboxError::QuotaExceeded {
                 usage: u64::MAX,
                 limit: self.policy.max_bytes,
-            })?;
+            },
+        )?;
         self.current_usage.active_transfers += 1;
         self.current_usage.last_updated = SystemTime::now();
 
