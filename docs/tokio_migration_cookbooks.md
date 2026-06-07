@@ -407,8 +407,8 @@ tokio = { version = "1", features = ["full"] }
 
 // After: asupersync with compat bridge
 [dependencies]
-asupersync = "0.3.1"
-asupersync-tokio-compat = { version = "0.3.1", features = ["full"] }
+asupersync = "0.3.4"
+asupersync-tokio-compat = { version = "0.3.4", features = ["full"] }
 ```
 
 ### 8.4 Adapter Examples for Common Tokio-Dependent Crates
