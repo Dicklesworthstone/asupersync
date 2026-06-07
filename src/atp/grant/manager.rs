@@ -321,6 +321,9 @@ impl GrantManager {
                 self.storage
                     .update_grant(&capability.grant_id, grant_info.clone())
             );
+            if !grant_info.is_usable() {
+                self.enforcer.remove_capability(&capability.grant_id);
+            }
 
             // Record audit event
             let audit_record = GrantAuditRecord {
