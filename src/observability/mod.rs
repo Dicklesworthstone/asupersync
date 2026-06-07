@@ -64,6 +64,7 @@ pub mod network_truth;
 pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
+#[cfg(test)]
 pub mod otel_conformance_tests;
 #[cfg(test)]
 pub mod otel_sampling_strategy_audit_test;
