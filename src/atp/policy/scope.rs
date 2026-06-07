@@ -361,7 +361,7 @@ impl ScopeConstraints {
         match self.allowed_hours {
             Some((start, end)) => {
                 update_digest_tag(&mut hasher, b"allowed_hours.some");
-                let allowed_hours = [start, end];
+                let allowed_hours: [u8; 2] = (start, end).into();
                 update_digest_bytes(&mut hasher, b"allowed_hours", &allowed_hours);
             }
             None => update_digest_tag(&mut hasher, b"allowed_hours.none"),
