@@ -39,7 +39,7 @@ use crate::observability::pressure_governor::{
 };
 use crate::runtime::resource_monitor::{DegradationLevel, RegionPriority, ResourceMonitor};
 use crate::types::{RegionId, id::next_bootstrap_region_id};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -48,6 +48,13 @@ use thiserror::Error;
 const DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD: f64 = 0.80;
 const DEFAULT_WORKLOAD_FEEDBACK_BACKPRESSURE_THRESHOLD: f64 = 0.80;
 const DEFAULT_WORKLOAD_LEASE_STARVATION_AGING_STEP: Duration = Duration::from_secs(5 * 60);
+const FOURTH_WAVE_GOVERNOR_POLICY_VERSION: &str = "fourth-wave-governor-policy-v1";
+const FOURTH_WAVE_PRESSURE_SNAPSHOT_SCHEMA_VERSION: &str =
+    "asupersync.fourth-wave.pressure-snapshot.v1";
+const FOURTH_WAVE_DECISION_RECEIPT_SCHEMA_VERSION: &str =
+    "asupersync.fourth-wave.governor-decision-receipt.v1";
+const FOURTH_WAVE_MAX_EVIDENCE_AGE_SECONDS: u64 = 900;
+const FOURTH_WAVE_BROWNOUT_PRESSURE_THRESHOLD_BPS: u16 = 9_000;
 
 /// Errors specific to swarm pressure governance.
 #[derive(Debug, Error)]
@@ -553,6 +560,1147 @@ impl SwarmWorkloadPressureSummary {
     #[must_use]
     fn has_live_pressure(self) -> bool {
         self.live_report_count > 0
+    }
+}
+
+/// Required evidence classes for the fourth-wave governor contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FourthWaveEvidenceClass {
+    /// Agent Mail and Beads workload coordination context.
+    BeadMailContext,
+    /// Large-host capacity or topology snapshot.
+    CapacitySnapshot,
+    /// Deterministic lab replay evidence.
+    LabReplay,
+    /// Runtime obligation pressure row.
+    ObligationPressure,
+    /// RCH proof-lane worker admission row.
+    RchProofLane,
+    /// Runtime region pressure row.
+    RegionPressure,
+    /// Worker and agent envelope row.
+    WorkerEnvelope,
+}
+
+impl FourthWaveEvidenceClass {
+    /// Stable schema label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BeadMailContext => "bead_mail_context",
+            Self::CapacitySnapshot => "capacity_snapshot",
+            Self::LabReplay => "lab_replay",
+            Self::ObligationPressure => "obligation_pressure",
+            Self::RchProofLane => "rch_proof_lane",
+            Self::RegionPressure => "region_pressure",
+            Self::WorkerEnvelope => "worker_envelope",
+        }
+    }
+}
+
+const FOURTH_WAVE_REQUIRED_EVIDENCE_CLASSES: [FourthWaveEvidenceClass; 7] = [
+    FourthWaveEvidenceClass::BeadMailContext,
+    FourthWaveEvidenceClass::CapacitySnapshot,
+    FourthWaveEvidenceClass::LabReplay,
+    FourthWaveEvidenceClass::ObligationPressure,
+    FourthWaveEvidenceClass::RchProofLane,
+    FourthWaveEvidenceClass::RegionPressure,
+    FourthWaveEvidenceClass::WorkerEnvelope,
+];
+
+/// Evidence claim quality for fourth-wave governor rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FourthWaveEvidenceClaimStatus {
+    /// Coordination-only evidence; useful context but not behavior proof.
+    CoordinationEvidence,
+    /// Schema-only evidence.
+    SchemaContract,
+    /// Deterministic replay-backed evidence.
+    ReplayBacked,
+    /// Remote RCH proof admission or success evidence.
+    RemoteProof,
+    /// Remote RCH worker refusal evidence.
+    RemoteRefusal,
+    /// Local RCH fallback marker.
+    LocalFallback,
+    /// Advisory-only signal that cannot drive control without replay evidence.
+    AdvisoryOnly,
+}
+
+impl FourthWaveEvidenceClaimStatus {
+    /// Stable schema label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CoordinationEvidence => "coordination_evidence",
+            Self::SchemaContract => "schema_contract",
+            Self::ReplayBacked => "replay_backed",
+            Self::RemoteProof => "remote_proof",
+            Self::RemoteRefusal => "remote_refusal",
+            Self::LocalFallback => "local_fallback",
+            Self::AdvisoryOnly => "advisory_only",
+        }
+    }
+
+    #[must_use]
+    const fn is_advisory_only(self) -> bool {
+        matches!(self, Self::AdvisoryOnly)
+    }
+}
+
+/// Snapshot parser status for fourth-wave governor inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FourthWaveInputStatus {
+    /// All required snapshot sections parsed.
+    Complete,
+    /// Parser detected malformed or incompatible snapshot data.
+    Malformed,
+}
+
+impl FourthWaveInputStatus {
+    /// Stable schema label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Malformed => "malformed",
+        }
+    }
+}
+
+/// Workload class for the fourth-wave governor objective row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FourthWaveWorkloadClass {
+    /// Required release/proof/cleanup work that must not be silently shed.
+    Required,
+    /// Optional work that may be browned out under pressure.
+    Optional,
+}
+
+impl FourthWaveWorkloadClass {
+    /// Stable schema label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Optional => "optional",
+        }
+    }
+}
+
+/// Configured objective row attached to a fourth-wave governor input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveGovernorObjective {
+    /// Stable objective identifier.
+    pub objective_id: String,
+    /// Workload class evaluated by this objective.
+    pub workload_class: FourthWaveWorkloadClass,
+    /// Target confidence floor for evidence-driven action.
+    pub target_confidence_bps: u16,
+}
+
+impl FourthWaveGovernorObjective {
+    /// Build a required-work objective.
+    #[must_use]
+    pub fn required(objective_id: impl Into<String>, target_confidence_bps: u16) -> Self {
+        Self {
+            objective_id: objective_id.into(),
+            workload_class: FourthWaveWorkloadClass::Required,
+            target_confidence_bps,
+        }
+    }
+
+    /// Build an optional-work objective.
+    #[must_use]
+    pub fn optional(objective_id: impl Into<String>, target_confidence_bps: u16) -> Self {
+        Self {
+            objective_id: objective_id.into(),
+            workload_class: FourthWaveWorkloadClass::Optional,
+            target_confidence_bps,
+        }
+    }
+}
+
+/// Normalized host capacity row for fourth-wave governor snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveHostCapacity {
+    /// Stable host profile id.
+    pub host_profile_id: String,
+    /// Physical core count.
+    pub physical_core_count: u16,
+    /// Effective available parallelism.
+    pub available_parallelism: u16,
+    /// NUMA node count.
+    pub numa_node_count: u16,
+    /// Total memory in MiB.
+    pub memory_total_mib: u64,
+    /// Cgroup CPU quota in milliseconds.
+    pub cgroup_cpu_quota_millis: u64,
+}
+
+/// Worker and agent envelope row for fourth-wave governor snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FourthWaveWorkerEnvelope {
+    /// Local agent slots.
+    pub local_agent_slots: u16,
+    /// Maximum admitted agent count.
+    pub max_agent_count: u16,
+    /// Currently active agent count.
+    pub active_agent_count: u16,
+    /// Remote RCH worker slots.
+    pub remote_worker_slots: u16,
+    /// Cache-warm remote workers.
+    pub cache_warm_remote_workers: u16,
+}
+
+/// Core-pressure envelope row for fourth-wave governor snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FourthWaveCoreEnvelope {
+    /// Local core pressure in basis points.
+    pub local_core_pressure_bps: u16,
+    /// Remote core pressure in basis points.
+    pub remote_core_pressure_bps: u16,
+    /// Cores reserved for critical work.
+    pub reserved_critical_cores: u16,
+    /// Core pressure budget for admitting more work.
+    pub admit_core_budget_bps: u16,
+}
+
+/// Memory envelope row for fourth-wave governor snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FourthWaveMemoryEnvelope {
+    /// Total memory in MiB.
+    pub total_mib: u64,
+    /// Available memory in MiB.
+    pub available_mib: u64,
+    /// Memory reserved for validation in MiB.
+    pub reserved_validation_mib: u64,
+    /// Artifact-cache memory in MiB.
+    pub artifact_cache_mib: u64,
+    /// Memory pressure in basis points.
+    pub memory_pressure_bps: u16,
+}
+
+/// Active-region pressure row for fourth-wave governor snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FourthWaveActiveRegionPressure {
+    /// Number of active regions.
+    pub active_region_count: u64,
+    /// Region limit.
+    pub region_limit: u64,
+    /// Runnable queue depth.
+    pub queue_depth: u64,
+    /// Region pressure in basis points.
+    pub region_pressure_bps: u16,
+}
+
+/// Obligation pressure row for fourth-wave governor snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FourthWaveObligationPressure {
+    /// Live obligation count.
+    pub live_obligation_count: u64,
+    /// Drain backlog.
+    pub drain_backlog: u64,
+    /// Suspected leak count.
+    pub leak_suspect_count: u64,
+    /// Obligation pressure in basis points.
+    pub obligation_pressure_bps: u16,
+}
+
+/// RCH admission row for fourth-wave governor snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveRchAdmissionState {
+    /// Whether this proof lane requires remote RCH execution.
+    pub remote_required: bool,
+    /// Whether at least one remote worker is admissible.
+    pub workers_admissible: bool,
+    /// Redacted selected worker id, when any.
+    pub selected_worker: Option<String>,
+    /// Whether any local fallback marker was detected.
+    pub local_fallback_marker_detected: bool,
+    /// First blocker, when worker admission failed.
+    pub first_blocker: Option<String>,
+}
+
+/// Agent Mail and Beads workload context for fourth-wave governor snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FourthWaveBeadMailWorkloadContext {
+    /// Ready bead count.
+    pub ready_beads: u64,
+    /// In-progress bead count.
+    pub in_progress_beads: u64,
+    /// Reserved path count.
+    pub reserved_path_count: u64,
+    /// Ack-required message backlog.
+    pub ack_required_backlog: u64,
+    /// Whether the tracker is writable.
+    pub tracker_writable: bool,
+}
+
+/// Lab replay metadata for fourth-wave governor snapshots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveLabReplayMetadata {
+    /// Scenario family.
+    pub scenario_family: String,
+    /// Deterministic scenario seed.
+    pub seed: u64,
+    /// Replay artifact path, when present.
+    pub replay_artifact: Option<String>,
+    /// Whether the snapshot is backed by deterministic replay evidence.
+    pub replay_backed: bool,
+}
+
+/// One evidence row consumed by the fourth-wave governor policy engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveEvidenceRow {
+    /// Required evidence class.
+    pub source_class: FourthWaveEvidenceClass,
+    /// Stable source id.
+    pub source_id: String,
+    /// Source schema version.
+    pub source_schema_version: String,
+    /// Evidence age in seconds.
+    pub evidence_age_seconds: u64,
+    /// Stable evidence hash.
+    pub evidence_hash: String,
+    /// Confidence in basis points.
+    pub confidence_bps: u16,
+    /// Evidence claim status.
+    pub claim_status: FourthWaveEvidenceClaimStatus,
+    /// Whether this row carries a local fallback marker.
+    pub local_fallback_marker_detected: bool,
+    /// Redacted source subject for logs.
+    pub redacted_subject: String,
+    /// Rejection/blocker reason, when any.
+    pub rejected_reason: String,
+}
+
+impl FourthWaveEvidenceRow {
+    /// Build a fresh evidence row for tests and deterministic replay fixtures.
+    #[must_use]
+    pub fn new(
+        source_class: FourthWaveEvidenceClass,
+        source_id: impl Into<String>,
+        claim_status: FourthWaveEvidenceClaimStatus,
+        confidence_bps: u16,
+    ) -> Self {
+        let source_id = source_id.into();
+        Self {
+            source_class,
+            source_schema_version: "fourth-wave-test-schema-v1".to_string(),
+            evidence_age_seconds: 0,
+            evidence_hash: format!("sha256:{source_id:0<64}"),
+            confidence_bps,
+            claim_status,
+            local_fallback_marker_detected: claim_status
+                == FourthWaveEvidenceClaimStatus::LocalFallback,
+            redacted_subject: format!("fourth-wave://{}", source_class.as_str()),
+            rejected_reason: String::new(),
+            source_id,
+        }
+    }
+
+    /// Override evidence age.
+    #[must_use]
+    pub fn with_age_seconds(mut self, evidence_age_seconds: u64) -> Self {
+        self.evidence_age_seconds = evidence_age_seconds;
+        self
+    }
+
+    /// Mark this row as a local fallback marker.
+    #[must_use]
+    pub fn with_local_fallback_marker(mut self, rejected_reason: impl Into<String>) -> Self {
+        self.local_fallback_marker_detected = true;
+        self.claim_status = FourthWaveEvidenceClaimStatus::LocalFallback;
+        self.rejected_reason = rejected_reason.into();
+        self
+    }
+
+    /// Set the row rejection reason.
+    #[must_use]
+    pub fn with_rejected_reason(mut self, rejected_reason: impl Into<String>) -> Self {
+        self.rejected_reason = rejected_reason.into();
+        self
+    }
+}
+
+/// Complete fourth-wave governor pressure snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWavePressureSnapshot {
+    /// Snapshot schema version.
+    pub schema_version: String,
+    /// Stable snapshot id.
+    pub snapshot_id: String,
+    /// Parser status.
+    pub input_status: FourthWaveInputStatus,
+    /// Policy version.
+    pub policy_version: String,
+    /// Input artifact hashes.
+    pub input_artifact_hashes: Vec<String>,
+    /// Normalized host capacity row.
+    pub normalized_host_capacity: FourthWaveHostCapacity,
+    /// Worker envelope row.
+    pub worker_envelope: FourthWaveWorkerEnvelope,
+    /// Core envelope row.
+    pub core_envelope: FourthWaveCoreEnvelope,
+    /// Memory envelope row.
+    pub memory_envelope: FourthWaveMemoryEnvelope,
+    /// Active region pressure row.
+    pub active_region_pressure: FourthWaveActiveRegionPressure,
+    /// Obligation pressure row.
+    pub obligation_pressure: FourthWaveObligationPressure,
+    /// RCH admission row.
+    pub rch_admission_state: FourthWaveRchAdmissionState,
+    /// Agent Mail and Beads context row.
+    pub bead_mail_workload_context: FourthWaveBeadMailWorkloadContext,
+    /// Lab replay metadata.
+    pub lab_replay_metadata: FourthWaveLabReplayMetadata,
+    /// Evidence rows in any caller order.
+    pub evidence_rows: Vec<FourthWaveEvidenceRow>,
+}
+
+/// Full input to the fourth-wave governor policy engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveGovernorInput {
+    /// Bead id or policy owner id used in logs.
+    pub bead_id: String,
+    /// Scenario id used for deterministic receipts.
+    pub scenario_id: String,
+    /// Objective row.
+    pub objective: FourthWaveGovernorObjective,
+    /// Pressure snapshot.
+    pub pressure_snapshot: FourthWavePressureSnapshot,
+}
+
+/// Deterministic fourth-wave governor action vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FourthWaveGovernorAction {
+    /// Fresh supported evidence admits required work.
+    AdmitRequiredWork,
+    /// Pressure sheds optional work but does not enable a runtime bridge.
+    BrownoutOptionalWork,
+    /// Remote-required proof work is deferred because no remote worker is admissible.
+    DeferNoRemoteWorker,
+    /// Advisory-only evidence fails closed.
+    FailClosedAdvisoryOnly,
+    /// Local RCH fallback marker fails closed.
+    FailClosedLocalRchFallback,
+    /// Malformed input fails closed.
+    FailClosedMalformedInput,
+    /// Missing required evidence fails closed.
+    FailClosedMissingEvidence,
+    /// Stale evidence fails closed.
+    FailClosedStaleEvidence,
+}
+
+impl FourthWaveGovernorAction {
+    /// Stable schema label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdmitRequiredWork => "admit_required_work",
+            Self::BrownoutOptionalWork => "brownout_optional_work",
+            Self::DeferNoRemoteWorker => "defer_no_remote_worker",
+            Self::FailClosedAdvisoryOnly => "fail_closed_advisory_only",
+            Self::FailClosedLocalRchFallback => "fail_closed_local_rch_fallback",
+            Self::FailClosedMalformedInput => "fail_closed_malformed_input",
+            Self::FailClosedMissingEvidence => "fail_closed_missing_evidence",
+            Self::FailClosedStaleEvidence => "fail_closed_stale_evidence",
+        }
+    }
+
+    /// Whether the action fails closed before any control behavior.
+    #[must_use]
+    pub const fn fail_closed(self) -> bool {
+        matches!(
+            self,
+            Self::FailClosedAdvisoryOnly
+                | Self::FailClosedLocalRchFallback
+                | Self::FailClosedMalformedInput
+                | Self::FailClosedMissingEvidence
+                | Self::FailClosedStaleEvidence
+        )
+    }
+}
+
+/// Deterministic fourth-wave governor rule id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FourthWaveGovernorRule {
+    /// Malformed input rule.
+    MalformedInput,
+    /// Missing required evidence rule.
+    MissingRequiredEvidence,
+    /// Local RCH fallback rule.
+    LocalRchFallback,
+    /// Stale evidence rule.
+    StaleEvidence,
+    /// Advisory-only evidence rule.
+    AdvisoryOnlyEvidence,
+    /// Remote-required no-worker rule.
+    RemoteRequiredNoWorker,
+    /// Optional-work brownout rule.
+    BrownoutOptionalWork,
+    /// Required-work admit rule.
+    AdmitRequiredWork,
+}
+
+impl FourthWaveGovernorRule {
+    /// Stable rule id.
+    #[must_use]
+    pub const fn rule_id(self) -> &'static str {
+        match self {
+            Self::MalformedInput => "malformed-input",
+            Self::MissingRequiredEvidence => "missing-required-evidence",
+            Self::LocalRchFallback => "local-rch-fallback",
+            Self::StaleEvidence => "stale-evidence",
+            Self::AdvisoryOnlyEvidence => "advisory-only-evidence",
+            Self::RemoteRequiredNoWorker => "remote-required-no-worker",
+            Self::BrownoutOptionalWork => "brownout-optional-work",
+            Self::AdmitRequiredWork => "admit-required-work",
+        }
+    }
+
+    /// Stable priority from the schema contract.
+    #[must_use]
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::MalformedInput => 10,
+            Self::MissingRequiredEvidence => 20,
+            Self::LocalRchFallback => 30,
+            Self::StaleEvidence => 40,
+            Self::AdvisoryOnlyEvidence => 50,
+            Self::RemoteRequiredNoWorker => 60,
+            Self::BrownoutOptionalWork => 70,
+            Self::AdmitRequiredWork => 80,
+        }
+    }
+
+    /// Action selected by this rule.
+    #[must_use]
+    pub const fn action(self) -> FourthWaveGovernorAction {
+        match self {
+            Self::MalformedInput => FourthWaveGovernorAction::FailClosedMalformedInput,
+            Self::MissingRequiredEvidence => FourthWaveGovernorAction::FailClosedMissingEvidence,
+            Self::LocalRchFallback => FourthWaveGovernorAction::FailClosedLocalRchFallback,
+            Self::StaleEvidence => FourthWaveGovernorAction::FailClosedStaleEvidence,
+            Self::AdvisoryOnlyEvidence => FourthWaveGovernorAction::FailClosedAdvisoryOnly,
+            Self::RemoteRequiredNoWorker => FourthWaveGovernorAction::DeferNoRemoteWorker,
+            Self::BrownoutOptionalWork => FourthWaveGovernorAction::BrownoutOptionalWork,
+            Self::AdmitRequiredWork => FourthWaveGovernorAction::AdmitRequiredWork,
+        }
+    }
+}
+
+const FOURTH_WAVE_RULE_PRIORITY_ORDER: [FourthWaveGovernorRule; 8] = [
+    FourthWaveGovernorRule::MalformedInput,
+    FourthWaveGovernorRule::MissingRequiredEvidence,
+    FourthWaveGovernorRule::LocalRchFallback,
+    FourthWaveGovernorRule::StaleEvidence,
+    FourthWaveGovernorRule::AdvisoryOnlyEvidence,
+    FourthWaveGovernorRule::RemoteRequiredNoWorker,
+    FourthWaveGovernorRule::BrownoutOptionalWork,
+    FourthWaveGovernorRule::AdmitRequiredWork,
+];
+
+/// Evidence-quality summary captured in fourth-wave decision receipts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveEvidenceQuality {
+    /// Total evidence rows.
+    pub row_count: u64,
+    /// Required evidence classes present.
+    pub required_input_classes_present: u64,
+    /// Minimum row confidence in basis points.
+    pub min_confidence_bps: u16,
+    /// Maximum evidence age in seconds.
+    pub max_evidence_age_seconds: u64,
+    /// Advisory-only evidence row count.
+    pub advisory_only_row_count: u64,
+    /// Whether lab metadata is replay-backed.
+    pub replay_backed: bool,
+    /// Whether any local fallback marker was present.
+    pub local_fallback_marker_detected: bool,
+    /// Dominant pressure class that would trigger brownout, when any.
+    pub dominant_pressure_class: Option<String>,
+}
+
+impl FourthWaveEvidenceQuality {
+    #[must_use]
+    fn as_log_value(&self) -> String {
+        format!(
+            "rows={} required_present={} min_confidence_bps={} max_age_seconds={} advisory_only_rows={} replay_backed={} local_fallback_marker_detected={} dominant_pressure_class={}",
+            self.row_count,
+            self.required_input_classes_present,
+            self.min_confidence_bps,
+            self.max_evidence_age_seconds,
+            self.advisory_only_row_count,
+            self.replay_backed,
+            self.local_fallback_marker_detected,
+            self.dominant_pressure_class.as_deref().unwrap_or("none")
+        )
+    }
+}
+
+/// Candidate rule not selected by the fourth-wave governor evaluator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveRejectedAlternative {
+    /// Candidate rule id.
+    pub rule_id: &'static str,
+    /// Candidate action.
+    pub selected_action: FourthWaveGovernorAction,
+    /// Deterministic reason the candidate was not selected.
+    pub reason: String,
+}
+
+/// Log fields required by the fourth-wave decision receipt contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveGovernorLogFields {
+    /// Bead id.
+    pub bead_id: String,
+    /// Scenario id.
+    pub scenario_id: String,
+    /// Snapshot id.
+    pub snapshot_id: String,
+    /// Decision id.
+    pub decision_id: String,
+    /// Policy version.
+    pub policy_version: String,
+    /// Selected action label.
+    pub selected_action: String,
+    /// Input artifact hashes joined in deterministic order.
+    pub input_artifact_hashes: String,
+    /// Rejected row count.
+    pub rejected_row_count: u64,
+    /// First rejected row reason.
+    pub first_rejected_row_reason: String,
+    /// Objective id.
+    pub objective_id: String,
+    /// Workload class.
+    pub workload_class: String,
+    /// Evidence quality summary.
+    pub evidence_quality: String,
+}
+
+/// Replayable fourth-wave governor decision receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FourthWaveGovernorDecisionReceipt {
+    /// Receipt schema version.
+    pub schema_version: &'static str,
+    /// Deterministic decision id.
+    pub decision_id: String,
+    /// Policy version.
+    pub policy_version: String,
+    /// Snapshot id.
+    pub snapshot_id: String,
+    /// Selected action.
+    pub selected_action: FourthWaveGovernorAction,
+    /// Non-action reason, when no action can be claimed.
+    pub non_action_reason: String,
+    /// Whether this decision fails closed.
+    pub fail_closed: bool,
+    /// Selected rule id.
+    pub rule_id: &'static str,
+    /// Confidence in basis points.
+    pub confidence_bps: u16,
+    /// Input artifact hashes.
+    pub input_artifact_hashes: Vec<String>,
+    /// Evidence row ids in deterministic order.
+    pub evidence_rows: Vec<String>,
+    /// Rejected row ids or missing class labels.
+    pub rejected_rows: Vec<String>,
+    /// Rejected candidate alternatives.
+    pub rejected_alternatives: Vec<FourthWaveRejectedAlternative>,
+    /// Objective row copied into the receipt.
+    pub objective_row: FourthWaveGovernorObjective,
+    /// Evidence quality summary.
+    pub evidence_quality: FourthWaveEvidenceQuality,
+    /// Structured log fields.
+    pub log_fields: FourthWaveGovernorLogFields,
+    /// Claims explicitly not made by this policy layer.
+    pub non_claims: Vec<&'static str>,
+}
+
+/// Evaluate the pure fourth-wave governor policy layer.
+///
+/// The evaluator is side-effect-free and advisory-only: it emits a replayable
+/// receipt, but it does not admit, reject, brown out, or defer runtime work.
+#[must_use]
+pub fn evaluate_fourth_wave_governor(
+    input: &FourthWaveGovernorInput,
+) -> FourthWaveGovernorDecisionReceipt {
+    let snapshot = &input.pressure_snapshot;
+    let evidence_rows = fourth_wave_sorted_evidence_row_ids(&snapshot.evidence_rows);
+    let input_artifact_hashes = fourth_wave_sorted_strings(&snapshot.input_artifact_hashes);
+    let pressure_trigger = fourth_wave_brownout_pressure_trigger(snapshot);
+    let evidence_quality = fourth_wave_evidence_quality(snapshot, pressure_trigger.as_deref());
+
+    let selected = fourth_wave_select_rule(input, pressure_trigger.as_deref());
+    let rule = selected.rule;
+    let action = rule.action();
+    let rejected_rows = fourth_wave_rejected_rows_for_rule(snapshot, rule, &selected.reason);
+    let confidence_bps = fourth_wave_receipt_confidence(snapshot, rule);
+    let decision_id = format!(
+        "fw-governor-decision/{}/policy-v1",
+        fourth_wave_scenario_slug(&input.scenario_id)
+    );
+    let first_rejected_row_reason = fourth_wave_first_rejected_row_reason(snapshot, &rejected_rows)
+        .unwrap_or_else(|| {
+            if rejected_rows.is_empty() {
+                String::new()
+            } else {
+                selected.reason.clone()
+            }
+        });
+    let log_fields = FourthWaveGovernorLogFields {
+        bead_id: input.bead_id.trim().to_string(),
+        scenario_id: input.scenario_id.trim().to_string(),
+        snapshot_id: snapshot.snapshot_id.trim().to_string(),
+        decision_id: decision_id.clone(),
+        policy_version: snapshot.policy_version.trim().to_string(),
+        selected_action: action.as_str().to_string(),
+        input_artifact_hashes: input_artifact_hashes.join(","),
+        rejected_row_count: rejected_rows.len() as u64,
+        first_rejected_row_reason,
+        objective_id: input.objective.objective_id.trim().to_string(),
+        workload_class: input.objective.workload_class.as_str().to_string(),
+        evidence_quality: evidence_quality.as_log_value(),
+    };
+
+    FourthWaveGovernorDecisionReceipt {
+        schema_version: FOURTH_WAVE_DECISION_RECEIPT_SCHEMA_VERSION,
+        decision_id,
+        policy_version: snapshot.policy_version.trim().to_string(),
+        snapshot_id: snapshot.snapshot_id.trim().to_string(),
+        selected_action: action,
+        non_action_reason: selected.reason,
+        fail_closed: action.fail_closed(),
+        rule_id: rule.rule_id(),
+        confidence_bps,
+        input_artifact_hashes,
+        evidence_rows,
+        rejected_rows,
+        rejected_alternatives: fourth_wave_rejected_alternatives(rule),
+        objective_row: input.objective.clone(),
+        evidence_quality,
+        log_fields,
+        non_claims: vec![
+            "policy engine only",
+            "no runtime bridge enabled",
+            "local cargo fallback not authorized",
+        ],
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FourthWaveSelectedRule {
+    rule: FourthWaveGovernorRule,
+    reason: String,
+}
+
+fn fourth_wave_select_rule(
+    input: &FourthWaveGovernorInput,
+    pressure_trigger: Option<&str>,
+) -> FourthWaveSelectedRule {
+    let snapshot = &input.pressure_snapshot;
+    if let Some(reason) = fourth_wave_malformed_reason(input) {
+        return FourthWaveSelectedRule {
+            rule: FourthWaveGovernorRule::MalformedInput,
+            reason,
+        };
+    }
+
+    let missing = fourth_wave_missing_required_evidence_classes(snapshot);
+    if !missing.is_empty() {
+        return FourthWaveSelectedRule {
+            rule: FourthWaveGovernorRule::MissingRequiredEvidence,
+            reason: format!("missing required evidence classes: {}", missing.join(",")),
+        };
+    }
+
+    if fourth_wave_local_fallback_marker_detected(snapshot) {
+        return FourthWaveSelectedRule {
+            rule: FourthWaveGovernorRule::LocalRchFallback,
+            reason: "local RCH fallback marker detected".to_string(),
+        };
+    }
+
+    if let Some(stale_row) = snapshot
+        .evidence_rows
+        .iter()
+        .filter(|row| row.evidence_age_seconds > FOURTH_WAVE_MAX_EVIDENCE_AGE_SECONDS)
+        .min_by(|left, right| {
+            (
+                left.evidence_age_seconds,
+                left.source_class.as_str(),
+                left.source_id.as_str(),
+            )
+                .cmp(&(
+                    right.evidence_age_seconds,
+                    right.source_class.as_str(),
+                    right.source_id.as_str(),
+                ))
+        })
+    {
+        return FourthWaveSelectedRule {
+            rule: FourthWaveGovernorRule::StaleEvidence,
+            reason: format!(
+                "evidence older than {FOURTH_WAVE_MAX_EVIDENCE_AGE_SECONDS} seconds: {}",
+                stale_row.source_id.trim()
+            ),
+        };
+    }
+
+    if !snapshot.lab_replay_metadata.replay_backed
+        && !snapshot.evidence_rows.is_empty()
+        && snapshot
+            .evidence_rows
+            .iter()
+            .all(|row| row.claim_status.is_advisory_only())
+    {
+        return FourthWaveSelectedRule {
+            rule: FourthWaveGovernorRule::AdvisoryOnlyEvidence,
+            reason: "advisory evidence lacks lab or replay backing".to_string(),
+        };
+    }
+
+    if snapshot.rch_admission_state.remote_required
+        && !snapshot.rch_admission_state.workers_admissible
+    {
+        return FourthWaveSelectedRule {
+            rule: FourthWaveGovernorRule::RemoteRequiredNoWorker,
+            reason: "remote-required lane has no admissible remote worker; local fallback refused"
+                .to_string(),
+        };
+    }
+
+    if let Some(reason) = pressure_trigger {
+        return FourthWaveSelectedRule {
+            rule: FourthWaveGovernorRule::BrownoutOptionalWork,
+            reason: reason.to_string(),
+        };
+    }
+
+    FourthWaveSelectedRule {
+        rule: FourthWaveGovernorRule::AdmitRequiredWork,
+        reason: String::new(),
+    }
+}
+
+fn fourth_wave_malformed_reason(input: &FourthWaveGovernorInput) -> Option<String> {
+    let snapshot = &input.pressure_snapshot;
+    if input.scenario_id.trim().is_empty() {
+        return Some("scenario_id is empty".to_string());
+    }
+    if input.bead_id.trim().is_empty() {
+        return Some("bead_id is empty".to_string());
+    }
+    if input.objective.objective_id.trim().is_empty() {
+        return Some("objective_id is empty".to_string());
+    }
+    if input.objective.target_confidence_bps > 10_000 {
+        return Some("objective target_confidence_bps exceeds 10000".to_string());
+    }
+    if snapshot.input_status != FourthWaveInputStatus::Complete {
+        return Some(format!(
+            "snapshot input_status is {}",
+            snapshot.input_status.as_str()
+        ));
+    }
+    if snapshot.schema_version.trim() != FOURTH_WAVE_PRESSURE_SNAPSHOT_SCHEMA_VERSION {
+        return Some("snapshot schema_version is unsupported".to_string());
+    }
+    if snapshot.policy_version.trim() != FOURTH_WAVE_GOVERNOR_POLICY_VERSION {
+        return Some("snapshot policy_version is unsupported".to_string());
+    }
+    if snapshot.snapshot_id.trim().is_empty() {
+        return Some("snapshot_id is empty".to_string());
+    }
+    if snapshot
+        .input_artifact_hashes
+        .iter()
+        .any(|hash| hash.trim().is_empty())
+    {
+        return Some("input_artifact_hashes contains an empty hash".to_string());
+    }
+    if snapshot
+        .evidence_rows
+        .iter()
+        .any(|row| row.source_id.trim().is_empty())
+    {
+        return Some("evidence row source_id is empty".to_string());
+    }
+    if snapshot
+        .evidence_rows
+        .iter()
+        .any(|row| row.source_schema_version.trim().is_empty())
+    {
+        return Some("evidence row source_schema_version is empty".to_string());
+    }
+    if snapshot
+        .evidence_rows
+        .iter()
+        .any(|row| row.evidence_hash.trim().is_empty())
+    {
+        return Some("evidence row evidence_hash is empty".to_string());
+    }
+    if snapshot
+        .evidence_rows
+        .iter()
+        .any(|row| row.confidence_bps > 10_000)
+    {
+        return Some("evidence row confidence_bps exceeds 10000".to_string());
+    }
+    None
+}
+
+fn fourth_wave_missing_required_evidence_classes(
+    snapshot: &FourthWavePressureSnapshot,
+) -> Vec<String> {
+    let present: BTreeSet<_> = snapshot
+        .evidence_rows
+        .iter()
+        .map(|row| row.source_class)
+        .collect();
+    FOURTH_WAVE_REQUIRED_EVIDENCE_CLASSES
+        .iter()
+        .copied()
+        .filter(|class| !present.contains(class))
+        .map(|class| class.as_str().to_string())
+        .collect()
+}
+
+fn fourth_wave_local_fallback_marker_detected(snapshot: &FourthWavePressureSnapshot) -> bool {
+    snapshot.rch_admission_state.local_fallback_marker_detected
+        || snapshot
+            .evidence_rows
+            .iter()
+            .any(|row| row.local_fallback_marker_detected)
+}
+
+fn fourth_wave_brownout_pressure_trigger(snapshot: &FourthWavePressureSnapshot) -> Option<String> {
+    if snapshot.memory_envelope.memory_pressure_bps >= FOURTH_WAVE_BROWNOUT_PRESSURE_THRESHOLD_BPS {
+        return Some("optional work exceeds memory pressure budget".to_string());
+    }
+    if snapshot.core_envelope.admit_core_budget_bps > 0
+        && (snapshot.core_envelope.local_core_pressure_bps
+            > snapshot.core_envelope.admit_core_budget_bps
+            || snapshot.core_envelope.remote_core_pressure_bps
+                > snapshot.core_envelope.admit_core_budget_bps)
+    {
+        return Some("optional work exceeds core pressure budget".to_string());
+    }
+    if snapshot.active_region_pressure.region_pressure_bps
+        >= FOURTH_WAVE_BROWNOUT_PRESSURE_THRESHOLD_BPS
+        || (snapshot.active_region_pressure.region_limit > 0
+            && snapshot.active_region_pressure.active_region_count
+                >= snapshot.active_region_pressure.region_limit)
+    {
+        return Some("optional work exceeds region pressure budget".to_string());
+    }
+    if snapshot.obligation_pressure.obligation_pressure_bps
+        >= FOURTH_WAVE_BROWNOUT_PRESSURE_THRESHOLD_BPS
+        || snapshot.obligation_pressure.leak_suspect_count > 0
+    {
+        return Some("optional work exceeds obligation pressure budget".to_string());
+    }
+    None
+}
+
+fn fourth_wave_evidence_quality(
+    snapshot: &FourthWavePressureSnapshot,
+    pressure_trigger: Option<&str>,
+) -> FourthWaveEvidenceQuality {
+    let present: BTreeSet<_> = snapshot
+        .evidence_rows
+        .iter()
+        .map(|row| row.source_class)
+        .collect();
+    FourthWaveEvidenceQuality {
+        row_count: snapshot.evidence_rows.len() as u64,
+        required_input_classes_present: FOURTH_WAVE_REQUIRED_EVIDENCE_CLASSES
+            .iter()
+            .filter(|class| present.contains(class))
+            .count() as u64,
+        min_confidence_bps: snapshot
+            .evidence_rows
+            .iter()
+            .map(|row| row.confidence_bps)
+            .min()
+            .unwrap_or(0),
+        max_evidence_age_seconds: snapshot
+            .evidence_rows
+            .iter()
+            .map(|row| row.evidence_age_seconds)
+            .max()
+            .unwrap_or(0),
+        advisory_only_row_count: snapshot
+            .evidence_rows
+            .iter()
+            .filter(|row| row.claim_status.is_advisory_only())
+            .count() as u64,
+        replay_backed: snapshot.lab_replay_metadata.replay_backed,
+        local_fallback_marker_detected: fourth_wave_local_fallback_marker_detected(snapshot),
+        dominant_pressure_class: pressure_trigger.map(ToOwned::to_owned),
+    }
+}
+
+fn fourth_wave_receipt_confidence(
+    snapshot: &FourthWavePressureSnapshot,
+    rule: FourthWaveGovernorRule,
+) -> u16 {
+    match rule {
+        FourthWaveGovernorRule::AdmitRequiredWork
+        | FourthWaveGovernorRule::BrownoutOptionalWork
+        | FourthWaveGovernorRule::RemoteRequiredNoWorker => snapshot
+            .evidence_rows
+            .iter()
+            .map(|row| row.confidence_bps)
+            .min()
+            .unwrap_or(0),
+        FourthWaveGovernorRule::MalformedInput
+        | FourthWaveGovernorRule::MissingRequiredEvidence
+        | FourthWaveGovernorRule::LocalRchFallback
+        | FourthWaveGovernorRule::StaleEvidence
+        | FourthWaveGovernorRule::AdvisoryOnlyEvidence => 0,
+    }
+}
+
+fn fourth_wave_rejected_rows_for_rule(
+    snapshot: &FourthWavePressureSnapshot,
+    rule: FourthWaveGovernorRule,
+    selected_reason: &str,
+) -> Vec<String> {
+    match rule {
+        FourthWaveGovernorRule::MalformedInput => vec![snapshot.snapshot_id.trim().to_string()],
+        FourthWaveGovernorRule::MissingRequiredEvidence => {
+            fourth_wave_missing_required_evidence_classes(snapshot)
+        }
+        FourthWaveGovernorRule::LocalRchFallback => snapshot
+            .evidence_rows
+            .iter()
+            .filter(|row| row.local_fallback_marker_detected)
+            .map(|row| row.source_id.trim().to_string())
+            .collect(),
+        FourthWaveGovernorRule::StaleEvidence => snapshot
+            .evidence_rows
+            .iter()
+            .filter(|row| row.evidence_age_seconds > FOURTH_WAVE_MAX_EVIDENCE_AGE_SECONDS)
+            .map(|row| row.source_id.trim().to_string())
+            .collect(),
+        FourthWaveGovernorRule::AdvisoryOnlyEvidence => snapshot
+            .evidence_rows
+            .iter()
+            .filter(|row| row.claim_status.is_advisory_only())
+            .map(|row| row.source_id.trim().to_string())
+            .collect(),
+        FourthWaveGovernorRule::RemoteRequiredNoWorker => {
+            let mut rows: Vec<String> = snapshot
+                .evidence_rows
+                .iter()
+                .filter(|row| row.source_class == FourthWaveEvidenceClass::RchProofLane)
+                .map(|row| row.source_id.trim().to_string())
+                .collect();
+            if rows.is_empty() {
+                rows.push(
+                    snapshot
+                        .rch_admission_state
+                        .first_blocker
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|blocker| !blocker.is_empty())
+                        .unwrap_or(selected_reason)
+                        .to_string(),
+                );
+            }
+            rows
+        }
+        FourthWaveGovernorRule::BrownoutOptionalWork
+        | FourthWaveGovernorRule::AdmitRequiredWork => Vec::new(),
+    }
+}
+
+fn fourth_wave_first_rejected_row_reason(
+    snapshot: &FourthWavePressureSnapshot,
+    rejected_rows: &[String],
+) -> Option<String> {
+    for rejected_row in rejected_rows {
+        if let Some(reason) = snapshot
+            .evidence_rows
+            .iter()
+            .find(|row| row.source_id.trim() == rejected_row.trim())
+            .and_then(|row| normalized_optional_string(Some(&row.rejected_reason)))
+        {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+fn fourth_wave_rejected_alternatives(
+    selected_rule: FourthWaveGovernorRule,
+) -> Vec<FourthWaveRejectedAlternative> {
+    FOURTH_WAVE_RULE_PRIORITY_ORDER
+        .iter()
+        .copied()
+        .filter(|rule| *rule != selected_rule)
+        .map(|rule| {
+            let reason = if rule.priority() < selected_rule.priority() {
+                format!(
+                    "{} did not trigger before {}",
+                    rule.rule_id(),
+                    selected_rule.rule_id()
+                )
+            } else {
+                format!(
+                    "{} skipped because {} selected first",
+                    rule.rule_id(),
+                    selected_rule.rule_id()
+                )
+            };
+            FourthWaveRejectedAlternative {
+                rule_id: rule.rule_id(),
+                selected_action: rule.action(),
+                reason,
+            }
+        })
+        .collect()
+}
+
+fn fourth_wave_sorted_evidence_row_ids(rows: &[FourthWaveEvidenceRow]) -> Vec<String> {
+    let mut ids: Vec<_> = rows
+        .iter()
+        .map(|row| (row.source_class.as_str(), row.source_id.trim().to_string()))
+        .collect();
+    ids.sort();
+    ids.into_iter().map(|(_, source_id)| source_id).collect()
+}
+
+fn fourth_wave_sorted_strings(values: &[String]) -> Vec<String> {
+    let mut values: Vec<_> = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect();
+    values.sort();
+    values
+}
+
+fn fourth_wave_scenario_slug(scenario_id: &str) -> String {
+    let mut slug = String::with_capacity(scenario_id.len());
+    let mut previous_dash = false;
+    for ch in scenario_id.trim().chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            previous_dash = false;
+        } else if !previous_dash {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = slug.strip_prefix("fw-governor-").unwrap_or(slug);
+    if slug.is_empty() {
+        "unknown".to_string()
+    } else {
+        slug.to_string()
     }
 }
 
@@ -3627,6 +4775,419 @@ mod tests {
             AdmissionDecision::AdmitWithBackpressure => 1,
             AdmissionDecision::Reject => 2,
         }
+    }
+
+    fn fourth_wave_sample_evidence_rows() -> Vec<FourthWaveEvidenceRow> {
+        vec![
+            FourthWaveEvidenceRow::new(
+                FourthWaveEvidenceClass::BeadMailContext,
+                "mail-ready-clean",
+                FourthWaveEvidenceClaimStatus::CoordinationEvidence,
+                8_400,
+            )
+            .with_age_seconds(120),
+            FourthWaveEvidenceRow::new(
+                FourthWaveEvidenceClass::CapacitySnapshot,
+                "large-host-64c-256g",
+                FourthWaveEvidenceClaimStatus::SchemaContract,
+                8_400,
+            )
+            .with_age_seconds(150),
+            FourthWaveEvidenceRow::new(
+                FourthWaveEvidenceClass::LabReplay,
+                "large-host-low-pressure-replay",
+                FourthWaveEvidenceClaimStatus::ReplayBacked,
+                8_600,
+            )
+            .with_age_seconds(200),
+            FourthWaveEvidenceRow::new(
+                FourthWaveEvidenceClass::ObligationPressure,
+                "obligation-drain-low",
+                FourthWaveEvidenceClaimStatus::ReplayBacked,
+                8_400,
+            )
+            .with_age_seconds(170),
+            FourthWaveEvidenceRow::new(
+                FourthWaveEvidenceClass::RchProofLane,
+                "remote-required-admit",
+                FourthWaveEvidenceClaimStatus::RemoteProof,
+                8_400,
+            )
+            .with_age_seconds(180),
+            FourthWaveEvidenceRow::new(
+                FourthWaveEvidenceClass::RegionPressure,
+                "regions-low",
+                FourthWaveEvidenceClaimStatus::ReplayBacked,
+                8_400,
+            )
+            .with_age_seconds(185),
+            FourthWaveEvidenceRow::new(
+                FourthWaveEvidenceClass::WorkerEnvelope,
+                "worker-envelope-low",
+                FourthWaveEvidenceClaimStatus::SchemaContract,
+                8_400,
+            )
+            .with_age_seconds(160),
+        ]
+    }
+
+    fn fourth_wave_sample_input(scenario_id: &str) -> FourthWaveGovernorInput {
+        FourthWaveGovernorInput {
+            bead_id: "asupersync-86fe9v.2".to_string(),
+            scenario_id: scenario_id.to_string(),
+            objective: FourthWaveGovernorObjective::required("release-proof-safety", 8_000),
+            pressure_snapshot: FourthWavePressureSnapshot {
+                schema_version: FOURTH_WAVE_PRESSURE_SNAPSHOT_SCHEMA_VERSION.to_string(),
+                snapshot_id: format!("fw-snapshot-{}", fourth_wave_scenario_slug(scenario_id)),
+                input_status: FourthWaveInputStatus::Complete,
+                policy_version: FOURTH_WAVE_GOVERNOR_POLICY_VERSION.to_string(),
+                input_artifact_hashes: vec![
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                ],
+                normalized_host_capacity: FourthWaveHostCapacity {
+                    host_profile_id: "large-host-64c-256g".to_string(),
+                    physical_core_count: 64,
+                    available_parallelism: 64,
+                    numa_node_count: 2,
+                    memory_total_mib: 262_144,
+                    cgroup_cpu_quota_millis: 64_000,
+                },
+                worker_envelope: FourthWaveWorkerEnvelope {
+                    local_agent_slots: 24,
+                    max_agent_count: 48,
+                    active_agent_count: 16,
+                    remote_worker_slots: 6,
+                    cache_warm_remote_workers: 3,
+                },
+                core_envelope: FourthWaveCoreEnvelope {
+                    local_core_pressure_bps: 3_200,
+                    remote_core_pressure_bps: 2_800,
+                    reserved_critical_cores: 8,
+                    admit_core_budget_bps: 7_600,
+                },
+                memory_envelope: FourthWaveMemoryEnvelope {
+                    total_mib: 262_144,
+                    available_mib: 180_224,
+                    reserved_validation_mib: 32_768,
+                    artifact_cache_mib: 8_192,
+                    memory_pressure_bps: 3_100,
+                },
+                active_region_pressure: FourthWaveActiveRegionPressure {
+                    active_region_count: 28,
+                    region_limit: 128,
+                    queue_depth: 18,
+                    region_pressure_bps: 2_600,
+                },
+                obligation_pressure: FourthWaveObligationPressure {
+                    live_obligation_count: 96,
+                    drain_backlog: 4,
+                    leak_suspect_count: 0,
+                    obligation_pressure_bps: 1_800,
+                },
+                rch_admission_state: FourthWaveRchAdmissionState {
+                    remote_required: true,
+                    workers_admissible: true,
+                    selected_worker: Some("rch-worker://redacted/cache-warm-01".to_string()),
+                    local_fallback_marker_detected: false,
+                    first_blocker: None,
+                },
+                bead_mail_workload_context: FourthWaveBeadMailWorkloadContext {
+                    ready_beads: 2,
+                    in_progress_beads: 1,
+                    reserved_path_count: 4,
+                    ack_required_backlog: 0,
+                    tracker_writable: true,
+                },
+                lab_replay_metadata: FourthWaveLabReplayMetadata {
+                    scenario_family: "large_host_low_pressure".to_string(),
+                    seed: 860_001,
+                    replay_artifact: Some(
+                        "artifacts/large_host_topology_corpus_v1.json".to_string(),
+                    ),
+                    replay_backed: true,
+                },
+                evidence_rows: fourth_wave_sample_evidence_rows(),
+            },
+        }
+    }
+
+    #[test]
+    fn fourth_wave_governor_admits_required_work_with_stable_receipt() {
+        let input = fourth_wave_sample_input("FW-GOVERNOR-ADMIT-REQUIRED-WORK");
+
+        let receipt = evaluate_fourth_wave_governor(&input);
+
+        assert_eq!(
+            receipt.selected_action,
+            FourthWaveGovernorAction::AdmitRequiredWork
+        );
+        assert_eq!(receipt.rule_id, "admit-required-work");
+        assert!(!receipt.fail_closed);
+        assert_eq!(
+            receipt.decision_id,
+            "fw-governor-decision/admit-required-work/policy-v1"
+        );
+        assert_eq!(receipt.confidence_bps, 8_400);
+        assert_eq!(receipt.evidence_rows.len(), 7);
+        assert!(receipt.rejected_rows.is_empty());
+        assert_eq!(receipt.log_fields.selected_action, "admit_required_work");
+        assert_eq!(receipt.log_fields.rejected_row_count, 0);
+        assert_eq!(
+            receipt.objective_row.objective_id,
+            input.objective.objective_id
+        );
+        assert_eq!(receipt.evidence_quality.required_input_classes_present, 7);
+        assert!(
+            receipt
+                .rejected_alternatives
+                .iter()
+                .any(|alternative| alternative.rule_id == "brownout-optional-work")
+        );
+    }
+
+    #[test]
+    fn fourth_wave_governor_zero_evidence_fails_missing_required_evidence() {
+        let mut input = fourth_wave_sample_input("FW-GOVERNOR-MISSING-REQUIRED-EVIDENCE");
+        input.pressure_snapshot.evidence_rows.clear();
+
+        let receipt = evaluate_fourth_wave_governor(&input);
+
+        assert_eq!(
+            receipt.selected_action,
+            FourthWaveGovernorAction::FailClosedMissingEvidence
+        );
+        assert_eq!(receipt.rule_id, "missing-required-evidence");
+        assert!(receipt.fail_closed);
+        assert_eq!(receipt.confidence_bps, 0);
+        assert_eq!(
+            receipt.rejected_rows,
+            vec![
+                "bead_mail_context",
+                "capacity_snapshot",
+                "lab_replay",
+                "obligation_pressure",
+                "rch_proof_lane",
+                "region_pressure",
+                "worker_envelope"
+            ]
+        );
+        assert_eq!(receipt.evidence_quality.row_count, 0);
+        assert_eq!(receipt.log_fields.rejected_row_count, 7);
+    }
+
+    #[test]
+    fn fourth_wave_governor_stale_evidence_fails_closed() {
+        let mut input = fourth_wave_sample_input("FW-GOVERNOR-FAIL-STALE-EVIDENCE");
+        input.pressure_snapshot.evidence_rows[2].evidence_age_seconds =
+            FOURTH_WAVE_MAX_EVIDENCE_AGE_SECONDS + 1;
+
+        let receipt = evaluate_fourth_wave_governor(&input);
+
+        assert_eq!(
+            receipt.selected_action,
+            FourthWaveGovernorAction::FailClosedStaleEvidence
+        );
+        assert_eq!(receipt.rule_id, "stale-evidence");
+        assert_eq!(
+            receipt.rejected_rows,
+            vec!["large-host-low-pressure-replay"]
+        );
+        assert!(
+            receipt
+                .non_action_reason
+                .contains("evidence older than 900 seconds")
+        );
+        assert!(receipt.fail_closed);
+    }
+
+    #[test]
+    fn fourth_wave_governor_local_fallback_marker_preempts_stale_and_pressure() {
+        let mut input = fourth_wave_sample_input("FW-GOVERNOR-FAIL-LOCAL-RCH-FALLBACK");
+        input.pressure_snapshot.memory_envelope.memory_pressure_bps = 9_300;
+        input.pressure_snapshot.evidence_rows[0].evidence_age_seconds =
+            FOURTH_WAVE_MAX_EVIDENCE_AGE_SECONDS + 1;
+        input
+            .pressure_snapshot
+            .rch_admission_state
+            .local_fallback_marker_detected = true;
+        let local_fallback_row = input.pressure_snapshot.evidence_rows[4]
+            .clone()
+            .with_local_fallback_marker("local_fallback_detected");
+        input.pressure_snapshot.evidence_rows[4] = local_fallback_row;
+
+        let receipt = evaluate_fourth_wave_governor(&input);
+
+        assert_eq!(
+            receipt.selected_action,
+            FourthWaveGovernorAction::FailClosedLocalRchFallback
+        );
+        assert_eq!(receipt.rule_id, "local-rch-fallback");
+        assert_eq!(receipt.rejected_rows, vec!["remote-required-admit"]);
+        assert_eq!(
+            receipt.log_fields.first_rejected_row_reason,
+            "local_fallback_detected"
+        );
+        assert!(
+            receipt
+                .rejected_alternatives
+                .iter()
+                .any(|alternative| alternative.rule_id == "stale-evidence"
+                    && alternative.reason.contains("skipped"))
+        );
+    }
+
+    #[test]
+    fn fourth_wave_governor_advisory_only_without_replay_fails_closed() {
+        let mut input = fourth_wave_sample_input("FW-GOVERNOR-FAIL-ADVISORY-ONLY");
+        input.pressure_snapshot.lab_replay_metadata.replay_backed = false;
+        input.pressure_snapshot.lab_replay_metadata.replay_artifact = None;
+        for row in &mut input.pressure_snapshot.evidence_rows {
+            row.claim_status = FourthWaveEvidenceClaimStatus::AdvisoryOnly;
+            row.confidence_bps = 4_200;
+            row.rejected_reason = "advisory_without_replay".to_string();
+        }
+
+        let receipt = evaluate_fourth_wave_governor(&input);
+
+        assert_eq!(
+            receipt.selected_action,
+            FourthWaveGovernorAction::FailClosedAdvisoryOnly
+        );
+        assert_eq!(receipt.rule_id, "advisory-only-evidence");
+        assert_eq!(receipt.rejected_rows.len(), 7);
+        assert_eq!(receipt.confidence_bps, 0);
+        assert_eq!(receipt.evidence_quality.advisory_only_row_count, 7);
+        assert_eq!(
+            receipt.log_fields.first_rejected_row_reason,
+            "advisory_without_replay"
+        );
+    }
+
+    #[test]
+    fn fourth_wave_governor_defer_no_remote_worker_no_win_refuses_local_fallback() {
+        let mut input = fourth_wave_sample_input("FW-GOVERNOR-DEFER-NO-REMOTE-WORKER");
+        input
+            .pressure_snapshot
+            .rch_admission_state
+            .workers_admissible = false;
+        input.pressure_snapshot.rch_admission_state.selected_worker = None;
+        input.pressure_snapshot.rch_admission_state.first_blocker =
+            Some("active_project_exclusion".to_string());
+        input.pressure_snapshot.evidence_rows[4].claim_status =
+            FourthWaveEvidenceClaimStatus::RemoteRefusal;
+        input.pressure_snapshot.evidence_rows[4].rejected_reason =
+            "active_project_exclusion".to_string();
+        input.pressure_snapshot.evidence_rows[4].confidence_bps = 7_800;
+
+        let receipt = evaluate_fourth_wave_governor(&input);
+
+        assert_eq!(
+            receipt.selected_action,
+            FourthWaveGovernorAction::DeferNoRemoteWorker
+        );
+        assert_eq!(receipt.rule_id, "remote-required-no-worker");
+        assert!(!receipt.fail_closed);
+        assert_eq!(receipt.rejected_rows, vec!["remote-required-admit"]);
+        assert_eq!(
+            receipt.log_fields.first_rejected_row_reason,
+            "active_project_exclusion"
+        );
+        assert!(receipt.non_action_reason.contains("local fallback refused"));
+        assert_eq!(receipt.confidence_bps, 7_800);
+    }
+
+    #[test]
+    fn fourth_wave_governor_pressure_boundaries_brownout_optional_work() {
+        let mut exact_memory = fourth_wave_sample_input("FW-GOVERNOR-BROWNOUT-OPTIONAL-WORK");
+        exact_memory
+            .pressure_snapshot
+            .memory_envelope
+            .memory_pressure_bps = FOURTH_WAVE_BROWNOUT_PRESSURE_THRESHOLD_BPS;
+        let receipt = evaluate_fourth_wave_governor(&exact_memory);
+        assert_eq!(
+            receipt.selected_action,
+            FourthWaveGovernorAction::BrownoutOptionalWork
+        );
+        assert_eq!(
+            receipt.non_action_reason,
+            "optional work exceeds memory pressure budget"
+        );
+        assert!(!receipt.fail_closed);
+
+        let mut exact_core_budget = fourth_wave_sample_input("FW-GOVERNOR-ADMIT-EXACT-CORE");
+        exact_core_budget
+            .pressure_snapshot
+            .core_envelope
+            .local_core_pressure_bps = 7_600;
+        assert_eq!(
+            evaluate_fourth_wave_governor(&exact_core_budget).selected_action,
+            FourthWaveGovernorAction::AdmitRequiredWork
+        );
+
+        let mut cpu_heavy = fourth_wave_sample_input("FW-GOVERNOR-CPU-BROWNOUT");
+        cpu_heavy
+            .pressure_snapshot
+            .core_envelope
+            .local_core_pressure_bps = 7_601;
+        assert_eq!(
+            evaluate_fourth_wave_governor(&cpu_heavy).non_action_reason,
+            "optional work exceeds core pressure budget"
+        );
+
+        let mut region_heavy = fourth_wave_sample_input("FW-GOVERNOR-REGION-BROWNOUT");
+        region_heavy
+            .pressure_snapshot
+            .active_region_pressure
+            .region_pressure_bps = FOURTH_WAVE_BROWNOUT_PRESSURE_THRESHOLD_BPS;
+        assert_eq!(
+            evaluate_fourth_wave_governor(&region_heavy).non_action_reason,
+            "optional work exceeds region pressure budget"
+        );
+
+        let mut obligation_heavy = fourth_wave_sample_input("FW-GOVERNOR-OBLIGATION-BROWNOUT");
+        obligation_heavy
+            .pressure_snapshot
+            .obligation_pressure
+            .leak_suspect_count = 1;
+        assert_eq!(
+            evaluate_fourth_wave_governor(&obligation_heavy).non_action_reason,
+            "optional work exceeds obligation pressure budget"
+        );
+    }
+
+    #[test]
+    fn fourth_wave_governor_malformed_input_preempts_evidence_rules() {
+        let mut input = fourth_wave_sample_input("FW-GOVERNOR-FAIL-MALFORMED-INPUT");
+        input.pressure_snapshot.input_status = FourthWaveInputStatus::Malformed;
+        input.pressure_snapshot.evidence_rows.clear();
+        input
+            .pressure_snapshot
+            .rch_admission_state
+            .local_fallback_marker_detected = true;
+
+        let receipt = evaluate_fourth_wave_governor(&input);
+
+        assert_eq!(
+            receipt.selected_action,
+            FourthWaveGovernorAction::FailClosedMalformedInput
+        );
+        assert_eq!(receipt.rule_id, "malformed-input");
+        assert_eq!(
+            receipt.non_action_reason,
+            "snapshot input_status is malformed"
+        );
+        assert_eq!(
+            receipt.rejected_rows,
+            vec!["fw-snapshot-fail-malformed-input"]
+        );
+        assert!(
+            receipt
+                .rejected_alternatives
+                .iter()
+                .any(|alternative| alternative.rule_id == "local-rch-fallback"
+                    && alternative.reason.contains("skipped"))
+        );
     }
 
     #[test]
