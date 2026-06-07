@@ -531,7 +531,11 @@ async fn send_with_producer(
 
 #[cfg(any(feature = "kafka", test))]
 fn producer_retry_backoff(config: &ProducerConfig, attempt: u32) -> Duration {
-    let base_ms = config.linger_ms.max(1);
+    if config.linger_ms == 0 {
+        return Duration::ZERO;
+    }
+
+    let base_ms = config.linger_ms;
     let exp = 1_u64 << attempt.min(6);
     Duration::from_millis(base_ms.saturating_mul(exp).min(250))
 }
@@ -3014,6 +3018,10 @@ mod tests {
         assert_eq!(producer_retry_backoff(&cfg, 1), Duration::from_millis(10));
         assert_eq!(producer_retry_backoff(&cfg, 2), Duration::from_millis(20));
         assert_eq!(producer_retry_backoff(&cfg, 20), Duration::from_millis(250));
+
+        let immediate = ProducerConfig::default().linger_ms(0);
+        assert_eq!(producer_retry_backoff(&immediate, 0), Duration::ZERO);
+        assert_eq!(producer_retry_backoff(&immediate, 20), Duration::ZERO);
     }
 
     #[test]

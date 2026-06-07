@@ -559,12 +559,12 @@ mod tests {
                 .iter()
                 .all(|result| result.verdict == ConnectMethodTestVerdict::Skipped)
         );
-        assert!(report.results.iter().all(|result| {
-            result
-                .error
-                .as_deref()
-                .is_some_and(|error| is_backend_unwired(error))
-        }));
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| { result.error.as_deref().is_some_and(is_backend_unwired) })
+        );
     }
 
     #[tokio::test]

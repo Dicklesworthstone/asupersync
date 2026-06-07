@@ -1,0 +1,107 @@
+{
+  "schema_version": "large-host-topology-corpus-v1",
+  "bead_id": "asupersync-ol11aa.1",
+  "created_date": "2026-06-06",
+  "source_of_truth": {
+    "artifact": "artifacts/large_host_topology_corpus_v1.json",
+    "helper": "scripts/large_host_topology_corpus.py",
+    "e2e_script": "scripts/run_large_host_topology_corpus_e2e.sh",
+    "contract_test": "tests/large_host_topology_corpus_contract.rs",
+    "operator_doc": "docs/large_host_topology_corpus.md"
+  },
+  "proof_boundary": {
+    "corpus_is_live_host_measurement": false,
+    "corpus_is_fresh_benchmark": false,
+    "proves_real_host_throughput": false,
+    "proves_rch_fleet_availability": false,
+    "runs_cargo": false,
+    "runs_rch": false,
+    "local_cargo_fallback_allowed": false,
+    "requires_rch_for_refresh_commands": true,
+    "operator_guidance_only": true
+  },
+  "required_profile_fields": [
+    "profile_id",
+    "profile_family",
+    "title",
+    "topology",
+    "memory",
+    "cgroup",
+    "rch_slot_model",
+    "contention_domains",
+    "fallback_policy",
+    "operator_interpretation",
+    "proof_boundary",
+    "rch_refresh_command",
+    "source_refs"
+  ],
+  "required_log_fields": [
+    "bead_id",
+    "profile_id",
+    "profile_family",
+    "status",
+    "physical_cores",
+    "memory_gib",
+    "numa_nodes",
+    "rch_slots",
+    "fallback_action",
+    "artifact_path",
+    "first_failure"
+  ],
+  "required_profile_ids": [
+    "bad-missing-topology"
+  ],
+  "profile_catalog": [
+    {
+      "profile_id": "bad-missing-topology",
+      "profile_family": "fixture",
+      "title": "Fixture missing required topology and fallback fields",
+      "memory": {
+        "total_gib": 256,
+        "per_numa_node_gib": [
+          256
+        ],
+        "reserved_for_os_gib": 16,
+        "admission_memory_ceiling_gib": 192,
+        "memory_pressure_state": "healthy"
+      },
+      "cgroup": {
+        "detected_from_live_host": false,
+        "cpuset_effective_cores": 64,
+        "memory_max_gib": 256,
+        "cpu_quota_cores": 64
+      },
+      "rch_slot_model": {
+        "recommended_slots": 4,
+        "max_parallel_heavy_lanes": 2,
+        "preferred_lane_classes": [
+          "focused-contract"
+        ],
+        "avoid_lane_classes": [
+          "local-fallback-cargo"
+        ]
+      },
+      "contention_domains": [
+        {
+          "domain_id": "fixture",
+          "resource": "fixture",
+          "risk": "fixture row intentionally omits topology",
+          "recommended_policy": "block"
+        }
+      ],
+      "operator_interpretation": "Negative fixture used to prove missing topology rows block.",
+      "proof_boundary": {
+        "corpus_is_live_host_measurement": false,
+        "corpus_is_fresh_benchmark": false,
+        "proves_real_host_throughput": false,
+        "operator_guidance_only": true
+      },
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_topology_bad_fixture CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test large_host_topology_corpus_contract helper_reports_missing_required_fields_without_mutating -- --nocapture",
+      "source_refs": [
+        "scripts/large_host_topology_corpus.py",
+        "docs/large_host_topology_corpus.md",
+        "tests/large_host_topology_corpus_contract.rs"
+      ]
+    }
+  ]
+}

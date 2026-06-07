@@ -155,6 +155,7 @@ pub mod scheduler;
 pub mod sharded_state;
 #[cfg(test)]
 pub mod sharded_state_conformance;
+pub mod slo_policy;
 /// Async wrapper for blocking pool operations.
 pub mod spawn_blocking;
 pub mod state;
@@ -217,6 +218,10 @@ pub use resource_cleanup_verifier::{
 };
 pub use scheduler::Scheduler;
 pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};
+pub use slo_policy::{
+    SloRuntimePolicyBridge, SloRuntimePolicyBridgeDecision, SloRuntimePolicyBridgeRequest,
+    SloRuntimeWorkKind,
+};
 pub use spawn_blocking::{spawn_blocking, spawn_blocking_io};
 pub use state::{RuntimeSnapshot, RuntimeState, SpawnError};
 pub use state_verifier::{

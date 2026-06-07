@@ -659,7 +659,18 @@ fuzz_target!(|data: KafkaProtocolFuzz| {
                 let wire_data = serialize_request(&oversized_request);
                 let result = parse_request(&wire_data, max_bytes);
 
-                if message_size > max_bytes {
+                // Compare against what the parser ACTUALLY checks: the wire
+                // size field (= body + header overhead), not the raw
+                // message_size. parse_request rejects when
+                // `request_size > max_bytes`, and request_size includes ~24
+                // header bytes (api key/version/correlation id + compact
+                // client_id + tagged-field count), so comparing raw
+                // message_size here would mis-predict near the boundary and
+                // false-positive the "within limits" panic below (gauntlet
+                // FUZZ-R6).
+                let request_size = (wire_data.len() - 4) as u32;
+
+                if request_size > max_bytes {
                     // Should be rejected
                     assert!(result.is_err(), "Oversized message should be rejected");
                     if let Err(KafkaError::MessageTooLarge { size, max_size }) = result {

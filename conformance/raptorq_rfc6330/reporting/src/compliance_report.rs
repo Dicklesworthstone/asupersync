@@ -477,8 +477,10 @@ mod tests {
     #[test]
     fn test_badge_url_generation() {
         let matrix = create_test_matrix();
-        let mut config = ReportConfig::default();
-        config.badge_style = BadgeStyle::Flat;
+        let config = ReportConfig {
+            badge_style: BadgeStyle::Flat,
+            ..Default::default()
+        };
         let generator = ComplianceReportGenerator::new(config);
         let url = generator.generate_badge_url(&matrix);
 

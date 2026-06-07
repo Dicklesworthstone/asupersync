@@ -6,6 +6,7 @@
 use super::{CacheError, CacheKey, StorageLocation};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -63,16 +64,50 @@ impl FileStorage {
 
     /// Get the file path for a given content hash.
     fn get_file_path(&self, content_hash: &str) -> PathBuf {
-        // Use first two characters as subdirectory for better file distribution
-        let subdir = if content_hash.len() >= 2 {
-            &content_hash[0..2]
-        } else {
-            "00"
-        };
+        let safe_name = hex::encode(Sha256::digest(content_hash.as_bytes()));
+        let subdir = &safe_name[0..2];
 
         self.root_dir
             .join(subdir)
-            .join(format!("{}.cache", content_hash))
+            .join(format!("{}.cache", safe_name))
+    }
+
+    fn canonical_root(&self) -> Result<PathBuf, CacheError> {
+        std::fs::canonicalize(&self.root_dir)
+            .map_err(|e| CacheError::Storage(format!("Failed to canonicalize cache root: {e}")))
+    }
+
+    fn ensure_directory_inside_root(&self, path: &Path) -> Result<(), CacheError> {
+        let root = self.canonical_root()?;
+        let canonical_path = std::fs::canonicalize(path).map_err(|e| {
+            CacheError::Storage(format!("Failed to canonicalize cache directory: {e}"))
+        })?;
+        if canonical_path.starts_with(&root) {
+            Ok(())
+        } else {
+            Err(CacheError::Storage(format!(
+                "Cache directory escapes storage root: {}",
+                path.display()
+            )))
+        }
+    }
+
+    fn existing_file_inside_root(&self, path: &Path) -> Result<Option<PathBuf>, CacheError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let root = self.canonical_root()?;
+        let canonical_path = std::fs::canonicalize(path)
+            .map_err(|e| CacheError::Storage(format!("Failed to canonicalize cache file: {e}")))?;
+        if canonical_path.starts_with(&root) {
+            Ok(Some(canonical_path))
+        } else {
+            Err(CacheError::Storage(format!(
+                "Cache file escapes storage root: {}",
+                path.display()
+            )))
+        }
     }
 
     /// Compress content if compression is enabled.
@@ -224,6 +259,7 @@ impl CacheStorage for FileStorage {
             std::fs::create_dir_all(parent).map_err(|e| {
                 CacheError::Storage(format!("Failed to create subdirectory: {}", e))
             })?;
+            self.ensure_directory_inside_root(parent)?;
         }
 
         // Compress content if enabled
@@ -245,7 +281,10 @@ impl CacheStorage for FileStorage {
     fn retrieve(&self, location: &StorageLocation) -> Result<Vec<u8>, CacheError> {
         match location {
             StorageLocation::File(path) => {
-                let content = std::fs::read(path)
+                let path = self.existing_file_inside_root(path)?.ok_or_else(|| {
+                    CacheError::Storage(format!("Cache file not found: {}", path.display()))
+                })?;
+                let content = std::fs::read(&path)
                     .map_err(|e| CacheError::Storage(format!("Failed to read file: {}", e)))?;
 
                 // Decompress if needed
@@ -272,8 +311,8 @@ impl CacheStorage for FileStorage {
     fn remove(&mut self, location: &StorageLocation) -> Result<(), CacheError> {
         match location {
             StorageLocation::File(path) => {
-                if path.exists() {
-                    std::fs::remove_file(path).map_err(|e| {
+                if let Some(path) = self.existing_file_inside_root(path)? {
+                    std::fs::remove_file(&path).map_err(|e| {
                         CacheError::Storage(format!("Failed to remove file: {}", e))
                     })?;
 
@@ -297,7 +336,9 @@ impl CacheStorage for FileStorage {
 
     fn exists(&self, location: &StorageLocation) -> bool {
         match location {
-            StorageLocation::File(path) => path.exists(),
+            StorageLocation::File(path) => self
+                .existing_file_inside_root(path)
+                .is_ok_and(|p| p.is_some()),
             StorageLocation::Memory(_) => false, // FileStorage doesn't handle memory
             StorageLocation::External(_) => false, // Can't check external existence
         }
@@ -331,7 +372,7 @@ impl MemoryStorage {
 
     /// Get memory key for content hash.
     fn get_memory_key(&self, key: &CacheKey) -> String {
-        format!("{}:{}", key.manifest_hash, key.content_hash)
+        key.as_index_key()
     }
 
     /// Current memory held by this backend.
@@ -356,21 +397,17 @@ impl CacheStorage for MemoryStorage {
             return Err(CacheError::InsufficientSpace);
         }
 
-        {
-            let mut store = self.content_store.write().unwrap();
-            if let Some(previous) = store.insert(memory_key.clone(), content.to_vec()) {
-                self.current_memory_bytes = self
-                    .current_memory_bytes
-                    .saturating_sub(previous.len() as u64);
-            }
-        }
+        self.content_store
+            .write()
+            .unwrap()
+            .insert(memory_key.clone(), content.to_vec());
 
         {
             let mut metrics = self.metrics.lock();
             metrics.files_stored += 1;
             metrics.bytes_stored += content.len() as u64;
         }
-        self.current_memory_bytes += content.len() as u64;
+        self.current_memory_bytes = projected_usage;
 
         Ok(StorageLocation::Memory(memory_key))
     }
@@ -407,7 +444,9 @@ impl CacheStorage for MemoryStorage {
                 if let Some(content) = store.remove(key) {
                     // Update metrics and memory tracking
                     self.metrics.lock().files_removed += 1;
-                    self.current_memory_bytes -= content.len() as u64;
+                    self.current_memory_bytes = self
+                        .current_memory_bytes
+                        .saturating_sub(content.len() as u64);
                 }
                 Ok(())
             }
@@ -499,7 +538,10 @@ impl CacheStorage for HybridStorage {
         let backend = self.choose_backend(content.len() as u64);
 
         let result = match backend {
-            "memory" => self.memory_storage.store(key, content),
+            "memory" => match self.memory_storage.store(key, content) {
+                Err(CacheError::InsufficientSpace) => self.file_storage.store(key, content),
+                result => result,
+            },
             "file" => self.file_storage.store(key, content),
             _ => unreachable!(),
         };
@@ -617,6 +659,85 @@ mod file_storage_unit_tests {
         let content = vec![b'x'; CACHE_COMPRESSION_THRESHOLD + 1];
 
         assert!(storage.compress_content(&content).is_err());
+    }
+
+    #[test]
+    fn file_storage_derives_safe_paths_from_untrusted_content_hashes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = FileStorage::new(root.path(), false).unwrap();
+        let key = CacheKey::new("manifest".to_string(), "../outside/cache".to_string(), None);
+        let content = b"cache content";
+
+        let location = storage.store(&key, content).unwrap();
+        let StorageLocation::File(path) = &location else {
+            panic!("file storage must return file location");
+        };
+
+        assert!(path.starts_with(root.path()));
+        assert!(
+            !path
+                .components()
+                .any(|component| { matches!(component, std::path::Component::ParentDir) })
+        );
+        assert_eq!(storage.retrieve(&location).unwrap(), content.to_vec());
+    }
+
+    #[test]
+    fn file_storage_rejects_locations_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().join("victim.cache");
+        std::fs::write(&outside_path, b"do not touch").unwrap();
+
+        let mut storage = FileStorage::new(root.path(), false).unwrap();
+        let location = StorageLocation::File(outside_path.clone());
+
+        assert!(storage.retrieve(&location).is_err());
+        assert!(!storage.exists(&location));
+        assert!(storage.remove(&location).is_err());
+        assert_eq!(std::fs::read(&outside_path).unwrap(), b"do not touch");
+    }
+
+    #[test]
+    fn memory_storage_distinguishes_scopes_and_tracks_replacement_bytes() {
+        let mut storage = MemoryStorage::new(128);
+        let key_private = CacheKey::new(
+            "manifest".to_string(),
+            "content".to_string(),
+            Some("private".to_string()),
+        );
+        let key_public = CacheKey::new(
+            "manifest".to_string(),
+            "content".to_string(),
+            Some("public".to_string()),
+        );
+
+        let private_location = storage.store(&key_private, b"private").unwrap();
+        let public_location = storage.store(&key_public, b"public").unwrap();
+        assert_ne!(private_location, public_location);
+        assert_eq!(storage.memory_usage(), 13);
+
+        storage.store(&key_private, b"p").unwrap();
+        assert_eq!(storage.memory_usage(), 7);
+        assert_eq!(storage.retrieve(&private_location).unwrap(), b"p".to_vec());
+        assert_eq!(
+            storage.retrieve(&public_location).unwrap(),
+            b"public".to_vec()
+        );
+    }
+
+    #[test]
+    fn hybrid_storage_falls_back_to_file_when_memory_backend_is_full() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage = HybridStorage::new(4, 1024, root.path(), false).unwrap();
+        let key = CacheKey::new("manifest".to_string(), "content".to_string(), None);
+        let content = b"larger than memory";
+
+        let location = storage.store(&key, content).unwrap();
+        assert!(matches!(location, StorageLocation::File(_)));
+        assert_eq!(storage.retrieve(&location).unwrap(), content.to_vec());
+        assert_eq!(storage.metrics().files_stored, 1);
+        assert_eq!(storage.metrics().errors, 0);
     }
 }
 

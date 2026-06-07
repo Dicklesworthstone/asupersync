@@ -106,6 +106,8 @@ struct SemaphoreState {
     waiter_tail: Option<usize>,
     /// Next waiter id for de-duplication.
     next_waiter_id: u64,
+    /// Cancelled or dropped acquire waiters observed by telemetry.
+    cancellation_count: u64,
 }
 
 #[derive(Debug)]
@@ -239,6 +241,7 @@ impl Semaphore {
                 waiter_head: None,
                 waiter_tail: None,
                 next_waiter_id: 0,
+                cancellation_count: 0,
             }),
             permits_shadow: AtomicUsize::new(permits),
             closed_shadow: AtomicBool::new(false),
@@ -278,6 +281,34 @@ impl Semaphore {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed_shadow.load(Ordering::Acquire)
+    }
+
+    /// Returns a deterministic, redacted snapshot of semaphore pressure.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, primitive_id: u64) -> crate::sync::SyncTelemetrySnapshot {
+        let state = self.state.lock();
+        let state_label = if state.closed {
+            "closed"
+        } else if state.waiter_head.is_some() {
+            "waiting"
+        } else if state.permits == 0 {
+            "saturated"
+        } else {
+            "open"
+        };
+        crate::sync::SyncTelemetrySnapshot {
+            primitive_id,
+            primitive_kind: "semaphore",
+            capacity: self.max_permits,
+            occupied_units: self.max_permits.saturating_sub(state.permits),
+            available_units: state.permits,
+            waiter_count: state.waiters.len(),
+            generation: 0,
+            state: state_label,
+            cancellation_count: state.cancellation_count,
+            closed: state.closed,
+        }
     }
 
     /// Closes the semaphore.
@@ -423,6 +454,7 @@ impl<Caps> Drop for AcquireFuture<'_, '_, Caps> {
         if let Some(waiter) = self.waiter {
             let next_waker = {
                 let mut state = self.semaphore.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
                 remove_waiter_and_take_next_waker(&mut state, waiter)
@@ -455,18 +487,20 @@ impl<'a, Caps> Future for AcquireFuture<'a, '_, Caps> {
         }
 
         if self.cx.checkpoint().is_err() {
-            if let Some(waiter) = self.waiter {
-                let next_waker = {
-                    let mut state = self.semaphore.state.lock();
+            let waiter = self.waiter.take();
+            let next_waker = {
+                let mut state = self.semaphore.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
+                if let Some(waiter) = waiter {
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
                     remove_waiter_and_take_next_waker(&mut state, waiter)
-                };
-                // Clear waiter so Drop doesn't try to remove it again
-                self.waiter = None;
-                if let Some(next) = next_waker {
-                    next.wake();
+                } else {
+                    None
                 }
+            };
+            if let Some(next) = next_waker {
+                next.wake();
             }
             self.completed = true;
             return Poll::Ready(Err(AcquireError::Cancelled));
@@ -656,9 +690,9 @@ pub struct OwnedSemaphorePermit {
 
 impl OwnedSemaphorePermit {
     /// Acquires an owned permit asynchronously.
-    pub async fn acquire(
+    pub async fn acquire<Caps>(
         semaphore: std::sync::Arc<Semaphore>,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         count: usize,
     ) -> Result<Self, AcquireError> {
         // Acquiring 0 permits succeeds immediately (no resources needed)
@@ -762,20 +796,20 @@ impl Drop for OwnedSemaphorePermit {
 }
 
 /// Future returned by `OwnedSemaphorePermit::acquire`.
-pub struct OwnedAcquireFuture {
+pub struct OwnedAcquireFuture<Caps = crate::cx::cap::All> {
     semaphore: Arc<Semaphore>,
-    cx: Option<Cx>,
+    cx: Option<Cx<Caps>>,
     count: usize,
     waiter: Option<WaiterHandle>,
     completed: bool,
 }
 
-impl OwnedAcquireFuture {
+impl<Caps> OwnedAcquireFuture<Caps> {
     /// Construct a new acquire future with an owned `Cx`.
     ///
     /// This avoids the lifetime issue with the `async fn acquire` signature
     /// which borrows `&Cx` (and thus ties the future's lifetime to the borrow).
-    pub(crate) fn new(semaphore: Arc<Semaphore>, cx: Cx, count: usize) -> Self {
+    pub(crate) fn new(semaphore: Arc<Semaphore>, cx: Cx<Caps>, count: usize) -> Self {
         // Note: count=0 is handled at the future poll level
         Self {
             semaphore,
@@ -785,7 +819,9 @@ impl OwnedAcquireFuture {
             completed: false,
         }
     }
+}
 
+impl OwnedAcquireFuture {
     /// Construct a new acquire future that waits without cancellation support.
     ///
     /// This is used by `Service::poll_ready` middleware paths that must still
@@ -803,11 +839,12 @@ impl OwnedAcquireFuture {
     }
 }
 
-impl Drop for OwnedAcquireFuture {
+impl<Caps> Drop for OwnedAcquireFuture<Caps> {
     fn drop(&mut self) {
         if let Some(waiter) = self.waiter {
             let next_waker = {
                 let mut state = self.semaphore.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
                 remove_waiter_and_take_next_waker(&mut state, waiter)
@@ -819,7 +856,7 @@ impl Drop for OwnedAcquireFuture {
     }
 }
 
-impl Future for OwnedAcquireFuture {
+impl<Caps> Future for OwnedAcquireFuture<Caps> {
     type Output = Result<OwnedSemaphorePermit, AcquireError>;
 
     #[inline]
@@ -840,17 +877,20 @@ impl Future for OwnedAcquireFuture {
         }
 
         if this.cx.as_ref().is_some_and(|cx| cx.checkpoint().is_err()) {
-            if let Some(waiter) = this.waiter {
-                let next_waker = {
-                    let mut state = this.semaphore.state.lock();
+            let waiter = this.waiter.take();
+            let next_waker = {
+                let mut state = this.semaphore.state.lock();
+                state.cancellation_count = state.cancellation_count.saturating_add(1);
+                if let Some(waiter) = waiter {
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
                     remove_waiter_and_take_next_waker(&mut state, waiter)
-                };
-                this.waiter = None;
-                if let Some(next) = next_waker {
-                    next.wake();
+                } else {
+                    None
                 }
+            };
+            if let Some(next) = next_waker {
+                next.wake();
             }
             this.completed = true;
             return Poll::Ready(Err(AcquireError::Cancelled));
@@ -1185,6 +1225,31 @@ mod tests {
         );
         crate::assert_with_log!(!sem.is_closed(), "not closed", false, sem.is_closed());
         crate::test_complete!("new_semaphore_has_correct_permits");
+    }
+
+    #[test]
+    fn acquire_accepts_detached_no_cap_context() {
+        init_test("acquire_accepts_detached_no_cap_context");
+        let cx = Cx::<cap::None>::detached_cancel_context();
+        let sem = Semaphore::new(2);
+
+        let permit = block_on(sem.acquire(&cx, 1)).expect("acquire should accept cap::None Cx");
+
+        crate::assert_with_log!(permit.count() == 1, "permit count", 1usize, permit.count());
+        crate::test_complete!("acquire_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn owned_acquire_accepts_detached_no_cap_context() {
+        init_test("owned_acquire_accepts_detached_no_cap_context");
+        let cx = Cx::<cap::None>::detached_cancel_context();
+        let sem = Arc::new(Semaphore::new(2));
+
+        let permit = block_on(OwnedSemaphorePermit::acquire(Arc::clone(&sem), &cx, 1))
+            .expect("owned acquire should accept cap::None Cx");
+
+        crate::assert_with_log!(permit.count() == 1, "permit count", 1usize, permit.count());
+        crate::test_complete!("owned_acquire_accepts_detached_no_cap_context");
     }
 
     #[test]

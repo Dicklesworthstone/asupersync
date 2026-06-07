@@ -30,7 +30,7 @@ fn main() {
     let verbose = matches.get_flag("verbose");
     let test_name = matches.get_one::<String>("test");
 
-    let test_cases: Vec<(&str, fn(bool) -> TestResult)> = vec![
+    let test_cases: Vec<TestCase> = vec![
         ("basic", test_basic_histogram),
         ("custom-buckets", test_custom_buckets),
         ("large-dataset", test_large_dataset),
@@ -44,10 +44,10 @@ fn main() {
     let mut passed_tests = 0;
 
     for (name, test_fn) in test_cases {
-        if let Some(filter) = test_name {
-            if name != filter {
-                continue;
-            }
+        if let Some(filter) = test_name
+            && name != filter
+        {
+            continue;
         }
 
         total_tests += 1;
@@ -75,6 +75,7 @@ fn main() {
 }
 
 type TestResult = Result<(), String>;
+type TestCase = (&'static str, fn(bool) -> TestResult);
 
 // =============================================================================
 // Histogram Data Comparison

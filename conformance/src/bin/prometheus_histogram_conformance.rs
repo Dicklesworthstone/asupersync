@@ -46,10 +46,10 @@ fn main() {
     let mut passed_tests = 0;
 
     for (name, test_fn) in test_cases {
-        if let Some(filter) = test_name {
-            if name != filter {
-                continue;
-            }
+        if let Some(filter) = test_name
+            && name != filter
+        {
+            continue;
         }
 
         total_tests += 1;
@@ -81,7 +81,7 @@ type LabelSet = Vec<(String, String)>;
 type HistogramTestFn = fn(bool) -> TestResult;
 
 fn default_histogram() -> Histogram {
-    Histogram::new(default_histogram_buckets().into_iter())
+    Histogram::new(default_histogram_buckets())
 }
 
 fn default_histogram_family() -> Family<LabelSet, Histogram> {
@@ -145,10 +145,10 @@ fn extract_prometheus_histogram(
             }
         }
         // Parse sum line: metric_name_sum 123.45
-        else if line.contains(&format!("{}_sum", metric_name)) {
-            if let Some(space_pos) = line.rfind(' ') {
-                sum = line[space_pos + 1..].trim().parse::<f64>()?;
-            }
+        else if line.contains(&format!("{}_sum", metric_name))
+            && let Some(space_pos) = line.rfind(' ')
+        {
+            sum = line[space_pos + 1..].trim().parse::<f64>()?;
         }
     }
 
@@ -327,7 +327,7 @@ fn test_custom_buckets(verbose: bool) -> TestResult {
         .map_err(|error| format!("asupersync custom histogram mismatch: {error}"))?;
 
     // Validate bucket assignment logic
-    let expected_buckets = vec![
+    let expected_buckets = [
         (0.1, 1),           // 0.05
         (0.5, 2),           // 0.05, 0.3
         (1.0, 3),           // 0.05, 0.3, 0.7
@@ -524,7 +524,7 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         let histogram: Family<LabelSet, Histogram, _> = Family::new_with_constructor(move || {
             Histogram::new(constructor_buckets.iter().copied())
         });
-        registry.register(*name, &format!("{} histogram", name), histogram.clone());
+        registry.register(*name, format!("{} histogram", name), histogram.clone());
 
         let metric = histogram.get_or_create(&vec![]);
         for &value in observations {

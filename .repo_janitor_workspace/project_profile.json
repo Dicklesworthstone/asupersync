@@ -1,0 +1,29 @@
+{
+  "primary_branch": "main",
+  "archetype": "rust-workspace",
+  "test_command": "rch exec -- cargo check --all-targets",
+  "typecheck_command": "rch exec -- cargo check --all-targets",
+  "lint_command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+  "build_command": "rch exec -- cargo build",
+  "formatter": "cargo fmt",
+  "ci_gates": ["dcg", "ubs"],
+  "existing_dest_dirs": ["docs", "docs/audits", "scripts", "tools", "tests/fixtures", "artifacts"],
+  "branch_synonyms": ["master"],
+  "branch_policy": "main_only_no_branches_per_AGENTS_md_RULE_2",
+  "protected_globs": [
+    "README.md", "LICENSE*", "AGENTS.md", "CHANGELOG.md", "TESTING.md",
+    ".gitignore", ".gitattributes", ".gitmodules", ".npmrc", ".nojekyll", ".rchignore",
+    ".claude/**", ".github/**",
+    "Cargo.toml", "Cargo.lock", "Makefile", "rust-toolchain.toml",
+    "package.json", "pnpm-workspace.yaml", "tsconfig.base.json",
+    "asupersync_plan_v4.md", "asupersync_v4_formal_semantics.md",
+    "asupersync_web_demo.html",
+    "audit_index.jsonl", ".stub-allowlist.txt", ".type_fork_baseline.json",
+    "MEMORY.md"
+  ],
+  "rule_overrides_from_AGENTS_md": {
+    "RULE_1_no_deletion_without_permission": "must surface candidates and get verbatim OK",
+    "RULE_2_no_branches_no_worktrees": "commit directly to main, NOT to a repo-janitor-DATE branch",
+    "no_script_based_changes": "no sed -i mass-rewrites; use Edit tool only"
+  }
+}

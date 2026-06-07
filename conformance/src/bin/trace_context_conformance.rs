@@ -38,7 +38,7 @@ fn main() {
     let verbose = matches.get_flag("verbose");
     let test_name = matches.get_one::<String>("test");
 
-    let test_cases: [(&str, fn(bool) -> TestResult); 5] = [
+    let test_cases: [TestCase; 5] = [
         ("basic", test_basic_propagation),
         ("nested", test_nested_spans),
         ("baggage", test_baggage_propagation),
@@ -50,10 +50,10 @@ fn main() {
     let mut passed_tests = 0;
 
     for (name, test_fn) in test_cases {
-        if let Some(filter) = test_name {
-            if name != filter {
-                continue;
-            }
+        if let Some(filter) = test_name
+            && name != filter
+        {
+            continue;
         }
 
         total_tests += 1;
@@ -81,6 +81,7 @@ fn main() {
 }
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestCase = (&'static str, fn(bool) -> TestResult);
 
 // =============================================================================
 // W3C Trace Context Conversion for Asupersync

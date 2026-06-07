@@ -62,7 +62,7 @@ fuzz_target!(|data: &[u8]| {
     let (sender, mut receiver) = watch::channel(0u32);
 
     // Create Cx for operations that need it
-    let cx = Cx::new(
+    let cx: Cx = Cx::new(
         RegionId::from_arena(ArenaIndex::new(0, 0)),
         TaskId::from_arena(ArenaIndex::new(0, 0)),
         Budget::INFINITE,

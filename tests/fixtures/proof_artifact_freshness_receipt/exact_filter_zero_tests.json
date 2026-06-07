@@ -1,0 +1,26 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/exact-filter-zero-tests.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exact_filter_zero cargo test -p asupersync --lib default_policy_no_csp_or_permissions -- --exact --nocapture",
+      "stderr": "[RCH] remote rch-worker-exact-filter-zero (711.3s)\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19135 filtered out; finished in 0.00s",
+      "source_fingerprint": "sha256:source-exact-filter-zero-tests",
+      "tree_fingerprint": "git-tree:exact-filter-zero-tests",
+      "touched_files": [
+        "src/web/security.rs",
+        "tests/proof_artifact_freshness_receipt_contract.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-06-05T03:20:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

@@ -1,0 +1,13 @@
+id	path	size_bytes	inbound_refs	smell	verdict	dest	rationale
+1	cx_optimization_benchmark	4248260	0	debug-elf-binary-at-root	delete-and-gitignore	-	4.2MB ELF debug binary; no [[bin]] target in Cargo.toml; no reference; committed by mistake in d006b5302
+2	asupersync_diagram.png	1735861	0	duplicate-image-format	delete	-	README.md:9 uses .webp version (322KB); .png (1.7MB) is the unused larger variant
+3	asupersync_illustration.png	2298538	0	duplicate-image-format	delete	-	README.md:2 uses .webp version (203KB); .png (2.2MB) is the unused larger variant
+4	MEMORY_ORDERING_OPTIMIZATION.md	3602	0	stranded-companion-doc-at-root	move	docs/MEMORY_ORDERING_OPTIMIZATION_REPORT.md	Companion to docs/MEMORY_ORDERING_OPTIMIZATION.md (audit) — they have distinct content (Report vs Audit); same bead but two documents. Rename on move to disambiguate
+5	CROSS_MODULE_LOCK_ORDERING.md	4348	0	stranded-design-doc-at-root	move	docs/	Architectural design doc on cross-module lock ordering; belongs in docs/
+6	bead_1qfd0.620.md	6316	1	bead-implementation-notes-at-root	move	docs/beads/	Bead 1qfd0.620 implementation notes; only ref from tests/artifacts/perf/asupersync-yvmiat-fingerprint.json
+7	bead_metamorphic_analysis.md	3231	1	bead-implementation-notes-at-root	move	docs/beads/	Channel metamorphic suite triage notes; only ref from same fingerprint JSON
+8	bug_report_uring_user_data_collision.md	3335	0	stranded-bug-report-at-root	move	docs/audits/	io_uring user_data collision bug report; useful as audits/ history, but src/fs/uring.rs has no backref
+9	MODES_ANALYSIS_PROGRESS.md	3118	0	skill-output-at-root	move	docs/analysis/	"Modes of Reasoning" Phase 1 checkpoint from 2026-05-07; intermediate artifact
+10	MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md	11016	1	skill-output-at-root	move	docs/analysis/	Final report of the same Modes of Reasoning analysis session
+11	perf_scenario_definition.md	851	0	scratch-perf-brief-at-root	move	docs/perf/	Performance profiling scenario brief; tiny but specific to one round; preserve under docs/perf/
+12	gh_og_share_image.png	330523	0	github-social-preview-image	surface-to-user	-	Likely GitHub social-preview asset (uploaded via repo settings; not lexically referenced); user knows if intentional

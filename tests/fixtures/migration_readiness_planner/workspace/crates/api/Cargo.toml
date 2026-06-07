@@ -1,0 +1,8 @@
+[package]
+name = "api-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+asupersync = { workspace = true }
+tokio = { workspace = true, optional = true }

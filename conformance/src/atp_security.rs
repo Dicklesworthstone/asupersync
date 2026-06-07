@@ -1076,7 +1076,7 @@ mod tests {
 
         // Verify test metadata consistency
         for (test, contract) in tests.iter().zip(ATP_SECURITY_CONTRACTS.iter()) {
-            assert!(test.id.contains(&contract.id));
+            assert!(test.id.contains(contract.id));
             assert_eq!(test.category, TestCategory::Security);
             assert!(test.tags.contains(&"security".to_string()));
         }

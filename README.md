@@ -307,7 +307,19 @@ The runtime design is backed by a small-step operational semantics (`asupersync_
 
 The proof posture is exact: these are Lean-checked core invariants with theorem and executable-test linkage. This is not a blanket mechanized proof of every adapter, protocol implementation, platform backend, or distributed runtime transport path. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
-The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. The current green/red claim dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows.
+The canonical proof-command coverage map is [`artifacts/proof_lane_manifest_v1.json`](./artifacts/proof_lane_manifest_v1.json), checked by [`tests/proof_lane_manifest_contract.rs`](./tests/proof_lane_manifest_contract.rs). It records which `RCH_REQUIRE_REMOTE=1 rch exec -- ...` lane covers each production graph, feature graph, fuzz smoke, lib/all-target/clippy/rustdoc frontier, and formal proof guarantee, plus what each lane explicitly does not prove. It also carries proof-lane resource-envelope classes for expected timeout, memory, remote-required, and no-local-fallback semantics; those classes harden proof admission metadata and do not replace OS-level RCH worker cgroup limits. The current green/red claim dashboard is [`artifacts/proof_status_snapshot_v1.json`](./artifacts/proof_status_snapshot_v1.json), checked by [`tests/proof_status_snapshot_contract.rs`](./tests/proof_status_snapshot_contract.rs); it maps README/AGENTS proof claims to manifest lanes and validation-frontier blocker rows.
+
+The Proof Evidence Debt Graph is [`artifacts/proof_evidence_debt_graph_contract_v1.json`](./artifacts/proof_evidence_debt_graph_contract_v1.json), emitted by [`scripts/proof_evidence_debt_graph.py`](./scripts/proof_evidence_debt_graph.py), checked by [`tests/proof_evidence_debt_graph_contract.rs`](./tests/proof_evidence_debt_graph_contract.rs), and documented in [`docs/proof_evidence_debt_graph.md`](./docs/proof_evidence_debt_graph.md). It ranks stale, superseded, blocked, zero-test, local-fallback, missing-envelope, advisory-only, and failed proof evidence so operators can decide what must be rerun before citation. It does not certify workspace health or turn cached/advisory evidence into correctness proof.
+
+The Proof Lane Failure Repro Receipts contract is [`artifacts/proof_lane_failure_repro_receipt_contract_v1.json`](./artifacts/proof_lane_failure_repro_receipt_contract_v1.json), emitted by [`scripts/proof_lane_failure_repro_receipt.py`](./scripts/proof_lane_failure_repro_receipt.py), checked by [`tests/proof_lane_failure_repro_receipt_contract.rs`](./tests/proof_lane_failure_repro_receipt_contract.rs), and documented in [`docs/proof_lane_failure_repro_receipt.md`](./docs/proof_lane_failure_repro_receipt.md). It converts saved failed RCH/proof-runner transcripts into minimal repro receipts for compile errors, test assertion failures, timeouts, worker disk pressure, SSH transport failures, retrieval timeouts after remote pass, zero-test proofs, and local-fallback refusals. It chooses the next smallest remote-required rerun or diagnostic command; it does not certify workspace health or turn a repro command into fresh proof.
+
+The Reservation-Aware Fallback Work Finder is [`artifacts/reservation_aware_fallback_work_finder_contract_v1.json`](./artifacts/reservation_aware_fallback_work_finder_contract_v1.json), emitted by [`scripts/reservation_aware_fallback_work_finder.py`](./scripts/reservation_aware_fallback_work_finder.py), checked by [`tests/reservation_aware_fallback_work_finder_contract.rs`](./tests/reservation_aware_fallback_work_finder_contract.rs), and documented in [`docs/reservation_aware_fallback_work_finder.md`](./docs/reservation_aware_fallback_work_finder.md). It converts read-only tracker, dirty-tree, and Agent Mail reservation fixture snapshots into safe next-action recommendations for claimable tasks, epic-only ready queues, active reservation blockers, stale in-progress candidates, tracker-only dirt, source peer dirt, no-useful-work blockers, and planning fallbacks. It never authorizes branches/worktrees, peer-reserved edits, or local Cargo fallback, and it does not certify source correctness.
+
+The Second-Wave Swarm Control-Loop Certification bundle is [`artifacts/second_wave_swarm_control_loop_certification_v1.json`](./artifacts/second_wave_swarm_control_loop_certification_v1.json), emitted by [`scripts/second_wave_swarm_control_loop_certification.py`](./scripts/second_wave_swarm_control_loop_certification.py), assembled by [`scripts/run_second_wave_swarm_control_loop_certification_e2e.sh`](./scripts/run_second_wave_swarm_control_loop_certification_e2e.sh), checked by [`tests/second_wave_swarm_control_loop_certification_contract.rs`](./tests/second_wave_swarm_control_loop_certification_contract.rs), and documented in [`docs/second_wave_swarm_control_loop_certification.md`](./docs/second_wave_swarm_control_loop_certification.md). It aggregates the `asupersync-ol11aa.1` through `asupersync-ol11aa.7` topology, admission, SLO brownout, stale-proof debt, crashpack repro, and fallback work-finder evidence into one operator report. Every child proof command must keep `RCH_REQUIRE_REMOTE=1 rch exec --`, isolated `CARGO_TARGET_DIR`, nonzero test evidence, and no-local-fallback semantics. The bundle is not a performance benchmark, not a release publish proof, not a substitute for broad check/clippy/test gates, and not evidence for unrelated source surfaces.
+
+The Third-Wave Swarm Guardrail E2E bundle is [`artifacts/third_wave_swarm_guardrail_e2e_contract_v1.json`](./artifacts/third_wave_swarm_guardrail_e2e_contract_v1.json), emitted by [`scripts/third_wave_swarm_guardrail_e2e.py`](./scripts/third_wave_swarm_guardrail_e2e.py), assembled by [`scripts/run_third_wave_swarm_guardrail_e2e.sh`](./scripts/run_third_wave_swarm_guardrail_e2e.sh), checked by [`tests/third_wave_swarm_guardrail_e2e_contract.rs`](./tests/third_wave_swarm_guardrail_e2e_contract.rs), and documented in [`docs/third_wave_swarm_guardrail_e2e.md`](./docs/third_wave_swarm_guardrail_e2e.md). It invokes child helpers for stale in-progress reaping, br/bv tracker graph drift, reservation lease watchdog coverage, swarm lane closeout, and RCH quiet-phase receipts against checked fixtures. It is not a broad workspace health proof, not a release publish proof, and not a substitute for broad check/clippy/test gates.
+
+The third-wave operator runbook is [`docs/third_wave_swarm_operator_runbook.md`](./docs/third_wave_swarm_operator_runbook.md), checked by [`tests/third_wave_swarm_operator_runbook_contract.rs`](./tests/third_wave_swarm_operator_runbook_contract.rs). It gives the fail-closed signoff checklist for stale work reaping, br/bv drift, reservation renewal, RCH no-local-fallback validation, Agent Mail closeout, peer dirt handling, `main` push, and legacy mirror verification.
 
 The admission-aware proof-lane atlas is anchored by [`artifacts/swarm_proof_lane_planner_contract_v1.json`](./artifacts/swarm_proof_lane_planner_contract_v1.json) and checked by [`tests/swarm_proof_lane_planner_contract.rs`](./tests/swarm_proof_lane_planner_contract.rs). Its focused manifest lane is `swarm-proof-lane-planner-contract`, which proves planner fixtures, atlas decision receipts, deterministic JSON/Markdown report goldens, docs markers, manifest mapping, and proof-status claim rows without broad workspace, conformance, throughput, scheduler-performance, or all-target claims.
 
@@ -492,6 +504,24 @@ stacks: hyper/reqwest/tonic transport, tower/axum middleware, and narrower
 Tokio runtime-context or I/O shims. The intended order is native Asupersync
 first, compat adapters only where a third-party crate still requires Tokio
 traits.
+
+Start brownfield work with the read-only migration readiness planner in
+[`docs/integration.md`](./docs/integration.md#migration-readiness-planner):
+
+```bash
+python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness
+```
+
+For deterministic examples, list and execute the repo-local fixtures:
+
+```bash
+python3 scripts/migration_readiness_planner.py --list
+python3 scripts/migration_readiness_planner.py --execute --output-root "${TMPDIR:-/tmp}/asupersync_migration_planner_e2e"
+```
+
+The report links `summary.final_verdict`, `proof_pack.proof_commands`,
+`semantic_map.recommendations`, and `operator_report.phase_plan` back to the
+playbook vocabulary before any target project code is edited.
 
 The reactor export contract is narrower than the directory listing suggests: `runtime::reactor` exports `EpollReactor` on Linux, `IoUringReactor` on Linux only (real with `io-uring`, intentional `Unsupported` without it), `KqueueReactor` on BSD-family targets, `IocpReactor` on Windows, `BrowserReactor` on `wasm32`, and `LabReactor` for deterministic testing. Historical files such as `src/runtime/reactor/uring.rs` and `src/runtime/reactor/macos.rs` are not part of the live export graph.
 
@@ -1656,13 +1686,15 @@ The checked signoff for this split is [`artifacts/phase6_methodology_gate_enforc
 The SLO-to-runtime lane is an opt-in direct-main proof loop for operator policy changes. It is grounded in the live schema, runtime application seam, deterministic replay evidence, and proof runner; it is not a separate docs-only process and it is not a blanket production enforcement claim outside the explicit SLO application/admission seam.
 
 - Canonical artifact: [`artifacts/slo_policy_bundle_contract_v1.json`](./artifacts/slo_policy_bundle_contract_v1.json)
-- Runtime API surface: [`src/types/slo_policy.rs`](./src/types/slo_policy.rs), exported through `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION`, `validate_slo_policy_bundle_json`, `validate_slo_proof_report_json`, and `validate_slo_runtime_policy_application_json`
+- Runtime API surface: [`src/types/slo_policy.rs`](./src/types/slo_policy.rs) defines the artifact/application contract, and [`src/runtime/slo_policy.rs`](./src/runtime/slo_policy.rs) provides the explicit `Cx`-scoped bridge through `SloRuntimePolicyBridge`, `SloRuntimePolicyBridgeRequest`, `SloRuntimePolicyBridgeDecision`, and `SloRuntimeWorkKind`. The artifact layer is exported through `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION`, `validate_slo_policy_bundle_json`, `validate_slo_proof_report_json`, and `validate_slo_runtime_policy_application_json`
 - Contract test: [`tests/slo_policy_bundle_contract.rs`](./tests/slo_policy_bundle_contract.rs)
 - Operator script: [`scripts/validate_slo_policy_bundle.sh`](./scripts/validate_slo_policy_bundle.sh)
 
-The artifact covers the policy bundle schema, compiler output, runtime application contract, LabRuntime replay evidence, proof-report gate, and runtime enforcement report in one JSON contract. The compiler schema is `slo-budget-admission-compiler-v1`, the runtime application schema is `slo-runtime-policy-application-v1`, the replay contract is `slo-lab-replay-contract-v1`, the proof-report schema is `slo-proof-report-v1`, and the runtime enforcement report schema is `slo-runtime-enforcement-proof-report-v1`.
+The artifact covers the policy bundle schema, compiler output, runtime application contract, LabRuntime replay evidence, brownout E2E receipts, proof-report gate, and runtime enforcement report in one JSON contract. The runtime bridge is intentionally narrower than a policy engine: callers pass an explicit `Cx`, work kind, and admission request, and the bridge records admitted, browned-out, cancelled, no-win, or blocked decisions while preserving region-close quiescence and explicit non-start/drain receipts. The compiler schema is `slo-budget-admission-compiler-v1`, the runtime application schema is `slo-runtime-policy-application-v1`, the replay contract is `slo-lab-replay-contract-v1`, the brownout E2E receipt schema is `slo-lab-brownout-e2e-receipt-v1`, the proof-report schema is `slo-proof-report-v1`, and the runtime enforcement report schema is `slo-runtime-enforcement-proof-report-v1`.
 
-The runtime enforcement report preserves `pass`, `degraded`, `no_win`, `blocked`, `stale_evidence`, `unsupported`, and `malformed` as separate outcomes. `pass` means admitted runtime work completed under the compiled policy. `degraded` means optional work browned out before violating the objective. `no_win` means the explicit no-win fallback receipt was selected. `blocked`, `stale_evidence`, `unsupported`, and `malformed` are fail-closed operator outcomes. Runtime JSONL rows emitted by `scripts/validate_slo_policy_bundle.sh` include `runtime_enforcement_status`, `runtime_admission_status`, `lab_replay_status`, admitted/rejected work counts, optional work browned out, cleanup deadline misses, `fallback_reason`, `issue_kinds`, `proof_command`, `proof_command_source`, and `redaction_policy_id`.
+The brownout E2E receipt rows are deterministic LabRuntime evidence for healthy admit, optional-work brownout, no-win fallback, cancellation during brownout, and recovery after pressure clears. They include `receipt_status`, `region_ids`, `task_counts`, `obligation_state`, cancellation counters, drain counters such as `drain_completed_count`, finalizer counters such as `finalizer_completed_count`, `final_quiescent`, `runtime_invariant_violations`, `oracle_violations`, `operator_interpretation`, and explicit non-claims. Missing drain or finalizer evidence produces a red receipt.
+
+The runtime enforcement report preserves `pass`, `degraded`, `no_win`, `blocked`, `stale_evidence`, `unsupported`, and `malformed` as separate outcomes. `pass` means admitted runtime work completed under the compiled policy. `degraded` means optional work browned out before violating the objective. `no_win` means the explicit no-win fallback receipt was selected. `blocked`, `stale_evidence`, `unsupported`, and `malformed` are fail-closed operator outcomes. Runtime JSONL rows emitted by `scripts/validate_slo_policy_bundle.sh` include `runtime_enforcement_status`, `runtime_admission_status`, `lab_replay_status`, `receipt_status`, admitted/rejected work counts, optional work browned out, cleanup deadline misses, `fallback_reason`, `issue_kinds`, `proof_command`, `proof_command_source`, `redaction_policy_id`, and the brownout E2E receipt fields. The script writes `slo-policy-bundle-run.json`, `slo-policy-bundle-run.md`, `slo-policy-bundle-events.ndjson`, and `slo-brownout-e2e-detail.log` under `target/slo-policy-bundle/<run-id>/`.
 
 The proof report still preserves `pass`, `fail`, `blocked`, `degraded`, `no_win`, `unsupported`, and `stale_evidence` as separate gate outcomes. The opt-in gate accepts only issue-free `pass`, `degraded`, and `no_win` reports. Only `pass` is counted as full success. Malformed reports, missing `rch exec` commands, stale profile hashes, missing no-win receipts, redaction failures, secret-like material, unsupported schema versions, missing required fields, and local `rch` fallback markers checked with `--check-rch-log` fail closed.
 
@@ -1676,6 +1708,26 @@ Rust proof for artifact/API/doc consistency stays scoped to the touched crate:
 
 ```bash
 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_docs CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture
+```
+
+Focused runtime bridge proof:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge --features test-internals -- --nocapture
+```
+
+Focused brownout E2E receipt proof:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture
+```
+
+Closeout validation for runtime bridge changes keeps the broad lanes explicit:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_check_all_targets_ol11aa3 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets_ol11aa3 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check_ol11aa3 cargo fmt --check
 ```
 
 ### Gate matrix
@@ -1809,12 +1861,14 @@ If you want to install the repo's local skills into your detected global agent-s
 Use it when you want an agent to:
 
 - migrate a Tokio / axum / hyper / tonic stack to native Asupersync,
+- run the migration readiness planner and map its report rows back to the playbook,
 - design a greenfield service around `Cx`, regions, `AppSpec`, supervision, and deterministic tests,
 - debug cancellation, obligation leaks, futurelock, scheduler behavior, or replay artifacts,
 - understand which Asupersync surfaces to lead with by default versus only use when the project explicitly needs them.
 
 Typical trigger prompts:
 
+- `Run the migration readiness planner and explain the operator report.`
 - `Migrate this Tokio service to native Asupersync.`
 - `Design this service around Cx, regions, AppSpec, and deterministic tests.`
 - `Fix this cancellation / futurelock / obligation leak bug in Asupersync.`

@@ -1,0 +1,106 @@
+{
+  "schema_version": "swarm-pressure-preflight-input-v1",
+  "profile_id": "chaos-pressure",
+  "generated_at": "2026-06-05T08:00:00Z",
+  "e2e_expectations": {
+    "case_id": "chaos-pressure-scenario",
+    "expected_decision": "preflight-blocked",
+    "expected_blocker_kinds": ["proof-admission-blocked"],
+    "expected_warning_kinds": ["proof-rerun-required", "runtime-pressure-high"],
+    "notes": ["chaos proof-lane pressure should queue rather than dispatch under critical pressure"]
+  },
+  "sources": {
+    "proof_lane_manifest": {
+      "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+      "data": {
+        "contract_version": "proof-lane-manifest-v1",
+        "command_policy": {
+          "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+        },
+        "resource_envelope_policy": {
+          "classes": [
+            {
+              "class_id": "chaos-e2e-high-pressure",
+              "lane_kinds": ["e2e_artifact_contract"],
+              "timeout_seconds": 3600,
+              "memory_mb": 32768,
+              "remote_required": true,
+              "local_fallback_allowed": false,
+              "resource_pressure": "critical"
+            }
+          ]
+        },
+        "required_guarantee_ids": ["proof-lane-pressure-chaos"],
+        "lanes": [
+          {
+            "lane_id": "proof-lane-pressure-chaos-e2e",
+            "kind": "e2e_artifact_contract",
+            "resource_envelope_class": "chaos-e2e-high-pressure",
+            "command": "RCH_REQUIRE_REMOTE=1 rch exec -- bash scripts/run_proof_lane_pressure_chaos_e2e.sh --profile fast --output-dir target/proof-lane-pressure-chaos-e2e",
+            "guarantee_ids": ["proof-lane-pressure-chaos"],
+            "source_paths": [
+              "scripts/run_proof_lane_pressure_chaos_e2e.sh",
+              "tests/fixtures/proof_lane_pressure_chaos/proof_lane_pressure_scenarios.json",
+              "artifacts/chaos_scenario_dsl_contract_v1.json"
+            ]
+          }
+        ]
+      }
+    },
+    "proof_status_snapshot": {
+      "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+      "data": {
+        "contract_version": "proof-status-snapshot-v1",
+        "claim_categories": [
+          {
+            "claim_id": "proof-lane-pressure-chaos",
+            "status": "yellow_frontier",
+            "proof_evidence_status": "rerun-required",
+            "manifest_lane_ids": ["proof-lane-pressure-chaos-e2e"]
+          }
+        ]
+      }
+    },
+    "runtime_pressure_contract": {
+      "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "data": {
+        "contract_version": "runtime-pressure-control-evidence-contract-v1",
+        "schema_versions": {
+          "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+          "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+          "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+          "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+        },
+        "proof_lanes": [
+          {
+            "lane_id": "proof-lane-pressure-chaos-e2e"
+          }
+        ],
+        "evidence_claims": [],
+        "operator_policy": {
+          "production_signals_are_advisory_without_lab_or_replay_evidence": true
+        }
+      }
+    },
+    "proof_admission_receipts": [
+      {
+        "artifact_path": "artifacts/proof/admission/proof-lane-pressure-chaos-critical.json",
+        "data": {
+          "schema_version": "proof-lane-admission-decision-receipt-v1",
+          "lane_id": "proof-lane-pressure-chaos-e2e",
+          "decision": {
+            "admission_decision": "queue",
+            "proof_may_run_now": false,
+            "reason_codes": ["chaos-pressure-window-saturated"]
+          },
+          "resource_pressure_summary": {
+            "class": "critical"
+          },
+          "disk_summary": {
+            "sufficient_for_lane": true
+          }
+        }
+      }
+    ]
+  }
+}

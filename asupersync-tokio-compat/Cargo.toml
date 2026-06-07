@@ -2,7 +2,7 @@
 name = "asupersync-tokio-compat"
 version = "0.3.3"
 edition = "2024"
-license-file = "../LICENSE"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Compatibility bridge for running Tokio-locked crates within the Asupersync async runtime."
 repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["async", "tokio", "compatibility", "bridge", "interop"]

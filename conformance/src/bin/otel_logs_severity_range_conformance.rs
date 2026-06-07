@@ -177,7 +177,7 @@ fn test_otlp_specification_coverage() -> Result<(), String> {
 
     // Verify we don't have any severity numbers outside the valid range (1-24)
     for &severity_num in &supported_severities {
-        if severity_num < 1 || severity_num > 24 {
+        if !(1..=24).contains(&severity_num) {
             return Err(format!(
                 "Severity number {} is outside valid OTLP range (1-24)",
                 severity_num
@@ -261,7 +261,7 @@ fn test_severity_level_mapping(test_case: &SeverityMappingTestCase) -> Result<()
         let severity_num = map_rust_level_to_otlp_severity(level);
 
         // Verify severity number is in valid range
-        if severity_num < 1 || severity_num > 24 {
+        if !(1..=24).contains(&severity_num) {
             return Err(format!(
                 "Invalid severity number {} for level {:?}",
                 severity_num, level

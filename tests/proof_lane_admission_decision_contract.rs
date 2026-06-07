@@ -38,6 +38,22 @@ fn run_fixture(name: &str) -> JsonValue {
     })
 }
 
+fn run_fixture_markdown(name: &str) -> String {
+    let output = Command::new("python3")
+        .current_dir(repo_root())
+        .arg(SCRIPT_PATH)
+        .arg("--input")
+        .arg(fixture_path(name))
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--output")
+        .arg("markdown")
+        .output()
+        .unwrap_or_else(|error| panic!("run planner markdown for {name}: {error}"));
+    assert_success(name, &output);
+    String::from_utf8(output.stdout).unwrap_or_else(|error| panic!("markdown utf8: {error}"))
+}
+
 fn assert_success(name: &str, output: &Output) {
     assert!(
         output.status.success(),
@@ -89,6 +105,12 @@ fn integrated(receipt: &JsonValue) -> &serde_json::Map<String, JsonValue> {
         .expect("integrated operator receipt")
 }
 
+fn topology(receipt: &JsonValue) -> &serde_json::Map<String, JsonValue> {
+    receipt["topology_guidance"]
+        .as_object()
+        .expect("topology guidance")
+}
+
 #[test]
 fn receipts_are_dry_run_non_mutating_and_name_non_coverage() {
     let receipt = run_fixture("high_core_admit.json");
@@ -132,6 +154,8 @@ fn receipts_are_dry_run_non_mutating_and_name_non_coverage() {
     assert!(non_coverage.contains(&"does not start proof lanes"));
     assert!(non_coverage.contains(&"does not prove Cargo/test success"));
     assert!(non_coverage.contains(&"does not make cache warmth correctness evidence"));
+    assert!(non_coverage.contains(&"does not make topology guidance correctness evidence"));
+    assert!(non_coverage.contains(&"does not prove live host topology or throughput"));
 
     let integrated = integrated(&receipt);
     assert_eq!(
@@ -152,6 +176,21 @@ fn receipts_are_dry_run_non_mutating_and_name_non_coverage() {
         integrated["actual_proof_commands_still_required"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        integrated["topology_guidance"]["topology_guidance_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn markdown_output_reports_topology_and_non_coverage_markers() {
+    let markdown = run_fixture_markdown("same_socket_contention_queue.json");
+    assert!(markdown.contains("# Proof Lane Admission Decision"));
+    assert!(markdown.contains("admission_decision: `queue`"));
+    assert!(markdown.contains("classification: `contention`"));
+    assert!(markdown.contains("profile_id: `dual-socket-64c-256g-numa`"));
+    assert!(markdown.contains("topology_guidance_is_correctness_evidence: `false`"));
+    assert!(markdown.contains("does not make topology guidance correctness evidence"));
 }
 
 #[test]
@@ -169,6 +208,7 @@ fn high_core_high_ram_profile_admits_clean_cold_worker() {
     assert_has_reason(&receipt, "host-large-core");
     assert_has_reason(&receipt, "worker-admissible");
     assert_has_reason(&receipt, "target-dir-isolated");
+    assert_has_reason(&receipt, "topology-fit");
     assert!(suggested_command(&receipt).contains("RCH_PREFERRED_WORKER=rchw-cold-a"));
     assert!(suggested_command(&receipt).contains("RCH_REQUIRE_REMOTE=1"));
     assert!(suggested_command(&receipt).contains("CARGO_TARGET_DIR="));
@@ -203,6 +243,19 @@ fn high_core_high_ram_profile_admits_clean_cold_worker() {
         integrated["resource_pressure_summary"]["class"].as_str(),
         Some("healthy")
     );
+    assert_eq!(
+        topology(&receipt)["profile_id"].as_str(),
+        Some("single-socket-64c-256g")
+    );
+    assert_eq!(topology(&receipt)["classification"].as_str(), Some("fit"));
+    assert_eq!(
+        topology(&receipt)["artifact_path"].as_str(),
+        Some("artifacts/large_host_topology_corpus_v1.json")
+    );
+    assert_eq!(
+        topology(&receipt)["topology_guidance_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
     assert!(
         integrated["suggested_next_command"]
             .as_str()
@@ -224,6 +277,67 @@ fn low_memory_profile_queues_before_admission() {
         Some(false)
     );
     assert_has_reason(&receipt, "low-memory-headroom");
+}
+
+#[test]
+fn low_memory_numa_topology_queues_even_when_scalar_memory_is_available() {
+    let receipt = run_fixture("low_memory_numa_node.json");
+    assert_eq!(decision_name(&receipt), "queue");
+    assert_eq!(
+        decision(&receipt)["admission_precondition"].as_str(),
+        Some("queue-for-topology")
+    );
+    assert_has_reason(&receipt, "low-memory-numa-node");
+    assert_has_reason(&receipt, "split-lane-recommended");
+    assert_eq!(
+        topology(&receipt)["profile_id"].as_str(),
+        Some("memory-pressure-degraded-64c")
+    );
+    assert_eq!(
+        topology(&receipt)["classification"].as_str(),
+        Some("memory-constrained")
+    );
+    assert_eq!(
+        topology(&receipt)["topology_guidance_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn same_socket_contention_queues_with_split_advice() {
+    let receipt = run_fixture("same_socket_contention_queue.json");
+    assert_eq!(decision_name(&receipt), "queue");
+    assert_eq!(
+        decision(&receipt)["admission_precondition"].as_str(),
+        Some("queue-for-topology")
+    );
+    assert_has_reason(&receipt, "same-domain-contention");
+    assert_has_reason(&receipt, "split-lane-recommended");
+    assert_eq!(
+        topology(&receipt)["profile_id"].as_str(),
+        Some("dual-socket-64c-256g-numa")
+    );
+    assert_eq!(
+        topology(&receipt)["requested_contention_domain"].as_str(),
+        Some("socket0-l3")
+    );
+    assert_eq!(
+        topology(&receipt)["classification"].as_str(),
+        Some("contention")
+    );
+}
+
+#[test]
+fn stale_topology_input_fails_closed_before_admission() {
+    let receipt = run_fixture("stale_topology_input.json");
+    assert_eq!(decision_name(&receipt), "wait_for_telemetry");
+    assert_eq!(
+        decision(&receipt)["admission_precondition"].as_str(),
+        Some("wait-for-topology-telemetry")
+    );
+    assert_has_reason(&receipt, "stale-topology-evidence");
+    assert_eq!(topology(&receipt)["classification"].as_str(), Some("stale"));
+    assert_eq!(topology(&receipt)["blocks_admission"].as_bool(), Some(true));
 }
 
 #[test]
@@ -268,6 +382,25 @@ fn peer_owned_dirty_paths_force_dirty_tree_handoff() {
     assert_eq!(
         integrated(&receipt)["operator_action"].as_str(),
         Some("wait_for_dirty_tree_handoff")
+    );
+}
+
+#[test]
+fn unrelated_unreserved_dirty_tree_blocker_overrides_topology_fit() {
+    let receipt = run_fixture("unrelated_dirty_tree_blocker.json");
+    assert_eq!(decision_name(&receipt), "wait_for_dirty_tree_handoff");
+    assert_has_reason(&receipt, "unreserved-dirty-path");
+    assert_has_reason(&receipt, "reservation-required");
+    assert_eq!(topology(&receipt)["classification"].as_str(), Some("fit"));
+    assert_eq!(
+        decision(&receipt)["proof_may_run_now"].as_bool(),
+        Some(false)
+    );
+    let gate = &integrated(&receipt)["dirty_tree_gate"];
+    assert_eq!(gate["blocks_admission"].as_bool(), Some(true));
+    assert_eq!(
+        gate["blockers"][0]["path"].as_str(),
+        Some("docs/proof_lane_pressure_chaos.md")
     );
 }
 
@@ -317,6 +450,7 @@ fn warm_worker_is_preferred_but_not_correctness_evidence() {
         Some("rchw-warm-a")
     );
     assert_has_reason(&receipt, "warm-worker-preferred");
+    assert_has_reason(&receipt, "remote-worker-preferred");
     assert!(suggested_command(&receipt).contains("RCH_PREFERRED_WORKER=rchw-warm-a"));
     let has_cache_warmth_non_coverage = receipt["non_coverage"]
         .as_array()
@@ -325,6 +459,14 @@ fn warm_worker_is_preferred_but_not_correctness_evidence() {
         .map(|value| value.as_str().expect("non coverage string"))
         .any(|entry| entry == "does not make cache warmth correctness evidence");
     assert!(has_cache_warmth_non_coverage);
+    assert_eq!(
+        topology(&receipt)["profile_id"].as_str(),
+        Some("remote-worker-queue-contention-64c-256g")
+    );
+    assert_eq!(
+        topology(&receipt)["topology_guidance_is_correctness_evidence"].as_bool(),
+        Some(false)
+    );
 }
 
 #[test]

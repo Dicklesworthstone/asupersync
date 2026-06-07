@@ -21,6 +21,12 @@ from typing import Any
 
 SCHEMA_VERSION = "dirty-tree-ownership-receipt-v1"
 TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db", ".beads/beads.db-wal"}
+DEFAULT_IGNORED_ARTIFACT_PATTERNS = (
+    "target/**",
+    ".rch-target-*",
+    "topology-smoke-out/**",
+    "*.profraw",
+)
 FORBIDDEN_COMMAND_TOKENS = [
     "git branch",
     "git checkout -b",
@@ -348,6 +354,42 @@ def active_reservations_for_path(
     return matches
 
 
+def reservations_for_path(
+    rows: list[dict[str, Any]],
+    path: str,
+    generated_at: str,
+) -> list[dict[str, Any]]:
+    now = parse_timestamp(generated_at) or dt.datetime.now(dt.timezone.utc)
+    matches = []
+    for row in rows:
+        if not row.get("exclusive", True):
+            continue
+        pattern = row_pattern(row)
+        if not pattern or not path_matches(pattern, path):
+            continue
+        expires_ts = str(row.get("expires_ts") or row.get("expires_at") or "")
+        expires_at = parse_timestamp(expires_ts)
+        released = bool(row.get("released_ts") or row.get("released_at"))
+        if released:
+            state = "released"
+        elif expires_at is not None and expires_at <= now:
+            state = "stale"
+        else:
+            state = "active"
+        matches.append(
+            {
+                "id": str(row.get("id", "")),
+                "holder": holder_name(row) or "unknown",
+                "path_pattern": row_pattern(row),
+                "exclusive": bool(row.get("exclusive", True)),
+                "expires_ts": expires_ts,
+                "state": state,
+                "artifact_path": str(row.get("artifact_path", "")),
+            }
+        )
+    return sorted(matches, key=lambda row: (row["state"], row["path_pattern"], row["holder"]))
+
+
 def messages_for_path(agent_mail: dict[str, Any], path: str) -> list[dict[str, Any]]:
     messages = extract_rows(agent_mail, ("messages", "inbox", "threads"))
     matches = []
@@ -360,6 +402,52 @@ def messages_for_path(agent_mail: dict[str, Any], path: str) -> list[dict[str, A
             matches.append(row)
     matches.sort(key=lambda row: str(row.get("created_ts") or row.get("created_at") or ""), reverse=True)
     return matches
+
+
+def ignored_artifact_patterns(source: dict[str, Any]) -> list[str]:
+    candidates = []
+    for key in ("release_prep", "dirty_tree", "git"):
+        section = source.get(key)
+        if isinstance(section, dict):
+            raw = section.get("ignored_artifact_patterns") or section.get("ignored_artifacts")
+            if isinstance(raw, list):
+                candidates.extend(str(item) for item in raw if str(item).strip())
+    if not candidates:
+        candidates = list(DEFAULT_IGNORED_ARTIFACT_PATTERNS)
+    seen: set[str] = set()
+    patterns = []
+    for pattern in candidates:
+        normalized = normalize_path(pattern)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            patterns.append(normalized)
+    return patterns
+
+
+def path_is_ignored_artifact(path: str, patterns: list[str]) -> bool:
+    return any(path_matches(pattern, path) for pattern in patterns)
+
+
+def lane_subjects(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    rows = []
+    seen: set[tuple[str, str, str]] = set()
+    for message in messages:
+        subject = str(message.get("subject", ""))
+        thread_id = str(message.get("thread_id", ""))
+        sender = holder_name(message)
+        key = (subject, thread_id, sender)
+        if not subject or key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "subject": subject,
+                "thread_id": thread_id,
+                "from": sender,
+                "created_ts": str(message.get("created_ts") or message.get("created_at") or ""),
+            }
+        )
+    return rows
 
 
 def bead_for_path(source: dict[str, Any], path: str) -> dict[str, Any] | None:
@@ -844,12 +932,139 @@ def shared_main_boundary(
     }
 
 
+def reservation_inventory(source: dict[str, Any], generated_at: str) -> list[dict[str, str]]:
+    agent_mail = source.get("agent_mail") if isinstance(source.get("agent_mail"), dict) else {}
+    rows = []
+    for reservation in reservation_rows(agent_mail):
+        pattern = row_pattern(reservation)
+        if not pattern:
+            continue
+        state_rows = reservations_for_path([reservation], pattern, generated_at)
+        state = state_rows[0]["state"] if state_rows else "inactive"
+        rows.append(
+            {
+                "holder": holder_name(reservation) or "unknown",
+                "path_pattern": pattern,
+                "expires_ts": str(reservation.get("expires_ts") or reservation.get("expires_at") or ""),
+                "state": state,
+            }
+        )
+    return sorted(rows, key=lambda row: (row["path_pattern"], row["holder"], row["expires_ts"]))
+
+
+def release_prep_row(
+    source: dict[str, Any],
+    row: dict[str, Any],
+    generated_at: str,
+    ignored_patterns: list[str],
+) -> dict[str, Any]:
+    path = str(row["path"])
+    agent_mail = source.get("agent_mail") if isinstance(source.get("agent_mail"), dict) else {}
+    matching_reservations = reservations_for_path(reservation_rows(agent_mail), path, generated_at)
+    active = [reservation for reservation in matching_reservations if reservation["state"] == "active"]
+    stale = [reservation for reservation in matching_reservations if reservation["state"] == "stale"]
+    subjects = lane_subjects(messages_for_path(agent_mail, path))
+    active_holders = sorted({reservation["holder"] for reservation in active if reservation["holder"]})
+
+    if path_is_ignored_artifact(path, ignored_patterns):
+        classification = "ignored-artifact"
+        release_blocker = False
+        reason = "dirty path matches an ignored artifact pattern"
+        recommended_next_step = "exclude-from-release-surface"
+    elif len(active_holders) > 1:
+        classification = "release-blocker"
+        release_blocker = True
+        reason = "overlapping active reservations disagree on owner"
+        recommended_next_step = "coordinate-overlapping-reservations"
+    elif row["classification"] == "self-owned":
+        classification = "owned"
+        release_blocker = False
+        reason = "current agent has ownership evidence"
+        recommended_next_step = "keep-path-limited"
+    elif row["classification"] in {"peer-owned", "owner-conflict", "tracker-state"}:
+        classification = "release-blocker"
+        release_blocker = True
+        reason = str(row["staging_guidance"]["reason"])
+        recommended_next_step = "coordinate-or-wait-for-owner"
+    elif stale:
+        classification = "stale-reservation"
+        release_blocker = True
+        reason = "only expired reservations match this dirty path"
+        recommended_next_step = "refresh-owner-snapshot-before-release"
+    else:
+        classification = "unowned"
+        release_blocker = True
+        reason = "no active reservation, recent lane subject, or bead evidence names an owner"
+        recommended_next_step = "assign-owner-before-release"
+
+    return {
+        "path": path,
+        "status": row["status"],
+        "classification": classification,
+        "base_classification": row["classification"],
+        "owner": row["owner"] or "unknown",
+        "release_blocker": release_blocker,
+        "reason": reason,
+        "recommended_next_step": recommended_next_step,
+        "matched_lane_subjects": subjects,
+        "matching_reservations": matching_reservations,
+        "staging_decision": row["staging_guidance"]["decision"],
+    }
+
+
+def build_release_prep_report(
+    source: dict[str, Any],
+    rows: list[dict[str, Any]],
+    generated_at: str,
+) -> dict[str, Any]:
+    ignored_patterns = ignored_artifact_patterns(source)
+    report_rows = [
+        release_prep_row(source, row, generated_at, ignored_patterns)
+        for row in rows
+    ]
+    blockers = [row for row in report_rows if row["release_blocker"]]
+    by_classification: dict[str, int] = {}
+    for row in report_rows:
+        classification = str(row["classification"])
+        by_classification[classification] = by_classification.get(classification, 0) + 1
+
+    if blockers:
+        decision = "release-blocked"
+        reason = "dirty paths require owner coordination before final release gates"
+    else:
+        decision = "release-preflight-clear"
+        reason = "dirty paths are either current-agent owned or ignored artifacts"
+
+    return {
+        "schema_version": "dirty-tree-release-prep-report-v1",
+        "generated_at": generated_at,
+        "ignored_artifact_patterns": ignored_patterns,
+        "input_files": [str(row["path"]) for row in rows],
+        "reservation_holders": reservation_inventory(source, generated_at),
+        "rows": report_rows,
+        "release_blocker_summary": {
+            "decision": decision,
+            "reason": reason,
+            "total_dirty_paths": len(report_rows),
+            "release_blocker_count": len(blockers),
+            "by_classification": dict(sorted(by_classification.items())),
+            "blocker_paths": [str(row["path"]) for row in blockers],
+        },
+        "safety": {
+            "mutating_commands_executed": False,
+            "destructive_cleanup_recommended": False,
+            "peer_owned_edit_or_stage_recommended": False,
+        },
+    }
+
+
 def build_receipt(
     source: dict[str, Any],
     repo_path: str,
     agent: str,
     generated_at: str,
     declared_commit_paths: list[str] | None = None,
+    include_release_prep_report: bool = False,
 ) -> dict[str, Any]:
     rows = [
         ownership_for_entry(source, agent, generated_at, entry)
@@ -907,6 +1122,8 @@ def build_receipt(
             source=source,
             generated_at=generated_at,
         )
+    if include_release_prep_report:
+        receipt["release_prep_report"] = build_release_prep_report(source, rows, generated_at)
     return receipt
 
 
@@ -935,6 +1152,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Read offline Agent Mail file reservation artifacts from this directory",
     )
+    parser.add_argument(
+        "--release-prep-report",
+        action="store_true",
+        help="Include owner-aware release-prep rows and blocker summary",
+    )
     parser.add_argument("--output", choices=["json"], default="json")
     return parser.parse_args()
 
@@ -955,6 +1177,7 @@ def main() -> int:
         agent=args.agent,
         generated_at=generated_at,
         declared_commit_paths=args.commit_path if args.declared_commit_preflight or args.commit_path else None,
+        include_release_prep_report=args.release_prep_report,
     )
     json.dump(receipt, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

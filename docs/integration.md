@@ -46,6 +46,48 @@ runtime, HTTP, web, gRPC, or database surfaces. Reach for
 `asupersync-tokio-compat` only at the boundary where a dependency is hard-wired
 to Tokio or hyper runtime traits.
 
+### Migration Readiness Planner
+
+Before changing a brownfield project, run the read-only planner so the migration
+starts from an inventory, proof-pack, semantic map, and operator phase plan
+rather than from hand-maintained notes.
+
+```bash
+python3 scripts/migration_readiness_planner.py --list
+python3 scripts/migration_readiness_planner.py --dry-run --scenario tokio-http-service
+python3 scripts/migration_readiness_planner.py --execute --output-root "${TMPDIR:-/tmp}/asupersync_migration_planner_e2e"
+python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness
+```
+
+The planner never mutates the scanned project. For a real project, read these
+report fields first:
+
+- `summary.final_verdict`: `ready`, `needs_quarantine`, or `blocked`
+- `proof_pack.proof_commands`: remote-required cargo-tree checks such as
+  `default-production-tokio-tree`, `metrics-production-tokio-tree`, and
+  `fuzz-tokio-quarantine-tree`
+- `semantic_map.recommendations`: Cx threading, region ownership,
+  cancellation checkpoints, and capability narrowing work
+- `operator_report.phase_plan`: six ordered phases that map inventory rows back
+  to the migration playbook
+- `operator_report.residual_risks`: rows that still need manual design review
+
+Fixture recipes:
+
+| Project shape | Planner scenario | Expected report path |
+|---|---|---|
+| Already native Asupersync crate | `native-clean` | `summary.final_verdict=ready`, native proof commands, no residual risk rows |
+| Tokio HTTP service using axum/hyper/tower markers | `tokio-http-service` | `needs_quarantine`, semantic recommendations for region ownership, cancellation, and capability narrowing |
+| Mixed native code with an explicit compat boundary | `mixed-compat-boundary` | `needs_quarantine`, compat rows mapped to `compat_boundary_ok` guidance |
+| Malformed Cargo manifest | `malformed-workspace` | `blocked`, fail-closed manifest parse and inventory report reasons |
+| Optional Tokio edge or transitive lockfile path | `feature-gated-tokio-edge` | quarantine rows plus proof commands that separate default, metrics, and fuzz graphs |
+| Ambient env/fs authority plus alternate runtime | `blocked-ambient-authority-service` | `blocked`, hard-blocker classification and manual design risk rows |
+| Parseable project with no runtime evidence | `zero-evidence-empty` | `blocked`, zero-runtime-surface and zero-semantic-recommendation reasons |
+
+Use these fixtures as deterministic examples only. Real migration signoff still
+comes from running `--project-root` against the target project and keeping the
+no-Tokio production graph checks green for the core crate.
+
 Compat crate feature gates and the entrypoints they expose:
 
 | Feature | Use when | Entry points |

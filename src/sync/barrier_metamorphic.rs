@@ -366,7 +366,7 @@ fn mr1_party_count_invariant(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new(
+                let cx: Cx = Cx::new(
                     crate::types::RegionId::new_for_test(1, 0),
                     crate::types::TaskId::new_for_test(1, 0),
                     crate::types::Budget::INFINITE,
@@ -500,7 +500,7 @@ fn mr3_drop_cleanup_correctness(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new(
+                let cx: Cx = Cx::new(
                     crate::types::RegionId::new_for_test(1, 0),
                     crate::types::TaskId::new_for_test(1, 0),
                     crate::types::Budget::INFINITE,
@@ -535,7 +535,7 @@ fn mr3_drop_cleanup_correctness(
             let (task_id, _handle) = runtime
                 .state
                 .create_task(root, Budget::INFINITE, async move {
-                    let cx = Cx::new(
+                    let cx: Cx = Cx::new(
                         crate::types::RegionId::new_for_test(1, 0),
                         crate::types::TaskId::new_for_test(1, 0),
                         crate::types::Budget::INFINITE,
@@ -663,7 +663,7 @@ fn execute_barrier_scenario(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new(
+                let cx: Cx = Cx::new(
                     crate::types::RegionId::new_for_test(1, 0),
                     crate::types::TaskId::new_for_test(1, 0),
                     crate::types::Budget::INFINITE,
@@ -705,7 +705,7 @@ fn execute_barrier_scenario_with_leader_tracking(
         let (task_id, _handle) = runtime
             .state
             .create_task(root, Budget::INFINITE, async move {
-                let cx = Cx::new(
+                let cx: Cx = Cx::new(
                     crate::types::RegionId::new_for_test(1, 0),
                     crate::types::TaskId::new_for_test(1, 0),
                     crate::types::Budget::INFINITE,

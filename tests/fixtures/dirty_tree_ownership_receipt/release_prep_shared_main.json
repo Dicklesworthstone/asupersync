@@ -1,0 +1,119 @@
+{
+  "agent_mail": {
+    "available": true,
+    "messages": [
+      {
+        "body_md": "I am closing issue #47 and currently own src/sync/mutex.rs.",
+        "created_ts": "2026-06-05T05:27:03Z",
+        "from": "SageWolf",
+        "subject": "Issue #47 fixed and pushed",
+        "thread_id": "asupersync-issue-47"
+      },
+      {
+        "body_md": "Release-prep checks are waiting on docs/proof_runner_usage.md and dirty proof docs.",
+        "created_ts": "2026-06-05T05:30:42Z",
+        "from": "BeigeOriole",
+        "subject": "[release-prep][handoff check] staged proof-lane metadata still blocks final gates",
+        "thread_id": "release-prep-proof-docs"
+      }
+    ],
+    "reservations": [
+      {
+        "agent_name": "TopazGoose",
+        "exclusive": true,
+        "expires_ts": "2026-06-05T06:30:00Z",
+        "path_pattern": "scripts/dirty_tree_ownership_receipt.py",
+        "reason": "asupersync-6m04gn"
+      },
+      {
+        "agent_name": "SageWolf",
+        "exclusive": true,
+        "expires_ts": "2026-06-05T06:35:00Z",
+        "path_pattern": "src/sync/mutex.rs",
+        "reason": "issue-47"
+      },
+      {
+        "agent_name": "BeigeOriole",
+        "exclusive": true,
+        "expires_ts": "2026-06-05T06:36:00Z",
+        "path_pattern": "src/sync/*.rs",
+        "reason": "release-prep-check"
+      },
+      {
+        "agent_name": "BeigeOriole",
+        "exclusive": true,
+        "expires_ts": "2026-06-05T06:40:00Z",
+        "path_pattern": "docs/proof_runner_usage.md",
+        "reason": "release-prep-docs"
+      },
+      {
+        "agent_name": "DormantAgent",
+        "exclusive": true,
+        "expires_ts": "2026-06-05T04:30:00Z",
+        "path_pattern": "src/stale_owner.rs",
+        "reason": "expired-lane"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "issues": [
+      {
+        "description": "Build the dirty-tree owner report in scripts/dirty_tree_ownership_receipt.py and docs/dirty_tree_ownership_receipt.md.",
+        "id": "asupersync-6m04gn",
+        "status": "in_progress",
+        "title": "Correlate dirty-tree blockers with Agent Mail reservations"
+      }
+    ],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": "scripts/dirty_tree_ownership_receipt.py",
+        "status": " M"
+      },
+      {
+        "path": "src/sync/mutex.rs",
+        "status": " M"
+      },
+      {
+        "path": "docs/proof_runner_usage.md",
+        "status": " M"
+      },
+      {
+        "path": "src/stale_owner.rs",
+        "status": " M"
+      },
+      {
+        "path": "target/release-prep/run.log",
+        "status": "??"
+      },
+      {
+        "path": "src/unowned.rs",
+        "status": " M"
+      },
+      {
+        "path": ".beads/issues.jsonl",
+        "status": " M"
+      }
+    ],
+    "ignored_artifact_patterns": [
+      "target/**",
+      ".rch-target-*"
+    ],
+    "status": "ok",
+    "upstream": {
+      "ahead": 0,
+      "behind": 0,
+      "branch": "origin/main",
+      "status": "ok"
+    }
+  },
+  "release_prep": {
+    "ignored_artifact_patterns": [
+      "target/**",
+      ".rch-target-*"
+    ]
+  }
+}

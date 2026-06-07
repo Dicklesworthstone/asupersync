@@ -109,32 +109,31 @@ fn extract_conformance_rate(data: &Value) -> Result<f64, Box<dyn std::error::Err
     // Try multiple possible JSON structures for conformance data
 
     // Structure 1: {"conformance_rate": 95.5}
-    if let Some(rate) = data.get("conformance_rate") {
-        if let Some(val) = rate.as_f64() {
-            return Ok(val);
-        }
+    if let Some(val) = data.get("conformance_rate").and_then(Value::as_f64) {
+        return Ok(val);
     }
 
     // Structure 2: {"results": {"pass": 100, "total": 105}}
-    if let Some(results) = data.get("results") {
-        if let (Some(pass), Some(total)) = (results.get("pass"), results.get("total")) {
-            if let (Some(pass_count), Some(total_count)) = (pass.as_u64(), total.as_u64()) {
-                if total_count > 0 {
-                    return Ok((pass_count as f64 / total_count as f64) * 100.0);
-                }
-            }
-        }
+    if let Some(results) = data.get("results")
+        && let (Some(pass_count), Some(total_count)) = (
+            results.get("pass").and_then(Value::as_u64),
+            results.get("total").and_then(Value::as_u64),
+        )
+        && total_count > 0
+    {
+        return Ok((pass_count as f64 / total_count as f64) * 100.0);
     }
 
     // Structure 3: {"test_summary": {"passed": 95, "failed": 5}}
-    if let Some(summary) = data.get("test_summary") {
-        if let (Some(passed), Some(failed)) = (summary.get("passed"), summary.get("failed")) {
-            if let (Some(pass_count), Some(fail_count)) = (passed.as_u64(), failed.as_u64()) {
-                let total = pass_count + fail_count;
-                if total > 0 {
-                    return Ok((pass_count as f64 / total as f64) * 100.0);
-                }
-            }
+    if let Some(summary) = data.get("test_summary")
+        && let (Some(pass_count), Some(fail_count)) = (
+            summary.get("passed").and_then(Value::as_u64),
+            summary.get("failed").and_then(Value::as_u64),
+        )
+    {
+        let total = pass_count + fail_count;
+        if total > 0 {
+            return Ok((pass_count as f64 / total as f64) * 100.0);
         }
     }
 

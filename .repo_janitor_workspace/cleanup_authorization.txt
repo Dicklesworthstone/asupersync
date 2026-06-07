@@ -1,0 +1,39 @@
+asupersync repo-janitor cleanup authorization — 2026-05-13
+
+User: Jeffrey Emanuel (mortimeremanuel@gmail.com)
+Pre-cleanup HEAD: 43fd4c8f8169363b33df4ff9555b27b471c2591c (saved at refs/repo-janitor-backup/2026-05-13-pre-cleanup)
+Recovery bundle: /data/projects/asupersync-repo-archive-2026-05-13/ (8.7 MB, byte-equality verified)
+
+CATEGORY A (MOVES) — Yes — execute all 8 moves
+  4  MEMORY_ORDERING_OPTIMIZATION.md                          -> docs/MEMORY_ORDERING_OPTIMIZATION_REPORT.md
+  5  CROSS_MODULE_LOCK_ORDERING.md                            -> docs/CROSS_MODULE_LOCK_ORDERING.md
+  6  bead_1qfd0.620.md                                        -> docs/beads/bead_1qfd0.620.md
+  7  bead_metamorphic_analysis.md                             -> docs/beads/bead_metamorphic_analysis.md
+  8  bug_report_uring_user_data_collision.md                  -> docs/audits/bug_report_uring_user_data_collision.md
+  9  MODES_ANALYSIS_PROGRESS.md                               -> docs/analysis/MODES_ANALYSIS_PROGRESS.md
+  10 MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md     -> docs/analysis/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md
+  11 perf_scenario_definition.md                              -> docs/perf/perf_scenario_definition.md
+
+CATEGORY B (DELETES) — Yes — delete all 3 (binary + both .png duplicates)
+  1  git rm cx_optimization_benchmark           (4.2 MB ELF debug binary)
+  2  git rm asupersync_diagram.png              (1.7 MB unused .png; README uses .webp)
+  3  git rm asupersync_illustration.png         (2.2 MB unused .png; README uses .webp)
+
+User course-correction log:
+  - First answer: authorize deletion of all 3
+  - Then: "wait don't delete the illustrations, just MOVE them and modify the README"
+  - Then: "oh wait you're right, we aren't using the png versions, just the webp ones"
+  - Final verbatim AskUserQuestion answer: "Delete both .png files (back to original plan)"
+
+CATEGORY C (SURFACE) — Keep gh_og_share_image.png (intentional GitHub social-preview asset)
+
+CATEGORY D (.gitignore) — Yes — add all 6 root-anchored patterns
+  /cx_*_benchmark
+  /asupersync_*.png
+  /bead_*.md
+  /MODES_*.md
+  /perf_scenario_*.md
+  /bug_report_*.md
+
+Branch policy: commit DIRECTLY TO main (per AGENTS.md RULE 2 — no branches).
+Final push: git push origin main && git push origin main:master

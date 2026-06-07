@@ -1,0 +1,57 @@
+{
+  "schema_version": "scheduler-resource-pressure-profiling-receipts-v1",
+  "bead_id": "asupersync-94pz70",
+  "source_of_truth": {
+    "contract": "artifacts/scheduler_resource_pressure_profiling_receipts_v1.json",
+    "script": "scripts/scheduler_resource_pressure_profiling_receipts.py"
+  },
+  "required_receipt_fields": [
+    "scenario_id",
+    "scenario_family",
+    "command",
+    "environment",
+    "data_hash",
+    "top_hot_paths",
+    "memory_observations",
+    "operator_interpretation",
+    "proof_boundary",
+    "rch_refresh_command",
+    "source_refs"
+  ],
+  "scenario_catalog": [
+    {
+      "scenario_id": "bad-missing-top-hot-paths",
+      "scenario_family": "scheduler_spawn_storm",
+      "title": "Missing hot paths should fail closed",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bad cargo bench -p asupersync --bench methodology_baselines --features test-internals -- methodology/task_spawn --noplot",
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bad cargo bench -p asupersync --bench methodology_baselines --features test-internals -- methodology/task_spawn --noplot",
+      "environment": {
+        "host_profile": "large-swarm-64c-256gb",
+        "remote_required": true,
+        "local_fallback_allowed": false
+      },
+      "data_hash": "sha256:c97b861e2007b8dce690709eb0f8930efffbe0f43f8e21754813d339311b8cee",
+      "memory_observations": [
+        {
+          "metric": "refresh_memory_ceiling_mb",
+          "value": 65536,
+          "unit": "MiB",
+          "interpretation": "Fixture should still report memory ceiling."
+        }
+      ],
+      "operator_interpretation": {
+        "status": "contract-receipt",
+        "recommended_action": "Do not accept missing hot paths."
+      },
+      "proof_boundary": {
+        "fresh_benchmark": false,
+        "deterministic_fixture": true,
+        "real_host_throughput_proof": false,
+        "requires_refresh_for_numbers": true
+      },
+      "source_refs": [
+        "benches/methodology_baselines.rs"
+      ]
+    }
+  ]
+}

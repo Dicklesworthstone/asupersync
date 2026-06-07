@@ -4,7 +4,7 @@ use super::{
     ChunkRange, CommitPolicy, PlatformCapabilities, RangeTracker, SparseRange, TempPathManager,
 };
 use crate::atp::manifest::{Manifest, MerkleRoot};
-use crate::atp::object::{ContentId, ObjectId};
+use crate::atp::object::ObjectId;
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use parking_lot::{Mutex, MutexGuard};
@@ -15,6 +15,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+const CONTENT_ID_DOMAIN: &[u8] = b"asupersync.atp.content-id.v1\0";
+const DIGEST_BUFFER_SIZE: usize = 8192;
 
 /// Configuration for sparse writer behavior
 #[derive(Debug, Clone)]
@@ -361,24 +364,25 @@ impl SparseWriter {
                 return self.fail_verification(format!("open for verification failed: {error}"));
             }
         };
-        let mut bytes = Vec::new();
-        if let Err(error) = file.read_to_end(&mut bytes) {
-            return self.fail_verification(format!("read for verification failed: {error}"));
-        }
+        let file_len = match file.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                return self
+                    .fail_verification(format!("metadata for verification failed: {error}"));
+            }
+        };
 
         if let Some(expected_size) = expected_size {
-            if bytes.len() as u64 != expected_size {
+            if file_len != expected_size {
                 return self.fail_verification(format!(
-                    "writer expected size {expected_size}, found {} bytes",
-                    bytes.len()
+                    "writer expected size {expected_size}, found {file_len} bytes"
                 ));
             }
         }
         if let Some(manifest_size) = manifest_object.size_bytes {
-            if bytes.len() as u64 != manifest_size {
+            if file_len != manifest_size {
                 return self.fail_verification(format!(
-                    "manifest expected size {manifest_size}, found {} bytes",
-                    bytes.len()
+                    "manifest expected size {manifest_size}, found {file_len} bytes"
                 ));
             }
         }
@@ -393,12 +397,15 @@ impl SparseWriter {
                     ));
                 }
             };
-            let Some(chunk) = bytes.get(*offset as usize..end as usize) else {
+            if end > file_len {
                 return self.fail_verification(format!(
                     "written chunk at {offset}..{end} is outside verified file"
                 ));
+            }
+            let actual_hash = match Self::hash_file_range(&mut file, *offset, metadata.size) {
+                Ok(hash) => hash,
+                Err(error) => return self.fail_verification(error.to_string()),
             };
-            let actual_hash: [u8; 32] = Sha256::digest(chunk).into();
             if actual_hash != metadata.hash {
                 return self
                     .fail_verification(format!("written chunk hash mismatch at offset {offset}"));
@@ -407,9 +414,16 @@ impl SparseWriter {
 
         if let Some(expected_hash) = manifest_object.content_hash {
             let actual_hash = if object_id.is_content_addressed() {
-                *ContentId::from_bytes(&bytes).hash()
+                Self::hash_file_with_prefix(&mut file, Some(CONTENT_ID_DOMAIN))
             } else {
-                Sha256::digest(&bytes).into()
+                Self::hash_file_with_prefix(&mut file, None)
+            };
+            let actual_hash = match actual_hash {
+                Ok(hash) => hash,
+                Err(error) => {
+                    return self
+                        .fail_verification(format!("content hash verification failed: {error}"));
+                }
             };
             if actual_hash != expected_hash {
                 return self.fail_verification("manifest content hash mismatch".to_owned());
@@ -430,13 +444,17 @@ impl SparseWriter {
                     ));
                 }
             };
-            let Some(chunk) = bytes.get(boundary.byte_offset as usize..end as usize) else {
+            if end > file_len {
                 return self.fail_verification(format!(
                     "manifest chunk {} range {}..{} is outside verified file",
                     boundary.index, boundary.byte_offset, end
                 ));
-            };
-            let actual_hash: [u8; 32] = Sha256::digest(chunk).into();
+            }
+            let actual_hash =
+                match Self::hash_file_range(&mut file, boundary.byte_offset, boundary.size_bytes) {
+                    Ok(hash) => hash,
+                    Err(error) => return self.fail_verification(error.to_string()),
+                };
             if actual_hash != boundary.content_hash {
                 return self
                     .fail_verification(format!("manifest chunk {} hash mismatch", boundary.index));
@@ -512,7 +530,11 @@ impl SparseWriter {
         let total_written = state.range_tracker.total_bytes();
         let chunk_count = state.written_chunks.len();
         let completion_ratio = if let Some(expected) = state.expected_size {
-            total_written as f64 / expected as f64
+            if expected == 0 {
+                1.0
+            } else {
+                total_written as f64 / expected as f64
+            }
         } else {
             0.0
         };
@@ -707,37 +729,48 @@ impl SparseWriter {
     }
 
     async fn atomic_commit(&self) -> Outcome<PathBuf, SparseWriterError> {
-        let state = self.lock_state();
-        let temp_path = match state.temp_path.as_ref() {
-            Some(path) => path,
-            None => return Outcome::Err(SparseWriterError::NoTempFile),
+        let (temp_path, final_path) = {
+            let mut state = self.lock_state();
+            let temp_path = match state.temp_path.clone() {
+                Some(path) => path,
+                None => return Outcome::Err(SparseWriterError::NoTempFile),
+            };
+            let final_path = state.final_path.clone();
+            if let Some(file) = state.temp_file.as_mut() {
+                if let Err(error) = file.flush() {
+                    return Outcome::Err(SparseWriterError::CommitFailed(format!(
+                        "flush before commit failed: {error}"
+                    )));
+                }
+            }
+            state.temp_file = None;
+            (temp_path, final_path)
         };
-        let final_path = &state.final_path;
 
         match self.config.commit_policy {
-            CommitPolicy::AtomicRename => match std::fs::rename(temp_path, final_path) {
+            CommitPolicy::AtomicRename => match std::fs::rename(&temp_path, &final_path) {
                 Ok(_) => {}
                 Err(e) => return Outcome::Err(SparseWriterError::CommitFailed(e.to_string())),
             },
             CommitPolicy::CopyAndVerify => {
-                match std::fs::copy(temp_path, final_path) {
+                match std::fs::copy(&temp_path, &final_path) {
                     Ok(_) => {}
                     Err(e) => return Outcome::Err(SparseWriterError::CommitFailed(e.to_string())),
                 }
-                if let Err(error) = Self::verify_copied_file(temp_path, final_path) {
+                if let Err(error) = Self::verify_copied_file(&temp_path, &final_path) {
                     return Outcome::Err(error);
                 }
             }
             CommitPolicy::LinkAndUnlink => {
                 #[cfg(unix)]
                 {
-                    match std::fs::hard_link(temp_path, final_path) {
+                    match std::fs::hard_link(&temp_path, &final_path) {
                         Ok(_) => {}
                         Err(e) => {
                             return Outcome::Err(SparseWriterError::CommitFailed(e.to_string()));
                         }
                     }
-                    match std::fs::remove_file(temp_path) {
+                    match std::fs::remove_file(&temp_path) {
                         Ok(_) => {}
                         Err(e) => {
                             return Outcome::Err(SparseWriterError::CommitFailed(e.to_string()));
@@ -747,7 +780,7 @@ impl SparseWriter {
                 #[cfg(not(unix))]
                 {
                     // Fallback to copy on non-Unix systems
-                    match std::fs::copy(temp_path, final_path) {
+                    match std::fs::copy(&temp_path, &final_path) {
                         Ok(_) => {}
                         Err(e) => {
                             return Outcome::Err(SparseWriterError::CommitFailed(e.to_string()));
@@ -757,7 +790,7 @@ impl SparseWriter {
             }
         }
 
-        Outcome::ok(final_path.clone())
+        Outcome::ok(final_path)
     }
 
     async fn cleanup_temp_file(&self) -> Result<(), SparseWriterError> {
@@ -825,6 +858,51 @@ impl SparseWriter {
             }
             hasher.update(&buffer[..read]);
         }
+        Ok(hasher.finalize().into())
+    }
+
+    fn hash_file_with_prefix(
+        file: &mut File,
+        prefix: Option<&[u8]>,
+    ) -> Result<[u8; 32], SparseWriterError> {
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| SparseWriterError::VerificationFailed(error.to_string()))?;
+        let mut hasher = Sha256::new();
+        if let Some(prefix) = prefix {
+            hasher.update(prefix);
+        }
+        let mut buffer = [0u8; DIGEST_BUFFER_SIZE];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| SparseWriterError::VerificationFailed(error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hasher.finalize().into())
+    }
+
+    fn hash_file_range(
+        file: &mut File,
+        offset: u64,
+        size: u64,
+    ) -> Result<[u8; 32], SparseWriterError> {
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| SparseWriterError::VerificationFailed(error.to_string()))?;
+        let mut remaining = size;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; DIGEST_BUFFER_SIZE];
+
+        while remaining > 0 {
+            let to_read = remaining.min(buffer.len() as u64) as usize;
+            file.read_exact(&mut buffer[..to_read])
+                .map_err(|error| SparseWriterError::VerificationFailed(error.to_string()))?;
+            hasher.update(&buffer[..to_read]);
+            remaining -= to_read as u64;
+        }
+
         Ok(hasher.finalize().into())
     }
 }
@@ -1038,6 +1116,42 @@ mod tests {
     }
 
     #[test]
+    fn streaming_content_id_hash_matches_object_content_id_domain() {
+        let content = b"content id domain regression guard";
+        let path = unique_temp_path("content_id_domain");
+        std::fs::write(&path, content).unwrap();
+        let mut file = File::open(&path).unwrap();
+
+        let streaming_hash =
+            SparseWriter::hash_file_with_prefix(&mut file, Some(CONTENT_ID_DOMAIN)).unwrap();
+
+        assert_eq!(streaming_hash, *ContentId::from_bytes(content).hash());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn stats_report_complete_ratio_for_zero_expected_size() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let object_id = test_object_id("test-zero-stats");
+            let writer = SparseWriter::new(
+                &cx,
+                object_id,
+                unique_temp_path("zero_stats"),
+                SparseWriterConfig::default(),
+            )
+            .await
+            .unwrap();
+
+            writer.set_expected_size(0).unwrap();
+
+            let stats = writer.get_stats();
+            assert_eq!(stats.completion_ratio, 1.0);
+            assert!(writer.is_complete());
+        });
+    }
+
+    #[test]
     fn verify_checks_manifest_content_hash_and_records_real_root() {
         futures_lite::future::block_on(async {
             let cx = create_test_cx();
@@ -1067,6 +1181,33 @@ mod tests {
                     manifest_root: manifest.merkle_root
                 }
             );
+        });
+    }
+
+    #[test]
+    fn commit_atomic_rename_closes_temp_handle_before_filesystem_move() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let content = b"verified sparse writer commit content";
+            let (object_id, manifest) = manifest_for_content(content);
+            let final_path = unique_temp_path("commit_atomic_final");
+            let writer =
+                SparseWriter::new(&cx, object_id, &final_path, SparseWriterConfig::default())
+                    .await
+                    .unwrap();
+
+            writer.set_expected_size(content.len() as u64).unwrap();
+            writer
+                .write_chunk(&cx, 0, content, WriteOptions::default())
+                .await
+                .unwrap();
+            writer.verify(&cx, &manifest).await.unwrap();
+
+            let committed_path = writer.commit(&cx).await.unwrap();
+
+            assert_eq!(committed_path, final_path);
+            assert_eq!(std::fs::read(&committed_path).unwrap(), content);
+            std::fs::remove_file(&committed_path).ok();
         });
     }
 

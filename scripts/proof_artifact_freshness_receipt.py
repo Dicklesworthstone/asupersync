@@ -24,6 +24,8 @@ SCHEMA_VERSION = "proof-artifact-freshness-receipt-v1"
 PROOF_REUSE_SCHEMA_VERSION = "proof-reuse-classifier-v1"
 PROOF_REUSE_INDEX_SCHEMA_VERSION = "proof-reuse-index-v1"
 PROOF_REUSE_QUERY_SCHEMA_VERSION = "proof-reuse-query-result-v1"
+DEFAULT_PROOF_REUSE_QUERY_ROW_LIMIT = 100
+MAX_PROOF_REUSE_QUERY_ROW_LIMIT = 1000
 MAIN_BRANCH = "main"
 APPROVED_PROOF_REUSE_INDEX_ROOTS = (
     "artifacts",
@@ -39,6 +41,46 @@ CARGO_PROOF_COMMAND = re.compile(
     r"(?:build|check|clippy|doc|fmt|fuzz|run|test|tree)\b",
     re.IGNORECASE,
 )
+LIBTEST_RUNNING_COUNT_RE = re.compile(
+    r"(?m)^\s*running\s+(\d+)\s+tests?\b",
+    re.IGNORECASE,
+)
+LIBTEST_RESULT_RE = re.compile(
+    r"test result:\s+\w+\.\s+"
+    r"(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored\b",
+    re.IGNORECASE,
+)
+CARGO_TEST_VALUE_OPTIONS = {
+    "-j",
+    "-p",
+    "-Z",
+    "--bench",
+    "--bin",
+    "--color",
+    "--config",
+    "--example",
+    "--exclude",
+    "--features",
+    "--jobs",
+    "--manifest-path",
+    "--message-format",
+    "--package",
+    "--profile",
+    "--target",
+    "--target-dir",
+    "--test",
+}
+LIBTEST_VALUE_OPTIONS = {
+    "--color",
+    "--ensure-time",
+    "--exclude-should-panic",
+    "--format",
+    "--logfile",
+    "--report-time",
+    "--shuffle-seed",
+    "--skip",
+    "--test-threads",
+}
 RCH_LOCAL_FALLBACK_RE = re.compile(
     r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
     re.IGNORECASE,
@@ -86,9 +128,12 @@ BROAD_CACHE_CLAIMS = {
 REUSE_REFUSAL_BY_CLASSIFICATION = {
     "dirty-surface-overlap": "dirty-frontier-overlap",
     "failed-proof-artifact": "failed-proof-status",
+    "exact-filter-no-executed-tests": "exact-filter-no-executed-tests",
+    "exact-filter-zero-tests": "exact-filter-zero-tests",
     "repo-not-main": "branch-mismatch",
     "rch-local-fallback-proof": "local-fallback-marker",
     "superseded-head": "stale-head",
+    "unverifiable-exact-filter-proof": "missing-exact-filter-test-count",
     "unverifiable-command": "missing-command-fingerprint",
     "unverifiable-fuzz-extent-proof": "missing-command-fingerprint",
     "unverifiable-head": "stale-head",
@@ -367,6 +412,102 @@ def normalized_command_argv(command: str) -> list[str]:
 def command_fingerprint(command: str) -> str:
     argv = normalized_command_argv(command)
     return sha256_text(json.dumps(argv, separators=(",", ":"), ensure_ascii=True))
+
+
+def split_option_separator(args: list[str]) -> tuple[list[str], list[str]]:
+    if "--" not in args:
+        return args, []
+    index = args.index("--")
+    return args[:index], args[index + 1 :]
+
+
+def positional_arguments(args: list[str], value_options: set[str]) -> list[str]:
+    positionals = []
+    skip_next = False
+    for token in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if token.startswith("--"):
+            if "=" not in token and token in value_options:
+                skip_next = True
+            continue
+        if token.startswith("-") and token != "-":
+            if token in value_options:
+                skip_next = True
+            continue
+        positionals.append(token)
+    return positionals
+
+
+def cargo_test_exact_filter(command: str) -> str:
+    argv = normalized_command_argv(command)
+    for index, token in enumerate(argv):
+        if token != "cargo":
+            continue
+        command_index = index + 1
+        if command_index < len(argv) and argv[command_index].startswith("+"):
+            command_index += 1
+        if command_index >= len(argv) or argv[command_index] != "test":
+            continue
+        cargo_args, harness_args = split_option_separator(argv[command_index + 1 :])
+        if "--exact" not in harness_args:
+            continue
+        filter_candidates = [
+            *positional_arguments(cargo_args, CARGO_TEST_VALUE_OPTIONS),
+            *positional_arguments(
+                [arg for arg in harness_args if arg != "--exact"],
+                LIBTEST_VALUE_OPTIONS,
+            ),
+        ]
+        if filter_candidates:
+            return filter_candidates[0]
+    return ""
+
+
+def exact_cargo_test_findings(command: str, texts: list[str]) -> dict[str, Any]:
+    exact_filter = cargo_test_exact_filter(command)
+    if not exact_filter:
+        return {"is_exact_filter": False, "defects": []}
+
+    output = normalize_proof_output_text(texts)
+    running_counts = [int(match.group(1)) for match in LIBTEST_RUNNING_COUNT_RE.finditer(output)]
+    result_counts = [
+        {
+            "passed": int(match.group(1)),
+            "failed": int(match.group(2)),
+            "ignored": int(match.group(3)),
+        }
+        for match in LIBTEST_RESULT_RE.finditer(output)
+    ]
+    total_tests = sum(running_counts)
+    passed_tests = sum(row["passed"] for row in result_counts)
+    failed_tests = sum(row["failed"] for row in result_counts)
+    ignored_tests = sum(row["ignored"] for row in result_counts)
+    executed_tests = passed_tests + failed_tests
+
+    defects = []
+    if not running_counts:
+        defects.append("missing-test-count")
+    elif total_tests == 0:
+        defects.append("zero-tests")
+    elif not result_counts:
+        defects.append("missing-test-result")
+    elif executed_tests == 0:
+        defects.append("no-executed-tests")
+
+    return {
+        "is_exact_filter": True,
+        "exact_filter": exact_filter,
+        "running_count_segments": running_counts,
+        "result_count_segments": result_counts,
+        "total_tests": total_tests,
+        "passed_tests": passed_tests,
+        "failed_tests": failed_tests,
+        "ignored_tests": ignored_tests,
+        "executed_tests": executed_tests,
+        "defects": defects,
+    }
 
 
 def command_has_required_rch_prefix(command: str) -> bool:
@@ -853,6 +994,7 @@ def classify_artifact(
         )
     )
     fuzz_extent_findings = fuzz_extent_proof_findings(artifact)
+    exact_test_findings = exact_cargo_test_findings(command, artifact.get("proof_text", []))
 
     evidence = {
         "artifact_git_sha": git_sha,
@@ -878,6 +1020,21 @@ def classify_artifact(
         evidence["fuzz_extent_proof_reasons"] = fuzz_extent_findings["defects"]
         evidence["fuzz_extent_missing_targets"] = fuzz_extent_findings["missing_targets"]
         evidence["fuzz_extent"] = artifact.get("fuzz_extent", {})
+    if exact_test_findings.get("is_exact_filter"):
+        evidence["exact_filter"] = exact_test_findings["exact_filter"]
+        evidence["exact_filter_running_count_segments"] = exact_test_findings[
+            "running_count_segments"
+        ]
+        evidence["exact_filter_result_count_segments"] = exact_test_findings[
+            "result_count_segments"
+        ]
+        evidence["exact_filter_total_tests"] = exact_test_findings["total_tests"]
+        evidence["exact_filter_passed_tests"] = exact_test_findings["passed_tests"]
+        evidence["exact_filter_failed_tests"] = exact_test_findings["failed_tests"]
+        evidence["exact_filter_ignored_tests"] = exact_test_findings["ignored_tests"]
+        evidence["exact_filter_executed_tests"] = exact_test_findings["executed_tests"]
+        if exact_test_findings["defects"]:
+            evidence["exact_filter_proof_reasons"] = exact_test_findings["defects"]
 
     if not git_sha or not current_head:
         classification = "unverifiable-head"
@@ -919,6 +1076,18 @@ def classify_artifact(
         classification = "unverifiable-rch-remote-proof"
         decision = "rerun-required"
         reason = "artifact proof evidence lacks positive rch remote worker route marker"
+    elif exact_test_findings.get("is_exact_filter") and "zero-tests" in exact_test_findings["defects"]:
+        classification = "exact-filter-zero-tests"
+        decision = "rerun-required"
+        reason = "artifact exact cargo test proof ran zero tests"
+    elif exact_test_findings.get("is_exact_filter") and "no-executed-tests" in exact_test_findings["defects"]:
+        classification = "exact-filter-no-executed-tests"
+        decision = "rerun-required"
+        reason = "artifact exact cargo test proof did not execute a matched test"
+    elif exact_test_findings.get("is_exact_filter") and exact_test_findings["defects"]:
+        classification = "unverifiable-exact-filter-proof"
+        decision = "rerun-required"
+        reason = "artifact exact cargo test proof lacks parseable executed-test evidence"
     elif fuzz_extent_findings["defects"]:
         classification = "unverifiable-fuzz-extent-proof"
         decision = "rerun-required"
@@ -935,6 +1104,9 @@ def classify_artifact(
     if rch_remote_route_required and classification in {
         "unverifiable-rch-remote-proof",
         "unverifiable-fuzz-extent-proof",
+        "exact-filter-no-executed-tests",
+        "exact-filter-zero-tests",
+        "unverifiable-exact-filter-proof",
         "dirty-surface-overlap",
         "current-clean",
     }:
@@ -1651,18 +1823,37 @@ def sort_proof_reuse_query_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
     return rows
 
 
+def bounded_proof_reuse_query_row_limit(raw_limit: Any) -> int:
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_PROOF_REUSE_QUERY_ROW_LIMIT
+    return max(0, min(limit, MAX_PROOF_REUSE_QUERY_ROW_LIMIT))
+
+
 def summarize_proof_reuse_query(
     rows: list[dict[str, Any]],
     request: dict[str, Any],
+    emitted_count: int,
+    row_limit: int,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "candidate_count": len(rows),
         "accepted_count": 0,
         "refused_count": 0,
         "miss_count": 0,
+        "candidate_pruned_count": 0,
+        "row_limit": row_limit,
+        "rows_emitted_count": emitted_count,
+        "rows_omitted_count": max(0, len(rows) - emitted_count),
+        "rows_omission_reason": "bounded-query-output" if len(rows) > emitted_count else "",
         "chosen_proof_id": "",
         "top_rerun_command": request.get("command", ""),
         "by_reason_code": {},
+        "elapsed_time": {
+            "measured": False,
+            "reason": "deterministic CLI output omits wall-clock timing; contract tests log elapsed_ms",
+        },
     }
     for row in rows:
         if row["decision"] == "reusable":
@@ -1676,6 +1867,7 @@ def summarize_proof_reuse_query(
         for reason in row.get("reason_codes", []):
             summary["by_reason_code"][reason] = summary["by_reason_code"].get(reason, 0) + 1
     summary["by_reason_code"] = dict(sorted(summary["by_reason_code"].items()))
+    summary["candidate_pruned_count"] = summary["refused_count"] + summary["miss_count"]
     if not summary["top_rerun_command"]:
         for row in rows:
             rerun = row.get("remediation", {}).get("rerun_command", "")
@@ -1692,7 +1884,7 @@ def build_proof_reuse_query(args: argparse.Namespace) -> dict[str, Any]:
         Path(args.repo_path).resolve(),
     )
     request = normalize_reuse_request(load_json(request_path))
-    rows = sort_proof_reuse_query_rows(
+    all_rows = sort_proof_reuse_query_rows(
         [
             compact_proof_reuse_query_row(
                 item,
@@ -1705,8 +1897,12 @@ def build_proof_reuse_query(args: argparse.Namespace) -> dict[str, Any]:
             for item in corpus
         ]
     )
-    summary = summarize_proof_reuse_query(rows, request)
-    best_candidate = next((row for row in rows if row["decision"] == "reusable"), None)
+    row_limit = bounded_proof_reuse_query_row_limit(
+        getattr(args, "max_query_rows", DEFAULT_PROOF_REUSE_QUERY_ROW_LIMIT)
+    )
+    rows = all_rows[:row_limit]
+    summary = summarize_proof_reuse_query(all_rows, request, len(rows), row_limit)
+    best_candidate = next((row for row in all_rows if row["decision"] == "reusable"), None)
     result = {
         "schema_version": PROOF_REUSE_QUERY_SCHEMA_VERSION,
         "generated_at": index["generated_at"],
@@ -1723,6 +1919,15 @@ def build_proof_reuse_query(args: argparse.Namespace) -> dict[str, Any]:
                 "accepted_count": summary["accepted_count"],
                 "refused_count": summary["refused_count"],
                 "miss_count": summary["miss_count"],
+                "candidate_pruned_count": summary["candidate_pruned_count"],
+                "pruning_reason_counts": summary["by_reason_code"],
+            },
+            {
+                "stage": "project",
+                "row_limit": summary["row_limit"],
+                "rows_emitted_count": summary["rows_emitted_count"],
+                "rows_omitted_count": summary["rows_omitted_count"],
+                "rows_omission_reason": summary["rows_omission_reason"],
             },
             {
                 "stage": "choose",
@@ -1756,6 +1961,9 @@ def render_proof_reuse_query_markdown(result: dict[str, Any]) -> str:
         f"- accepted: {summary['accepted_count']}",
         f"- refused: {summary['refused_count']}",
         f"- misses: {summary['miss_count']}",
+        f"- candidate_pruned: {summary['candidate_pruned_count']}",
+        f"- detailed_rows_emitted: {summary['rows_emitted_count']}",
+        f"- detailed_rows_omitted: {summary['rows_omitted_count']}",
         f"- chosen_proof_id: {chosen}",
         f"- top_rerun_command: {summary['top_rerun_command'] or '<missing>'}",
         "",
@@ -1824,6 +2032,33 @@ def remediation_for(classification: str, command: str) -> dict[str, Any]:
             "operator_note": "Do not cite an RCH Cargo proof without positive remote-worker route evidence.",
             "next_steps": [
                 "rerun the proof remotely and capture a transcript line starting with [RCH] remote",
+                "replace the artifact output before citing it",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "exact-filter-zero-tests":
+        return {
+            "operator_note": "Do not cite an exact-filter Cargo proof that ran zero tests.",
+            "next_steps": [
+                "verify that the exact test name still exists on current main",
+                "rerun the intended proof lane or update the stale filter before citing it",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "exact-filter-no-executed-tests":
+        return {
+            "operator_note": "Do not cite an exact-filter Cargo proof whose matched tests were all ignored.",
+            "next_steps": [
+                "run a proof lane that executes at least one matched test",
+                "keep the stale or ignored exact-filter output as diagnostic evidence only",
+            ],
+            "rerun_command": command,
+        }
+    if classification == "unverifiable-exact-filter-proof":
+        return {
+            "operator_note": "Do not cite an exact-filter Cargo proof without parseable test-count evidence.",
+            "next_steps": [
+                "rerun with --nocapture or otherwise capture libtest running/test-result summary lines",
                 "replace the artifact output before citing it",
             ],
             "rerun_command": command,
@@ -1992,6 +2227,15 @@ def main() -> int:
         dest="reuse_request_path",
         default="",
         help="Desired proof lane JSON envelope for proof reuse query mode",
+    )
+    parser.add_argument(
+        "--max-query-rows",
+        type=int,
+        default=DEFAULT_PROOF_REUSE_QUERY_ROW_LIMIT,
+        help=(
+            "Maximum detailed rows to emit for proof reuse query results "
+            f"(0-{MAX_PROOF_REUSE_QUERY_ROW_LIMIT}; full summary counts are preserved)"
+        ),
     )
     parser.add_argument("--output", choices=["json", "markdown"], default="json")
     args = parser.parse_args()

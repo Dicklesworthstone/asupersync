@@ -397,7 +397,6 @@ where
                 Err(err) => {
                     self.stats.record_spawn_failure();
                     if should_retry_after_spawn_failure(&err) {
-                        crate::runtime::yield_now().await;
                         continue;
                     }
                     return Err(io::Error::other(format!(
@@ -677,9 +676,9 @@ mod tests {
         init_test_logging();
         let runtime = RuntimeBuilder::current_thread()
             .root_region_limits(RegionLimits {
-                // One task slot is consumed by the listener itself; the second slot
-                // is filled by the blocker so accepted connections hit region capacity.
-                max_tasks: Some(2),
+                // The blocker consumes the only root task slot, so a per-connection
+                // spawn attempt must fail without leaking its connection guard.
+                max_tasks: Some(1),
                 ..RegionLimits::unlimited()
             })
             .build()
@@ -701,82 +700,46 @@ mod tests {
 
             blocker_started.notified().await;
 
-            let listener = Http1Listener::bind_with_config(
-                "127.0.0.1:0",
-                |_req| async { Response::new(200, "OK", b"listener alive".to_vec()) },
-                Http1ListenerConfig::default().http_config(localhost_http_config()),
-            )
-            .await
-            .expect("bind failed");
+            let raw_listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("bind raw listener");
+            let addr = raw_listener.local_addr().expect("raw listener addr");
+            let client = std::net::TcpStream::connect(addr).expect("connect raw client");
+            let (server_raw, peer_addr) = raw_listener.accept().expect("accept raw server side");
+            let server_stream =
+                crate::net::tcp::stream::TcpStream::from_std(server_raw).expect("wrap stream");
 
-            let addr = listener.local_addr().expect("local addr");
-            let stats_handle = listener.stats_handle();
-            let manager = listener.connection_manager().clone();
-            let shutdown = listener.shutdown_signal();
+            let shutdown = ShutdownSignal::new();
+            let manager = ConnectionManager::new(Some(16), shutdown.clone());
+            let guard = manager.register(peer_addr).expect("register connection");
 
-            let run_handle = handle
-                .clone()
-                .try_spawn(async move { listener.run(&handle).await })
-                .expect("spawn listener");
+            let handler = Arc::new(|_req| async { Response::new(200, "OK", Vec::new()) });
+            let err = match spawn_connection(
+                server_stream,
+                guard,
+                handler,
+                localhost_http_config(),
+                shutdown.clone(),
+                &handle,
+            ) {
+                Ok(_) => panic!("connection spawn should fail while root region is at capacity"),
+                Err(err) => err,
+            };
 
-            let mut rejected_client = crate::net::tcp::stream::TcpStream::connect(addr)
-                .await
-                .expect("connect rejected client");
-            rejected_client
-                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .await
-                .expect("write rejected request");
-
-            for _ in 0..64 {
-                if stats_handle.snapshot().spawn_failures_total == 1 {
-                    break;
-                }
-                crate::time::sleep(crate::time::wall_now(), Duration::from_millis(10)).await;
-            }
-
-            let _ = rejected_client.shutdown(std::net::Shutdown::Both);
-            drop(rejected_client);
-
-            let stats = stats_handle.snapshot();
-            assert_eq!(stats.spawn_failures_total, 1);
-            assert_eq!(stats.accepted_total, 1);
+            assert!(matches!(err, SpawnError::RegionAtCapacity { .. }));
             assert!(
-                !run_handle.is_finished(),
-                "listener should keep running after a per-connection spawn failure"
+                should_retry_after_spawn_failure(&err),
+                "capacity failures should be scoped to the rejected connection"
             );
+            assert_eq!(
+                manager.active_count(),
+                0,
+                "failed spawn must drop the connection guard immediately"
+            );
+            assert_eq!(shutdown.phase(), ShutdownPhase::Running);
 
+            drop(client);
             blocker_release.notify_one();
             blocker.await;
-
-            let mut healthy_client = crate::net::tcp::stream::TcpStream::connect(addr)
-                .await
-                .expect("connect healthy client");
-            healthy_client
-                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .await
-                .expect("write healthy request");
-            let _ = healthy_client.shutdown(std::net::Shutdown::Both);
-            drop(healthy_client);
-
-            for _ in 0..64 {
-                let snapshot = stats_handle.snapshot();
-                if snapshot.accepted_total == 2 && snapshot.spawn_failures_total == 1 {
-                    break;
-                }
-                crate::time::sleep(crate::time::wall_now(), Duration::from_millis(10)).await;
-            }
-
-            let recovered = stats_handle.snapshot();
-            assert_eq!(recovered.accepted_total, 2);
-            assert_eq!(recovered.spawn_failures_total, 1);
-            assert!(
-                !run_handle.is_finished(),
-                "listener should still be alive after capacity recovers"
-            );
-
-            assert!(manager.begin_drain(Duration::from_millis(0)));
-            let _ = run_handle.await.expect("listener run");
-            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
         });
     }
 

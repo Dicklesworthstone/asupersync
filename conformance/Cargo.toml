@@ -8,7 +8,7 @@ autobins = false
 # to compile, including unrelated experimental OTLP/trace bins.
 autotests = false
 description = "Conformance test suite for async runtime specifications"
-license-file = "../LICENSE"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 repository = "https://github.com/Dicklesworthstone/asupersync"
 readme = "README.md"
 keywords = ["async", "conformance", "runtime", "testing"]

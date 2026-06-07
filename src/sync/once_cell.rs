@@ -56,6 +56,7 @@ struct InitWaiter {
 struct WaiterState {
     waiters: SmallVec<[InitWaiter; 4]>,
     next_waiter_id: u64,
+    cancellation_count: u64,
 }
 
 #[cfg(test)]
@@ -133,6 +134,7 @@ impl<T> OnceCell<T> {
             waiters: StdMutex::new(WaiterState {
                 waiters: SmallVec::new(),
                 next_waiter_id: 0,
+                cancellation_count: 0,
             }),
             cvar: Condvar::new(),
         }
@@ -165,6 +167,35 @@ impl<T> OnceCell<T> {
             self.value.get()
         } else {
             None
+        }
+    }
+
+    /// Returns a deterministic, redacted snapshot of cell initialization pressure.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, primitive_id: u64) -> crate::sync::SyncTelemetrySnapshot {
+        let state_value = self.state.load(Ordering::Acquire);
+        let waiters = match self.waiters.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let state_label = match state_value {
+            UNINIT => "uninitialized",
+            INITIALIZING => "initializing",
+            INITIALIZED => "initialized",
+            _ => "unknown",
+        };
+        crate::sync::SyncTelemetrySnapshot {
+            primitive_id,
+            primitive_kind: "once_cell",
+            capacity: 1,
+            occupied_units: usize::from(state_value != UNINIT),
+            available_units: usize::from(state_value == UNINIT),
+            waiter_count: waiters.waiters.len(),
+            generation: 0,
+            state: state_label,
+            cancellation_count: waiters.cancellation_count,
+            closed: state_value == INITIALIZED,
         }
     }
 
@@ -443,7 +474,7 @@ impl<T> OnceCell<T> {
     /// cancelled before initialization completes.
     #[inline]
     #[allow(clippy::future_not_send)]
-    pub async fn wait(&self, cx: &crate::cx::Cx) -> Result<(), OnceCellError> {
+    pub async fn wait<Caps>(&self, cx: &crate::cx::Cx<Caps>) -> Result<(), OnceCellError> {
         // Fast path: already initialized
         if self.is_initialized() {
             return Ok(());
@@ -525,6 +556,17 @@ impl<T> OnceCell<T> {
             *waiter_id = Some(id);
         }
         drop(guard);
+    }
+
+    fn remove_waiter_for_cancellation(&self, waiter_id: u64) {
+        let mut guard = match self.waiters.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
+            guard.waiters.swap_remove(pos);
+            guard.cancellation_count = guard.cancellation_count.saturating_add(1);
+        }
     }
 }
 
@@ -619,26 +661,20 @@ impl<T> Drop for WaitInit<'_, T> {
         if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately so repeated
             // cancel/drop cycles don't accumulate until transition_out_of_initializing() drains.
-            let mut guard = match self.cell.waiters.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
-                guard.waiters.swap_remove(pos);
-            }
+            self.cell.remove_waiter_for_cancellation(waiter_id);
         }
     }
 }
 
 /// Cancel-aware future that waits for initialization to complete.
-struct CancelAwareWaitInit<'a, T> {
+struct CancelAwareWaitInit<'a, T, Caps = crate::cx::cap::All> {
     cell: &'a OnceCell<T>,
-    cx: &'a crate::cx::Cx,
+    cx: &'a crate::cx::Cx<Caps>,
     /// Tracks registered waiter identity to prevent unbounded queue growth.
     waiter_id: Option<u64>,
 }
 
-impl<T> std::future::Future for CancelAwareWaitInit<'_, T> {
+impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
     type Output = Result<(), OnceCellError>;
 
     fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -670,17 +706,11 @@ impl<T> std::future::Future for CancelAwareWaitInit<'_, T> {
     }
 }
 
-impl<T> Drop for CancelAwareWaitInit<'_, T> {
+impl<T, Caps> Drop for CancelAwareWaitInit<'_, T, Caps> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately
-            let mut guard = match self.cell.waiters.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if let Some(pos) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
-                guard.waiters.swap_remove(pos);
-            }
+            self.cell.remove_waiter_for_cancellation(waiter_id);
         }
     }
 }
@@ -766,6 +796,24 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.wakes.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn wait_accepts_detached_no_cap_context() {
+        init_test("wait_accepts_detached_no_cap_context");
+        let cell = OnceCell::new();
+        let cx = crate::cx::Cx::<crate::cx::cap::None>::detached_cancel_context();
+
+        cell.set(47).expect("set should succeed");
+        block_on(cell.wait(&cx)).expect("wait should accept cap::None Cx");
+
+        crate::assert_with_log!(
+            cell.get() == Some(&47),
+            "cell value",
+            Some(47),
+            cell.get().copied()
+        );
+        crate::test_complete!("wait_accepts_detached_no_cap_context");
     }
 
     #[test]

@@ -208,11 +208,6 @@ fn print_test_summary(report: &asupersync_conformance::RequestBuildingCompliance
             "│  🎯 Compliance: {:.1}%                            │",
             report.summary.compliance_score * 100.0
         );
-    } else if has_failures && has_partial_coverage {
-        eprintln!(
-            "│  📊 Compliance: {:.1}%                           │",
-            report.summary.compliance_score * 100.0
-        );
     } else if has_failures {
         eprintln!(
             "│  📊 Compliance: {:.1}%                           │",

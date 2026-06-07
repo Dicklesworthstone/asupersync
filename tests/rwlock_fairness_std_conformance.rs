@@ -93,7 +93,7 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
             let thread_id = i;
             start_barrier.wait();
 
-            let cx = Cx::new(
+            let cx: Cx = Cx::new(
                 RegionId::from_arena(ArenaIndex::new(0, thread_id as u32)),
                 TaskId::from_arena(ArenaIndex::new(0, thread_id as u32)),
                 Budget::INFINITE,
@@ -148,7 +148,7 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
             let thread_id = config.reader_count + i; // Offset by reader count
             start_barrier.wait();
 
-            let cx = Cx::new(
+            let cx: Cx = Cx::new(
                 RegionId::from_arena(ArenaIndex::new(1, i as u32)),
                 TaskId::from_arena(ArenaIndex::new(1, i as u32)),
                 Budget::INFINITE,

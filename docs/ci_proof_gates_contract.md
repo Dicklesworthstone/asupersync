@@ -17,12 +17,14 @@ This contract defines the hard CI gates that make the ascension program operatio
 The SLO-to-runtime lane is a direct-main operator gate for service-objective policy changes. It covers the explicit SLO application/admission seam: compile the bundle, apply the compiled policy at runtime, replay deterministic enforcement evidence, and run the proof script. It does not replace the broad Phase 6 gates and does not claim blanket production enforcement outside that seam.
 
 1. Canonical artifact: `artifacts/slo_policy_bundle_contract_v1.json`
-2. Runtime API and exported constants: `src/types/slo_policy.rs`, `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION`
+2. Runtime API and exported constants: `src/types/slo_policy.rs`, `src/runtime/slo_policy.rs`, `SloRuntimePolicyBridge`, `SloRuntimePolicyBridgeRequest`, `SloRuntimePolicyBridgeDecision`, `SloRuntimeWorkKind`, `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION`
 3. JSON validators: `validate_slo_policy_bundle_json`, `validate_slo_proof_report_json`, and `validate_slo_runtime_policy_application_json`
 4. Invariant suite: `tests/slo_policy_bundle_contract.rs`
 5. Operator script: `scripts/validate_slo_policy_bundle.sh`
 
-The artifact records the bundle schema, compiler schema `slo-budget-admission-compiler-v1`, runtime application schema `slo-runtime-policy-application-v1`, LabRuntime replay contract `slo-lab-replay-contract-v1`, proof-report schema `slo-proof-report-v1`, and runtime enforcement report schema `slo-runtime-enforcement-proof-report-v1`. Operators should read those as one chain: bundle input, compiled Budget/admission decision, runtime application contract, replay evidence, final proof-report gate, and runtime enforcement report.
+The artifact records the bundle schema, compiler schema `slo-budget-admission-compiler-v1`, runtime application schema `slo-runtime-policy-application-v1`, LabRuntime replay contract `slo-lab-replay-contract-v1`, brownout E2E receipt schema `slo-lab-brownout-e2e-receipt-v1`, proof-report schema `slo-proof-report-v1`, and runtime enforcement report schema `slo-runtime-enforcement-proof-report-v1`. Operators should read those as one chain: bundle input, compiled Budget/admission decision, runtime application contract, replay evidence, brownout/no-win receipt evidence, final proof-report gate, and runtime enforcement report. The runtime bridge is not a global policy engine; it receives an explicit `Cx`, work kind, and admission request, then preserves the application decision as admitted, browned out, cancelled, no-win, or blocked evidence with explicit non-start/drain receipts and region-close quiescence.
+
+Brownout E2E receipt rows are deterministic LabRuntime evidence for healthy admit, optional-work brownout, no-win fallback, cancellation during brownout, and recovery after pressure clears. They include `receipt_status`, `region_ids`, `task_counts`, `obligation_state`, cancellation counters, drain counters such as `drain_completed_count`, finalizer counters such as `finalizer_completed_count`, `final_quiescent`, `runtime_invariant_violations`, `oracle_violations`, `operator_interpretation`, and explicit non-claims. Missing drain or finalizer evidence produces a red receipt.
 
 Runtime enforcement rows preserve separate outcomes before the proof-report gate:
 
@@ -36,7 +38,7 @@ Runtime enforcement rows preserve separate outcomes before the proof-report gate
 | `unsupported` | Unsupported optional work or runtime lane |
 | `malformed` | Malformed runtime enforcement row or report |
 
-Runtime enforcement JSONL rows emitted by `scripts/validate_slo_policy_bundle.sh` include `runtime_enforcement_status`, `runtime_admission_status`, `lab_replay_status`, admitted and rejected work counts, optional work browned out, cleanup deadline misses, `fallback_reason`, `issue_kinds`, `proof_command`, `proof_command_source`, and `redaction_policy_id`.
+Runtime enforcement JSONL rows emitted by `scripts/validate_slo_policy_bundle.sh` include `runtime_enforcement_status`, `runtime_admission_status`, `lab_replay_status`, `receipt_status`, admitted and rejected work counts, optional work browned out, cleanup deadline misses, `fallback_reason`, `issue_kinds`, `proof_command`, `proof_command_source`, `redaction_policy_id`, and the brownout E2E receipt fields. The script writes `slo-policy-bundle-run.json`, `slo-policy-bundle-run.md`, `slo-policy-bundle-events.ndjson`, and `slo-brownout-e2e-detail.log` under `target/slo-policy-bundle/<run-id>/`.
 
 Proof reports still preserve separate outcomes instead of collapsing them into success:
 
@@ -62,6 +64,26 @@ The Rust contract for the artifact, exported APIs, README section, and this oper
 
 ```bash
 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_docs CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture
+```
+
+The focused bridge proof for required, optional, cleanup/finalizer, proof/reporting, cancellation, and no-win seams is:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge --features test-internals -- --nocapture
+```
+
+The focused brownout E2E receipt proof for healthy admit, optional-work brownout, no-win fallback, cancellation during brownout, recovery, red missing-drain receipts, and red missing-finalizer receipts is:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_brownout_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_brownout_lab_e2e --features test-internals -- --nocapture
+```
+
+Runtime bridge closeout also lists the broad check, clippy, and fmt lanes:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_check_all_targets_ol11aa3 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets_ol11aa3 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fmt_check_ol11aa3 cargo fmt --check
 ```
 
 ## Gate Definitions

@@ -8,7 +8,7 @@ use std::mem::MaybeUninit;
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{
     OnceLock,
@@ -571,19 +571,78 @@ impl PlatformCapabilities {
         linked
     }
 
-    async fn test_sparse_file_support(_path: &Path) -> bool {
-        // Most modern filesystems support sparse files
-        // This could be enhanced with actual testing
-        true
+    async fn test_sparse_file_support(path: &Path) -> bool {
+        let Some((test_file, mut file)) = Self::create_unique_probe_file(path, "sparse") else {
+            return false;
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let sparse_offset = 1024 * 1024;
+            let probe_ok = file
+                .seek(SeekFrom::Start(sparse_offset))
+                .and_then(|_| file.write_all(&[1]))
+                .is_ok();
+            drop(file);
+
+            let sparse = if probe_ok {
+                match std::fs::metadata(&test_file) {
+                    Ok(metadata) => {
+                        let logical_len = metadata.len();
+                        let allocated_bytes = metadata.blocks().saturating_mul(512);
+                        logical_len > sparse_offset && allocated_bytes < logical_len / 2
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+
+            let _ = std::fs::remove_file(&test_file);
+            sparse
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Windows needs FSCTL_SET_SPARSE before sparse allocation is
+            // guaranteed. Avoid advertising support until a platform-specific
+            // implementation marks the file sparse and verifies allocation.
+            drop(file);
+            let _ = std::fs::remove_file(&test_file);
+            false
+        }
     }
 
-    async fn test_hole_punching_support(_path: &Path) -> bool {
-        // Platform-specific hole punching test
+    #[allow(unsafe_code)]
+    async fn test_hole_punching_support(path: &Path) -> bool {
         #[cfg(target_os = "linux")]
-        return true; // Most Linux filesystems support FALLOC_FL_PUNCH_HOLE
+        {
+            use std::os::unix::io::AsRawFd;
+
+            let Some((test_file, mut file)) = Self::create_unique_probe_file(path, "punch") else {
+                return false;
+            };
+
+            let initialized = file.write_all(&[0xA5; 8192]).and_then(|_| file.sync_data());
+            let supported = if initialized.is_ok() {
+                let flags = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+                unsafe { libc::fallocate(file.as_raw_fd(), flags, 0, 4096) == 0 }
+            } else {
+                false
+            };
+
+            drop(file);
+            let _ = std::fs::remove_file(&test_file);
+            supported
+        }
 
         #[cfg(not(target_os = "linux"))]
-        return false;
+        {
+            let _ = path;
+            false
+        }
     }
 
     async fn test_cow_support(_path: &Path) -> bool {

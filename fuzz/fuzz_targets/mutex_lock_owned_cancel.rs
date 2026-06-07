@@ -227,7 +227,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Create contexts and lock futures for operations
     for i in 0..config.operation_count {
-        let cx = Cx::new(
+        let cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(u32::from(i), 0)),
             TaskId::from_arena(ArenaIndex::new(u32::from(i), 0)),
             Budget::unlimited(),
@@ -317,7 +317,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             // Verify that a fresh lock attempt succeeds
-            let fresh_cx = Cx::new(
+            let fresh_cx: Cx = Cx::new(
                 RegionId::from_arena(ArenaIndex::new(100, 0)),
                 TaskId::from_arena(ArenaIndex::new(100, 0)),
                 Budget::unlimited(),
@@ -527,7 +527,7 @@ fuzz_target!(|data: &[u8]| {
     tracker.validate_cancel_invariants();
 
     // Test that mutex is still functional after all operations
-    let final_cx = Cx::new(
+    let final_cx: Cx = Cx::new(
         RegionId::from_arena(ArenaIndex::new(999, 0)),
         TaskId::from_arena(ArenaIndex::new(999, 0)),
         Budget::unlimited(),

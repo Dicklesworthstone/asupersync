@@ -204,17 +204,27 @@ impl ShutdownReceiver {
     /// This method returns immediately if shutdown has already been initiated.
     /// Otherwise, it waits until the controller's `shutdown()` method is called.
     pub async fn wait(&mut self) {
-        // Create the notification future first to avoid missing a shutdown
-        // that happens between the check and registration.
-        let notified = self.state.notify.notified();
+        let state = Arc::clone(&self.state);
+        loop {
+            if state.initiated.load(Ordering::Acquire) {
+                return;
+            }
 
-        // Check if already shut down.
-        if self.is_shutting_down() {
-            return;
+            let mut notified = std::pin::pin!(state.notify.notified());
+            std::future::poll_fn(|cx| {
+                if std::future::Future::poll(notified.as_mut(), cx).is_ready()
+                    || state.initiated.load(Ordering::Acquire)
+                {
+                    return std::task::Poll::Ready(());
+                }
+                std::task::Poll::Pending
+            })
+            .await;
+
+            if state.initiated.load(Ordering::Acquire) {
+                return;
+            }
         }
-
-        // Wait for notification.
-        notified.await;
     }
 
     /// Checks if shutdown has been initiated.

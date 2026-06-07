@@ -45,6 +45,13 @@
     "process_stall",
     "delayed_cleanup",
     "cancellation_storm",
+    "memory_envelope_exceeded",
+    "time_envelope_exceeded",
+    "stale_exact_filter_zero_tests",
+    "remote_admission_denied",
+    "local_fallback_attempted",
+    "dirty_peer_owned_release_blocker",
+    "cancellation_obligation_pressure_warning",
     "resource_caps",
     "expected_invariants",
     "minimized_counterexample"
@@ -679,6 +686,92 @@
     ],
     "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_process_stall_counterexample CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract live_process_stall_minimized_counterexample_is_source_backed -- --nocapture"
   },
+  "proof_lane_pressure_profile": {
+    "profile_id": "proof-lane-pressure-chaos",
+    "bead_id": "asupersync-dneu1w",
+    "schema_version": "proof-lane-pressure-chaos-scenarios-v1",
+    "description": "Deterministic, dry-run proof-lane pressure scenarios that feed swarm_pressure_preflight_report.py with synthetic RCH/admission/freshness/dirty-tree inputs without exhausting local resources.",
+    "fixture_path": "tests/fixtures/proof_lane_pressure_chaos/proof_lane_pressure_scenarios.json",
+    "e2e_script": "scripts/run_proof_lane_pressure_chaos_e2e.sh",
+    "report_surface": "scripts/swarm_pressure_preflight_report.py",
+    "preflight_input_schema_version": "swarm-pressure-preflight-input-v1",
+    "deterministic": true,
+    "dry_run_only": true,
+    "no_real_resource_exhaustion": true,
+    "required_scenario_fields": [
+      "scenario_id",
+      "description",
+      "pressure_dimensions",
+      "injected_pressure_facts",
+      "expected_decision",
+      "expected_blocker_kinds",
+      "expected_warning_kinds",
+      "preflight_input"
+    ],
+    "required_pressure_dimensions": [
+      "memory_envelope_exceeded",
+      "time_envelope_exceeded",
+      "stale_exact_filter_zero_tests",
+      "remote_admission_denied",
+      "local_fallback_attempted",
+      "dirty_peer_owned_release_blocker",
+      "cancellation_obligation_pressure_warning"
+    ],
+    "expected_decisions": [
+      "preflight-blocked",
+      "preflight-attention"
+    ],
+    "required_preflight_report_flags": {
+      "dry_run_only": true,
+      "non_mutating": true,
+      "runs_cargo": false,
+      "runs_rch": false,
+      "runs_git_mutation": false,
+      "runs_beads_mutation": false,
+      "sends_agent_mail": false,
+      "writes_cache": false,
+      "deletes_files": false
+    },
+    "forbidden_test_behaviors": {
+      "allocates_large_memory": false,
+      "burns_cpu_indefinitely": false,
+      "wall_clock_sleep": false,
+      "runs_cargo": false,
+      "runs_rch": false,
+      "mutates_git": false,
+      "mutates_beads": false,
+      "sends_agent_mail": false,
+      "deletes_files": false
+    },
+    "scenario_ids": [
+      "proof-pressure-memory-envelope-exceeded",
+      "proof-pressure-time-envelope-exceeded",
+      "proof-pressure-stale-exact-filter-zero-tests",
+      "proof-pressure-remote-admission-denied",
+      "proof-pressure-local-fallback-attempted",
+      "proof-pressure-dirty-peer-owned-release-blocker",
+      "proof-pressure-cancellation-obligation-warning"
+    ],
+    "expected_blocker_kinds": [
+      "proof-admission-blocked",
+      "stale-exact-filter-zero-tests",
+      "unsafe-resource-envelope-policy",
+      "unsafe-proof-command-prefix",
+      "dirty-tree-release-blocker"
+    ],
+    "expected_warning_kinds": [
+      "runtime-pressure-high",
+      "proof-rerun-required"
+    ],
+    "required_e2e_log_markers": [
+      "scenario_id=",
+      "injected_pressure_facts=",
+      "expected_decision=",
+      "actual_decision=",
+      "blockers=",
+      "warnings="
+    ]
+  },
   "required_invariants": [
     "quiescence",
     "losers_drained",
@@ -745,10 +838,121 @@
         "deterministic_replay"
       ],
       "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "proof-pressure-memory-envelope-exceeded",
+      "description": "A proof lane whose memory envelope would be exceeded must be blocked by admission before dispatch.",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "deterministic preflight fixture drives proof-admission-blocked and high-pressure warning without allocating memory",
+      "fault_dimensions": [
+        "memory_envelope_exceeded",
+        "resource_caps"
+      ],
+      "expected_invariants": [
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "proof-pressure-time-envelope-exceeded",
+      "description": "A proof lane whose time envelope would be exceeded must be blocked by admission before dispatch.",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "deterministic preflight fixture drives proof-admission-blocked from timeout pressure without wall-clock sleeps",
+      "fault_dimensions": [
+        "time_envelope_exceeded",
+        "resource_caps"
+      ],
+      "expected_invariants": [
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "proof-pressure-stale-exact-filter-zero-tests",
+      "description": "A stale exact-filter proof receipt with zero executed tests must block citation and force a rerun.",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "deterministic preflight fixture drives stale-exact-filter-zero-tests from inline freshness receipt data",
+      "fault_dimensions": [
+        "stale_exact_filter_zero_tests"
+      ],
+      "expected_invariants": [
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "proof-pressure-remote-admission-denied",
+      "description": "A remote worker admission denial must stop the proof lane instead of silently falling back locally.",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "deterministic preflight fixture drives proof-admission-blocked from a remote admission denial receipt",
+      "fault_dimensions": [
+        "remote_admission_denied"
+      ],
+      "expected_invariants": [
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "proof-pressure-local-fallback-attempted",
+      "description": "A manifest that permits local fallback or omits the remote-required command prefix must fail closed.",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "deterministic preflight fixture drives unsafe envelope policy and unsafe command prefix blockers",
+      "fault_dimensions": [
+        "local_fallback_attempted",
+        "resource_caps"
+      ],
+      "expected_invariants": [
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "proof-pressure-dirty-peer-owned-release-blocker",
+      "description": "A peer-owned dirty release blocker must keep the proof/release preflight from claiming readiness.",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "deterministic preflight fixture drives dirty-tree-release-blocker from inline ownership receipt data",
+      "fault_dimensions": [
+        "dirty_peer_owned_release_blocker"
+      ],
+      "expected_invariants": [
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "proof-pressure-cancellation-obligation-warning",
+      "description": "A cancellation/obligation frontier with stale proof evidence must warn and require a fresh proof lane before citation.",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "deterministic preflight fixture drives proof-rerun-required without claiming behavioral correctness",
+      "fault_dimensions": [
+        "cancellation_obligation_pressure_warning",
+        "cancellation_storm"
+      ],
+      "expected_invariants": [
+        "no_obligation_leaks",
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
     }
   ],
-  "golden_markdown": "| scenario_id | status | fault_dimensions | expected_invariants |\n| --- | --- | --- | --- |\n| chaos-disk-pressure-cleanup-delay | LIVE | disk_pressure, delayed_cleanup, resource_caps | quiescence, no_obligation_leaks, bounded_artifact_output, deterministic_replay |\n| chaos-partition-cancel-storm | LIVE | network_partition, cancellation_storm | quiescence, losers_drained, no_obligation_leaks, deterministic_replay |\n| chaos-process-stall-minimized-counterexample | LIVE | process_stall, minimized_counterexample | quiescence, losers_drained, deterministic_replay |\n",
+  "golden_markdown": "| scenario_id | status | fault_dimensions | expected_invariants |\n| --- | --- | --- | --- |\n| chaos-disk-pressure-cleanup-delay | LIVE | disk_pressure, delayed_cleanup, resource_caps | quiescence, no_obligation_leaks, bounded_artifact_output, deterministic_replay |\n| chaos-partition-cancel-storm | LIVE | network_partition, cancellation_storm | quiescence, losers_drained, no_obligation_leaks, deterministic_replay |\n| chaos-process-stall-minimized-counterexample | LIVE | process_stall, minimized_counterexample | quiescence, losers_drained, deterministic_replay |\n| proof-pressure-cancellation-obligation-warning | LIVE | cancellation_obligation_pressure_warning, cancellation_storm | no_obligation_leaks, bounded_artifact_output, deterministic_replay |\n| proof-pressure-dirty-peer-owned-release-blocker | LIVE | dirty_peer_owned_release_blocker | bounded_artifact_output, deterministic_replay |\n| proof-pressure-local-fallback-attempted | LIVE | local_fallback_attempted, resource_caps | bounded_artifact_output, deterministic_replay |\n| proof-pressure-memory-envelope-exceeded | LIVE | memory_envelope_exceeded, resource_caps | bounded_artifact_output, deterministic_replay |\n| proof-pressure-remote-admission-denied | LIVE | remote_admission_denied | bounded_artifact_output, deterministic_replay |\n| proof-pressure-stale-exact-filter-zero-tests | LIVE | stale_exact_filter_zero_tests | bounded_artifact_output, deterministic_replay |\n| proof-pressure-time-envelope-exceeded | LIVE | time_envelope_exceeded, resource_caps | bounded_artifact_output, deterministic_replay |\n",
   "proof_commands": [
-    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_scenario_dsl_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract -- --nocapture"
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_scenario_dsl_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_proof_lane_pressure CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract proof_lane_pressure -- --nocapture"
   ]
 }

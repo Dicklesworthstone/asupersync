@@ -127,7 +127,7 @@ fn execute_operation(
         } => {
             tracker.poison_attempts.fetch_add(1, Ordering::SeqCst);
 
-            let cx = Cx::new(
+            let cx: Cx = Cx::new(
                 RegionId::from_arena(ArenaIndex::new(0, 1)),
                 TaskId::from_arena(ArenaIndex::new(0, 1)),
                 Budget::INFINITE,
@@ -297,7 +297,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Phase 2: Poison the mutex by panicking while holding the lock
     let poison_result = catch_unwind(AssertUnwindSafe(|| {
-        let cx = Cx::new(
+        let cx: Cx = Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 2)),
             TaskId::from_arena(ArenaIndex::new(0, 2)),
             Budget::INFINITE,
@@ -361,7 +361,7 @@ fuzz_target!(|data: &[u8]| {
 
                 thread::spawn(move || {
                     for attempt in 0..3 {
-                        let cx = Cx::new(
+                        let cx: Cx = Cx::new(
                             RegionId::from_arena(ArenaIndex::new(1, thread_id as u32)),
                             TaskId::from_arena(ArenaIndex::new(1, thread_id as u32)),
                             Budget::INFINITE,

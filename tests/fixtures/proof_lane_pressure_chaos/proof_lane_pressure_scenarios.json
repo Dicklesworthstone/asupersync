@@ -1,0 +1,868 @@
+{
+  "schema_version": "proof-lane-pressure-chaos-scenarios-v1",
+  "profile_id": "proof-lane-pressure-chaos",
+  "generated_at": "2026-06-05T08:55:00Z",
+  "scenarios": [
+    {
+      "scenario_id": "proof-pressure-memory-envelope-exceeded",
+      "description": "Admission blocks a proof lane before dispatch when the requested memory envelope exceeds the current worker budget.",
+      "pressure_dimensions": [
+        "memory_envelope_exceeded"
+      ],
+      "injected_pressure_facts": {
+        "lane_id": "lib-tests",
+        "requested_memory_mb": 262144,
+        "available_memory_mb": 65536,
+        "admission_decision": "reject",
+        "resource_pressure_class": "critical"
+      },
+      "expected_decision": "preflight-blocked",
+      "expected_blocker_kinds": [
+        "proof-admission-blocked"
+      ],
+      "expected_warning_kinds": [
+        "runtime-pressure-high"
+      ],
+      "preflight_input": {
+        "schema_version": "swarm-pressure-preflight-input-v1",
+        "profile_id": "proof-pressure-memory-envelope-exceeded",
+        "generated_at": "2026-06-05T08:55:00Z",
+        "sources": {
+          "proof_lane_manifest": {
+            "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+            "data": {
+              "contract_version": "proof-lane-manifest-v1",
+              "command_policy": {
+                "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+              },
+              "resource_envelope_policy": {
+                "classes": [
+                  {
+                    "class_id": "test-frontier-heavy",
+                    "lane_kinds": [
+                      "test_frontier"
+                    ],
+                    "timeout_seconds": 7200,
+                    "memory_mb": 262144,
+                    "remote_required": true,
+                    "local_fallback_allowed": false,
+                    "resource_pressure": "critical"
+                  }
+                ]
+              },
+              "required_guarantee_ids": [
+                "lib-test-frontier"
+              ],
+              "lanes": [
+                {
+                  "lane_id": "lib-tests",
+                  "kind": "test_frontier",
+                  "resource_envelope_class": "test-frontier-heavy",
+                  "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_lib cargo test -p asupersync --lib --features test-internals",
+                  "guarantee_ids": [
+                    "lib-test-frontier"
+                  ],
+                  "source_paths": [
+                    "src/lib.rs"
+                  ]
+                }
+              ]
+            }
+          },
+          "proof_status_snapshot": {
+            "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+            "data": {
+              "contract_version": "proof-status-snapshot-v1",
+              "claim_categories": [
+                {
+                  "claim_id": "lib-test-frontier",
+                  "status": "green",
+                  "proof_evidence_status": "fresh-rch-pass",
+                  "manifest_lane_ids": [
+                    "lib-tests"
+                  ]
+                }
+              ]
+            }
+          },
+          "runtime_pressure_contract": {
+            "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+            "data": {
+              "contract_version": "runtime-pressure-control-evidence-contract-v1",
+              "schema_versions": {
+                "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+                "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+                "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+                "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+              },
+              "proof_lanes": [],
+              "evidence_claims": [],
+              "operator_policy": {}
+            }
+          },
+          "proof_admission_receipts": [
+            {
+              "artifact_path": "artifacts/admission/lib-tests-memory.json",
+              "data": {
+                "schema_version": "runtime-pressure-admission-decision-v1",
+                "lane_id": "lib-tests",
+                "decision": {
+                  "lane_id": "lib-tests",
+                  "admission_decision": "reject",
+                  "proof_may_run_now": false,
+                  "reason_codes": [
+                    "memory-envelope-exceeded"
+                  ]
+                },
+                "resource_pressure_summary": {
+                  "class": "critical"
+                },
+                "disk_summary": {
+                  "sufficient_for_lane": true
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-pressure-time-envelope-exceeded",
+      "description": "Admission blocks a proof lane before dispatch when its expected duration exceeds the lane timeout envelope.",
+      "pressure_dimensions": [
+        "time_envelope_exceeded"
+      ],
+      "injected_pressure_facts": {
+        "lane_id": "all-targets-check",
+        "requested_timeout_seconds": 14400,
+        "maximum_timeout_seconds": 3600,
+        "admission_decision": "reject",
+        "resource_pressure_class": "medium"
+      },
+      "expected_decision": "preflight-blocked",
+      "expected_blocker_kinds": [
+        "proof-admission-blocked"
+      ],
+      "expected_warning_kinds": [],
+      "preflight_input": {
+        "schema_version": "swarm-pressure-preflight-input-v1",
+        "profile_id": "proof-pressure-time-envelope-exceeded",
+        "generated_at": "2026-06-05T08:55:00Z",
+        "sources": {
+          "proof_lane_manifest": {
+            "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+            "data": {
+              "contract_version": "proof-lane-manifest-v1",
+              "command_policy": {
+                "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+              },
+              "resource_envelope_policy": {
+                "classes": [
+                  {
+                    "class_id": "check-frontier-medium",
+                    "lane_kinds": [
+                      "check_frontier"
+                    ],
+                    "timeout_seconds": 3600,
+                    "memory_mb": 32768,
+                    "remote_required": true,
+                    "local_fallback_allowed": false,
+                    "resource_pressure": "medium"
+                  }
+                ]
+              },
+              "required_guarantee_ids": [
+                "all-targets-check"
+              ],
+              "lanes": [
+                {
+                  "lane_id": "all-targets-check",
+                  "kind": "check_frontier",
+                  "resource_envelope_class": "check-frontier-medium",
+                  "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_check cargo check --all-targets",
+                  "guarantee_ids": [
+                    "all-targets-check"
+                  ],
+                  "source_paths": [
+                    "src/lib.rs"
+                  ]
+                }
+              ]
+            }
+          },
+          "proof_status_snapshot": {
+            "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+            "data": {
+              "contract_version": "proof-status-snapshot-v1",
+              "claim_categories": [
+                {
+                  "claim_id": "all-targets-check",
+                  "status": "green",
+                  "proof_evidence_status": "fresh-rch-pass",
+                  "manifest_lane_ids": [
+                    "all-targets-check"
+                  ]
+                }
+              ]
+            }
+          },
+          "runtime_pressure_contract": {
+            "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+            "data": {
+              "contract_version": "runtime-pressure-control-evidence-contract-v1",
+              "schema_versions": {
+                "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+                "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+                "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+                "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+              },
+              "proof_lanes": [],
+              "evidence_claims": [],
+              "operator_policy": {}
+            }
+          },
+          "proof_admission_receipts": [
+            {
+              "artifact_path": "artifacts/admission/all-targets-check-time.json",
+              "data": {
+                "schema_version": "runtime-pressure-admission-decision-v1",
+                "lane_id": "all-targets-check",
+                "decision": {
+                  "lane_id": "all-targets-check",
+                  "admission_decision": "reject",
+                  "proof_may_run_now": false,
+                  "reason_codes": [
+                    "time-envelope-exceeded"
+                  ]
+                },
+                "resource_pressure_summary": {
+                  "class": "medium"
+                },
+                "disk_summary": {
+                  "sufficient_for_lane": true
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-pressure-stale-exact-filter-zero-tests",
+      "description": "A stale exact-filter receipt that executed zero tests blocks proof citation until the exact test name is refreshed and rerun.",
+      "pressure_dimensions": [
+        "stale_exact_filter_zero_tests"
+      ],
+      "injected_pressure_facts": {
+        "lane_id": "default-policy-no-csp-or-permissions",
+        "exact_filter": "default_policy_no_csp_or_permissions",
+        "exact_filter_executed_tests": 0,
+        "freshness_decision": "rerun-required"
+      },
+      "expected_decision": "preflight-blocked",
+      "expected_blocker_kinds": [
+        "stale-exact-filter-zero-tests"
+      ],
+      "expected_warning_kinds": [],
+      "preflight_input": {
+        "schema_version": "swarm-pressure-preflight-input-v1",
+        "profile_id": "proof-pressure-stale-exact-filter-zero-tests",
+        "generated_at": "2026-06-05T08:55:00Z",
+        "sources": {
+          "proof_lane_manifest": {
+            "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+            "data": {
+              "contract_version": "proof-lane-manifest-v1",
+              "command_policy": {
+                "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+              },
+              "resource_envelope_policy": {
+                "classes": [
+                  {
+                    "class_id": "exact-filter-medium",
+                    "lane_kinds": [
+                      "test_frontier"
+                    ],
+                    "timeout_seconds": 3600,
+                    "memory_mb": 16384,
+                    "remote_required": true,
+                    "local_fallback_allowed": false,
+                    "resource_pressure": "medium"
+                  }
+                ]
+              },
+              "required_guarantee_ids": [
+                "default-policy"
+              ],
+              "lanes": [
+                {
+                  "lane_id": "default-policy-no-csp-or-permissions",
+                  "kind": "test_frontier",
+                  "resource_envelope_class": "exact-filter-medium",
+                  "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exact cargo test -p asupersync --lib default_policy_no_csp_or_permissions -- --exact --nocapture",
+                  "guarantee_ids": [
+                    "default-policy"
+                  ],
+                  "source_paths": [
+                    "src/cx/policy.rs"
+                  ]
+                }
+              ]
+            }
+          },
+          "proof_status_snapshot": {
+            "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+            "data": {
+              "contract_version": "proof-status-snapshot-v1",
+              "claim_categories": [
+                {
+                  "claim_id": "default-policy",
+                  "status": "green",
+                  "proof_evidence_status": "fresh-rch-pass",
+                  "manifest_lane_ids": [
+                    "default-policy-no-csp-or-permissions"
+                  ]
+                }
+              ]
+            }
+          },
+          "runtime_pressure_contract": {
+            "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+            "data": {
+              "contract_version": "runtime-pressure-control-evidence-contract-v1",
+              "schema_versions": {
+                "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+                "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+                "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+                "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+              },
+              "proof_lanes": [],
+              "evidence_claims": [],
+              "operator_policy": {}
+            }
+          },
+          "proof_freshness_receipts": [
+            {
+              "artifact_path": "artifacts/freshness/default-policy-zero-tests.json",
+              "data": {
+                "schema_version": "proof-artifact-freshness-receipt-v1",
+                "rows": [
+                  {
+                    "artifact_path": "artifacts/proof/default-policy-zero-tests.json",
+                    "classification": "exact-filter-zero-tests",
+                    "decision": "rerun-required",
+                    "safe_to_cite": false,
+                    "lane_id": "default-policy-no-csp-or-permissions",
+                    "evidence": {
+                      "exact_filter": "default_policy_no_csp_or_permissions",
+                      "exact_filter_executed_tests": 0,
+                      "exact_filter_proof_reasons": [
+                        "zero-tests"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-pressure-remote-admission-denied",
+      "description": "A remote admission denial blocks dispatch even when the manifest itself is well-formed.",
+      "pressure_dimensions": [
+        "remote_admission_denied"
+      ],
+      "injected_pressure_facts": {
+        "lane_id": "rustdoc-frontier",
+        "admission_decision": "reject",
+        "reason_codes": [
+          "no-admissible-remote-workers"
+        ],
+        "resource_pressure_class": "healthy"
+      },
+      "expected_decision": "preflight-blocked",
+      "expected_blocker_kinds": [
+        "proof-admission-blocked"
+      ],
+      "expected_warning_kinds": [],
+      "preflight_input": {
+        "schema_version": "swarm-pressure-preflight-input-v1",
+        "profile_id": "proof-pressure-remote-admission-denied",
+        "generated_at": "2026-06-05T08:55:00Z",
+        "sources": {
+          "proof_lane_manifest": {
+            "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+            "data": {
+              "contract_version": "proof-lane-manifest-v1",
+              "command_policy": {
+                "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+              },
+              "resource_envelope_policy": {
+                "classes": [
+                  {
+                    "class_id": "rustdoc-medium",
+                    "lane_kinds": [
+                      "rustdoc_frontier"
+                    ],
+                    "timeout_seconds": 3600,
+                    "memory_mb": 32768,
+                    "remote_required": true,
+                    "local_fallback_allowed": false,
+                    "resource_pressure": "medium"
+                  }
+                ]
+              },
+              "required_guarantee_ids": [
+                "rustdoc-frontier"
+              ],
+              "lanes": [
+                {
+                  "lane_id": "rustdoc-frontier",
+                  "kind": "rustdoc_frontier",
+                  "resource_envelope_class": "rustdoc-medium",
+                  "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_doc cargo doc --workspace --no-deps",
+                  "guarantee_ids": [
+                    "rustdoc-frontier"
+                  ],
+                  "source_paths": [
+                    "src/lib.rs"
+                  ]
+                }
+              ]
+            }
+          },
+          "proof_status_snapshot": {
+            "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+            "data": {
+              "contract_version": "proof-status-snapshot-v1",
+              "claim_categories": [
+                {
+                  "claim_id": "rustdoc-frontier",
+                  "status": "green",
+                  "proof_evidence_status": "fresh-rch-pass",
+                  "manifest_lane_ids": [
+                    "rustdoc-frontier"
+                  ]
+                }
+              ]
+            }
+          },
+          "runtime_pressure_contract": {
+            "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+            "data": {
+              "contract_version": "runtime-pressure-control-evidence-contract-v1",
+              "schema_versions": {
+                "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+                "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+                "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+                "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+              },
+              "proof_lanes": [],
+              "evidence_claims": [],
+              "operator_policy": {}
+            }
+          },
+          "proof_admission_receipts": [
+            {
+              "artifact_path": "artifacts/admission/rustdoc-frontier-remote-denied.json",
+              "data": {
+                "schema_version": "runtime-pressure-admission-decision-v1",
+                "lane_id": "rustdoc-frontier",
+                "decision": {
+                  "lane_id": "rustdoc-frontier",
+                  "admission_decision": "reject",
+                  "proof_may_run_now": false,
+                  "reason_codes": [
+                    "no-admissible-remote-workers"
+                  ]
+                },
+                "resource_pressure_summary": {
+                  "class": "healthy"
+                },
+                "disk_summary": {
+                  "sufficient_for_lane": true
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-pressure-local-fallback-attempted",
+      "description": "A manifest that allows local fallback or drops the remote-required command prefix fails closed before any proof lane can run locally.",
+      "pressure_dimensions": [
+        "local_fallback_attempted"
+      ],
+      "injected_pressure_facts": {
+        "lane_id": "lib-tests-local-fallback",
+        "remote_required": false,
+        "local_fallback_allowed": true,
+        "command_prefix": "cargo test"
+      },
+      "expected_decision": "preflight-blocked",
+      "expected_blocker_kinds": [
+        "unsafe-proof-command-prefix",
+        "unsafe-resource-envelope-policy"
+      ],
+      "expected_warning_kinds": [],
+      "preflight_input": {
+        "schema_version": "swarm-pressure-preflight-input-v1",
+        "profile_id": "proof-pressure-local-fallback-attempted",
+        "generated_at": "2026-06-05T08:55:00Z",
+        "sources": {
+          "proof_lane_manifest": {
+            "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+            "data": {
+              "contract_version": "proof-lane-manifest-v1",
+              "command_policy": {
+                "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+              },
+              "resource_envelope_policy": {
+                "classes": [
+                  {
+                    "class_id": "unsafe-local-fallback",
+                    "lane_kinds": [
+                      "test_frontier"
+                    ],
+                    "timeout_seconds": 3600,
+                    "memory_mb": 16384,
+                    "remote_required": false,
+                    "local_fallback_allowed": true,
+                    "resource_pressure": "medium"
+                  }
+                ]
+              },
+              "required_guarantee_ids": [
+                "lib-test-frontier"
+              ],
+              "lanes": [
+                {
+                  "lane_id": "lib-tests-local-fallback",
+                  "kind": "test_frontier",
+                  "resource_envelope_class": "unsafe-local-fallback",
+                  "command": "cargo test -p asupersync --lib --features test-internals",
+                  "guarantee_ids": [
+                    "lib-test-frontier"
+                  ],
+                  "source_paths": [
+                    "src/lib.rs"
+                  ]
+                }
+              ]
+            }
+          },
+          "proof_status_snapshot": {
+            "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+            "data": {
+              "contract_version": "proof-status-snapshot-v1",
+              "claim_categories": []
+            }
+          },
+          "runtime_pressure_contract": {
+            "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+            "data": {
+              "contract_version": "runtime-pressure-control-evidence-contract-v1",
+              "schema_versions": {
+                "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+                "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+                "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+                "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+              },
+              "proof_lanes": [],
+              "evidence_claims": [],
+              "operator_policy": {}
+            }
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-pressure-dirty-peer-owned-release-blocker",
+      "description": "A peer-owned dirty-tree release blocker prevents release/readiness claims until the owner hands off or commits.",
+      "pressure_dimensions": [
+        "dirty_peer_owned_release_blocker"
+      ],
+      "injected_pressure_facts": {
+        "path": "Cargo.toml",
+        "owner": "BeigeOriole",
+        "classification": "peer-owned",
+        "release_blocker": true
+      },
+      "expected_decision": "preflight-blocked",
+      "expected_blocker_kinds": [
+        "dirty-tree-release-blocker"
+      ],
+      "expected_warning_kinds": [],
+      "preflight_input": {
+        "schema_version": "swarm-pressure-preflight-input-v1",
+        "profile_id": "proof-pressure-dirty-peer-owned-release-blocker",
+        "generated_at": "2026-06-05T08:55:00Z",
+        "sources": {
+          "proof_lane_manifest": {
+            "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+            "data": {
+              "contract_version": "proof-lane-manifest-v1",
+              "command_policy": {
+                "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+              },
+              "resource_envelope_policy": {
+                "classes": [
+                  {
+                    "class_id": "artifact-contract-medium",
+                    "lane_kinds": [
+                      "artifact_contract"
+                    ],
+                    "timeout_seconds": 3600,
+                    "memory_mb": 16384,
+                    "remote_required": true,
+                    "local_fallback_allowed": false,
+                    "resource_pressure": "medium"
+                  }
+                ]
+              },
+              "required_guarantee_ids": [
+                "shared-main-commit-guard"
+              ],
+              "lanes": [
+                {
+                  "lane_id": "dirty-tree-ownership-receipt-contract",
+                  "kind": "artifact_contract",
+                  "resource_envelope_class": "artifact-contract-medium",
+                  "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_dirty cargo test -p asupersync --test dirty_tree_ownership_receipt_contract -- --nocapture",
+                  "guarantee_ids": [
+                    "shared-main-commit-guard"
+                  ],
+                  "source_paths": [
+                    "scripts/dirty_tree_ownership_receipt.py"
+                  ]
+                }
+              ]
+            }
+          },
+          "proof_status_snapshot": {
+            "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+            "data": {
+              "contract_version": "proof-status-snapshot-v1",
+              "claim_categories": []
+            }
+          },
+          "runtime_pressure_contract": {
+            "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+            "data": {
+              "contract_version": "runtime-pressure-control-evidence-contract-v1",
+              "schema_versions": {
+                "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+                "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+                "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+                "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+              },
+              "proof_lanes": [],
+              "evidence_claims": [],
+              "operator_policy": {}
+            }
+          },
+          "dirty_tree_ownership_receipt": {
+            "artifact_path": "artifacts/dirty-tree/release-prep.json",
+            "data": {
+              "schema_version": "dirty-tree-ownership-receipt-v1",
+              "release_prep_report": {
+                "release_blocker_summary": {
+                  "decision": "release-blocked",
+                  "total_dirty_paths": 1,
+                  "blocker_count": 1,
+                  "release_ready": false,
+                  "by_classification": {
+                    "peer-owned": 1
+                  }
+                },
+                "rows": [
+                  {
+                    "path": "Cargo.toml",
+                    "classification": "peer-owned",
+                    "release_blocker": true,
+                    "owner": "BeigeOriole",
+                    "reason": "active peer reservation owns this dirty path",
+                    "recommended_next_step": "wait-for-peer-handoff"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-pressure-cancellation-obligation-warning",
+      "description": "A cancellation/obligation claim with stale proof evidence produces attention, not a pass, until the canonical RCH lane is fresh.",
+      "pressure_dimensions": [
+        "cancellation_obligation_pressure_warning"
+      ],
+      "injected_pressure_facts": {
+        "claim_id": "cancellation-obligation-pressure",
+        "proof_evidence_status": "rerun-required",
+        "manifest_lane_id": "obligation-cleanup-e2e"
+      },
+      "expected_decision": "preflight-attention",
+      "expected_blocker_kinds": [],
+      "expected_warning_kinds": [
+        "proof-rerun-required"
+      ],
+      "preflight_input": {
+        "schema_version": "swarm-pressure-preflight-input-v1",
+        "profile_id": "proof-pressure-cancellation-obligation-warning",
+        "generated_at": "2026-06-05T08:55:00Z",
+        "sources": {
+          "proof_lane_manifest": {
+            "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+            "data": {
+              "contract_version": "proof-lane-manifest-v1",
+              "command_policy": {
+                "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- "
+              },
+              "resource_envelope_policy": {
+                "classes": [
+                  {
+                    "class_id": "e2e-medium",
+                    "lane_kinds": [
+                      "e2e"
+                    ],
+                    "timeout_seconds": 3600,
+                    "memory_mb": 32768,
+                    "remote_required": true,
+                    "local_fallback_allowed": false,
+                    "resource_pressure": "medium"
+                  }
+                ]
+              },
+              "required_guarantee_ids": [
+                "cancellation-obligation-pressure"
+              ],
+              "lanes": [
+                {
+                  "lane_id": "obligation-cleanup-e2e",
+                  "kind": "e2e",
+                  "resource_envelope_class": "e2e-medium",
+                  "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_obligation cargo test -p asupersync --test obligation_cleanup_e2e -- --nocapture",
+                  "guarantee_ids": [
+                    "cancellation-obligation-pressure"
+                  ],
+                  "source_paths": [
+                    "src/obligation/mod.rs",
+                    "src/cancel/mod.rs"
+                  ]
+                }
+              ]
+            }
+          },
+          "proof_status_snapshot": {
+            "artifact_path": "artifacts/proof_status_snapshot_v1.json",
+            "data": {
+              "contract_version": "proof-status-snapshot-v1",
+              "claim_categories": [
+                {
+                  "claim_id": "cancellation-obligation-pressure",
+                  "status": "yellow_frontier",
+                  "proof_evidence_status": "rerun-required",
+                  "manifest_lane_ids": [
+                    "obligation-cleanup-e2e"
+                  ]
+                }
+              ]
+            }
+          },
+          "runtime_pressure_contract": {
+            "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+            "data": {
+              "contract_version": "runtime-pressure-control-evidence-contract-v1",
+              "schema_versions": {
+                "runtime_pressure_snapshot": "runtime-pressure-snapshot-v1",
+                "runtime_pressure_admission_policy": "runtime-pressure-admission-policy-v1",
+                "runtime_pressure_admission_decision": "runtime-pressure-admission-decision-v1",
+                "runtime_pressure_rch_proof_lane": "runtime-pressure-rch-proof-lane-v1"
+              },
+              "proof_lanes": [],
+              "evidence_claims": [],
+              "operator_policy": {}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "negative_cases": [
+    {
+      "case_id": "version-mismatch",
+      "input": {
+        "schema_version": "proof-lane-pressure-chaos-scenarios-v0",
+        "profile_id": "proof-lane-pressure-chaos",
+        "scenarios": []
+      },
+      "expected_error_fragments": [
+        "schema_version"
+      ]
+    },
+    {
+      "case_id": "missing-required-field",
+      "input": {
+        "schema_version": "proof-lane-pressure-chaos-scenarios-v1",
+        "profile_id": "proof-lane-pressure-chaos",
+        "scenarios": [
+          {
+            "scenario_id": "missing-expected-decision",
+            "description": "missing expected_decision must fail closed",
+            "pressure_dimensions": [
+              "memory_envelope_exceeded"
+            ],
+            "injected_pressure_facts": {
+              "lane_id": "lib-tests"
+            },
+            "expected_blocker_kinds": [
+              "proof-admission-blocked"
+            ],
+            "expected_warning_kinds": [],
+            "preflight_input": {
+              "schema_version": "swarm-pressure-preflight-input-v1"
+            }
+          }
+        ]
+      },
+      "expected_error_fragments": [
+        "expected_decision"
+      ]
+    },
+    {
+      "case_id": "unknown-field",
+      "input": {
+        "schema_version": "proof-lane-pressure-chaos-scenarios-v1",
+        "profile_id": "proof-lane-pressure-chaos",
+        "scenarios": [
+          {
+            "scenario_id": "unknown-field",
+            "description": "unknown fields must fail closed",
+            "pressure_dimensions": [
+              "memory_envelope_exceeded"
+            ],
+            "injected_pressure_facts": {
+              "lane_id": "lib-tests"
+            },
+            "expected_decision": "preflight-blocked",
+            "expected_blocker_kinds": [
+              "proof-admission-blocked"
+            ],
+            "expected_warning_kinds": [],
+            "preflight_input": {
+              "schema_version": "swarm-pressure-preflight-input-v1"
+            },
+            "surprise": true
+          }
+        ]
+      },
+      "expected_error_fragments": [
+        "unknown field"
+      ]
+    }
+  ]
+}

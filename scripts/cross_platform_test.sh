@@ -60,6 +60,25 @@ run_cargo_check() {
     fi
 }
 
+run_cargo_test() {
+    local label="$1"
+    shift
+
+    log_info "Running cargo test: $label"
+    local cargo_output
+    if cargo_output="$(CARGO_TARGET_DIR="$(cargo_target_dir)" cargo test "$@" 2>&1)"; then
+        printf '%s\n' "$cargo_output" >> "$TEST_LOG"
+        if grep -Eq "running 0 tests|0 passed; 0 failed; 0 ignored; .* filtered out" <<< "$cargo_output"; then
+            log_failure "$label ran zero tests"
+            return
+        fi
+        log_pass "$label passed"
+    else
+        printf '%s\n' "$cargo_output" >> "$TEST_LOG"
+        log_failure "$label failed"
+    fi
+}
+
 tool_exists() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -151,11 +170,31 @@ test_network_caps() {
         log_skip "netcat not available for network testing"
     fi
 
-    # Test SO_REUSEPORT (Linux/BSD specific)
-    if [[ "$PLATFORM" == "linux" ]] || [[ "$PLATFORM" == "macos" ]]; then
-        # This would need a specific test program, skip for now
-        log_skip "SO_REUSEPORT test not implemented"
-    fi
+    # Test SO_REUSEPORT with the canonical Rust coverage instead of a shell stub.
+    case "$PLATFORM" in
+        linux)
+            run_cargo_test \
+                "SO_REUSEPORT Linux conformance" \
+                --test conformance \
+                conformance::tcp_listener::test_so_reuseport_load_balancing \
+                -- \
+                --exact
+            ;;
+        macos)
+            run_cargo_test \
+                "SO_REUSEPORT Unix socket option" \
+                --lib \
+                net::tcp::socket::tests::test_listen_with_reuseport \
+                -- \
+                --exact
+            ;;
+        windows)
+            log_skip "SO_REUSEPORT is Unix-only"
+            ;;
+        *)
+            log_skip "SO_REUSEPORT proof unavailable for unknown platform"
+            ;;
+    esac
 }
 
 # Test ATP-specific capabilities
@@ -308,7 +347,8 @@ generate_capability_matrix() {
         },
         "network": {
             "ipv6": "$(grep -q "IPv6 support available" "$TEST_LOG" && echo "true" || echo "false")",
-            "udp_sockets": "$(grep -q "UDP socket binding available" "$TEST_LOG" && echo "true" || echo "false")"
+            "udp_sockets": "$(grep -q "UDP socket binding available" "$TEST_LOG" && echo "true" || echo "false")",
+            "reuseport": "$(grep -Eq "SO_REUSEPORT (Linux conformance|Unix socket option) passed" "$TEST_LOG" && echo "true" || echo "false")"
         },
         "atp": {
             "core_compilation": "$(grep -q "ATP/native core compiles" "$TEST_LOG" && echo "true" || echo "false")",

@@ -434,10 +434,10 @@ fn newest_fixture_age_days(path: &Path) -> Result<u64, DynError> {
             continue;
         }
         saw_file = true;
-        if let Ok(modified) = metadata.modified() {
-            if modified > newest {
-                newest = modified;
-            }
+        if let Ok(modified) = metadata.modified()
+            && modified > newest
+        {
+            newest = modified;
         }
     }
 

@@ -68,6 +68,8 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::duration_suboptimal_units)]
+#![allow(unknown_lints)]
+#![allow(clippy::unused_async_trait_impl)]
 // Pedantic/nursery/WIP lints that should be silenced are configured via
 // [lints.clippy] in Cargo.toml, which propagates to integration tests and
 // benches too. Crate-level attributes don't reach `tests/*.rs` since each

@@ -183,9 +183,10 @@ fn run_all_tests(verbose: bool) {
             requirement_level: RequirementLevel::Must,
             log_inputs: vec![TestLogInput {
                 timestamp: SystemTime::UNIX_EPOCH
-                    + std::time::Duration::from_nanos(1640995200_123456789),
+                    + std::time::Duration::from_nanos(1_640_995_200_123_456_789),
                 observed_timestamp: Some(
-                    SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(1640995200_987654321),
+                    SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_nanos(1_640_995_200_987_654_321),
                 ),
                 severity: Severity::Info,
                 body: "Timestamp test".to_string(),
@@ -391,7 +392,7 @@ fn generate_our_otlp_request(
             OtlpLogScopeInput {
                 service_name: test_case
                     .log_inputs
-                    .get(0)
+                    .first()
                     .and_then(|log| {
                         log.resource_attributes
                             .iter()
@@ -532,9 +533,9 @@ fn run_timestamps_test(_verbose: bool) -> ConformanceTestResult {
         requirement_level: RequirementLevel::Must,
         log_inputs: vec![TestLogInput {
             timestamp: SystemTime::UNIX_EPOCH
-                + std::time::Duration::from_nanos(1640995200_123456789),
+                + std::time::Duration::from_nanos(1_640_995_200_123_456_789),
             observed_timestamp: Some(
-                SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(1640995200_987654321),
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(1_640_995_200_987_654_321),
             ),
             severity: Severity::Info,
             body: "Timestamp test".to_string(),

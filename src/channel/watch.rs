@@ -596,7 +596,7 @@ impl<T> Receiver<T> {
     ///
     /// Returns `RecvError::Closed` if the sender was dropped.
     /// Returns `RecvError::Cancelled` if the operation was cancelled.
-    pub fn changed<'a, 'b>(&'a mut self, cx: &'b Cx) -> ChangedFuture<'a, 'b, T> {
+    pub fn changed<'a, 'b, Caps>(&'a mut self, cx: &'b Cx<Caps>) -> ChangedFuture<'a, 'b, T, Caps> {
         cx.trace("watch::changed starting wait");
         ChangedFuture {
             receiver: self,
@@ -605,9 +605,9 @@ impl<T> Receiver<T> {
         }
     }
 
-    pub(crate) fn poll_changed(
+    pub(crate) fn poll_changed<Caps>(
         &mut self,
-        cx: &Cx,
+        cx: &Cx<Caps>,
         context: &Context<'_>,
     ) -> Poll<Result<(), RecvError>> {
         if cx.checkpoint().is_err() {
@@ -797,13 +797,13 @@ impl<T> Receiver<T> {
 /// Future returned by [`Receiver::changed`].
 ///
 /// Resolves when a new value is available or the channel closes.
-pub struct ChangedFuture<'a, 'b, T> {
+pub struct ChangedFuture<'a, 'b, T, Caps = crate::cx::cap::All> {
     receiver: &'a mut Receiver<T>,
-    cx: &'b Cx,
+    cx: &'b Cx<Caps>,
     completed: bool,
 }
 
-impl<T> Future for ChangedFuture<'_, '_, T> {
+impl<T, Caps> Future for ChangedFuture<'_, '_, T, Caps> {
     type Output = Result<(), RecvError>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
@@ -823,7 +823,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
     }
 }
 
-impl<T> Drop for ChangedFuture<'_, '_, T> {
+impl<T, Caps> Drop for ChangedFuture<'_, '_, T, Caps> {
     fn drop(&mut self) {
         let mut removed_pending_waiter = false;
         if let Some(waiter) = self.receiver.waiter.as_ref() {
@@ -941,6 +941,20 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    #[test]
+    fn changed_accepts_detached_no_cap_context() {
+        init_test("changed_accepts_detached_no_cap_context");
+        let cx = Cx::<crate::cx::cap::None>::detached_cancel_context();
+        let (tx, mut rx) = channel(0);
+
+        tx.send(47).expect("send should succeed");
+        block_on(rx.changed(&cx)).expect("changed should accept cap::None Cx");
+        let value = *rx.borrow();
+
+        crate::assert_with_log!(value == 47, "watch value", 47, value);
+        crate::test_complete!("changed_accepts_detached_no_cap_context");
     }
 
     #[test]

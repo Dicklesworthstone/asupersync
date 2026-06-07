@@ -159,15 +159,17 @@ mod tests {
         let _ = cache.put(key2.clone(), content2);
         let _ = cache.put(key3.clone(), content3);
 
-        // Verify index key generation includes manifest and grant
-        assert_eq!(key1.as_index_key(), "manifest1:content1:grant1");
-        assert_eq!(key2.as_index_key(), "manifest1:content2:grant1");
-        assert_eq!(key3.as_index_key(), "manifest2:content1:grant2");
+        // Verify index key generation includes manifest and grant without delimiter collisions.
+        assert_ne!(key1.as_index_key(), key2.as_index_key());
+        assert_ne!(key1.as_index_key(), key3.as_index_key());
 
         // Keys with same manifest but different grants should be distinct
         let key_no_grant = CacheKey::new("manifest1".to_string(), "content1".to_string(), None);
-        assert_eq!(key_no_grant.as_index_key(), "manifest1:content1");
         assert_ne!(key1.as_index_key(), key_no_grant.as_index_key());
+
+        let delimiter_collision =
+            CacheKey::new("manifest1".to_string(), "content1:grant1".to_string(), None);
+        assert_ne!(key1.as_index_key(), delimiter_collision.as_index_key());
     }
 
     /// Test cache eviction preserves proof/journal invariants

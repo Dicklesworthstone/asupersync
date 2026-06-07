@@ -284,6 +284,36 @@ fn cross_platform_script_result_counters_are_errexit_safe() {
 }
 
 #[test]
+fn cross_platform_script_runs_reuseport_proof_when_supported() {
+    let script = load_source("scripts/cross_platform_test.sh");
+
+    assert!(
+        !script.contains("SO_REUSEPORT test not implemented"),
+        "cross-platform script must use existing SO_REUSEPORT proof coverage"
+    );
+
+    assert!(
+        script.contains("ran zero tests"),
+        "cross-platform cargo test helper must fail closed on exact filters that match zero tests"
+    );
+
+    for required_token in [
+        "run_cargo_test",
+        "SO_REUSEPORT Linux conformance",
+        "--test conformance",
+        "conformance::tcp_listener::test_so_reuseport_load_balancing",
+        "SO_REUSEPORT Unix socket option",
+        "net::tcp::socket::tests::test_listen_with_reuseport",
+        "\"reuseport\"",
+    ] {
+        assert!(
+            script.contains(required_token),
+            "cross-platform script missing SO_REUSEPORT proof token: {required_token}"
+        );
+    }
+}
+
+#[test]
 fn tls_pin_hashing_does_not_add_direct_ring_dependency() {
     let cargo_toml = load_source("Cargo.toml");
     let tls_types = load_source("src/tls/types.rs");

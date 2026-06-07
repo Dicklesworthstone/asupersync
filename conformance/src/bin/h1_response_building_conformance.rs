@@ -238,12 +238,10 @@ fn has_incomplete_coverage(
 
 fn exit_code(report: &asupersync_conformance::ResponseBuildingComplianceReport) -> i32 {
     // Fail closed: exit 1 for any incomplete coverage or failures
-    if report.summary.failed > 0 {
-        1 // Hard failures
-    } else if has_incomplete_coverage(report) {
-        1 // Incomplete coverage (skipped, expected failures, or zero cases)
+    if report.summary.failed > 0 || has_incomplete_coverage(report) {
+        1
     } else {
-        0 // Only exit 0 for complete green coverage
+        0
     }
 }
 
