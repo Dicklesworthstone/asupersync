@@ -3,6 +3,7 @@
   "scenario_schema_version": "asupersync.swarm-workload-scenario.v1",
   "runtime_schema_version": "asupersync.swarm-replay-lab.v1",
   "bead_id": "asupersync-vssefs.9.1",
+  "extension_bead_id": "asupersync-86fe9v.3",
   "description": "Stable workload scenario corpus for massive agent-swarm replay planning, LabRuntime execution, and future no-mock swarm proof runners.",
   "source_of_truth": {
     "contract": "artifacts/swarm_workload_scenario_corpus_v1.json",
@@ -79,6 +80,21 @@
     "same_shape_policy": "Scenario rows own semantic workload knobs; runners may add execution provenance but must not reinterpret scale, pressure, admission, cancellation, or timeout fields.",
     "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_workload_scenario_corpus cargo test -p asupersync --test swarm_workload_scenario_corpus_contract --features test-internals -- --nocapture"
   },
+  "runner_log_contract": {
+    "description": "Deterministic e2e-style runner log projection assembled from the live replay, pressure, agent-run, and what-if planner outputs.",
+    "required_fields": [
+      "scenario_id",
+      "seed",
+      "host_envelope",
+      "agent_count",
+      "task_counts",
+      "region_ids",
+      "obligation_counts",
+      "pressure_timeline",
+      "rch_queue_state",
+      "final_governor_input_snapshot"
+    ]
+  },
   "required_semantic_dimensions": [
     "healthy_run",
     "cancellation_storm",
@@ -88,6 +104,30 @@
     "admission_cancel_drain",
     "forced_timeout",
     "saturated_scale"
+  ],
+  "required_fourth_wave_workload_dimensions": [
+    "large_host_64c_256g",
+    "cpu_heavy_cargo_rch",
+    "memory_heavy_artifact_generation",
+    "tracker_only_bead_updates",
+    "release_gate_quiet_phase",
+    "source_audit_swarms",
+    "stalled_worker_recovery",
+    "rch_active_project_exclusion",
+    "no_useful_work_planning_fallback"
+  ],
+  "large_host_profiles": [
+    {
+      "profile_id": "large-host-64c-256g",
+      "cpu_cores": 64,
+      "memory_gib": 256,
+      "description": "Planning profile for fourth-wave replay fixtures; this is not a live-host benchmark claim.",
+      "non_claims": [
+        "does_not_prove_current_worker_capacity",
+        "does_not_publish_release_gate_evidence",
+        "does_not_authorize_local_cargo_fallback"
+      ]
+    }
   ],
   "scenarios": [
     {
@@ -363,6 +403,186 @@
         "region_cleanup_poll_quota_per_task": 1,
         "cancel_after_steps": null,
         "max_steps": 100000
+      }
+    }
+  ],
+  "pressure_scenarios": [
+    {
+      "scenario_id": "fourth-wave-large-host-release-gate-pressure",
+      "description": "64-core release-gate pressure model with CPU-heavy Cargo/RCH proof lanes, quiet-phase worker loss, and recovery.",
+      "execution_mode": "run_in_contract",
+      "workload_dimensions": [
+        "large_host_64c_256g",
+        "cpu_heavy_cargo_rch",
+        "release_gate_quiet_phase",
+        "rch_active_project_exclusion",
+        "stalled_worker_recovery"
+      ],
+      "pressure_scenario": {
+        "scenario_id": "fourth-wave-large-host-release-gate-pressure",
+        "seed": 72623859790382856,
+        "worker_count": 64,
+        "interactive_tasks": 96,
+        "proof_tasks": 64,
+        "cleanup_requests": 4,
+        "rch_workers_initial": 8,
+        "disk_pressure_transitions": [
+          {
+            "at_step": 0,
+            "level": "green"
+          },
+          {
+            "at_step": 8,
+            "level": "red"
+          },
+          {
+            "at_step": 32,
+            "level": "green"
+          }
+        ],
+        "rch_worker_events": [
+          {
+            "at_step": 6,
+            "kind": "loss",
+            "worker_delta": 8
+          },
+          {
+            "at_step": 40,
+            "kind": "recovery",
+            "worker_delta": 8
+          }
+        ],
+        "interactive_latency_bound_steps": 4,
+        "max_steps": 50000
+      }
+    },
+    {
+      "scenario_id": "fourth-wave-source-audit-artifact-pressure",
+      "description": "Source-audit swarm plus artifact-heavy proof pressure used to feed later governor policy receipts.",
+      "execution_mode": "validate_only",
+      "workload_dimensions": [
+        "large_host_64c_256g",
+        "memory_heavy_artifact_generation",
+        "source_audit_swarms"
+      ],
+      "pressure_scenario": {
+        "scenario_id": "fourth-wave-source-audit-artifact-pressure",
+        "seed": 72623859790382857,
+        "worker_count": 64,
+        "interactive_tasks": 160,
+        "proof_tasks": 96,
+        "cleanup_requests": 8,
+        "rch_workers_initial": 12,
+        "disk_pressure_transitions": [
+          {
+            "at_step": 0,
+            "level": "green"
+          },
+          {
+            "at_step": 20,
+            "level": "red"
+          }
+        ],
+        "rch_worker_events": [
+          {
+            "at_step": 24,
+            "kind": "loss",
+            "worker_delta": 6
+          }
+        ],
+        "interactive_latency_bound_steps": 6,
+        "max_steps": 80000
+      }
+    }
+  ],
+  "agent_run_scenarios": [
+    {
+      "scenario_id": "fourth-wave-agent-swarm-rch-refusal-handoff",
+      "description": "Synthetic 64-agent coordination run covering tracker-only updates, source audits, active_project_exclusion, and replayable handoff recovery.",
+      "execution_mode": "run_in_contract",
+      "workload_dimensions": [
+        "large_host_64c_256g",
+        "tracker_only_bead_updates",
+        "source_audit_swarms",
+        "stalled_worker_recovery",
+        "rch_active_project_exclusion"
+      ],
+      "agent_run_scenario": {
+        "scenario_id": "fourth-wave-agent-swarm-rch-refusal-handoff",
+        "seed": 1311768467463790320,
+        "agent_count": 64,
+        "rch_workers": 8,
+        "rch_refusal_agent": 7,
+        "validation_blocker_agent": 23,
+        "crash_agent": 47,
+        "max_steps": 60000
+      }
+    }
+  ],
+  "what_if_scenarios": [
+    {
+      "scenario_id": "fourth-wave-no-useful-work-fallback",
+      "description": "Planner-only fallback for the no-useful-ready-work case; it must stay non-mutating and must not request branches, worktrees, or cleanup.",
+      "execution_mode": "plan_in_contract",
+      "workload_dimensions": [
+        "no_useful_work_planning_fallback"
+      ],
+      "what_if_scenario": {
+        "scenario_id": "fourth-wave-no-useful-work-fallback",
+        "input_age_secs": 0,
+        "local_agent_slots": 0,
+        "rch_workers_admissible": 0,
+        "cache_warm_workers": 0,
+        "memory_pressure_bps": 0,
+        "disk_pressure_bps": 0,
+        "reservation_conflicts": 0,
+        "workloads": []
+      }
+    },
+    {
+      "scenario_id": "fourth-wave-memory-heavy-artifact-planning",
+      "description": "Planner-only high-memory artifact wave that must split or defer noncritical proof/artifact work under large-host pressure.",
+      "execution_mode": "plan_in_contract",
+      "workload_dimensions": [
+        "memory_heavy_artifact_generation",
+        "cpu_heavy_cargo_rch",
+        "release_gate_quiet_phase"
+      ],
+      "what_if_scenario": {
+        "scenario_id": "fourth-wave-memory-heavy-artifact-planning",
+        "input_age_secs": 120,
+        "local_agent_slots": 48,
+        "rch_workers_admissible": 8,
+        "cache_warm_workers": 4,
+        "memory_pressure_bps": 9300,
+        "disk_pressure_bps": 3000,
+        "reservation_conflicts": 0,
+        "workloads": [
+          {
+            "workload_id": "release-gate-clippy",
+            "work_class": "proof",
+            "agent_count": 16,
+            "remote_required": true,
+            "priority": "critical",
+            "artifact_gib": 12
+          },
+          {
+            "workload_id": "source-audit-swarm",
+            "work_class": "code",
+            "agent_count": 24,
+            "remote_required": false,
+            "priority": "foreground",
+            "artifact_gib": 2
+          },
+          {
+            "workload_id": "memory-heavy-artifact-generation",
+            "work_class": "artifact",
+            "agent_count": 24,
+            "remote_required": true,
+            "priority": "background",
+            "artifact_gib": 96
+          }
+        ]
       }
     }
   ],
