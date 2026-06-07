@@ -5,6 +5,7 @@ use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -99,7 +100,7 @@ impl GrantStorage {
 
         // Create storage record
         let mut metadata = StorageMetadata::default();
-        metadata.file_path = Some(self.grant_file_path(&grant_id));
+        metadata.file_path = Some(self.grant_file_path(&grant_id).to_string_lossy().to_string());
 
         let record = GrantRecord {
             grant_info,
@@ -107,12 +108,15 @@ impl GrantStorage {
             storage_metadata: metadata,
         };
 
-        // Store in cache
-        self.grants_cache.insert(grant_id.clone(), record);
-        self.cache_dirty = true;
+        match self.persist_record(&grant_id, &record) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
-        // Persist to disk
-        self.persist_grant(&grant_id)
+        self.grants_cache.insert(grant_id, record);
+        Outcome::ok(())
     }
 
     /// Retrieve a grant by ID.
@@ -127,20 +131,41 @@ impl GrantStorage {
 
     /// Update an existing grant.
     pub fn update_grant(&mut self, grant_id: &str, grant_info: GrantInfo) -> GrantResult<()> {
-        let record = match self.grants_cache.get_mut(grant_id) {
+        if grant_info.capability.grant_id != grant_id {
+            return Outcome::Err(GrantError::ValidationFailed {
+                issues: vec![format!(
+                    "grant id mismatch: key {grant_id:?} does not match capability id {:?}",
+                    grant_info.capability.grant_id
+                )],
+            });
+        }
+
+        let mut updated_record = match self.grants_cache.get(grant_id) {
             Some(record) => record,
             None => {
                 return Outcome::Err(GrantError::NotFound {
                     grant_id: grant_id.to_string(),
                 });
             }
-        };
+        }
+        .clone();
 
-        record.grant_info = grant_info;
-        record.storage_metadata.updated_at = SystemTime::now();
-        self.cache_dirty = true;
+        updated_record.grant_info = grant_info;
+        updated_record.storage_metadata.updated_at = SystemTime::now();
+        updated_record.storage_metadata.file_path =
+            Some(self.grant_file_path(grant_id).to_string_lossy().to_string());
 
-        self.persist_grant(grant_id)
+        match self.persist_record(grant_id, &updated_record) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        self.grants_cache
+            .insert(grant_id.to_string(), updated_record);
+        self.cache_dirty = false;
+        Outcome::ok(())
     }
 
     /// Delete a grant.
@@ -152,14 +177,19 @@ impl GrantStorage {
         }
 
         let file_path = self.grant_file_path(grant_id);
-        if let Err(e) = fs::remove_file(&file_path) {
-            return Outcome::Err(GrantError::Storage(format!(
-                "failed to remove grant file {file_path}: {e}"
-            )));
+        match fs::remove_file(&file_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Outcome::Err(GrantError::Storage(format!(
+                    "failed to remove grant file {}: {error}",
+                    file_path.display()
+                )));
+            }
         }
 
         self.grants_cache.remove(grant_id);
-        self.cache_dirty = true;
+        self.cache_dirty = false;
         Outcome::ok(())
     }
 
@@ -212,18 +242,39 @@ impl GrantStorage {
 
     /// Add an audit record for a grant.
     pub fn add_audit_record(&mut self, record: GrantAuditRecord) -> GrantResult<()> {
-        // Add to grant-specific audit trail
-        if let Some(grant_record) = self.grants_cache.get_mut(&record.grant_id) {
-            grant_record.audit_records.push(record.clone());
-            grant_record.storage_metadata.updated_at = SystemTime::now();
+        let grant_id = record.grant_id.clone();
+        let mut updated_record = match self.grants_cache.get(&grant_id) {
+            Some(grant_record) => grant_record.clone(),
+            None => {
+                return Outcome::Err(GrantError::NotFound {
+                    grant_id: record.grant_id,
+                });
+            }
+        };
+        updated_record.audit_records.push(record.clone());
+        updated_record.storage_metadata.updated_at = SystemTime::now();
+
+        let mut updated_audit_cache = self.audit_cache.clone();
+        updated_audit_cache.push(record);
+
+        match self.persist_record(&grant_id, &updated_record) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
-        // Add to global audit cache
-        self.audit_cache.push(record);
-        self.cache_dirty = true;
+        match self.persist_audit_records(&updated_audit_cache) {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
-        // Persist audit log
-        self.persist_audit_log()
+        self.grants_cache.insert(grant_id, updated_record);
+        self.audit_cache = updated_audit_cache;
+        self.cache_dirty = false;
+        Outcome::ok(())
     }
 
     /// Get audit records for a grant.
@@ -248,7 +299,7 @@ impl GrantStorage {
         let mut grants_by_state = HashMap::new();
         let mut unique_subjects = HashSet::new();
         let mut unique_issuers = HashSet::new();
-        let mut total_usage = 0;
+        let mut total_usage = 0_u64;
 
         for record in self.grants_cache.values() {
             let grant_info = &record.grant_info;
@@ -261,7 +312,7 @@ impl GrantStorage {
             unique_issuers.insert(grant_info.capability.issuer);
 
             // Sum usage
-            total_usage += grant_info.usage_count;
+            total_usage = total_usage.saturating_add(grant_info.usage_count);
         }
 
         GrantStats {
@@ -366,7 +417,7 @@ impl GrantStorage {
             }
         };
 
-        let record: GrantRecord = match serde_json::from_str(&content) {
+        let mut record: GrantRecord = match serde_json::from_str(&content) {
             Ok(r) => r,
             Err(e) => {
                 return Outcome::err(GrantError::Storage(format!(
@@ -376,6 +427,14 @@ impl GrantStorage {
         };
 
         let grant_id = record.grant_info.capability.grant_id.clone();
+        if self.grants_cache.contains_key(&grant_id) {
+            return Outcome::Err(GrantError::Storage(format!(
+                "duplicate grant id {grant_id:?} while loading {}",
+                path.display()
+            )));
+        }
+
+        record.storage_metadata.file_path = Some(path.to_string_lossy().to_string());
         self.grants_cache.insert(grant_id, record);
 
         Outcome::ok(())
@@ -422,6 +481,11 @@ impl GrantStorage {
             }
         };
 
+        self.persist_record(grant_id, record)
+    }
+
+    /// Persist an already-built grant record to disk.
+    fn persist_record(&self, grant_id: &str, record: &GrantRecord) -> GrantResult<()> {
         // Ensure grants directory exists
         let grants_dir = self.base_dir.join("grants");
         if let Err(e) = fs::create_dir_all(&grants_dir) {
@@ -455,10 +519,15 @@ impl GrantStorage {
 
     /// Persist audit log to disk.
     fn persist_audit_log(&self) -> GrantResult<()> {
+        self.persist_audit_records(&self.audit_cache)
+    }
+
+    /// Persist the provided audit records to disk.
+    fn persist_audit_records(&self, records: &[GrantAuditRecord]) -> GrantResult<()> {
         let audit_file = self.base_dir.join("audit.jsonl");
         let mut content = String::new();
 
-        for record in &self.audit_cache {
+        for record in records {
             let line = match serde_json::to_string(record) {
                 Ok(line) => line,
                 Err(error) => {
@@ -484,23 +553,13 @@ impl GrantStorage {
     }
 
     /// Get file path for a grant.
-    fn grant_file_path(&self, grant_id: &str) -> String {
-        let safe_id = grant_id
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
+    fn grant_file_path(&self, grant_id: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
 
+        let digest = Sha256::digest(grant_id.as_bytes());
         self.base_dir
             .join("grants")
-            .join(format!("{}.json", safe_id))
-            .to_string_lossy()
-            .to_string()
+            .join(format!("{}.json", hex::encode(digest)))
     }
 }
 
@@ -522,12 +581,12 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
-    fn create_test_grant_info() -> GrantInfo {
+    fn create_test_grant_info_with_id(grant_id: &str) -> GrantInfo {
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::Read);
 
         let capability = Capability::new(
-            "test-grant-123".to_string(),
+            grant_id.to_string(),
             PeerId::test(1),
             PeerId::test(2),
             ResourceScope::Any,
@@ -537,6 +596,10 @@ mod tests {
         );
 
         GrantInfo::new(capability)
+    }
+
+    fn create_test_grant_info() -> GrantInfo {
+        create_test_grant_info_with_id("test-grant-123")
     }
 
     #[test]

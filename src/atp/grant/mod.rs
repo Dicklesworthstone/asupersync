@@ -131,7 +131,7 @@ impl GrantInfo {
 
     /// Record usage of this grant.
     pub fn record_usage(&mut self) {
-        self.usage_count += 1;
+        self.usage_count = self.usage_count.saturating_add(1);
         self.last_used = Some(SystemTime::now());
 
         // Check if usage is exhausted
@@ -416,6 +416,30 @@ mod tests {
         assert_eq!(grant_info.usage_count, 1);
         assert_eq!(grant_info.state, GrantState::Expired); // Max uses was 1
         assert!(!grant_info.is_usable());
+    }
+
+    #[test]
+    fn grant_info_usage_count_saturates_at_u64_max() {
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+
+        let capability = crate::atp::policy::Capability::new(
+            "saturating-grant".to_string(),
+            PeerId::test(1),
+            PeerId::test(2),
+            ResourceScope::Any,
+            actions,
+            TemporalScope::expires_in(Duration::from_secs(3600)),
+            ScopeConstraints::default(),
+        );
+
+        let mut grant_info = GrantInfo::new(capability);
+        grant_info.usage_count = u64::MAX;
+
+        grant_info.record_usage();
+
+        assert_eq!(grant_info.usage_count, u64::MAX);
+        assert_eq!(grant_info.state, GrantState::Active);
     }
 
     #[test]
