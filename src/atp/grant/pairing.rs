@@ -8,8 +8,11 @@ use crate::atp::policy::{
 use crate::net::atp::protocol::PeerId;
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
+
+const MAX_PAIRING_CODE_GENERATION_ATTEMPTS: usize = 8;
 
 /// Pairing code for establishing trust between peers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,27 +319,34 @@ impl PairingManager {
         duration: Duration,
         one_time: bool,
     ) -> GrantResult<String> {
-        let temporal = TemporalScope::expires_in(duration);
-        let constraints = ScopeConstraints::default();
+        for _ in 0..MAX_PAIRING_CODE_GENERATION_ATTEMPTS {
+            let temporal = TemporalScope::expires_in(duration);
+            let constraints = ScopeConstraints::default();
 
-        let pairing_code = match PairingCode::new(
-            &self.identity,
-            actions,
-            scope,
-            temporal,
-            constraints,
-            one_time,
-        ) {
-            Outcome::Ok(code) => code,
-            Outcome::Err(error) => return Outcome::Err(error),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        };
+            let pairing_code = match PairingCode::new(
+                &self.identity,
+                actions.clone(),
+                scope.clone(),
+                temporal,
+                constraints,
+                one_time,
+            ) {
+                Outcome::Ok(code) => code,
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            };
 
-        let code = pairing_code.code.clone();
-        self.active_codes.insert(code.clone(), pairing_code);
+            if let Some(code) = self.insert_pairing_code_if_vacant(pairing_code) {
+                return Outcome::ok(code);
+            }
+        }
 
-        Outcome::ok(code)
+        Outcome::Err(GrantError::PairingError {
+            reason: format!(
+                "failed to generate a unique pairing code after {MAX_PAIRING_CODE_GENERATION_ATTEMPTS} attempts"
+            ),
+        })
     }
 
     /// Generate a share code for quick access.
@@ -427,9 +437,33 @@ impl PairingManager {
             }
         };
 
-        // Check if code is valid and can be used
+        // Reject invalid codes before any fallible grant-id generation, and
+        // avoid consuming a live code if system entropy is temporarily
+        // unavailable.
+        if !pairing_code.is_valid() {
+            return Outcome::Err(GrantError::PairingError {
+                reason: "pairing code cannot be used".to_string(),
+            });
+        }
+
+        let grant_id = match self.generate_pairing_grant_id(code, peer_identity.peer_id()) {
+            Outcome::Ok(grant_id) => grant_id,
+            Outcome::Err(error) => {
+                self.restore_pairing_code_if_valid(code, pairing_code);
+                return Outcome::Err(error);
+            }
+            Outcome::Cancelled(reason) => {
+                self.restore_pairing_code_if_valid(code, pairing_code);
+                return Outcome::Cancelled(reason);
+            }
+            Outcome::Panicked(payload) => {
+                self.restore_pairing_code_if_valid(code, pairing_code);
+                return Outcome::Panicked(payload);
+            }
+        };
+
+        // Create capability for the requesting peer
         if !pairing_code.record_use() {
-            // Put it back if it's still valid but hit use limit
             if pairing_code.is_valid() {
                 self.active_codes.insert(code.to_string(), pairing_code);
             }
@@ -437,9 +471,6 @@ impl PairingManager {
                 reason: "pairing code cannot be used".to_string(),
             });
         }
-
-        // Create capability for the requesting peer
-        let grant_id = format!("paired-{}-{}", code, peer_identity.peer_id().redacted());
 
         let capability = Capability::new(
             grant_id,
@@ -545,6 +576,45 @@ impl PairingManager {
         };
 
         self.generate_share_code(actions, scope, Duration::from_secs(seconds))
+    }
+
+    fn insert_pairing_code_if_vacant(&mut self, pairing_code: PairingCode) -> Option<String> {
+        let code = pairing_code.code.clone();
+        match self.active_codes.entry(code.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(pairing_code);
+                Some(code)
+            }
+            Entry::Occupied(_) => None,
+        }
+    }
+
+    fn restore_pairing_code_if_valid(&mut self, code: &str, pairing_code: PairingCode) {
+        if pairing_code.is_valid() {
+            self.active_codes.insert(code.to_string(), pairing_code);
+        }
+    }
+
+    fn generate_pairing_grant_id(&self, code: &str, peer: PeerId) -> GrantResult<String> {
+        use sha2::{Digest, Sha256};
+
+        let mut nonce = [0u8; 16];
+        if let Err(error) = getrandom::fill(&mut nonce) {
+            return Outcome::Err(GrantError::PairingError {
+                reason: format!("failed to generate secure pairing grant entropy: {error}"),
+            });
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"asupersync-atp-pairing-grant-v1");
+        hasher.update(self.identity.peer_id().as_bytes());
+        hasher.update(peer.as_bytes());
+        hasher.update(code.as_bytes());
+        hasher.update((self.completed_pairings.len() as u64).to_le_bytes());
+        hasher.update(nonce);
+
+        let digest = hasher.finalize();
+        Outcome::ok(format!("paired-{}", hex::encode(&digest[..16])))
     }
 }
 
@@ -758,6 +828,83 @@ mod tests {
         assert_eq!(first.subject, first_peer.peer_id());
         assert_eq!(second.subject, second_peer.peer_id());
         assert!(manager.get_pairing_code(&code).is_ok());
+    }
+
+    #[test]
+    fn pairing_code_collision_does_not_overwrite_active_code() {
+        let identity = create_test_identity();
+        let mut manager = PairingManager::new(identity.clone());
+
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+
+        let mut first = PairingCode::new(
+            &identity,
+            actions.clone(),
+            ResourceScope::Any,
+            TemporalScope::expires_in(Duration::from_secs(3600)),
+            ScopeConstraints::default(),
+            false,
+        )
+        .expect("create first pairing code")
+        .with_description("first".to_string());
+        first.code = "DUPL-ICAT-ECOD-E".to_string();
+
+        let mut colliding = PairingCode::new(
+            &identity,
+            actions,
+            ResourceScope::Any,
+            TemporalScope::expires_in(Duration::from_secs(3600)),
+            ScopeConstraints::default(),
+            false,
+        )
+        .expect("create colliding pairing code")
+        .with_description("second".to_string());
+        colliding.code.clone_from(&first.code);
+
+        assert_eq!(
+            manager.insert_pairing_code_if_vacant(first.clone()),
+            Some(first.code.clone())
+        );
+        assert_eq!(manager.insert_pairing_code_if_vacant(colliding), None);
+
+        let stored = manager
+            .get_pairing_code(&first.code)
+            .expect("get original pairing code");
+        assert_eq!(stored.description.as_deref(), Some("first"));
+        assert_eq!(manager.list_active_codes().len(), 1);
+    }
+
+    #[test]
+    fn reusable_pairing_code_issues_unique_grant_ids_for_same_peer() {
+        let identity = create_test_identity();
+        let peer = create_test_identity();
+        let mut manager = PairingManager::new(identity);
+
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+
+        let code = manager
+            .generate_pairing_code(
+                actions,
+                ResourceScope::Any,
+                Duration::from_secs(3600),
+                false,
+            )
+            .expect("generate reusable pairing code");
+
+        let first = manager
+            .use_pairing_code(&code, &peer)
+            .expect("first use should succeed");
+        let second = manager
+            .use_pairing_code(&code, &peer)
+            .expect("second use should succeed for the same peer");
+
+        assert_ne!(first.grant_id, second.grant_id);
+        assert!(first.grant_id.starts_with("paired-"));
+        assert!(second.grant_id.starts_with("paired-"));
+        assert!(!first.grant_id.contains(&code));
+        assert!(!second.grant_id.contains(&code));
     }
 
     #[test]
