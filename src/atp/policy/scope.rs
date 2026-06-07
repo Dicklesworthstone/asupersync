@@ -3,7 +3,6 @@
 pub use crate::atp::object::ObjectId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::{Component, Path};
 
 /// Normalized ATP resource path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -11,15 +10,28 @@ pub struct AtpPath(pub String);
 
 impl AtpPath {
     pub fn from_str(s: &str) -> Result<Self, &'static str> {
-        let path = Path::new(s);
-        if s.is_empty() || !path.is_absolute() {
+        if s.is_empty() || !s.starts_with('/') {
             return Err("path must be absolute and non-empty");
         }
-        for component in path.components() {
-            if matches!(component, Component::ParentDir | Component::CurDir) {
+
+        if s.contains('\\') {
+            return Err("path must use forward slashes");
+        }
+
+        if s.len() > 1 && s.ends_with('/') {
+            return Err("path must be normalized");
+        }
+
+        if s == "/" {
+            return Ok(Self(s.to_string()));
+        }
+
+        for component in s.split('/').skip(1) {
+            if component.is_empty() || component == "." || component == ".." {
                 return Err("path must be normalized");
             }
         }
+
         Ok(Self(s.to_string()))
     }
 
@@ -35,7 +47,16 @@ impl AtpPath {
 
     #[must_use]
     pub fn starts_with_team(&self, team: &str) -> bool {
-        self.0 == format!("/team/{team}") || self.0.starts_with(&format!("/team/{team}/"))
+        if team.is_empty() || team.contains('/') {
+            return false;
+        }
+
+        let prefix = format!("/team/{team}");
+        self.0 == prefix
+            || self
+                .0
+                .strip_prefix(&prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
     }
 }
 
@@ -125,43 +146,44 @@ impl ResourceScope {
     pub fn digest(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
+        update_digest_tag(&mut hasher, b"asupersync.atp.ResourceScope.v2");
 
         match self {
-            Self::Any => hasher.update(b"any"),
+            Self::Any => update_digest_tag(&mut hasher, b"variant.Any"),
             Self::Object(id) => {
-                hasher.update(b"object");
-                hasher.update(id.hash_bytes());
+                update_digest_tag(&mut hasher, b"variant.Object");
+                update_digest_bytes(&mut hasher, b"object.hash", id.hash_bytes());
             }
             Self::Path(scope) => {
-                hasher.update(b"path");
-                hasher.update(scope.digest());
+                update_digest_tag(&mut hasher, b"variant.Path");
+                update_digest_bytes(&mut hasher, b"path.digest", &scope.digest());
             }
-            Self::Inbox => hasher.update(b"inbox"),
+            Self::Inbox => update_digest_tag(&mut hasher, b"variant.Inbox"),
             Self::Team(team) => {
-                hasher.update(b"team");
-                hasher.update(team.as_bytes());
+                update_digest_tag(&mut hasher, b"variant.Team");
+                update_digest_bytes(&mut hasher, b"team", team.as_bytes());
             }
             Self::Relay { destinations } => {
-                hasher.update(b"relay");
+                update_digest_tag(&mut hasher, b"variant.Relay");
                 let mut sorted_destinations: Vec<_> = destinations.iter().collect();
                 sorted_destinations.sort();
+                update_digest_len(&mut hasher, b"destinations.len", sorted_destinations.len());
                 for dest in sorted_destinations {
-                    hasher.update(dest.as_bytes());
+                    update_digest_bytes(&mut hasher, b"destination", dest.as_bytes());
                 }
             }
             Self::Cache {
                 object_types,
                 max_size_bytes,
             } => {
-                hasher.update(b"cache");
+                update_digest_tag(&mut hasher, b"variant.Cache");
                 let mut sorted_types: Vec<_> = object_types.iter().collect();
                 sorted_types.sort();
+                update_digest_len(&mut hasher, b"object_types.len", sorted_types.len());
                 for obj_type in sorted_types {
-                    hasher.update(obj_type.as_bytes());
+                    update_digest_bytes(&mut hasher, b"object_type", obj_type.as_bytes());
                 }
-                if let Some(max_size) = max_size_bytes {
-                    hasher.update(max_size.to_le_bytes());
-                }
+                update_digest_option_u64(&mut hasher, b"max_size_bytes", *max_size_bytes);
             }
         }
 
@@ -207,23 +229,24 @@ impl PathScope {
         let path_str = path.as_str();
 
         // Check exclusions first
-        if self.exclusions.iter().any(|exc| glob_match(exc, path_str)) {
+        if self
+            .exclusions
+            .iter()
+            .any(|exc| path_pattern_match(exc, path_str))
+        {
             return false;
         }
 
         // Check pattern match
-        if glob_match(&self.pattern, path_str) {
+        if path_pattern_match(&self.pattern, path_str) {
             return true;
         }
 
-        // If recursive, check if path is under pattern
-        if self.recursive {
-            let pattern_path = Path::new(&self.pattern);
-            let check_path = Path::new(path_str);
-            check_path.starts_with(pattern_path)
-        } else {
-            false
-        }
+        // If recursive, check if path is under a literal pattern. Wildcard
+        // patterns are handled by path_pattern_match above.
+        self.recursive
+            && !contains_path_wildcard(&self.pattern)
+            && path_is_same_or_descendant(&self.pattern, path_str)
     }
 
     /// Get a digest of this path scope.
@@ -231,13 +254,15 @@ impl PathScope {
     pub fn digest(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(self.pattern.as_bytes());
-        hasher.update([u8::from(self.recursive)]);
+        update_digest_tag(&mut hasher, b"asupersync.atp.PathScope.v2");
+        update_digest_bytes(&mut hasher, b"pattern", self.pattern.as_bytes());
+        update_digest_bool(&mut hasher, b"recursive", self.recursive);
 
         let mut sorted_exclusions: Vec<_> = self.exclusions.iter().collect();
         sorted_exclusions.sort();
+        update_digest_len(&mut hasher, b"exclusions.len", sorted_exclusions.len());
         for exclusion in sorted_exclusions {
-            hasher.update(exclusion.as_bytes());
+            update_digest_bytes(&mut hasher, b"exclusion", exclusion.as_bytes());
         }
 
         hasher.finalize().into()
@@ -288,6 +313,10 @@ impl ScopeConstraints {
 
         match self.allowed_hours {
             Some((start, end)) => {
+                if start >= 24 || end > 24 {
+                    return false;
+                }
+
                 let now = SystemTime::now();
                 let secs_since_epoch = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                 let hour = ((secs_since_epoch / 3600) % 24) as u8;
@@ -309,29 +338,104 @@ impl ScopeConstraints {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
 
-        if let Some(max_size) = self.max_transfer_size {
-            hasher.update(max_size.to_le_bytes());
-        }
-        if let Some(max_bw) = self.max_bandwidth {
-            hasher.update(max_bw.to_le_bytes());
-        }
-        if let Some(ref level) = self.min_security_level {
-            hasher.update(level.as_bytes());
-        }
-        if let Some(ref ips) = self.allowed_ips {
-            let mut sorted_ips: Vec<_> = ips.iter().collect();
-            sorted_ips.sort();
-            for ip in sorted_ips {
-                hasher.update(ip.as_bytes());
+        update_digest_tag(&mut hasher, b"asupersync.atp.ScopeConstraints.v2");
+        update_digest_option_u64(&mut hasher, b"max_transfer_size", self.max_transfer_size);
+        update_digest_option_u64(&mut hasher, b"max_bandwidth", self.max_bandwidth);
+        update_digest_option_bytes(
+            &mut hasher,
+            b"min_security_level",
+            self.min_security_level.as_deref().map(str::as_bytes),
+        );
+        match &self.allowed_ips {
+            Some(ips) => {
+                update_digest_tag(&mut hasher, b"allowed_ips.some");
+                let mut sorted_ips: Vec<_> = ips.iter().collect();
+                sorted_ips.sort();
+                update_digest_len(&mut hasher, b"allowed_ips.len", sorted_ips.len());
+                for ip in sorted_ips {
+                    update_digest_bytes(&mut hasher, b"allowed_ip", ip.as_bytes());
+                }
             }
+            None => update_digest_tag(&mut hasher, b"allowed_ips.none"),
         }
-        if let Some((start, end)) = self.allowed_hours {
-            let allowed_hours: [u8; 2] = (start, end).into();
-            hasher.update(allowed_hours);
+        match self.allowed_hours {
+            Some((start, end)) => {
+                update_digest_tag(&mut hasher, b"allowed_hours.some");
+                update_digest_bytes(&mut hasher, b"allowed_hours", &[start, end]);
+            }
+            None => update_digest_tag(&mut hasher, b"allowed_hours.none"),
         }
 
         hasher.finalize().into()
     }
+}
+
+pub(crate) fn update_digest_tag(hasher: &mut impl sha2::Digest, tag: &[u8]) {
+    update_digest_len_raw(hasher, tag.len());
+    hasher.update(tag);
+}
+
+pub(crate) fn update_digest_bytes(hasher: &mut impl sha2::Digest, tag: &[u8], value: &[u8]) {
+    update_digest_tag(hasher, tag);
+    update_digest_len_raw(hasher, value.len());
+    hasher.update(value);
+}
+
+pub(crate) fn update_digest_option_bytes(
+    hasher: &mut impl sha2::Digest,
+    tag: &[u8],
+    value: Option<&[u8]>,
+) {
+    match value {
+        Some(bytes) => {
+            update_digest_tag(hasher, tag);
+            update_digest_tag(hasher, b"some");
+            update_digest_len_raw(hasher, bytes.len());
+            hasher.update(bytes);
+        }
+        None => {
+            update_digest_tag(hasher, tag);
+            update_digest_tag(hasher, b"none");
+        }
+    }
+}
+
+pub(crate) fn update_digest_u64(hasher: &mut impl sha2::Digest, tag: &[u8], value: u64) {
+    update_digest_bytes(hasher, tag, &value.to_le_bytes());
+}
+
+pub(crate) fn update_digest_option_u64(
+    hasher: &mut impl sha2::Digest,
+    tag: &[u8],
+    value: Option<u64>,
+) {
+    match value {
+        Some(value) => {
+            update_digest_tag(hasher, tag);
+            update_digest_tag(hasher, b"some");
+            hasher.update(value.to_le_bytes());
+        }
+        None => {
+            update_digest_tag(hasher, tag);
+            update_digest_tag(hasher, b"none");
+        }
+    }
+}
+
+pub(crate) fn update_digest_bool(hasher: &mut impl sha2::Digest, tag: &[u8], value: bool) {
+    update_digest_bytes(hasher, tag, &[u8::from(value)]);
+}
+
+pub(crate) fn update_digest_len(hasher: &mut impl sha2::Digest, tag: &[u8], len: usize) {
+    update_digest_u64(hasher, tag, usize_to_u64_len(len));
+}
+
+fn update_digest_len_raw(hasher: &mut impl sha2::Digest, len: usize) {
+    hasher.update(usize_to_u64_len(len).to_le_bytes());
+}
+
+fn usize_to_u64_len(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
@@ -370,10 +474,87 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     pattern_index == pattern.len()
 }
 
+fn path_pattern_match(pattern: &str, path: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let path = path.as_bytes();
+    let (mut pattern_index, mut path_index) = (0usize, 0usize);
+    let mut star: Option<(usize, usize, bool)> = None;
+
+    while path_index < path.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == path[path_index])
+            && path[path_index] != b'/'
+        {
+            pattern_index += 1;
+            path_index += 1;
+        } else if pattern_index < pattern.len()
+            && pattern[pattern_index] == path[path_index]
+            && path[path_index] == b'/'
+        {
+            pattern_index += 1;
+            path_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            let star_start = pattern_index;
+            while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+                pattern_index += 1;
+            }
+            star = Some((pattern_index, path_index, pattern_index - star_start > 1));
+        } else if let Some((next_pattern_index, next_path_index, recursive)) =
+            advance_path_star(path, star)
+        {
+            pattern_index = next_pattern_index;
+            path_index = next_path_index;
+            star = Some((next_pattern_index, next_path_index, recursive));
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
+}
+
+fn advance_path_star(
+    path: &[u8],
+    star: Option<(usize, usize, bool)>,
+) -> Option<(usize, usize, bool)> {
+    let (next_pattern_index, path_index, recursive) = star?;
+    if path_index >= path.len() || (!recursive && path[path_index] == b'/') {
+        return None;
+    }
+
+    Some((next_pattern_index, path_index + 1, recursive))
+}
+
+fn contains_path_wildcard(pattern: &str) -> bool {
+    pattern
+        .as_bytes()
+        .iter()
+        .any(|byte| *byte == b'*' || *byte == b'?')
+}
+
+fn path_is_same_or_descendant(base: &str, path: &str) -> bool {
+    if base == "/" {
+        return path.starts_with('/');
+    }
+
+    path == base
+        || path
+            .strip_prefix(base)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::atp::object::ContentId;
+
+    fn string_set(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
 
     fn test_object_id(id: u32) -> ObjectId {
         let mut bytes = [0u8; 32];
@@ -400,6 +581,46 @@ mod tests {
         assert!(scope.matches(&path1));
         assert!(scope.matches(&path2));
         assert!(!scope.matches(&path3));
+    }
+
+    #[test]
+    fn atp_path_rejects_non_normalized_logical_paths() {
+        assert!(AtpPath::from_str("/").is_ok());
+        assert!(AtpPath::from_str("/inbox/message").is_ok());
+
+        for path in [
+            "",
+            "relative/path",
+            "/data/./file",
+            "/data/../file",
+            "/data//file",
+            "/data/file/",
+            "/data\\file",
+        ] {
+            assert!(AtpPath::from_str(path).is_err(), "{path} should reject");
+        }
+    }
+
+    #[test]
+    fn path_scope_recursive_literal_respects_segment_boundaries() {
+        let scope = PathScope::new("/data".to_string(), true);
+        let root = AtpPath::from_str("/data").expect("path");
+        let child = AtpPath::from_str("/data/file.txt").expect("path");
+        let sibling_prefix = AtpPath::from_str("/database/file.txt").expect("path");
+
+        assert!(scope.matches(&root));
+        assert!(scope.matches(&child));
+        assert!(!scope.matches(&sibling_prefix));
+    }
+
+    #[test]
+    fn path_scope_single_star_does_not_cross_segments() {
+        let scope = PathScope::new("/team/*/inbox/**".to_string(), false);
+        let allowed = AtpPath::from_str("/team/alpha/inbox/a/b").expect("path");
+        let too_deep = AtpPath::from_str("/team/alpha/beta/inbox/a").expect("path");
+
+        assert!(scope.matches(&allowed));
+        assert!(!scope.matches(&too_deep));
     }
 
     #[test]
@@ -439,6 +660,69 @@ mod tests {
 
         assert_eq!(scope1.digest(), scope2.digest());
         assert_ne!(scope1.digest(), scope3.digest());
+    }
+
+    #[test]
+    fn resource_scope_digest_frames_variable_length_sets() {
+        let relay1 = ResourceScope::Relay {
+            destinations: string_set(&["ab", "c"]),
+        };
+        let relay2 = ResourceScope::Relay {
+            destinations: string_set(&["a", "bc"]),
+        };
+
+        assert_ne!(relay1.digest(), relay2.digest());
+
+        let cache1 = ResourceScope::Cache {
+            object_types: string_set(&["ab", "c"]),
+            max_size_bytes: None,
+        };
+        let cache2 = ResourceScope::Cache {
+            object_types: string_set(&["a", "bc"]),
+            max_size_bytes: None,
+        };
+
+        assert_ne!(cache1.digest(), cache2.digest());
+    }
+
+    #[test]
+    fn path_scope_digest_frames_exclusions() {
+        let scope1 =
+            PathScope::with_exclusions("/data/**".to_string(), true, string_set(&["/ab", "/c"]));
+        let scope2 =
+            PathScope::with_exclusions("/data/**".to_string(), true, string_set(&["/a", "/bc"]));
+
+        assert_ne!(scope1.digest(), scope2.digest());
+    }
+
+    #[test]
+    fn scope_constraints_digest_frames_options_and_fields() {
+        let no_ip_constraint = ScopeConstraints::default();
+        let deny_all_ips = ScopeConstraints {
+            allowed_ips: Some(HashSet::new()),
+            ..Default::default()
+        };
+        assert_ne!(no_ip_constraint.digest(), deny_all_ips.digest());
+
+        let transfer = ScopeConstraints {
+            max_transfer_size: Some(1),
+            ..Default::default()
+        };
+        let bandwidth = ScopeConstraints {
+            max_bandwidth: Some(1),
+            ..Default::default()
+        };
+        assert_ne!(transfer.digest(), bandwidth.digest());
+    }
+
+    #[test]
+    fn scope_constraints_invalid_allowed_hours_fail_closed() {
+        let constraints = ScopeConstraints {
+            allowed_hours: Some((24, 24)),
+            ..Default::default()
+        };
+
+        assert!(!constraints.check_time_allowed());
     }
 
     #[test]

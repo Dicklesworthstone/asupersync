@@ -201,42 +201,42 @@ impl Capability {
     pub fn policy_digest(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(self.grant_id.as_bytes());
-        hasher.update(self.subject.as_bytes());
-        hasher.update(self.issuer.as_bytes());
-        hasher.update(self.scope.digest());
+        scope::update_digest_tag(&mut hasher, b"asupersync.atp.CapabilityPolicy.v2");
+        scope::update_digest_bytes(&mut hasher, b"grant_id", self.grant_id.as_bytes());
+        scope::update_digest_bytes(&mut hasher, b"subject", self.subject.as_bytes());
+        scope::update_digest_bytes(&mut hasher, b"issuer", self.issuer.as_bytes());
+        scope::update_digest_bytes(&mut hasher, b"scope_digest", &self.scope.digest());
 
         // Serialize actions in deterministic order
         let mut actions: Vec<_> = self.actions.iter().collect();
-        actions.sort_by_key(|a| format!("{a:?}"));
+        actions.sort_by_key(|action| capability_action_digest_order(**action));
+        scope::update_digest_len(&mut hasher, b"actions.len", actions.len());
         for action in actions {
-            hasher.update(format!("{action:?}").as_bytes());
+            scope::update_digest_bytes(
+                &mut hasher,
+                b"action",
+                capability_action_digest_label(*action),
+            );
         }
 
         // Add temporal constraints
-        if let Some(not_before) = self.temporal.not_before {
-            hasher.update(
-                not_before
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .to_le_bytes(),
-            );
-        }
-        if let Some(not_after) = self.temporal.not_after {
-            hasher.update(
-                not_after
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .to_le_bytes(),
-            );
-        }
-        if let Some(max_uses) = self.temporal.max_uses {
-            hasher.update(max_uses.to_le_bytes());
-        }
+        scope::update_digest_option_u64(
+            &mut hasher,
+            b"not_before",
+            self.temporal.not_before.map(system_time_digest_secs),
+        );
+        scope::update_digest_option_u64(
+            &mut hasher,
+            b"not_after",
+            self.temporal.not_after.map(system_time_digest_secs),
+        );
+        scope::update_digest_option_u64(&mut hasher, b"max_uses", self.temporal.max_uses);
 
-        hasher.update(self.constraints.digest());
+        scope::update_digest_bytes(
+            &mut hasher,
+            b"constraints_digest",
+            &self.constraints.digest(),
+        );
         hasher.finalize().into()
     }
 
@@ -332,6 +332,40 @@ pub enum CapabilityError {
 /// Result type for capability operations.
 pub type CapabilityResult<T> = Outcome<T, CapabilityError>;
 
+fn capability_action_digest_order(action: CapabilityAction) -> u8 {
+    match action {
+        CapabilityAction::ReadOnce => 0,
+        CapabilityAction::Read => 1,
+        CapabilityAction::Write => 2,
+        CapabilityAction::WriteInbox => 3,
+        CapabilityAction::Share => 4,
+        CapabilityAction::Relay => 5,
+        CapabilityAction::Seed => 6,
+        CapabilityAction::MailboxDelivery => 7,
+        CapabilityAction::Receive => 8,
+    }
+}
+
+fn capability_action_digest_label(action: CapabilityAction) -> &'static [u8] {
+    match action {
+        CapabilityAction::ReadOnce => b"ReadOnce",
+        CapabilityAction::Read => b"Read",
+        CapabilityAction::Write => b"Write",
+        CapabilityAction::WriteInbox => b"WriteInbox",
+        CapabilityAction::Share => b"Share",
+        CapabilityAction::Relay => b"Relay",
+        CapabilityAction::Seed => b"Seed",
+        CapabilityAction::MailboxDelivery => b"MailboxDelivery",
+        CapabilityAction::Receive => b"Receive",
+    }
+}
+
+fn system_time_digest_secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +447,42 @@ mod tests {
         );
 
         assert_eq!(cap1.policy_digest(), cap2.policy_digest());
+    }
+
+    #[test]
+    fn capability_policy_digest_frames_temporal_fields() {
+        let peer_id = PeerId::test(1);
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+
+        let expires_at_one = Capability::new(
+            "test-grant".to_string(),
+            peer_id,
+            peer_id,
+            ResourceScope::Any,
+            actions.clone(),
+            TemporalScope {
+                not_before: None,
+                not_after: Some(UNIX_EPOCH + Duration::from_secs(1)),
+                max_uses: None,
+            },
+            ScopeConstraints::default(),
+        );
+
+        let one_use = Capability::new(
+            "test-grant".to_string(),
+            peer_id,
+            peer_id,
+            ResourceScope::Any,
+            actions,
+            TemporalScope {
+                not_before: None,
+                not_after: None,
+                max_uses: Some(1),
+            },
+            ScopeConstraints::default(),
+        );
+
+        assert_ne!(expires_at_one.policy_digest(), one_use.policy_digest());
     }
 }
