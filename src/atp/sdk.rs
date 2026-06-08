@@ -4,7 +4,9 @@
 //! write(really_big_buffer) experience without bypassing ATP correctness.
 //! All APIs are Cx-first and support native Asupersync semantics.
 
-use crate::atp::actor::{TransferActorId, TransferActorTopology, TransferRegionId};
+use crate::atp::actor::{
+    TransferActorId, TransferActorTopology, TransferChildRole, TransferRegionId,
+};
 use crate::atp::object::{ContentId, ObjectId};
 use crate::atp::stream_object::{
     ByteRange, ConsumptionPolicy, EpochState, PrefixConsumer, StreamEpoch, StreamManifest,
@@ -32,6 +34,8 @@ use std::sync::{Arc, PoisonError};
 
 const TRANSFER_REGISTRY_SHARDS: usize = 64;
 const CANCEL_IDEMPOTENCY_DOMAIN: &[u8] = b"ATP-SDK-CANCEL-IDEMPOTENCY-V1\0";
+const TRANSFER_ACTOR_ID_DOMAIN: &[u8] = b"ATP-SDK-TRANSFER-ACTOR-ID-V1\0";
+const TRANSFER_REGION_ID_DOMAIN: &[u8] = b"ATP-SDK-TRANSFER-REGION-ID-V1\0";
 
 type TransferActorHandle = Arc<ContendedMutex<TransferActor>>;
 
@@ -124,6 +128,67 @@ fn transfer_shard_index(transfer_id: TransferId, shard_count: usize) -> usize {
     }
 }
 
+fn transfer_actor_id(transfer_id: TransferId) -> TransferActorId {
+    TransferActorId::new(nonzero_hash_u64(
+        TRANSFER_ACTOR_ID_DOMAIN,
+        transfer_id,
+        b"actor",
+    ))
+}
+
+fn transfer_actor_topology(transfer_id: TransferId) -> TransferActorTopology {
+    let mut used = BTreeSet::new();
+    let supervisor_region = transfer_region_id(transfer_id, b"supervisor", &mut used);
+    let actor_region = transfer_region_id(transfer_id, b"actor", &mut used);
+
+    let mut topology = TransferActorTopology::new(supervisor_region, actor_region);
+    for role in [
+        TransferChildRole::PathRace,
+        TransferChildRole::Writer,
+        TransferChildRole::Repair,
+        TransferChildRole::Relay,
+        TransferChildRole::Mailbox,
+        TransferChildRole::Swarm,
+        TransferChildRole::Finalizer,
+    ] {
+        topology = topology.with_child(
+            transfer_region_id(transfer_id, role.code().as_bytes(), &mut used),
+            role,
+        );
+    }
+    topology
+}
+
+fn transfer_region_id(
+    transfer_id: TransferId,
+    label: &[u8],
+    used: &mut BTreeSet<u64>,
+) -> TransferRegionId {
+    let mut raw = nonzero_hash_u64(TRANSFER_REGION_ID_DOMAIN, transfer_id, label);
+    while !used.insert(raw) {
+        raw = raw.wrapping_add(1);
+        if raw == 0 {
+            raw = 1;
+        }
+    }
+    TransferRegionId::new(raw)
+}
+
+fn nonzero_hash_u64(domain: &[u8], transfer_id: TransferId, label: &[u8]) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(transfer_id.as_bytes());
+    hasher.update(label);
+    let digest: [u8; 32] = hasher.finalize().into();
+
+    let mut raw = [0_u8; 8];
+    raw.copy_from_slice(&digest[..8]);
+    match u64::from_be_bytes(raw) {
+        0 => 1,
+        value => value,
+    }
+}
+
 fn cancel_idempotency_key(transfer_id: TransferId) -> IdempotencyKey {
     let mut hasher = Sha256::new();
     hasher.update(CANCEL_IDEMPOTENCY_DOMAIN);
@@ -210,15 +275,12 @@ impl AtpSession {
     pub async fn open(cx: &Cx, config: AtpConfig) -> AtpOutcome<Self> {
         cx.trace("atp_sdk");
 
-        // Generate session ID from current process and timestamp
-        let session_id = format!(
-            "atp-session-{}-{}",
-            std::process::id(), // ubs:ignore
-            std::time::SystemTime::now() // ubs:ignore
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        let mut session_nonce = [0u8; 16];
+        cx.random_bytes(&mut session_nonce);
+        if session_nonce.iter().all(|&byte| byte == 0) {
+            session_nonce[0] = 1;
+        }
+        let session_id = format!("atp-session-{}", hex::encode(session_nonce));
 
         // Generate local peer ID from system entropy
         let mut local_peer_id = [0u8; 32];
@@ -292,7 +354,7 @@ impl AtpSession {
         let actor_handle = Arc::new(ContendedMutex::new(
             "transfer_actor",
             match TransferActor::new(
-                TransferActorId::new(1), // Generate unique actor ID
+                transfer_actor_id(transfer_id),
                 transfer_id,
                 TransferManifestRef {
                     schema_version: 1,
@@ -300,7 +362,7 @@ impl AtpSession {
                     object_count: 1,
                 },
                 PeerCapabilities::default(),
-                TransferActorTopology::new(TransferRegionId::new(10), TransferRegionId::new(20)),
+                transfer_actor_topology(transfer_id),
             ) {
                 Ok(actor) => actor,
                 Err(_) => {
@@ -359,7 +421,7 @@ impl AtpSession {
         };
 
         let actor = entry.actor.lock().unwrap_or_else(PoisonError::into_inner);
-        if actor.state() != TransferState::Committed {
+        if !matches!(actor.state(), TransferState::Committed) {
             return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
         }
         let size_bytes = actor.progress.committed_bytes;
@@ -1301,6 +1363,48 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn sdk_transfer_actor_identity_is_stable_unique_and_valid() {
+        let first = TransferId::from_u128(1);
+        let second = TransferId::from_u128(2);
+
+        assert_eq!(transfer_actor_id(first), transfer_actor_id(first));
+        assert_ne!(transfer_actor_id(first), transfer_actor_id(second));
+
+        let topology = transfer_actor_topology(first);
+        assert_eq!(topology, transfer_actor_topology(first));
+        assert_ne!(topology, transfer_actor_topology(second));
+        assert!(topology.validate().is_ok());
+
+        let mut region_ids = BTreeSet::new();
+        assert!(region_ids.insert(topology.supervisor_region.get()));
+        assert!(region_ids.insert(topology.actor_region.get()));
+        assert_ne!(topology.supervisor_region.get(), 0);
+        assert_ne!(topology.actor_region.get(), 0);
+        for child in &topology.child_regions {
+            assert_ne!(child.id.get(), 0);
+            assert!(region_ids.insert(child.id.get()));
+        }
+
+        let roles = topology
+            .child_regions
+            .iter()
+            .map(|child| child.role)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            roles,
+            BTreeSet::from([
+                TransferChildRole::PathRace,
+                TransferChildRole::Writer,
+                TransferChildRole::Repair,
+                TransferChildRole::Relay,
+                TransferChildRole::Mailbox,
+                TransferChildRole::Swarm,
+                TransferChildRole::Finalizer,
+            ])
+        );
+    }
+
     fn directory_file(path: &str, content_id: &str, size_bytes: u64) -> DirectoryManifestEntry {
         DirectoryManifestEntry::new(
             DirectoryPath::normalize(path, PathNormalizationRules::default()).unwrap(),
@@ -1744,7 +1848,11 @@ mod tests {
 
             // Open session
             let session = AtpSession::open(cx, config).await.unwrap();
-            assert!(!session.session_id.is_empty());
+            assert!(matches!(
+                session.session_id.strip_prefix("atp-session-"),
+                Some(nonce) if nonce.len() == 32
+                    && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+            ));
             assert_ne!(session.local_peer_id, [0u8; 32]); // Should not be all zeros
 
             // Close session
@@ -1760,10 +1868,10 @@ mod tests {
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let remote_peer = [1u8; 32];
 
-            match session.path_diagnose(cx, remote_peer).await {
-                Outcome::Err(AtpError::Path(PathError::NoAvailablePaths)) => {}
-                other => panic!("path diagnosis must fail closed without path evidence: {other:?}"),
-            }
+            assert!(matches!(
+                session.path_diagnose(cx, remote_peer).await,
+                Outcome::Err(AtpError::Path(PathError::NoAvailablePaths))
+            ));
         });
     }
 
@@ -1775,10 +1883,10 @@ mod tests {
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let object_id = ObjectId::content(crate::atp::object::ContentId::new([1u8; 32]));
 
-            match session.verify_object(cx, object_id.clone(), None).await {
-                Outcome::Err(AtpError::Manifest(ManifestError::ObjectNotFound)) => {}
-                other => panic!("verification without object bytes must fail closed: {other:?}"),
-            }
+            assert!(matches!(
+                session.verify_object(cx, object_id.clone(), None).await,
+                Outcome::Err(AtpError::Manifest(ManifestError::ObjectNotFound))
+            ));
 
             let result = session
                 .verify_object(cx, object_id.clone(), Some(*object_id.hash_bytes()))
@@ -1854,10 +1962,10 @@ mod tests {
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
             let object_id = ObjectId::content(ContentId::new([1u8; 32]));
 
-            match session.get_stream_epochs(cx, object_id).await {
-                Outcome::Err(AtpError::Manifest(ManifestError::ObjectNotFound)) => {}
-                other => panic!("stream epochs must fail closed without manifest store: {other:?}"),
-            }
+            assert!(matches!(
+                session.get_stream_epochs(cx, object_id).await,
+                Outcome::Err(AtpError::Manifest(ManifestError::ObjectNotFound))
+            ));
         });
     }
 
@@ -2005,15 +2113,12 @@ mod tests {
 
             let root_object = ObjectId::content(ContentId::new([42u8; 32]));
 
-            match session
-                .send_object_graph(cx, root_object, remote_peer, None)
-                .await
-            {
-                Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled)) => {}
-                other => panic!(
-                    "object graph send must fail closed until graph store is wired: {other:?}"
-                ),
-            }
+            assert!(matches!(
+                session
+                    .send_object_graph(cx, root_object, remote_peer, None)
+                    .await,
+                Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+            ));
         });
     }
 
@@ -2047,10 +2152,10 @@ mod tests {
 
             // 3. receive_object must not fabricate a receipt for a send-side transfer
             let transfer_id = handle.transfer_id;
-            match session.receive_object(cx, transfer_id).await {
-                Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
-                other => panic!("receive_object must fail closed without receive state: {other:?}"),
-            }
+            assert!(matches!(
+                session.receive_object(cx, transfer_id).await,
+                Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+            ));
 
             // 4. Check verify_object uses the content ID hash when expected hash is provided.
             let verification = session
@@ -2093,13 +2198,12 @@ mod tests {
 
             // 7. Object graph sending must fail closed rather than synthesize bytes.
             let root_object = ObjectId::content(ContentId::new([99u8; 32]));
-            match session
-                .send_object_graph(cx, root_object, remote_peer, None)
-                .await
-            {
-                Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled)) => {}
-                other => panic!("object graph send must not fabricate graph data: {other:?}"),
-            }
+            assert!(matches!(
+                session
+                    .send_object_graph(cx, root_object, remote_peer, None)
+                    .await,
+                Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+            ));
         });
     }
 }
