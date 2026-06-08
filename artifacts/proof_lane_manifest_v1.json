@@ -197,6 +197,7 @@
     "fourth-wave-runtime-bridge-contract",
     "fourth-wave-benchmark-contract",
     "fourth-wave-governor-signoff-runbook",
+    "fourth-wave-governor-final-signoff",
     "admission-aware-proof-lane-atlas",
     "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
@@ -987,6 +988,49 @@
       }
     },
     {
+      "lane_id": "fourth-wave-governor-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-governor-final-signoff"
+      ],
+      "covers": "The final fourth-wave signoff artifact, child bead evidence rows, freshness policy, fail-closed fixtures, deterministic operator report, proof manifest mapping, proof-status aggregate row, docs markers, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not run child proof lanes, prove fresh benchmark improvement, prove broad workspace health, enable production-on-by-default admission control, or prove RCH fleet availability.",
+      "expected_signal": "fourth_wave_governor_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_governor_final_signoff_v1.json",
+        "tests/fourth_wave_governor_final_signoff_contract.rs",
+        "docs/fourth_wave_swarm_governor_runbook.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "final signoff artifact drift",
+        "child proof row evidence-status drift",
+        "operator report field drift",
+        "README or AGENTS marker drift"
+      ],
+      "escalation_notes": "Use this lane for final fourth-wave signoff aggregation only; child proof lanes must still be rerun through RCH before closing the parent epic or making any fresh proof or performance claim.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-governor-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1337,6 +1381,13 @@
       "description": "Fourth-wave operator runbook, manifest rows, status rows, README/AGENTS markers, rollback guidance, and no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "fourth-wave-governor-signoff-runbook"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-final-signoff",
+      "description": "Fourth-wave final signoff aggregation, child bead evidence rows, freshness policy, fail-closed fixtures, deterministic operator report, docs markers, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "fourth-wave-governor-final-signoff"
       ]
     },
     {

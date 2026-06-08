@@ -461,11 +461,13 @@
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave final aggregated signoff",
-          "fourth-wave-governor-signoff-runbook"
+          "fourth-wave-governor-signoff-runbook",
+          "fourth-wave-governor-final-signoff"
         ],
         "AGENTS.md": [
           "fourth-wave final aggregated signoff",
-          "fourth-wave-governor-signoff-runbook"
+          "fourth-wave-governor-signoff-runbook",
+          "fourth-wave-governor-final-signoff"
         ]
       },
       "manifest_guarantee_ids": [
@@ -474,7 +476,8 @@
         "fourth-wave-swarm-replay-corpus",
         "fourth-wave-runtime-bridge-contract",
         "fourth-wave-benchmark-contract",
-        "fourth-wave-governor-signoff-runbook"
+        "fourth-wave-governor-signoff-runbook",
+        "fourth-wave-governor-final-signoff"
       ],
       "manifest_lane_ids": [
         "fourth-wave-governor-schema-contract",
@@ -482,7 +485,8 @@
         "fourth-wave-swarm-replay-corpus",
         "fourth-wave-runtime-bridge-contract",
         "fourth-wave-benchmark-contract",
-        "fourth-wave-governor-signoff-runbook"
+        "fourth-wave-governor-signoff-runbook",
+        "fourth-wave-governor-final-signoff"
       ],
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture",
@@ -490,10 +494,11 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
-        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture"
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture"
       ],
       "blocked_frontier": null,
-      "notes": "Yellow-scoped aggregate signoff: cite it only as an operator checklist tying child lanes together. It remains a no-claim status for production-on-by-default control, live performance improvement, no regression, broad workspace health, and RCH fleet availability until separate fresh proof artifacts exist."
+      "notes": "Yellow-scoped aggregate signoff: cite it only as an executable operator report and operator checklist tying child lanes together. It remains a no-claim status for production-on-by-default control, live performance improvement, no regression, broad workspace health, and RCH fleet availability until every child row has fresh remote-required proof or an explicit blocked follow-up."
     },
     {
       "claim_id": "migration-readiness-planner-signoff",

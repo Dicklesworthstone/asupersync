@@ -10,6 +10,8 @@ const README_PATH: &str = "README.md";
 const RUNBOOK_PATH: &str = "docs/fourth_wave_swarm_governor_runbook.md";
 const SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 const TEST_PATH: &str = "tests/fourth_wave_swarm_governor_runbook_contract.rs";
+const FINAL_SIGNOFF_PATH: &str = "artifacts/fourth_wave_governor_final_signoff_v1.json";
+const FINAL_SIGNOFF_TEST_PATH: &str = "tests/fourth_wave_governor_final_signoff_contract.rs";
 const PROOF_RUNNER_DOC_PATH: &str = "docs/proof_runner_usage.md";
 
 const FOURTH_WAVE_LANES: &[&str] = &[
@@ -19,6 +21,7 @@ const FOURTH_WAVE_LANES: &[&str] = &[
     "fourth-wave-runtime-bridge-contract",
     "fourth-wave-benchmark-contract",
     "fourth-wave-governor-signoff-runbook",
+    "fourth-wave-governor-final-signoff",
 ];
 
 const FOURTH_WAVE_CATEGORIES: &[&str] = &[
@@ -129,10 +132,13 @@ fn runbook_names_canonical_surfaces_and_single_lane_command() {
             "artifacts/swarm_workload_scenario_corpus_v1.json",
             "artifacts/slo_policy_bundle_contract_v1.json",
             "artifacts/fourth_wave_swarm_governor_benchmark_contract_v1.json",
+            FINAL_SIGNOFF_PATH,
             "artifacts/proof_lane_manifest_v1.json",
             "artifacts/proof_status_snapshot_v1.json",
             "fourth-wave-governor-signoff-runbook",
+            "fourth-wave-governor-final-signoff",
             "cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract",
+            "cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract",
         ],
     );
     assert_contains_all(
@@ -188,6 +194,30 @@ fn proof_manifest_declares_fourth_wave_lanes_with_remote_only_commands() {
     assert!(
         string(signoff, "explicit_not_covered").contains("fresh benchmark improvement"),
         "signoff lane must preserve benchmark non-claim text"
+    );
+
+    let final_signoff = lanes
+        .get("fourth-wave-governor-final-signoff")
+        .expect("final signoff lane");
+    for required_path in [
+        FINAL_SIGNOFF_PATH,
+        FINAL_SIGNOFF_TEST_PATH,
+        RUNBOOK_PATH,
+        MANIFEST_PATH,
+        SNAPSHOT_PATH,
+        README_PATH,
+        AGENTS_PATH,
+    ] {
+        assert!(
+            string_set(final_signoff, "source_paths").contains(required_path),
+            "final signoff lane missing source path {required_path}"
+        );
+    }
+    assert!(
+        string(final_signoff, "explicit_not_covered").contains("production-on-by-default")
+            && string(final_signoff, "explicit_not_covered")
+                .contains("fresh benchmark improvement"),
+        "final signoff lane must preserve broad non-claim text"
     );
 }
 
@@ -268,6 +298,7 @@ fn readme_agents_and_proof_runner_point_to_the_runbook_and_markers() {
                 RUNBOOK_PATH,
                 "fourth-wave governor proof map",
                 "fourth-wave-governor-signoff-runbook",
+                "fourth-wave-governor-final-signoff",
                 "fourth-wave final aggregated signoff",
                 "fourth-wave benchmark no-claim contract",
                 "no fresh benchmark result",
@@ -302,6 +333,8 @@ fn runbook_preserves_operator_safety_no_local_fallback_and_rollback() {
             "fail_closed_local_rch_fallback",
             "SloRuntimePolicyBridge::evaluate_fourth_wave",
             "Stop calling the fourth-wave bridge",
+            "parent_close_allowed=false",
+            "no_win_rerun_required",
             "do not delete",
             "production-on-by-default",
             "RCH fleet availability is proven",

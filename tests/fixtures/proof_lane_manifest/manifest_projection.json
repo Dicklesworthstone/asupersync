@@ -171,6 +171,7 @@
     "fourth-wave-runtime-bridge-contract",
     "fourth-wave-benchmark-contract",
     "fourth-wave-governor-signoff-runbook",
+    "fourth-wave-governor-final-signoff",
     "admission-aware-proof-lane-atlas",
     "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
@@ -557,6 +558,27 @@
       ]
     },
     {
+      "lane_id": "fourth-wave-governor-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture",
+      "guarantee_ids": [
+        "fourth-wave-governor-final-signoff"
+      ],
+      "feature_flags": [],
+      "expected_signal": "fourth_wave_governor_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_governor_final_signoff_v1.json",
+        "tests/fourth_wave_governor_final_signoff_contract.rs",
+        "docs/fourth_wave_swarm_governor_runbook.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ]
+    },
+    {
       "lane_id": "dirty-tree-ownership-receipt-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -782,6 +804,12 @@
       "guarantee_id": "fourth-wave-governor-signoff-runbook",
       "lane_ids": [
         "fourth-wave-governor-signoff-runbook"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-final-signoff",
+      "lane_ids": [
+        "fourth-wave-governor-final-signoff"
       ]
     },
     {

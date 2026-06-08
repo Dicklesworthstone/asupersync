@@ -10,9 +10,11 @@ Canonical surfaces:
 - `artifacts/swarm_workload_scenario_corpus_v1.json`
 - `artifacts/slo_policy_bundle_contract_v1.json`
 - `artifacts/fourth_wave_swarm_governor_benchmark_contract_v1.json`
+- `artifacts/fourth_wave_governor_final_signoff_v1.json`
 - `artifacts/proof_lane_manifest_v1.json`
 - `artifacts/proof_status_snapshot_v1.json`
 - `tests/fourth_wave_swarm_governor_runbook_contract.rs`
+- `tests/fourth_wave_governor_final_signoff_contract.rs`
 
 ## Single Proof Command
 
@@ -23,6 +25,16 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target
 ```
 
 This is the `fourth-wave-governor-signoff-runbook` manifest lane. It proves only that the operator text, manifest rows, proof-status rows, README/AGENTS markers, no-local-fallback language, decision taxonomy, rollback guidance, and no-claim boundaries stay aligned.
+
+## Final Signoff Command
+
+Run the final signoff aggregator after the runbook verifier when preparing a parent-epic closeout:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture
+```
+
+This is the `fourth-wave-governor-final-signoff` manifest lane. It proves only that `artifacts/fourth_wave_governor_final_signoff_v1.json`, child bead evidence rows, freshness policy, fail-closed fixtures, deterministic operator report fields, manifest/status mappings, README/AGENTS markers, and non-claim boundaries stay aligned. It does not run the child proof lanes or convert rerun-required status into fresh proof.
 
 ## Clean Tree And Coordination
 
@@ -47,8 +59,9 @@ The fourth-wave governor proof map is intentionally split:
 | Runtime bridge | `fourth-wave-runtime-bridge-contract` | Explicit opt-in `Cx` bridge behavior, base SLO preservation, cancellation precedence, brownout, no-worker defer, fail-closed receipts, and redaction |
 | Benchmark contract | `fourth-wave-benchmark-contract` | Scenario catalog, compare modes, metric fields, log fields, RCH refresh commands, flamegraph targets, and no-claim report |
 | Aggregate signoff | `fourth-wave-governor-signoff-runbook` | Operator checklist alignment only |
+| Final signoff report | `fourth-wave-governor-final-signoff` | Child bead rows, freshness policy, fail-closed fixtures, deterministic report fields, and parent-close guardrails only |
 
-The fourth-wave final aggregated signoff is yellow-scoped until every child lane has fresh remote proof and any benchmark refresh artifacts are committed and classified.
+The fourth-wave final aggregated signoff is yellow-scoped until every child lane has fresh remote proof and any benchmark refresh artifacts are committed and classified. `artifacts/fourth_wave_governor_final_signoff_v1.json` currently reports `no_win_rerun_required` and `parent_close_allowed=false`; that is the intended fail-closed state until fresh RCH transcripts replace rerun-required child rows.
 
 ## Child Lane Commands
 

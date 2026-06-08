@@ -1,0 +1,227 @@
+{
+  "schema_version": "fourth-wave-governor-final-signoff-v1",
+  "bead_id": "asupersync-86fe9v.6",
+  "parent_bead": "asupersync-86fe9v",
+  "parent_close_policy": "parent_remains_open_until_every_child_row_has_fresh_remote_required_evidence_or_an_explicit_blocked_followup",
+  "source_of_truth": {
+    "signoff_artifact": "artifacts/fourth_wave_governor_final_signoff_v1.json",
+    "contract_test": "tests/fourth_wave_governor_final_signoff_contract.rs",
+    "operator_runbook": "docs/fourth_wave_swarm_governor_runbook.md",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md"
+  },
+  "signoff_lane": {
+    "lane_id": "fourth-wave-governor-final-signoff",
+    "guarantee_id": "fourth-wave-governor-final-signoff",
+    "proof_status_claim_id": "fourth-wave-final-aggregated-signoff",
+    "proof_command_id": "fourth-wave-final-signoff-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture"
+  },
+  "freshness_policy": {
+    "policy_id": "fourth-wave-final-signoff-freshness-v1",
+    "freshness_window_seconds": 86400,
+    "required_evidence_status": "fresh-rch-pass",
+    "required_remote_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- env ",
+    "reject_evidence_statuses": [
+      "approved-cache-hit",
+      "rerun-required",
+      "stale-evidence",
+      "blocked",
+      "no-win",
+      "unsupported"
+    ],
+    "reject_transcript_markers": [
+      "[RCH] local",
+      "Executing command locally",
+      "local fallback accepted",
+      "falling back to local execution"
+    ],
+    "reject_zero_tests": true,
+    "artifact_hash_algorithm": "sha256"
+  },
+  "required_child_rows": [
+    {
+      "row_id": "schema-contract",
+      "owner_bead": "asupersync-86fe9v.1",
+      "manifest_lane_id": "fourth-wave-governor-schema-contract",
+      "proof_status_claim_id": "fourth-wave-governor-schema-proof",
+      "proof_command_id": "fourth-wave-governor-schema-contract",
+      "artifact_paths": [
+        "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_contract.rs"
+      ],
+      "required_evidence_status": "fresh-rch-pass",
+      "current_evidence_status": "rerun-required",
+      "current_claim_status": "green",
+      "blocked_followup": null,
+      "test_evidence_min_count": 1,
+      "claim_boundary": "Schema, receipt ordering, redaction, fail-closed fixtures, and non-claims only."
+    },
+    {
+      "row_id": "policy-engine",
+      "owner_bead": "asupersync-86fe9v.2",
+      "manifest_lane_id": "fourth-wave-governor-policy-engine",
+      "proof_status_claim_id": "fourth-wave-governor-policy-engine-proof",
+      "proof_command_id": "fourth-wave-governor-policy-engine",
+      "artifact_paths": [
+        "src/observability/swarm_pressure_governor.rs",
+        "tests/fourth_wave_swarm_governor_contract.rs"
+      ],
+      "required_evidence_status": "fresh-rch-pass",
+      "current_evidence_status": "rerun-required",
+      "current_claim_status": "green",
+      "blocked_followup": null,
+      "test_evidence_min_count": 1,
+      "claim_boundary": "Pure deterministic policy-engine receipt selection only."
+    },
+    {
+      "row_id": "replay-corpus",
+      "owner_bead": "asupersync-86fe9v.3",
+      "manifest_lane_id": "fourth-wave-swarm-replay-corpus",
+      "proof_status_claim_id": "fourth-wave-swarm-replay-corpus",
+      "proof_command_id": "fourth-wave-swarm-replay-corpus",
+      "artifact_paths": [
+        "artifacts/swarm_workload_scenario_corpus_v1.json",
+        "tests/swarm_workload_scenario_corpus_contract.rs",
+        "src/lab/swarm_replay.rs"
+      ],
+      "required_evidence_status": "fresh-rch-pass",
+      "current_evidence_status": "rerun-required",
+      "current_claim_status": "green",
+      "blocked_followup": null,
+      "test_evidence_min_count": 1,
+      "claim_boundary": "Deterministic replay workload dimensions and fixture hashes only."
+    },
+    {
+      "row_id": "runtime-bridge",
+      "owner_bead": "asupersync-86fe9v.4",
+      "manifest_lane_id": "fourth-wave-runtime-bridge-contract",
+      "proof_status_claim_id": "fourth-wave-runtime-bridge",
+      "proof_command_id": "fourth-wave-runtime-bridge-contract",
+      "artifact_paths": [
+        "src/runtime/slo_policy.rs",
+        "tests/slo_policy_bundle_contract.rs",
+        "artifacts/slo_policy_bundle_contract_v1.json"
+      ],
+      "required_evidence_status": "fresh-rch-pass",
+      "current_evidence_status": "rerun-required",
+      "current_claim_status": "green",
+      "blocked_followup": null,
+      "test_evidence_min_count": 1,
+      "claim_boundary": "Explicit opt-in bridge behavior, rollback receipts, redaction, and non-claim propagation only."
+    },
+    {
+      "row_id": "runbook",
+      "owner_bead": "asupersync-86fe9v.5",
+      "manifest_lane_id": "fourth-wave-governor-signoff-runbook",
+      "proof_status_claim_id": "fourth-wave-final-aggregated-signoff",
+      "proof_command_id": "fourth-wave-governor-signoff-runbook",
+      "artifact_paths": [
+        "docs/fourth_wave_swarm_governor_runbook.md",
+        "tests/fourth_wave_swarm_governor_runbook_contract.rs"
+      ],
+      "required_evidence_status": "fresh-rch-pass",
+      "current_evidence_status": "rerun-required",
+      "current_claim_status": "yellow_scoped",
+      "blocked_followup": null,
+      "test_evidence_min_count": 1,
+      "claim_boundary": "Operator runbook, docs markers, no-local-fallback language, rollback guidance, and non-claims only."
+    },
+    {
+      "row_id": "benchmark-no-claim",
+      "owner_bead": "asupersync-86fe9v.7",
+      "manifest_lane_id": "fourth-wave-benchmark-contract",
+      "proof_status_claim_id": "fourth-wave-benchmark-no-claim-contract",
+      "proof_command_id": "fourth-wave-benchmark-contract",
+      "artifact_paths": [
+        "artifacts/fourth_wave_swarm_governor_benchmark_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_benchmark_contract.rs"
+      ],
+      "required_evidence_status": "fresh-rch-pass",
+      "current_evidence_status": "rerun-required",
+      "current_claim_status": "yellow_scoped",
+      "blocked_followup": null,
+      "test_evidence_min_count": 1,
+      "claim_boundary": "Benchmark schema and no-claim report only; no fresh performance result."
+    }
+  ],
+  "evaluation_rules": {
+    "accepted_verdict": "pass",
+    "current_expected_verdict": "no_win_rerun_required",
+    "allow_parent_close_when": [
+      "every required child row has current_evidence_status=fresh-rch-pass",
+      "every proof command starts with the remote-required RCH prefix",
+      "every Cargo proof command includes CARGO_TARGET_DIR",
+      "every transcript has nonzero test evidence",
+      "no transcript contains a local fallback marker",
+      "benchmark rows either carry fresh benchmark refresh artifacts or keep the no-claim boundary",
+      "dirty peer work is absent or represented by a blocked follow-up row"
+    ],
+    "block_parent_close_when": [
+      "any child row is rerun-required",
+      "any child row has stale, local-fallback, unsupported, blocked, no-win, or approved-cache-hit evidence",
+      "any filtered Cargo lane reports zero tests",
+      "any benchmark row claims improvement without a fresh RCH benchmark artifact",
+      "any broad workspace-health or production-on-by-default claim appears"
+    ]
+  },
+  "failure_fixtures": [
+    {
+      "fixture_id": "missing-runtime-bridge-proof",
+      "mutated_row_id": "runtime-bridge",
+      "mutation": "remove required child row",
+      "expected_verdict": "fail_closed",
+      "expected_first_failing_row": "runtime-bridge",
+      "expected_reason": "missing required child evidence"
+    },
+    {
+      "fixture_id": "local-fallback-evidence",
+      "mutated_row_id": "schema-contract",
+      "mutation": "inject transcript marker [RCH] local",
+      "expected_verdict": "fail_closed",
+      "expected_first_failing_row": "schema-contract",
+      "expected_reason": "local fallback evidence rejected"
+    },
+    {
+      "fixture_id": "zero-test-filter",
+      "mutated_row_id": "policy-engine",
+      "mutation": "set observed_test_count to 0",
+      "expected_verdict": "fail_closed",
+      "expected_first_failing_row": "policy-engine",
+      "expected_reason": "zero-test exact filter rejected"
+    },
+    {
+      "fixture_id": "stale-benchmark-claim",
+      "mutated_row_id": "benchmark-no-claim",
+      "mutation": "replace no-claim boundary with performance improvement claim",
+      "expected_verdict": "fail_closed",
+      "expected_first_failing_row": "benchmark-no-claim",
+      "expected_reason": "fresh benchmark artifact required before performance claim"
+    }
+  ],
+  "current_operator_report": {
+    "report_id": "fourth-wave-final-signoff-current",
+    "final_verdict": "no_win_rerun_required",
+    "parent_close_allowed": false,
+    "first_failing_row": "schema-contract",
+    "required_log_fields": [
+      "child_bead_id",
+      "proof_command_id",
+      "artifact_sha256",
+      "freshness_window_seconds",
+      "first_failing_row",
+      "final_verdict"
+    ],
+    "summary": "Every child row is mapped and scoped, but the final signoff cannot close the parent until fresh remote-required RCH evidence replaces rerun-required status for each child lane. Benchmark rows remain no-claim until fresh benchmark artifacts exist."
+  },
+  "non_claims": [
+    "does not prove p95 improvement",
+    "does not prove throughput improvement",
+    "does not prove no regression",
+    "does not prove production-on-by-default control",
+    "does not prove broad workspace health",
+    "does not prove RCH fleet availability"
+  ]
+}

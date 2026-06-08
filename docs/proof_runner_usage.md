@@ -457,6 +457,14 @@ The proof runner reads from `artifacts/proof_lane_manifest_v1.json`. Common lane
 | `runtime-pressure-control-evidence-contract` | Pressure-control evidence scope | Pressure snapshot/lab evidence/docs changes |
 | `dirty-tree-ownership-receipt-contract` | Shared-main commit guard | ASW-7 guard or docs changes |
 
+The fourth-wave governor proof map lives in `docs/fourth_wave_swarm_governor_runbook.md`.
+Use `fourth-wave-governor-signoff-runbook` for the runbook marker contract and
+`fourth-wave-governor-final-signoff` for the fourth-wave final aggregated
+signoff operator report. The fourth-wave benchmark no-claim contract remains
+separate: it records no fresh benchmark result and must not be cited as
+performance, production-on-by-default, broad workspace-health, or RCH-fleet
+evidence.
+
 ## Integration with Beads Workflow
 
 ### Standard Close Reason Pattern

@@ -545,6 +545,7 @@ fn fourth_wave_status_rows_preserve_child_lane_boundaries() {
         "fourth-wave-runtime-bridge-contract".to_string(),
         "fourth-wave-benchmark-contract".to_string(),
         "fourth-wave-governor-signoff-runbook".to_string(),
+        "fourth-wave-governor-final-signoff".to_string(),
     ]);
 
     for claim_id in [
