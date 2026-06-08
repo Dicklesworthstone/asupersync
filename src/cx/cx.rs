@@ -3203,7 +3203,9 @@ impl Cx<cap::All> {
     ///
     /// This constructor creates a Cx with default IDs and an infinite budget,
     /// suitable for unit and integration tests. The resulting context is fully
-    /// functional but not connected to a real runtime.
+    /// functional but not connected to a real runtime. The synthetic region is
+    /// non-root so tests can create cancel-safe obligations without tripping the
+    /// root-region leak guard.
     ///
     /// # Example
     ///
@@ -3231,7 +3233,7 @@ impl Cx<cap::All> {
     #[must_use]
     pub fn for_testing() -> Self {
         Self::new(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
         )
@@ -3263,7 +3265,7 @@ impl Cx<cap::All> {
     #[must_use]
     pub fn for_testing_with_budget(budget: Budget) -> Self {
         Self::new(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             budget,
         )
@@ -3292,7 +3294,7 @@ impl Cx<cap::All> {
     #[must_use]
     pub fn for_testing_with_io() -> Self {
         Self::new_with_io(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -3421,7 +3423,7 @@ mod tests {
     use crate::messaging::subject::SubjectPattern;
     use crate::trace::TraceBufferHandle;
     use crate::types::CapabilityBudgetDimension;
-    use crate::util::{ArenaIndex, DetEntropy};
+    use crate::util::DetEntropy;
     use std::sync::atomic::{AtomicU8, Ordering};
 
     static CURRENT_CX_DTOR_STATE: AtomicU8 = AtomicU8::new(0);
@@ -3451,7 +3453,7 @@ mod tests {
 
     fn test_cx_with_entropy(seed: u64) -> Cx<cap::All> {
         Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -4008,7 +4010,7 @@ mod tests {
 
         let reason = cx.cancel_reason().expect("should have reason");
         // Region should be set from the Cx
-        let expected_region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let expected_region = cx.region_id();
         assert_eq!(reason.origin_region, expected_region);
     }
 

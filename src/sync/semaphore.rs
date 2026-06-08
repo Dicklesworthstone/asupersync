@@ -1010,14 +1010,32 @@ mod tests {
     use crate::{RegionId, TaskId};
     use futures_lite::future::block_on;
 
+    thread_local! {
+        static TEST_CURRENT_CX_GUARD: std::cell::RefCell<Option<crate::cx::cx::CurrentCxGuard>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     fn init_test(name: &str) {
         init_test_logging();
+        TEST_CURRENT_CX_GUARD.with(|guard| {
+            let mut guard = guard.borrow_mut();
+            guard.take();
+            *guard = Some(install_test_current_cx());
+        });
         crate::test_phase!(name);
     }
 
+    fn install_test_current_cx() -> crate::cx::cx::CurrentCxGuard {
+        Cx::set_current(Some(test_cx()))
+    }
+
     fn test_cx() -> Cx<cap::All> {
+        // Region must be non-root: obligations (e.g. semaphore permits) created in the root
+        // region (`as_u64() == 0`) are rejected by `ObligationToken::reserve`, because a
+        // root-region obligation can never be drained by region close and would leak. Use a
+        // non-root region (index 0, generation 1 => `as_u64() == 1<<32 != 0`). (br-asupersync-88h4nd)
         Cx::<cap::All>::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
         )
@@ -4117,6 +4135,7 @@ mod tests {
                 .map(|_| {
                     let counter = Arc::clone(&permit_counters);
                     s.spawn(move || {
+                        let _current = install_test_current_cx();
                         for i in 0..100 {
                             if let Ok(permit) = sem_ref.try_acquire(1) {
                                 counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4349,91 +4368,111 @@ mod tests {
             available_after_try
         );
 
-        // Phase 2: Test async acquire atomicity with contention
-        let sem_clone = std::sync::Arc::new(Semaphore::new(3));
+        // Phase 2: async acquire must be atomic and FIFO. A front waiter that
+        // needs more permits than currently exist must not consume a partial
+        // set, and later waiters must not bypass it.
+        let sem_fifo = Semaphore::new(3);
+        let cx1 = test_cx();
+        let cx2 = test_cx();
 
-        // Task 1: Request 5 permits (more than available)
-        let sem1 = sem_clone.clone();
-        let handle1 = std::thread::spawn(move || {
-            let cx1 = test_cx();
-            let start_time = std::time::Instant::now();
-
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                block_on(async move { OwnedSemaphorePermit::acquire(sem1, &cx1, 5).await })
-            }));
-
-            (result, start_time.elapsed())
-        });
-
-        // Give task 1 time to register as waiter
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Task 2: Request 2 permits (should succeed immediately)
-        let sem2 = sem_clone.clone();
-        let handle2 = std::thread::spawn(move || {
-            let cx2 = test_cx();
-            block_on(async move { OwnedSemaphorePermit::acquire(sem2, &cx2, 2).await })
-        });
-
-        // Task 2 should complete quickly with 2 permits
-        let result2 = handle2.join().expect("task 2 should not panic");
+        let mut front_waiter = sem_fifo.acquire(&cx1, 5);
+        let front_pending = poll_once(&mut front_waiter).is_none();
         crate::assert_with_log!(
-            result2.is_ok(),
-            "acquire(2) succeeds when 3 permits available",
+            front_pending,
+            "front acquire(5) waits for the full permit set",
             true,
-            result2.is_ok()
+            front_pending
         );
 
-        // Verify task 2 consumed exactly 2 permits
-        let remaining_permits = sem_clone.available_permits();
+        let permits_after_front_poll = sem_fifo.available_permits();
         crate::assert_with_log!(
-            remaining_permits == 1,
-            "exactly 2 permits consumed, 1 remains",
-            1,
-            remaining_permits
+            permits_after_front_poll == 3,
+            "front waiter consumed no partial permits",
+            3,
+            permits_after_front_poll
         );
 
-        // Task 1 should still be waiting (no partial acquire of 1 permit)
-
-        // Add permits to allow task 1 to complete
-        sem_clone.add_permits(4); // Now 5 permits available
-
-        // Task 1 should now complete successfully
-        let (result1, duration1) = handle1.join().expect("task 1 should not panic");
-        let task1_result = result1.expect("task 1 should not have panicked");
-
+        let mut later_waiter = sem_fifo.acquire(&cx2, 2);
+        let later_pending = poll_once(&mut later_waiter).is_none();
         crate::assert_with_log!(
-            task1_result.is_ok(),
-            "acquire(5) succeeds after sufficient permits added",
+            later_pending,
+            "later acquire(2) does not bypass the FIFO head",
             true,
-            task1_result.is_ok()
+            later_pending
         );
 
+        let permits_after_later_poll = sem_fifo.available_permits();
         crate::assert_with_log!(
-            duration1 >= std::time::Duration::from_millis(10),
-            "task 1 waited for full permit set (no partial acquire)",
+            permits_after_later_poll == 3,
+            "queued waiters leave all permits available until the head can run",
+            3,
+            permits_after_later_poll
+        );
+
+        sem_fifo.add_permits(2);
+        let front_result = poll_once(&mut front_waiter)
+            .expect("front waiter should complete once five permits are available");
+        crate::assert_with_log!(
+            front_result.is_ok(),
+            "front acquire(5) succeeds after enough permits are added",
             true,
-            duration1 >= std::time::Duration::from_millis(10)
+            front_result.is_ok()
+        );
+        let front_permit = front_result.unwrap();
+        crate::assert_with_log!(
+            front_permit.count() == 5,
+            "front waiter receives exactly the requested five permits",
+            5,
+            front_permit.count()
         );
 
-        // Phase 3: Verify final state
-        let final_permits = sem_clone.available_permits();
+        let permits_while_front_held = sem_fifo.available_permits();
         crate::assert_with_log!(
-            final_permits == 0,
-            "all permits properly accounted for",
+            permits_while_front_held == 0,
+            "front waiter consumed all five available permits",
             0,
-            final_permits
+            permits_while_front_held
         );
 
-        // Clean up permits
-        drop(result2.unwrap()); // Release 2 permits
-        drop(task1_result.unwrap()); // Release 5 permits
-
-        let cleaned_permits = sem_clone.available_permits();
+        let later_still_pending = poll_once(&mut later_waiter).is_none();
         crate::assert_with_log!(
-            cleaned_permits == 7,
+            later_still_pending,
+            "later waiter remains pending while the front permit set is held",
+            true,
+            later_still_pending
+        );
+
+        drop(front_permit);
+        let later_result = poll_once(&mut later_waiter)
+            .expect("later waiter should complete after front permit release");
+        crate::assert_with_log!(
+            later_result.is_ok(),
+            "later acquire(2) succeeds after front permit release",
+            true,
+            later_result.is_ok()
+        );
+        let later_permit = later_result.unwrap();
+        crate::assert_with_log!(
+            later_permit.count() == 2,
+            "later waiter receives exactly the requested two permits",
+            2,
+            later_permit.count()
+        );
+
+        let permits_while_later_held = sem_fifo.available_permits();
+        crate::assert_with_log!(
+            permits_while_later_held == 3,
+            "later waiter consumes exactly two of five permits",
+            3,
+            permits_while_later_held
+        );
+
+        drop(later_permit);
+        let cleaned_permits = sem_fifo.available_permits();
+        crate::assert_with_log!(
+            cleaned_permits == 5,
             "permits properly released on drop",
-            7,
+            5,
             cleaned_permits
         );
 

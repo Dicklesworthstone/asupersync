@@ -954,7 +954,7 @@ mod tests {
 
     fn test_cx_with_timer(timer: TimerDriverHandle) -> Cx<crate::cx::cap::All> {
         Cx::new_with_drivers(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
             None,

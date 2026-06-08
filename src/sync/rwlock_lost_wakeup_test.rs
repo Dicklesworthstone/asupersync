@@ -22,7 +22,7 @@ use std::task::{Context, Poll, Wake, Waker};
 
 fn test_cx() -> Cx<cap::All> {
     Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
+        RegionId::from_arena(ArenaIndex::new(0, 1)),
         TaskId::from_arena(ArenaIndex::new(0, 0)),
         Budget::INFINITE,
     )

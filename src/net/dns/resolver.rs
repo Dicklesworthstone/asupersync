@@ -3370,7 +3370,7 @@ mod tests {
         clock.set(Time::from_nanos(5_000_000_000));
 
         let cx = Cx::new_with_drivers(
-            crate::types::RegionId::new_for_test(0, 0),
+            crate::types::RegionId::new_for_test(0, 1),
             crate::types::TaskId::new_for_test(0, 0),
             crate::types::Budget::INFINITE,
             None,

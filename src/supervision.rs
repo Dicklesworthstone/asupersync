@@ -3820,7 +3820,7 @@ mod tests {
     }
 
     fn test_region_id() -> RegionId {
-        RegionId::from_arena(ArenaIndex::new(0, 0))
+        RegionId::from_arena(ArenaIndex::new(0, 1))
     }
 
     /// Helper: a `ChildStart`-compatible function that returns the canonical test `TaskId`.
@@ -8388,7 +8388,7 @@ mod tests {
         }));
 
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
         supervisor.on_failure(task, region, None, &Outcome::Err(()), 1_000);
 
         // Domain-specific ledger should have the entry.
@@ -8417,7 +8417,7 @@ mod tests {
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Stop);
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
         supervisor.on_failure(task, region, None, &Outcome::Err(()), 2_000);
 
         let evidence = supervisor.generalized_evidence();
@@ -8439,7 +8439,7 @@ mod tests {
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Escalate);
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
         supervisor.on_failure(task, region, None, &Outcome::Err(()), 3_000);
 
         let evidence = supervisor.generalized_evidence();
@@ -8466,7 +8466,7 @@ mod tests {
         }));
 
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
 
         // Panicked — should produce Stop with MonotoneSeverity.
         supervisor.on_failure(
@@ -8501,7 +8501,7 @@ mod tests {
         }));
 
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
 
         // First failure: restart allowed.
         supervisor.on_failure(task, region, None, &Outcome::Err(()), 5_000);
@@ -8540,7 +8540,7 @@ mod tests {
         }));
 
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
 
         // Budget with only 10 cost remaining — insufficient for restart_cost=100.
         let mut budget = Budget::new().with_cost_quota(10);
@@ -8584,7 +8584,7 @@ mod tests {
         }));
 
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
 
         // Multiple decisions.
         for i in 0..3 {
@@ -8616,7 +8616,7 @@ mod tests {
 
         let mut supervisor = Supervisor::new(SupervisionStrategy::Stop);
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
 
         supervisor.on_failure(task, region, None, &Outcome::Err(()), 8_000);
         assert_eq!(supervisor.generalized_evidence().len(), 1);
@@ -8647,7 +8647,7 @@ mod tests {
         }));
 
         let task = TaskId::from_arena(ArenaIndex::new(0, 1));
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region_id();
 
         // Same sequence of decisions on both supervisors.
         for t in [1_000u64, 2_000, 3_000] {

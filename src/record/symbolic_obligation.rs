@@ -538,7 +538,7 @@ impl SymbolicObligation {
                 object_id,
                 expected_symbol: None,
                 holder: TaskId::from_arena(ArenaIndex::new(0, 0)),
-                region: RegionId::from_arena(ArenaIndex::new(0, 0)),
+                region: RegionId::from_arena(ArenaIndex::new(0, 1)),
                 state: RwLock::new(SymbolicObligationState::Reserved),
                 progress: FulfillmentProgress::new(total),
                 created_at: Time::from_nanos(1_000_000_000),

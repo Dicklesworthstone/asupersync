@@ -1544,11 +1544,11 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let panicking_record = TaskRecord::new(
                 panicking_task,
-                RegionId::new_for_test(0, 0),
+                RegionId::new_for_test(0, 1),
                 Budget::INFINITE,
             );
             let waiter_record =
-                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 0), Budget::INFINITE);
+                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 1), Budget::INFINITE);
             let _panicking_idx = guard.insert_task(panicking_record);
             let _waiter_idx = guard.insert_task(waiter_record);
 
@@ -1705,11 +1705,11 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let completing_record = TaskRecord::new(
                 completing_task,
-                RegionId::new_for_test(0, 0),
+                RegionId::new_for_test(0, 1),
                 Budget::INFINITE,
             );
             let mut waiter_record =
-                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 0), Budget::INFINITE);
+                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 1), Budget::INFINITE);
             waiter_record.pin_to_worker(1);
             let _completing_idx = guard.insert_task(completing_record);
             let _waiter_idx = guard.insert_task(waiter_record);
@@ -1788,11 +1788,11 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let panicking_record = TaskRecord::new(
                 panicking_task,
-                RegionId::new_for_test(0, 0),
+                RegionId::new_for_test(0, 1),
                 Budget::INFINITE,
             );
             let mut waiter_record =
-                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 0), Budget::INFINITE);
+                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 1), Budget::INFINITE);
             waiter_record.pin_to_worker(1);
             let _panicking_idx = guard.insert_task(panicking_record);
             let _waiter_idx = guard.insert_task(waiter_record);

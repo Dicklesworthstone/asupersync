@@ -4890,7 +4890,7 @@ mod tests {
     }
 
     fn test_region_id() -> RegionId {
-        RegionId::new_for_test(0, 0)
+        RegionId::new_for_test(0, 1)
     }
 
     fn test_task_id() -> TaskId {

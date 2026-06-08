@@ -67,7 +67,7 @@ impl LifecycleState {
 
 fn test_cx() -> Cx<cap::All> {
     Cx::new(
-        RegionId::from_arena(crate::util::ArenaIndex::new(0, 0)),
+        RegionId::from_arena(crate::util::ArenaIndex::new(0, 1)),
         TaskId::from_arena(crate::util::ArenaIndex::new(0, 0)),
         Budget::INFINITE,
     )

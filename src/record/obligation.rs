@@ -488,7 +488,7 @@ mod tests {
         (
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
         )
     }
 

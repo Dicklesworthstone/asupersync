@@ -214,12 +214,16 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn test_region(index: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(index, 1))
+    }
+
     #[test]
     fn detects_leak_on_region_close() {
         init_test("detects_leak_on_region_close");
         let mut oracle = ObligationLeakOracle::new();
 
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -240,22 +244,25 @@ mod tests {
         init_test("snapshot_from_state_catches_reserved_obligation");
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
+        let region = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child region");
 
         let task_idx = state.insert_task(TaskRecord::new(
             TaskId::from_arena(ArenaIndex::new(0, 0)),
-            root,
+            region,
             Budget::INFINITE,
         ));
         let task_id = TaskId::from_arena(task_idx);
         state.task_mut(task_id).unwrap().id = task_id;
 
         let obl_id = state
-            .create_obligation(ObligationKind::Ack, task_id, root, None)
+            .create_obligation(ObligationKind::Ack, task_id, region, None)
             .expect("create obligation");
 
         let mut oracle = ObligationLeakOracle::new();
         oracle.snapshot_from_state(&state, Time::ZERO);
-        oracle.on_region_close(root, Time::ZERO);
+        oracle.on_region_close(region, Time::ZERO);
 
         let err = oracle.check(Time::ZERO).expect_err("expected leak");
         let len = err.leaked.len();
@@ -270,7 +277,7 @@ mod tests {
         init_test("resolved_obligation_is_not_leak");
         let mut oracle = ObligationLeakOracle::new();
 
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -287,7 +294,7 @@ mod tests {
 
     #[test]
     fn obligation_leak_display() {
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -303,7 +310,7 @@ mod tests {
 
     #[test]
     fn obligation_leak_debug_clone_eq() {
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -322,7 +329,7 @@ mod tests {
 
     #[test]
     fn obligation_leak_violation_display_debug_error() {
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -349,7 +356,7 @@ mod tests {
 
     #[test]
     fn obligation_leak_violation_clone() {
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let violation = ObligationLeakViolation {
             region,
             leaked: vec![],
@@ -376,7 +383,7 @@ mod tests {
     #[test]
     fn oracle_reset() {
         let mut oracle = ObligationLeakOracle::new();
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -393,7 +400,7 @@ mod tests {
     #[test]
     fn oracle_no_leaks_without_region_close() {
         let mut oracle = ObligationLeakOracle::new();
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -405,7 +412,7 @@ mod tests {
     #[test]
     fn oracle_aborted_not_leaked() {
         let mut oracle = ObligationLeakOracle::new();
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -418,7 +425,7 @@ mod tests {
     #[test]
     fn oracle_leaked_state_is_reported_as_violation() {
         let mut oracle = ObligationLeakOracle::new();
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 
@@ -438,7 +445,7 @@ mod tests {
     #[test]
     fn resolution_after_close_still_violates() {
         let mut oracle = ObligationLeakOracle::new();
-        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let region = test_region(0);
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
 

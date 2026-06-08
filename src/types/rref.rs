@@ -339,7 +339,7 @@ mod tests {
     use crate::util::ArenaIndex;
 
     fn test_region_id() -> RegionId {
-        RegionId::from_arena(ArenaIndex::new(0, 0))
+        RegionId::from_arena(ArenaIndex::new(0, 1))
     }
 
     #[test]

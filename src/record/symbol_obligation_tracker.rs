@@ -619,11 +619,15 @@ mod tests {
     use super::*;
     use crate::util::ArenaIndex;
 
+    fn test_region(index: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(index, 1))
+    }
+
     fn test_ids() -> (ObligationId, TaskId, RegionId) {
         (
             ObligationId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            test_region(0),
         )
     }
 
@@ -724,7 +728,7 @@ mod tests {
     // Test 5: Tracker registration and lookup
     #[test]
     fn test_tracker_registration() {
-        let rid = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let rid = test_region(0);
         let mut tracker = SymbolObligationTracker::new(rid);
 
         let (oid, tid, _) = test_ids();
@@ -754,7 +758,7 @@ mod tests {
     // original pending obligation instead of silently discarding it.
     #[test]
     fn test_register_same_id_panics_and_preserves_original_obligation() {
-        let rid = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let rid = test_region(0);
         let mut tracker = SymbolObligationTracker::new(rid);
 
         let (oid, tid, _) = test_ids();
@@ -802,8 +806,8 @@ mod tests {
     // region instead of silently tracking them under the wrong owner.
     #[test]
     fn test_register_cross_region_obligation_panics() {
-        let tracker_region = RegionId::from_arena(ArenaIndex::new(0, 0));
-        let other_region = RegionId::from_arena(ArenaIndex::new(9, 0));
+        let tracker_region = test_region(0);
+        let other_region = test_region(9);
         let mut tracker = SymbolObligationTracker::new(tracker_region);
 
         let (oid, tid, _) = test_ids();
@@ -831,7 +835,7 @@ mod tests {
     // Test 6: Tracker resolution (commit)
     #[test]
     fn test_tracker_resolve_commit() {
-        let rid = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let rid = test_region(0);
         let mut tracker = SymbolObligationTracker::new(rid);
 
         let (oid, tid, _) = test_ids();
@@ -860,7 +864,7 @@ mod tests {
     // Test 7: Leak detection during region close
     #[test]
     fn test_leak_detection() {
-        let rid = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let rid = test_region(0);
         let mut tracker = SymbolObligationTracker::new(rid);
 
         let (oid1, tid, _) = test_ids();
@@ -902,7 +906,7 @@ mod tests {
     // Test 8: Epoch-based abort
     #[test]
     fn test_abort_expired_epoch() {
-        let rid = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let rid = test_region(0);
         let mut tracker = SymbolObligationTracker::new(rid);
 
         let (oid, tid, _) = test_ids();
@@ -938,7 +942,7 @@ mod tests {
     // Test 9: Deadline-based abort
     #[test]
     fn test_abort_expired_deadlines() {
-        let rid = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let rid = test_region(0);
         let mut tracker = SymbolObligationTracker::new(rid);
 
         let (oid, tid, _) = test_ids();
