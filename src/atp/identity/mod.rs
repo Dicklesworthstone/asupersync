@@ -10,6 +10,7 @@ use crate::net::atp::protocol::{
     ClientHello, PeerId, PeerIdentityError, SessionContextKind, SessionTraceId, TransferNonce,
 };
 use crate::security::keys::{IdentityKeyStore, KeyFingerprint, KeyStoreError, PublicIdentityKey};
+use nkeys::{KeyPair, KeyPairType};
 
 #[path = "../directory/mod.rs"]
 pub mod directory;
@@ -33,6 +34,12 @@ pub struct DurablePeerIdentity {
 impl DurablePeerIdentity {
     /// Build an identity from an exported public key.
     pub fn from_public_key(public_key: &PublicIdentityKey) -> Result<Self, IdentityError> {
+        if public_key.revoked {
+            return Err(IdentityError::RevokedPublicKey {
+                generation: public_key.generation,
+                fingerprint: public_key.fingerprint,
+            });
+        }
         Self::from_parts(
             public_key.public_key.clone(),
             public_key.fingerprint,
@@ -51,6 +58,7 @@ impl DurablePeerIdentity {
         fingerprint: KeyFingerprint,
         generation: u64,
     ) -> Result<Self, IdentityError> {
+        validate_nkey_public_key(&public_key, generation)?;
         let derived_fingerprint = KeyFingerprint::from_public_key(public_key.as_bytes())?;
         if derived_fingerprint != fingerprint {
             return Err(IdentityError::FingerprintMismatch {
@@ -146,6 +154,21 @@ impl DurablePeerIdentity {
     }
 }
 
+fn validate_nkey_public_key(public_key: &str, generation: u64) -> Result<(), KeyStoreError> {
+    let key_pair = KeyPair::from_public_key(public_key).map_err(|err| {
+        KeyStoreError::InvalidPublicKey(format!(
+            "generation {generation} public key could not be decoded: {err}"
+        ))
+    })?;
+    if key_pair.key_pair_type() != KeyPairType::User {
+        return Err(KeyStoreError::InvalidPublicKey(format!(
+            "generation {generation} is {:?}, expected User",
+            key_pair.key_pair_type()
+        )));
+    }
+    Ok(())
+}
+
 /// Durable identity construction failures.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
@@ -162,6 +185,14 @@ pub enum IdentityError {
         expected: KeyFingerprint,
         /// Fingerprint supplied by the key export.
         actual: KeyFingerprint,
+    },
+    /// Revoked public-key generations cannot become active peer identities.
+    #[error("public identity key generation {generation} is revoked ({fingerprint})")]
+    RevokedPublicKey {
+        /// Revoked key generation.
+        generation: u64,
+        /// Revoked public-key fingerprint.
+        fingerprint: KeyFingerprint,
     },
 }
 
@@ -205,6 +236,42 @@ mod tests {
             alice.peer_id(),
             PeerId::from_public_key(alice.public_key().as_bytes()).expect("peer id")
         );
+    }
+
+    #[test]
+    fn durable_identity_rejects_revoked_public_history_entries() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("identity.json");
+        let mut store = IdentityKeyStore::create(&path, strong_seed(8), 100).expect("create store");
+        let retired = store.export_public().expect("retired public");
+        store.rotate(strong_seed(9), 200).expect("rotate");
+        let revoked = store.revoke(retired.fingerprint, 300).expect("revoke");
+
+        assert!(matches!(
+            DurablePeerIdentity::from_public_key(&revoked),
+            Err(IdentityError::RevokedPublicKey {
+                generation,
+                fingerprint,
+            }) if generation == retired.generation && fingerprint == retired.fingerprint
+        ));
+    }
+
+    #[test]
+    fn durable_identity_rejects_malformed_public_key_with_matching_fingerprint() {
+        let public_key = "not-an-nkey-public-identity".to_string();
+        let exported = PublicIdentityKey {
+            generation: 42,
+            fingerprint: KeyFingerprint::from_public_key(public_key.as_bytes())
+                .expect("syntactic fingerprint"),
+            public_key,
+            revoked: false,
+        };
+
+        assert!(matches!(
+            DurablePeerIdentity::from_public_key(&exported),
+            Err(IdentityError::KeyStore(KeyStoreError::InvalidPublicKey(message)))
+                if message.contains("generation 42")
+        ));
     }
 
     #[test]
