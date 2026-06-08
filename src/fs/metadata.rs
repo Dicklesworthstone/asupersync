@@ -87,6 +87,11 @@ pub struct FileType {
 }
 
 impl FileType {
+    /// Wraps a `std::fs::FileType`.
+    pub(crate) fn from_std(inner: std::fs::FileType) -> Self {
+        Self { inner }
+    }
+
     /// Returns true if this file type is a directory.
     #[must_use]
     pub fn is_dir(&self) -> bool {
