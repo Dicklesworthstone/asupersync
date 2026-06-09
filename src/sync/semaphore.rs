@@ -2077,13 +2077,36 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "cannot acquire 0 permits")]
-    fn owned_acquire_panics_on_zero_count() {
-        init_test("owned_acquire_panics_on_zero_count");
+    fn owned_acquire_accepts_zero_count() {
+        init_test("owned_acquire_accepts_zero_count");
         let sem = Arc::new(Semaphore::new(1));
         let cx = test_cx();
-        let mut fut = Box::pin(OwnedSemaphorePermit::acquire(sem, &cx, 0));
-        let _ = poll_once(&mut fut);
+        let mut fut = Box::pin(OwnedSemaphorePermit::acquire(Arc::clone(&sem), &cx, 0));
+
+        let permit = poll_once(&mut fut)
+            .expect("zero-count owned acquire should be ready")
+            .expect("zero-count owned acquire should succeed");
+
+        crate::assert_with_log!(
+            permit.count() == 0,
+            "zero permit count",
+            0usize,
+            permit.count()
+        );
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "zero-count acquire leaves permits unchanged",
+            1usize,
+            sem.available_permits()
+        );
+        drop(permit);
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "zero-count drop leaves permits unchanged",
+            1usize,
+            sem.available_permits()
+        );
+        crate::test_complete!("owned_acquire_accepts_zero_count");
     }
 
     #[test]
@@ -3896,16 +3919,27 @@ mod tests {
             poll_result.is_none()
         );
 
-        // Phase 2: Acquire and release the remaining permit with cancel mask
-        let acquired = sem.try_acquire(1).expect("acquire remaining permit");
+        // Phase 2: A fresh try_acquire must not bypass the queued waiter,
+        // even though one permit is still available.
+        let blocked_by_fifo = sem.try_acquire(1).is_err();
+        crate::assert_with_log!(
+            blocked_by_fifo,
+            "try_acquire should not bypass queued waiter",
+            true,
+            blocked_by_fifo
+        );
 
-        // Apply cancel mask during hold period
-        cx1.masked(|| {
-            // Release permit - should not affect waiting behavior
-            drop(acquired);
-        });
+        // Applying a cancel mask around a no-op critical section must not
+        // perturb waiter state or available permits.
+        cx1.masked(|| {});
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "FIFO-blocked identity leaves permits unchanged",
+            1usize,
+            sem.available_permits()
+        );
 
-        // Phase 3: Verify waiter is still waiting (identity preserved)
+        // Phase 3: Verify waiter is still waiting (FIFO identity preserved)
         let poll_after_identity = poll_once(&mut waiter_future);
         crate::assert_with_log!(
             poll_after_identity.is_none(),
