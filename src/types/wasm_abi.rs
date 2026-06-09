@@ -991,6 +991,26 @@ impl WasmHandleTable {
         }
     }
 
+    /// Overrides the token-stream seed.
+    ///
+    /// Two independently constructed tables that share the same starting seed
+    /// mint **identical** `owner_token` sequences, which makes their handles
+    /// indistinguishable by value. Owners of separate handle namespaces (e.g.
+    /// distinct provider instances) must therefore seed their tables with
+    /// distinct values so a handle minted by one table can never be mistaken
+    /// for a handle of another. The seed remains deterministic for lab replay.
+    #[must_use]
+    pub fn with_token_seed(mut self, seed: u64) -> Self {
+        // Avoid the all-zero seed: it would make the first minted token depend
+        // only on the splitmix constants, colliding with a default table.
+        self.next_token_seed = if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        };
+        self
+    }
+
     /// br-asupersync-axbme3: SplitMix64-style mixing of the internal
     /// seed → fresh u64 token. Mirrors the asupersync-97gwup pattern
     /// from franken_kernel: deterministic-by-seed for lab replay,
@@ -1664,6 +1684,17 @@ impl WasmExportDispatcher {
     #[must_use]
     pub fn with_abort_mode(mut self, mode: WasmAbortPropagationMode) -> Self {
         self.abort_mode = mode;
+        self
+    }
+
+    /// Seeds the dispatcher's handle-table token stream.
+    ///
+    /// Distinct dispatchers that manage separate handle namespaces must use
+    /// distinct seeds so their handles never collide by value. See
+    /// [`WasmHandleTable::with_token_seed`].
+    #[must_use]
+    pub fn with_token_seed(mut self, seed: u64) -> Self {
+        self.handles = std::mem::take(&mut self.handles).with_token_seed(seed);
         self
     }
 
@@ -2751,14 +2782,39 @@ impl ReactProviderState {
         self.root_scope_handle == Some(scope) || self.child_scopes.contains(&scope)
     }
 
-    fn tracks_task_handle(&self, task: &WasmHandleRef) -> bool {
-        self.active_tasks.contains(task)
+    /// Whether any tracked task occupies the same slot/kind as `task`,
+    /// irrespective of generation or owner token. Used so that a stale-but-
+    /// slot-matching handle reaches the dispatcher (which then reports the exact
+    /// `Handle` error) instead of being misclassified as "not tracked".
+    fn tracks_task_slot(&self, task: &WasmHandleRef) -> bool {
+        self.active_tasks
+            .iter()
+            .any(|t| t.slot == task.slot && t.kind == task.kind)
     }
 
     /// Creates a new provider state in `Pending` phase.
     #[must_use]
     pub fn new(config: ReactProviderConfig) -> Self {
-        let dispatcher = WasmExportDispatcher::new().with_abort_mode(config.abort_mode);
+        // Each provider owns a private handle namespace. Seed its handle-table
+        // token stream with a value unique to this provider instance so a scope
+        // or task handle minted by one provider can never be mistaken (by value)
+        // for a handle of another provider — otherwise a second provider with an
+        // identical default token stream would "own" the first provider's root
+        // scope and accept cross-provider spawns. A process-global monotone
+        // counter keeps this deterministic per run while distinct per instance.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static PROVIDER_NONCE: AtomicU64 = AtomicU64::new(1);
+        let nonce = PROVIDER_NONCE.fetch_add(1, Ordering::Relaxed);
+        // SplitMix step so consecutive nonces produce well-separated seeds.
+        let seed = {
+            let mut z = nonce.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let dispatcher = WasmExportDispatcher::new()
+            .with_abort_mode(config.abort_mode)
+            .with_token_seed(seed);
         Self {
             phase: ReactProviderPhase::Pending,
             config,
@@ -3018,12 +3074,20 @@ impl ReactProviderState {
     }
 
     /// Completes a task with its outcome, removing it from tracking.
+    ///
+    /// A handle whose slot is not tracked by this provider at all is rejected up
+    /// front as `InvalidRequest`. A handle that targets a tracked slot but is
+    /// otherwise invalid (e.g. a stale generation or forged owner token) is
+    /// forwarded to the dispatcher, which surfaces the precise
+    /// [`WasmDispatchError::Handle`] cause. In that case `task_join` fails, so the
+    /// genuine task is left tracked for later cleanup rather than being silently
+    /// dropped on a bogus handle.
     pub fn complete_task(
         &mut self,
         task: &WasmHandleRef,
         outcome: WasmAbiOutcomeEnvelope,
     ) -> Result<WasmAbiOutcomeEnvelope, WasmDispatchError> {
-        if !self.tracks_task_handle(task) {
+        if !self.tracks_task_slot(task) {
             return Err(WasmDispatchError::InvalidRequest {
                 reason: "task not tracked by provider".to_string(),
             });
@@ -3032,6 +3096,7 @@ impl ReactProviderState {
             .dispatcher
             .task_join(task, outcome, self.config.consumer_version);
         if result.is_ok() {
+            // Only drop the exact handle we successfully joined.
             self.active_tasks.retain(|t| t != task);
         }
         result
