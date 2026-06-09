@@ -1008,7 +1008,7 @@ mod tests {
                 injection: InjectionResult::success(3, 2),
                 oracle_violations: vec![OracleViolation::TaskLeak(
                     crate::lab::oracle::task_leak::TaskLeakViolation {
-                        region: RegionId::from_arena(ArenaIndex::new(0, 0)),
+                        region: RegionId::from_arena(ArenaIndex::new(0, 1)),
                         leaked_tasks: vec![],
                         region_close_time: Time::ZERO,
                     },

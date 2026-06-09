@@ -1118,11 +1118,13 @@ fn test_mr_replay_verifier() {
         // Generate causal trace
         for i in 0..event_count {
             let process_id = (i as u64) % process_count;
+            let mut causality_vector = vec![0; process_count as usize];
+            causality_vector[process_id as usize] = i as u64;
             let event = TraceEvent {
                 event_id: i as u64,
                 timestamp: i as u64 * 1000,
                 event_type: EventType::TaskStart { task_id: i as u64 },
-                causality_vector: vec![i as u64; process_count as usize],
+                causality_vector,
             };
             original_events.push(event);
         }
@@ -1137,6 +1139,8 @@ fn test_mr_replay_verifier() {
         // Test equivalent replay (same causality)
         let equivalent_events = original_events.clone();
         let equivalent_result = verifier.replay(equivalent_events);
+        prop_assert_eq!(equivalent_result, VerificationResult::Identical,
+            "Equivalent replay should verify as identical");
 
         // MR: Replay verification should preserve correctness for equivalent traces
         prop_assert!(verifier.replay_correctness_holds(),

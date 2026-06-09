@@ -6470,6 +6470,7 @@ mod tests {
                     },
                     "effective_seed": 42,
                     "effective_entropy_seed": derive_component_seed(42, "entropy"),
+                    "nondeterminism_notes": ["scheduler jitter"],
                 },
             })
         );

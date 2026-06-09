@@ -1,0 +1,321 @@
+{
+  "schema_version": "fifth-wave-swarm-control-plane-atlas-v1",
+  "bead_id": "asupersync-fifth-wave-swarm-atlas-qkc2qs",
+  "purpose": "Planning and contract anchor for fifth-wave swarm-scale control-plane work on 64+ core / 256GB+ RAM hosts.",
+  "source_of_truth": {
+    "atlas_artifact": "artifacts/fifth_wave_swarm_control_plane_atlas_v1.json",
+    "contract_test": "tests/fifth_wave_swarm_control_plane_atlas_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "fourth_wave_runbook": "docs/fourth_wave_swarm_governor_runbook.md",
+    "fourth_wave_final_signoff": "artifacts/fourth_wave_governor_final_signoff_v1.json",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "atlas_contract_lane": {
+    "lane_id": "fifth-wave-swarm-control-plane-atlas",
+    "owner_bead": "asupersync-fifth-wave-swarm-atlas-qkc2qs",
+    "proof_command_id": "fifth-wave-swarm-control-plane-atlas-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_swarm_control_plane_atlas CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_swarm_control_plane_atlas_contract -- --nocapture",
+    "resource_envelope": {
+      "class_id": "artifact-contract-medium",
+      "timeout_seconds": 900,
+      "memory_mb": 4096,
+      "remote_required": true,
+      "local_fallback_allowed": false,
+      "resource_pressure": "medium",
+      "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_swarm_control_plane_atlas"
+    },
+    "covers": [
+      "atlas_schema_validation",
+      "child_lane_inventory",
+      "resource_envelope_inventory",
+      "no_claim_boundary_validation"
+    ],
+    "does_not_cover": [
+      "does not prove broad workspace health",
+      "does not prove release readiness",
+      "does not prove live RCH fleet availability",
+      "does not implement fifth-wave child surfaces"
+    ]
+  },
+  "fourth_wave_inputs": [
+    {
+      "input_id": "fourth-wave-governor-runbook",
+      "path": "docs/fourth_wave_swarm_governor_runbook.md",
+      "consumed_as": "operator vocabulary, rollback taxonomy, no-local-fallback policy, and no-claim boundary source",
+      "not_reopened_by_fifth_wave": true
+    },
+    {
+      "input_id": "fourth-wave-final-signoff",
+      "path": "artifacts/fourth_wave_governor_final_signoff_v1.json",
+      "consumed_as": "freshness policy and child-row evidence status model",
+      "not_reopened_by_fifth_wave": true
+    },
+    {
+      "input_id": "proof-lane-manifest",
+      "path": "artifacts/proof_lane_manifest_v1.json",
+      "consumed_as": "resource envelope classes, remote-required command policy, and claim-boundary model",
+      "not_reopened_by_fifth_wave": true
+    },
+    {
+      "input_id": "proof-status-snapshot",
+      "path": "artifacts/proof_status_snapshot_v1.json",
+      "consumed_as": "claim status vocabulary and yellow-scoped no-claim examples",
+      "not_reopened_by_fifth_wave": true
+    },
+    {
+      "input_id": "swarm-proof-lane-planner",
+      "path": "artifacts/swarm_proof_lane_planner_contract_v1.json",
+      "consumed_as": "Agent Mail handoff text, admission decision taxonomy, and planner receipt fixtures",
+      "not_reopened_by_fifth_wave": true
+    }
+  ],
+  "child_lanes": [
+    {
+      "lane_id": "fifth-wave-rch-proof-freshness-broker",
+      "owner_bead": "asupersync-rch-proof-freshness-broker-u9iy0g",
+      "category": "proof-ergonomics",
+      "summary": "Broker fresh, remote-required proof receipts so agents can reuse valid evidence without accepting stale heads, local fallback, or zero-test exact filters.",
+      "source_surfaces": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "artifacts/durable_rch_proof_final_signoff_v1.json",
+        "tests/proof_lane_manifest_contract.rs"
+      ],
+      "target_artifacts": [
+        "artifacts/fifth_wave_rch_proof_freshness_broker_v1.json",
+        "tests/fifth_wave_rch_proof_freshness_broker_contract.rs"
+      ],
+      "proof_command_id": "fifth-wave-rch-proof-freshness-broker-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_rch_proof_freshness_broker CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_rch_proof_freshness_broker_contract -- --nocapture",
+      "resource_envelope": {
+        "class_id": "artifact-contract-medium",
+        "timeout_seconds": 1200,
+        "memory_mb": 4096,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_rch_proof_freshness_broker"
+      },
+      "covers": [
+        "proof_receipt_freshness_rules",
+        "head_match_reuse_policy",
+        "local_fallback_refusal",
+        "zero_test_filter_refusal"
+      ],
+      "does_not_cover": [
+        "does not prove release readiness",
+        "does not prove broad workspace health",
+        "does not prove live RCH fleet availability",
+        "does not authorize local Cargo fallback"
+      ]
+    },
+    {
+      "lane_id": "fifth-wave-numa-scheduler-locality-lab",
+      "owner_bead": "asupersync-numa-scheduler-locality-lab-zhvkr9",
+      "category": "scheduler-lab",
+      "summary": "Define deterministic NUMA and cache-locality lab scenarios before any production scheduler policy changes.",
+      "source_surfaces": [
+        "src/lab/numa/mod.rs",
+        "src/runtime/scheduler/",
+        "artifacts/runtime_workload_corpus_v1.json",
+        "tests/runtime_capacity_hints_contract.rs"
+      ],
+      "target_artifacts": [
+        "artifacts/fifth_wave_numa_scheduler_locality_lab_v1.json",
+        "tests/fifth_wave_numa_scheduler_locality_lab_contract.rs"
+      ],
+      "proof_command_id": "fifth-wave-numa-scheduler-locality-lab-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_numa_scheduler_locality_lab CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_numa_scheduler_locality_lab_contract -- --nocapture",
+      "resource_envelope": {
+        "class_id": "artifact-contract-medium",
+        "timeout_seconds": 1200,
+        "memory_mb": 4096,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_numa_scheduler_locality_lab"
+      },
+      "covers": [
+        "numa_fixture_schema",
+        "cache_locality_metric_catalog",
+        "scheduler_lab_no_claim_boundary",
+        "large_host_topology_fixture_inventory"
+      ],
+      "does_not_cover": [
+        "does not prove scheduler performance improvement",
+        "does not change production scheduling policy",
+        "does not prove no regression",
+        "does not implement the fourth-wave governor"
+      ]
+    },
+    {
+      "lane_id": "fifth-wave-cancellation-storm-replay-corpus",
+      "owner_bead": "asupersync-cancellation-storm-replay-corpus-z7hfs6",
+      "category": "deterministic-replay",
+      "summary": "Add replay corpus coverage for cancellation storms, obligation pressure, loser drain, and region-close quiescence at swarm scale.",
+      "source_surfaces": [
+        "src/lab/swarm_replay.rs",
+        "src/cancel/",
+        "src/obligation/",
+        "tests/swarm_workload_scenario_corpus_contract.rs"
+      ],
+      "target_artifacts": [
+        "artifacts/fifth_wave_cancellation_storm_replay_corpus_v1.json",
+        "tests/fifth_wave_cancellation_storm_replay_corpus_contract.rs"
+      ],
+      "proof_command_id": "fifth-wave-cancellation-storm-replay-corpus-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_cancellation_storm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_cancellation_storm_replay_corpus_contract -- --nocapture",
+      "resource_envelope": {
+        "class_id": "artifact-contract-medium",
+        "timeout_seconds": 1200,
+        "memory_mb": 4096,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_cancellation_storm_replay_corpus"
+      },
+      "covers": [
+        "cancellation_storm_fixture_catalog",
+        "obligation_pressure_fixture_catalog",
+        "loser_drain_invariant_mapping",
+        "region_close_quiescence_mapping"
+      ],
+      "does_not_cover": [
+        "does not prove broad cancellation correctness",
+        "does not prove broad workspace health",
+        "does not replace DPOR or formal proofs",
+        "does not implement production admission policy"
+      ]
+    },
+    {
+      "lane_id": "fifth-wave-capacity-ticket-agent-admission",
+      "owner_bead": "asupersync-capacity-ticket-agent-admission-od29tn",
+      "category": "agent-admission-api",
+      "summary": "Define explicit capacity-ticket admission receipts for agent swarms without enabling production-on-by-default throttling.",
+      "source_surfaces": [
+        "artifacts/runtime_control_seam_inventory_v1.json",
+        "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+        "tests/admission_aware_runtime_pressure_atlas_contract.rs",
+        "tests/capacity_envelope_planner_contract.rs"
+      ],
+      "target_artifacts": [
+        "artifacts/fifth_wave_capacity_ticket_admission_contract_v1.json",
+        "tests/fifth_wave_capacity_ticket_agent_admission_contract.rs"
+      ],
+      "proof_command_id": "fifth-wave-capacity-ticket-agent-admission-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_capacity_ticket_agent_admission CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_capacity_ticket_agent_admission_contract -- --nocapture",
+      "resource_envelope": {
+        "class_id": "artifact-contract-medium",
+        "timeout_seconds": 1200,
+        "memory_mb": 4096,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_capacity_ticket_agent_admission"
+      },
+      "covers": [
+        "capacity_ticket_schema",
+        "agent_admission_receipt_shape",
+        "reservation_overlap_status_mapping",
+        "fail_closed_capacity_policy_fixtures"
+      ],
+      "does_not_cover": [
+        "does not enable production-on-by-default admission control",
+        "does not prove runtime resource enforcement",
+        "does not prove live fleet capacity",
+        "does not implement the fourth-wave governor"
+      ]
+    },
+    {
+      "lane_id": "fifth-wave-live-swarm-telemetry-heatmap",
+      "owner_bead": "asupersync-live-swarm-telemetry-heatmap-wt9b4r",
+      "category": "operator-observability",
+      "summary": "Define deterministic operator heatmap snapshots for live swarm telemetry without claiming live fleet availability or production dashboards.",
+      "source_surfaces": [
+        "src/observability/",
+        "src/trace/",
+        "artifacts/swarm_operator_cockpit_report_contract_v1.json",
+        "tests/swarm_operator_cockpit_report_contract.rs"
+      ],
+      "target_artifacts": [
+        "artifacts/fifth_wave_live_swarm_telemetry_heatmap_v1.json",
+        "tests/fifth_wave_live_swarm_telemetry_heatmap_contract.rs"
+      ],
+      "proof_command_id": "fifth-wave-live-swarm-telemetry-heatmap-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_live_swarm_telemetry_heatmap CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_live_swarm_telemetry_heatmap_contract -- --nocapture",
+      "resource_envelope": {
+        "class_id": "artifact-contract-medium",
+        "timeout_seconds": 1200,
+        "memory_mb": 4096,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_live_swarm_telemetry_heatmap"
+      },
+      "covers": [
+        "heatmap_snapshot_schema",
+        "operator_report_fields",
+        "redaction_boundary",
+        "stale_evidence_warning_mapping"
+      ],
+      "does_not_cover": [
+        "does not prove live RCH fleet availability",
+        "does not implement a production dashboard",
+        "does not prove broad observability correctness",
+        "does not prove broad workspace health"
+      ]
+    }
+  ],
+  "non_goals": [
+    "does not implement the fourth-wave governor",
+    "does not close asupersync-86fe9v or asupersync-86fe9v.8",
+    "does not prove performance improvement",
+    "does not prove no regression",
+    "does not prove broad workspace health",
+    "does not prove release readiness",
+    "does not prove live RCH fleet availability",
+    "does not authorize local Cargo fallback",
+    "does not create branches, worktrees, scratch clones, or non-main refs"
+  ],
+  "failure_fixtures": [
+    {
+      "fixture_id": "missing-child-proof-command",
+      "mutation": "remove proof_command from a child lane",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "every child lane must declare a remote-required proof command"
+    },
+    {
+      "fixture_id": "local-fallback-authorized",
+      "mutation": "set local_fallback_allowed=true or include a local fallback marker",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "fifth-wave proof lanes must fail closed to remote RCH"
+    },
+    {
+      "fixture_id": "missing-no-claim-boundary",
+      "mutation": "remove does_not_cover rows from a child lane",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "each child lane must name explicit no-claim boundaries"
+    },
+    {
+      "fixture_id": "broad-performance-claim",
+      "mutation": "add performance improvement, no-regression, broad workspace health, or release readiness to covers",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "benchmark or release claims require fresh evidence outside this atlas"
+    },
+    {
+      "fixture_id": "fourth-wave-duplication",
+      "mutation": "replace fifth-wave child surfaces with fourth-wave governor implementation claims",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "the atlas may consume fourth-wave inputs but must not re-file or inflate fourth-wave governor claims"
+    }
+  ],
+  "closeout_requirements": [
+    "RCH-backed contract test passes for tests/fifth_wave_swarm_control_plane_atlas_contract.rs",
+    "bv --robot-triage still identifies downstream child beads as unblocked by the atlas",
+    "br dep cycles reports no dependency cycles",
+    "working-tree commits stay on main and do not touch release-source files owned by other agents",
+    "no local Cargo fallback is used as proof"
+  ]
+}

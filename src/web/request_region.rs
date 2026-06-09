@@ -999,15 +999,34 @@ mod tests {
             let cancel_observed_clone = Arc::clone(&cancel_observed);
             let cx_clone = cx.clone();
 
-            // Simulate client disconnect by setting cancel after a brief delay
+            // Signal that the handler has started and the disconnect should
+            // now be delivered. This removes the previous wall-clock/spin
+            // race (the handler could finish its fixed 10-iteration loop
+            // before the background thread's arbitrary delay set the cancel
+            // flag, leaving neither `cancel_observed` nor `outcome` cancelled
+            // and flaking the assertion). The barrier guarantees the
+            // disconnect arrives *during* handler execution, which is exactly
+            // the metamorphic property under test.
+            let handler_started = Arc::new(AtomicBool::new(false));
+            let handler_started_clone = Arc::clone(&handler_started);
+
+            // Simulate client disconnect: wait until the handler is running,
+            // then set cancel. Mirrors a disconnect observed mid-request.
             let cancel_thread = std::thread::spawn(move || {
-                virtual_delay(Duration::from_millis(1)); // Simulate network delay
+                while !handler_started_clone.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
                 cx_clone.set_cancel_requested(true);
             });
 
             let outcome = region.run(|ctx| {
-                // Handler checks cancellation repeatedly
-                for _i in 0..10 {
+                // Announce that the handler is executing so the disconnect is
+                // delivered now, then poll for cancellation. The loop is
+                // bounded but large enough that it cannot exit before the
+                // cross-thread store becomes visible (the handler spins on
+                // `is_cancel_requested` rather than doing fixed busywork).
+                handler_started.store(true, Ordering::SeqCst);
+                for _i in 0..1_000_000 {
                     if ctx.cx().is_cancel_requested() {
                         cancel_observed_clone.store(true, Ordering::SeqCst);
                         return Response::new(
@@ -1015,14 +1034,14 @@ mod tests {
                             b"cancelled".to_vec(),
                         );
                     }
-                    // Simulate work that might take multiple ticks
-                    virtual_delay(Duration::from_millis(1));
+                    std::hint::spin_loop();
                 }
                 Response::new(StatusCode::OK, b"completed".to_vec())
             });
             cancel_thread.join().expect("cancel thread panicked");
 
-            // MR1: Cancel should be observed within reasonable time
+            // MR1: a disconnect delivered during handler execution must be
+            // observable by the handler (or surfaced as a cancelled outcome).
             assert!(
                 cancel_observed.load(Ordering::SeqCst) || outcome.is_cancelled(),
                 "Client disconnect should trigger observable cancellation"

@@ -833,7 +833,7 @@ mod tests {
         let reactor = Arc::new(LabReactor::new());
         let driver = IoDriverHandle::new(reactor);
         let cx = Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -872,7 +872,7 @@ mod tests {
         let reactor = Arc::new(LabReactor::new());
         let driver = IoDriverHandle::new(reactor);
         let cx_cap = Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -928,7 +928,7 @@ mod tests {
         let reactor = Arc::new(LabReactor::new());
         let driver = IoDriverHandle::new(reactor);
         let cx_cap = Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,

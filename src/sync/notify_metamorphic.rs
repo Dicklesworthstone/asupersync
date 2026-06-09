@@ -9,8 +9,10 @@
 use super::notify::Notify;
 use crate::lab::{LabConfig, runtime::LabRuntime};
 use crate::{Time, time};
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 /// Metamorphic Relation: Notification Conservation
@@ -182,11 +184,17 @@ fn mr_broadcast_equivalence() {
                     count_clone.fetch_add(1, Ordering::Relaxed);
                     i
                 };
-                futures1.push(future);
+                futures1.push(Box::pin(future));
             }
 
-            // Give waiters time to register
-            time::sleep(Time::ZERO, Duration::from_millis(5)).await;
+            let noop_waker = Waker::noop();
+            let mut poll_cx = Context::from_waker(noop_waker);
+            for future in &mut futures1 {
+                assert!(
+                    matches!(future.as_mut().poll(&mut poll_cx), Poll::Pending),
+                    "Iteration {iteration}: waiter should register before broadcast"
+                );
+            }
 
             // Single broadcast notification
             notify1.notify_waiters();
@@ -210,11 +218,17 @@ fn mr_broadcast_equivalence() {
                     count_clone.fetch_add(1, Ordering::Relaxed);
                     i
                 };
-                futures2.push(future);
+                futures2.push(Box::pin(future));
             }
 
-            // Give waiters time to register
-            time::sleep(Time::ZERO, Duration::from_millis(5)).await;
+            let noop_waker = Waker::noop();
+            let mut poll_cx = Context::from_waker(noop_waker);
+            for future in &mut futures2 {
+                assert!(
+                    matches!(future.as_mut().poll(&mut poll_cx), Poll::Pending),
+                    "Iteration {iteration}: waiter should register before notify_one sequence"
+                );
+            }
 
             // Sequential individual notifications
             for _ in 0..NUM_WAITERS {

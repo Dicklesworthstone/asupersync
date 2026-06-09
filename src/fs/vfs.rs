@@ -225,8 +225,7 @@ impl AsyncSeek for UnixVfsFile {
 
 impl VfsFile for UnixVfsFile {
     async fn metadata(&self) -> io::Result<Metadata> {
-        let m = self.inner.metadata().await?;
-        Ok(Metadata::from_std(m))
+        self.inner.metadata().await
     }
 
     async fn sync_all(&self) -> io::Result<()> {
@@ -242,7 +241,7 @@ impl VfsFile for UnixVfsFile {
     }
 
     async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
-        self.inner.set_permissions(perm.into_inner()).await
+        self.inner.set_permissions(perm).await
     }
 }
 

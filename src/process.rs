@@ -2758,7 +2758,7 @@ mod tests {
         init_test("test_kill_on_drop_reap_strategy_tracks_ambient_cx_without_pool");
 
         let cx = Cx::new(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
         );
@@ -2784,7 +2784,7 @@ mod tests {
             .build()
             .expect("runtime build");
         let cx = Cx::new(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
         )

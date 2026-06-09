@@ -445,6 +445,36 @@ impl Sleep {
         self.time_getter.map_or_else(wall_now, |getter| getter())
     }
 
+    fn timer_driver_for_poll(&self) -> Option<TimerDriverHandle> {
+        self.bound_timer_driver
+            .clone()
+            .or_else(|| Cx::current().and_then(|current| current.timer_driver()))
+    }
+
+    pub(crate) fn has_timer_driver_for_poll(&self) -> bool {
+        self.bound_timer_driver.is_some()
+            || Cx::current()
+                .and_then(|current| current.timer_driver())
+                .is_some()
+    }
+
+    fn complete_ready_registration(&self, now: Time, timer_driver: Option<TimerDriverHandle>) {
+        let (handle, driver) = {
+            let mut state = self.state.lock();
+            (state.timer_handle.take(), state.timer_driver.clone())
+        };
+        if let Some(handle) = handle {
+            let trace = Cx::current().and_then(|current| current.trace_buffer());
+            if let Some(trace) = trace.as_ref() {
+                let fired_at = now.max(self.deadline);
+                trace.record_event(|seq| TraceEvent::timer_fired(seq, fired_at, handle.id()));
+            }
+            if let Some(driver) = driver.or(timer_driver) {
+                let _ = driver.cancel(&handle);
+            }
+        }
+    }
+
     /// Returns whether this sleep uses a custom time source.
     #[inline]
     #[must_use]
@@ -468,6 +498,23 @@ impl Sleep {
         if self.ready.swap(false, Ordering::AcqRel) || now >= self.deadline {
             self.completed
                 .store(true, std::sync::atomic::Ordering::Release);
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+
+    pub(crate) fn poll_ready_with_time(&self, now: Time) -> Poll<()> {
+        assert!(
+            !self.completed.load(std::sync::atomic::Ordering::Acquire),
+            "Sleep polled after completion"
+        );
+        if self.ready.swap(false, Ordering::AcqRel) || now >= self.deadline {
+            self.polled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.completed
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.complete_ready_registration(now, self.timer_driver_for_poll());
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -502,22 +549,8 @@ impl Future for Sleep {
 
         match self.poll_with_time(now) {
             Poll::Ready(()) => {
-                // Cancel any registered timer on completion
-                let (handle, driver) = {
-                    let mut state = self.state.lock();
-                    (state.timer_handle.take(), state.timer_driver.clone())
-                };
-                if let Some(handle) = handle {
-                    if let Some(trace) = trace.as_ref() {
-                        let fired_at = now.max(self.deadline);
-                        trace.record_event(|seq| {
-                            TraceEvent::timer_fired(seq, fired_at, handle.id())
-                        });
-                    }
-                    if let Some(driver) = driver.or_else(|| timer_driver.clone()) {
-                        let _ = driver.cancel(&handle);
-                    }
-                }
+                // Cancel any registered timer on completion.
+                self.complete_ready_registration(now, timer_driver.clone());
                 Poll::Ready(())
             }
             Poll::Pending => {
@@ -1090,6 +1123,43 @@ mod tests {
     }
 
     #[test]
+    fn poll_ready_with_time_before_deadline_does_not_register() {
+        init_test("poll_ready_with_time_before_deadline_does_not_register");
+        let sleep = Sleep::new(Time::from_secs(10));
+
+        let poll = sleep.poll_ready_with_time(Time::from_secs(5));
+
+        crate::assert_with_log!(poll.is_pending(), "pending", true, poll.is_pending());
+        crate::assert_with_log!(!sleep.was_polled(), "not polled", false, sleep.was_polled());
+        let state = sleep.state.lock();
+        crate::assert_with_log!(
+            state.timer_handle.is_none(),
+            "timer handle absent",
+            true,
+            state.timer_handle.is_none()
+        );
+        crate::assert_with_log!(
+            state.fallback.is_none(),
+            "fallback absent",
+            true,
+            state.fallback.is_none()
+        );
+        crate::test_complete!("poll_ready_with_time_before_deadline_does_not_register");
+    }
+
+    #[test]
+    fn poll_ready_with_time_at_deadline_completes() {
+        init_test("poll_ready_with_time_at_deadline_completes");
+        let sleep = Sleep::new(Time::from_secs(10));
+
+        let poll = sleep.poll_ready_with_time(Time::from_secs(10));
+
+        crate::assert_with_log!(poll.is_ready(), "ready", true, poll.is_ready());
+        crate::assert_with_log!(sleep.was_polled(), "was polled", true, sleep.was_polled());
+        crate::test_complete!("poll_ready_with_time_at_deadline_completes");
+    }
+
+    #[test]
     fn poll_with_time_repoll_after_completion_panics() {
         init_test("poll_with_time_repoll_after_completion_panics");
         let sleep = Sleep::new(Time::from_secs(10));
@@ -1211,7 +1281,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let timer = TimerDriverHandle::with_virtual_clock(clock);
         let cx = Cx::new_with_drivers(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -1252,7 +1322,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
         let cx = Cx::new_with_drivers(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -2177,9 +2247,9 @@ mod tests {
         let _ = Pin::new(&mut sleep1).poll(&mut task_cx);
         let _ = Pin::new(&mut sleep2).poll(&mut task_cx);
         crate::assert_with_log!(
-            timer.pending_count() == 3,
-            "all sleeps registered",
-            3,
+            timer.pending_count() == 2,
+            "reset clone was cancelled; direct sleeps registered",
+            2,
             timer.pending_count()
         );
 

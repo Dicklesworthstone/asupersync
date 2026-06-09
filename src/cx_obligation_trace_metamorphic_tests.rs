@@ -36,16 +36,14 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::cx::macaroon::{Caveat, CaveatPredicate, MacaroonToken};
+    use crate::cx::macaroon::CaveatPredicate;
+    use crate::obligation::VarState;
     use crate::obligation::lyapunov::{LyapunovGovernor, PotentialWeights, StateSnapshot};
-    use crate::obligation::{ObligationVar, VarState};
     use crate::record::ObligationKind;
-    use crate::security::key::AuthKey;
-    use crate::trace::dpor::{DetectedRace, Race, RaceAnalysis, RaceKind};
+    use crate::trace::dpor::{Race, RaceAnalysis};
     use crate::trace::independence::Resource;
     use crate::types::{RegionId, TaskId, Time};
     use proptest::prelude::*;
-    use std::collections::{BTreeSet, HashMap, HashSet};
 
     // ────────────────────────────────────────────────────────────────────
     // Property Generators for Metamorphic Relations

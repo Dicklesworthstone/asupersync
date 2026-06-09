@@ -92,6 +92,20 @@ mkdir -p "$ARTIFACTS_DIR"
 mkdir -p "test-results"
 mkdir -p "logs"
 
+if ! command -v timeout >/dev/null 2>&1; then
+    if command -v gtimeout >/dev/null 2>&1; then
+        timeout() {
+            gtimeout "$@"
+        }
+    else
+        timeout() {
+            local _duration="$1"
+            shift
+            "$@"
+        }
+    fi
+fi
+
 # Lane-specific setup
 LANE_LOG="logs/${LANE_ID}_${PLATFORM}_${MODE}.log"
 LANE_ARTIFACTS_DIR="${ARTIFACTS_DIR}/${LANE_ID}"
@@ -187,8 +201,8 @@ case "$LANE_ID" in
 
     "atp_conformance")
         echo "Running ATP conformance tests..." | tee -a "$LANE_LOG"
-        run_required "timeout '$TIMEOUT' cargo test atp::quic::conformance --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
-        run_required "timeout '$TIMEOUT' cargo test --test atp_conformance_suite 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_e2e_proof_suite conformance --no-fail-fast -- --nocapture 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_native_quic_endpoint_contract -- --nocapture 2>&1 | tee -a '$LANE_LOG'"
 
         # Collect conformance artifacts
         if [[ -f "conformance_results.json" ]]; then
@@ -198,7 +212,7 @@ case "$LANE_ID" in
 
     "atp_fuzz")
         echo "Running ATP fuzz tests..." | tee -a "$LANE_LOG"
-        run_required "timeout '$TIMEOUT' cargo test atp::quic::fuzz_harness --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_e2e_proof_suite fuzz --no-fail-fast -- --nocapture 2>&1 | tee -a '$LANE_LOG'"
 
         # Run extended fuzzing if in full/release mode (this is optional)
         if [[ "$MODE" == "full" || "$MODE" == "release" ]]; then
@@ -209,8 +223,8 @@ case "$LANE_ID" in
 
     "atp_e2e")
         echo "Running ATP E2E proof suite..." | tee -a "$LANE_LOG"
-        run_required "timeout '$TIMEOUT' cargo test atp::e2e_proof_suite --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
-        run_required "timeout '$TIMEOUT' cargo test atp::quic::e2e_endpoints 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_e2e_proof_suite --no-fail-fast -- --nocapture 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_object_journal_e2e_proof_suite -- --nocapture 2>&1 | tee -a '$LANE_LOG'"
 
         # Run E2E scenarios (optional if scripts exist)
         if [[ -f "scripts/ci/run_e2e_scenarios.sh" ]]; then
@@ -218,14 +232,25 @@ case "$LANE_ID" in
         fi
         ;;
 
-    "atp_network")
-        echo "Running ATP network tests..." | tee -a "$LANE_LOG"
-        run_required "timeout '$TIMEOUT' cargo test atp::network --no-fail-fast 2>&1 | tee -a '$LANE_LOG'"
+    "atp_packet_lab" | "atp_network")
+        echo "Running ATP packet laboratory tests..." | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_e2e_proof_suite packet_lab --no-fail-fast -- --nocapture 2>&1 | tee -a '$LANE_LOG'"
 
         # Run network scenarios (optional)
         if [[ -f "scripts/ci/run_network_scenarios.sh" ]]; then
             run_optional "timeout '$TIMEOUT' scripts/ci/run_network_scenarios.sh 2>&1 | tee -a '$LANE_LOG'" "network scenarios"
         fi
+        ;;
+
+    "dependency_audit")
+        echo "Running ATP dependency audit..." | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' scripts/detect_forbidden_quic_deps.sh --audit-only 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_quic_dependency_audit_gate_contract -- --nocapture 2>&1 | tee -a '$LANE_LOG'"
+        ;;
+
+    "platform_caps")
+        echo "Running ATP platform capability tests..." | tee -a "$LANE_LOG"
+        run_required "timeout '$TIMEOUT' cargo test --test atp_cross_platform_capability -- --nocapture 2>&1 | tee -a '$LANE_LOG'"
         ;;
 
     "atp_security")
@@ -251,9 +276,9 @@ case "$LANE_ID" in
         fi
         ;;
 
-    "atp_benchmark")
+    "atp_benchmark" | "atp_benchmarks")
         echo "Running ATP benchmarks..." | tee -a "$LANE_LOG"
-        run_required "timeout '$TIMEOUT' cargo bench --features criterion-benches --bench atp_benchmarks 2>&1 | tee -a '$LANE_LOG'"
+        run_required "timeout '$TIMEOUT' cargo bench --features benchmark-adapters,criterion-benches --bench atp_lab_benchmarks -- --test 2>&1 | tee -a '$LANE_LOG'"
 
         # Comparison benchmarks are optional
         if [[ -f "scripts/ci/run_comparison_benchmarks.sh" ]]; then

@@ -402,7 +402,7 @@ mod tests {
         init_test("spawn_blocking_uses_pool_when_current");
         let pool = crate::runtime::BlockingPool::new(1, 1);
         let cx = Cx::new_with_drivers(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,

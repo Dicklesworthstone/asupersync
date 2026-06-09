@@ -87,7 +87,7 @@ TEST_COMMAND=(
     --test
     property_region_ops
     --test
-    security/property_tests
+    security
     --all-features
     --
     --nocapture

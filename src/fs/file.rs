@@ -12,9 +12,9 @@
 #![allow(clippy::unused_async)]
 
 use crate::fs::OpenOptions;
+use crate::fs::metadata::{Metadata, Permissions};
 use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use crate::runtime::spawn_blocking_io;
-use std::fs::{Metadata, Permissions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::pin::Pin;
@@ -122,7 +122,9 @@ impl File {
 
     /// Queries metadata about the underlying file.
     pub async fn metadata(&self) -> io::Result<Metadata> {
-        self.with_inner(|inner| inner.metadata()).await
+        self.with_inner(|inner| inner.metadata())
+            .await
+            .map(Metadata::from_std)
     }
 
     /// Creates a new `File` instance that shares the same underlying file handle.
@@ -134,7 +136,7 @@ impl File {
 
     /// Changes the permissions on the underlying file.
     pub async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
-        self.with_inner(move |inner| inner.set_permissions(perm))
+        self.with_inner(move |inner| inner.set_permissions(perm.into_inner()))
             .await
     }
 
@@ -408,6 +410,46 @@ mod tests {
             crate::assert_with_log!(metadata.len() == 12, "file length", 12u64, metadata.len());
         });
         crate::test_complete!("test_file_metadata");
+    }
+
+    #[test]
+    fn test_file_metadata_permissions_roundtrip_uses_fs_wrapper() {
+        init_test("test_file_metadata_permissions_roundtrip_uses_fs_wrapper");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("test_metadata_permissions.txt");
+
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .await
+                .unwrap();
+
+            let mut permissions = file.metadata().await.unwrap().permissions();
+            permissions.set_readonly(true);
+            file.set_permissions(permissions).await.unwrap();
+            let readonly = file.metadata().await.unwrap().permissions().readonly();
+            crate::assert_with_log!(
+                readonly,
+                "file permissions set readonly through fs wrapper",
+                true,
+                readonly
+            );
+
+            let mut permissions = file.metadata().await.unwrap().permissions();
+            permissions.set_readonly(false);
+            file.set_permissions(permissions).await.unwrap();
+            let readonly = file.metadata().await.unwrap().permissions().readonly();
+            crate::assert_with_log!(
+                !readonly,
+                "file permissions reset through fs wrapper",
+                false,
+                readonly
+            );
+        });
+        crate::test_complete!("test_file_metadata_permissions_roundtrip_uses_fs_wrapper");
     }
 
     #[test]

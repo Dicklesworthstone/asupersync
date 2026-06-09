@@ -140,7 +140,7 @@ expression: events
             "generation": 0
           },
           "origin_task": null,
-          "timestamp": 0,
+          "timestamp": 1000000000,
           "message": null,
           "cause": null,
           "truncated": false,
@@ -200,7 +200,7 @@ expression: events
             "generation": 0
           },
           "origin_task": null,
-          "timestamp": 0,
+          "timestamp": 1000000000,
           "message": null,
           "cause": null,
           "truncated": false,

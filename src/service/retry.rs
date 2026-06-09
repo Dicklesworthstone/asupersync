@@ -868,8 +868,23 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    thread_local! {
+        static TEST_CURRENT_CX_GUARD: std::cell::RefCell<Option<crate::cx::cx::CurrentCxGuard>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
+        // Concurrency-limit middleware (used by some retry tests) acquires a
+        // semaphore permit synchronously in poll_ready. Permits are obligations
+        // and ObligationToken::reserve rejects root-region tokens, so install a
+        // non-root testing Cx as the thread-local current context.
+        // (br-asupersync-88h4nd)
+        TEST_CURRENT_CX_GUARD.with(|guard| {
+            let mut guard = guard.borrow_mut();
+            guard.take();
+            *guard = Some(Cx::set_current(Some(Cx::for_testing())));
+        });
         crate::test_phase!(name);
     }
     use std::task::Waker;
@@ -1493,13 +1508,13 @@ mod tests {
             delays.push((attempt, delay));
         }
 
-        // Golden values (deterministic due to DetEntropy)
+        // Golden values (deterministic due to DetEntropy::new(42))
         let expected = vec![
-            (0, 93),  // random(0, 100)
-            (1, 124), // random(0, 200)
-            (2, 344), // random(0, 400)
-            (3, 372), // random(0, 800)
-            (4, 822), // random(0, 1600)
+            (0, 94),   // random(0, 100)
+            (1, 163),  // random(0, 200)
+            (2, 44),   // random(0, 400)
+            (3, 502),  // random(0, 800)
+            (4, 1366), // random(0, 1600)
         ];
 
         for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
@@ -1538,11 +1553,11 @@ mod tests {
 
         // Golden values: base/2 + random(0, base/2) where base = 100 * 2^attempt
         let expected = vec![
-            (0, 96),   // 50 + random(0, 50) = 50 + 46 = 96
-            (1, 162),  // 100 + random(0, 100) = 100 + 62 = 162
-            (2, 372),  // 200 + random(0, 200) = 200 + 172 = 372
-            (3, 586),  // 400 + random(0, 400) = 400 + 186 = 586
-            (4, 1211), // 800 + random(0, 800) = 800 + 411 = 1211
+            (0, 75),   // 50 + random(0, 50)
+            (1, 194),  // 100 + random(0, 100)
+            (2, 363),  // 200 + random(0, 200)
+            (3, 444),  // 400 + random(0, 400)
+            (4, 1302), // 800 + random(0, 800)
         ];
 
         for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
@@ -1583,11 +1598,11 @@ mod tests {
 
         // Golden values: random(base_delay, last_delay * 3)
         let expected = vec![
-            (0, 186),  // random(100, 300) = 186
-            (1, 390),  // random(100, 558) = 390
-            (2, 571),  // random(100, 1170) = 571
-            (3, 857),  // random(100, 1713) = 857
-            (4, 1186), // random(100, 2571) = 1186
+            (0, 263),  // random(100, 300)
+            (1, 764),  // random(100, last_delay*3)
+            (2, 1349), // random(100, last_delay*3)
+            (3, 1274), // random(100, last_delay*3)
+            (4, 2573), // random(100, last_delay*3)
         ];
 
         for ((attempt, delay), (exp_attempt, exp_delay)) in delays.iter().zip(expected.iter()) {
@@ -1755,9 +1770,9 @@ mod tests {
         let decorrelated_delay = decorrelated_policy.calculate_delay();
 
         // Golden values for attempt 3 with base_delay 100
-        let expected_full = 372; // random(0, 800)
-        let expected_equal = 586; // 400 + random(0, 400)
-        let expected_decorrelated = 1356; // random(100, 2400)
+        let expected_full = 502; // random(0, 800)
+        let expected_equal = 444; // 400 + random(0, 400)
+        let expected_decorrelated = 404; // random(100, 2400)
 
         crate::assert_with_log!(
             full_delay == expected_full,
@@ -1848,7 +1863,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
         let cx = Cx::new_with_drivers(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,

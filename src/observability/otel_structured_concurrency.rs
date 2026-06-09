@@ -734,7 +734,10 @@ mod tests {
     #[cfg(feature = "metrics")]
     #[test]
     fn span_storage_tracks_context_and_lazy_materialization_separately() {
-        let config = OtelStructuredConcurrencyConfig::new().with_global_sample_rate(1.0);
+        let mut config = OtelStructuredConcurrencyConfig::new().with_global_sample_rate(1.0);
+        // Materialize after the two operations recorded below (the default lazy
+        // threshold is 5, which would never trip for this two-operation case).
+        config.lazy_threshold = 2;
         let storage = SpanStorage::new(config);
         let tracer = opentelemetry::global::tracer("otel-structured-concurrency-test");
         let entity = EntityId::Operation(17);

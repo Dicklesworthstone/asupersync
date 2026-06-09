@@ -1481,11 +1481,16 @@ mod tests {
         // shape: many closed streams at the front, an attempt to
         // open a stream just past the cap.
         let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
-        // Open a few streams and close them so prune_closed can
-        // advance base_id past them.
+        // Open a few streams in both peer and local stream-id spaces and close
+        // them so prune_closed can advance base_id past them.
         for id in [1u32, 3, 5, 7, 9] {
             let s = store.get_or_create(id).unwrap();
             s.reset(ErrorCode::Cancel);
+        }
+        for expected_id in [2u32, 4, 6, 8, 10] {
+            let id = store.allocate_stream_id().unwrap();
+            assert_eq!(id, expected_id);
+            store.get_mut(id).unwrap().reset(ErrorCode::Cancel);
         }
         // Sanity: base_id is still 1 (no automatic prune on close).
         assert_eq!(store.base_id, 1);

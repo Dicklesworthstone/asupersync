@@ -130,33 +130,59 @@ mod metamorphic_tests {
     }
 
     /// MR2: Length Consistency (Additive)
-    /// len() should exactly track the number of items in queue
+    /// len() should exactly track the number of items in queue.
+    ///
+    /// We maintain a reference model (an ordered list of currently-present
+    /// ids) IN LOCKSTEP with the chain as each op executes. Effects must be
+    /// evaluated at the moment they happen, not reconstructed afterwards: a
+    /// removed id is no longer `contains`-present at the end, so any post-hoc
+    /// accounting would systematically miscount removals.
     proptest! {
         #[test]
         fn mr_length_consistency(ops: OpSequence) {
             let mut chain = WaiterChain::new();
-            let mut expected_len = 0usize;
+            // Reference model: ids currently in the chain, in FIFO order.
+            let mut model: std::collections::VecDeque<WaiterId> = std::collections::VecDeque::new();
+            // Maps an op index to the id it generated (None for non-push ops),
+            // mirroring `execute_ops`' bookkeeping.
+            let mut generated_ids: Vec<Option<WaiterId>> = Vec::new();
 
-            let ids = execute_ops(&mut chain, &ops.0);
-
-            // Count net additions
-            for (op, _generated_id) in ops.0.iter().zip(ids.iter()) {
+            for op in &ops.0 {
                 match op {
-                    WaiterOp::PushBack(_) | WaiterOp::PushFront(_) => expected_len += 1,
+                    WaiterOp::PushBack(tag) => {
+                        let id = chain.push_back_tagged(noop_waker(), tag.clone());
+                        model.push_back(id);
+                        generated_ids.push(Some(id));
+                    }
+                    WaiterOp::PushFront(tag) => {
+                        let id = chain.push_front_tagged(noop_waker(), tag.clone());
+                        model.push_front(id);
+                        generated_ids.push(Some(id));
+                    }
                     WaiterOp::PopFront => {
-                        expected_len = expected_len.saturating_sub(1);
+                        chain.pop_front();
+                        model.pop_front();
+                        generated_ids.push(None);
                     }
                     WaiterOp::Remove(idx) => {
-                        if let Some(Some(_)) = ids.get(*idx) {
-                            if chain.contains(*ids[*idx].as_ref().unwrap()) {
-                                expected_len = expected_len.saturating_sub(1);
+                        if let Some(Some(id)) = generated_ids.get(*idx).copied() {
+                            chain.remove(id);
+                            if let Some(pos) = model.iter().position(|&m| m == id) {
+                                model.remove(pos);
                             }
                         }
-                    },
-                    WaiterOp::UpdateWaker(_) => {}
+                        generated_ids.push(None);
+                    }
+                    WaiterOp::UpdateWaker(idx) => {
+                        if let Some(Some(id)) = generated_ids.get(*idx).copied() {
+                            chain.update_waker(id, &noop_waker());
+                        }
+                        generated_ids.push(None);
+                    }
                 }
             }
 
+            let expected_len = model.len();
             prop_assert_eq!(chain.len(), expected_len,
                 "Length inconsistent: chain.len()={}, expected={}", chain.len(), expected_len);
             prop_assert_eq!(chain.is_empty(), expected_len == 0,
@@ -300,17 +326,32 @@ mod metamorphic_tests {
         }
     }
 
-    /// MR8: Operation Commutativity (Equivalence)
-    /// Independent operations (on different items) should commute
+    /// MR8: Push-Order Multiset Invariance (Equivalence)
+    ///
+    /// A FIFO chain's *order* is intentionally NOT commutative under
+    /// `push_back` — appending op1 then op2 yields `[.., op1, op2]`, whereas
+    /// op2 then op1 yields `[.., op2, op1]`. The genuine invariant is that the
+    /// chain's *length* and its *multiset of tags* are independent of the order
+    /// in which the two independent items were appended. We assert exactly that
+    /// (equal length; equal sorted tag multisets), and additionally pin the
+    /// order-sensitivity that distinguishes a FIFO from a bag.
     proptest! {
         #[test]
         fn mr_independent_operations_commute(
-            initial_tags: Vec<String>,
-            op1_tag: String,
-            op2_tag: String
+            // Bound the initial sequence directly in the strategy instead of
+            // rejection-sampling, which previously discarded too many cases and
+            // tripped proptest's global-reject limit.
+            initial_tags in prop::collection::vec(".*", 0..=10),
+            op1_tag in ".*",
+            op2_tag in ".*",
         ) {
-            prop_assume!(op1_tag != op2_tag);
-            prop_assume!(initial_tags.len() <= 10); // Keep test manageable
+            // Distinct payloads keep the order-sensitivity assertions meaningful;
+            // construct op2 so it always differs from op1 without rejection.
+            let op2_tag = if op1_tag == op2_tag {
+                format!("{op2_tag}\u{0}distinct")
+            } else {
+                op2_tag
+            };
 
             // Setup initial state
             let mut chain1 = WaiterChain::new();
@@ -328,14 +369,13 @@ mod metamorphic_tests {
             chain2.push_back_tagged(noop_waker(), op2_tag.clone());
             chain2.push_back_tagged(noop_waker(), op1_tag.clone());
 
-            // Final states should be equivalent (modulo ID values)
+            // Invariant 1: length is independent of append order.
             prop_assert_eq!(chain1.len(), chain2.len(),
-                "Commutative operations produced different lengths");
+                "Append order changed the chain length");
 
-            // Pop all from both and verify same tag sequences
+            // Drain both chains preserving FIFO order.
             let mut tags1 = Vec::new();
             let mut tags2 = Vec::new();
-
             while let Some((_, _, tag)) = chain1.pop_front() {
                 tags1.push(tag);
             }
@@ -343,8 +383,23 @@ mod metamorphic_tests {
                 tags2.push(tag);
             }
 
-            prop_assert_eq!(tags1, tags2,
-                "Commutative operations produced different final sequences");
+            // Invariant 2: the multiset of tags is independent of append order.
+            let mut sorted1 = tags1.clone();
+            let mut sorted2 = tags2.clone();
+            sorted1.sort();
+            sorted2.sort();
+            prop_assert_eq!(&sorted1, &sorted2,
+                "Append order changed the multiset of tags");
+
+            // Invariant 3 (order sensitivity): the trailing two elements reflect
+            // the actual append order — a FIFO is NOT a commutative bag. The
+            // shared prefix (initial_tags) is identical; the suffix differs.
+            let n = tags1.len();
+            prop_assert!(n >= 2);
+            prop_assert_eq!(&tags1[n - 2..], &[op1_tag.clone(), op2_tag.clone()][..],
+                "chain1 suffix must reflect op1-then-op2 append order");
+            prop_assert_eq!(&tags2[n - 2..], &[op2_tag.clone(), op1_tag.clone()][..],
+                "chain2 suffix must reflect op2-then-op1 append order");
         }
     }
 
@@ -386,48 +441,76 @@ mod metamorphic_tests {
     }
 
     /// MR10: Contains Consistency (Inclusive/Exclusive)
-    /// contains() should accurately reflect current queue membership
+    /// contains() should accurately reflect current queue membership.
+    ///
+    /// Membership is tracked with a FIFO-ordered reference model evaluated in
+    /// lockstep with execution. A `PopFront` must drop the id that was at the
+    /// front AT THAT MOMENT (not the final front), so the model must mirror the
+    /// chain step by step rather than reconstructing membership afterwards.
     proptest! {
         #[test]
         fn mr_contains_consistency(ops: OpSequence) {
             let mut chain = WaiterChain::new();
-            let ids = execute_ops(&mut chain, &ops.0);
+            // FIFO-ordered reference model of currently-present ids.
+            let mut model: std::collections::VecDeque<WaiterId> = std::collections::VecDeque::new();
+            let mut generated_ids: Vec<Option<WaiterId>> = Vec::new();
 
-            // Track which IDs should be present based on operations
-            let mut should_contain = HashSet::new();
-
-            for (op, generated_id) in ops.0.iter().zip(ids.iter()) {
-                match (op, generated_id) {
-                    (WaiterOp::PushBack(_) | WaiterOp::PushFront(_), Some(id)) => {
-                        should_contain.insert(*id);
-                    },
-                    (WaiterOp::PopFront, _) => {
-                        // Remove front ID if we can determine it
-                        let mut temp = chain.clone();
-                        if let Some((id, _, _)) = temp.pop_front() {
-                            should_contain.remove(&id);
+            for op in &ops.0 {
+                match op {
+                    WaiterOp::PushBack(tag) => {
+                        let id = chain.push_back_tagged(noop_waker(), tag.clone());
+                        model.push_back(id);
+                        generated_ids.push(Some(id));
+                    }
+                    WaiterOp::PushFront(tag) => {
+                        let id = chain.push_front_tagged(noop_waker(), tag.clone());
+                        model.push_front(id);
+                        generated_ids.push(Some(id));
+                    }
+                    WaiterOp::PopFront => {
+                        chain.pop_front();
+                        model.pop_front();
+                        generated_ids.push(None);
+                    }
+                    WaiterOp::Remove(idx) => {
+                        if let Some(Some(id)) = generated_ids.get(*idx).copied() {
+                            chain.remove(id);
+                            if let Some(pos) = model.iter().position(|&m| m == id) {
+                                model.remove(pos);
+                            }
                         }
-                    },
-                    (WaiterOp::Remove(idx), _) => {
-                        if let Some(Some(id)) = ids.get(*idx) {
-                            should_contain.remove(id);
+                        generated_ids.push(None);
+                    }
+                    WaiterOp::UpdateWaker(idx) => {
+                        if let Some(Some(id)) = generated_ids.get(*idx).copied() {
+                            chain.update_waker(id, &noop_waker());
                         }
-                    },
-                    _ => {},
+                        generated_ids.push(None);
+                    }
                 }
             }
 
-            // Verify contains() matches our tracking
+            let should_contain: HashSet<WaiterId> = model.iter().copied().collect();
+
+            // Every id the model says is present must be reported by contains().
             for id in &should_contain {
                 prop_assert!(chain.contains(*id),
                     "contains({}) returned false but ID should be present", id);
             }
 
-            // Test some IDs that definitely shouldn't be there
-            let max_id = ids.iter().flatten().max().unwrap_or(&0);
-            for test_id in (*max_id + 1)..(*max_id + 10) {
+            // No id the model dropped should still be reported.
+            for id in generated_ids.iter().flatten() {
+                if !should_contain.contains(id) {
+                    prop_assert!(!chain.contains(*id),
+                        "contains({}) returned true for a removed ID", id);
+                }
+            }
+
+            // IDs that were never minted must never be present.
+            let max_id = generated_ids.iter().flatten().max().copied().unwrap_or(0);
+            for test_id in (max_id + 1)..(max_id + 10) {
                 prop_assert!(!chain.contains(test_id),
-                    "contains({}) returned true for non-existent ID", test_id);
+                    "contains({}) returned true for a non-existent ID", test_id);
             }
         }
     }

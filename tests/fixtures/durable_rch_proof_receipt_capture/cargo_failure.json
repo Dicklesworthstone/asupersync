@@ -1,0 +1,34 @@
+{
+  "expected": {
+    "citable": false,
+    "exit_code": 101,
+    "first_blocker_contains": [
+      "error[E0308]",
+      "mismatched types"
+    ],
+    "first_blocker_forbidden": [],
+    "lifecycle_state": "terminal_fail",
+    "max_first_blocker_lines": 8,
+    "outcome_status": "fail",
+    "proof_evidence_status": "blocked",
+    "refusal_reason_codes": [
+      "failed-proof-status"
+    ],
+    "terminal_classification": "cargo_failure"
+  },
+  "fixture_id": "cargo-failure",
+  "rch_outcome": {
+    "build_id": "29879655498514500",
+    "detector_heartbeat_stale": false,
+    "detector_progress_stale": false,
+    "exit_code": 101,
+    "finished_at": "2026-06-09T09:20:00Z",
+    "location": "remote",
+    "started_at": "2026-06-09T09:18:00Z",
+    "status": "failed",
+    "submitted_at": "2026-06-09T09:17:00Z",
+    "worker_id": "vmi1227854"
+  },
+  "stderr": "error[E0308]: mismatched types\n  --> tests/example.rs:12:9\n   |\n12 |     true\n   |     ^^^^ expected `usize`, found `bool`\nerror: could not compile `asupersync` due to previous error\n",
+  "stdout": "Compiling asupersync v0.3.4\n"
+}

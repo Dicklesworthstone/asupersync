@@ -3949,7 +3949,7 @@ mod tests {
 
     fn insert_child_region(state: &mut RuntimeState, parent: RegionId) -> RegionId {
         let idx = state.regions.insert(RegionRecord::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
             Some(parent),
             Budget::INFINITE,
         ));

@@ -1,0 +1,33 @@
+{
+  "expected": {
+    "citable": false,
+    "exit_code": 0,
+    "first_blocker_contains": [
+      "[RCH] local fallback"
+    ],
+    "first_blocker_forbidden": [],
+    "lifecycle_state": "terminal_fail",
+    "max_first_blocker_lines": 8,
+    "outcome_status": "local_fallback_refused",
+    "proof_evidence_status": "blocked",
+    "refusal_reason_codes": [
+      "local-fallback-marker"
+    ],
+    "terminal_classification": "local_fallback_refused"
+  },
+  "fixture_id": "local-fallback-refused",
+  "rch_outcome": {
+    "build_id": "local-1",
+    "detector_heartbeat_stale": false,
+    "detector_progress_stale": false,
+    "exit_code": 0,
+    "finished_at": "2026-06-09T09:50:00Z",
+    "location": "local",
+    "started_at": "2026-06-09T09:49:00Z",
+    "status": "completed",
+    "submitted_at": "2026-06-09T09:48:00Z",
+    "worker_id": "local"
+  },
+  "stderr": "[RCH] local fallback executed cargo test locally\n",
+  "stdout": "test result: ok. 9 passed\n"
+}

@@ -5,12 +5,13 @@
 use crate::runtime::spawn_blocking_io;
 use crate::stream::Stream;
 use std::ffi::OsString;
-use std::fs::{FileType, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+use super::metadata::{FileType, Metadata};
 
 /// Async directory entry iterator.
 pub struct ReadDir {
@@ -83,13 +84,17 @@ impl DirEntry {
     /// Returns the metadata for the entry.
     pub async fn metadata(&self) -> io::Result<Metadata> {
         let inner = Arc::clone(&self.inner);
-        spawn_blocking_io(move || inner.metadata()).await
+        spawn_blocking_io(move || inner.metadata())
+            .await
+            .map(Metadata::from_std)
     }
 
     /// Returns the file type for the entry.
     pub async fn file_type(&self) -> io::Result<FileType> {
         let inner = Arc::clone(&self.inner);
-        spawn_blocking_io(move || inner.file_type()).await
+        spawn_blocking_io(move || inner.file_type())
+            .await
+            .map(FileType::from_std)
     }
 }
 
@@ -149,16 +154,7 @@ mod tests {
     )]
     use super::*;
     use crate::stream::StreamExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut path = std::env::temp_dir();
-        path.push(format!("asupersync_test_{name}_{id}"));
-        path
-    }
+    use tempfile::tempdir;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -168,8 +164,8 @@ mod tests {
     #[test]
     fn test_read_dir() {
         init_test("test_read_dir");
-        let path = unique_temp_dir("read_dir");
-        std::fs::create_dir_all(&path).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path();
         std::fs::write(path.join("a.txt"), b"a").unwrap();
         std::fs::write(path.join("b.txt"), b"b").unwrap();
         std::fs::create_dir_all(path.join("subdir")).unwrap();
@@ -191,15 +187,14 @@ mod tests {
             vec!["a.txt", "b.txt", "subdir"],
             result
         );
-        let _ = std::fs::remove_dir_all(&path);
         crate::test_complete!("test_read_dir");
     }
 
     #[test]
     fn test_read_dir_as_stream() {
         init_test("test_read_dir_as_stream");
-        let path = unique_temp_dir("read_dir_stream");
-        std::fs::create_dir_all(&path).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path();
         std::fs::write(path.join("file1.txt"), b"1").unwrap();
         std::fs::write(path.join("file2.txt"), b"2").unwrap();
 
@@ -220,15 +215,14 @@ mod tests {
             vec!["file1.txt", "file2.txt"],
             names
         );
-        let _ = std::fs::remove_dir_all(&path);
         crate::test_complete!("test_read_dir_as_stream");
     }
 
     #[test]
     fn test_dir_entry_metadata() {
         init_test("test_dir_entry_metadata");
-        let path = unique_temp_dir("dir_entry_metadata");
-        std::fs::create_dir_all(&path).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path();
         let file_path = path.join("test.txt");
         std::fs::write(&file_path, b"content").unwrap();
 
@@ -242,7 +236,6 @@ mod tests {
 
         crate::assert_with_log!(is_file, "is_file", true, is_file);
         crate::assert_with_log!(len == 7, "len", 7, len);
-        let _ = std::fs::remove_dir_all(&path);
         crate::test_complete!("test_dir_entry_metadata");
     }
 
@@ -250,8 +243,8 @@ mod tests {
     #[test]
     fn test_dir_entry_symlink_semantics() {
         init_test("test_dir_entry_symlink_semantics");
-        let path = unique_temp_dir("dir_entry_symlink_semantics");
-        std::fs::create_dir_all(&path).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path();
         let target = path.join("target.txt");
         let link = path.join("link.txt");
         std::fs::write(&target, b"target").unwrap();
@@ -293,7 +286,6 @@ mod tests {
             metadata_is_symlink
         );
         crate::assert_with_log!(len > 0, "symlink metadata len", true, len > 0);
-        let _ = std::fs::remove_dir_all(&path);
         crate::test_complete!("test_dir_entry_symlink_semantics");
     }
 }

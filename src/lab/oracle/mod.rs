@@ -1599,7 +1599,7 @@ mod tests {
         let mentions_stuck_creation = entry
             .violation
             .as_deref()
-            .is_some_and(|violation| violation.contains("StuckCreation"));
+            .is_some_and(|violation| violation.contains("Stuck Creation"));
         crate::assert_with_log!(
             mentions_stuck_creation,
             "report mentions StuckCreation",

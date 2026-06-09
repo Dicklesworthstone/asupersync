@@ -428,26 +428,26 @@ fn mr_race_symmetry() {
     )| {
         // Test the symmetry property of race results
         let race_ab_result = if winner_is_a {
-            RaceResult::First(outcome_a.clone())
+            RaceResult::First(outcome_a)
         } else {
-            RaceResult::Second(outcome_b.clone())
+            RaceResult::Second(outcome_b)
         };
 
         let race_ba_result = if winner_is_a {
-            RaceResult::Second(outcome_a.clone()) // A wins but is second in race(b,a)
+            RaceResult::Second(outcome_a) // A wins but is second in race(b,a)
         } else {
-            RaceResult::First(outcome_b.clone())  // B wins but is first in race(b,a)
+            RaceResult::First(outcome_b)  // B wins but is first in race(b,a)
         };
 
         // Extract the winner values
         let winner_ab = match &race_ab_result {
-            RaceResult::First(val) => val.clone(),
-            RaceResult::Second(val) => val.clone(),
+            RaceResult::First(val) => *val,
+            RaceResult::Second(val) => *val,
         };
 
         let winner_ba = match &race_ba_result {
-            RaceResult::First(val) => val.clone(),
-            RaceResult::Second(val) => val.clone(),
+            RaceResult::First(val) => *val,
+            RaceResult::Second(val) => *val,
         };
 
         // The winning value should be the same regardless of argument order

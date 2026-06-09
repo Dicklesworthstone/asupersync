@@ -53,9 +53,9 @@
         "tests/fourth_wave_swarm_governor_contract.rs"
       ],
       "required_evidence_status": "fresh-rch-pass",
-      "current_evidence_status": "rerun-required",
+      "current_evidence_status": "blocked",
       "current_claim_status": "green",
-      "blocked_followup": null,
+      "blocked_followup": "blocked by dirty shared-main peer changes and same-project RCH contention on 2026-06-09; rerun the exact remote-required fourth-wave lane from a clean committed main tree before parent close",
       "test_evidence_min_count": 1,
       "claim_boundary": "Schema, receipt ordering, redaction, fail-closed fixtures, and non-claims only."
     },
@@ -70,9 +70,9 @@
         "tests/fourth_wave_swarm_governor_contract.rs"
       ],
       "required_evidence_status": "fresh-rch-pass",
-      "current_evidence_status": "rerun-required",
+      "current_evidence_status": "blocked",
       "current_claim_status": "green",
-      "blocked_followup": null,
+      "blocked_followup": "blocked by dirty shared-main peer changes and same-project RCH contention on 2026-06-09; rerun the exact remote-required fourth-wave lane from a clean committed main tree before parent close",
       "test_evidence_min_count": 1,
       "claim_boundary": "Pure deterministic policy-engine receipt selection only."
     },
@@ -88,9 +88,9 @@
         "src/lab/swarm_replay.rs"
       ],
       "required_evidence_status": "fresh-rch-pass",
-      "current_evidence_status": "rerun-required",
+      "current_evidence_status": "blocked",
       "current_claim_status": "green",
-      "blocked_followup": null,
+      "blocked_followup": "blocked by dirty shared-main peer changes and same-project RCH contention on 2026-06-09; rerun the exact remote-required fourth-wave lane from a clean committed main tree before parent close",
       "test_evidence_min_count": 1,
       "claim_boundary": "Deterministic replay workload dimensions and fixture hashes only."
     },
@@ -106,9 +106,9 @@
         "artifacts/slo_policy_bundle_contract_v1.json"
       ],
       "required_evidence_status": "fresh-rch-pass",
-      "current_evidence_status": "rerun-required",
+      "current_evidence_status": "blocked",
       "current_claim_status": "green",
-      "blocked_followup": null,
+      "blocked_followup": "blocked by dirty shared-main peer changes and same-project RCH contention on 2026-06-09; rerun the exact remote-required fourth-wave lane from a clean committed main tree before parent close",
       "test_evidence_min_count": 1,
       "claim_boundary": "Explicit opt-in bridge behavior, rollback receipts, redaction, and non-claim propagation only."
     },
@@ -123,9 +123,9 @@
         "tests/fourth_wave_swarm_governor_runbook_contract.rs"
       ],
       "required_evidence_status": "fresh-rch-pass",
-      "current_evidence_status": "rerun-required",
+      "current_evidence_status": "blocked",
       "current_claim_status": "yellow_scoped",
-      "blocked_followup": null,
+      "blocked_followup": "blocked by dirty shared-main peer changes and same-project RCH contention on 2026-06-09; rerun the exact remote-required fourth-wave lane from a clean committed main tree before parent close",
       "test_evidence_min_count": 1,
       "claim_boundary": "Operator runbook, docs markers, no-local-fallback language, rollback guidance, and non-claims only."
     },
@@ -140,9 +140,9 @@
         "tests/fourth_wave_swarm_governor_benchmark_contract.rs"
       ],
       "required_evidence_status": "fresh-rch-pass",
-      "current_evidence_status": "rerun-required",
+      "current_evidence_status": "blocked",
       "current_claim_status": "yellow_scoped",
-      "blocked_followup": null,
+      "blocked_followup": "blocked by dirty shared-main peer changes and same-project RCH contention on 2026-06-09; rerun the exact remote-required fourth-wave lane from a clean committed main tree before parent close",
       "test_evidence_min_count": 1,
       "claim_boundary": "Benchmark schema and no-claim report only; no fresh performance result."
     }
@@ -214,7 +214,7 @@
       "first_failing_row",
       "final_verdict"
     ],
-    "summary": "Every child row is mapped and scoped, but the final signoff cannot close the parent until fresh remote-required RCH evidence replaces rerun-required status for each child lane. Benchmark rows remain no-claim until fresh benchmark artifacts exist."
+    "summary": "Every child row is mapped and scoped, but the final signoff cannot close the parent while the shared main tree carries dirty peer work and same-project RCH contention. Rerun every exact remote-required fourth-wave lane from a clean committed main tree before parent close. Benchmark rows remain no-claim until fresh benchmark artifacts exist."
   },
   "non_claims": [
     "does not prove p95 improvement",

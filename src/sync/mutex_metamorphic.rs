@@ -32,7 +32,6 @@ use crate::util::ArenaIndex;
 use crate::{Cx, RegionId, TaskId};
 use proptest::prelude::*;
 use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -143,22 +142,25 @@ fn mr1_panic_poisoning_consistency() {
             prop_assert!(mutex.is_poisoned(), "is_poisoned() should return true after panic");
         }
 
-        // MR1.4: Verify that get_mut and into_inner panic on poisoned mutex
-        // (These require owned access so we test them separately)
+        // MR1.4: Verify that get_mut and into_inner report poison consistently
+        // via Err(LockError::Poisoned). The poison contract is Result-returning
+        // (not panic-on-misuse): owned accessors surface the poison to the caller
+        // rather than crashing, matching lock()/try_lock() above.
+        // (These require owned access so we test them separately.)
         {
             let mut mutex_owned = Arc::try_unwrap(mutex).expect("should be sole owner now");
 
-            // get_mut should panic
-            let get_mut_result = catch_unwind(AssertUnwindSafe(|| {
-                let _ = mutex_owned.get_mut();
-            }));
-            prop_assert!(get_mut_result.is_err(), "get_mut should panic on poisoned mutex");
+            // get_mut should return Poisoned
+            prop_assert!(
+                matches!(mutex_owned.get_mut(), Err(LockError::Poisoned)),
+                "get_mut should return Err(Poisoned) on poisoned mutex"
+            );
 
-            // into_inner should panic
-            let into_inner_result = catch_unwind(AssertUnwindSafe(|| {
-                let _ = mutex_owned.into_inner();
-            }));
-            prop_assert!(into_inner_result.is_err(), "into_inner should panic on poisoned mutex");
+            // into_inner should return Poisoned
+            prop_assert!(
+                matches!(mutex_owned.into_inner(), Err(LockError::Poisoned)),
+                "into_inner should return Err(Poisoned) on poisoned mutex"
+            );
         }
     });
 }

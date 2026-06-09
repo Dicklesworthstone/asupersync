@@ -3875,6 +3875,20 @@ mod metamorphic_tests {
             _ => None,
         };
         let state_while_reader_active = lock.debug_state();
+
+        // Snapshot the writer wake counts WHILE the older reader still holds
+        // the lock. The property under test is whether any younger writer was
+        // woken *before the older reader acquired* — i.e., during the window
+        // between the initial writer's release and the reader's admission. We
+        // must read the counters here, before dropping the reader guard:
+        // releasing the reader legitimately wakes the queued writer via
+        // `release_reader`, and capturing the counts afterwards would conflate
+        // that expected post-acquisition wake with a fairness violation.
+        let writer_wakes_before_reader: Vec<usize> = writer_wake_counts
+            .iter()
+            .map(|count| count.load(Ordering::SeqCst))
+            .collect();
+
         drop(reader_guard);
         drop(writer_futs);
         drop(writer_wakers);
@@ -3883,10 +3897,7 @@ mod metamorphic_tests {
             reader_ready_after_release: state_while_reader_active.readers > 0,
             readers_while_guard_held: state_while_reader_active.readers,
             writer_waiters_while_reader_active: state_while_reader_active.writer_waiters,
-            writer_wakes_before_reader: writer_wake_counts
-                .iter()
-                .map(|count| count.load(Ordering::SeqCst))
-                .collect(),
+            writer_wakes_before_reader,
         }
     }
 
@@ -4302,7 +4313,15 @@ mod metamorphic_tests {
             // Start with active writer to force queuing
             let initial_writer = block_on(lock.write(&cx)).expect("initial writer acquire");
 
-            // Queue readers - these will test the fairness bound
+            // Queue readers - these will test the fairness bound.
+            //
+            // The read futures MUST stay alive to remain queued: dropping a
+            // pending read future deregisters its waiter, after which a forced
+            // reader batch has nothing to wake. We therefore retain both the
+            // futures and their wakers for the duration of the test (mirroring
+            // how the writer futures below are kept in `writer_futures`).
+            let mut reader_futures = Vec::new();
+            let mut reader_wakers = Vec::new();
             let mut reader_wake_counts = Vec::new();
             for i in 0..num_queued_readers {
                 let reader_lock = lock.clone();
@@ -4318,8 +4337,8 @@ mod metamorphic_tests {
                 );
 
                 reader_wake_counts.push(count);
-                // Keep futures alive by dropping them - simulates queued state
-                std::mem::drop(read_fut);
+                reader_wakers.push(waker_obj);
+                reader_futures.push(read_fut);
             }
 
             // Queue writers beyond the fairness threshold
@@ -4385,6 +4404,11 @@ mod metamorphic_tests {
                     num_excess_writers, writers_served
                 );
             }
+
+            // Keep reader futures/wakers alive until here so they stayed queued
+            // throughout the writer sequence above.
+            drop(reader_futures);
+            drop(reader_wakers);
         }
     }
 

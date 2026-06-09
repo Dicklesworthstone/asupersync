@@ -1088,7 +1088,18 @@ mod tests {
     }
 
     fn make_region() -> RegionId {
-        RegionId::from_arena(ArenaIndex::new(0, 0))
+        non_root_region(0)
+    }
+
+    fn other_region() -> RegionId {
+        non_root_region(1)
+    }
+
+    fn non_root_region(index: u32) -> RegionId {
+        // The root region (`as_u64() == 0`) cannot own obligations because it
+        // never closes to drain them. Ledger tests need ordinary non-root
+        // owner regions while preserving stable fixture IDs. (br-asupersync-88h4nd)
+        RegionId::from_arena(ArenaIndex::new(index, 1))
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1232,8 +1243,8 @@ mod tests {
         init_test("pending_for_region");
         let mut ledger = ObligationLedger::new();
         let task = make_task();
-        let r1 = RegionId::from_arena(ArenaIndex::new(0, 0));
-        let r2 = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let r1 = make_region();
+        let r2 = other_region();
 
         let _t1 = ledger.acquire(ObligationKind::SendPermit, task, r1, Time::ZERO);
         let _t2 = ledger.acquire(ObligationKind::Ack, task, r1, Time::ZERO);
@@ -1349,8 +1360,8 @@ mod tests {
         init_test("check_region_leaks_scoped");
         let mut ledger = ObligationLedger::new();
         let task = make_task();
-        let r1 = RegionId::from_arena(ArenaIndex::new(0, 0));
-        let r2 = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let r1 = make_region();
+        let r2 = other_region();
 
         let _t1 = ledger.acquire(ObligationKind::SendPermit, task, r1, Time::ZERO);
         let t2 = ledger.acquire(ObligationKind::Ack, task, r2, Time::ZERO);
@@ -2125,8 +2136,8 @@ mod tests {
         init_test("region_isolation_during_drain");
         let mut ledger = ObligationLedger::new();
         let task = make_task();
-        let r_cancel = RegionId::from_arena(ArenaIndex::new(0, 0));
-        let r_alive = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let r_cancel = make_region();
+        let r_alive = other_region();
 
         // Obligations in region being cancelled.
         let tok_cancel = ledger.acquire(ObligationKind::SendPermit, task, r_cancel, Time::ZERO);

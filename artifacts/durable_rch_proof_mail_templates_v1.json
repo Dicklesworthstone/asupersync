@@ -1,0 +1,304 @@
+{
+  "contract_version": "durable-rch-proof-mail-templates-v1",
+  "bead_id": "asupersync-durable-rch-proof-submission-zxnnhe.6",
+  "created_date": "2026-06-09",
+  "description": "Deterministic Agent Mail handoff templates for durable RCH proof submissions. The templates are fixture-only, require no live Agent Mail during tests, and never broaden a focused durable receipt into release readiness, workspace health, or live RCH fleet availability.",
+  "source_of_truth": {
+    "contract": "artifacts/durable_rch_proof_mail_templates_v1.json",
+    "contract_test": "tests/durable_rch_proof_mail_templates_contract.rs",
+    "runbook": "docs/proof_runner_usage.md",
+    "submission_cli": "scripts/durable_rch_proof_submission.py",
+    "receipt_contract": "artifacts/durable_rch_proof_receipt_contract_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json"
+  },
+  "policy": {
+    "network_access_required_for_tests": false,
+    "live_agent_mail_required_for_tests": false,
+    "tracker_mutation_allowed": false,
+    "broadcast_allowed": false,
+    "raw_agent_mail_bodies_allowed": false,
+    "required_query_command_prefix": "python3 scripts/durable_rch_proof_submission.py query --job-store",
+    "targeting_rule": "Send to the current lane owner, the next explicitly named owner, or the peer blocked by the proof lane. Do not broadcast.",
+    "non_claim_boundaries": [
+      "release-readiness",
+      "workspace-health",
+      "live-rch-fleet-availability",
+      "unrelated-proof-lanes"
+    ],
+    "forbidden_broadcast_phrases": [
+      "broadcast",
+      "all agents",
+      "everyone",
+      "all hands",
+      "whoever is around"
+    ],
+    "green_proof_phrases": [
+      "green proof",
+      "release ready",
+      "workspace healthy",
+      "fleet healthy"
+    ]
+  },
+  "required_template_fields": [
+    "template_id",
+    "lifecycle_state",
+    "terminal_classification",
+    "proof_evidence_status",
+    "subject_template",
+    "body_template",
+    "required_placeholders",
+    "may_claim_green_proof",
+    "broadcast_allowed",
+    "operator_action",
+    "lane_ownership_rule",
+    "claims_allowed",
+    "claims_forbidden"
+  ],
+  "required_placeholders": [
+    "{durable_submission_id}",
+    "{receipt_id_or_pending}",
+    "{manifest_lane_id}",
+    "{source_head}",
+    "{command_fingerprint}",
+    "{lifecycle_state}",
+    "{terminal_classification}",
+    "{first_blocker_summary}",
+    "{refusal_reason_codes}",
+    "{query_command}"
+  ],
+  "templates": [
+    {
+      "template_id": "submitted-proof-lane",
+      "lifecycle_state": "queued",
+      "terminal_classification": "pending",
+      "proof_evidence_status": "rerun-required",
+      "subject_template": "Durable RCH submitted: {manifest_lane_id} {durable_submission_id}",
+      "body_template": "Durable RCH proof submitted for `{manifest_lane_id}`.\n\n- submission: `{durable_submission_id}`\n- receipt: `{receipt_id_or_pending}`\n- source HEAD: `{source_head}`\n- command fingerprint: `{command_fingerprint}`\n- lifecycle: `{lifecycle_state}`\n- terminal classification: `{terminal_classification}`\n- first blocker: `{first_blocker_summary}`\n- refusal reasons: `{refusal_reason_codes}`\n- query: `{query_command}`\n\nOwnership: sender owns this proof lane until it reaches a terminal receipt or an explicit handoff is accepted. Do not cancel it unless the owner asks.\n\nClaim boundary: this is a queued durable submission only. It does not prove release-readiness, workspace-health, live-rch-fleet-availability, or unrelated proof lanes.",
+      "required_placeholders": [
+        "{durable_submission_id}",
+        "{receipt_id_or_pending}",
+        "{manifest_lane_id}",
+        "{source_head}",
+        "{command_fingerprint}",
+        "{lifecycle_state}",
+        "{terminal_classification}",
+        "{first_blocker_summary}",
+        "{refusal_reason_codes}",
+        "{query_command}"
+      ],
+      "may_claim_green_proof": false,
+      "broadcast_allowed": false,
+      "operator_action": "wait-or-coordinate",
+      "lane_ownership_rule": "owner-retains-cancel-authority",
+      "claims_allowed": [
+        "durable-submission-created"
+      ],
+      "claims_forbidden": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability",
+        "unrelated-proof-lanes"
+      ]
+    },
+    {
+      "template_id": "running-proof-lane",
+      "lifecycle_state": "running",
+      "terminal_classification": "pending",
+      "proof_evidence_status": "rerun-required",
+      "subject_template": "Durable RCH running: {manifest_lane_id} {durable_submission_id}",
+      "body_template": "Durable RCH proof still running for `{manifest_lane_id}`.\n\n- submission: `{durable_submission_id}`\n- receipt: `{receipt_id_or_pending}`\n- source HEAD: `{source_head}`\n- command fingerprint: `{command_fingerprint}`\n- lifecycle: `{lifecycle_state}`\n- terminal classification: `{terminal_classification}`\n- first blocker: `{first_blocker_summary}`\n- refusal reasons: `{refusal_reason_codes}`\n- query: `{query_command}`\n\nOwnership: sender owns the active lane. If this blocks a release proof, ask for handoff instead of canceling from another pane.\n\nClaim boundary: running evidence is not terminal evidence. Do not cite it as release-readiness, workspace-health, live-rch-fleet-availability, or unrelated proof-lane proof.",
+      "required_placeholders": [
+        "{durable_submission_id}",
+        "{receipt_id_or_pending}",
+        "{manifest_lane_id}",
+        "{source_head}",
+        "{command_fingerprint}",
+        "{lifecycle_state}",
+        "{terminal_classification}",
+        "{first_blocker_summary}",
+        "{refusal_reason_codes}",
+        "{query_command}"
+      ],
+      "may_claim_green_proof": false,
+      "broadcast_allowed": false,
+      "operator_action": "wait-or-request-handoff",
+      "lane_ownership_rule": "owner-retains-cancel-authority",
+      "claims_allowed": [
+        "durable-proof-running"
+      ],
+      "claims_forbidden": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability",
+        "unrelated-proof-lanes"
+      ]
+    },
+    {
+      "template_id": "stale-proof-lane",
+      "lifecycle_state": "terminal_stale",
+      "terminal_classification": "stale_progress_canceled",
+      "proof_evidence_status": "stale-evidence",
+      "subject_template": "Durable RCH stale: {manifest_lane_id} {durable_submission_id}",
+      "body_template": "Durable RCH proof is stale for `{manifest_lane_id}`.\n\n- submission: `{durable_submission_id}`\n- receipt: `{receipt_id_or_pending}`\n- source HEAD: `{source_head}`\n- command fingerprint: `{command_fingerprint}`\n- lifecycle: `{lifecycle_state}`\n- terminal classification: `{terminal_classification}`\n- first blocker: `{first_blocker_summary}`\n- refusal reasons: `{refusal_reason_codes}`\n- query: `{query_command}`\n\nOwnership: sender yields the active slot for a fresh rerun or handoff. Cite the stale receipt only as a blocker/refusal.\n\nClaim boundary: stale evidence is not terminal pass evidence and cannot support release-readiness, workspace-health, live-rch-fleet-availability, or unrelated proof lanes.",
+      "required_placeholders": [
+        "{durable_submission_id}",
+        "{receipt_id_or_pending}",
+        "{manifest_lane_id}",
+        "{source_head}",
+        "{command_fingerprint}",
+        "{lifecycle_state}",
+        "{terminal_classification}",
+        "{first_blocker_summary}",
+        "{refusal_reason_codes}",
+        "{query_command}"
+      ],
+      "may_claim_green_proof": false,
+      "broadcast_allowed": false,
+      "operator_action": "rerun-or-handoff",
+      "lane_ownership_rule": "owner-yields-after-stale-classification",
+      "claims_allowed": [
+        "stale-evidence-blocker"
+      ],
+      "claims_forbidden": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability",
+        "unrelated-proof-lanes"
+      ]
+    },
+    {
+      "template_id": "canceled-yielded-proof-lane",
+      "lifecycle_state": "terminal_canceled",
+      "terminal_classification": "operator_canceled",
+      "proof_evidence_status": "blocked",
+      "subject_template": "Durable RCH canceled/yielded: {manifest_lane_id} {durable_submission_id}",
+      "body_template": "Durable RCH proof was canceled or yielded for `{manifest_lane_id}`.\n\n- submission: `{durable_submission_id}`\n- receipt: `{receipt_id_or_pending}`\n- source HEAD: `{source_head}`\n- command fingerprint: `{command_fingerprint}`\n- lifecycle: `{lifecycle_state}`\n- terminal classification: `{terminal_classification}`\n- first blocker: `{first_blocker_summary}`\n- refusal reasons: `{refusal_reason_codes}`\n- query: `{query_command}`\n\nOwnership: sender releases this lane. A successor must submit a fresh durable proof before citing pass evidence.\n\nClaim boundary: canceled evidence is a coordination receipt only. It does not prove release-readiness, workspace-health, live-rch-fleet-availability, or unrelated proof lanes.",
+      "required_placeholders": [
+        "{durable_submission_id}",
+        "{receipt_id_or_pending}",
+        "{manifest_lane_id}",
+        "{source_head}",
+        "{command_fingerprint}",
+        "{lifecycle_state}",
+        "{terminal_classification}",
+        "{first_blocker_summary}",
+        "{refusal_reason_codes}",
+        "{query_command}"
+      ],
+      "may_claim_green_proof": false,
+      "broadcast_allowed": false,
+      "operator_action": "fresh-submit-required",
+      "lane_ownership_rule": "owner-yields-after-cancel",
+      "claims_allowed": [
+        "operator-canceled-blocker"
+      ],
+      "claims_forbidden": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability",
+        "unrelated-proof-lanes"
+      ]
+    },
+    {
+      "template_id": "terminal-pass-proof-lane",
+      "lifecycle_state": "terminal_pass",
+      "terminal_classification": "pass",
+      "proof_evidence_status": "fresh-rch-pass",
+      "subject_template": "Durable RCH passed: {manifest_lane_id} {durable_submission_id}",
+      "body_template": "Durable RCH proof passed for `{manifest_lane_id}`.\n\n- submission: `{durable_submission_id}`\n- receipt: `{receipt_id_or_pending}`\n- source HEAD: `{source_head}`\n- command fingerprint: `{command_fingerprint}`\n- lifecycle: `{lifecycle_state}`\n- terminal classification: `{terminal_classification}`\n- first blocker: `{first_blocker_summary}`\n- refusal reasons: `{refusal_reason_codes}`\n- query: `{query_command}`\n\nOwnership: sender may close the matching narrow bead or hand this receipt to the next named owner.\n\nClaim boundary: cite only the exact manifest lane and claim scope in the receipt. This does not prove release-readiness, workspace-health, live-rch-fleet-availability, or unrelated proof lanes.",
+      "required_placeholders": [
+        "{durable_submission_id}",
+        "{receipt_id_or_pending}",
+        "{manifest_lane_id}",
+        "{source_head}",
+        "{command_fingerprint}",
+        "{lifecycle_state}",
+        "{terminal_classification}",
+        "{first_blocker_summary}",
+        "{refusal_reason_codes}",
+        "{query_command}"
+      ],
+      "may_claim_green_proof": true,
+      "broadcast_allowed": false,
+      "operator_action": "cite-exact-lane-only",
+      "lane_ownership_rule": "owner-may-close-or-handoff",
+      "claims_allowed": [
+        "fresh-rch-pass-for-exact-manifest-lane"
+      ],
+      "claims_forbidden": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability",
+        "unrelated-proof-lanes"
+      ]
+    },
+    {
+      "template_id": "terminal-fail-proof-lane",
+      "lifecycle_state": "terminal_fail",
+      "terminal_classification": "cargo_failure",
+      "proof_evidence_status": "blocked",
+      "subject_template": "Durable RCH failed: {manifest_lane_id} {durable_submission_id}",
+      "body_template": "Durable RCH proof failed for `{manifest_lane_id}`.\n\n- submission: `{durable_submission_id}`\n- receipt: `{receipt_id_or_pending}`\n- source HEAD: `{source_head}`\n- command fingerprint: `{command_fingerprint}`\n- lifecycle: `{lifecycle_state}`\n- terminal classification: `{terminal_classification}`\n- first blocker: `{first_blocker_summary}`\n- refusal reasons: `{refusal_reason_codes}`\n- query: `{query_command}`\n\nOwnership: sender owns the first blocker until explicitly handing it off or reopening the lane for a narrower owner.\n\nClaim boundary: failed proof is blocker evidence only. It does not prove release-readiness, workspace-health, live-rch-fleet-availability, or unrelated proof lanes.",
+      "required_placeholders": [
+        "{durable_submission_id}",
+        "{receipt_id_or_pending}",
+        "{manifest_lane_id}",
+        "{source_head}",
+        "{command_fingerprint}",
+        "{lifecycle_state}",
+        "{terminal_classification}",
+        "{first_blocker_summary}",
+        "{refusal_reason_codes}",
+        "{query_command}"
+      ],
+      "may_claim_green_proof": false,
+      "broadcast_allowed": false,
+      "operator_action": "fix-first-blocker-or-handoff",
+      "lane_ownership_rule": "owner-keeps-first-blocker-until-handoff",
+      "claims_allowed": [
+        "first-blocker-evidence"
+      ],
+      "claims_forbidden": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability",
+        "unrelated-proof-lanes"
+      ]
+    },
+    {
+      "template_id": "handoff-to-next-agent",
+      "lifecycle_state": "handoff",
+      "terminal_classification": "handoff_requested",
+      "proof_evidence_status": "rerun-required",
+      "subject_template": "Durable RCH handoff: {manifest_lane_id} {durable_submission_id}",
+      "body_template": "Durable RCH proof handoff requested for `{manifest_lane_id}`.\n\n- submission: `{durable_submission_id}`\n- receipt: `{receipt_id_or_pending}`\n- source HEAD: `{source_head}`\n- command fingerprint: `{command_fingerprint}`\n- lifecycle: `{lifecycle_state}`\n- terminal classification: `{terminal_classification}`\n- first blocker: `{first_blocker_summary}`\n- refusal reasons: `{refusal_reason_codes}`\n- query: `{query_command}`\n\nOwnership: next named agent should acknowledge before taking cancellation or closeout action. Until then, sender remains the owner.\n\nClaim boundary: handoff text is coordination metadata, not proof. It does not prove release-readiness, workspace-health, live-rch-fleet-availability, or unrelated proof lanes.",
+      "required_placeholders": [
+        "{durable_submission_id}",
+        "{receipt_id_or_pending}",
+        "{manifest_lane_id}",
+        "{source_head}",
+        "{command_fingerprint}",
+        "{lifecycle_state}",
+        "{terminal_classification}",
+        "{first_blocker_summary}",
+        "{refusal_reason_codes}",
+        "{query_command}"
+      ],
+      "may_claim_green_proof": false,
+      "broadcast_allowed": false,
+      "operator_action": "wait-for-ack-before-transfer",
+      "lane_ownership_rule": "sender-owns-until-ack",
+      "claims_allowed": [
+        "handoff-requested"
+      ],
+      "claims_forbidden": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability",
+        "unrelated-proof-lanes"
+      ]
+    }
+  ],
+  "golden_markdown": "| template_id | lifecycle_state | proof_evidence_status | may_claim_green_proof | operator_action |\n| --- | --- | --- | --- | --- |\n| canceled-yielded-proof-lane | terminal_canceled | blocked | false | fresh-submit-required |\n| handoff-to-next-agent | handoff | rerun-required | false | wait-for-ack-before-transfer |\n| running-proof-lane | running | rerun-required | false | wait-or-request-handoff |\n| stale-proof-lane | terminal_stale | stale-evidence | false | rerun-or-handoff |\n| submitted-proof-lane | queued | rerun-required | false | wait-or-coordinate |\n| terminal-fail-proof-lane | terminal_fail | blocked | false | fix-first-blocker-or-handoff |\n| terminal-pass-proof-lane | terminal_pass | fresh-rch-pass | true | cite-exact-lane-only |\n"
+}

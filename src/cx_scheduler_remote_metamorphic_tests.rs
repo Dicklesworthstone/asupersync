@@ -36,8 +36,6 @@ mod tests {
     #[cfg(test)]
     use proptest::prelude::*;
     use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-    use std::sync::Arc;
-    use std::time::Duration;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Mock Implementations for Metamorphic Testing
@@ -677,7 +675,7 @@ mod tests {
 
             // This is a simplified check - in practice, combiner batching
             // can reorder within batches while preserving global FIFO
-            while let (Some(&ready_task), Some(&injected_task)) =
+            while let (Some(&_ready_task), Some(&injected_task)) =
                 (ready_iter.next(), injection_iter.next())
             {
                 // Allow for combiner reordering within reasonable bounds
@@ -1379,7 +1377,7 @@ mod tests {
                 10..30
             ),
             contention_pattern in proptest::collection::vec(0u8..4, 5..15),
-            batch_sizes in proptest::collection::vec(2usize..8, 3..10)
+            _batch_sizes in proptest::collection::vec(2usize..8, 3..10)
         )| {
             // MR-GlobalInjectorFIFOContention:
             // FIFO properties should be preserved under concurrent injection
@@ -1577,6 +1575,11 @@ mod tests {
                     "State should be stable after post-completion operation type {}",
                     op_type % 3
                 );
+                prop_assert_eq!(
+                    handle.completion_result.clone(), result_before,
+                    "Completion result should be stable after post-completion operation type {}",
+                    op_type % 3
+                );
             }
 
             // Call counters should reflect the operations but not affect results
@@ -1615,7 +1618,7 @@ mod tests {
             let mut handles_pattern2 = Vec::new();
 
             // Create handles with same configurations
-            for (task_id, lease_duration, completion_offset) in &task_configs {
+            for (task_id, lease_duration, _) in &task_configs {
                 let lease_expiry = Some(*lease_duration);
                 handles_pattern1.push(MockRemoteHandle::new(*task_id, lease_expiry));
                 handles_pattern2.push(MockRemoteHandle::new(*task_id, lease_expiry));

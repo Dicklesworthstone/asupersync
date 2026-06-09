@@ -90,6 +90,9 @@ mod tests {
             let content = String::from_utf8_lossy(data);
             let delimiter = format!("--{}", boundary);
             let end_delimiter = format!("--{}--", boundary);
+            if !content.contains(&end_delimiter) {
+                return None;
+            }
 
             let mut fields = Vec::new();
             let parts: Vec<&str> = content.split(&delimiter).collect();

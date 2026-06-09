@@ -981,6 +981,7 @@ pub fn run_swarm_replay_lab(seed: u64, knobs: &SwarmReplayScenarioKnobs) -> Swar
     let knobs = knobs.normalized();
     let mut config = LabConfig::new(seed)
         .worker_count(knobs.worker_count)
+        .with_cancellation_oracle_warnings()
         .trace_capacity((knobs.total_task_count() * 32).max(2_048));
     if knobs.max_steps > 0 {
         config = config.max_steps(knobs.max_steps);

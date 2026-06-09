@@ -193,9 +193,7 @@ mod tests {
         }
 
         fn blob_content(size_bytes: usize, pattern: u8) -> Vec<u8> {
-            (0..size_bytes)
-                .map(|i| (pattern + (i % 256) as u8))
-                .collect()
+            (0..size_bytes).map(|i| pattern + (i % 256) as u8).collect()
         }
 
         fn test_cache_key(manifest_id: &str, content_id: &str, scope: Option<&str>) -> CacheKey {

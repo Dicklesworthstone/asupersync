@@ -5960,9 +5960,9 @@ mod tests {
                 // Cooperative async wait that remains pending past the 5ms
                 // grpc-timeout budget, giving dispatch_unary's timeout race a
                 // deterministic cancellation point. A finite sleep can become
-                // ready alongside the timeout under scheduler delay, and
-                // TimeoutFuture intentionally prefers ready inner work at the
-                // boundary.
+                // ready alongside the timeout under scheduler delay; this path
+                // keeps the inner operation pending so the deadline path is
+                // exercised directly.
                 futures_lite::future::yield_now().await;
                 std::future::pending::<()>().await;
 

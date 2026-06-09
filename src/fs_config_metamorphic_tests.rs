@@ -8,31 +8,19 @@
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod fs_config_tests {
-    use crate::config::{
-        EncodingConfig, RaptorQConfig, ResourceConfig, SecurityConfig, TimeoutConfig,
-        TransportConfig,
-    };
     use crate::fs::Permissions;
-    use crate::fs::vfs::{Vfs, VfsFile};
-    use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
-    use crate::observability::{LogLevel, ObservabilityConfig};
     use crate::runtime::env_config::{
         ENV_STEAL_BATCH_SIZE, ENV_TASK_QUEUE_DEPTH, ENV_THREAD_NAME_PREFIX, ENV_THREAD_STACK_SIZE,
         ENV_WORKER_THREADS,
     };
-    use crate::security::AuthMode;
     use crate::test_utils::init_test_logging;
     use proptest::prelude::*;
-    use proptest::{prop_oneof, strategy::BoxedStrategy, strategy::Just};
+    use proptest::strategy::BoxedStrategy;
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::env;
-    use std::fs;
-    use std::io::{self, Cursor, SeekFrom};
+    use std::io::{self, Cursor};
     use std::path::{Path, PathBuf};
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-    use std::time::Duration;
     use tempfile::TempDir;
 
     // ═══ Deterministic Filesystem Model ══════════════════════════════════════════
@@ -124,7 +112,7 @@ mod fs_config_tests {
                 canonical_path,
                 MockVfsFileData {
                     content: content.to_vec(),
-                    permissions: Permissions::from_mode(0o644),
+                    permissions: fixture_file_permissions(),
                     metadata: MockMetadata {
                         len: content.len() as u64,
                         is_dir: false,
@@ -184,6 +172,22 @@ mod fs_config_tests {
             }
 
             Ok(entries)
+        }
+    }
+
+    fn fixture_file_permissions() -> Permissions {
+        #[cfg(unix)]
+        {
+            Permissions::from_mode(0o644)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let mut inner = std::fs::metadata(".")
+                .expect("current directory metadata should be readable")
+                .permissions();
+            inner.set_readonly(false);
+            Permissions { inner }
         }
     }
 
@@ -504,7 +508,7 @@ mod fs_config_tests {
             relative_dots in prop::collection::vec("\\.\\.?", 0..=3)
         )| {
             let temp_dir = TempDir::new().unwrap();
-            let mut mock_vfs = MockVfs::with_temp_dir(temp_dir.path().to_path_buf());
+            let mock_vfs = MockVfs::with_temp_dir(temp_dir.path().to_path_buf());
 
             // Build path with relative components and dots
             let mut path = PathBuf::new();

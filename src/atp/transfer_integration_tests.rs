@@ -12,10 +12,9 @@ mod tests {
     use crate::atp::transfer::{
         IdempotencyKey, PeerCapabilities, TransferActor, TransferActorId, TransferCancelPhase,
         TransferCommand, TransferCommandKind, TransferFailureKind, TransferId, TransferManifestRef,
-        TransferObligationId, TransferProgress, TransferState,
+        TransferObligationId, TransferState,
     };
     use serde_json::json;
-    use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
 
     /// Structured test logger for ATP transfer integration tests.

@@ -61,7 +61,7 @@ The fourth-wave governor proof map is intentionally split:
 | Aggregate signoff | `fourth-wave-governor-signoff-runbook` | Operator checklist alignment only |
 | Final signoff report | `fourth-wave-governor-final-signoff` | Child bead rows, freshness policy, fail-closed fixtures, deterministic report fields, and parent-close guardrails only |
 
-The fourth-wave final aggregated signoff is yellow-scoped until every child lane has fresh remote proof and any benchmark refresh artifacts are committed and classified. `artifacts/fourth_wave_governor_final_signoff_v1.json` currently reports `no_win_rerun_required` and `parent_close_allowed=false`; that is the intended fail-closed state until fresh RCH transcripts replace rerun-required child rows.
+The fourth-wave final aggregated signoff is yellow-scoped until every child lane has fresh remote proof and any benchmark refresh artifacts are committed and classified. `artifacts/fourth_wave_governor_final_signoff_v1.json` currently reports `no_win_rerun_required` and `parent_close_allowed=false`; that is the intended fail-closed state while blocked child rows record dirty shared-main peer work and same-project RCH contention. Parent close requires rerunning the exact remote-required fourth-wave lanes from a clean committed `main`, or keeping explicit blocked follow-up rows.
 
 ## Child Lane Commands
 

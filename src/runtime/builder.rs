@@ -4132,6 +4132,45 @@ impl Wake for ThreadWaker {
     }
 }
 
+fn current_timer_driver_for_block_on() -> Option<TimerDriverHandle> {
+    crate::cx::Cx::current().and_then(|cx| cx.timer_driver())
+}
+
+fn process_current_block_on_timers() -> bool {
+    let fired = current_timer_driver_for_block_on().is_some_and(|timer| timer.process_timers() > 0);
+    if fired
+        && let Some(inner) = Runtime::current_handle().and_then(|handle| handle.try_inner().ok())
+    {
+        inner.scheduler.wake_all();
+    }
+    fired
+}
+
+fn next_block_on_timer_park_duration(timer: &TimerDriverHandle) -> Option<Duration> {
+    let deadline = timer.next_deadline()?;
+    let now = timer.now();
+    if deadline <= now {
+        Some(Duration::ZERO)
+    } else {
+        Some(Duration::from_nanos(deadline.duration_since(now)))
+    }
+}
+
+const BLOCK_ON_RUNTIME_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
+
+fn current_runtime_has_live_tasks() -> bool {
+    Runtime::current_handle()
+        .and_then(|handle| handle.try_inner().ok())
+        .is_some_and(|inner| {
+            inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count()
+                > 0
+        })
+}
+
 fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
     let thread = std::thread::current();
     let thread_waker = Arc::new(ThreadWaker {
@@ -4146,6 +4185,7 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
     let mut consecutive_budget_exhaustions: u32 = 0;
 
     loop {
+        let _ = process_current_block_on_timers();
         // Clear the woken flag BEFORE polling. This tracks if the future
         // wakes itself during the poll or immediately after.
         thread_waker
@@ -4181,7 +4221,30 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
                     // to prevent penalizing long-lived futures that genuinely wait.
                     polls = 0;
                     consecutive_budget_exhaustions = 0;
-                    std::thread::park();
+
+                    if process_current_block_on_timers()
+                        || thread_waker
+                            .woken
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        continue;
+                    }
+
+                    if let Some(timer) = current_timer_driver_for_block_on() {
+                        match next_block_on_timer_park_duration(&timer) {
+                            Some(duration) => {
+                                if !duration.is_zero() {
+                                    std::thread::park_timeout(duration);
+                                }
+                            }
+                            None if current_runtime_has_live_tasks() => {
+                                std::thread::park_timeout(BLOCK_ON_RUNTIME_RECHECK_INTERVAL);
+                            }
+                            None => std::thread::park(),
+                        }
+                    } else {
+                        std::thread::park();
+                    }
                 }
             }
         }
@@ -4262,7 +4325,7 @@ mod tests {
     #[cfg(unix)]
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     static CURRENT_HANDLE_DTOR_STATE: AtomicU8 = AtomicU8::new(0);
 
@@ -5614,7 +5677,46 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "block_on parks thread on Pending; current-thread runtime cannot drive timers"]
+    fn runtime_block_on_drives_timer_sleep_without_reactor() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let started = Instant::now();
+
+        runtime.block_on(async {
+            let now = Cx::current()
+                .and_then(|cx| cx.timer_driver())
+                .expect("runtime block_on should install a timer driver")
+                .now();
+            sleep(now, Duration::from_millis(5)).await;
+        });
+
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "block_on timer sleep should not wait for the old 250ms idle poll floor"
+        );
+
+        let runtime_counts = {
+            let guard = runtime
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            parity_counts(guard.trace.snapshot())
+        };
+        assert!(
+            runtime_counts.timer_scheduled > 0,
+            "runtime trace should record timer scheduling"
+        );
+        assert_eq!(
+            runtime_counts.timer_scheduled, runtime_counts.timer_fired,
+            "runtime trace should fire every scheduled timer"
+        );
+    }
+
+    #[test]
     fn lab_runtime_matches_prod_trace_for_timer_sleep() {
         init_test_logging();
 

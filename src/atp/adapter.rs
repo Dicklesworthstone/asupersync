@@ -312,6 +312,8 @@ pub struct AdapterManager {
     parity_matrix: HashMap<AdapterType, AdapterParity>,
     /// Active adapter sessions
     active_sessions: HashMap<String, AdapterSession>,
+    /// Monotonic per-manager session sequence for collision-free session IDs.
+    next_session_sequence: u64,
     /// Adapter metrics
     metrics: AdapterMetrics,
 }
@@ -373,6 +375,7 @@ impl AdapterManager {
             config,
             parity_matrix,
             active_sessions: HashMap::new(),
+            next_session_sequence: 1,
             metrics: AdapterMetrics::new(),
         }
     }
@@ -383,10 +386,12 @@ impl AdapterManager {
         requirements: &[RequiredFeature],
         trace_id: TraceId,
     ) -> Result<AdapterNegotiation> {
+        let effective_requirements = self.effective_requirements(requirements);
+        let requirements = effective_requirements.as_slice();
+
         // Try preferred adapters in order
         for &adapter_type in &self.config.preferred_adapters {
             if let Ok(negotiation) = self.try_adapter(adapter_type, requirements, trace_id).await {
-                self.record_successful_negotiation(&negotiation);
                 return Ok(negotiation);
             }
         }
@@ -411,27 +416,28 @@ impl AdapterManager {
     pub async fn start_session(
         &mut self,
         negotiation: AdapterNegotiation,
-        _object_id: ObjectId,
+        object_id: ObjectId,
     ) -> Result<String> {
-        let session_id = format!(
-            "adapter-{:?}-{}",
-            negotiation.selected_adapter,
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
-        );
+        let adapter_type = negotiation.selected_adapter;
+        self.ensure_adapter_capacity(adapter_type)?;
+
+        let session_id = self.allocate_session_id(adapter_type, &object_id)?;
+        if self.active_sessions.contains_key(&session_id) {
+            return Err(Error::new(ErrorKind::Internal)
+                .with_message(format!("ATP adapter session ID collision for {session_id}")));
+        }
+        let started_at = negotiation.negotiated_at;
 
         let session = AdapterSession {
             session_id: session_id.clone(),
             negotiation,
-            started_at: SystemTime::now(),
-            last_activity: SystemTime::now(),
+            started_at,
+            last_activity: started_at,
             stats: SessionStats::new(),
         };
 
         self.active_sessions.insert(session_id.clone(), session);
-        self.update_metrics();
+        self.record_session_started(adapter_type, started_at);
 
         Ok(session_id)
     }
@@ -515,6 +521,74 @@ impl AdapterManager {
         );
 
         matrix
+    }
+
+    fn effective_requirements(&self, requirements: &[RequiredFeature]) -> Vec<RequiredFeature> {
+        let mut effective = self.config.required_features.clone();
+        for requirement in requirements {
+            if !effective.contains(requirement) {
+                effective.push(requirement.clone());
+            }
+        }
+        effective
+    }
+
+    fn ensure_adapter_capacity(&self, adapter_type: AdapterType) -> Result<()> {
+        let Some(adapter_config) = self.config.adapter_configs.get(&adapter_type) else {
+            return Ok(());
+        };
+
+        if adapter_config.max_concurrent == 0 {
+            return Err(Error::new(ErrorKind::AdmissionDenied).with_message(format!(
+                "{adapter_type} adapter has zero configured session capacity"
+            )));
+        }
+
+        let active_for_adapter = self
+            .active_sessions
+            .values()
+            .filter(|session| {
+                Self::adapter_types_match(session.negotiation.selected_adapter, adapter_type)
+            })
+            .count();
+
+        if active_for_adapter >= adapter_config.max_concurrent {
+            return Err(Error::new(ErrorKind::AdmissionDenied).with_message(format!(
+                "{adapter_type} adapter session capacity exhausted: active={active_for_adapter}, max={}",
+                adapter_config.max_concurrent
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn allocate_session_id(
+        &mut self,
+        adapter_type: AdapterType,
+        object_id: &ObjectId,
+    ) -> Result<String> {
+        let sequence = self.next_session_sequence;
+        self.next_session_sequence =
+            self.next_session_sequence.checked_add(1).ok_or_else(|| {
+                Error::new(ErrorKind::Internal)
+                    .with_message("ATP adapter session sequence exhausted")
+            })?;
+
+        let object_hex = object_id.as_hex();
+        let object_prefix = object_hex.get(..16).unwrap_or(object_hex.as_str());
+        Ok(format!(
+            "adapter-{adapter_type}-{sequence:016x}-{object_prefix}"
+        ))
+    }
+
+    fn adapter_types_match(left: AdapterType, right: AdapterType) -> bool {
+        matches!(
+            (left, right),
+            (AdapterType::NativeQuic, AdapterType::NativeQuic)
+                | (AdapterType::WebTransport, AdapterType::WebTransport)
+                | (AdapterType::MasqueConnectUdp, AdapterType::MasqueConnectUdp)
+                | (AdapterType::TcpTlsFallback, AdapterType::TcpTlsFallback)
+        )
     }
 
     /// Try to negotiate specific adapter type.
@@ -632,26 +706,39 @@ impl AdapterManager {
 
     /// Add adapter-specific performance caveats.
     fn add_adapter_caveats(&self, adapter_type: AdapterType, caveats: &mut Vec<PerformanceCaveat>) {
+        let reporting = &self.config.caveat_reporting;
         match adapter_type {
             AdapterType::NativeQuic => {
                 // No caveats for native implementation
             }
             AdapterType::WebTransport => {
-                caveats.push(PerformanceCaveat::NestedTransportOverhead);
+                if reporting.report_performance {
+                    caveats.push(PerformanceCaveat::NestedTransportOverhead);
+                }
             }
             AdapterType::MasqueConnectUdp => {
-                caveats.push(PerformanceCaveat::NestedTransportOverhead);
-                caveats.push(PerformanceCaveat::IncreasedLatency(Duration::from_millis(
-                    50,
-                )));
+                if reporting.report_performance {
+                    caveats.push(PerformanceCaveat::NestedTransportOverhead);
+                    if reporting.include_timing {
+                        caveats.push(PerformanceCaveat::IncreasedLatency(Duration::from_millis(
+                            50,
+                        )));
+                    }
+                }
             }
             AdapterType::TcpTlsFallback => {
-                caveats.push(PerformanceCaveat::HeadOfLineBlocking);
-                caveats.push(PerformanceCaveat::NoMultiplexing);
-                caveats.push(PerformanceCaveat::IncreasedLatency(Duration::from_millis(
-                    100,
-                )));
-                caveats.push(PerformanceCaveat::ReducedThroughput(0.7)); // 30% throughput reduction
+                if reporting.report_hol_blocking {
+                    caveats.push(PerformanceCaveat::HeadOfLineBlocking);
+                }
+                if reporting.report_performance {
+                    caveats.push(PerformanceCaveat::NoMultiplexing);
+                    if reporting.include_timing {
+                        caveats.push(PerformanceCaveat::IncreasedLatency(Duration::from_millis(
+                            100,
+                        )));
+                    }
+                    caveats.push(PerformanceCaveat::ReducedThroughput(0.7)); // 30% throughput reduction
+                }
             }
         }
     }
@@ -681,19 +768,14 @@ impl AdapterManager {
         }
     }
 
-    /// Record successful negotiation for metrics.
-    fn record_successful_negotiation(&mut self, negotiation: &AdapterNegotiation) {
+    /// Record a started session for metrics.
+    fn record_session_started(&mut self, adapter_type: AdapterType, started_at: SystemTime) {
         *self
             .metrics
             .sessions_by_adapter
-            .entry(negotiation.selected_adapter)
+            .entry(adapter_type)
             .or_insert(0) += 1;
-        self.metrics.last_updated = SystemTime::now();
-    }
-
-    /// Update adapter metrics.
-    fn update_metrics(&mut self) {
-        self.metrics.last_updated = SystemTime::now();
+        self.metrics.last_updated = started_at;
     }
 }
 
@@ -740,7 +822,7 @@ impl AdapterMetrics {
             caveat_frequency: HashMap::new(),
             avg_session_duration: HashMap::new(),
             success_rates: HashMap::new(),
-            last_updated: SystemTime::now(),
+            last_updated: SystemTime::UNIX_EPOCH,
         }
     }
 }
@@ -770,7 +852,39 @@ impl fmt::Display for FeatureSupport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::object::{ContentId, ObjectId};
     use futures_lite::future::block_on;
+    use std::collections::HashMap;
+
+    fn test_object_id(label: &str) -> ObjectId {
+        ObjectId::content(ContentId::from_bytes(label.as_bytes()))
+    }
+
+    fn adapter_specific_config(max_concurrent: usize) -> AdapterSpecificConfig {
+        AdapterSpecificConfig {
+            connection_timeout: Duration::from_secs(10),
+            max_concurrent,
+            feature_flags: HashMap::new(),
+            performance_config: PerformanceConfig {
+                buffer_sizes: BufferSizes {
+                    send_buffer: 64 * 1024,
+                    recv_buffer: 64 * 1024,
+                    max_frame_size: 16 * 1024,
+                },
+                retry_policy: RetryPolicy {
+                    max_attempts: 3,
+                    base_delay: Duration::from_millis(100),
+                    max_delay: Duration::from_secs(5),
+                    backoff_factor: 2.0,
+                },
+                keep_alive: KeepAliveConfig {
+                    interval: Duration::from_secs(30),
+                    timeout: Duration::from_secs(60),
+                    enabled: true,
+                },
+            },
+        }
+    }
 
     #[test]
     fn test_adapter_parity_matrix() {
@@ -845,6 +959,138 @@ mod tests {
                 negotiation.downgrade_reasons.is_empty(),
                 "selected adapter should satisfy the requested features"
             );
+        });
+    }
+
+    #[test]
+    fn adapter_config_required_features_are_enforced() {
+        block_on(async {
+            let config = AdapterConfig {
+                preferred_adapters: vec![AdapterType::NativeQuic, AdapterType::WebTransport],
+                required_features: vec![RequiredFeature::ObjectVerification],
+                ..Default::default()
+            };
+            let mut manager = AdapterManager::new(config);
+            manager
+                .parity_matrix
+                .get_mut(&AdapterType::NativeQuic)
+                .expect("native parity")
+                .object_support = FeatureSupport::Unsupported;
+
+            let negotiation = manager
+                .negotiate_adapter(&[], TraceId::from_parts(1, 1))
+                .await
+                .expect("configured requirement should force compatible fallback");
+
+            assert_eq!(negotiation.selected_adapter, AdapterType::WebTransport);
+        });
+    }
+
+    #[test]
+    fn negotiation_does_not_count_as_started_session() {
+        block_on(async {
+            let mut manager = AdapterManager::new(AdapterConfig::default());
+            let negotiation = manager
+                .negotiate_adapter(&[], TraceId::from_parts(1, 1))
+                .await
+                .expect("negotiation should succeed");
+
+            assert_eq!(
+                manager
+                    .metrics()
+                    .sessions_by_adapter
+                    .get(&negotiation.selected_adapter),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn start_session_generates_unique_ids_and_preserves_sessions() {
+        block_on(async {
+            let mut manager = AdapterManager::new(AdapterConfig::default());
+            let negotiation = manager
+                .negotiate_adapter(&[], TraceId::from_parts(1, 1))
+                .await
+                .expect("negotiation should succeed");
+            let object_id = test_object_id("session-id-collision-regression");
+
+            let first = manager
+                .start_session(negotiation.clone(), object_id.clone())
+                .await
+                .expect("first session should start");
+            let second = manager
+                .start_session(negotiation.clone(), object_id)
+                .await
+                .expect("second session should start without replacing the first");
+
+            assert_ne!(first, second);
+            assert!(manager.active_sessions.contains_key(&first));
+            assert!(manager.active_sessions.contains_key(&second));
+            assert_eq!(manager.active_sessions.len(), 2);
+            assert_eq!(
+                manager
+                    .metrics()
+                    .sessions_by_adapter
+                    .get(&negotiation.selected_adapter),
+                Some(&2)
+            );
+        });
+    }
+
+    #[test]
+    fn start_session_enforces_adapter_concurrency_limit() {
+        block_on(async {
+            let mut adapter_configs = HashMap::new();
+            adapter_configs.insert(AdapterType::NativeQuic, adapter_specific_config(1));
+            let config = AdapterConfig {
+                adapter_configs,
+                ..Default::default()
+            };
+            let mut manager = AdapterManager::new(config);
+            let negotiation = manager
+                .negotiate_adapter(&[], TraceId::from_parts(1, 1))
+                .await
+                .expect("negotiation should succeed");
+
+            manager
+                .start_session(
+                    negotiation.clone(),
+                    test_object_id("session-capacity-first"),
+                )
+                .await
+                .expect("first session should fit configured capacity");
+            let err = manager
+                .start_session(negotiation, test_object_id("session-capacity-second"))
+                .await
+                .expect_err("second session should exceed configured capacity");
+
+            assert_eq!(err.kind(), ErrorKind::AdmissionDenied);
+            assert_eq!(manager.active_sessions.len(), 1);
+        });
+    }
+
+    #[test]
+    fn caveat_reporting_flags_filter_reported_caveats() {
+        block_on(async {
+            let config = AdapterConfig {
+                preferred_adapters: vec![AdapterType::TcpTlsFallback],
+                caveat_reporting: CaveatReporting {
+                    report_performance: false,
+                    report_hol_blocking: false,
+                    report_diagnostic_limits: false,
+                    include_timing: false,
+                },
+                ..Default::default()
+            };
+            let mut manager = AdapterManager::new(config);
+
+            let negotiation = manager
+                .negotiate_adapter(&[], TraceId::from_parts(1, 1))
+                .await
+                .expect("TCP fallback should still negotiate");
+
+            assert!(negotiation.performance_caveats.is_empty());
         });
     }
 

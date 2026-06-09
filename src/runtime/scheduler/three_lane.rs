@@ -12464,7 +12464,7 @@ mod tests {
         use crate::record::task::TaskRecord;
         let record = TaskRecord::new(
             TaskId::new_for_test(1, 0),
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             Budget::INFINITE,
         );
         assert!(!record.is_local(), "default should be false");
@@ -12475,7 +12475,7 @@ mod tests {
         use crate::record::task::TaskRecord;
         let mut record = TaskRecord::new(
             TaskId::new_for_test(1, 0),
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             Budget::INFINITE,
         );
         assert!(!record.is_local());
@@ -13196,7 +13196,7 @@ mod tests {
         let task_id = TaskId::new_for_test(1, 0);
 
         // Set up cx_inner with cancel_acknowledged flag.
-        let region_id = RegionId::new_for_test(0, 0);
+        let region_id = RegionId::new_for_test(0, 1);
         let cx_inner = Arc::new(RwLock::new(CxInner::new(
             region_id,
             task_id,

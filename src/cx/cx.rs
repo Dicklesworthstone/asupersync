@@ -2386,7 +2386,13 @@ impl<Caps> Cx<Caps> {
         let context = obs.context.clone();
         drop(obs);
         let mut entry = entry.with_context(&context);
-        if include_timestamps && entry.timestamp() == Time::from_nanos(1_000_000_000) {
+        // `LogEntry::new`/`info` initialize `timestamp` to `Time::ZERO`, which is
+        // the "unset" sentinel: when the caller did not supply an explicit
+        // timestamp we fill it in from the context's timer driver. The previous
+        // sentinel (`Time::from_nanos(1_000_000_000)`) never matched the actual
+        // default, so auto-timestamping silently never fired and entries kept
+        // `Time::ZERO`.
+        if include_timestamps && entry.timestamp() == Time::ZERO {
             let now = self
                 .handles
                 .timer_driver
@@ -3203,7 +3209,9 @@ impl Cx<cap::All> {
     ///
     /// This constructor creates a Cx with default IDs and an infinite budget,
     /// suitable for unit and integration tests. The resulting context is fully
-    /// functional but not connected to a real runtime.
+    /// functional but not connected to a real runtime. The synthetic region is
+    /// non-root so tests can create cancel-safe obligations without tripping the
+    /// root-region leak guard.
     ///
     /// # Example
     ///
@@ -3231,7 +3239,7 @@ impl Cx<cap::All> {
     #[must_use]
     pub fn for_testing() -> Self {
         Self::new(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
         )
@@ -3263,7 +3271,7 @@ impl Cx<cap::All> {
     #[must_use]
     pub fn for_testing_with_budget(budget: Budget) -> Self {
         Self::new(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             budget,
         )
@@ -3292,7 +3300,7 @@ impl Cx<cap::All> {
     #[must_use]
     pub fn for_testing_with_io() -> Self {
         Self::new_with_io(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -3421,7 +3429,7 @@ mod tests {
     use crate::messaging::subject::SubjectPattern;
     use crate::trace::TraceBufferHandle;
     use crate::types::CapabilityBudgetDimension;
-    use crate::util::{ArenaIndex, DetEntropy};
+    use crate::util::DetEntropy;
     use std::sync::atomic::{AtomicU8, Ordering};
 
     static CURRENT_CX_DTOR_STATE: AtomicU8 = AtomicU8::new(0);
@@ -3451,7 +3459,7 @@ mod tests {
 
     fn test_cx_with_entropy(seed: u64) -> Cx<cap::All> {
         Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -4008,7 +4016,7 @@ mod tests {
 
         let reason = cx.cancel_reason().expect("should have reason");
         // Region should be set from the Cx
-        let expected_region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let expected_region = cx.region_id();
         assert_eq!(reason.origin_region, expected_region);
     }
 

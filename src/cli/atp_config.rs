@@ -195,7 +195,7 @@ impl Default for ConfigPaths {
 impl ConfigPaths {
     /// Detect standard config paths for the current platform.
     pub fn detect_standard_paths() -> Self {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             let home = Self::sanitize_env_path("HOME", "/tmp");
             let config_dir =

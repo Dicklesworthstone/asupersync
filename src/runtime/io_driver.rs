@@ -2859,14 +2859,20 @@ mod tests {
         // This is a regression test for the deadlock issue where on_event was called
         // while holding the inner mutex.
 
-        let handle = IoDriverHandle::new(Arc::new(NotFoundReactor));
+        let reactor = Arc::new(LabReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let handle = IoDriverHandle::new(reactor_handle);
+        let source = TestFdSource;
 
-        // Create an event that would trigger the callback
-        let events = {
-            let mut events = Events::with_capacity(1);
-            events.push(Event::new(Token::new(42), Interest::READABLE));
-            events
-        };
+        let (waker, waker_state) = create_test_waker();
+        let registration = handle
+            .register(&source, Interest::READABLE, waker)
+            .expect("register test source");
+        reactor.inject_event(
+            registration.token,
+            Event::readable(registration.token),
+            Duration::ZERO,
+        );
 
         // Clone handle to capture in callback
         let handle_clone = handle.clone();
@@ -2885,14 +2891,14 @@ mod tests {
             let _empty = handle_clone.is_empty();
         };
 
-        // Manually invoke the method that was previously causing deadlocks
-        {
-            let mut driver = handle.inner.lock();
-            let _wakers = driver.restore_and_extract_wakers(events, on_event);
-        }
+        let events = handle
+            .turn_with(Some(Duration::ZERO), on_event)
+            .expect("turn_with should dispatch injected event");
 
         // Verify the callback was executed
         assert!(callback_executed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(events, 1);
+        assert!(waker_state.flag.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
 

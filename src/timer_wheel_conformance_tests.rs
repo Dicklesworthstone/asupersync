@@ -357,6 +357,8 @@ mod conformance_tests {
         let timer3 = wheel.extract_earliest().expect("Should have timer");
         assert_eq!(timer3.deadline.nanos(), 300);
 
+        assert!(!wheel.cancel(id1), "Extracted timer id1 should be gone");
+        assert!(!wheel.cancel(id3), "Extracted timer id3 should be gone");
         assert!(wheel.extract_earliest().is_none(), "Should be empty");
     }
 
@@ -574,6 +576,11 @@ mod conformance_tests {
                 wheel.verify_invariants()
                     .map_err(|e| TestCaseError::fail(format!("Invariants violated: {}", e)))?;
             }
+
+            prop_assert!(
+                extracted_count <= inserted_ids.len(),
+                "Extracted more timers than were inserted"
+            );
         }
     }
 
@@ -588,14 +595,14 @@ mod conformance_tests {
         // Insert 1000 timers with random deadlines
         let mut timer_ids = Vec::new();
         for _ in 0..1000 {
-            let deadline = MockDeadline::from_nanos(rng.gen_range(0..10_000_000));
+            let deadline = MockDeadline::from_nanos(rng.random_range(0..10_000_000));
             let id = wheel.insert(deadline);
             timer_ids.push(id);
         }
 
         // Randomly cancel 30% of timers
         for _ in 0..300 {
-            let index = rng.gen_range(0..timer_ids.len());
+            let index = rng.random_range(0..timer_ids.len());
             wheel.cancel(timer_ids[index]);
         }
 

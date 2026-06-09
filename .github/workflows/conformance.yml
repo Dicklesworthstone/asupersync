@@ -214,7 +214,12 @@ jobs:
             echo "rch is required for conformance runtime matrix tests" >&2
             exit 1
           fi
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_conformance_runtime_${ASUPERSYNC_RUNTIME}" cargo test --features ${{ matrix.features }} -- --nocapture
+          "$RCH_BIN" exec -- env \
+            CARGO_INCREMENTAL=0 \
+            CARGO_PROFILE_TEST_DEBUG=0 \
+            RUSTFLAGS="-C debuginfo=0" \
+            CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_conformance_runtime_${ASUPERSYNC_RUNTIME}" \
+            cargo test --features ${{ matrix.features }} -- --nocapture
         env:
           ASUPERSYNC_RUNTIME: ${{ matrix.runtime }}
 

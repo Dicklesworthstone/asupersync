@@ -803,8 +803,13 @@ mod tests {
                     rejected_log_records: 1, // Server rejects 1 log record
                     error_message: "Log record too large".to_string(),
                 },
-                expected_dropped_records: vec!["log_002".to_string()], // Record with issue should be dropped
-                expected_retained_records: vec!["log_001".to_string(), "log_003".to_string()],
+                // The OTLP partial-success response only carries a rejected
+                // COUNT, not per-record identifiers, so the exporter drops the
+                // last N records deterministically (see
+                // evaluate_asupersync_export_logs_partial_success). With one
+                // rejection that is the final record.
+                expected_dropped_records: vec!["log_003".to_string()],
+                expected_retained_records: vec!["log_001".to_string(), "log_002".to_string()],
                 should_retry_rejected: false, // MUST NOT retry rejected records
                 should_respect_partial_success: true,
             },
@@ -2050,16 +2055,13 @@ mod tests {
                 .iter()
                 .all(|entry| scenario.initial_tracestate_entries.contains(entry));
 
-        // Check order preservation (if we have same entries)
-        let order_preserved = if current_entries.len() == scenario.initial_tracestate_entries.len()
-        {
-            current_entries
-                .iter()
-                .zip(scenario.initial_tracestate_entries.iter())
-                .all(|(a, b)| a == b)
-        } else {
-            false
-        };
+        // Check order preservation: the retained entries must appear in the
+        // same relative order as in the original list. Overflow ("drop oldest")
+        // and size-limit filtering both shrink the list, so a length-equality
+        // gate would spuriously report a re-ordering; an in-order subsequence
+        // check captures the real W3C requirement.
+        let order_preserved =
+            is_in_order_subsequence(&current_entries, &scenario.initial_tracestate_entries);
 
         TracestateHeaderResult {
             final_tracestate_entries: current_entries.clone(),
@@ -2074,6 +2076,16 @@ mod tests {
             max_entry_size_enforced: true,
             max_entries_enforced: current_entries.len() <= 32,
         }
+    }
+
+    /// Returns true if `subset` appears as an in-order (not necessarily
+    /// contiguous) subsequence of `full`. Used to confirm tracestate entries
+    /// keep their original relative order after overflow/size filtering.
+    fn is_in_order_subsequence(subset: &[(String, String)], full: &[(String, String)]) -> bool {
+        let mut iter = full.iter();
+        subset
+            .iter()
+            .all(|entry| iter.by_ref().any(|candidate| candidate == entry))
     }
 
     /// Evaluate tracestate header propagation with reference implementation
@@ -2100,15 +2112,8 @@ mod tests {
         let entries_preserved = !overflow_occurred
             && current_entries.len() == scenario.initial_tracestate_entries.len();
 
-        let order_preserved = if current_entries.len() == scenario.initial_tracestate_entries.len()
-        {
-            current_entries
-                .iter()
-                .zip(scenario.initial_tracestate_entries.iter())
-                .all(|(a, b)| a == b)
-        } else {
-            false
-        };
+        let order_preserved =
+            is_in_order_subsequence(&current_entries, &scenario.initial_tracestate_entries);
 
         TracestateHeaderResult {
             final_tracestate_entries: current_entries.clone(),

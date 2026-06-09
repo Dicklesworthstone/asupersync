@@ -1,0 +1,34 @@
+{
+  "expected": {
+    "citable": false,
+    "exit_code": -1,
+    "first_blocker_contains": [
+      "client disconnected"
+    ],
+    "first_blocker_forbidden": [],
+    "lifecycle_state": "partial",
+    "max_first_blocker_lines": 8,
+    "outcome_status": "partial",
+    "proof_evidence_status": "blocked",
+    "refusal_reason_codes": [
+      "failed-proof-status"
+    ],
+    "terminal_classification": "client_disconnected_partial"
+  },
+  "fixture_id": "client-disconnected-partial",
+  "rch_outcome": {
+    "build_id": "29879655498514503",
+    "client_disconnected": true,
+    "detector_heartbeat_stale": false,
+    "detector_progress_stale": false,
+    "exit_code": -1,
+    "finished_at": "2026-06-09T09:45:00Z",
+    "location": "remote",
+    "started_at": "2026-06-09T09:44:00Z",
+    "status": "client_disconnected",
+    "submitted_at": "2026-06-09T09:43:00Z",
+    "worker_id": "vmi1227854"
+  },
+  "stderr": "client disconnected before terminal status was observed\n",
+  "stdout": "remote command still running when the attached session ended\n"
+}

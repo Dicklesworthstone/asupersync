@@ -480,7 +480,7 @@ mod tests {
         let reactor = Arc::new(LabReactor::new());
         let driver = IoDriverHandle::new(reactor);
         let cx = Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -566,7 +566,7 @@ mod tests {
         });
         let driver = IoDriverHandle::new(reactor);
         let cx = Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -671,7 +671,7 @@ mod tests {
         let reactor = Arc::new(LabReactor::new());
         let driver = IoDriverHandle::new(reactor);
         let cx = Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -754,7 +754,7 @@ mod tests {
         let clock = Arc::new(crate::time::VirtualClock::new());
         let timer = crate::time::TimerDriverHandle::with_virtual_clock(clock.clone());
         let cx = Cx::new_with_drivers(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,

@@ -1215,14 +1215,15 @@ mod tests {
     fn set_header_strips_crlf_from_name() {
         let mut resp = Response::empty(StatusCode::OK);
         resp.set_header("x-test\r\nEvil-Header: injected", "value");
-        // CRLF in the name is stripped before lowercasing/insertion so the
-        // wire-format encoder never sees an injection vector.
-        assert!(resp.headers.contains_key("x-testevil-header: injected"));
+        // Invalid field-name bytes are stripped before lowercasing/insertion,
+        // so the wire-format encoder never sees an injection vector or an
+        // unserializable header name.
+        assert!(resp.headers.contains_key("x-testevil-headerinjected"));
         assert!(
             !resp
                 .headers
                 .keys()
-                .any(|k| k.contains('\r') || k.contains('\n'))
+                .any(|k| k.contains(['\r', '\n', ':', ' ']))
         );
     }
 

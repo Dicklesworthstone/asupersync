@@ -353,6 +353,7 @@ def main():
 
     with open(args.output, 'w') as f:
         json.dump(matrix, f, indent=2)
+        f.write("\n")
 
     print(f"Generated {args.mode} matrix with {len(matrix[args.mode])} entries")
     print(f"Matrix written to {args.output}")

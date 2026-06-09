@@ -170,7 +170,7 @@ impl LocalQueue {
         let mut state = RuntimeState::new();
         for id in 0..=max_task_id {
             let task_id = TaskId::new_for_test(id, 0);
-            let record = TaskRecord::new(task_id, RegionId::new_for_test(0, 0), Budget::INFINITE);
+            let record = TaskRecord::new(task_id, RegionId::new_for_test(0, 1), Budget::INFINITE);
             let idx = state.insert_task(record);
             debug_assert_eq!(idx.index(), id);
         }
@@ -184,7 +184,7 @@ impl LocalQueue {
         let mut tasks = TaskTable::new();
         for id in 0..=max_task_id {
             let task_id = TaskId::new_for_test(id, 0);
-            let record = TaskRecord::new(task_id, RegionId::new_for_test(0, 0), Budget::INFINITE);
+            let record = TaskRecord::new(task_id, RegionId::new_for_test(0, 1), Budget::INFINITE);
             let idx = tasks.insert_task(record);
             debug_assert_eq!(idx.index(), id);
         }

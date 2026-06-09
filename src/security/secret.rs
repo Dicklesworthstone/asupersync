@@ -216,7 +216,6 @@ mod tests {
     #![allow(clippy::pedantic, clippy::nursery)]
 
     use super::*;
-    use std::mem::ManuallyDrop;
 
     #[test]
     fn new_preserves_bytes() {
@@ -289,45 +288,38 @@ mod tests {
     }
 
     /// br-asupersync-r2l1ze: `Drop` MUST overwrite every byte of the
-    /// secret before the allocation is released. We verify with the
-    /// same `ManuallyDrop` + raw-pointer trick used to validate
-    /// `AuthKey::drop` (br-asupersync-4pegj0): keep the storage alive
-    /// past the destructor side-effect by using `ManuallyDrop`, snapshot
-    /// a pointer to the byte buffer before `drop` runs, then read back
-    /// through the pointer to confirm every byte is zero.
+    /// secret before the allocation is released. The destructor is
+    /// `fn drop(&mut self) { self.zeroize_bytes(); }`, so we verify by
+    /// invoking that exact routine on a still-live buffer and reading the
+    /// bytes back in place — no reads of freed memory.
     #[test]
     fn drop_zeroizes_secret_bytes() {
-        let mut s = ManuallyDrop::new(SecretString::new("plaintext"));
+        // br-asupersync-r2l1ze: the `Drop` impl is exactly
+        // `fn drop(&mut self) { self.zeroize_bytes(); }`, so we verify the
+        // destructor's zeroization by invoking that *same* routine while the
+        // backing allocation is still live and reading the bytes back in
+        // place. This avoids the use-after-free that results from reading a
+        // pointer into a buffer the `Vec` destructor has already freed (the
+        // previous version snapshotted `as_ptr()` then read it back after the
+        // allocation was released — undefined behaviour that could observe
+        // reused/garbage memory rather than the zeroized bytes).
+        let mut s = SecretString::new("plaintext");
 
-        // Snapshot the data pointer + length BEFORE running Drop. Using
-        // `as_ptr()` is sound here because `ManuallyDrop` keeps the
-        // storage alive — only the destructor's side-effect (the
-        // zeroize loop) runs when we explicitly call
-        // `ManuallyDrop::drop`.
-        let ptr: *const u8 = s.bytes.as_ptr();
-        let len = s.bytes.len();
-        assert!(len > 0);
+        // Sanity: pre-zeroize the bytes are the plaintext we put in.
+        assert_eq!(s.as_bytes(), b"plaintext");
 
-        // Sanity: pre-drop the bytes are the plaintext we put in.
-        let pre = unsafe { core::slice::from_raw_parts(ptr, len) };
-        assert_eq!(pre, b"plaintext");
+        // Run the destructor's side-effect directly. `zeroize_bytes` is the
+        // single source of truth shared by `Drop` and `explicit_zeroize`.
+        s.zeroize_bytes();
 
-        // Run the destructor manually.
-        unsafe {
-            ManuallyDrop::drop(&mut s);
-        }
-
-        // Post-drop, every byte must be zero. We read through the
-        // saved pointer; the storage is technically logically-released
-        // but `Vec`'s allocator hasn't reused it yet on any reasonable
-        // platform within a single test, so the read returns the
-        // zeroed bytes the destructor wrote. (This same pattern is
-        // documented and used in the `zeroize` crate's own tests.)
-        let post = unsafe { core::slice::from_raw_parts(ptr, len) };
+        // Every byte must now be zero. The buffer is still allocated and
+        // owned by `s`, so this read is fully defined.
         assert!(
-            post.iter().all(|&b| b == 0),
-            "Drop must zeroize every byte; observed: {post:02x?}"
+            s.bytes.iter().all(|&b| b == 0),
+            "Drop's zeroize must clear every byte; observed: {:02x?}",
+            s.bytes
         );
+        assert_eq!(s.bytes.len(), b"plaintext".len());
     }
 
     /// br-asupersync-r2l1ze: `from_string` consumes the source `String`
@@ -338,18 +330,22 @@ mod tests {
     /// and zeroization on drop, which together imply the safety property.)
     #[test]
     fn from_string_zeroizes_on_drop() {
-        let mut s = ManuallyDrop::new(SecretString::from_string(String::from("from_string")));
-        let ptr: *const u8 = s.bytes.as_ptr();
-        let len = s.bytes.len();
-        assert_eq!(
-            unsafe { core::slice::from_raw_parts(ptr, len) },
-            b"from_string"
+        // br-asupersync-r2l1ze: `from_string` re-uses the source `String`'s
+        // allocation; verify the destructor's zeroization clears exactly
+        // those bytes. As in `drop_zeroizes_secret_bytes`, we exercise the
+        // shared `zeroize_bytes` routine (which `Drop` calls verbatim) on the
+        // still-live buffer rather than reading a freed allocation.
+        let mut s = SecretString::from_string(String::from("from_string"));
+        assert_eq!(s.as_bytes(), b"from_string");
+
+        s.zeroize_bytes();
+
+        assert!(
+            s.bytes.iter().all(|&b| b == 0),
+            "Drop's zeroize must clear every byte; observed: {:02x?}",
+            s.bytes
         );
-        unsafe {
-            ManuallyDrop::drop(&mut s);
-        }
-        let post = unsafe { core::slice::from_raw_parts(ptr, len) };
-        assert!(post.iter().all(|&b| b == 0));
+        assert_eq!(s.bytes.len(), b"from_string".len());
     }
 
     /// `explicit_zeroize` must wipe the bytes IMMEDIATELY (before drop)

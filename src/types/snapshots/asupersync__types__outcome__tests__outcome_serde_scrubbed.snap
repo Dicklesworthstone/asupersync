@@ -1,6 +1,6 @@
 ---
 source: src/types/outcome.rs
-assertion_line: 1210
+assertion_line: 1257
 expression: "scrub_outcome_serde(json!({\n    \"ok\": Outcome::<u8, &str>::ok(7), \"err\": Outcome::<u8,\n    &str>::err(\"denied\"), \"cancelled\": Outcome::<u8,\n    &str>::cancelled(CancelReason::user(\"req-9f4c36b1\")), \"panicked\":\n    OutcomeError::<&str>::Panicked(PanicPayload::new(\"boom\")),\n}))"
 ---
 {
@@ -15,7 +15,7 @@ expression: "scrub_outcome_serde(json!({\n    \"ok\": Outcome::<u8, &str>::ok(7)
         "kind": "RegionId"
       },
       "origin_task": null,
-      "timestamp": 0,
+      "timestamp": 1000000000,
       "truncated": false,
       "truncated_at_depth": null
     }

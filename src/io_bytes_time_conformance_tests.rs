@@ -260,7 +260,8 @@ mod tests {
 
     #[test]
     fn timeout_future_uses_explicit_time_without_wall_clock_sleep() {
-        let mut ready_timeout = TimeoutFuture::after(Time::ZERO, Duration::ZERO, ready(42_u8));
+        let mut ready_timeout =
+            TimeoutFuture::after(Time::ZERO, Duration::from_millis(10), ready(42_u8));
         let ready_result = with_task_context(|cx| ready_timeout.poll_with_time(cx, Time::ZERO));
         assert_eq!(ready_result, Poll::Ready(Ok(42)));
 

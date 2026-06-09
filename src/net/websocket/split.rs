@@ -1855,7 +1855,7 @@ mod tests {
 
     fn test_cx_with_entropy(entropy: Arc<dyn EntropySource>) -> Cx {
         Cx::new_with_observability(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,

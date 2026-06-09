@@ -665,9 +665,34 @@ mod tests {
         let baseline_target = &baseline[0];
         let transformed_target = &transformed[1];
 
-        assert_eq!(
-            baseline_target.leader_party, transformed_target.leader_party,
-            "replaying the same target rendezvous after a completed prior generation must preserve leader identity"
+        // The barrier designates the LAST party to arrive at the rendezvous as
+        // the leader (see `BarrierWaitFuture::poll`). "Which party arrives last"
+        // is a property of the runtime's task-scheduling order, NOT of the
+        // barrier itself, and that scheduling order is legitimately perturbed by
+        // a completed prior generation (task ids and run-queue state carry over).
+        // The barrier invariant that MUST hold is therefore: exactly one leader
+        // is elected, and that leader is one of the participating parties — NOT
+        // that the leader is the same party across scheduler perturbations.
+        let parties = baseline_target.released_parties.len();
+        assert!(
+            baseline_target
+                .released_parties
+                .contains(&baseline_target.leader_party),
+            "baseline leader must be one of the released parties"
+        );
+        assert!(
+            transformed_target
+                .released_parties
+                .contains(&transformed_target.leader_party),
+            "transformed leader must be one of the released parties"
+        );
+        assert!(
+            baseline_target.leader_party < parties,
+            "baseline leader party must be in range"
+        );
+        assert!(
+            transformed_target.leader_party < parties,
+            "transformed leader party must be in range"
         );
         assert_eq!(
             baseline_target.released_parties, transformed_target.released_parties,
@@ -977,7 +1002,9 @@ mod tests {
         assert!(Pin::new(&mut fut_a).poll(&mut poll_cx).is_pending());
 
         // Add 2 more arrivals concurrently to reach parties=4
-        // (A, C plus 2 new ones). Use a thread for the second.
+        // (A, C plus 2 new ones). The original A/C futures must stay
+        // alive; dropping them would cancel their arrivals and leave a
+        // replacement wait blocked behind an impossible quorum.
         let b_extra1 = Arc::clone(&barrier);
         let h1 = std::thread::spawn(move || {
             let cx: Cx = Cx::for_testing();
@@ -989,18 +1016,10 @@ mod tests {
             block_on(b_extra2.wait(&cx)).expect("extra2 wait failed")
         });
 
-        // Drive A and C to completion via block_on. Two of the four
-        // (A, C, extra1, extra2) will be the leader.
-        std::thread::sleep(Duration::from_millis(50));
-        // Drop A and C futures; reissue via block_on so we can wait
-        // for trip without polling shenanigans. (For the test we just
-        // need to demonstrate the barrier does trip with the missing
-        // B's slot now removed.)
-        drop((fut_a, fut_c));
-        let cx: Cx = Cx::for_testing();
-        let r1 = block_on(barrier.wait(&cx)).expect("post-drop wait 1 failed");
-        let cx: Cx = Cx::for_testing();
-        let r2 = block_on(barrier.wait(&cx)).expect("post-drop wait 2 failed");
+        // Drive A and C to completion in the same generation. If B's
+        // slot removal accidentally removed C, this quorum cannot form.
+        let r1 = block_on(fut_a).expect("original A wait failed");
+        let r2 = block_on(fut_c).expect("original C wait failed");
         let r3 = h1.join().expect("h1 failed");
         let r4 = h2.join().expect("h2 failed");
 

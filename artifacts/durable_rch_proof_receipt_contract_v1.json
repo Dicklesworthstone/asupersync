@@ -1,0 +1,193 @@
+{
+  "contract_version": "durable-rch-proof-receipt-contract-v1",
+  "receipt_schema_version": "durable-rch-proof-receipt-v1",
+  "bead_id": "asupersync-durable-rch-proof-submission-zxnnhe.1",
+  "created_date": "2026-06-09",
+  "description": "Source-owned fail-closed schema for durable RCH proof submissions and terminal receipts. This contract defines receipt fields only; it does not submit jobs, query live RCH, or mutate Agent Mail.",
+  "source_of_truth": {
+    "contract": "artifacts/durable_rch_proof_receipt_contract_v1.json",
+    "contract_test": "tests/durable_rch_proof_receipt_contract.rs",
+    "fixture_root": "tests/fixtures/durable_rch_proof_receipt",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "proof_reuse_cache_contract": "artifacts/proof_reuse_cache_contract_v1.json",
+    "agent_instructions": "AGENTS.md"
+  },
+  "decision_policy": {
+    "default_decision": "refused",
+    "accepted_decision": "accepted",
+    "unknown_or_missing_fields_decision": "refused",
+    "remote_required": true,
+    "required_command_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "local_fallback_allowed": false,
+    "required_branch": "main",
+    "accepted_lifecycle_state": "terminal_pass",
+    "accepted_terminal_classification": "pass",
+    "accepted_proof_evidence_status": "fresh-rch-pass",
+    "network_access_required_for_contract_tests": false,
+    "live_agent_mail_required_for_contract_tests": false,
+    "tracker_mutation_allowed_for_contract_tests": false
+  },
+  "required_receipt_sections": [
+    "command",
+    "source",
+    "rch_provenance",
+    "outcome",
+    "claim_boundaries"
+  ],
+  "required_fields_by_section": [
+    {
+      "section": "identity",
+      "required_fields": [
+        "schema_version",
+        "receipt_id",
+        "submission_id",
+        "generated_at",
+        "manifest_lane_id",
+        "manifest_guarantee_ids",
+        "claim_scope",
+        "proof_evidence_status",
+        "lifecycle_state",
+        "terminal_classification"
+      ]
+    },
+    {
+      "section": "command",
+      "required_fields": [
+        "command",
+        "argv",
+        "command_fingerprint",
+        "env_fingerprint",
+        "env_allowlist",
+        "remote_required",
+        "local_fallback_allowed",
+        "local_fallback_markers"
+      ]
+    },
+    {
+      "section": "source",
+      "required_fields": [
+        "branch",
+        "head_commit",
+        "expected_head",
+        "source_tree_fingerprint",
+        "dirty_frontier_status",
+        "dirty_frontier_paths",
+        "touched_files",
+        "touched_file_hashes"
+      ]
+    },
+    {
+      "section": "rch_provenance",
+      "required_fields": [
+        "worker_id",
+        "remote_route_segments",
+        "submitted_at",
+        "started_at",
+        "finished_at",
+        "detector_progress_stale",
+        "detector_heartbeat_stale"
+      ]
+    },
+    {
+      "section": "outcome",
+      "required_fields": [
+        "status",
+        "exit_code",
+        "output_digest",
+        "first_blocker_lines",
+        "cancellation_reason",
+        "staleness_reason"
+      ]
+    },
+    {
+      "section": "claim_boundaries",
+      "required_fields": [
+        "citable",
+        "covers",
+        "explicit_not_covered",
+        "refusal_reason_codes"
+      ]
+    }
+  ],
+  "allowed_lifecycle_states": [
+    "queued",
+    "running",
+    "client_disconnected",
+    "partial",
+    "terminal_pass",
+    "terminal_fail",
+    "terminal_canceled",
+    "terminal_stale",
+    "terminal_infra_error"
+  ],
+  "terminal_lifecycle_states": [
+    "terminal_pass",
+    "terminal_fail",
+    "terminal_canceled",
+    "terminal_stale",
+    "terminal_infra_error"
+  ],
+  "terminal_classifications": [
+    "pass",
+    "cargo_failure",
+    "operator_canceled",
+    "stale_progress_canceled",
+    "heartbeat_stale_infra",
+    "client_disconnected_partial",
+    "local_fallback_refused"
+  ],
+  "required_explicit_not_covered": [
+    "release-readiness",
+    "workspace-health",
+    "live-rch-fleet-availability"
+  ],
+  "refusal_reason_codes": [
+    "branch-mismatch",
+    "broad-claim-unsupported",
+    "citable-receipt-has-refusal-reasons",
+    "command-mismatch",
+    "dirty-frontier-overlap",
+    "failed-proof-status",
+    "invalid-required-field",
+    "lane-mismatch",
+    "local-fallback-marker",
+    "missing-command-fingerprint",
+    "missing-required-field",
+    "missing-manifest-lane",
+    "missing-required-section",
+    "missing-schema-version",
+    "missing-terminal-classification",
+    "missing-touched-files",
+    "schema-version-mismatch",
+    "stale-head",
+    "toolchain-mismatch",
+    "unknown-lifecycle-state"
+  ],
+  "fixture_contract": {
+    "fixture_root": "tests/fixtures/durable_rch_proof_receipt",
+    "accepted_fixture": "terminal_pass.json",
+    "rejected_fixtures": [
+      "missing_schema_version.json",
+      "missing_manifest_lane.json",
+      "missing_command_section.json",
+      "missing_source_section.json",
+      "missing_rch_provenance_section.json",
+      "missing_outcome_section.json",
+      "missing_claim_boundaries_section.json",
+      "local_fallback_marker.json",
+      "stale_head.json",
+      "dirty_overlap.json",
+      "unsupported_broad_claim.json",
+      "unknown_lifecycle_state.json",
+      "missing_terminal_classification.json"
+    ]
+  },
+  "non_goals": [
+    "Does not implement detached RCH submission execution.",
+    "Does not provide CLI status/query/cancel UX.",
+    "Does not update proof lane manifest or proof status rows.",
+    "Does not make stale, canceled, local-fallback, partial, or failed receipts citable as green proof.",
+    "Does not prove release readiness, broad workspace health, or live RCH fleet availability."
+  ]
+}

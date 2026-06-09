@@ -6,8 +6,10 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use crate::Cx;
+use crate::runtime::{Runtime, RuntimeBuilder};
 
 use super::extract::{FromRequest, FromRequestParts, Request};
 use super::response::{IntoResponse, Response};
@@ -263,6 +265,61 @@ pub struct AsyncCxFnHandler<F> {
     func: F,
 }
 
+thread_local! {
+    static ASYNC_HANDLER_HELPER_RUNTIME: Runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("async handler helper runtime should build");
+}
+
+#[pin_project::pin_project]
+struct CurrentCxFuture<Fut> {
+    cx: Cx,
+    #[pin]
+    future: Fut,
+}
+
+impl<Fut: Future> Future for CurrentCxFuture<Fut> {
+    type Output = Fut::Output;
+
+    fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        let _guard = Cx::set_current(Some(this.cx.clone()));
+        this.future.poll(task_cx)
+    }
+}
+
+async fn run_async_cx_handler<F, Fut, Res>(caller_cx: Cx, func: F) -> Response
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: Future<Output = Res>,
+    Res: IntoResponse,
+{
+    let ambient_cx = Cx::current();
+    let handler_cx = if caller_cx.timer_driver().is_some() {
+        caller_cx
+    } else if let Some(current) = ambient_cx
+        && (current.timer_driver().is_some() || Runtime::current_handle().is_none())
+    {
+        current
+    } else if let Some(runtime_cx) = Runtime::current_request_cx_with_budget(caller_cx.budget()) {
+        runtime_cx
+    } else {
+        return ASYNC_HANDLER_HELPER_RUNTIME.with(|runtime| {
+            let runtime_cx = runtime.request_cx_with_budget(caller_cx.budget());
+            runtime.block_on_with_cx(runtime_cx.clone(), async move {
+                func(runtime_cx).await.into_response()
+            })
+        });
+    };
+
+    let future_cx = handler_cx.clone();
+    CurrentCxFuture {
+        cx: handler_cx,
+        future: async move { func(future_cx).await.into_response() },
+    }
+    .await
+}
+
 impl<F> AsyncCxFnHandler<F> {
     /// Wrap an async Cx-aware function as a handler.
     pub fn new(func: F) -> Self {
@@ -280,10 +337,7 @@ where
     fn call(&self, cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         let func = &self.func;
-        Box::pin(async move {
-            let result = func(cx).await;
-            result.into_response()
-        })
+        Box::pin(async move { run_async_cx_handler(cx, func).await })
     }
 }
 
@@ -319,8 +373,7 @@ where
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
-            let result = func(cx, t1).await;
-            result.into_response()
+            run_async_cx_handler(cx, |handler_cx| func(handler_cx, t1)).await
         })
     }
 }
@@ -358,8 +411,7 @@ where
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
-            let result = func(cx, t1, t2).await;
-            result.into_response()
+            run_async_cx_handler(cx, |handler_cx| func(handler_cx, t1, t2)).await
         })
     }
 }
@@ -398,8 +450,7 @@ where
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
-            let result = func(cx, t1, t2, t3).await;
-            result.into_response()
+            run_async_cx_handler(cx, |handler_cx| func(handler_cx, t1, t2, t3)).await
         })
     }
 }
@@ -439,8 +490,7 @@ where
                 Ok(v) => v,
                 Err(resp) => return resp,
             };
-            let result = func(cx, t1, t2, t3, t4).await;
-            result.into_response()
+            run_async_cx_handler(cx, |handler_cx| func(handler_cx, t1, t2, t3, t4)).await
         })
     }
 }
@@ -723,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn async_cx_handler_falls_back_to_helper_runtime_with_ambient_nonruntime_cx() {
+    fn async_cx_handler_preserves_ambient_nonruntime_cx_without_runtime() {
         let ambient = Cx::for_testing();
         let expected_task = ambient.task_id();
         let expected_region = ambient.region_id();
@@ -732,7 +782,7 @@ mod tests {
         let handler = AsyncCxFnHandler::new(move |cx: Cx| async move {
             assert_eq!(cx.task_id(), expected_task);
             assert_eq!(cx.region_id(), expected_region);
-            let current = Cx::current().expect("helper runtime should preserve CURRENT_CX");
+            let current = Cx::current().expect("ambient CURRENT_CX should be preserved");
             assert_eq!(current.task_id(), expected_task);
             assert_eq!(current.region_id(), expected_region);
             "ok"

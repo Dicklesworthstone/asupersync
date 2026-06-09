@@ -94,8 +94,21 @@ fn apply_operation(
 ) {
     match op {
         TableOperation::Insert { owner, deadline } => {
-            let record = make_test_task(*owner, *deadline);
-            let idx = table.insert_task(record);
+            // Use pooled acquisition so the TaskRecord pool's hit/miss stats are
+            // exercised (see `mr_pool_stats_conservation`). The factory mirrors
+            // `make_test_task`: an INFINITE budget, optionally carrying a
+            // deadline. A fresh table has an empty pool, so the first inserts
+            // are misses; inserts after a `RecycledRemove` become hits.
+            let budget = match deadline {
+                Some(d) => Budget::INFINITE.with_deadline(*d),
+                None => Budget::INFINITE,
+            };
+            let owner = *owner;
+            let idx = table.insert_pooled_task_with(|_idx, record| {
+                record.owner = owner;
+                record.deadline = budget.deadline;
+                record.polls_remaining = budget.poll_quota;
+            });
             let task_id = TaskId::from_arena(idx);
             task_indices.push((task_id, idx));
         }
@@ -117,7 +130,18 @@ fn apply_operation(
         } => {
             if let Some((task_id, _)) = task_indices.get(*task_index % task_indices.len().max(1)) {
                 table.update_task(*task_id, |record| {
-                    record.phase.store(*new_phase);
+                    // Phase transitions must follow the formal task-phase state
+                    // machine (see `TaskPhase::is_valid_transition`). The
+                    // generator produces arbitrary target phases, so only apply
+                    // those that are legal from the record's current phase;
+                    // storing an illegal transition trips the debug_assert in
+                    // `TaskPhaseCell::store`. Skipping illegal targets keeps the
+                    // operation stream valid while still exercising real phase
+                    // changes and the associated bookkeeping.
+                    let current = record.phase.load();
+                    if current.is_valid_transition(*new_phase) {
+                        record.phase.store(*new_phase);
+                    }
                 });
             }
         }
@@ -181,12 +205,15 @@ impl TableSnapshot {
 #[test]
 fn mr_operation_order_invariance() {
     proptest!(|(ops in prop::collection::vec(arb_table_operation(), 0..=30))| {
-        // Only test with operations that should be commutative
+        // Only test with operations that are genuinely order-invariant.
+        // `Insert` is commutative for the metrics asserted below (task count
+        // and stored-future count). `StoreFuture` is NOT: it targets a task by
+        // its position in the running `task_indices` list, so it depends on the
+        // `Insert`s that precede it. Reordering an `Insert`/`StoreFuture` pair
+        // changes whether the future lands on an existing task, breaking the
+        // commutativity premise. Restrict to `Insert` to keep the relation sound.
         let commutative_ops: Vec<_> = ops.into_iter()
-            .filter(|op| matches!(op,
-                TableOperation::Insert { .. } |
-                TableOperation::StoreFuture { .. }
-            ))
+            .filter(|op| matches!(op, TableOperation::Insert { .. }))
             .take(10) // Limit for performance
             .collect();
 
@@ -498,10 +525,22 @@ fn mr_phase_transition_consistency() {
                 .map(|r| r.phase.load())
                 .unwrap_or(TaskPhase::Completed);
 
-            // Apply phase transition
-            table.update_task(task_id, |record| {
-                record.phase.store(new_phase);
-            });
+            // The generator produces arbitrary target phases, but the task-phase
+            // state machine (`TaskPhase::is_valid_transition`) only permits legal
+            // transitions; storing an illegal one trips the debug_assert in
+            // `TaskPhaseCell::store`. Skip illegal targets entirely (including
+            // self-loops on terminal phases like `Completed -> Completed`) so the
+            // effective phase is unchanged for those iterations, keeping the
+            // live-count invariant below well-defined.
+            let new_phase = if old_phase.is_valid_transition(new_phase) {
+                // Apply phase transition only when it is legal.
+                table.update_task(task_id, |record| {
+                    record.phase.store(new_phase);
+                });
+                new_phase
+            } else {
+                old_phase
+            };
 
             let current_live_count = table.live_task_count();
 

@@ -235,11 +235,11 @@ fn status_snapshot_keeps_fourth_wave_claims_separate_and_scoped() {
         let claim = claims
             .get(*category)
             .unwrap_or_else(|| panic!("snapshot missing claim category {category}"));
-        assert_eq!(string(claim, "proof_evidence_status"), "rerun-required");
-        assert_eq!(
-            claim.get("blocked_frontier"),
-            Some(&Value::Null),
-            "{category}: fourth-wave rows should not attach stale frontier blockers"
+        assert_eq!(string(claim, "proof_evidence_status"), "blocked");
+        assert_contains_all(
+            "blocked frontier",
+            string(&claim["blocked_frontier"], "required_followup"),
+            &["Rerun", "fourth-wave", "clean committed main"],
         );
         for command in string_set(claim, "proof_commands") {
             assert_remote_required_cargo(&command, category);
@@ -335,6 +335,7 @@ fn runbook_preserves_operator_safety_no_local_fallback_and_rollback() {
             "Stop calling the fourth-wave bridge",
             "parent_close_allowed=false",
             "no_win_rerun_required",
+            "dirty shared-main peer work",
             "do not delete",
             "production-on-by-default",
             "RCH fleet availability is proven",

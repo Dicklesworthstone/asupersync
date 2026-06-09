@@ -474,7 +474,7 @@ mod tests {
 
     fn test_cx() -> crate::cx::Cx {
         crate::cx::Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
         )

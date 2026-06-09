@@ -2055,10 +2055,19 @@ mod tests {
             params.p, params.l, params.w
         );
 
-        // RFC 6330 Section 5 Conformance Check 3: Encoding Behavior Validation
+        // RFC 6330 Section 5 Conformance Check 3: Encoding Behavior Validation.
+        //
+        // `max_block_size` is the per-block byte budget. The §5 conformance
+        // assertions below treat the whole object as ONE source block of K=10
+        // symbols (ESI 0..K-1 systematic), so the block budget MUST be large
+        // enough to hold the entire 80-byte payload in a single block. A budget
+        // smaller than the object (the previous value of 64 < 80 bytes) splits
+        // it into two blocks, each restarting ESI at 0 — making "ESI 8" the
+        // first *repair* symbol of block 0 rather than source symbol 8, which is
+        // what made this conformance check fail spuriously.
         let config = EncodingConfig {
             repair_overhead: 1.5,
-            max_block_size: 64,
+            max_block_size: 1024,
             symbol_size: test_vector.symbol_size,
             encoding_parallelism: 1,
             decoding_parallelism: 1,
@@ -2080,30 +2089,43 @@ mod tests {
             test_vector.k
         );
 
-        // Verify source symbols preserve systematic property under §5 constraints
-        for (i, symbol) in symbols.iter().take(test_vector.k).enumerate() {
+        // Verify source symbols preserve systematic property under §5 constraints.
+        //
+        // The systematic property is keyed by Encoding Symbol ID (ESI), NOT by
+        // the symbol's position in the emitted stream: a systematic symbol with
+        // ESI `e` must carry source block `e`. The encoder is free to emit the
+        // K systematic symbols in any order (and may interleave repair symbols),
+        // so we index `source_data` by each symbol's actual ESI rather than by
+        // its enumeration position. We also confirm every ESI < K appears
+        // exactly once across the source-symbol prefix.
+        let mut seen_source_esis = std::collections::BTreeSet::new();
+        for symbol in symbols.iter() {
             let esi = symbol.id().esi();
-            assert!(
-                esi < test_vector.k as u32,
-                "RFC6330-5.1-1: Source symbol ESI must be < K under §5 constraints. \
-                 Symbol {} has ESI {} ≥ K={}",
-                i,
-                esi,
-                test_vector.k
-            );
+            if esi >= test_vector.k as u32 {
+                continue; // repair symbol — systematic property does not apply
+            }
 
-            // Verify systematic data preservation
-            let expected_start = i * test_vector.symbol_size as usize;
+            // Verify systematic data preservation for source ESI `esi`.
+            let expected_start = esi as usize * test_vector.symbol_size as usize;
             let expected_end = expected_start + test_vector.symbol_size as usize;
             let expected_data = &test_vector.source_data[expected_start..expected_end];
 
             assert_eq!(
                 symbol.symbol().data(),
                 expected_data,
-                "RFC6330-5.1-1: Systematic symbol {} data must match source under §5 encoding",
-                i
+                "RFC6330-5.1-1: systematic symbol with ESI {esi} must carry source \
+                 block {esi} verbatim under §5 encoding",
             );
+            seen_source_esis.insert(esi);
         }
+
+        assert_eq!(
+            seen_source_esis.len(),
+            test_vector.k,
+            "RFC6330-5.1-1: every source ESI in [0, K) must appear exactly once \
+             among the systematic symbols (K={})",
+            test_vector.k
+        );
 
         println!(
             "RFC 6330 §5 CONFORMANCE: ✅ PASS - {} ({}) parameters conform to \

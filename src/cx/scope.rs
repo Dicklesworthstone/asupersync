@@ -3158,7 +3158,7 @@ mod tests {
         let token = MacaroonToken::mint(&auth_key, "scope:spawn", "cx/scope");
 
         let parent_cx = Cx::new_with_io(
-            crate::types::RegionId::new_for_test(0, 0),
+            crate::types::RegionId::new_for_test(0, 1),
             crate::types::TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,

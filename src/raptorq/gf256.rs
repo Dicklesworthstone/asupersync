@@ -6882,57 +6882,32 @@ mod tests {
         );
     }
 
+    // SECURITY (commit 4cca31a4): malformed numeric GF256 env overrides now
+    // FAIL CLOSED with a panic rather than marking the override active while
+    // silently retaining the catalog default. A malformed value that was
+    // accepted-but-scrubbed could let an attacker flip `*_env_override()` to
+    // `true` (suppressing the canonical-selection provenance) without supplying
+    // a usable value — so `detect_dual_policy()` must reject it outright. These
+    // tests pin that fail-closed contract for each numeric override key.
     #[test]
+    #[should_panic(expected = "Invalid environment variable value for")]
     fn malformed_numeric_addmul_floor_request_scrubs_canonical_selection_metadata() {
         with_gf256_env(
             "ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL",
             "not-a-number",
             || {
-                let policy = detect_dual_policy();
-                let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
-                let metadata = effective_profile_pack_metadata(&policy);
-
-                assert!(policy.override_mask.addmul_min_total_env_override());
-                assert!(!policy_uses_canonical_selection_contract(&policy));
-                assert_eq!(policy.addmul_min_total, catalog_profile.addmul_min_total);
-                assert_eq!(policy.tuning_corpus_id, MANUAL_OVERRIDE_TUNING_CORPUS_ID);
-                assert_eq!(
-                    policy.selected_tuning_candidate_id,
-                    MANUAL_OVERRIDE_SELECTED_TUNING_CANDIDATE
-                );
-                assert!(policy.rejected_tuning_candidate_ids.is_empty());
-                assert_eq!(
-                    metadata.decision_artifact_id,
-                    MANUAL_OVERRIDE_DECISION_ARTIFACT_ID
-                );
-                assert_eq!(
-                    metadata.decision_evidence_status,
-                    MANUAL_OVERRIDE_DECISION_EVIDENCE_STATUS
-                );
+                // Must panic before producing any policy — a malformed numeric
+                // override cannot be allowed to scrub canonical provenance.
+                let _ = detect_dual_policy();
             },
         );
     }
 
     #[test]
+    #[should_panic(expected = "Invalid environment variable value for")]
     fn malformed_numeric_lane_ratio_request_preserves_catalog_value_but_scrubs_provenance() {
         with_gf256_env("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO", "eight", || {
-            let policy = detect_dual_policy();
-            let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
-            let metadata = effective_profile_pack_metadata(&policy);
-
-            assert!(policy.override_mask.max_lane_ratio_env_override());
-            assert!(!policy_uses_canonical_selection_contract(&policy));
-            assert_eq!(policy.max_lane_ratio, catalog_profile.max_lane_ratio);
-            assert_eq!(policy.replay_pointer, MANUAL_OVERRIDE_REPLAY_POINTER);
-            assert_eq!(policy.command_bundle, MANUAL_OVERRIDE_COMMAND_BUNDLE);
-            assert_eq!(
-                metadata.selected_candidate_summary,
-                MANUAL_OVERRIDE_SELECTED_CANDIDATE_SUMMARY
-            );
-            assert_eq!(
-                metadata.rejected_candidate_set_summary,
-                MANUAL_OVERRIDE_REJECTED_CANDIDATE_SET_SUMMARY
-            );
+            let _ = detect_dual_policy();
         });
     }
 

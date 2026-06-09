@@ -1748,6 +1748,23 @@ mod tests {
         vec![vec![0u8; config.symbol_size]; config.k]
     }
 
+    /// Build a minimal, fully-terminated proof for hash/content tests.
+    ///
+    /// The proof builder now requires both `received` and `outcome` to be set
+    /// before `build()` (br-asupersync-gvxrxv). Hash-equality/sensitivity tests
+    /// that only care about config/received/elimination provenance terminate the
+    /// builder with a neutral failure outcome so the build contract is satisfied
+    /// without binding any incidental success payload.
+    fn built_test_proof(config: DecodeConfig) -> DecodeProof {
+        let mut builder = DecodeProof::builder(config);
+        builder.set_received(ReceivedSummary::from_received(std::iter::empty()));
+        builder.set_failure(FailureReason::InsufficientSymbols {
+            received: 0,
+            required: 1,
+        });
+        builder.build()
+    }
+
     fn deterministic_artifact_payload(len: usize) -> Vec<u8> {
         (0..len)
             .map(|idx| (idx.wrapping_mul(37).wrapping_add(11) % 251) as u8)
@@ -3115,6 +3132,10 @@ mod tests {
         let config = make_test_config();
         let mut builder = DecodeProof::builder(config);
         builder.set_received(ReceivedSummary::from_received(std::iter::empty()));
+        builder.set_failure(FailureReason::InsufficientSymbols {
+            received: 0,
+            required: 1,
+        });
         let proof = builder.build();
 
         let hash = proof.content_hash();
@@ -3136,8 +3157,8 @@ mod tests {
         // Verify that identical proofs produce identical hashes (deterministic).
 
         let config = make_test_config();
-        let proof1 = DecodeProof::builder(config.clone()).build();
-        let proof2 = DecodeProof::builder(config).build();
+        let proof1 = built_test_proof(config.clone());
+        let proof2 = built_test_proof(config);
 
         assert_eq!(
             proof1.content_hash().as_bytes(),
@@ -3153,8 +3174,8 @@ mod tests {
         let mut config2 = make_test_config();
         config2.k = config1.k + 1; // Different configuration
 
-        let proof1 = DecodeProof::builder(config1).build();
-        let proof2 = DecodeProof::builder(config2).build();
+        let proof1 = built_test_proof(config1);
+        let proof2 = built_test_proof(config2);
 
         assert_ne!(
             proof1.content_hash().as_bytes(),
@@ -3218,8 +3239,8 @@ mod tests {
         let mut config2 = config1.clone();
         config2.seed = config1.seed.wrapping_add(1); // Minimal change
 
-        let proof1 = DecodeProof::builder(config1).build();
-        let proof2 = DecodeProof::builder(config2).build();
+        let proof1 = built_test_proof(config1);
+        let proof2 = built_test_proof(config2);
 
         assert_ne!(
             proof1.content_hash().as_bytes(),
@@ -3238,6 +3259,10 @@ mod tests {
         let received1 =
             ReceivedSummary::from_received([(0, true), (1, true), (2, true)].iter().copied());
         builder1.set_received(received1);
+        builder1.set_failure(FailureReason::InsufficientSymbols {
+            received: 0,
+            required: 1,
+        });
         let proof1 = builder1.build();
 
         let mut builder2 = DecodeProof::builder(config);
@@ -3245,6 +3270,10 @@ mod tests {
             ReceivedSummary::from_received([(0, true), (1, true), (2, true)].iter().copied());
         received2.esi_multiset_hash = received2.esi_multiset_hash.wrapping_add(1); // Forge the hash
         builder2.set_received(received2);
+        builder2.set_failure(FailureReason::InsufficientSymbols {
+            received: 0,
+            required: 1,
+        });
         let proof2 = builder2.build();
 
         assert_ne!(
@@ -3266,6 +3295,10 @@ mod tests {
         builder1
             .elimination_mut()
             .set_strategy(InactivationStrategy::AllAtOnce);
+        builder1.set_failure(FailureReason::InsufficientSymbols {
+            received: 0,
+            required: 1,
+        });
         let proof1 = builder1.build();
 
         let mut builder2 = DecodeProof::builder(config);
@@ -3274,6 +3307,10 @@ mod tests {
         builder2
             .elimination_mut()
             .set_strategy(InactivationStrategy::HighSupportFirst);
+        builder2.set_failure(FailureReason::InsufficientSymbols {
+            received: 0,
+            required: 1,
+        });
         let proof2 = builder2.build();
 
         assert_ne!(
@@ -3295,11 +3332,19 @@ mod tests {
         let mut builder1 = DecodeProof::builder(config.clone());
         builder1.set_received(received.clone());
         builder1.elimination_mut().record_pivot(3, 0);
+        builder1.set_failure(FailureReason::InsufficientSymbols {
+            received: 0,
+            required: 1,
+        });
         let proof1 = builder1.build();
 
         let mut builder2 = DecodeProof::builder(config);
         builder2.set_received(received);
         builder2.elimination_mut().record_pivot(7, 1);
+        builder2.set_failure(FailureReason::InsufficientSymbols {
+            received: 0,
+            required: 1,
+        });
         let proof2 = builder2.build();
 
         assert_eq!(proof1.elimination.pivots, proof2.elimination.pivots);
@@ -3340,9 +3385,7 @@ mod tests {
         // Test that ProofHash hex encoding/decoding works correctly.
 
         let config = make_test_config();
-        let mut builder = DecodeProof::builder(config);
-        builder.set_received(ReceivedSummary::from_received(std::iter::empty()));
-        let proof = builder.build();
+        let proof = built_test_proof(config);
         let original_hash = proof.content_hash();
 
         let hex = original_hash.to_hex();

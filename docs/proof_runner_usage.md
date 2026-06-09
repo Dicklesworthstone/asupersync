@@ -414,6 +414,107 @@ provenance evidence only: it helps route a blocker to a recent slice, but the
 `decision` and `green_proof_claimed` fields remain authoritative for whether a
 closeout may claim a green proof.
 
+## Durable RCH Agent Mail Templates
+
+The durable RCH proof mail template contract is
+`artifacts/durable_rch_proof_mail_templates_v1.json`, checked by
+`tests/durable_rch_proof_mail_templates_contract.rs`, with contract version
+`durable-rch-proof-mail-templates-v1`. Use these templates for durable proof
+submission updates, running-status updates, stale/canceled receipts, terminal
+pass/fail closeouts, and explicit handoffs. The contract is fixture-only:
+tests do not require network access, live Agent Mail, tracker mutation, or raw
+mail-body capture.
+
+Each message must include the durable submission id, receipt id or pending
+receipt marker, manifest lane id, source HEAD, command fingerprint, lifecycle
+state, terminal classification, first blocker summary, refusal reason codes, and
+the durable proof query command. Send the message only to the current lane
+owner, the next explicitly named owner, or the peer blocked by the proof lane.
+Do not broadcast.
+
+Template IDs:
+
+- `submitted-proof-lane`
+- `running-proof-lane`
+- `stale-proof-lane`
+- `canceled-yielded-proof-lane`
+- `terminal-pass-proof-lane`
+- `terminal-fail-proof-lane`
+- `handoff-to-next-agent`
+
+Only `terminal-pass-proof-lane` may cite `fresh-rch-pass`, and even then it may
+cite only the exact manifest lane and receipt scope. Submitted, running, stale,
+canceled, failed, and handoff templates are not green proof. No template may be
+used to claim release-readiness, workspace-health, live-rch-fleet-availability,
+or unrelated-proof-lanes.
+
+## Durable RCH Deterministic E2E Scenarios
+
+The durable RCH detached-proof scenario corpus is
+`artifacts/durable_rch_proof_e2e_scenarios_v1.json`, checked by
+`tests/durable_rch_proof_e2e_contract.rs`, with contract version
+`durable-rch-proof-e2e-scenarios-v1`. The suite replays synthetic submission,
+receipt-capture, CLI status/query, policy-refusal, duplicate-submission, and
+mail-template handoff cases without invoking live RCH, live Agent Mail, or
+tracker mutation.
+
+Use the corpus when reviewing durable proof closeouts that mention terminal
+pass, Cargo failure, client disconnect, stale_progress_canceled, heartbeat-stale
+infrastructure, local fallback, stale HEAD, dirty frontier overlap,
+wrong-feature-set, wrong command envelope, unsupported broad claims, or duplicate
+lane plus HEAD submissions. The scenario matrix verifies that partial, stale,
+canceled, local-fallback, stale-head, dirty-overlap, wrong-feature-set, and broad
+claim cases all fail closed and do not become green proof.
+
+Synthetic fixtures do not prove live RCH fleet availability. Synthetic fixtures
+do not prove release readiness, broad workspace health, or unrelated proof-lane
+correctness. Closeout still needs a focused remote Cargo proof for the contract
+test, and any cited receipt must keep its exact manifest lane, source HEAD,
+command fingerprint, receipt id, first blocker, and refusal reason codes visible.
+
+## Durable RCH Final Signoff
+
+The durable RCH final signoff closure packet is
+`artifacts/durable_rch_proof_final_signoff_v1.json`, checked by
+`tests/durable_rch_proof_final_signoff_contract.rs`, with schema version
+`durable-rch-proof-final-signoff-v1`. It aggregates the child proof rows for the
+receipt schema, detached submission lifecycle, receipt capture, CLI UX,
+manifest/status integration, Agent Mail templates, and deterministic e2e
+scenario suite. The focused verifier lane is
+`durable-rch-proof-final-signoff` in `artifacts/proof_lane_manifest_v1.json`.
+
+Run the scoped verifier before closing the parent durable-RCH bead:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture
+```
+
+Because `artifacts/*` is ignored, a new signoff artifact must be staged
+explicitly:
+
+```bash
+git add -f artifacts/durable_rch_proof_final_signoff_v1.json
+```
+
+The final signoff may cite only the durable proof-submission program's child
+contracts and exact final verifier lane:
+
+- does not prove live RCH fleet availability
+- does not prove release readiness
+- does not prove broad workspace health
+- does not prove correctness of unrelated proof lanes
+
+It also does not convert partial, stale, canceled, client-disconnected,
+local-fallback, wrong-command, wrong-feature-set, stale-head, dirty-overlap, or
+unsupported broad-claim receipts into green proof.
+
+Closeout recipes must keep the common paths explicit: submit, detach, query,
+cite, refuse, cancel, and hand off. Only a terminal pass receipt with
+`proof_evidence_status=fresh-rch-pass`, exact manifest lane, exact source HEAD,
+exact command fingerprint, and no local fallback markers may be cited as green
+proof. After pushing `main`, preserve the repo's legacy mirror expectation with
+`git push origin main:master`.
+
 ## Proof-Lane Resource Envelopes
 
 The proof runner reads resource-envelope metadata from

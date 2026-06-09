@@ -1,0 +1,87 @@
+{
+  "fixture_id": "missing-outcome-section-refused",
+  "expected_contract_verdict": {
+    "decision": "refused",
+    "reason_codes": [
+      "missing-required-section"
+    ]
+  },
+  "receipt": {
+    "schema_version": "durable-rch-proof-receipt-v1",
+    "receipt_id": "drpr-20260609-proof-lane-manifest-contract-missing-outcome",
+    "submission_id": "rch-sub-20260609-0001",
+    "generated_at": "2026-06-09T06:00:00Z",
+    "manifest_lane_id": "proof-lane-manifest-contract",
+    "manifest_guarantee_ids": [
+      "proof-lane-manifest-verifier"
+    ],
+    "claim_scope": "proof-lane-manifest-verifier",
+    "proof_evidence_status": "fresh-rch-pass",
+    "lifecycle_state": "terminal_pass",
+    "terminal_classification": "pass",
+    "command": {
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "asupersync",
+        "--test",
+        "proof_lane_manifest_contract",
+        "--",
+        "--nocapture"
+      ],
+      "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+      "env_fingerprint": "sha256:proof-lane-manifest-contract-env",
+      "env_allowlist": [
+        "CARGO_INCREMENTAL",
+        "CARGO_PROFILE_TEST_DEBUG",
+        "CARGO_TARGET_DIR",
+        "RUSTFLAGS"
+      ],
+      "remote_required": true,
+      "local_fallback_allowed": false,
+      "local_fallback_markers": []
+    },
+    "source": {
+      "branch": "main",
+      "head_commit": "f7f924efe965be84e3ed95a08de0f4b8ffaed352",
+      "expected_head": "f7f924efe965be84e3ed95a08de0f4b8ffaed352",
+      "source_tree_fingerprint": "git-tree:f7f924efe965be84e3ed95a08de0f4b8ffaed352",
+      "dirty_frontier_status": "clean",
+      "dirty_frontier_paths": [],
+      "touched_files": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs"
+      ],
+      "touched_file_hashes": {
+        "artifacts/proof_lane_manifest_v1.json": "sha256:manifest",
+        "tests/proof_lane_manifest_contract.rs": "sha256:contract-test"
+      }
+    },
+    "rch_provenance": {
+      "worker_id": "vmi-proof-01",
+      "remote_route_segments": [
+        "rch-daemon",
+        "vmi-proof-01"
+      ],
+      "submitted_at": "2026-06-09T05:56:00Z",
+      "started_at": "2026-06-09T05:56:05Z",
+      "finished_at": "2026-06-09T05:57:30Z",
+      "detector_progress_stale": false,
+      "detector_heartbeat_stale": false
+    },
+    "claim_boundaries": {
+      "citable": false,
+      "covers": "This receipt is intentionally missing its outcome section and must not be citable.",
+      "explicit_not_covered": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability"
+      ],
+      "refusal_reason_codes": [
+        "missing-required-section"
+      ]
+    }
+  }
+}

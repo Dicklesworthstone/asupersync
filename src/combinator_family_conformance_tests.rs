@@ -724,7 +724,7 @@ mod conformance_tests {
 
             // Verify exponential backoff calculation would be correct
             let mut expected_delay = base_delay;
-            for attempt in 1..max_attempts {
+            for _attempt in 1..max_attempts {
                 let next_delay = std::cmp::min(
                     (expected_delay as f64 * multiplier) as u64,
                     10000

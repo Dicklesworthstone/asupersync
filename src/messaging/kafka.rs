@@ -3601,7 +3601,7 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
         let cx = Cx::new_with_drivers(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,

@@ -7,10 +7,8 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
-    use std::sync::Arc;
 
     /// Error message golden test infrastructure
     struct ErrorGoldenTester {

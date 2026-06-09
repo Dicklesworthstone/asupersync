@@ -17,6 +17,7 @@ brew update
 # Install essential tools
 echo "Installing system dependencies..."
 brew install \
+    coreutils \
     curl \
     jq \
     python3 \

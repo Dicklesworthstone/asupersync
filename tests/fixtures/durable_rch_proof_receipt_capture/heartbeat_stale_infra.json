@@ -1,0 +1,34 @@
+{
+  "expected": {
+    "citable": false,
+    "exit_code": 255,
+    "first_blocker_contains": [
+      "heartbeat stale"
+    ],
+    "first_blocker_forbidden": [],
+    "lifecycle_state": "terminal_infra_error",
+    "max_first_blocker_lines": 8,
+    "outcome_status": "infra_error",
+    "proof_evidence_status": "blocked",
+    "refusal_reason_codes": [
+      "failed-proof-status"
+    ],
+    "terminal_classification": "heartbeat_stale_infra"
+  },
+  "fixture_id": "heartbeat-stale-infra",
+  "rch_outcome": {
+    "build_id": "29879655498514502",
+    "detector_heartbeat_stale": true,
+    "detector_progress_stale": true,
+    "exit_code": 255,
+    "finished_at": "2026-06-09T09:42:00Z",
+    "location": "remote",
+    "started_at": "2026-06-09T09:12:00Z",
+    "status": "infra_error",
+    "staleness_reason": "heartbeat stale before terminal status",
+    "submitted_at": "2026-06-09T09:11:00Z",
+    "worker_id": "vmi1227854"
+  },
+  "stderr": "worker heartbeat stale before terminal status; treating as infrastructure failure\n",
+  "stdout": ""
+}

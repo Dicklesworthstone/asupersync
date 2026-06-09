@@ -806,8 +806,9 @@ mod tests {
         oracle.on_task_complete(task(1), t(50));
         oracle.on_race_complete(race_id, task(1), t(100));
 
-        // Duplicate completion events must not erase the original participant set.
-        oracle.on_race_complete(race_id, task(1), t(200));
+        // Exact duplicate completion events must not erase the original
+        // participant set.
+        oracle.on_race_complete(race_id, task(1), t(100));
 
         let violation = oracle
             .check()

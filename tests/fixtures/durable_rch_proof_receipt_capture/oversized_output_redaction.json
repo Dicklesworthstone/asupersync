@@ -1,0 +1,38 @@
+{
+  "expected": {
+    "citable": false,
+    "exit_code": 101,
+    "first_blocker_contains": [
+      "error: failure included TOKEN=[REDACTED]",
+      "Bearer [REDACTED]"
+    ],
+    "first_blocker_forbidden": [
+      "super-secret-token",
+      "SECRET=do-not-commit",
+      "Bearer abcdefghijklmnopqrstuvwxyz0123456789"
+    ],
+    "lifecycle_state": "terminal_fail",
+    "max_first_blocker_lines": 3,
+    "outcome_status": "fail",
+    "proof_evidence_status": "blocked",
+    "refusal_reason_codes": [
+      "failed-proof-status"
+    ],
+    "terminal_classification": "cargo_failure"
+  },
+  "fixture_id": "oversized-output-redaction",
+  "rch_outcome": {
+    "build_id": "29879655498514504",
+    "detector_heartbeat_stale": false,
+    "detector_progress_stale": false,
+    "exit_code": 101,
+    "finished_at": "2026-06-09T09:55:00Z",
+    "location": "remote",
+    "started_at": "2026-06-09T09:53:00Z",
+    "status": "failed",
+    "submitted_at": "2026-06-09T09:52:00Z",
+    "worker_id": "vmi1227854"
+  },
+  "stderr": "error: failure included TOKEN=super-secret-token and SECRET=do-not-commit\nAuthorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789\nthis line should be retained but bounded\nthis fourth line should be omitted by the max blocker line limit\nthis fifth line should also be omitted\n",
+  "stdout": "Compiling asupersync v0.3.4\n"
+}

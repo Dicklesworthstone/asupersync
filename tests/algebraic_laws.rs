@@ -71,6 +71,25 @@ fn arb_outcome() -> impl Strategy<Value = Outcome<i32, i32>> {
     ]
 }
 
+/// Generate arbitrary outcomes that are valid as drained race losers.
+///
+/// `race2_outcomes` is the post-drain result constructor. A loser cancelled
+/// with `User` or `Timeout` is not a valid post-drain race loser because race
+/// cancellation must strengthen losers to at least `RaceLost`.
+fn arb_drained_race_loser_outcome() -> impl Strategy<Value = Outcome<i32, i32>> {
+    prop_oneof![
+        any::<i32>().prop_map(Outcome::Ok),
+        any::<i32>().prop_map(Outcome::Err),
+        prop_oneof![
+            Just(CancelKind::RaceLost),
+            Just(CancelKind::ParentCancelled),
+            Just(CancelKind::Shutdown),
+        ]
+        .prop_map(|kind| Outcome::Cancelled(CancelReason::new(kind))),
+        "[a-z]{1,10}".prop_map(|s| Outcome::Panicked(PanicPayload::new(s))),
+    ]
+}
+
 /// Generate arbitrary RaceWinner values
 fn arb_race_winner() -> impl Strategy<Value = RaceWinner> {
     prop_oneof![Just(RaceWinner::First), Just(RaceWinner::Second)]
@@ -529,17 +548,25 @@ proptest! {
     /// Swapping inputs and flipping the winner should preserve winner/loser severity.
     #[test]
     fn race_commutative_severity(
-        a in arb_outcome(),
-        b in arb_outcome(),
+        winner_outcome in arb_outcome(),
+        loser_outcome in arb_drained_race_loser_outcome(),
         winner in arb_race_winner()
     ) {
         init_test_logging();
         test_phase!("race_commutative_severity");
-        let (winner_ab, _, loser_ab) = race2_outcomes(winner, a.clone(), b.clone());
-        let flipped = match winner {
-            RaceWinner::First => RaceWinner::Second,
-            RaceWinner::Second => RaceWinner::First,
+        let (a, b, flipped) = match winner {
+            RaceWinner::First => (
+                winner_outcome.clone(),
+                loser_outcome.clone(),
+                RaceWinner::Second,
+            ),
+            RaceWinner::Second => (
+                loser_outcome.clone(),
+                winner_outcome.clone(),
+                RaceWinner::First,
+            ),
         };
+        let (winner_ab, _, loser_ab) = race2_outcomes(winner, a.clone(), b.clone());
         let (winner_ba, _, loser_ba) = race2_outcomes(flipped, b, a);
 
         prop_assert_eq!(winner_ab.severity(), winner_ba.severity());
@@ -571,9 +598,9 @@ proptest! {
     /// We compare the severities of the possible winner outcomes on both sides.
     #[test]
     fn race_join_dist_severity(
-        a in arb_outcome(),
-        b in arb_outcome(),
-        c in arb_outcome()
+        a in arb_drained_race_loser_outcome(),
+        b in arb_drained_race_loser_outcome(),
+        c in arb_drained_race_loser_outcome()
     ) {
         init_test_logging();
         test_phase!("race_join_dist_severity");
@@ -906,14 +933,26 @@ fn algebraic_law_coverage() {
         let mut runner = TestRunner::new(config.clone());
         runner
             .run(
-                &(arb_outcome(), arb_outcome(), arb_race_winner()),
-                |(a, b, winner)| {
+                &(
+                    arb_outcome(),
+                    arb_drained_race_loser_outcome(),
+                    arb_race_winner(),
+                ),
+                |(winner_outcome, loser_outcome, winner)| {
                     let mut t = tracker.borrow_mut();
-                    let (w_ab, _, l_ab) = race2_outcomes(winner, a.clone(), b.clone());
-                    let flipped = match winner {
-                        RaceWinner::First => RaceWinner::Second,
-                        RaceWinner::Second => RaceWinner::First,
+                    let (a, b, flipped) = match winner {
+                        RaceWinner::First => (
+                            winner_outcome.clone(),
+                            loser_outcome.clone(),
+                            RaceWinner::Second,
+                        ),
+                        RaceWinner::Second => (
+                            loser_outcome.clone(),
+                            winner_outcome.clone(),
+                            RaceWinner::First,
+                        ),
                     };
+                    let (w_ab, _, l_ab) = race2_outcomes(winner, a.clone(), b.clone());
                     let (w_ba, _, l_ba) = race2_outcomes(flipped, b, a);
                     let comm =
                         w_ab.severity() == w_ba.severity() && l_ab.severity() == l_ba.severity();
@@ -978,17 +1017,28 @@ fn race_never_abandon_exhaustive() {
     init_test_logging();
     test_phase!("race_never_abandon_exhaustive");
 
-    let outcomes: Vec<Outcome<i32, i32>> = vec![
+    let winner_outcomes: Vec<Outcome<i32, i32>> = vec![
         Outcome::Ok(1),
         Outcome::Err(2),
         Outcome::Cancelled(CancelReason::timeout()),
         Outcome::Panicked(PanicPayload::new("boom")),
         Outcome::Cancelled(CancelReason::race_loser()),
     ];
+    let drained_loser_outcomes: Vec<Outcome<i32, i32>> = vec![
+        Outcome::Ok(3),
+        Outcome::Err(4),
+        Outcome::Cancelled(CancelReason::race_loser()),
+        Outcome::Cancelled(CancelReason::new(CancelKind::ParentCancelled)),
+        Outcome::Panicked(PanicPayload::new("drained-loser-panic")),
+    ];
 
-    for a in &outcomes {
-        for b in &outcomes {
+    for winner_outcome in &winner_outcomes {
+        for loser_outcome in &drained_loser_outcomes {
             for &winner in &[RaceWinner::First, RaceWinner::Second] {
+                let (a, b) = match winner {
+                    RaceWinner::First => (winner_outcome.clone(), loser_outcome.clone()),
+                    RaceWinner::Second => (loser_outcome.clone(), winner_outcome.clone()),
+                };
                 let (winner_outcome, _, loser_outcome) =
                     race2_outcomes(winner, a.clone(), b.clone());
 
@@ -1028,11 +1078,15 @@ proptest! {
     /// selection, the loser always has a resolved (terminal) outcome.
     #[test]
     fn race_never_abandon_property(
-        a in arb_outcome(),
-        b in arb_outcome(),
+        winner_outcome in arb_outcome(),
+        loser_outcome in arb_drained_race_loser_outcome(),
         winner in arb_race_winner()
     ) {
         init_test_logging();
+        let (a, b) = match winner {
+            RaceWinner::First => (winner_outcome, loser_outcome),
+            RaceWinner::Second => (loser_outcome, winner_outcome),
+        };
         let (_winner_out, _, loser_out) = race2_outcomes(winner, a, b);
         // Loser must have a terminal outcome — never stuck in a non-resolved state
         prop_assert!(matches!(

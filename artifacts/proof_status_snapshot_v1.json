@@ -77,6 +77,7 @@
     "fourth-wave benchmark no-claim contract",
     "fourth-wave final aggregated signoff",
     "migration readiness planner signoff",
+    "durable RCH final signoff",
     "formal Lean posture",
     "rustdoc/API examples"
   ],
@@ -322,7 +323,7 @@
       "claim_id": "fourth-wave-governor-schema-proof",
       "category": "fourth-wave governor schema proof",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave governor proof map",
@@ -342,14 +343,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Green maps only the schema/receipt contract, fail-closed fixture matrix, redaction checks, and explicit non-claims. It does not prove the policy engine, runtime bridge, live benchmarks, production-on-by-default control, or scheduler performance."
     },
     {
       "claim_id": "fourth-wave-governor-policy-engine-proof",
       "category": "fourth-wave governor policy-engine proof",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave governor proof map",
@@ -369,14 +375,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_policy_engine CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib fourth_wave_governor --features test-internals -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Green maps only the pure deterministic policy-engine receipt tests. It does not prove opt-in bridge behavior, benchmark improvement, no regression, or production-on-by-default control."
     },
     {
       "claim_id": "fourth-wave-swarm-replay-corpus",
       "category": "fourth-wave swarm replay corpus",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave governor proof map",
@@ -396,14 +407,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Green maps only the deterministic replay corpus and stable workload dimensions. It does not prove live host throughput, runtime bridge correctness, or scheduler performance."
     },
     {
       "claim_id": "fourth-wave-runtime-bridge",
       "category": "fourth-wave runtime bridge",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave governor proof map",
@@ -423,14 +439,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Green maps only the explicit opt-in runtime bridge contract for base SLO preservation, cancellation precedence, brownout, no-worker defer, fail-closed receipts, redaction, and non-claim propagation. It does not prove production-on-by-default control, live performance improvement, or broad workspace health."
     },
     {
       "claim_id": "fourth-wave-benchmark-no-claim-contract",
       "category": "fourth-wave benchmark no-claim contract",
       "status": "yellow_scoped",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave benchmark no-claim contract",
@@ -450,14 +471,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Yellow-scoped because this is a benchmark contract and no-claim report, not a fresh benchmark result. It does not prove p95 improvement, throughput improvement, no regression, scheduler performance, or production-on-by-default control."
     },
     {
       "claim_id": "fourth-wave-final-aggregated-signoff",
       "category": "fourth-wave final aggregated signoff",
       "status": "yellow_scoped",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave final aggregated signoff",
@@ -497,7 +523,12 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun all fourth-wave child lanes and the two signoff lanes from a clean committed main tree, or keep explicit blocked rows before parent close."
+      },
       "notes": "Yellow-scoped aggregate signoff: cite it only as an executable operator report and operator checklist tying child lanes together. It remains a no-claim status for production-on-by-default control, live performance improvement, no regression, broad workspace health, and RCH fleet availability until every child row has fresh remote-required proof or an explicit blocked follow-up."
     },
     {
@@ -526,6 +557,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Green maps only the executable planner signoff artifact, child evidence, fixture E2E, report-field, docs-marker, manifest, and proof-status contract. It does not prove broad workspace health, live external projects, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target."
+    },
+    {
+      "claim_id": "durable-rch-final-signoff",
+      "category": "durable RCH final signoff",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ],
+        "AGENTS.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "durable-rch-final-signoff"
+      ],
+      "manifest_lane_ids": [
+        "durable-rch-proof-final-signoff"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the durable RCH final signoff artifact, child proof evidence rows, refusal matrix, operator recipes, manifest/status mapping, docs markers, main-only closeout notes, ignored-artifact force-add note, and no-claim boundaries. It does not prove release readiness, broad workspace health, live RCH fleet availability, correctness of unrelated proof lanes, broad clippy, full release tests, or local Cargo fallback proof."
     },
     {
       "claim_id": "formal-lean-posture",
@@ -669,6 +727,109 @@
       ],
       "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
       "notes": "Broad workspace health is non-citeable from cache unless a manifest lane explicitly permits that exact claim scope."
+    }
+  ],
+  "durable_receipt_status_rows": [
+    {
+      "row_id": "durable-receipt-terminal-pass-candidate",
+      "proof_evidence_status": "fresh-rch-pass",
+      "fixture": "terminal_pass.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "accepted",
+      "reason_codes": [],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A terminal pass durable receipt is only candidate fresh proof for the exact manifest lane, guarantee, command, clean source frontier, and remote-required RCH route in the receipt."
+    },
+    {
+      "row_id": "durable-receipt-missing-manifest-lane",
+      "proof_evidence_status": "blocked",
+      "fixture": "missing_manifest_lane.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "missing-manifest-lane"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A receipt whose claimed lane cannot be found in the manifest is blocked evidence, not a green proof."
+    },
+    {
+      "row_id": "durable-receipt-stale-head",
+      "proof_evidence_status": "stale-evidence",
+      "fixture": "stale_head.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "stale-head"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A stale durable receipt must flow through the stale-evidence path and cannot be cited as fresh proof."
+    },
+    {
+      "row_id": "durable-receipt-wrong-command-envelope",
+      "proof_evidence_status": "blocked",
+      "fixture": "terminal_pass.json",
+      "synthetic_mutations": [
+        "wrong-command-envelope"
+      ],
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "command-envelope-mismatch"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A receipt with a command that no longer matches the manifest lane command is blocked until the exact lane is rerun."
+    },
+    {
+      "row_id": "durable-receipt-wrong-feature-set",
+      "proof_evidence_status": "blocked",
+      "fixture": "terminal_pass.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [
+        "test-internals"
+      ],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "wrong-feature-set"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A status row that declares a feature set different from the manifest lane is refused rather than widening the receipt claim."
+    },
+    {
+      "row_id": "durable-receipt-local-fallback-refused",
+      "proof_evidence_status": "blocked",
+      "fixture": "local_fallback_marker.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "local-fallback-detected"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "Local fallback markers make a durable receipt blocked evidence even if the command otherwise looks like the lane command."
+    },
+    {
+      "row_id": "durable-receipt-unsupported-broad-claim",
+      "proof_evidence_status": "unsupported",
+      "fixture": "unsupported_broad_claim.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "release-readiness",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "broad-claim-unsupported"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A focused durable receipt cannot support workspace-health, release-readiness, or live RCH fleet availability claims."
     }
   ],
   "documentation_contract": {

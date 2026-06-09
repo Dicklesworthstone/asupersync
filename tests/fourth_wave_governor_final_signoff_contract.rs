@@ -258,6 +258,23 @@ fn signoff_artifact_declares_sources_child_rows_and_current_no_win_report() {
         string(&artifact["current_operator_report"], "first_failing_row"),
         "schema-contract"
     );
+    for row in rows {
+        assert_eq!(
+            string(row, "current_evidence_status"),
+            "blocked",
+            "{} must name the current blocked proof state",
+            string(row, "row_id")
+        );
+        assert_contains_all(
+            "blocked_followup",
+            string(row, "blocked_followup"),
+            &[
+                "dirty shared-main peer changes",
+                "same-project RCH contention",
+                "clean committed main",
+            ],
+        );
+    }
 }
 
 #[test]
@@ -315,7 +332,12 @@ fn manifest_and_status_snapshot_wire_the_final_signoff_lane() {
         string_set(aggregate, "proof_commands").contains(string(signoff_lane, "proof_command"))
     );
     assert_eq!(string(aggregate, "status"), "yellow_scoped");
-    assert_eq!(string(aggregate, "proof_evidence_status"), "rerun-required");
+    assert_eq!(string(aggregate, "proof_evidence_status"), "blocked");
+    assert_contains_all(
+        "aggregate blocked frontier",
+        string(&aggregate["blocked_frontier"], "required_followup"),
+        &["Rerun all fourth-wave child lanes", "clean committed main"],
+    );
 }
 
 #[test]
@@ -442,6 +464,7 @@ fn deterministic_operator_report_logs_required_fields_and_non_claims() {
             "freshness_window_seconds=86400",
             "first_failing_row=schema-contract",
             "final_verdict=no_win_rerun_required",
+            "evidence_status=blocked",
         ],
     );
     for row in &left.rows {

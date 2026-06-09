@@ -392,8 +392,30 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::Waker;
 
+    thread_local! {
+        static TEST_CURRENT_CX_GUARD: std::cell::RefCell<Option<crate::cx::cx::CurrentCxGuard>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Installs a non-root testing `Cx` as the thread-local current context.
+    ///
+    /// Semaphore permits are obligations; `ObligationToken::reserve` rejects
+    /// tokens created in the root region to prevent leaks. `poll_ready` on the
+    /// concurrency limiter acquires a permit synchronously via `try_acquire_arc`,
+    /// which consults `Cx::current()` for the obligation region. Without a
+    /// non-root current Cx these tests panic at semaphore.rs. `Cx::for_testing()`
+    /// yields a synthetic non-root region. (br-asupersync-88h4nd)
+    fn install_test_current_cx() {
+        TEST_CURRENT_CX_GUARD.with(|guard| {
+            let mut guard = guard.borrow_mut();
+            guard.take();
+            *guard = Some(Cx::set_current(Some(Cx::for_testing())));
+        });
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
+        install_test_current_cx();
         crate::test_phase!(name);
     }
 
@@ -1118,6 +1140,7 @@ mod tests {
 
     #[test]
     fn concurrency_limit_future_debug() {
+        install_test_current_cx();
         let sem = Arc::new(Semaphore::new(1));
         let permit = OwnedSemaphorePermit::try_acquire_arc(&sem, 1).unwrap();
         let future: ConcurrencyLimitFuture<_, std::convert::Infallible> =

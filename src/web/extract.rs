@@ -21,7 +21,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::bytes::Bytes;
-use serde::de::DeserializeOwned;
+use serde::de::{
+    self, DeserializeOwned, DeserializeSeed, IntoDeserializer, SeqAccess, Unexpected, Visitor,
+};
+use serde::forward_to_deserialize_any;
 
 // ─── Request Type ────────────────────────────────────────────────────────────
 
@@ -397,24 +400,277 @@ fn deserialize_from_multi_value_map<T>(
 where
     T: DeserializeOwned,
 {
-    // Try deserializing with intelligent handling of single vs multi values
-    let mut json_map = serde_json::Map::new();
+    let fields = parsed
+        .iter()
+        .map(|(key, values)| (key.as_str(), FormValueDeserializer { values }));
+    let deserializer = de::value::MapDeserializer::new(fields);
+    T::deserialize(deserializer)
+        .map_err(|e| ExtractionError::bad_request(format!("invalid {context}: {e}")))
+}
 
-    for (key, values) in parsed {
-        let json_value = if values.len() == 1 {
-            // Single value - use coerced scalar (bool, number, string)
-            coerce_json_scalar(&values[0])
-        } else {
-            // Multiple values - serialize as array of coerced values
-            serde_json::Value::Array(values.iter().map(|v| coerce_json_scalar(v)).collect())
-        };
-        json_map.insert(key.clone(), json_value);
+#[derive(Clone, Copy)]
+struct FormValueDeserializer<'a> {
+    values: &'a [String],
+}
+
+impl<'a> FormValueDeserializer<'a> {
+    fn first<E>(self) -> Result<&'a str, E>
+    where
+        E: de::Error,
+    {
+        self.values
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| E::invalid_value(Unexpected::Seq, &"at least one form value"))
     }
 
-    let json_value = serde_json::Value::Object(json_map);
+    fn parse<T, E>(self, expected: &'static str) -> Result<T, E>
+    where
+        T: std::str::FromStr,
+        E: de::Error,
+    {
+        let raw = self.first::<E>()?;
+        raw.parse::<T>()
+            .map_err(|_| E::invalid_value(Unexpected::Str(raw), &expected))
+    }
+}
 
-    serde_json::from_value::<T>(json_value)
-        .map_err(|e| ExtractionError::bad_request(format!("invalid {context}: {e}")))
+impl<'de> IntoDeserializer<'de, de::value::Error> for FormValueDeserializer<'de> {
+    type Deserializer = Self;
+
+    fn into_deserializer(self) -> Self::Deserializer {
+        self
+    }
+}
+
+impl<'de> de::Deserializer<'de> for FormValueDeserializer<'de> {
+    type Error = de::value::Error;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_str(self.first::<Self::Error>()?)
+    }
+
+    fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_bool(self.parse("a boolean")?)
+    }
+
+    fn deserialize_i8<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_i8(self.parse("an i8")?)
+    }
+
+    fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_i16(self.parse("an i16")?)
+    }
+
+    fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_i32(self.parse("an i32")?)
+    }
+
+    fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_i64(self.parse("an i64")?)
+    }
+
+    fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u8(self.parse("a u8")?)
+    }
+
+    fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u16(self.parse("a u16")?)
+    }
+
+    fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u32(self.parse("a u32")?)
+    }
+
+    fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_u64(self.parse("a u64")?)
+    }
+
+    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_f32(self.parse("an f32")?)
+    }
+
+    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_f64(self.parse("an f64")?)
+    }
+
+    fn deserialize_char<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        let raw = self.first::<Self::Error>()?;
+        let mut chars = raw.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => visitor.visit_char(c),
+            _ => Err(de::Error::invalid_value(Unexpected::Str(raw), &"a char")),
+        }
+    }
+
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_str(self.first::<Self::Error>()?)
+    }
+
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_string(self.first::<Self::Error>()?.to_string())
+    }
+
+    fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_bytes(self.first::<Self::Error>()?.as_bytes())
+    }
+
+    fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_byte_buf(self.first::<Self::Error>()?.as_bytes().to_vec())
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        if self.values.is_empty() {
+            visitor.visit_none()
+        } else {
+            visitor.visit_some(self)
+        }
+    }
+
+    fn deserialize_unit<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        if self.first::<Self::Error>()?.is_empty() {
+            visitor.visit_unit()
+        } else {
+            Err(de::Error::invalid_value(
+                Unexpected::Str(self.first::<Self::Error>()?),
+                &"an empty form value",
+            ))
+        }
+    }
+
+    fn deserialize_newtype_struct<V>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_seq(FormSeqDeserializer {
+            values: self.values.iter(),
+        })
+    }
+
+    fn deserialize_tuple<V>(self, _len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_tuple_struct<V>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_enum<V>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_enum(self.first::<Self::Error>()?.into_deserializer())
+    }
+
+    forward_to_deserialize_any! {
+        unit_struct map struct identifier ignored_any
+    }
+}
+
+struct FormSeqDeserializer<'a> {
+    values: std::slice::Iter<'a, String>,
+}
+
+impl<'de> SeqAccess<'de> for FormSeqDeserializer<'de> {
+    type Error = de::value::Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        self.values
+            .next()
+            .map(|value| {
+                seed.deserialize(FormValueDeserializer {
+                    values: std::slice::from_ref(value),
+                })
+            })
+            .transpose()
+    }
 }
 
 /// Parse a URL-encoded string into key-value pairs.

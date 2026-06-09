@@ -60,7 +60,7 @@ mod tests {
     }
 
     fn test_region() -> crate::types::RegionId {
-        crate::types::RegionId::from_arena(ArenaIndex::new(0, 0))
+        crate::types::RegionId::from_arena(ArenaIndex::new(0, 1))
     }
 
     #[test]

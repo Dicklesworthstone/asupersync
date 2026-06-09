@@ -1,0 +1,43 @@
+{
+  "config": {
+    "h": 10,
+    "k": 10,
+    "l": 27,
+    "object_id": "[OBJECT_ID]",
+    "s": 7,
+    "sbn": 0,
+    "seed": "[SEED]",
+    "symbol_size": 32
+  },
+  "content_hash": "[CONTENT_HASH]",
+  "elimination_trace": {
+    "inactivated": 0,
+    "inactive_cols": [],
+    "inactive_cols_truncated": false,
+    "pivot_events": [],
+    "pivot_events_truncated": false,
+    "pivots": 0,
+    "row_ops": 0,
+    "strategy": "AllAtOnce",
+    "strategy_transitions": [],
+    "strategy_transitions_truncated": false
+  },
+  "outcome": {
+    "kind": "Failure",
+    "reason": "InsufficientSymbols { received: 3, required: 27 }"
+  },
+  "peeling_trace": {
+    "solved": 0,
+    "solved_indices": [],
+    "truncated": false
+  },
+  "received_summary": {
+    "esi_multiset_hash": "[ESI_HASH]",
+    "esis_length": 3,
+    "repair_count": 0,
+    "source_count": 3,
+    "total": 3,
+    "truncated": false
+  },
+  "version": 2
+}

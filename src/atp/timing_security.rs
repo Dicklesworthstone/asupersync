@@ -561,6 +561,7 @@ mod tests {
                 for &byte in data {
                     result ^= byte;
                 }
+                std::hint::black_box(result);
             },
             &input_a,
             &input_b,

@@ -44,8 +44,7 @@
 mod tests {
     #[cfg(test)]
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, HashMap, VecDeque};
-    use std::convert::TryFrom;
+    use std::collections::{HashMap, VecDeque};
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Mock Implementations for HTTP/gRPC Protocol Testing
@@ -1063,7 +1062,6 @@ mod tests {
             )
         ) {
             let mut table1 = MockHpackTable::new(4096);
-            let mut table2 = MockHpackTable::new(4096);
 
             let headers: Vec<(String, String)> = common_headers.into_iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
@@ -1118,7 +1116,6 @@ mod tests {
             let mut table = MockHpackTable::new(max_size);
 
             for (name, value) in operations {
-                let pre_size = table.current_size;
                 table.add_entry(name.clone(), value.clone());
                 let post_size = table.current_size;
 
@@ -1274,6 +1271,15 @@ mod tests {
                     }
                 }
             }
+
+            prop_assert!(
+                flow_control.connection_window >= initial_connection_window,
+                "Connection window should not end below its initial value"
+            );
+            prop_assert!(
+                flow_control.stream_windows[&stream_id] >= initial_stream_window,
+                "Stream window should not end below its initial value"
+            );
         }
     }
 
@@ -1329,6 +1335,11 @@ mod tests {
             let final_stream_a_change = initial_stream_a_window - flow_control.stream_windows[&stream_a];
             let final_stream_b_change = initial_stream_b_window - flow_control.stream_windows[&stream_b];
 
+            prop_assert!(
+                final_stream_a_change >= 0,
+                "Stream {} window should not increase when only sending data",
+                stream_a
+            );
             prop_assert_eq!(final_stream_b_change, 0,
                 "Stream {} window changed by {} despite no operations on it",
                 stream_b, final_stream_b_change);

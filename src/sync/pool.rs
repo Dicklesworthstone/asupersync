@@ -2532,7 +2532,7 @@ mod tests {
 
     fn test_cx_with_timer(timer: TimerDriverHandle) -> Cx {
         Cx::new_with_drivers(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             Budget::INFINITE,
             None,
@@ -2545,7 +2545,7 @@ mod tests {
 
     fn test_cx_with_timer_and_budget(timer: TimerDriverHandle, budget: Budget) -> Cx {
         Cx::new_with_drivers(
-            RegionId::new_for_test(0, 0),
+            RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 0),
             budget,
             None,

@@ -23,6 +23,7 @@
 #![cfg(all(target_os = "linux", feature = "io-uring"))]
 #![allow(unsafe_code)]
 
+use crate::fs::metadata::{Metadata, Permissions};
 use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use io_uring::{IoUring, opcode, types};
 use parking_lot::Mutex;
@@ -59,7 +60,7 @@ impl OpKind {
         (u64::from(self as u8) << USER_DATA_KIND_SHIFT) | (sequence & USER_DATA_SEQUENCE_MASK)
     }
 
-    fn decode(user_data: u64) -> Option<Self> {
+    fn from_user_data(user_data: u64) -> Option<Self> {
         match (user_data >> USER_DATA_KIND_SHIFT) as u8 {
             1 => Some(Self::Read),
             2 => Some(Self::Write),
@@ -171,7 +172,7 @@ fn mark_op_complete(state: &Mutex<OpState>, user_data: u64, result: i32) -> bool
 }
 
 fn mark_tracked_op_complete(inner: &IoUringFileInner, user_data: u64, result: i32) -> bool {
-    match OpKind::decode(user_data) {
+    match OpKind::from_user_data(user_data) {
         Some(OpKind::Read) => mark_op_complete(&inner.read_state, user_data, result),
         Some(OpKind::Write) => mark_op_complete(&inner.write_state, user_data, result),
         Some(OpKind::Fsync | OpKind::Fdatasync) => {
@@ -465,18 +466,18 @@ impl IoUringFile {
     }
 
     /// Queries metadata about the underlying file via `fstat`.
-    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+    pub fn metadata(&self) -> io::Result<Metadata> {
         let fd = self.inner.fd.as_raw_fd();
         // SAFETY: We borrow the fd temporarily; the OwnedFd still owns it.
         let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
-        std_file.metadata()
+        std_file.metadata().map(Metadata::from_std)
     }
 
     /// Changes the permissions on the underlying file.
-    pub fn set_permissions(&self, perm: std::fs::Permissions) -> io::Result<()> {
+    pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
         let fd = self.inner.fd.as_raw_fd();
         let std_file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
-        std_file.set_permissions(perm)
+        std_file.set_permissions(perm.into_inner())
     }
 
     /// Returns the raw file descriptor.
@@ -1136,6 +1137,16 @@ mod tests {
         );
     }
 
+    fn assert_poll_fails_closed<T: std::fmt::Debug>(poll: Poll<io::Result<T>>, operation: &str) {
+        assert!(
+            matches!(&poll, Poll::Ready(Err(_))),
+            "expected fail-closed {operation} repoll, got {poll:?}"
+        );
+        if let Poll::Ready(Err(err)) = poll {
+            assert_polled_after_completion(&err, operation);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_path_to_cstring_accepts_non_utf8_unix_paths() {
@@ -1467,13 +1478,8 @@ mod tests {
 
             let mut buf = [0u8; 5];
             let n = file.read(&mut buf).await.unwrap();
-            crate::assert_with_log!(n == 5, "read length after SQ recovery", 5usize, n);
-            crate::assert_with_log!(
-                &buf == b"hello",
-                "read succeeds after SQ-full recovery",
-                "hello",
-                String::from_utf8_lossy(&buf)
-            );
+            assert_eq!(n, 5, "read length after SQ recovery");
+            assert_eq!(&buf, b"hello", "read succeeds after SQ-full recovery");
         });
         crate::test_complete!("test_uring_sq_full_recovers_by_submitting_and_retrying");
     }
@@ -1813,10 +1819,7 @@ mod tests {
             assert!(matches!(first, Poll::Ready(Ok(5))));
             assert_eq!(file.position(), 5);
 
-            match Pin::new(&mut future).poll(&mut cx) {
-                Poll::Ready(Err(err)) => assert_polled_after_completion(&err, "read"),
-                other => panic!("expected fail-closed read repoll, got {other:?}"),
-            }
+            assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "read");
         }
         assert_eq!(&buf, b"hello");
         assert_eq!(file.position(), 5);
@@ -1843,10 +1846,7 @@ mod tests {
         assert!(matches!(first, Poll::Ready(Ok(3))));
         assert_eq!(file.position(), 3);
 
-        match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(err)) => assert_polled_after_completion(&err, "write"),
-            other => panic!("expected fail-closed write repoll, got {other:?}"),
-        }
+        assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "write");
         assert_eq!(file.position(), 3);
 
         let mut buf = [0u8; 3];
@@ -1870,10 +1870,7 @@ mod tests {
         let first = Pin::new(&mut future).poll(&mut cx);
         assert!(matches!(first, Poll::Ready(Ok(()))));
 
-        match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(err)) => assert_polled_after_completion(&err, "sync"),
-            other => panic!("expected fail-closed sync repoll, got {other:?}"),
-        }
+        assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "sync");
         crate::test_complete!("test_uring_sync_future_second_poll_fails_closed");
     }
 
@@ -1893,10 +1890,7 @@ mod tests {
         assert!(matches!(first, Poll::Ready(Err(_))));
         assert_eq!(file.position(), 0);
 
-        match Pin::new(&mut future).poll(&mut cx) {
-            Poll::Ready(Err(err)) => assert_polled_after_completion(&err, "write"),
-            other => panic!("expected fail-closed repoll after write error, got {other:?}"),
-        }
+        assert_poll_fails_closed(Pin::new(&mut future).poll(&mut cx), "write");
         assert_eq!(file.position(), 0);
         crate::test_complete!("test_uring_error_terminal_still_fails_closed_on_repoll");
     }
@@ -2005,6 +1999,45 @@ mod tests {
             crate::assert_with_log!(meta.len() == 13, "file length", 13u64, meta.len());
         });
         crate::test_complete!("test_uring_file_metadata");
+    }
+
+    #[test]
+    fn test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper() {
+        init_test("test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_metadata_permissions_roundtrip.txt");
+
+            let file = IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+            .unwrap();
+
+            let mut permissions = file.metadata().unwrap().permissions();
+            permissions.set_readonly(true);
+            file.set_permissions(permissions).unwrap();
+            let readonly = file.metadata().unwrap().permissions().readonly();
+            crate::assert_with_log!(
+                readonly,
+                "io_uring file permissions set readonly through fs wrapper",
+                true,
+                readonly
+            );
+
+            let mut permissions = file.metadata().unwrap().permissions();
+            permissions.set_readonly(false);
+            file.set_permissions(permissions).unwrap();
+            let readonly = file.metadata().unwrap().permissions().readonly();
+            crate::assert_with_log!(
+                !readonly,
+                "io_uring file permissions reset through fs wrapper",
+                false,
+                readonly
+            );
+        });
+        crate::test_complete!("test_uring_file_metadata_permissions_roundtrip_uses_fs_wrapper");
     }
 
     #[test]

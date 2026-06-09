@@ -827,6 +827,11 @@ mod tests {
         init_test("snapshot_from_runtime_counts_tasks_obligations_and_regions");
 
         let mut state = RuntimeState::new();
+        // Create the obligation at logical time zero so the age below is
+        // measured against a known baseline (RuntimeState::new starts the
+        // logical clock at 1s to keep timestamps valid for the obligation
+        // guard).
+        state.now = Time::ZERO;
         let root = state.create_root_region(Budget::unlimited());
 
         let (task_id, _handle) = state
@@ -891,6 +896,11 @@ mod tests {
             let ok = region.begin_drain();
             crate::assert_with_log!(ok, "begin_drain", true, ok);
         }
+        // The transition above mutates the region record directly rather than
+        // going through a RuntimeState method, so the read-biased draining
+        // snapshot cache is not notified. Invalidate it so the next snapshot
+        // performs an authoritative region-table scan.
+        state.invalidate_read_biased_region_snapshot_for_testing();
 
         let snap2 = StateSnapshot::from_runtime_state(&state);
         crate::assert_with_log!(
@@ -2725,6 +2735,13 @@ mod tests {
         fixture: &GovernorStateSnapshotFixture,
     ) -> GovernorStateScenarioState {
         let mut state = RuntimeState::new();
+        // Build the fixture starting from logical time zero so the obligations
+        // created below have ages that grow as the scenario advances time
+        // (RuntimeState::new starts the logical clock at 1s, which would push
+        // the obligation creation time past the scenario's sub-second steps and
+        // saturate every age to zero). The golden projection expects
+        // obligation_age_sum_ns to change across steps.
+        state.now = Time::ZERO;
         let root = state.create_root_region(Budget::unlimited());
         state.set_read_biased_region_snapshot(fixture.read_biased_enabled);
 
