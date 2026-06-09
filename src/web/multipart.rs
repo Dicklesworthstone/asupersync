@@ -771,7 +771,7 @@ fn sanitize_filename(filename: &str) -> String {
     // Filter out control characters and normalize
     let sanitized = base_name
         .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '?' | '*' | '"' | '<' | '>' | '|'))
+        .filter(|c| !c.is_control() && !matches!(c, '?' | '*' | '<' | '>' | '|'))
         .collect::<String>();
 
     // Trim problematic leading/trailing characters
