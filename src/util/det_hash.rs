@@ -300,15 +300,34 @@ pub type ProductionHashMap<K, V> = std::collections::HashMap<K, V, ProductionBui
 pub type ProductionHashSet<K> = std::collections::HashSet<K, ProductionBuildHasher>;
 
 /// Builder that always produces production-safe hashers with random seeding.
-#[derive(Clone, Default)]
-pub struct ProductionBuildHasher;
+///
+/// The random seed is captured **once** when the builder is created and reused
+/// for every `build_hasher` call. This is required for `HashMap`/`HashSet`
+/// correctness: a given key must hash identically on insert and lookup, so all
+/// hashers produced by one builder must share the same seed. (Re-randomizing
+/// per `build_hasher` would make every probe hash differently and silently
+/// break the map.) Per-process randomization across distinct builders still
+/// defeats hash-collision DoS for attacker-controlled keys.
+#[derive(Debug, Clone)]
+pub struct ProductionBuildHasher {
+    seed: u64,
+}
+
+impl Default for ProductionBuildHasher {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            seed: DetHasher::for_production().state,
+        }
+    }
+}
 
 impl BuildHasher for ProductionBuildHasher {
     type Hasher = DetHasher;
 
     #[inline]
     fn build_hasher(&self) -> Self::Hasher {
-        DetHasher::for_production()
+        DetHasher { state: self.seed }
     }
 }
 
@@ -588,15 +607,34 @@ mod tests {
 
     #[test]
     fn production_hasher_builder_always_random() {
-        let builder = ProductionBuildHasher;
-        let h1 = builder.build_hasher();
-        let h2 = builder.build_hasher();
-        let mut x = h1;
-        let mut y = h2;
+        // A single builder must produce hashers with a STABLE seed: HashMap calls
+        // build_hasher() once per probe, so insert and lookup of the same key must
+        // hash identically or the map silently loses entries. Two hashers from the
+        // same builder therefore agree on the same input.
+        let builder = ProductionBuildHasher::default();
+        let mut h1 = builder.build_hasher();
+        let mut h2 = builder.build_hasher();
+        h1.write(b"collision test");
+        h2.write(b"collision test");
+        assert_eq!(
+            h1.finish(),
+            h2.finish(),
+            "one builder must seed all its hashers identically (HashMap correctness)"
+        );
+
+        // Distinct builders are independently random-seeded, defeating collision
+        // attacks across map instances. With 64-bit seeds a collision here is
+        // astronomically unlikely.
+        let other = ProductionBuildHasher::default();
+        let mut x = builder.build_hasher();
+        let mut y = other.build_hasher();
         x.write(b"collision test");
         y.write(b"collision test");
-        // Should be different with high probability due to random seeding
-        assert_ne!(x.finish(), y.finish());
+        assert_ne!(
+            x.finish(),
+            y.finish(),
+            "independent builders use independent random seeds"
+        );
     }
 
     #[test]

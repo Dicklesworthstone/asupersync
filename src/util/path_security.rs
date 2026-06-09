@@ -221,6 +221,14 @@ impl SecurePath {
                         allowed_base: self.allowed_base.display().to_string(),
                     });
                 }
+                // When the whole path already exists, `missing_suffix` is empty.
+                // `PathBuf::join("")` appends a trailing separator, yielding e.g.
+                // `.../test.txt/`, which the OS treats as a directory request and
+                // rejects file reads with `NotADirectory`. Only join when there is
+                // an actually-missing tail to append.
+                if missing_suffix.as_os_str().is_empty() {
+                    return Ok(canonical_probe);
+                }
                 return Ok(canonical_probe.join(missing_suffix));
             }
 
