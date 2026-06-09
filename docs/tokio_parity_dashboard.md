@@ -2,30 +2,30 @@
 
 **Bead**: `asupersync-2oh2u.1.4.1` ([T1.4.a])
 **Generator**: `scripts/generate_tokio_parity_dashboard.py`
-**Generated at (UTC)**: `2026-03-03T19:37:18Z`
+**Generated at (UTC)**: `2026-06-08T23:59:11Z`
 **Schema**: `tokio-parity-dashboard-v1`
 
 ## 1. Executive Summary
 
-- Program issues: **124**
-- Status counts: open=80, in_progress=8, closed=36, other=0
+- Program issues: **125**
+- Status counts: open=0, in_progress=0, closed=125, other=0
 - Tracks: **9**
 - Capability families: **28** (parity states: {'complete': 8, 'active': 16, 'partial': 3, 'adapter': 1})
-- Unresolved blocker chains: **59**
+- Unresolved blocker chains: **0**
 
 ## 2. Track Parity Dashboard
 
 | Track | Root Bead | Root Status | Child Progress | Evidence | Unresolved Blockers |
 |---|---|---|---|---|---|
-| T1 | `asupersync-2oh2u.1` | `open` | 17/20 (85.0%) | 9/9 (100.0%) | 0 |
-| T2 | `asupersync-2oh2u.2` | `open` | 3/10 (30.0%) | 2/2 (100.0%) | 5 |
-| T3 | `asupersync-2oh2u.3` | `open` | 3/10 (30.0%) | 3/3 (100.0%) | 5 |
-| T4 | `asupersync-2oh2u.4` | `open` | 0/11 (0.0%) | 0/0 (100.0%) | 10 |
-| T5 | `asupersync-2oh2u.5` | `open` | 2/12 (16.7%) | 2/2 (100.0%) | 8 |
-| T6 | `asupersync-2oh2u.6` | `open` | 1/13 (7.7%) | 2/2 (100.0%) | 6 |
-| T7 | `asupersync-2oh2u.7` | `open` | 3/11 (27.3%) | 2/2 (100.0%) | 7 |
-| T8 | `asupersync-2oh2u.10` | `open` | 4/13 (30.8%) | 6/6 (100.0%) | 7 |
-| T9 | `asupersync-2oh2u.11` | `open` | 1/12 (8.3%) | 2/2 (100.0%) | 11 |
+| T1 | `asupersync-2oh2u.1` | `closed` | 20/20 (100.0%) | 9/9 (100.0%) | 0 |
+| T2 | `asupersync-2oh2u.2` | `closed` | 10/10 (100.0%) | 2/2 (100.0%) | 0 |
+| T3 | `asupersync-2oh2u.3` | `closed` | 10/10 (100.0%) | 3/3 (100.0%) | 0 |
+| T4 | `asupersync-2oh2u.4` | `closed` | 11/11 (100.0%) | 0/0 (100.0%) | 0 |
+| T5 | `asupersync-2oh2u.5` | `closed` | 12/12 (100.0%) | 2/2 (100.0%) | 0 |
+| T6 | `asupersync-2oh2u.6` | `closed` | 13/13 (100.0%) | 2/2 (100.0%) | 0 |
+| T7 | `asupersync-2oh2u.7` | `closed` | 11/11 (100.0%) | 2/2 (100.0%) | 0 |
+| T8 | `asupersync-2oh2u.10` | `closed` | 13/13 (100.0%) | 6/6 (100.0%) | 0 |
+| T9 | `asupersync-2oh2u.11` | `closed` | 12/12 (100.0%) | 2/2 (100.0%) | 0 |
 
 ## 3. Evidence Completeness by Track
 
@@ -69,28 +69,7 @@
 
 Top unresolved chains by depth. Chain starts with blocked issue and follows unresolved dependencies.
 
-| Issue | Status | Chain |
-|---|---|---|
-| `asupersync-2oh2u.11.9` | `open` | `asupersync-2oh2u.11.9` -> `asupersync-2oh2u.10.9` -> `asupersync-2oh2u.10.10` -> `asupersync-2oh2u.11.11` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.10.9` | `open` | `asupersync-2oh2u.10.9` -> `asupersync-2oh2u.10.10` -> `asupersync-2oh2u.11.11` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.12` | `open` | `asupersync-2oh2u.11.12` -> `asupersync-2oh2u.10.10` -> `asupersync-2oh2u.11.11` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.5` | `open` | `asupersync-2oh2u.11.5` -> `asupersync-2oh2u.10.10` -> `asupersync-2oh2u.11.11` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.7` | `open` | `asupersync-2oh2u.11.7` -> `asupersync-2oh2u.10.10` -> `asupersync-2oh2u.11.11` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.8` | `open` | `asupersync-2oh2u.11.8` -> `asupersync-2oh2u.10.10` -> `asupersync-2oh2u.11.11` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.10.10` | `open` | `asupersync-2oh2u.10.10` -> `asupersync-2oh2u.11.11` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.7.9` | `open` | `asupersync-2oh2u.7.9` -> `asupersync-2oh2u.7.8` -> `asupersync-2oh2u.7.7` -> `asupersync-2oh2u.7.5` -> `asupersync-2oh2u.5.7` -> `asupersync-2oh2u.5.6` -> `asupersync-2oh2u.2.4` |
-| `asupersync-2oh2u.11.11` | `open` | `asupersync-2oh2u.11.11` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.2` | `open` | `asupersync-2oh2u.11.2` -> `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.3` | `open` | `asupersync-2oh2u.11.3` -> `asupersync-2oh2u.11.10` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.6` | `open` | `asupersync-2oh2u.11.6` -> `asupersync-2oh2u.11.10` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.7.8` | `open` | `asupersync-2oh2u.7.8` -> `asupersync-2oh2u.7.7` -> `asupersync-2oh2u.7.5` -> `asupersync-2oh2u.5.7` -> `asupersync-2oh2u.5.6` -> `asupersync-2oh2u.2.4` |
-| `asupersync-2oh2u.10.13` | `open` | `asupersync-2oh2u.10.13` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.10` | `open` | `asupersync-2oh2u.11.10` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.11.4` | `open` | `asupersync-2oh2u.11.4` -> `asupersync-2oh2u.10.12` -> `asupersync-2oh2u.10.11` -> `asupersync-2oh2u.2.9` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.2.7` | `open` | `asupersync-2oh2u.2.7` -> `asupersync-2oh2u.2.10` -> `asupersync-2oh2u.2.8` -> `asupersync-2oh2u.2.5` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.4.7` | `open` | `asupersync-2oh2u.4.7` -> `asupersync-2oh2u.4.6` -> `asupersync-2oh2u.4.5` -> `asupersync-2oh2u.4.2` -> `asupersync-2oh2u.4.1` |
-| `asupersync-2oh2u.6.13` | `open` | `asupersync-2oh2u.6.13` -> `asupersync-2oh2u.6.12` -> `asupersync-2oh2u.6.10` -> `asupersync-2oh2u.2.5` -> `asupersync-2oh2u.2.3` |
-| `asupersync-2oh2u.7.7` | `open` | `asupersync-2oh2u.7.7` -> `asupersync-2oh2u.7.5` -> `asupersync-2oh2u.5.7` -> `asupersync-2oh2u.5.6` -> `asupersync-2oh2u.2.4` |
+No unresolved blocker chains detected.
 
 ## 5. Capability Family Parity Snapshot
 
