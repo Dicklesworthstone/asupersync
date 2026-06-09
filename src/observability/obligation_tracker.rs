@@ -693,6 +693,11 @@ mod tests {
     #[test]
     fn test_region_close_obligation_detection() {
         let mut state = RuntimeState::new();
+        // Create the obligation at logical time zero so the age below is
+        // measured against a known baseline (RuntimeState::new starts the
+        // logical clock at 1s to keep timestamps valid for the obligation
+        // guard).
+        state.now = Time::ZERO;
         let root = state.create_root_region(Budget::INFINITE);
         let (task_id, _handle) = state
             .create_task(root, Budget::INFINITE, async {})
@@ -955,6 +960,11 @@ mod tests {
     #[test]
     fn tracker_uses_runtime_logical_time_without_timer_driver() {
         let mut state = RuntimeState::new();
+        // Create the obligation at logical time zero so the age below is
+        // measured against a known baseline (RuntimeState::new starts the
+        // logical clock at 1s to keep timestamps valid for the obligation
+        // guard).
+        state.now = Time::ZERO;
         let root = state.create_root_region(Budget::INFINITE);
         let (task_id, _handle) = state
             .create_task(root, Budget::INFINITE, async {})
@@ -984,6 +994,11 @@ mod tests {
     #[test]
     fn tracker_prefers_timer_driver_when_available() {
         let mut state = RuntimeState::new();
+        // Create the obligation at logical time zero so the age below is
+        // measured against a known baseline (RuntimeState::new starts the
+        // logical clock at 1s to keep timestamps valid for the obligation
+        // guard).
+        state.now = Time::ZERO;
         let root = state.create_root_region(Budget::INFINITE);
         let (task_id, _handle) = state
             .create_task(root, Budget::INFINITE, async {})
