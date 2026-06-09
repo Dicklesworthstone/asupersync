@@ -79,6 +79,7 @@ jobs:
         {
           echo "matrix<<ATP_MATRIX_JSON"
           cat matrix.json
+          printf '\n'
           echo "ATP_MATRIX_JSON"
         } >> "$GITHUB_OUTPUT"
 
