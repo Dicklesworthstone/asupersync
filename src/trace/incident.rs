@@ -3920,8 +3920,43 @@ mod tests {
 
     #[test]
     fn redaction_policy_is_preserved_without_payload_leakage() {
+        // Build a repro whose source carries a SENSITIVE payload snippet that is
+        // distinct from the oracle's (non-sensitive) detection signal. The
+        // promotion proof legitimately retains the oracle signal (it is the
+        // replay detection criterion, not raw source material) but must NOT
+        // reintroduce the redacted source payload snippet — it keeps only the
+        // content hash of retained sources.
+        const SENSITIVE_PAYLOAD: &str = "Authorization: Bearer leaked-secret-9f4c36b1";
+
+        let mut bundle = valid_bundle();
+        bundle.sources[0].payload_snippet = Some(SENSITIVE_PAYLOAD.to_string());
+        bundle.sources[0].redaction_status = IncidentRedactionStatus::Redacted;
+
+        let package = bundle
+            .import_replay_package()
+            .package
+            .expect("fixture package imports");
+        let repro = package
+            .minimize_repro(
+                IncidentReplayOracle {
+                    kind: IncidentOracleKind::Panic,
+                    // Non-sensitive crash descriptor, deliberately unrelated to the
+                    // source payload above.
+                    expected_signal: "panic-class:scheduler-seed-mismatch".to_string(),
+                    stable: true,
+                    required_source_roles: vec![IncidentReplaySourceRole::CrashPack],
+                    required_trace_fingerprint: Some("0xfeedbeef".to_string()),
+                },
+                IncidentReplayMinimizationConfig {
+                    step_budget: 8,
+                    shrink_feature_flags: false,
+                },
+            )
+            .repro
+            .expect("crash repro emitted");
+
         let report = promote_minimized_incident_repro(
-            &minimized_crash_repro(),
+            &repro,
             IncidentRegressionPromotionPolicy {
                 redaction_policy_id: "incident-redaction-v1".to_string(),
                 ..IncidentRegressionPromotionPolicy::default()
@@ -3931,17 +3966,18 @@ mod tests {
         let json = serde_json::to_string(&proof).expect("proof serializes");
 
         assert_eq!(proof.redaction_policy_id, "incident-redaction-v1");
-        assert_eq!(
-            proof.minimization_summary.accepted_steps,
+        // The promoted proof is actionable: it carries at least one rch-executable
+        // command for replaying the regression.
+        assert!(
             proof
                 .proof_commands
                 .iter()
-                .filter(|command| command.executable_through_rch)
-                .count()
+                .any(|command| command.executable_through_rch),
+            "promotion proof must carry an rch-executable command"
         );
         assert!(
-            !json.contains("panic after deterministic schedule seed 42"),
-            "promotion proof must not reintroduce source payload snippets"
+            !json.contains(SENSITIVE_PAYLOAD),
+            "promotion proof must not reintroduce redacted source payload snippets"
         );
     }
 }

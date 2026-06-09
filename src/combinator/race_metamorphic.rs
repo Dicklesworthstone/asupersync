@@ -271,7 +271,7 @@ struct SeededDrainSimulation {
 /// Create a test context with deterministic IDs
 fn create_test_context(region_id: u32, task_id: u32) -> Cx {
     Cx::new(
-        RegionId::from_arena(ArenaIndex::new(region_id, 0)),
+        RegionId::from_arena(ArenaIndex::new(region_id, 1)),
         TaskId::from_arena(ArenaIndex::new(task_id, 0)),
         Budget::INFINITE,
     )

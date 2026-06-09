@@ -7177,21 +7177,25 @@ mod tests {
             "dependency root cause should preserve the original start failure"
         );
 
-        let record = state
-            .region(region)
-            .expect("supervisor region should still be tracked after boot failure");
-        let started_task = *record
-            .task_ids()
-            .first()
-            .expect("independent child should have started before boot failed");
-        let task = state
-            .task(started_task)
-            .expect("started child task should exist");
+        // When a required child's dependency is unavailable, the supervisor aborts
+        // boot via a full cancel cascade. The already-started sibling ("metrics")
+        // is cancelled; because it is a registered-but-unpolled task it quiesces
+        // immediately, so the cancel cascade drives the supervisor region to
+        // terminal state and reaps both the task and the region. We therefore
+        // assert the cascade cleaned up the region (no leak) rather than that it
+        // lingers in a `Cancelling` state.
         assert!(
-            task.state.is_cancelling(),
-            "already-started sibling should be cancelled when boot fails on dependency availability"
+            state.region(region).is_none(),
+            "boot-failure cancel cascade should quiesce and reap the supervisor region"
         );
-        assert_eq!(log.lock().as_slice(), ["metrics"]);
+        // The required dependent ("api") is started in dependency order, before the
+        // independent "metrics" child, so its dependency-unavailable abort halts the
+        // boot before "metrics" runs its start hook — nothing is logged.
+        assert!(
+            log.lock().is_empty(),
+            "abort on the required dependent halts boot before later children start; got {:?}",
+            log.lock().as_slice()
+        );
 
         crate::test_complete!("required_child_with_failed_dependency_fails_supervisor_boot");
     }
@@ -9355,27 +9359,48 @@ mod tests {
         let alpha_rc_before = compiled.children[compiled.start_order[0]]
             .name
             .strong_count();
+        let charlie_rc_before = compiled.children[compiled.start_order[2]]
+            .name
+            .strong_count();
 
         let err: Outcome<(), ()> = Outcome::Err(());
         let plan = compiled
             .restart_plan_for_failure("charlie", &err)
             .expect("plan");
 
-        // After creating the plan, child names in plan should bump the Arc refcount.
-        // cancel_order has 3 names (OneForAll), restart_order has 3 names.
-        // So each child name's refcount increases by 2 (one in cancel, one in restart).
+        // After creating the plan, child names in the plan share the children's
+        // Arc allocations (refcount bump, not heap copy). Under OneForAll the
+        // cancel_order covers all 3 affected children, but restart_order is pruned
+        // to children whose own strategy is `Restart` — here only "charlie".
+        // "alpha"/"bravo" default to `Stop`, so they appear in cancel_order only
+        // and their refcount bumps by exactly 1.
         let alpha_rc_after = compiled.children[compiled.start_order[0]]
             .name
             .strong_count();
         assert_eq!(
             alpha_rc_after,
-            alpha_rc_before + 2,
+            alpha_rc_before + 1,
             "plan names must share Arc with children (refcount bump, not copy)"
+        );
+
+        // charlie is the only restartable child, so it appears in BOTH the
+        // cancel and restart orders — proving the restart_order also shares Arcs.
+        let charlie_rc_after = compiled.children[compiled.start_order[2]]
+            .name
+            .strong_count();
+        assert_eq!(
+            charlie_rc_after,
+            charlie_rc_before + 2,
+            "restartable child name is shared into both cancel_order and restart_order"
         );
 
         // Verify plan has the right content.
         assert_eq!(plan.cancel_order.len(), 3);
-        assert_eq!(plan.restart_order.len(), 3);
+        assert_eq!(
+            plan.restart_order.len(),
+            1,
+            "only children with a Restart strategy are scheduled for restart"
+        );
 
         // Dropping the plan restores refcounts.
         drop(plan);

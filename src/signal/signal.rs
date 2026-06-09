@@ -1100,19 +1100,29 @@ mod tests {
         let mut stream = signal(SignalKind::pipe()).expect("SIGPIPE stream");
         let dispatcher = dispatcher_for(SignalKind::pipe()).expect("SIGPIPE dispatcher");
 
-        // Inject a signal before starting recv
-        dispatcher.inject(SignalKind::pipe());
-
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // Start recv, then drop it (simulating cancellation)
+        // Poll a recv while NO signal is pending so it parks (Pending) and
+        // registers a waiter — this is the future we will "cancel" by dropping.
         {
             let mut recv = Box::pin(stream.recv());
-            let _poll = recv.as_mut().poll(&mut cx);
-        } // recv dropped here
+            let poll_before = recv.as_mut().poll(&mut cx);
+            crate::assert_with_log!(
+                matches!(poll_before, Poll::Pending),
+                "recv parks while no SIGPIPE is pending",
+                "Poll::Pending",
+                poll_before
+            );
 
-        // Start a new recv - signal should still be delivered (cancel-safe)
+            // A signal arrives while the recv future is alive...
+            dispatcher.inject(SignalKind::pipe());
+            // ...then the recv future is dropped (cancellation) WITHOUT being
+            // polled again, so it must not have consumed the pending delivery.
+        }
+
+        // A fresh recv must still observe the injected signal — cancel-safety
+        // means dropping the previous recv did not swallow the delivery.
         let mut recv_after_cancel = Box::pin(stream.recv());
         let poll_after = recv_after_cancel.as_mut().poll(&mut cx);
         crate::assert_with_log!(

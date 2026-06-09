@@ -1750,6 +1750,7 @@ fn normalization_redirect_response(path: &str) -> Response {
 }
 
 fn invalid_normalized_redirect_response(path: &str, err: impl std::fmt::Display) -> Response {
+    let _ = (&path, &err);
     warn!(
         path = %path,
         error = %err,

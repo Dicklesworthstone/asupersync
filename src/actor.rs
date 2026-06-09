@@ -2132,11 +2132,8 @@ mod tests {
 
         init_test("supervised_restart_window_expires_without_timer_driver");
 
-        let cx = Cx::new(
-            RegionId::testing_default(),
-            TaskId::new_for_test(1, 1),
-            Budget::INFINITE,
-        );
+        let region_id = RegionId::new_for_test(0, 1);
+        let cx = Cx::new(region_id, TaskId::new_for_test(1, 1), Budget::INFINITE);
         let mut supervisor =
             crate::supervision::Supervisor::new(crate::supervision::SupervisionStrategy::Restart(
                 crate::supervision::RestartConfig::new(1, Duration::from_millis(2))
@@ -2147,7 +2144,7 @@ mod tests {
 
         let first = supervisor.on_failure(
             task_id,
-            RegionId::testing_default(),
+            region_id,
             None,
             &outcome,
             supervised_restart_timestamp(&cx),
@@ -2164,7 +2161,7 @@ mod tests {
 
         let second = supervisor.on_failure(
             task_id,
-            RegionId::testing_default(),
+            region_id,
             None,
             &outcome,
             supervised_restart_timestamp(&cx),
