@@ -1773,7 +1773,7 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
             if matches!(
                 self.strategy,
                 TrailingSlash::RedirectTrim | TrailingSlash::RedirectAlways
-            ) && let Err(err) = Redirect::permanent(path.to_string())
+            ) && let Err(err) = Redirect::permanent(path.clone())
             {
                 return invalid_normalized_redirect_response(path, err);
             }
