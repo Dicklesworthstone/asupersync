@@ -50,17 +50,15 @@ fn measurement(current: u64, max_limit: u64) -> ResourceMeasurement {
 #[test]
 fn mr1_measurement_additivity() {
     proptest!(|(
-        base_usage: u64,
-        increments: Vec<u64>
+        base_usage in 0u64..1_000_000,
+        increments in prop::collection::vec(0u64..100_000, 1..=10)
     )| {
-        prop_assume!(!increments.is_empty() && increments.len() <= 10);
-        let Some(total_increment) = increments
-            .iter()
-            .try_fold(0_u64, |total, increment| total.checked_add(*increment))
-        else {
-            return Ok(());
-        };
-        prop_assume!(base_usage.saturating_add(total_increment) < u64::MAX / 2);
+        // Generate a bounded, non-empty increment sequence and a bounded base
+        // usage directly. Previously these were arbitrary `u64`/`Vec<u64>` with
+        // `prop_assume!` guards that rejected almost every generated case,
+        // aborting the run with "too many global rejects". The chosen ranges
+        // keep `base_usage + sum(increments)` far below `u64::MAX / 2`.
+        let total_increment: u64 = increments.iter().copied().sum();
 
         let config = MonitorConfig::default();
 
@@ -112,10 +110,13 @@ fn mr1_measurement_additivity() {
 #[test]
 fn mr2_pressure_monotonicity() {
     proptest!(|(
-        base_usage: u64,
-        scale_factor in 1.0..10.0_f64
+        base_usage in 1u64..1_000_000,
+        scale_factor in 2.0..10.0_f64
     )| {
-        prop_assume!(base_usage > 0 && base_usage < u64::MAX / 20);
+        // Generate a bounded, positive base usage directly (was arbitrary `u64`
+        // guarded by `prop_assume!`, which rejected nearly every case). With a
+        // scale factor of at least 2.0 and `base_usage >= 1`, the scaled usage
+        // is strictly greater than the base, so no rejection is needed.
         let scaled_usage = (base_usage as f64 * scale_factor) as u64;
         prop_assume!(scaled_usage > base_usage); // Ensure actual increase
 
@@ -426,13 +427,12 @@ fn mr7_ordering_invariance() {
 #[test]
 fn mr8_subset_consistency() {
     proptest!(|(
-        all_measurements in generators::degradation_scenario()
+        all_measurements in generators::distinct_degradation_scenario()
     )| {
-        prop_assume!(all_measurements.len() >= 3 && all_measurements.len() <= 6);
-        prop_assume!(all_measurements.iter().all(|(_, _, threshold)| *threshold > 0));
-        let unique_resources: std::collections::HashSet<_> =
-            all_measurements.iter().map(|(resource_type, _, _)| resource_type.clone()).collect();
-        prop_assume!(unique_resources.len() == all_measurements.len());
+        // `distinct_degradation_scenario` already yields 3..=5 measurements with
+        // distinct resource types and `threshold >= usage >= 1`, so no
+        // `prop_assume!` rejection is required (the previous guards aborted the
+        // run with "too many global rejects").
 
         // Create subset (first half)
         let subset_size = all_measurements.len() / 2;
@@ -497,6 +497,36 @@ mod generators {
             vec.into_iter()
                 .map(|(rt, (usage, threshold))| (rt, usage, threshold))
                 .collect()
+        })
+    }
+
+    /// Generates a degradation scenario with a DISTINCT set of resource types.
+    ///
+    /// `mr8_subset_consistency` requires 3..=6 measurements whose resource types
+    /// are all unique (so that the subset/full comparison is well-defined per
+    /// resource). Generating arbitrary scenarios and rejecting non-distinct ones
+    /// via `prop_assume!` aborted with "too many global rejects"; instead we
+    /// draw a distinct subset of the fixed resource types up front and attach an
+    /// independent valid measurement to each.
+    pub fn distinct_degradation_scenario() -> impl Strategy<Value = Vec<(ResourceType, u64, u64)>> {
+        let fixed_types = vec![
+            ResourceType::Memory,
+            ResourceType::FileDescriptors,
+            ResourceType::CpuLoad,
+            ResourceType::NetworkConnections,
+            ResourceType::Task,
+        ];
+        // Pick 3..=5 distinct types, then attach a valid measurement to each.
+        prop::sample::subsequence(fixed_types, 3..=5).prop_flat_map(|types| {
+            let len = types.len();
+            prop::collection::vec(valid_measurement(), len).prop_map(move |measurements| {
+                types
+                    .iter()
+                    .cloned()
+                    .zip(measurements)
+                    .map(|(rt, (usage, threshold))| (rt, usage, threshold))
+                    .collect()
+            })
         })
     }
 }
