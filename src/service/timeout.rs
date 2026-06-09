@@ -866,12 +866,15 @@ mod tests {
     /// fires first if it has a shorter duration.
     #[test]
     fn golden_nested_timeout_inheritance() {
-        // Create layered timeouts: outer (10ms) > inner (3ms) > never service
+        // Create layered timeouts: outer (10s) > inner (3s) > never service.
+        // The time arithmetic below operates at second scale (start + 2.5s / 3.5s
+        // in nanos), so the durations must match that scale for the inner timeout
+        // to fire between the two poll points.
         let inner_timeout =
-            Timeout::with_time_getter(NeverService, Duration::from_millis(3), test_time);
+            Timeout::with_time_getter(NeverService, Duration::from_secs(3), test_time);
 
         let mut outer_timeout =
-            Timeout::with_time_getter(inner_timeout, Duration::from_millis(10), test_time);
+            Timeout::with_time_getter(inner_timeout, Duration::from_secs(10), test_time);
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -896,9 +899,12 @@ mod tests {
         set_test_time(start_time.as_nanos() + 3_500_000_000);
         let result = Future::poll(Pin::new(&mut future), &mut cx);
 
-        // Should get a timeout error with the inner timeout's deadline
+        // Should get a timeout error with the inner timeout's deadline. The
+        // inner timeout fires first and surfaces as Elapsed; the outer timeout
+        // observes that as an inner-service error, so the outer error type is
+        // TimeoutError<TimeoutError<E>> with the inner Elapsed nested under Inner.
         match result {
-            Poll::Ready(Err(TimeoutError::Elapsed(elapsed))) => {
+            Poll::Ready(Err(TimeoutError::Inner(TimeoutError::Elapsed(elapsed)))) => {
                 let expected_inner_deadline = start_time.saturating_add_nanos(3_000_000_000);
                 assert_eq!(
                     elapsed.deadline(),

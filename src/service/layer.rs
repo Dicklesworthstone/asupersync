@@ -709,8 +709,8 @@ mod tests {
 
             // Right-associative: Stack(A, Stack(B, C))
             let right_stack = Stack::new(
-                Stack::new(layer_b.clone(), layer_c.clone()),
                 layer_a.clone(),
+                Stack::new(layer_b.clone(), layer_c.clone()),
             );
             let right_service = right_stack.layer(EchoService);
             let right_result = execute_service_call(right_service, test_value);
@@ -936,40 +936,38 @@ mod tests {
         let layer_b = TrackingLayer::new(2, Arc::clone(&order));
         let layer_c = TrackingLayer::new(3, Arc::clone(&order));
 
-        // Test different composition structures
-        let compositions = vec![
-            (
-                "left_assoc",
-                Stack::new(
-                    Stack::new(layer_a.clone(), layer_b.clone()),
-                    layer_c.clone(),
-                ),
-            ),
-            (
-                "right_assoc",
-                Stack::new(
-                    Stack::new(layer_b.clone(), layer_c.clone()),
-                    layer_a.clone(),
-                ),
-            ),
-        ];
-
-        for (name, composition) in compositions {
-            order.lock().clear();
-
-            let _service = composition.layer(EchoService);
-            let application_order = order.lock().clone();
-
-            // Verify that layers are applied in the correct order: inner first, outer last
-            // For Stack(A, B), A should be applied before B
+        // Equivalent compositions group the same layer order (A, B, C) under
+        // different associativity. They have distinct concrete types, so apply
+        // each separately rather than collecting into a homogeneous Vec.
+        let assert_order = |name: &str, applied: Vec<u32>| {
+            // Verify that layers are applied in the correct order: inner first,
+            // outer last. For Stack(A, B), A should be applied before B.
             assert_eq!(
-                application_order,
+                applied,
                 vec![1, 2, 3],
                 "Composition {} has wrong application order: {:?}",
                 name,
-                application_order
+                applied
             );
-        }
+        };
+
+        // Left-associative: Stack(Stack(A, B), C)
+        order.lock().clear();
+        let _left = Stack::new(
+            Stack::new(layer_a.clone(), layer_b.clone()),
+            layer_c.clone(),
+        )
+        .layer(EchoService);
+        assert_order("left_assoc", order.lock().clone());
+
+        // Right-associative: Stack(A, Stack(B, C))
+        order.lock().clear();
+        let _right = Stack::new(
+            layer_a.clone(),
+            Stack::new(layer_b.clone(), layer_c.clone()),
+        )
+        .layer(EchoService);
+        assert_order("right_assoc", order.lock().clone());
     }
 
     // =========================================================================
