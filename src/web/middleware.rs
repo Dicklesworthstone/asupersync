@@ -46,7 +46,6 @@
 //! like rate-limit, timeout, circuit-breaker, and load-shed so their synthetic
 //! 4xx/5xx responses still carry the security headers.
 
-use std::convert::Infallible;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -644,17 +643,20 @@ impl<H: Handler> Handler for RateLimitMiddleware<H> {
 
         Box::pin(async move {
             // Check rate limit first
-            match self.limiter.call(now, || Ok::<_, Infallible>(())) {
-                Ok(()) => {
+            let cost = self.limiter.policy().default_cost;
+            match self.limiter.acquire_permit(cost, now) {
+                Ok(permit) => {
                     // Rate limit passed, call inner handler
-                    self.inner.call(&cx, req).await
+                    let response = self.inner.call(&cx, req).await;
+                    permit.commit();
+                    response
                 }
                 Err(
                     crate::combinator::rate_limit::RateLimitError::RateLimitExceeded
                     | crate::combinator::rate_limit::RateLimitError::Timeout { .. }
                     | crate::combinator::rate_limit::RateLimitError::Cancelled,
                 ) => {
-                    let retry_after = self.limiter.retry_after(1, now);
+                    let retry_after = self.limiter.retry_after(cost, now);
                     let secs = retry_after.as_secs().max(1);
                     Response::new(
                         StatusCode::TOO_MANY_REQUESTS,
@@ -1745,6 +1747,18 @@ fn normalization_redirect_response(path: &str) -> Response {
     }
 }
 
+fn invalid_normalized_redirect_response(path: &str, err: impl std::fmt::Display) -> Response {
+    warn!(
+        path = %path,
+        error = %err,
+        "NormalizePathMiddleware: refusing unsafe request path for redirect strategy"
+    );
+    Response::new(
+        StatusCode::BAD_REQUEST,
+        b"Bad Request: invalid normalized redirect target".to_vec(),
+    )
+}
+
 impl<H: Handler> Handler for NormalizePathMiddleware<H> {
     fn call(
         &self,
@@ -1754,6 +1768,13 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
         let cx = cx.clone();
         Box::pin(async move {
             let path = &req.path;
+            if matches!(
+                self.strategy,
+                TrailingSlash::RedirectTrim | TrailingSlash::RedirectAlways
+            ) && let Err(err) = Redirect::permanent(path.to_string())
+            {
+                return invalid_normalized_redirect_response(path, err);
+            }
 
             match self.strategy {
                 TrailingSlash::Trim => {
@@ -4923,11 +4944,11 @@ mod tests {
             );
 
             // Advance time and verify retry calculation updates
-            set_test_time(70_000); // t=70s (50s elapsed)
+            set_test_time(70_000); // t=70s (60s elapsed after consuming at t=10s)
             let still_limited = mw.call(make_request());
             let updated_retry_after = still_limited.headers.get("retry-after").unwrap();
             assert_eq!(
-                updated_retry_after, "70",
+                updated_retry_after, "60",
                 "Retry-After should decrease as time progresses"
             );
 

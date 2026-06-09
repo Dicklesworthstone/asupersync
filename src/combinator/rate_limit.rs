@@ -255,13 +255,25 @@ pub struct RateLimiter {
     max_wait_time_ms: AtomicU64,
 }
 
-struct TokenRefundGuard<'a> {
+/// RAII permit returned by [`RateLimiter::acquire_permit`].
+///
+/// The permit refunds its token cost if dropped before [`Self::commit`]. This
+/// is useful for async or panic-prone call paths where the protected work is
+/// split from synchronous token acquisition.
+pub struct RateLimitPermit<'a> {
     limiter: &'a RateLimiter,
     cost: u32,
     refund: bool,
 }
 
-impl Drop for TokenRefundGuard<'_> {
+impl RateLimitPermit<'_> {
+    /// Mark the protected work as successfully completed.
+    pub fn commit(mut self) {
+        self.refund = false;
+    }
+}
+
+impl Drop for RateLimitPermit<'_> {
     fn drop(&mut self) {
         if self.refund {
             self.limiter.refund_tokens(self.cost);
@@ -450,6 +462,27 @@ impl RateLimiter {
         state.tokens = state.tokens.saturating_add(cost).min(self.policy.burst);
     }
 
+    /// Acquire a refundable permit for `cost` tokens.
+    ///
+    /// The returned permit refunds tokens on drop until committed. Failed
+    /// acquisitions update rejection metrics just like [`Self::call_weighted`].
+    pub fn acquire_permit(
+        &self,
+        cost: u32,
+        now: Time,
+    ) -> Result<RateLimitPermit<'_>, RateLimitError<()>> {
+        if !self.try_acquire(cost, now) {
+            self.total_rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(RateLimitError::RateLimitExceeded);
+        }
+
+        Ok(RateLimitPermit {
+            limiter: self,
+            cost,
+            refund: true,
+        })
+    }
+
     /// Try to acquire with default cost.
     #[must_use]
     pub fn try_acquire_default(&self, now: Time) -> bool {
@@ -477,24 +510,21 @@ impl RateLimiter {
     where
         F: FnOnce() -> Result<T, E>,
     {
-        if !self.try_acquire(cost, now) {
-            self.total_rejected.fetch_add(1, Ordering::Relaxed);
-            return Err(RateLimitError::RateLimitExceeded);
-        }
-
-        let mut refund_guard = TokenRefundGuard {
-            limiter: self,
-            cost,
-            refund: true,
-        };
+        let permit = self.acquire_permit(cost, now).map_err(|err| match err {
+            RateLimitError::RateLimitExceeded => RateLimitError::RateLimitExceeded,
+            RateLimitError::Timeout { waited } => RateLimitError::Timeout { waited },
+            RateLimitError::Cancelled => RateLimitError::Cancelled,
+            RateLimitError::QueueIdExhausted => RateLimitError::QueueIdExhausted,
+            RateLimitError::Inner(()) => unreachable!("permit acquisition has no inner op"),
+        })?;
 
         match catch_unwind(AssertUnwindSafe(op)) {
             Ok(Ok(v)) => {
-                refund_guard.refund = false;
+                permit.commit();
                 Ok(v)
             }
             Ok(Err(e)) => {
-                refund_guard.refund = false;
+                permit.commit();
                 Err(RateLimitError::Inner(e))
             }
             Err(panic) => resume_unwind(panic),
