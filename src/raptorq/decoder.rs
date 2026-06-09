@@ -2494,7 +2494,7 @@ impl InactivationDecoder {
         // would receive a successful decode whose intermediate
         // symbols were attacker-influenced zero blocks. Now any
         // unfilled pivot row surfaces as
-        // `DecodeError::SingularMatrix { row: dense_col }`,
+        // `DecodeError::SingularMatrix` with the original column id,
         // matching the same error the explicit elimination_error
         // path raises elsewhere.
         for (dense_col, &col) in dense_cols.iter().enumerate() {
@@ -2502,7 +2502,7 @@ impl InactivationDecoder {
             if prow < n_rows {
                 state.solved[col] = Some(std::mem::take(&mut b[prow]));
             } else {
-                return Err(DecodeError::SingularMatrix { row: dense_col });
+                return Err(singular_matrix_error(dense_cols, dense_col));
             }
         }
 
@@ -2831,7 +2831,7 @@ impl InactivationDecoder {
         // would receive a successful decode whose intermediate
         // symbols were attacker-influenced zero blocks. Now any
         // unfilled pivot row surfaces as
-        // `DecodeError::SingularMatrix { row: dense_col }`,
+        // `DecodeError::SingularMatrix` with the original column id,
         // matching the same error the explicit elimination_error
         // path raises elsewhere.
         for (dense_col, &col) in dense_cols.iter().enumerate() {
@@ -2839,7 +2839,7 @@ impl InactivationDecoder {
             if prow < n_rows {
                 state.solved[col] = Some(std::mem::take(&mut b[prow]));
             } else {
-                return Err(DecodeError::SingularMatrix { row: dense_col });
+                return Err(singular_matrix_error(dense_cols, dense_col));
             }
         }
 
@@ -5909,6 +5909,15 @@ mod tests {
                 row: 11,
                 attempted_cols: vec![3, 9],
             }
+        );
+    }
+
+    #[test]
+    fn singular_matrix_error_maps_reordered_dense_column_to_original_id() {
+        assert_eq!(
+            singular_matrix_error(&[11, 3, 7], 2),
+            DecodeError::SingularMatrix { row: 7 },
+            "defensive pivot fallbacks must report the original column id, not the dense ordinal"
         );
     }
 
