@@ -9849,7 +9849,10 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let task = insert_task(&mut state, region);
 
-        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+        // Complete a task with an error in a region that has NOT been cancelled.
+        // The region close outcome should track that error (Err is the worst
+        // severity present, per the documented ordering
+        // `Ok < Err < Cancelled < Panicked`).
         state
             .task_mut(task)
             .expect("task")
