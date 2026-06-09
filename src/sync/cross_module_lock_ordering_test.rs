@@ -62,7 +62,10 @@ fn test_cross_module_violation_obligation_while_holding_cancel() {
 
 #[test]
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-#[should_panic(expected = "CROSS-MODULE DEADLOCK PREVENTION")]
+// Acquiring a Tasks-rank lock while holding an Obligations-rank lock is a plain
+// rank-order inversion, so the basic guard fires first with the "DEADLOCK
+// PREVENTION" message before the Runtime/Obligation cross-module rule is reached.
+#[should_panic(expected = "DEADLOCK PREVENTION")]
 fn test_cross_module_violation_runtime_while_holding_obligation() {
     clear_held_locks();
 

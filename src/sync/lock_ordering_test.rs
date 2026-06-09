@@ -78,12 +78,24 @@ mod tests {
         {
             let _config_guard = config_lock.lock().unwrap(); // ubs:ignore - test oracle
             let _tasks_guard = tasks_lock.lock().unwrap(); // ubs:ignore - test oracle
-        } // Both guards dropped here
+        } // Both guards dropped here, releasing both ranks.
 
-        // Second acquisition: Tasks -> Config should now work (ranks reset)
+        // After releasing, the per-thread held-rank set must be empty again.
+        // We prove this two ways:
+        //
+        // 1. Acquiring the lower-ranked Config lock ALONE must succeed. If the
+        //    release of the Tasks (rank 40) lock had not been recorded, the
+        //    rank-order guard would reject acquiring Config (rank 10) here as
+        //    an inversion. That it succeeds shows the higher rank was cleared.
         {
-            let _tasks_guard = tasks_lock.lock().unwrap(); // ubs:ignore - test oracle
             let _config_guard = config_lock.lock().unwrap(); // ubs:ignore - test oracle
+        }
+
+        // 2. Re-acquiring in the original correct order (Config -> Tasks) must
+        //    still succeed, confirming no stale "already held" state lingered.
+        {
+            let _config_guard = config_lock.lock().unwrap(); // ubs:ignore - test oracle
+            let _tasks_guard = tasks_lock.lock().unwrap(); // ubs:ignore - test oracle
         }
     }
 
