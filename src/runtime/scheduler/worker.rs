@@ -1577,9 +1577,13 @@ mod tests {
         let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             worker.execute(panicking_task);
         }));
+        // The worker isolates task panics via the panic_isolator: a panicking
+        // poll is converted to a structured Panicked outcome and the worker
+        // returns normally so the run loop survives. The panic must NOT unwind
+        // into the caller.
         assert!(
-            panic_result.is_err(),
-            "panicking task should still propagate unwind to caller"
+            panic_result.is_ok(),
+            "worker must isolate task panics and not propagate unwind to caller"
         );
 
         {
@@ -1651,9 +1655,11 @@ mod tests {
         let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             worker.execute(panicking_task);
         }));
+        // Panics are isolated by the panic_isolator and converted to a
+        // structured Panicked outcome; execute returns normally.
         assert!(
-            panic_result.is_err(),
-            "panicking task should still propagate unwind to caller"
+            panic_result.is_ok(),
+            "worker must isolate task panics and not propagate unwind to caller"
         );
 
         let finalizer_task = global
@@ -1822,7 +1828,11 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             worker.execute(panicking_task);
         }));
-        assert!(result.is_err(), "panicking task should propagate unwind");
+        // Panics are isolated by the panic_isolator; execute returns normally.
+        assert!(
+            result.is_ok(),
+            "worker must isolate task panics and not propagate unwind to caller"
+        );
 
         let guard = state
             .lock()
@@ -1942,12 +1952,18 @@ mod tests {
         let mut heavy_chosen = 0;
         let mut light_chosen = 0;
 
-        for trial in 0..TRIALS {
-            // Set up load imbalance: heavy has 5 tasks, light has 1 task
-            for _ in 0..5 {
-                heavy_queue.push(TaskId::new_for_test(100 + trial as u32, 0));
+        for _trial in 0..TRIALS {
+            // Set up load imbalance: heavy has 5 tasks, light has 1 task.
+            // Each push must use a DISTINCT task id: LocalQueue::push dedups via
+            // a presence set, so reusing the same id collapses 5 pushes into a
+            // single queued task and erases the intended load imbalance. The
+            // queues are drained at the end of every trial (pop() also clears the
+            // presence set), so the same five heavy ids may be reused each trial.
+            // All heavy ids stay inside the [100, 200) attribution range.
+            for slot in 0..5u32 {
+                heavy_queue.push(TaskId::new_for_test(100 + slot, 0));
             }
-            light_queue.push(TaskId::new_for_test(200 + trial as u32, 0));
+            light_queue.push(TaskId::new_for_test(200, 0));
 
             let stealers = vec![heavy_queue.stealer(), light_queue.stealer()];
             let mut rng = DetRng::new(42 + trial as u64);
@@ -2171,8 +2187,16 @@ mod tests {
                     // Clear and repopulate
                     while q.pop().is_some() {}
                     for task_idx in 0..load {
+                        // Worker id is recovered via `index / 1000` at steal time,
+                        // so each worker's task ids must stay strictly inside its
+                        // own [worker_id*1000, worker_id*1000 + 1000) band. The
+                        // per-worker offset `task_idx + trial` is bounded by
+                        // max_load (20) + TOTAL_TRIALS (400) < 1000, so it never
+                        // bleeds into the next worker's band. (The previous
+                        // `trial * 10` term overflowed the band for late trials and
+                        // misattributed heavy-worker steals to its neighbours.)
                         q.push(TaskId::new_for_test(
-                            (worker_id * 1000 + task_idx + trial * 10) as u32,
+                            (worker_id * 1000 + task_idx + trial) as u32,
                             0,
                         ));
                     }
