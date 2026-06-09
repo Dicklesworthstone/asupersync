@@ -323,7 +323,7 @@
       "claim_id": "fourth-wave-governor-schema-proof",
       "category": "fourth-wave governor schema proof",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave governor proof map",
@@ -343,14 +343,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Green maps only the schema/receipt contract, fail-closed fixture matrix, redaction checks, and explicit non-claims. It does not prove the policy engine, runtime bridge, live benchmarks, production-on-by-default control, or scheduler performance."
     },
     {
       "claim_id": "fourth-wave-governor-policy-engine-proof",
       "category": "fourth-wave governor policy-engine proof",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave governor proof map",
@@ -370,14 +375,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_policy_engine CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib fourth_wave_governor --features test-internals -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Green maps only the pure deterministic policy-engine receipt tests. It does not prove opt-in bridge behavior, benchmark improvement, no regression, or production-on-by-default control."
     },
     {
       "claim_id": "fourth-wave-swarm-replay-corpus",
       "category": "fourth-wave swarm replay corpus",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave governor proof map",
@@ -397,14 +407,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Green maps only the deterministic replay corpus and stable workload dimensions. It does not prove live host throughput, runtime bridge correctness, or scheduler performance."
     },
     {
       "claim_id": "fourth-wave-runtime-bridge",
       "category": "fourth-wave runtime bridge",
       "status": "green",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave governor proof map",
@@ -424,14 +439,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Green maps only the explicit opt-in runtime bridge contract for base SLO preservation, cancellation precedence, brownout, no-worker defer, fail-closed receipts, redaction, and non-claim propagation. It does not prove production-on-by-default control, live performance improvement, or broad workspace health."
     },
     {
       "claim_id": "fourth-wave-benchmark-no-claim-contract",
       "category": "fourth-wave benchmark no-claim contract",
       "status": "yellow_scoped",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave benchmark no-claim contract",
@@ -451,14 +471,19 @@
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun this exact fourth-wave remote-required manifest command from a clean committed main tree, or replace this row with a narrower explicit blocker before parent close."
+      },
       "notes": "Yellow-scoped because this is a benchmark contract and no-claim report, not a fresh benchmark result. It does not prove p95 improvement, throughput improvement, no regression, scheduler performance, or production-on-by-default control."
     },
     {
       "claim_id": "fourth-wave-final-aggregated-signoff",
       "category": "fourth-wave final aggregated signoff",
       "status": "yellow_scoped",
-      "proof_evidence_status": "rerun-required",
+      "proof_evidence_status": "blocked",
       "doc_claim_markers": {
         "README.md": [
           "fourth-wave final aggregated signoff",
@@ -498,7 +523,12 @@
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture",
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture"
       ],
-      "blocked_frontier": null,
+      "blocked_frontier": {
+        "blocker_id": "dirty-shared-main-rch-contention-2026-06-09",
+        "blocked_at": "2026-06-09T17:30:00Z",
+        "reason": "Shared main contains uncommitted peer changes across active release-fix clusters and RCH had a same-project observability lane during the refresh attempt.",
+        "required_followup": "Rerun all fourth-wave child lanes and the two signoff lanes from a clean committed main tree, or keep explicit blocked rows before parent close."
+      },
       "notes": "Yellow-scoped aggregate signoff: cite it only as an executable operator report and operator checklist tying child lanes together. It remains a no-claim status for production-on-by-default control, live performance improvement, no regression, broad workspace health, and RCH fleet availability until every child row has fresh remote-required proof or an explicit blocked follow-up."
     },
     {
