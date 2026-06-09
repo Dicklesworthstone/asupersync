@@ -1173,14 +1173,16 @@ mod tests {
             let sdk = AtpSdk::new_in_process(config);
 
             let peer = PeerId::from_label("test_peer");
-            let session_options = crate::net::atp::sdk::SessionOptions::direct(peer)
-                .with_grants(vec![CapabilityGrant::new(
-                    CapabilityGrantId::from_label("path-monitoring"),
-                    peer,
-                    local_peer,
-                    [CapabilityAction::Read, CapabilityAction::Write],
-                    CapabilityScope::for_context(SessionContextKind::Direct),
-                )]);
+            let session_options =
+                crate::net::atp::sdk::SessionOptions::direct(peer).with_grants(vec![
+                    CapabilityGrant::new(
+                        CapabilityGrantId::from_label("path-monitoring"),
+                        peer,
+                        local_peer,
+                        [CapabilityAction::Read, CapabilityAction::Write],
+                        CapabilityScope::for_context(SessionContextKind::Direct),
+                    ),
+                ]);
             let session = sdk.open_session(&cx, session_options).await.unwrap();
 
             let monitor = session.start_path_monitoring(&cx, 100).await.unwrap();

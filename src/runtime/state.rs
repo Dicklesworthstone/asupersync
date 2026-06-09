@@ -4330,19 +4330,19 @@ impl RuntimeState {
                             // protocol violation. Only validate the
                             // `FinalizerCompleted` transition when the validator
                             // has not already reached `Finalized`.
-                            let already_finalized = matches!(
+                            let already_finalized =
+                                matches!(
                                 self.cancel_protocol_validator
                                     .lock()
                                     .region_state(region_id),
                                 Some(crate::cancel::protocol_state_machines::RegionState::Finalized)
                             );
                             if !already_finalized {
-                                let validation_result = self
-                                    .validate_region_protocol_transition(
-                                        region_id,
-                                        RegionEvent::FinalizerCompleted, // Use FinalizerCompleted for close
-                                        &context,
-                                    );
+                                let validation_result = self.validate_region_protocol_transition(
+                                    region_id,
+                                    RegionEvent::FinalizerCompleted, // Use FinalizerCompleted for close
+                                    &context,
+                                );
                                 if matches!(
                                     validation_result,
                                     TransitionResult::Invalid { .. }
@@ -8509,14 +8509,8 @@ mod tests {
                         region,
                         time: now,
                     },
-                    FinalizerHistoryEvent::Ran {
-                        id: 0,
-                        time: now,
-                    },
-                    FinalizerHistoryEvent::RegionClosed {
-                        region,
-                        time: now,
-                    },
+                    FinalizerHistoryEvent::Ran { id: 0, time: now },
+                    FinalizerHistoryEvent::RegionClosed { region, time: now },
                 ],
             "history records cleanup execution and close once the finalizer task finishes",
             "registered -> ran -> closed",

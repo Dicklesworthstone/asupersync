@@ -675,11 +675,15 @@ mod tests {
         // that the leader is the same party across scheduler perturbations.
         let parties = baseline_target.released_parties.len();
         assert!(
-            baseline_target.released_parties.contains(&baseline_target.leader_party),
+            baseline_target
+                .released_parties
+                .contains(&baseline_target.leader_party),
             "baseline leader must be one of the released parties"
         );
         assert!(
-            transformed_target.released_parties.contains(&transformed_target.leader_party),
+            transformed_target
+                .released_parties
+                .contains(&transformed_target.leader_party),
             "transformed leader must be one of the released parties"
         );
         assert!(
