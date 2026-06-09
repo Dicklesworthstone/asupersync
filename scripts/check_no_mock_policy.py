@@ -9,6 +9,7 @@ import fnmatch
 import json
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -197,6 +198,9 @@ def run_scan(
     escaped = [re.escape(term) for term in terms]
     token_re = re.compile(rf"(?i)\b({'|'.join(escaped)})\b")
 
+    if shutil.which("rg") is None:
+        return run_scan_without_ripgrep(roots, token_re, cwd=cwd)
+
     cmd = ["rg", "--line-number", "--no-heading", "--color", "never"]
     for term in terms:
         cmd += ["-e", rf"(?i)\b{re.escape(term)}\b"]
@@ -209,8 +213,12 @@ def run_scan(
     if proc.returncode == 1:
         return []
 
+    return parse_scan_rows(proc.stdout.splitlines(), token_re)
+
+
+def parse_scan_rows(rows: Iterable[str], token_re: re.Pattern[str]) -> list[Hit]:
     hits: list[Hit] = []
-    for row in proc.stdout.splitlines():
+    for row in rows:
         parts = row.split(":", 2)
         if len(parts) != 3:
             continue
@@ -223,6 +231,39 @@ def run_scan(
         if not tokens:
             continue
         hits.append(Hit(path=path, line=line, text=text, tokens=tokens))
+    return hits
+
+
+def run_scan_without_ripgrep(
+    roots: Iterable[str],
+    token_re: re.Pattern[str],
+    cwd: pathlib.Path | None = None,
+) -> list[Hit]:
+    base = cwd if cwd is not None else pathlib.Path.cwd()
+    hits: list[Hit] = []
+
+    for root in roots:
+        root_path = base / root
+        if root_path.is_file():
+            candidates = [root_path]
+        elif root_path.is_dir():
+            candidates = sorted(path for path in root_path.rglob("*") if path.is_file())
+        else:
+            continue
+
+        for path in candidates:
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            rel_path = path.relative_to(base).as_posix()
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                tokens = tuple(sorted({m.group(1).lower() for m in token_re.finditer(line)}))
+                if tokens:
+                    hits.append(
+                        Hit(path=rel_path, line=line_number, text=line, tokens=tokens)
+                    )
+
     return hits
 
 
