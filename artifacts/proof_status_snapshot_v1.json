@@ -671,6 +671,109 @@
       "notes": "Broad workspace health is non-citeable from cache unless a manifest lane explicitly permits that exact claim scope."
     }
   ],
+  "durable_receipt_status_rows": [
+    {
+      "row_id": "durable-receipt-terminal-pass-candidate",
+      "proof_evidence_status": "fresh-rch-pass",
+      "fixture": "terminal_pass.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "accepted",
+      "reason_codes": [],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A terminal pass durable receipt is only candidate fresh proof for the exact manifest lane, guarantee, command, clean source frontier, and remote-required RCH route in the receipt."
+    },
+    {
+      "row_id": "durable-receipt-missing-manifest-lane",
+      "proof_evidence_status": "blocked",
+      "fixture": "missing_manifest_lane.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "missing-manifest-lane"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A receipt whose claimed lane cannot be found in the manifest is blocked evidence, not a green proof."
+    },
+    {
+      "row_id": "durable-receipt-stale-head",
+      "proof_evidence_status": "stale-evidence",
+      "fixture": "stale_head.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "stale-head"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A stale durable receipt must flow through the stale-evidence path and cannot be cited as fresh proof."
+    },
+    {
+      "row_id": "durable-receipt-wrong-command-envelope",
+      "proof_evidence_status": "blocked",
+      "fixture": "terminal_pass.json",
+      "synthetic_mutations": [
+        "wrong-command-envelope"
+      ],
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "command-envelope-mismatch"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A receipt with a command that no longer matches the manifest lane command is blocked until the exact lane is rerun."
+    },
+    {
+      "row_id": "durable-receipt-wrong-feature-set",
+      "proof_evidence_status": "blocked",
+      "fixture": "terminal_pass.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [
+        "test-internals"
+      ],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "wrong-feature-set"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A status row that declares a feature set different from the manifest lane is refused rather than widening the receipt claim."
+    },
+    {
+      "row_id": "durable-receipt-local-fallback-refused",
+      "proof_evidence_status": "blocked",
+      "fixture": "local_fallback_marker.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "local-fallback-detected"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "Local fallback markers make a durable receipt blocked evidence even if the command otherwise looks like the lane command."
+    },
+    {
+      "row_id": "durable-receipt-unsupported-broad-claim",
+      "proof_evidence_status": "unsupported",
+      "fixture": "unsupported_broad_claim.json",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "release-readiness",
+      "expected_feature_flags": [],
+      "expected_decision": "refused",
+      "reason_codes": [
+        "broad-claim-unsupported"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "notes": "A focused durable receipt cannot support workspace-health, release-readiness, or live RCH fleet availability claims."
+    }
+  ],
   "documentation_contract": {
     "docs_must_reference_snapshot": [
       "README.md",

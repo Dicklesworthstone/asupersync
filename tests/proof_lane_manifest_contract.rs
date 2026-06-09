@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 const AGENTS_PATH: &str = "AGENTS.md";
 const CARGO_PATH: &str = "Cargo.toml";
+const DURABLE_RECEIPT_CONTRACT_PATH: &str = "artifacts/durable_rch_proof_receipt_contract_v1.json";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const MANIFEST_PROJECTION_GOLDEN_PATH: &str =
     "tests/fixtures/proof_lane_manifest/manifest_projection.json";
@@ -605,6 +606,101 @@ fn validate_lane_proof_reuse_policy(lane: &Value, manifest: &Value) -> Result<()
     Ok(())
 }
 
+fn validate_durable_receipt_candidate_policy(manifest: &Value) -> Result<(), String> {
+    let proof_reuse_policy = manifest
+        .get("proof_reuse_policy")
+        .ok_or_else(|| "manifest missing proof_reuse_policy".to_string())?;
+    let durable_policy = proof_reuse_policy
+        .get("durable_receipt_candidate_policy")
+        .ok_or_else(|| "proof_reuse_policy missing durable_receipt_candidate_policy".to_string())?;
+
+    if required_string(durable_policy, "policy_id")?
+        != "durable-rch-proof-receipt-candidate-policy-v1"
+    {
+        return Err("durable receipt policy id drifted".to_string());
+    }
+    if required_string(durable_policy, "receipt_schema_version")? != "durable-rch-proof-receipt-v1"
+    {
+        return Err("durable receipt schema version drifted".to_string());
+    }
+    if required_string(durable_policy, "receipt_contract")? != DURABLE_RECEIPT_CONTRACT_PATH {
+        return Err("durable receipt contract path drifted".to_string());
+    }
+    if !repo_path(DURABLE_RECEIPT_CONTRACT_PATH).exists() {
+        return Err("durable receipt contract source must exist".to_string());
+    }
+
+    for required_true in [
+        "candidate_evidence_only",
+        "must_pass_through_reuse_and_citation_classifiers",
+        "requires_main_branch",
+        "requires_clean_dirty_frontier",
+        "requires_remote_required_command",
+    ] {
+        if !required_bool(durable_policy, required_true)? {
+            return Err(format!("durable receipt policy must set {required_true}"));
+        }
+    }
+    if required_bool(durable_policy, "local_fallback_allowed")? {
+        return Err("durable receipt policy must forbid local fallback".to_string());
+    }
+    if required_string(durable_policy, "required_terminal_lifecycle_state")? != "terminal_pass" {
+        return Err("durable receipt lifecycle policy must require terminal_pass".to_string());
+    }
+    if required_string(durable_policy, "required_terminal_classification")? != "pass" {
+        return Err("durable receipt classification policy must require pass".to_string());
+    }
+    if required_string(durable_policy, "required_proof_evidence_status")? != "fresh-rch-pass" {
+        return Err("durable receipt policy must require fresh-rch-pass".to_string());
+    }
+
+    let required_fields = string_set_result(durable_policy, "required_receipt_fields")?;
+    for required in [
+        "manifest_lane_id",
+        "manifest_guarantee_ids",
+        "claim_scope",
+        "command.command",
+        "command.command_fingerprint",
+        "command.remote_required",
+        "command.local_fallback_allowed",
+        "command.local_fallback_markers",
+        "source.branch",
+        "source.head_commit",
+        "source.expected_head",
+        "source.source_tree_fingerprint",
+        "source.dirty_frontier_status",
+        "source.touched_files",
+        "source.touched_file_hashes",
+        "rch_provenance.worker_id",
+        "rch_provenance.remote_route_segments",
+        "outcome.status",
+        "outcome.output_digest",
+        "claim_boundaries.citable",
+        "claim_boundaries.explicit_not_covered",
+        "claim_boundaries.refusal_reason_codes",
+    ] {
+        if !required_fields.contains(required) {
+            return Err(format!("durable receipt policy must require {required}"));
+        }
+    }
+
+    let non_citeable_scopes = string_set_result(durable_policy, "non_citeable_claim_scopes")?;
+    for scope in [
+        "fresh-rch-pass",
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability",
+    ] {
+        if !non_citeable_scopes.contains(scope) {
+            return Err(format!(
+                "durable receipt policy must reject broad/non-proof scope {scope}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn cargo_feature_names() -> BTreeSet<String> {
     let cargo = read_repo_file(CARGO_PATH);
     let mut in_features = false;
@@ -1048,6 +1144,7 @@ fn every_lane_declares_fail_closed_proof_reuse_policy() {
         repo_path(PROOF_REUSE_CONTRACT_PATH).exists(),
         "proof reuse cache contract source must exist"
     );
+    validate_durable_receipt_candidate_policy(&manifest).unwrap_or_else(|error| panic!("{error}"));
 
     let lanes = array(&manifest, "lanes");
     for lane in lanes {

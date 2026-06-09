@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const AGENTS_PATH: &str = "AGENTS.md";
+const DURABLE_RECEIPT_FIXTURE_ROOT: &str = "tests/fixtures/durable_rch_proof_receipt";
 const FRONTIER_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const README_PATH: &str = "README.md";
@@ -217,6 +218,216 @@ fn validate_proof_reuse_status_row(
             }
         }
         other => return Err(format!("{row_id}: unknown proof evidence status {other}")),
+    }
+
+    Ok(())
+}
+
+fn nested_value<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut cursor = value;
+    for key in path {
+        cursor = cursor.get(key)?;
+    }
+    Some(cursor)
+}
+
+fn nested_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    nested_value(value, path).and_then(Value::as_str)
+}
+
+fn nested_bool(value: &Value, path: &[&str]) -> Option<bool> {
+    nested_value(value, path).and_then(Value::as_bool)
+}
+
+fn nested_string_set(value: &Value, path: &[&str]) -> BTreeSet<String> {
+    nested_value(value, path)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .unwrap_or_else(|| panic!("{path:?} entries must be strings"))
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn durable_receipt_fixture(name: &str) -> Value {
+    let relative = format!("{DURABLE_RECEIPT_FIXTURE_ROOT}/{name}");
+    json(&relative)
+}
+
+fn durable_receipt_from_row(row: &Value) -> Value {
+    let fixture = durable_receipt_fixture(string(row, "fixture"));
+    let mut receipt = fixture
+        .get("receipt")
+        .unwrap_or_else(|| panic!("{}: fixture missing receipt", string(row, "row_id")))
+        .clone();
+
+    for mutation in row
+        .get("synthetic_mutations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match mutation
+            .as_str()
+            .unwrap_or_else(|| panic!("{}: mutation must be a string", string(row, "row_id")))
+        {
+            "wrong-command-envelope" => {
+                receipt["command"]["command"] = Value::String(
+                    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wrong_durable_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test wrong_contract -- --nocapture".to_string(),
+                );
+            }
+            other => panic!(
+                "{}: unknown durable receipt mutation {other}",
+                string(row, "row_id")
+            ),
+        }
+    }
+
+    receipt
+}
+
+fn durable_non_citeable_scopes(manifest: &Value) -> BTreeSet<String> {
+    manifest
+        .get("proof_reuse_policy")
+        .and_then(|policy| policy.get("durable_receipt_candidate_policy"))
+        .map(|policy| string_set(policy, "non_citeable_claim_scopes"))
+        .unwrap_or_default()
+}
+
+fn classify_durable_receipt_candidate(
+    receipt: &Value,
+    row: &Value,
+    manifest: &Value,
+    lanes: &BTreeMap<String, Value>,
+) -> BTreeSet<String> {
+    let mut reasons = BTreeSet::new();
+    let receipt_lane_id = optional_string(receipt, "manifest_lane_id").unwrap_or("");
+    let claim_scope = optional_string(receipt, "claim_scope").unwrap_or("");
+    let durable_non_citeable = durable_non_citeable_scopes(manifest);
+
+    if optional_string(receipt, "schema_version") != Some("durable-rch-proof-receipt-v1") {
+        reasons.insert("invalid-receipt-schema".to_string());
+    }
+    if optional_string(receipt, "lifecycle_state") != Some("terminal_pass")
+        || optional_string(receipt, "terminal_classification") != Some("pass")
+        || optional_string(receipt, "proof_evidence_status") != Some("fresh-rch-pass")
+        || nested_string(receipt, &["outcome", "status"]) != Some("pass")
+    {
+        reasons.insert("not-terminal-pass".to_string());
+    }
+
+    if nested_bool(receipt, &["command", "remote_required"]) != Some(true)
+        || nested_bool(receipt, &["command", "local_fallback_allowed"]) != Some(false)
+        || !nested_string_set(receipt, &["command", "local_fallback_markers"]).is_empty()
+    {
+        reasons.insert("local-fallback-detected".to_string());
+    }
+
+    if nested_string(receipt, &["source", "branch"]) != Some("main") {
+        reasons.insert("non-main-branch".to_string());
+    }
+    if nested_string(receipt, &["source", "head_commit"])
+        != nested_string(receipt, &["source", "expected_head"])
+    {
+        reasons.insert("stale-head".to_string());
+    }
+    if nested_string(receipt, &["source", "dirty_frontier_status"]) != Some("clean") {
+        reasons.insert("dirty-frontier-overlap".to_string());
+    }
+
+    let lane = match lanes.get(receipt_lane_id) {
+        Some(lane) => lane,
+        None => {
+            reasons.insert("missing-manifest-lane".to_string());
+            return reasons;
+        }
+    };
+
+    if nested_string(receipt, &["command", "command"]) != Some(string(lane, "command")) {
+        reasons.insert("command-envelope-mismatch".to_string());
+    }
+
+    let receipt_guarantees = string_set(receipt, "manifest_guarantee_ids");
+    let lane_guarantees = string_set(lane, "guarantee_ids");
+    if receipt_guarantees.is_empty() || receipt_guarantees.is_disjoint(&lane_guarantees) {
+        reasons.insert("manifest-guarantee-mismatch".to_string());
+    }
+
+    let expected_feature_flags = string_set(row, "expected_feature_flags");
+    let lane_feature_flags = string_set(lane, "feature_flags");
+    if expected_feature_flags != lane_feature_flags {
+        reasons.insert("wrong-feature-set".to_string());
+    }
+
+    let proof_reuse_policy = lane
+        .get("proof_reuse_policy")
+        .unwrap_or_else(|| panic!("{receipt_lane_id}: missing proof_reuse_policy"));
+    let allowed_scopes = string_set(proof_reuse_policy, "allowed_claim_scopes");
+    let non_citeable_scopes = string_set(proof_reuse_policy, "non_citeable_claim_scopes");
+    if durable_non_citeable.contains(claim_scope) || non_citeable_scopes.contains(claim_scope) {
+        reasons.insert("broad-claim-unsupported".to_string());
+    } else if !allowed_scopes.contains(claim_scope) {
+        reasons.insert("claim-scope-not-allowed".to_string());
+    }
+
+    reasons
+}
+
+fn validate_durable_receipt_status_row(
+    row: &Value,
+    manifest: &Value,
+    lanes: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    let row_id = string(row, "row_id");
+    let row_lane_id = string(row, "manifest_lane_id");
+    let row_lane = lanes
+        .get(row_lane_id)
+        .ok_or_else(|| format!("{row_id}: unknown row lane {row_lane_id}"))?;
+    if string(row, "rerun_command") != string(row_lane, "command") {
+        return Err(format!(
+            "{row_id}: rerun command must match the row manifest lane command"
+        ));
+    }
+
+    let receipt = durable_receipt_from_row(row);
+    let actual_reasons = classify_durable_receipt_candidate(&receipt, row, manifest, lanes);
+    let expected_reasons = string_set(row, "reason_codes");
+    if actual_reasons != expected_reasons {
+        return Err(format!(
+            "{row_id}: durable receipt reasons drifted: expected {expected_reasons:?}, got {actual_reasons:?}"
+        ));
+    }
+
+    match string(row, "expected_decision") {
+        "accepted" if !actual_reasons.is_empty() => {
+            return Err(format!("{row_id}: accepted row has refusal reasons"));
+        }
+        "refused" if actual_reasons.is_empty() => {
+            return Err(format!("{row_id}: refused row has no refusal reasons"));
+        }
+        "accepted" | "refused" => {}
+        other => return Err(format!("{row_id}: unknown expected_decision {other}")),
+    }
+
+    let expected_status = if actual_reasons.is_empty() {
+        "fresh-rch-pass"
+    } else if actual_reasons.contains("broad-claim-unsupported") {
+        "unsupported"
+    } else if actual_reasons.contains("stale-head") {
+        "stale-evidence"
+    } else {
+        "blocked"
+    };
+    if string(row, "proof_evidence_status") != expected_status {
+        return Err(format!(
+            "{row_id}: proof_evidence_status must be {expected_status}"
+        ));
     }
 
     Ok(())
@@ -613,6 +824,38 @@ fn proof_reuse_status_rows_preserve_cache_hit_and_rerun_distinctions() {
 
     for row in rows {
         validate_proof_reuse_status_row(row, &lanes).unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[test]
+fn durable_rch_receipt_status_rows_preserve_manifest_and_claim_boundaries() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let rows = array(&snapshot, "durable_receipt_status_rows");
+    let row_ids = rows
+        .iter()
+        .map(|row| string(row, "row_id").to_string())
+        .collect::<BTreeSet<_>>();
+
+    for required in [
+        "durable-receipt-terminal-pass-candidate",
+        "durable-receipt-missing-manifest-lane",
+        "durable-receipt-stale-head",
+        "durable-receipt-wrong-command-envelope",
+        "durable-receipt-wrong-feature-set",
+        "durable-receipt-local-fallback-refused",
+        "durable-receipt-unsupported-broad-claim",
+    ] {
+        assert!(
+            row_ids.contains(required),
+            "durable receipt status rows must include {required}"
+        );
+    }
+
+    for row in rows {
+        validate_durable_receipt_status_row(row, &manifest, &lanes)
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 }
 
