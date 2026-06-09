@@ -33,16 +33,22 @@ fn make_temp_dir(test_name: &str) -> PathBuf {
 }
 
 fn run_generator(json_out: &Path, md_out: &Path) {
-    let status = Command::new("python3")
+    let root = repo_root();
+    let mut command = Command::new("python3");
+    command
         .arg(SCRIPT_PATH)
         .arg("--repo-root")
-        .arg(repo_root())
+        .arg(&root)
         .arg("--json-out")
         .arg(json_out)
         .arg("--md-out")
         .arg(md_out)
         .arg("--generated-at")
-        .arg(FIXED_TIMESTAMP)
+        .arg(FIXED_TIMESTAMP);
+    if !root.join(".beads/issues.jsonl").exists() {
+        command.env("ASUPERSYNC_TOKIO_DASHBOARD_CAPTURE_FALLBACK", "1");
+    }
+    let status = command
         .status()
         .expect("failed to execute parity dashboard generator");
     assert!(status.success(), "generator command must exit successfully");
@@ -449,7 +455,7 @@ fn workflow_exists_and_enforces_hard_fail_drift_policy() {
         "Suggested drift routing actions:",
         "status_flag_command:",
         "agent_mail_thread:",
-        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs cargo test --test tokio_parity_dashboard -- --nocapture",
+        "\"$RCH_BIN\" exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs\" cargo test --test tokio_parity_dashboard -- --nocapture",
     ] {
         assert!(
             workflow.contains(token),

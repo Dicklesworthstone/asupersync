@@ -17,6 +17,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from typing import Any
 PROGRAM_ID = "asupersync-2oh2u"
 PROGRAM_BEAD = "asupersync-2oh2u.1.4.1"
 SCHEMA_VERSION = "tokio-parity-dashboard-v1"
+CAPTURE_FALLBACK_ENV = "ASUPERSYNC_TOKIO_DASHBOARD_CAPTURE_FALLBACK"
 CONTRACT_TEST_COMMAND = (
     "rch exec -- env "
     "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs "
@@ -162,6 +164,29 @@ def load_ndjson(path: Path) -> list[dict[str, Any]]:
             parsed["_line"] = line_no
             records.append(parsed)
     return records
+
+
+def load_capture_fallback_payload(repo_root: Path, generated_at: str) -> dict[str, Any] | None:
+    if os.environ.get(CAPTURE_FALLBACK_ENV) != "1":
+        return None
+
+    fallback_path = repo_root / "docs/tokio_parity_dashboard.json"
+    if not fallback_path.exists():
+        return None
+
+    payload = json.loads(read_text(fallback_path))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{fallback_path} must contain a JSON object")
+
+    payload["generated_at"] = generated_at
+    drift_routing = payload.get("drift_routing")
+    if isinstance(drift_routing, dict):
+        drift_routing["generated_at"] = generated_at
+    payload["ci_commands"] = [
+        "python3 scripts/generate_tokio_parity_dashboard.py",
+        CONTRACT_TEST_COMMAND,
+    ]
+    return payload
 
 
 def file_sha256(path: Path) -> str | None:
@@ -796,6 +821,17 @@ def main() -> int:
     md_out_path = (repo_root / args.md_out).resolve()
 
     generated_at = args.generated_at or utc_now_rfc3339()
+
+    fallback_payload = None
+    if not issues_path.exists():
+        fallback_payload = load_capture_fallback_payload(repo_root, generated_at)
+    if fallback_payload is not None:
+        markdown = render_markdown(fallback_payload)
+        write_json(json_out_path, fallback_payload)
+        write_text(md_out_path, markdown)
+        print(f"Wrote {display_path(json_out_path, repo_root)}")
+        print(f"Wrote {display_path(md_out_path, repo_root)}")
+        return 0
 
     records = load_ndjson(issues_path)
     issues_by_id = program_issues(records)
