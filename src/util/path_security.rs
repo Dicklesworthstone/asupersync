@@ -29,7 +29,7 @@
 //! ```
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 /// Errors that can occur during path security validation.
@@ -156,40 +156,21 @@ impl SecurePath {
             );
         }
 
-        // Join with the allowed base directory
-        let joined_path = self.allowed_base.join(user_path_ref);
-
-        // Canonicalize to resolve any ".." or "." components
-        let canonical_path = match joined_path.canonicalize() {
-            Ok(path) => path,
-            Err(e) => {
-                // If canonicalization fails, it could be because the path doesn't exist yet
-                // Try to canonicalize the parent directory and append the filename
-                if let Some(parent) = joined_path.parent() {
-                    if let Some(filename) = joined_path.file_name() {
-                        match parent.canonicalize() {
-                            Ok(canonical_parent) => canonical_parent.join(filename),
-                            Err(_) => {
-                                return Err(PathSecurityError::CanonicalizationFailed {
-                                    path: user_path_str,
-                                    source: e,
-                                });
-                            }
-                        }
-                    } else {
-                        return Err(PathSecurityError::CanonicalizationFailed {
-                            path: user_path_str,
-                            source: e,
-                        });
-                    }
-                } else {
-                    return Err(PathSecurityError::CanonicalizationFailed {
-                        path: user_path_str,
-                        source: e,
-                    });
-                }
-            }
+        let joined_path = if user_path_ref.is_absolute() {
+            user_path_ref.to_path_buf()
+        } else {
+            self.allowed_base.join(user_path_ref)
         };
+        let normalized_path = normalize_lexically(&joined_path);
+
+        if !normalized_path.starts_with(&self.allowed_base) {
+            return Err(PathSecurityError::OutsideAllowedBounds {
+                path: normalized_path.display().to_string(),
+                allowed_base: self.allowed_base.display().to_string(),
+            });
+        }
+
+        let canonical_path = self.resolve_existing_ancestor(&normalized_path, &user_path_str)?;
 
         // Verify the canonical path is within the allowed bounds
         if !canonical_path.starts_with(&self.allowed_base) {
@@ -217,6 +198,75 @@ impl SecurePath {
     pub fn base_directory(&self) -> &Path {
         &self.allowed_base
     }
+
+    fn resolve_existing_ancestor(
+        &self,
+        normalized_path: &Path,
+        original_path: &str,
+    ) -> Result<PathBuf, PathSecurityError> {
+        let mut probe = normalized_path.to_path_buf();
+        let mut missing_suffix = PathBuf::new();
+
+        loop {
+            if probe.exists() {
+                let canonical_probe = probe.canonicalize().map_err(|e| {
+                    PathSecurityError::CanonicalizationFailed {
+                        path: original_path.to_string(),
+                        source: e,
+                    }
+                })?;
+                if !canonical_probe.starts_with(&self.allowed_base) {
+                    return Err(PathSecurityError::OutsideAllowedBounds {
+                        path: canonical_probe.display().to_string(),
+                        allowed_base: self.allowed_base.display().to_string(),
+                    });
+                }
+                return Ok(canonical_probe.join(missing_suffix));
+            }
+
+            let Some(name) = probe.file_name() else {
+                return Err(PathSecurityError::CanonicalizationFailed {
+                    path: original_path.to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no existing ancestor found",
+                    ),
+                });
+            };
+
+            let mut next_suffix = PathBuf::from(name);
+            if !missing_suffix.as_os_str().is_empty() {
+                next_suffix.push(missing_suffix);
+            }
+            missing_suffix = next_suffix;
+
+            if !probe.pop() {
+                return Err(PathSecurityError::CanonicalizationFailed {
+                    path: original_path.to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no existing ancestor found",
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 /// Secure wrapper functions for common file operations.
