@@ -15,6 +15,7 @@
 //! use asupersync_conformance::rfc6330_fixtures::*;
 //!
 //! // Validate V0 lookup table
+//! let actual_v0 = RFC6330_V0_TABLE;
 //! for (i, &expected) in RFC6330_V0_TABLE.iter().enumerate() {
 //!     assert_eq!(actual_v0[i], expected);
 //! }

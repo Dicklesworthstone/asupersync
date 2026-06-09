@@ -886,6 +886,12 @@ mod conformance_tests {
                     cancelled > 0,
                     "Should cancel some operations on success"
                 );
+                prop_assert!(
+                    cancelled <= expected_cancelled,
+                    "Cancelled {} operations, expected at most {}",
+                    cancelled,
+                    expected_cancelled
+                );
             } else {
                 // All operations beyond timeout
                 prop_assert_eq!(result, None, "Should fail when all operations exceed timeout");
@@ -923,7 +929,7 @@ mod conformance_tests {
 
             // Verify exponential backoff progression would be correct
             let mut expected_delay = base_delay;
-            for attempt in 1..max_attempts {
+            for _attempt in 1..max_attempts {
                 let next_delay = std::cmp::min(
                     (expected_delay as f64 * multiplier) as u64,
                     max_delay_ms

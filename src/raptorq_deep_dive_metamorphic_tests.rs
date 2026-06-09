@@ -746,6 +746,11 @@ mod tests {
                         let right_pair = MockProofBundle::hash(&[leaves[2].as_slice(), leaves[3].as_slice()].concat());
                         MockProofBundle::hash(&[left_pair.as_slice(), right_pair.as_slice()].concat())
                     };
+                    prop_assert_ne!(
+                        left_grouped,
+                        [0u8; 32],
+                        "Manual grouped Merkle root should not be all zeroes"
+                    );
 
                     // Test with full tree construction
                     let (tree_root, _) = MockProofBundle::build_merkle_tree(&leaves[..4]);
@@ -772,6 +777,11 @@ mod tests {
                     let incremental_root = {
                         let partial_leaves = &leaves[..2];
                         let (partial_root, _) = MockProofBundle::build_merkle_tree(partial_leaves);
+                        prop_assert_ne!(
+                            partial_root,
+                            [0u8; 32],
+                            "Partial Merkle root should not be all zeroes"
+                        );
 
                         let extended_leaves = &leaves[..4];
                         let (extended_root, _) = MockProofBundle::build_merkle_tree(extended_leaves);
@@ -1839,6 +1849,11 @@ mod tests {
                     for i in 0..matrix_size {
                         let expected_inverse = GF256((i + 2) as u8).inverse();
                         if let Some(expected) = expected_inverse {
+                            prop_assert_ne!(
+                                expected.0, 0,
+                                "Expected inverse for diagonal element {} should be non-zero",
+                                i
+                            );
                             // Our simplified implementation may not produce exact mathematical inverse
                             // but should be consistent
                             prop_assert!(
