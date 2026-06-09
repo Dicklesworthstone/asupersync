@@ -1275,7 +1275,6 @@ impl Default for ProofAggregationMetrics {
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     use super::*;
-    use crate::types::{Budget, Outcome};
 
     #[test]
     fn test_control_plane_metrics_creation() {

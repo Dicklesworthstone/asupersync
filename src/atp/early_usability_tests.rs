@@ -4,9 +4,7 @@
 //! cancellation, resume, sparse ranges, and consumer API invariants per ATP-E4 acceptance criteria.
 
 use crate::atp::object::{ContentId, ObjectId};
-use crate::atp::sdk::{
-    DirectoryHandle, StreamEarlyUsabilityState, StreamFinalCommitState, StreamHandle,
-};
+use crate::atp::sdk::{DirectoryHandle, StreamHandle};
 use crate::atp::stream_object::{
     ByteRange, ConsumptionPolicy, EpochState, PrefixExposureDecision, PrefixExposureRecord,
     PrefixVerifiedState, StreamEpoch, StreamManifest, StreamPrefixProofArtifact, StreamProofRecord,

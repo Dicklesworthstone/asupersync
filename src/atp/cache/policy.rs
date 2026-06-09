@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn eviction_policy_lru_ordering() {
-        let mut manager = CachePolicyManager::new(EvictionPolicy::LeastRecentlyUsed);
+        let manager = CachePolicyManager::new(EvictionPolicy::LeastRecentlyUsed);
 
         let mut entries = BTreeMap::new();
 

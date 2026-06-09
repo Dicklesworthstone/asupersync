@@ -12,12 +12,10 @@
 
 use super::*;
 use crate::atp::logging::failure_bundle::{self, *};
-use crate::atp::logging::redaction::*;
 use crate::atp::logging::replay_artifacts::*;
 use crate::atp::logging::schema::*;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // Test constants for consistent validation
 const TEST_SCHEMA_VERSION: &str = "asupersync.atp.log.event.v1";

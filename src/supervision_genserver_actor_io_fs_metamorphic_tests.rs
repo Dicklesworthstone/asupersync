@@ -499,6 +499,10 @@ mod tests {
                     all_quiescent = false;
                 }
             }
+            prop_assert!(
+                all_quiescent,
+                "Restart policy should not allow restarts at or above max_restarts"
+            );
 
             // Verify that excessive failures lead to quiescence
             let excessive_failures = policy.max_restarts + 1;
@@ -1332,6 +1336,11 @@ mod tests {
                     prop_assert_eq!(
                         entry1.content.clone(), entry2.content.clone(),
                         "File contents should be identical: {}", path
+                    );
+                    prop_assert_eq!(
+                        entry1.content.as_ref(),
+                        Some(content),
+                        "File content should match operation payload: {}", path
                     );
                     prop_assert_eq!(
                         entry1.is_directory, entry2.is_directory,

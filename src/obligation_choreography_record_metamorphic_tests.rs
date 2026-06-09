@@ -29,12 +29,12 @@ mod tests {
     use crate::obligation::marking::{MarkingEvent, MarkingEventKind};
     use crate::obligation::recovery::{RecoveryConfig, RecoveryPhase};
     use crate::obligation::saga::Lattice;
+    use crate::record::ObligationKind;
     use crate::record::region::RegionState;
-    use crate::record::task::{TaskOutcome, TaskPhase, TaskState};
-    use crate::record::{ObligationKind, ObligationState};
-    use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
+    use crate::record::task::TaskPhase;
+    use crate::types::{ObligationId, RegionId, TaskId, Time};
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    use std::collections::{HashMap, HashSet};
 
     // ────────────────────────────────────────────────────────────────────
     // Property Generators for Metamorphic Relations
@@ -241,7 +241,7 @@ mod tests {
 
             for event in events {
                 match &event.kind {
-                    MarkingEventKind::Reserve { obligation, .. } => {
+                    MarkingEventKind::Reserve { obligation: _, .. } => {
                         self.ghost_counter += 1;
                     }
                     MarkingEventKind::Commit { obligation, .. }
@@ -560,7 +560,7 @@ mod tests {
                 "Proof verification should be deterministic");
 
             // Verification traces should also be identical
-            prop_assert_eq!(prover_a.trace().clone(), prover_b.trace().clone(),
+            prop_assert_eq!(prover_a.trace(), prover_b.trace(),
                 "Proof traces should be deterministic");
         }
     }

@@ -324,7 +324,7 @@ mod tests {
             replicas: &[ReplicaInfo],
             k: u16,
         ) -> Vec<ReplicaAssignment> {
-            let mut security_context = SecurityContext::for_testing(42);
+            let security_context = SecurityContext::for_testing(42);
             for replica in replicas {
                 security_context
                     .authorize_replica(&replica.id, None)
@@ -776,7 +776,7 @@ mod tests {
         let security_context = SecurityContext::for_testing(42);
 
         // Mix of authorized and unauthorized replica IDs
-        let mut replicas = vec![
+        let replicas = vec![
             ReplicaInfo::new("replica-auth-1", "addr1"), // authorized
             ReplicaInfo::new("node-auth-2", "addr2"),    // authorized
             ReplicaInfo::new("r3", "addr3"),             // authorized

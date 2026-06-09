@@ -48,9 +48,7 @@
 mod tests {
     #[cfg(test)]
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::collections::{BTreeSet, HashMap, VecDeque};
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Mock Implementations for Metamorphic Testing
@@ -298,7 +296,7 @@ mod tests {
                 last_phase = event_phase;
             }
 
-            true
+            last_phase <= current_phase
         }
     }
 
@@ -732,10 +730,7 @@ mod tests {
         fn process_reclamation(&mut self) {
             while let Some(obj) = self.reclamation_queue.front() {
                 if obj.reclaimable_after_epoch <= self.current_epoch && !obj.reclaimed {
-                    if let Some(mut obj) = self.reclamation_queue.pop_front() {
-                        obj.reclaimed = true;
-                        // Object reclaimed - in practice this would free memory
-                    }
+                    self.reclamation_queue.pop_front();
                 } else {
                     break;
                 }
@@ -886,6 +881,12 @@ mod tests {
         }
 
         pub fn start_child(&mut self, child_id: u64, timestamp: u64) -> Result<(), &'static str> {
+            if matches!(
+                self.supervision_tree_state,
+                MockSupervisionTreeState::Quiescent
+            ) {
+                return Err("Supervision tree is quiescent");
+            }
             if self.children.contains_key(&child_id) {
                 return Err("Child already exists");
             }
@@ -1037,19 +1038,6 @@ mod tests {
                 }
             }
 
-            // Check individual child lifecycle progression
-            for child in self.children.values() {
-                let phase_order = |phase: &MockLifecyclePhase| match phase {
-                    MockLifecyclePhase::Init => 0,
-                    MockLifecyclePhase::Active => 1,
-                    MockLifecyclePhase::Terminating => 2,
-                    MockLifecyclePhase::Terminated => 3,
-                };
-
-                // Child lifecycle phases should generally progress forward
-                // (with allowances for restarts)
-            }
-
             true
         }
 
@@ -1111,6 +1099,10 @@ mod tests {
                 server.advance_time(drain_timeout_ms + 1000 - total_time);
                 total_time = drain_timeout_ms + 1000;
             }
+            prop_assert!(
+                total_time >= drain_timeout_ms + 1000,
+                "Test should advance past drain timeout"
+            );
 
             // Verify shutdown completion guarantees
             prop_assert!(
@@ -1238,6 +1230,11 @@ mod tests {
             // All servers should reach the same terminal behavior under same timeout
             // (allowing for differences in connection counts)
             let force_close_counts: Vec<_> = server_results.iter().map(|(_, _, force_closed)| *force_closed).collect();
+            prop_assert_eq!(
+                force_close_counts.len(),
+                server_results.len(),
+                "Force-close count projection should cover every server"
+            );
 
             // Servers with more connections should either have more force-closed connections
             // or the same proportion
@@ -1330,6 +1327,11 @@ mod tests {
 
                 // Protocol state should remain consistent across resumes
                 let final_state = &resume_results.last().unwrap().1;
+                prop_assert_eq!(
+                    &resume_results[0].1,
+                    &initial_state,
+                    "First resume should preserve checkpoint protocol state"
+                );
                 for (i, (_, state, _)) in resume_results.iter().enumerate() {
                     prop_assert_eq!(
                         state, final_state,
@@ -1365,7 +1367,7 @@ mod tests {
                 ),
                 3..8
             ),
-            transformation_seed in 0u64..1000
+            _transformation_seed in 0u64..1000
         )| {
             // MR-SessionDualityPreservation:
             // Session type duality should be preserved under protocol transformations
@@ -1461,6 +1463,12 @@ mod tests {
                     // Some flexibility allowed due to mock simplification
                 }
             }
+            let double_dual_b = new_dual_of_b.create_dual();
+            prop_assert!(
+                std::mem::discriminant(&session_b.protocol_state)
+                    == std::mem::discriminant(&double_dual_b.protocol_state),
+                "Double duality should return session B to the same state family"
+            );
 
             // Protocol state transitions should be consistent
             prop_assert!(
@@ -2242,6 +2250,10 @@ mod tests {
                         // Attempt to start new child (should not affect quiescent state)
                         let new_child_id = child_id + 2000;
                         let result = supervisor.start_child(new_child_id, current_time);
+                        prop_assert!(
+                            result.is_err(),
+                            "Quiescent supervision tree should reject new child starts"
+                        );
 
                         if matches!(
                             &supervisor.supervision_tree_state,
@@ -2261,6 +2273,11 @@ mod tests {
                     }
                 }
             }
+            prop_assert_eq!(
+                &supervisor.quiescence_state,
+                &initial_quiescence_state,
+                "Post-quiescence events should not change quiescence state"
+            );
 
             // Verify final state consistency
             if matches!(

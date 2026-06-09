@@ -12,13 +12,35 @@ mod cli_tests {
     use crate::cli::output::{ColorChoice, OutputFormat};
     use crate::cli::progress::{ProgressEvent, ProgressKind, ProgressReporter};
     use crate::test_utils::init_test_logging;
+    use parking_lot::Mutex;
     use proptest::prelude::*;
     use proptest::{prop_oneof, strategy::BoxedStrategy, strategy::Just};
     use serde_json;
     use std::collections::HashMap;
-    use std::io::Cursor;
+    use std::io::{self, Write};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Duration;
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedBuffer {
+        fn snapshot_string(&self) -> String {
+            String::from_utf8(self.0.lock().clone()).expect("progress output should be UTF-8")
+        }
+    }
+
+    impl Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     // Deterministic CLI doctor fixture implementation.
 
@@ -451,11 +473,11 @@ mod cli_tests {
 
             // All reports must be identical - deterministic output
             prop_assert_eq!(
-                report1, report2,
+                &report1, &report2,
                 "Doctor reports differ between runs - non-deterministic scanning detected"
             );
             prop_assert_eq!(
-                report2, report3,
+                &report2, &report3,
                 "Doctor reports differ on third run - state pollution detected"
             );
 
@@ -666,9 +688,9 @@ mod cli_tests {
             let script3 = generator.generate_completion(shell);
 
             // All scripts must be identical - deterministic generation
-            prop_assert_eq!(script1, script2,
+            prop_assert_eq!(&script1, &script2,
                 "Completion scripts differ between runs for shell {}", shell.name());
-            prop_assert_eq!(script2, script3,
+            prop_assert_eq!(&script2, &script3,
                 "Completion scripts differ on third generation for shell {}", shell.name());
 
             // Script must contain command name
@@ -755,22 +777,24 @@ mod cli_tests {
                 .elapsed(Duration::from_millis(1500));
 
             // Create two reporters with same format
-            let mut buffer1 = Cursor::new(Vec::new());
-            let mut buffer2 = Cursor::new(Vec::new());
+            let buffer1 = SharedBuffer::default();
+            let buffer2 = SharedBuffer::default();
+            let buffer1_view = buffer1.clone();
+            let buffer2_view = buffer2.clone();
 
-            let mut reporter1 = ProgressReporter::with_writer(format, &mut buffer1);
-            let mut reporter2 = ProgressReporter::with_writer(format, &mut buffer2);
+            let mut reporter1 = ProgressReporter::with_writer(format, buffer1);
+            let mut reporter2 = ProgressReporter::with_writer(format, buffer2);
 
             // Report same event to both reporters
             reporter1.report(event.clone()).unwrap();
             reporter2.report(event.clone()).unwrap();
 
             // Extract output
-            let output1 = String::from_utf8(buffer1.into_inner()).unwrap();
-            let output2 = String::from_utf8(buffer2.into_inner()).unwrap();
+            let output1 = buffer1_view.snapshot_string();
+            let output2 = buffer2_view.snapshot_string();
 
             // Same events should produce identical output for same format
-            prop_assert_eq!(output1, output2,
+            prop_assert_eq!(&output1, &output2,
                 "Progress reporter output differs for format {:?}", format);
 
             // Format-specific validations
@@ -819,9 +843,9 @@ mod cli_tests {
             let subset_report2 = doctor.generate_capability_report(&capability_subset);
             let subset_report3 = doctor.generate_capability_report(&capability_subset);
 
-            prop_assert_eq!(subset_report1, subset_report2,
+            prop_assert_eq!(&subset_report1, &subset_report2,
                 "Subset capability reports differ - filtering breaks determinism");
-            prop_assert_eq!(subset_report2, subset_report3,
+            prop_assert_eq!(&subset_report2, &subset_report3,
                 "Third subset report differs - compound determinism failure");
 
             // MR2: Subset property - verify inclusion holds deterministically
@@ -862,6 +886,16 @@ mod cli_tests {
             assert_eq!(event.current, Some(3));
             assert_eq!(event.total, Some(10));
             assert_eq!(event.kind, ProgressKind::Update);
+
+            let positioned = tracker.set_progress(7);
+            assert_eq!(positioned.current, Some(7));
+            assert_eq!(positioned.total, Some(10));
+            assert_eq!(positioned.kind, ProgressKind::Update);
+        }
+
+        #[test]
+        fn test_arbitrary_common_args_strategy_smoke() {
+            let _strategy = arbitrary_common_args();
         }
 
         #[test]

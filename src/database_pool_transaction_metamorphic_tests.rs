@@ -55,7 +55,9 @@ mod tests {
     }
 
     impl MockSCRAMTranscript {
-        pub fn new(username: &str, password: &str, salt: Vec<u8>, iterations: u32) -> Self {
+        pub fn new(username: &str, _password: &str, salt: Vec<u8>, iterations: u32) -> Self {
+            use base64::Engine;
+
             let client_nonce = format!("r={}", Self::generate_client_nonce());
             let client_first_message = format!("n,,n={},r={}", username, client_nonce);
 
@@ -63,7 +65,7 @@ mod tests {
             let server_first_message = format!(
                 "r={},s={},i={}",
                 server_nonce,
-                base64::encode(&salt),
+                base64::engine::general_purpose::STANDARD.encode(&salt),
                 iterations
             );
 

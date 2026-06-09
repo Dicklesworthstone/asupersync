@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn trust_boundary_checker_custom_max_entries() {
         let policy = TrustPolicy::local();
-        let mut checker = TrustBoundaryChecker::with_max_log_entries(policy, 100);
+        let checker = TrustBoundaryChecker::with_max_log_entries(policy, 100);
 
         assert_eq!(checker.max_log_entries(), 100);
 

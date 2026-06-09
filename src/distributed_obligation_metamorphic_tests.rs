@@ -26,7 +26,7 @@ mod tests {
     use crate::distributed::consistent_hash::HashRing;
     use crate::obligation::eprocess::{AlertState, LeakMonitor, MonitorConfig};
     use proptest::prelude::*;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     // ────────────────────────────────────────────────────────────────────
     // Property Generators for Metamorphic Relations
@@ -394,8 +394,8 @@ mod tests {
         ) {
             let mut monitor = MockLeakMonitor::new(config);
 
-            let mut previous_e_value = monitor.e_value();
-            prop_assert!(previous_e_value >= 1.0, "Initial e-value should be ≥ 1.0, got {}", previous_e_value);
+            let initial_e_value = monitor.e_value();
+            prop_assert!(initial_e_value >= 1.0, "Initial e-value should be ≥ 1.0, got {}", initial_e_value);
 
             for age in ages {
                 monitor.observe(age);
@@ -408,7 +408,6 @@ mod tests {
                 // Note: E-value can sometimes decrease due to the normalization factor
                 // but it should never go below 1.0. The monotonicity is in the evidence accumulation,
                 // not necessarily in the absolute value.
-                previous_e_value = current_e_value;
             }
         }
     }

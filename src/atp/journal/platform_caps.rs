@@ -8,7 +8,9 @@ use std::mem::MaybeUninit;
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use std::collections::HashMap;
-use std::io::{ErrorKind, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::io::Write;
+use std::io::{ErrorKind, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{
     OnceLock,
@@ -574,7 +576,7 @@ impl PlatformCapabilities {
     }
 
     async fn test_sparse_file_support(path: &Path) -> bool {
-        let Some((test_file, mut file)) = Self::create_unique_probe_file(path, "sparse") else {
+        let Some((test_file, file)) = Self::create_unique_probe_file(path, "sparse") else {
             return false;
         };
 
@@ -582,6 +584,7 @@ impl PlatformCapabilities {
         {
             use std::os::unix::fs::MetadataExt;
 
+            let mut file = file;
             let sparse_offset = 1024 * 1024;
             let probe_ok = file
                 .seek(SeekFrom::Start(sparse_offset))
