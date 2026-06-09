@@ -472,6 +472,49 @@ correctness. Closeout still needs a focused remote Cargo proof for the contract
 test, and any cited receipt must keep its exact manifest lane, source HEAD,
 command fingerprint, receipt id, first blocker, and refusal reason codes visible.
 
+## Durable RCH Final Signoff
+
+The durable RCH final signoff closure packet is
+`artifacts/durable_rch_proof_final_signoff_v1.json`, checked by
+`tests/durable_rch_proof_final_signoff_contract.rs`, with schema version
+`durable-rch-proof-final-signoff-v1`. It aggregates the child proof rows for the
+receipt schema, detached submission lifecycle, receipt capture, CLI UX,
+manifest/status integration, Agent Mail templates, and deterministic e2e
+scenario suite. The focused verifier lane is
+`durable-rch-proof-final-signoff` in `artifacts/proof_lane_manifest_v1.json`.
+
+Run the scoped verifier before closing the parent durable-RCH bead:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture
+```
+
+Because `artifacts/*` is ignored, a new signoff artifact must be staged
+explicitly:
+
+```bash
+git add -f artifacts/durable_rch_proof_final_signoff_v1.json
+```
+
+The final signoff may cite only the durable proof-submission program's child
+contracts and exact final verifier lane:
+
+- does not prove live RCH fleet availability
+- does not prove release readiness
+- does not prove broad workspace health
+- does not prove correctness of unrelated proof lanes
+
+It also does not convert partial, stale, canceled, client-disconnected,
+local-fallback, wrong-command, wrong-feature-set, stale-head, dirty-overlap, or
+unsupported broad-claim receipts into green proof.
+
+Closeout recipes must keep the common paths explicit: submit, detach, query,
+cite, refuse, cancel, and hand off. Only a terminal pass receipt with
+`proof_evidence_status=fresh-rch-pass`, exact manifest lane, exact source HEAD,
+exact command fingerprint, and no local fallback markers may be cited as green
+proof. After pushing `main`, preserve the repo's legacy mirror expectation with
+`git push origin main:master`.
+
 ## Proof-Lane Resource Envelopes
 
 The proof runner reads resource-envelope metadata from

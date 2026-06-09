@@ -77,6 +77,7 @@
     "fourth-wave benchmark no-claim contract",
     "fourth-wave final aggregated signoff",
     "migration readiness planner signoff",
+    "durable RCH final signoff",
     "formal Lean posture",
     "rustdoc/API examples"
   ],
@@ -526,6 +527,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Green maps only the executable planner signoff artifact, child evidence, fixture E2E, report-field, docs-marker, manifest, and proof-status contract. It does not prove broad workspace health, live external projects, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target."
+    },
+    {
+      "claim_id": "durable-rch-final-signoff",
+      "category": "durable RCH final signoff",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ],
+        "AGENTS.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "durable-rch-final-signoff"
+      ],
+      "manifest_lane_ids": [
+        "durable-rch-proof-final-signoff"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the durable RCH final signoff artifact, child proof evidence rows, refusal matrix, operator recipes, manifest/status mapping, docs markers, main-only closeout notes, ignored-artifact force-add note, and no-claim boundaries. It does not prove release readiness, broad workspace health, live RCH fleet availability, correctness of unrelated proof lanes, broad clippy, full release tests, or local Cargo fallback proof."
     },
     {
       "claim_id": "formal-lean-posture",

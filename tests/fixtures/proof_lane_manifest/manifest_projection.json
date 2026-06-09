@@ -175,6 +175,7 @@
     "admission-aware-proof-lane-atlas",
     "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
+    "durable-rch-final-signoff",
     "proof-lane-manifest-verifier"
   ],
   "lanes": [
@@ -596,6 +597,30 @@
       ]
     },
     {
+      "lane_id": "durable-rch-proof-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture",
+      "guarantee_ids": [
+        "durable-rch-final-signoff"
+      ],
+      "feature_flags": [],
+      "expected_signal": "durable_rch_proof_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/durable_rch_proof_final_signoff_v1.json",
+        "tests/durable_rch_proof_final_signoff_contract.rs",
+        "docs/proof_runner_usage.md",
+        "artifacts/durable_rch_proof_e2e_scenarios_v1.json",
+        "artifacts/durable_rch_proof_mail_templates_v1.json",
+        "artifacts/durable_rch_proof_receipt_contract_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ]
+    },
+    {
       "lane_id": "swarm-proof-lane-planner-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -828,6 +853,12 @@
       "guarantee_id": "shared-main-commit-guard",
       "lane_ids": [
         "dirty-tree-ownership-receipt-contract"
+      ]
+    },
+    {
+      "guarantee_id": "durable-rch-final-signoff",
+      "lane_ids": [
+        "durable-rch-proof-final-signoff"
       ]
     },
     {

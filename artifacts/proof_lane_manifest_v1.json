@@ -245,6 +245,7 @@
     "admission-aware-proof-lane-atlas",
     "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
+    "durable-rch-final-signoff",
     "proof-lane-manifest-verifier"
   ],
   "lanes": [
@@ -1113,6 +1114,54 @@
       }
     },
     {
+      "lane_id": "durable-rch-proof-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "durable-rch-final-signoff"
+      ],
+      "covers": "The durable RCH final signoff artifact, child proof evidence rows, refusal matrix, operator recipes, docs markers, manifest/status mapping, main-only closeout notes, ignored-artifact force-add note, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not prove live RCH fleet availability, release readiness, broad workspace health, correctness of unrelated proof lanes, broad clippy, full release tests, or local Cargo fallback proof.",
+      "expected_signal": "durable_rch_proof_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/durable_rch_proof_final_signoff_v1.json",
+        "tests/durable_rch_proof_final_signoff_contract.rs",
+        "docs/proof_runner_usage.md",
+        "artifacts/durable_rch_proof_e2e_scenarios_v1.json",
+        "artifacts/durable_rch_proof_mail_templates_v1.json",
+        "artifacts/durable_rch_proof_receipt_contract_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "durable RCH child proof row drift",
+        "final signoff artifact drift",
+        "mail template or e2e refusal matrix drift",
+        "docs marker drift",
+        "peer-owned broad clippy or full-test release blockers"
+      ],
+      "escalation_notes": "Use this lane only for durable RCH proof-submission final signoff aggregation. It cannot be cited as release readiness, broad workspace health, live RCH fleet availability, unrelated proof-lane correctness, broad clippy proof, or full-test proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "durable-rch-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
       "lane_id": "swarm-proof-lane-planner-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1453,6 +1502,13 @@
       "description": "Shared-main dirty-tree ownership guard and declared-path commit preflight have a canonical no-mock contract lane.",
       "lane_ids": [
         "dirty-tree-ownership-receipt-contract"
+      ]
+    },
+    {
+      "guarantee_id": "durable-rch-final-signoff",
+      "description": "Durable RCH final signoff aggregation, child proof evidence rows, refusal matrix, operator recipes, docs markers, manifest/status mapping, main-only closeout notes, ignored-artifact force-add note, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "durable-rch-proof-final-signoff"
       ]
     },
     {

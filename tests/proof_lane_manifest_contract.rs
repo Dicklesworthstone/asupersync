@@ -798,6 +798,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "fourth-wave-benchmark-contract",
         "fourth-wave-governor-signoff-runbook",
         "dirty-tree-ownership-receipt-contract",
+        "durable-rch-proof-final-signoff",
         "swarm-proof-lane-planner-contract",
         "migration-readiness-planner-signoff-contract",
         "proof-lane-manifest-contract",
@@ -977,6 +978,10 @@ fn every_lane_declares_fail_closed_resource_envelope() {
         ),
         (
             "migration-readiness-planner-signoff-contract",
+            "artifact-contract-medium",
+        ),
+        (
+            "durable-rch-proof-final-signoff",
             "artifact-contract-medium",
         ),
         ("rustdoc-api", "documentation-frontier-medium"),
