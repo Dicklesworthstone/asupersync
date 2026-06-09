@@ -414,6 +414,40 @@ provenance evidence only: it helps route a blocker to a recent slice, but the
 `decision` and `green_proof_claimed` fields remain authoritative for whether a
 closeout may claim a green proof.
 
+## Durable RCH Agent Mail Templates
+
+The durable RCH proof mail template contract is
+`artifacts/durable_rch_proof_mail_templates_v1.json`, checked by
+`tests/durable_rch_proof_mail_templates_contract.rs`, with contract version
+`durable-rch-proof-mail-templates-v1`. Use these templates for durable proof
+submission updates, running-status updates, stale/canceled receipts, terminal
+pass/fail closeouts, and explicit handoffs. The contract is fixture-only:
+tests do not require network access, live Agent Mail, tracker mutation, or raw
+mail-body capture.
+
+Each message must include the durable submission id, receipt id or pending
+receipt marker, manifest lane id, source HEAD, command fingerprint, lifecycle
+state, terminal classification, first blocker summary, refusal reason codes, and
+the durable proof query command. Send the message only to the current lane
+owner, the next explicitly named owner, or the peer blocked by the proof lane.
+Do not broadcast.
+
+Template IDs:
+
+- `submitted-proof-lane`
+- `running-proof-lane`
+- `stale-proof-lane`
+- `canceled-yielded-proof-lane`
+- `terminal-pass-proof-lane`
+- `terminal-fail-proof-lane`
+- `handoff-to-next-agent`
+
+Only `terminal-pass-proof-lane` may cite `fresh-rch-pass`, and even then it may
+cite only the exact manifest lane and receipt scope. Submitted, running, stale,
+canceled, failed, and handoff templates are not green proof. No template may be
+used to claim release-readiness, workspace-health, live-rch-fleet-availability,
+or unrelated-proof-lanes.
+
 ## Proof-Lane Resource Envelopes
 
 The proof runner reads resource-envelope metadata from
