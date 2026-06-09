@@ -3873,24 +3873,34 @@ mod tests {
                 .map(String::as_str),
             Some("no-object-id-fallback")
         );
+        // br-asupersync-36grbm: hardened log_fields omits raw endpoint IDs/exact
+        // counts; with no object id there is no selection, so the boolean
+        // indicators are false and counts are bucketed.
         assert_eq!(
             missing_key_fields
-                .get("selected_endpoint_id")
+                .get("selection_occurred")
                 .map(String::as_str),
-            Some("")
+            Some("false")
+        );
+        assert_eq!(
+            missing_key_fields
+                .get("primary_selection_occurred")
+                .map(String::as_str),
+            Some("false")
         );
         assert_eq!(
             missing_key_fields.get("fairness_state").map(String::as_str),
             Some(
-                "policy=hrw-bounded-load;primary=;selected=;available=2;rejected=2;overloaded=0;within_capacity=2"
+                "policy=hrw-bounded-load;primary_selected=false;selection_occurred=false;available_bucket=1-2;rejected_bucket=1-2;overloaded_bucket=0;within_capacity_bucket=1-2"
             )
         );
         assert_eq!(
             missing_key_fields
-                .get("rejected_endpoint_count")
+                .get("rejected_endpoint_bucket")
                 .map(String::as_str),
-            Some("2")
+            Some("1-2")
         );
+        // The raw (non-logged) accessor still surfaces the rejected endpoints.
         assert_eq!(
             missing_key_decision.rejected_endpoint_ids().as_slice(),
             &[EndpointId::new(1), EndpointId::new(2)]

@@ -2050,12 +2050,17 @@ mod tests {
             matches!(first, Poll::Ready(Ok(())))
         );
 
+        // When the primary buffer is full and the inner sink is transiently
+        // pending, BufferedSink stages the overflow symbol and returns Ready(Ok)
+        // rather than Pending: this prevents callers from retrying the send and
+        // causing duplicate delivery. The symbol is retained (not dropped) in the
+        // staged backlog and the original buffered symbol is preserved.
         let second = Pin::new(&mut buffered).poll_send(&mut context, create_symbol(2));
         crate::assert_with_log!(
-            matches!(second, Poll::Pending),
-            "second send backpressures instead of dropping",
+            matches!(second, Poll::Ready(Ok(()))),
+            "second send is accepted into the staged backlog instead of dropping",
             true,
-            matches!(second, Poll::Pending)
+            matches!(second, Poll::Ready(Ok(())))
         );
         crate::assert_with_log!(
             buffered.buffer.len() == 1,
@@ -2127,11 +2132,16 @@ mod tests {
             true,
             matches!(second, Poll::Ready(Ok(())))
         );
+        // The third send finds the primary buffer full, performs a partial drain
+        // (flushing the head symbol to the inner sink), and is then accepted into
+        // the freed buffer slot, returning Ready(Ok) rather than Pending. Accepting
+        // the symbol avoids caller retries and duplicate delivery; FIFO order is
+        // preserved because only the head symbol drained.
         crate::assert_with_log!(
-            matches!(third, Poll::Pending),
-            "third symbol stalls on partial drain",
+            matches!(third, Poll::Ready(Ok(()))),
+            "third symbol is accepted after a partial head drain",
             true,
-            matches!(third, Poll::Pending)
+            matches!(third, Poll::Ready(Ok(())))
         );
 
         let sent_after_third = {
