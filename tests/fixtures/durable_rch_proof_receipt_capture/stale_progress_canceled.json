@@ -1,0 +1,37 @@
+{
+  "expected": {
+    "citable": false,
+    "exit_code": 130,
+    "first_blocker_contains": [
+      "stale progress"
+    ],
+    "first_blocker_forbidden": [],
+    "lifecycle_state": "terminal_stale",
+    "max_first_blocker_lines": 8,
+    "outcome_status": "stale",
+    "proof_evidence_status": "blocked",
+    "refusal_reason_codes": [
+      "failed-proof-status"
+    ],
+    "terminal_classification": "stale_progress_canceled"
+  },
+  "fixture_id": "stale-progress-canceled",
+  "rch_outcome": {
+    "build_id": "29879655498514501",
+    "cancellation": {
+      "reason_code": "stale-progress"
+    },
+    "detector_heartbeat_stale": false,
+    "detector_progress_stale": true,
+    "exit_code": 130,
+    "finished_at": "2026-06-09T09:35:00Z",
+    "location": "remote",
+    "started_at": "2026-06-09T09:05:00Z",
+    "status": "canceled",
+    "staleness_reason": "stale progress exceeded operator threshold",
+    "submitted_at": "2026-06-09T09:04:00Z",
+    "worker_id": "vmi1227854"
+  },
+  "stderr": "[RCH] stale progress: no new test output for 624s; cancellation requested\n",
+  "stdout": "running release tests\n"
+}

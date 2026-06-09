@@ -1,0 +1,36 @@
+{
+  "expected": {
+    "citable": false,
+    "exit_code": 130,
+    "first_blocker_contains": [
+      "operator canceled"
+    ],
+    "first_blocker_forbidden": [],
+    "lifecycle_state": "terminal_canceled",
+    "max_first_blocker_lines": 8,
+    "outcome_status": "canceled",
+    "proof_evidence_status": "blocked",
+    "refusal_reason_codes": [
+      "failed-proof-status"
+    ],
+    "terminal_classification": "operator_canceled"
+  },
+  "fixture_id": "operator-canceled",
+  "rch_outcome": {
+    "build_id": "29879655498514507",
+    "cancellation": {
+      "reason_code": "operator-canceled"
+    },
+    "detector_heartbeat_stale": false,
+    "detector_progress_stale": false,
+    "exit_code": 130,
+    "finished_at": "2026-06-09T09:42:00Z",
+    "location": "remote",
+    "started_at": "2026-06-09T09:40:00Z",
+    "status": "canceled",
+    "submitted_at": "2026-06-09T09:39:00Z",
+    "worker_id": "vmi1227854"
+  },
+  "stderr": "[RCH] operator canceled build before terminal proof status\n",
+  "stdout": "running focused proof lane\n"
+}
