@@ -624,7 +624,10 @@ mod integration_tests {
             .obligations
             .get(obligation.arena_index())
             .is_some_and(crate::record::obligation::ObligationRecord::is_leaked);
-        assert!(leaked, "obligation should be marked leaked after mark_obligation_leaked");
+        assert!(
+            leaked,
+            "obligation should be marked leaked after mark_obligation_leaked"
+        );
         if let Some(child_record) = state.regions.get(child.arena_index()) {
             assert_eq!(child_record.parent, Some(root));
         }

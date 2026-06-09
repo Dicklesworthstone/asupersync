@@ -2081,10 +2081,7 @@ mod tests {
     /// Returns true if `subset` appears as an in-order (not necessarily
     /// contiguous) subsequence of `full`. Used to confirm tracestate entries
     /// keep their original relative order after overflow/size filtering.
-    fn is_in_order_subsequence(
-        subset: &[(String, String)],
-        full: &[(String, String)],
-    ) -> bool {
+    fn is_in_order_subsequence(subset: &[(String, String)], full: &[(String, String)]) -> bool {
         let mut iter = full.iter();
         subset
             .iter()
