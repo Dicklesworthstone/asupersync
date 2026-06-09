@@ -1247,10 +1247,6 @@ mod tests {
             S: Subscriber + for<'a> LookupSpan<'a>,
         {
             fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-                // Only care about epoch_consistency_violation events.
-                if event.metadata().name() != "epoch_consistency_violation" {
-                    return;
-                }
                 let mut v = VisitField {
                     violation_type: None,
                 };
