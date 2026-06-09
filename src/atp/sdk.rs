@@ -1303,7 +1303,7 @@ mod tests {
 
     fn test_cx() -> Cx<cap::All> {
         Cx::new(
-            RegionId::testing_default(),
+            RegionId::new_for_test(0, 1),
             TaskId::testing_default(),
             Budget::INFINITE,
         )

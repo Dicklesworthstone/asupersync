@@ -25,7 +25,7 @@ mod sqlite_wal_tests {
     /// Create a test context for SQLite operations.
     fn create_test_context() -> Cx {
         Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
         )

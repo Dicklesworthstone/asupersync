@@ -67,7 +67,7 @@ type SharedPendingResults = Arc<Mutex<PendingResultsMap>>;
 #[inline]
 fn harness_cx() -> Cx {
     Cx::new(
-        RegionId::testing_default(),
+        RegionId::from_arena(crate::util::ArenaIndex::new(0, 1)),
         TaskId::testing_default(),
         Budget::INFINITE,
     )
@@ -75,7 +75,7 @@ fn harness_cx() -> Cx {
 
 #[inline]
 const fn harness_origin_region() -> RegionId {
-    RegionId::testing_default()
+    RegionId::from_arena(crate::util::ArenaIndex::new(0, 1))
 }
 
 #[inline]

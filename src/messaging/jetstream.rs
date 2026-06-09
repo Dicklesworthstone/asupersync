@@ -2374,7 +2374,7 @@ pub fn fuzz_probe_publish_backpressure(
         .store(preexisting_in_flight_publishes, Ordering::Relaxed);
 
     let mut cx = Cx::new(
-        crate::types::RegionId::testing_default(),
+        crate::types::RegionId::new_for_test(0, 1),
         crate::types::TaskId::testing_default(),
         crate::types::Budget::INFINITE,
     );
@@ -2422,7 +2422,7 @@ pub fn fuzz_probe_publish_backpressure_tail_evidence(
         .store(preexisting_in_flight_publishes, Ordering::Relaxed);
 
     let mut cx = Cx::new(
-        crate::types::RegionId::testing_default(),
+        crate::types::RegionId::new_for_test(0, 1),
         crate::types::TaskId::testing_default(),
         crate::types::Budget::INFINITE,
     );
@@ -2491,7 +2491,7 @@ pub fn fuzz_probe_publish_backpressure_cohort_tail_evidence(
             gate.in_flight_publishes.store(1, Ordering::Relaxed);
         }
         let cx = Cx::new(
-            crate::types::RegionId::testing_default(),
+            crate::types::RegionId::new_for_test(0, 1),
             crate::types::TaskId::testing_default(),
             crate::types::Budget::INFINITE,
         );
@@ -5041,7 +5041,7 @@ mod tests {
     fn jetstream_publish_backpressure_releases_slot_after_response() {
         let gate = JetStreamPublishBackpressureGate::new(Default::default());
         let cx = crate::cx::Cx::new(
-            RegionId::testing_default(),
+            RegionId::new_for_test(0, 1),
             TaskId::testing_default(),
             Budget::INFINITE,
         );

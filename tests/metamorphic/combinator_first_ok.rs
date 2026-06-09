@@ -27,7 +27,7 @@ use asupersync::{scope, task};
 /// Create a test context for first_ok testing.
 fn test_cx() -> Cx {
     Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
+        RegionId::from_arena(ArenaIndex::new(0, 1)),
         TaskId::from_arena(ArenaIndex::new(0, 0)),
         Budget::INFINITE,
     )

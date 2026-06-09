@@ -25,7 +25,7 @@ mod tls_key_share_tests {
     #[allow(dead_code)]
     fn create_test_context() -> Cx {
         Cx::new(
-            RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
+            RegionId::from_arena(asupersync::util::ArenaIndex::new(0, 1)),
             TaskId::from_arena(asupersync::util::ArenaIndex::new(0, 0)),
             Budget::INFINITE,
         )
