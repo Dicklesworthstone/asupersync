@@ -280,7 +280,7 @@ pub struct LostPacketInfo {
 }
 
 /// Reason for packet loss declaration.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LossReason {
     /// Packet threshold exceeded (N packets acked beyond this one).
     PacketThreshold { threshold: u32 },
@@ -417,8 +417,10 @@ impl AtpLossDetector {
         let packet_threshold = self.get_adaptive_packet_threshold(space);
         let time_threshold = self.calculate_time_threshold(*transport_state);
 
-        // Check for time threshold losses
-        let time_threshold_boundary = now_micros.saturating_sub(time_threshold);
+        // Check for time threshold losses only after enough time has elapsed.
+        // A saturating subtraction would floor the boundary to zero and mark a
+        // packet sent at t=0 as time-lost before the threshold is reachable.
+        let time_threshold_boundary = now_micros.checked_sub(time_threshold);
 
         let mut remaining_packets = VecDeque::new();
         let enable_early_retransmit = self.config.enable_early_retransmit;
@@ -443,7 +445,7 @@ impl AtpLossDetector {
             }
 
             // Time threshold loss
-            if packet.time_sent_micros <= time_threshold_boundary
+            if time_threshold_boundary.is_some_and(|boundary| packet.time_sent_micros <= boundary)
                 && packet.packet_number <= largest_acked
             {
                 if is_lost {
@@ -1063,9 +1065,17 @@ mod tests {
         LossTransportState::from_rtt_and_recovery(rtt, 4_800, 12_000)
     }
 
+    fn packet_threshold_only_detector() -> AtpLossDetector {
+        AtpLossDetector::with_config(LossDetectionConfig {
+            adaptive_packet_threshold: false,
+            enable_early_retransmit: false,
+            ..LossDetectionConfig::default()
+        })
+    }
+
     #[test]
     fn loss_detector_packet_threshold() {
-        let mut detector = AtpLossDetector::new();
+        let mut detector = packet_threshold_only_detector();
         let rtt = RttEstimator::default();
 
         // Send packets 0-5
@@ -1094,6 +1104,59 @@ mod tests {
             result.detection_method,
             LossDetectionMethod::PacketThreshold
         );
+        assert!(
+            result
+                .lost_packets
+                .iter()
+                .all(|packet| matches!(packet.reason, LossReason::PacketThreshold { .. }))
+        );
+        assert_eq!(detector.metrics().time_threshold_losses, 0);
+    }
+
+    #[test]
+    fn time_threshold_waits_until_boundary_is_reachable() {
+        let mut detector = packet_threshold_only_detector();
+        let rtt = RttEstimator::default();
+
+        // Default base RTT is 333ms, so the 9/8 time threshold is far beyond
+        // this 10ms ACK. Packet 0 has timestamp zero and must not be upgraded
+        // to a combined packet+time loss by a saturated boundary of zero.
+        for pn in 0..6 {
+            detector.on_packet_sent(create_test_packet(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                pn * 1000,
+            ));
+        }
+
+        let ack_ranges = [AckRange::new(5, 5).unwrap()];
+        let result = detector
+            .on_ack_received(
+                PacketNumberSpace::ApplicationData,
+                &ack_ranges,
+                0,
+                10_000,
+                &test_transport_state(&rtt),
+            )
+            .expect("packet-threshold losses should be detected");
+
+        assert_eq!(
+            result
+                .lost_packets
+                .iter()
+                .map(|packet| (packet.packet_number, packet.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, LossReason::PacketThreshold { threshold: 3 }),
+                (1, LossReason::PacketThreshold { threshold: 3 }),
+                (2, LossReason::PacketThreshold { threshold: 3 }),
+            ]
+        );
+        assert_eq!(
+            result.detection_method,
+            LossDetectionMethod::PacketThreshold
+        );
+        assert_eq!(detector.metrics().time_threshold_losses, 0);
     }
 
     #[test]
@@ -1364,7 +1427,7 @@ mod tests {
 
     #[test]
     fn late_ack_of_declared_lost_packet_records_one_spurious_loss() {
-        let mut detector = AtpLossDetector::new();
+        let mut detector = packet_threshold_only_detector();
         let rtt = RttEstimator::default();
 
         for pn in 0..6 {
