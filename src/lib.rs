@@ -338,6 +338,8 @@ pub mod public_api_golden_tests;
 pub mod raptorq_deep_dive_metamorphic_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod raptorq_rfc6330_conformance_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_e2e_hardening_consolidation;
 #[cfg(all(test, feature = "h3-websocket-e2e"))]
 pub mod real_http_h3_server_websocket_upgrade_e2e_tests;
 #[cfg(feature = "obligation-cleanup-e2e")]

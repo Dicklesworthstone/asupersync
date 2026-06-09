@@ -2117,7 +2117,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
             CertificateChain::from_pem(TEST_CERT_PEM).unwrap(),
             PrivateKey::from_pem(TEST_KEY_PEM).unwrap(),
         )
-        .enable_early_data(16384)
+        .enable_early_data_with_protection(16384)
         .build()
         .expect("build with early data enabled");
         assert_eq!(
@@ -2133,7 +2133,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
             CertificateChain::from_pem(TEST_CERT_PEM).unwrap(),
             PrivateKey::from_pem(TEST_KEY_PEM).unwrap(),
         )
-        .enable_early_data(16384)
+        .enable_early_data_with_protection(16384)
         .disable_early_data()
         .build()
         .expect("build with early data toggled off");
@@ -2329,7 +2329,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 "127.0.0.1:5201".parse().unwrap(),
             );
 
-            let (client_res, server_res) = zip(
+            let (_client_res, server_res) = zip(
                 connector.connect("localhost", client_io),
                 acceptor.accept(server_io),
             )

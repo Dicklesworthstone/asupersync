@@ -9,8 +9,18 @@ mod tls_helpers_tests {
     use crate::real_e2e_hardening_consolidation::hardened_examples::{
         generate_test_tls_material, test_certificate, test_private_key,
     };
-    use crate::tls::{Certificate, PrivateKey, TlsAcceptor, TlsAcceptorBuilder};
+    use crate::tls::{Certificate, CertificateChain, PrivateKey, TlsAcceptorBuilder};
     use std::time::Instant;
+
+    fn single_cert_chain(cert: Certificate) -> CertificateChain {
+        CertificateChain::from_cert(cert)
+    }
+
+    fn assert_acceptor_builds(cert: Certificate, key: PrivateKey) {
+        TlsAcceptorBuilder::new(single_cert_chain(cert), key)
+            .build()
+            .expect("certificate and private key should build a TLS acceptor");
+    }
 
     /// Unit test: Verify test_certificate() returns valid certificate data
     #[test]
@@ -41,23 +51,7 @@ mod tls_helpers_tests {
     fn test_private_key_unit_validation() {
         let key = test_private_key();
 
-        // Private key should have non-empty DER data
-        assert!(
-            key.as_der().len() > 0,
-            "Private key DER data should not be empty"
-        );
-
-        // Private key should have reasonable size
-        let der_len = key.as_der().len();
-        assert!(der_len > 50, "Private key too small: {} bytes", der_len);
-        assert!(der_len < 5000, "Private key too large: {} bytes", der_len);
-
-        // DER data should start with valid ASN.1 SEQUENCE tag (0x30)
-        assert_eq!(
-            key.as_der()[0],
-            0x30,
-            "Private key should start with ASN.1 SEQUENCE tag"
-        );
+        assert_acceptor_builds(test_certificate(), key);
     }
 
     /// Deterministic generation test: Same inputs should produce same outputs
@@ -83,16 +77,9 @@ mod tls_helpers_tests {
         let key2 = test_private_key();
         let key3 = test_private_key();
 
-        assert_eq!(
-            key1.as_der(),
-            key2.as_der(),
-            "Private keys should be identical (cached)"
-        );
-        assert_eq!(
-            key1.as_der(),
-            key3.as_der(),
-            "Private keys should be identical (cached)"
-        );
+        assert_acceptor_builds(cert1.clone(), key1);
+        assert_acceptor_builds(cert2.clone(), key2);
+        assert_acceptor_builds(cert3.clone(), key3);
 
         // Verify underlying shared material is identical
         let material1 = generate_test_tls_material();
@@ -103,10 +90,9 @@ mod tls_helpers_tests {
             material2.0.as_der(),
             "Shared certificate material should be identical"
         );
-        assert_eq!(
-            material1.1.as_der(),
-            material2.1.as_der(),
-            "Shared private key material should be identical"
+        assert!(
+            std::ptr::eq(material1, material2),
+            "Shared TLS material should come from the same OnceLock entry"
         );
     }
 
@@ -117,7 +103,8 @@ mod tls_helpers_tests {
         let key = test_private_key();
 
         // Verify we can create a TlsAcceptor with the cert/key pair
-        let acceptor_result = TlsAcceptorBuilder::new(cert.clone(), key.clone()).build();
+        let acceptor_result =
+            TlsAcceptorBuilder::new(single_cert_chain(cert.clone()), key.clone()).build();
 
         assert!(
             acceptor_result.is_ok(),
@@ -130,7 +117,7 @@ mod tls_helpers_tests {
         // but we can verify it was generated with the expected parameters by
         // testing that it works with TLS acceptor
 
-        let acceptor = acceptor_result.unwrap();
+        let _acceptor = acceptor_result.unwrap();
         // If we got here, the certificate and key are compatible
     }
 
@@ -149,16 +136,14 @@ mod tls_helpers_tests {
         // by ensuring the certificate was generated with our known parameters
 
         // Verify certificate chain length is appropriate (single cert for self-signed)
-        let der = cert.as_der();
-
-        // Basic structural validation - should contain localhost somewhere
-        // (This is a heuristic check since we don't want to add ASN.1 parsing dependencies)
-        let cert_str = String::from_utf8_lossy(der);
-        // Note: localhost might be encoded in various ways in DER, this is basic validation
+        assert!(
+            !cert.as_der().is_empty(),
+            "certificate DER must not be empty"
+        );
 
         // More importantly, verify it works with TLS stack
         let key = test_private_key();
-        let acceptor_result = TlsAcceptorBuilder::new(cert, key).build();
+        let acceptor_result = TlsAcceptorBuilder::new(single_cert_chain(cert), key).build();
         assert!(
             acceptor_result.is_ok(),
             "Test certificate should be valid for TLS acceptor"
@@ -222,12 +207,12 @@ mod tls_helpers_tests {
         let empty_cert = Certificate::from_der(vec![]);
         let key = test_private_key();
 
-        let result = TlsAcceptorBuilder::new(empty_cert, key.clone());
+        let _result = TlsAcceptorBuilder::new(single_cert_chain(empty_cert), key.clone());
         // Should handle gracefully - either in builder or when building
 
         // Invalid DER data
         let invalid_cert = Certificate::from_der(vec![0xFF, 0xFF, 0xFF, 0xFF]);
-        let result2 = TlsAcceptorBuilder::new(invalid_cert, key.clone());
+        let _result2 = TlsAcceptorBuilder::new(single_cert_chain(invalid_cert), key.clone());
         // Should handle gracefully
 
         // These tests verify our error handling paths exist
@@ -241,12 +226,12 @@ mod tls_helpers_tests {
 
         // Empty private key data
         let empty_key = PrivateKey::from_pkcs8_der(vec![]);
-        let result = TlsAcceptorBuilder::new(cert.clone(), empty_key);
+        let _result = TlsAcceptorBuilder::new(single_cert_chain(cert.clone()), empty_key);
         // Should handle gracefully
 
         // Invalid DER data
         let invalid_key = PrivateKey::from_pkcs8_der(vec![0xFF, 0xFF, 0xFF, 0xFF]);
-        let result2 = TlsAcceptorBuilder::new(cert.clone(), invalid_key);
+        let _result2 = TlsAcceptorBuilder::new(single_cert_chain(cert.clone()), invalid_key);
         // Should handle gracefully
 
         // These tests verify our error handling paths exist
@@ -259,9 +244,11 @@ mod tls_helpers_tests {
         let key = test_private_key();
 
         // Should be able to create multiple acceptors with same cert/key
-        let acceptor1_result = TlsAcceptorBuilder::new(cert.clone(), key.clone()).build();
-        let acceptor2_result = TlsAcceptorBuilder::new(cert.clone(), key.clone()).build();
-        let acceptor3_result = TlsAcceptorBuilder::new(cert, key).build();
+        let acceptor1_result =
+            TlsAcceptorBuilder::new(single_cert_chain(cert.clone()), key.clone()).build();
+        let acceptor2_result =
+            TlsAcceptorBuilder::new(single_cert_chain(cert.clone()), key.clone()).build();
+        let acceptor3_result = TlsAcceptorBuilder::new(single_cert_chain(cert), key).build();
 
         assert!(
             acceptor1_result.is_ok(),
@@ -277,9 +264,9 @@ mod tls_helpers_tests {
         );
 
         // Verify all acceptors are independent instances
-        let acceptor1 = acceptor1_result.unwrap();
-        let acceptor2 = acceptor2_result.unwrap();
-        let acceptor3 = acceptor3_result.unwrap();
+        let _acceptor1 = acceptor1_result.unwrap();
+        let _acceptor2 = acceptor2_result.unwrap();
+        let _acceptor3 = acceptor3_result.unwrap();
 
         // They should be separate instances (can't easily test without Eq trait)
         // But if we got this far, the test certificate material works for multiple acceptors
@@ -295,7 +282,7 @@ mod tls_helpers_tests {
         // This ensures we don't break existing integration tests
 
         // Should be able to create acceptor (basic requirement)
-        let acceptor = TlsAcceptorBuilder::new(cert, key)
+        let _acceptor = TlsAcceptorBuilder::new(single_cert_chain(cert), key)
             .build()
             .expect("Test certificate should work with TLS acceptor");
 
@@ -313,12 +300,21 @@ mod tls_helpers_tests {
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod edge_case_tests {
-    use super::*;
     use crate::real_e2e_hardening_consolidation::hardened_examples::{
         test_certificate, test_private_key,
     };
-    use std::sync::Arc;
+    use crate::tls::{Certificate, CertificateChain, PrivateKey, TlsAcceptorBuilder};
     use std::thread;
+
+    fn single_cert_chain(cert: Certificate) -> CertificateChain {
+        CertificateChain::from_cert(cert)
+    }
+
+    fn acceptor_builds(cert: Certificate, key: PrivateKey) -> bool {
+        TlsAcceptorBuilder::new(single_cert_chain(cert), key)
+            .build()
+            .is_ok()
+    }
 
     /// Concurrent access test: Multiple threads should get same cached material
     #[test]
@@ -328,7 +324,9 @@ mod edge_case_tests {
                 thread::spawn(|| {
                     let cert = test_certificate();
                     let key = test_private_key();
-                    (cert.as_der().to_vec(), key.as_der().to_vec())
+                    let cert_der = cert.as_der().to_vec();
+                    let builds_acceptor = acceptor_builds(cert, key);
+                    (cert_der, builds_acceptor)
                 })
             })
             .collect();
@@ -343,11 +341,7 @@ mod edge_case_tests {
                 "Certificate should be identical across threads (thread {})",
                 i
             );
-            assert_eq!(
-                result.1, first.1,
-                "Private key should be identical across threads (thread {})",
-                i
-            );
+            assert!(result.1, "Private key should work across threads ({i})");
         }
     }
 
@@ -382,7 +376,7 @@ mod edge_case_tests {
             "Certificate should still work under memory pressure"
         );
         assert!(
-            key.as_der().len() > 0,
+            acceptor_builds(cert, key),
             "Private key should still work under memory pressure"
         );
     }
@@ -391,8 +385,9 @@ mod edge_case_tests {
 /// Performance benchmark tests (optional, for monitoring performance characteristics)
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod performance_tests {
-    use super::*;
-    use crate::real_e2e_hardening_consolidation::hardened_examples::generate_test_tls_material;
+    use crate::real_e2e_hardening_consolidation::hardened_examples::{
+        generate_test_tls_material, test_certificate, test_private_key,
+    };
     use std::time::Instant;
 
     /// Benchmark: Initial generation time
