@@ -3793,75 +3793,67 @@ mod tests {
             fields.get("fairness_policy_id").map(String::as_str),
             Some(BoundedLoadDecision::FAIRNESS_POLICY_ID)
         );
-        assert_eq!(
-            fields.get("primary_endpoint_id").map(String::as_str),
-            Some("Endpoint(1)")
-        );
+        // br-asupersync-36grbm: log_fields() is security-hardened and exposes only
+        // bucketed aggregates and boolean indicators (no raw endpoint IDs or exact
+        // counts) to prevent timing/reconnaissance attacks. Raw endpoint identities
+        // are still available via the non-logged rejected_endpoint_ids() accessor.
         assert_eq!(
             fields.get("rebalance_reason").map(String::as_str),
             Some("primary-over-capacity-rebalanced")
         );
         assert_eq!(
-            fields.get("rebalance_reasons").map(String::as_str),
-            Some("primary-over-capacity-rebalanced")
-        );
-        assert_ne!(
-            fields.get("selected_endpoint_id").map(String::as_str),
-            Some("Endpoint(1)")
+            fields.get("primary_selection_occurred").map(String::as_str),
+            Some("true")
         );
         assert_eq!(
-            fields.get("available_endpoint_count").map(String::as_str),
-            Some("4")
-        );
-        assert_eq!(
-            fields.get("selected_endpoint_count").map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(
-            fields.get("rejected_endpoint_count").map(String::as_str),
-            Some("3")
+            fields.get("selection_occurred").map(String::as_str),
+            Some("true")
         );
         assert_eq!(
             fields
-                .get("within_capacity_endpoint_count")
+                .get("available_endpoint_bucket")
                 .map(String::as_str),
-            Some("2")
+            Some("3-5")
+        );
+        assert_eq!(
+            fields.get("rejected_endpoint_bucket").map(String::as_str),
+            Some("3-5")
+        );
+        assert_eq!(
+            fields.get("overloaded_endpoint_bucket").map(String::as_str),
+            Some("1-2")
+        );
+        assert_eq!(
+            fields
+                .get("within_capacity_endpoint_bucket")
+                .map(String::as_str),
+            Some("1-2")
         );
         let fairness_state = fields
             .get("fairness_state")
             .map(String::as_str)
             .expect("bounded-load logs carry fairness_state");
         assert!(fairness_state.contains("policy=hrw-bounded-load"));
-        assert!(fairness_state.contains("primary=Endpoint(1)"));
-        assert!(fairness_state.contains("available=4"));
-        assert!(fairness_state.contains("rejected=3"));
-        assert!(fairness_state.contains("overloaded=2"));
-        assert!(fairness_state.contains("within_capacity=2"));
-        let selected_endpoint_id = fields
-            .get("selected_endpoint_id")
-            .map(String::as_str)
-            .expect("bounded-load logs carry selected_endpoint_id");
-        assert!(fairness_state.contains(&format!("selected={selected_endpoint_id}")));
+        assert!(fairness_state.contains("primary_selected=true"));
+        assert!(fairness_state.contains("selection_occurred=true"));
+        assert!(fairness_state.contains("available_bucket=3-5"));
+        assert!(fairness_state.contains("rejected_bucket=3-5"));
+        assert!(fairness_state.contains("overloaded_bucket=1-2"));
+        assert!(fairness_state.contains("within_capacity_bucket=1-2"));
+        assert_eq!(
+            fields
+                .get("endpoint_pressure_aggregate")
+                .map(String::as_str),
+            Some("total_bucket=3-5;within_capacity_bucket=1-2;over_capacity_bucket=1-2")
+        );
+        // The raw (non-logged) accessor still exposes the rejected endpoints, with the
+        // selected endpoint omitted from the rejected alternatives.
         assert_eq!(
             rejected_ids.len(),
             3,
             "selected endpoint must be omitted from rejected alternatives"
         );
-        assert!(
-            fields
-                .get("rejected_endpoint_ids")
-                .is_some_and(|ids| ids.contains("Endpoint(1)"))
-        );
-        assert!(
-            fields
-                .get("endpoint_pressure_snapshot")
-                .is_some_and(|snapshot| snapshot.contains("Endpoint(1):3/1:over:primary"))
-        );
-        assert!(
-            fields
-                .get("endpoint_pressure_snapshot")
-                .is_some_and(|snapshot| snapshot.contains(":selected"))
-        );
+        assert!(rejected_ids.contains(&primary_id));
     }
 
     #[test]
