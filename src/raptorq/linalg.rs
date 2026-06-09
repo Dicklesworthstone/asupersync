@@ -2183,18 +2183,31 @@ mod tests {
         let basic_result = basic.solve();
         let markowitz_result = markowitz.solve_markowitz();
 
+        // Rows 2 and 3 share coefficients [1,1,0,0] but carry distinct RHS
+        // values (3 vs 4). After eliminating columns 0 and 1 the residual rows
+        // collapse to `0 = c`: row 2 is consistent (0 = 0) but row 3 is a hard
+        // contradiction (0 = 1). Both solvers must therefore agree on the more
+        // precise `Inconsistent` classification (br-asupersync-biw352: an
+        // inconsistent overdetermined system is reported as Inconsistent, not
+        // Singular) and pin the contradicting row deterministically.
         assert_eq!(
             basic_result,
-            GaussianResult::Singular { row: 2 },
-            "basic solver should fail at first unpivotable column"
+            GaussianResult::Inconsistent { row: 3 },
+            "basic solver must detect the row-3 contradiction"
         );
         assert_eq!(
             markowitz_result,
-            GaussianResult::Singular { row: 2 },
-            "markowitz solver should fail at the same column"
+            GaussianResult::Inconsistent { row: 3 },
+            "markowitz solver must agree on the same contradicting row"
+        );
+        // Both solvers select pivots on columns 0 and 1 before failing on the
+        // all-zero column; the count must match across strategies.
+        assert_eq!(
+            basic.stats().pivot_selections,
+            markowitz.stats().pivot_selections,
+            "pivot-selection accounting must be deterministic across solvers"
         );
         assert_eq!(basic.stats().pivot_selections, 3);
-        assert_eq!(markowitz.stats().pivot_selections, 3);
     }
 
     #[test]
