@@ -3636,9 +3636,13 @@ mod tests {
     fn reconnect_replay_failure_keeps_subscription_state_and_disconnects_jh9g1j() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind replay failure listener");
         let addr = listener.local_addr().expect("listener addr");
+        let (accepted_tx, accepted_rx) = std_mpsc::channel();
+        let (close_now_tx, close_now_rx) = std_mpsc::channel();
         let (closed_tx, closed_rx) = std_mpsc::channel();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept replay failure client");
+            accepted_tx.send(()).expect("accepted ack");
+            close_now_rx.recv().expect("close command");
             SockRef::from(&stream)
                 .set_linger(Some(Duration::ZERO))
                 .expect("force reset on close");
@@ -3650,6 +3654,8 @@ mod tests {
             let stream = TcpStream::connect(format!("{addr}"))
                 .await
                 .expect("connect replay failure client");
+            accepted_rx.recv().expect("server accepted");
+            close_now_tx.send(()).expect("request reset");
             closed_rx.recv().expect("server closed");
 
             let state = Arc::new(SharedState::new());

@@ -1972,7 +1972,8 @@ impl RedisConnection {
             hello_args.push(p.as_bytes());
         }
         let mut hello_handled_auth = false;
-        match self.exec_no_init(cx, &hello_args).await? {
+        self.write_command(cx, &hello_args).await?;
+        match self.read_response(cx).await? {
             RespValue::Map(_) | RespValue::Array(Some(_)) => {
                 // RESP3 reply is a Map; some Redis builds (notably KeyDB)
                 // still answer in RESP2 with an Array even after HELLO 3.
@@ -8941,6 +8942,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set read timeout");
 
+            write_hello3_ok(&mut stream);
             let subscribe = read_resp_frame(&mut stream);
             assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
             let subscribe_ack = RespValue::Array(Some(vec![
@@ -9023,6 +9025,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set first read timeout");
 
+            write_hello3_ok(&mut first_stream);
             let subscribe = read_resp_frame(&mut first_stream);
             assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
             let subscribe_ack = RespValue::Array(Some(vec![
@@ -9060,6 +9063,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set second read timeout");
 
+            write_hello3_ok(&mut second_stream);
             let subscribe = read_resp_frame(&mut second_stream);
             assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
             let subscribe_ack = RespValue::Array(Some(vec![
@@ -9143,6 +9147,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set read timeout");
 
+            write_hello3_ok(&mut stream);
             let subscribe = read_resp_frame(&mut stream);
             assert_resp_command(subscribe, &[b"SUBSCRIBE", b"chan"]);
             subscribe_seen_tx
@@ -9703,6 +9708,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set transaction read timeout");
 
+            write_hello3_ok(&mut stream);
             let multi = read_resp_frame(&mut stream);
             assert_resp_command(multi, &[b"MULTI"]);
             stream.write_all(b"+OK\r\n").expect("write MULTI response");
@@ -9809,6 +9815,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("set transaction read timeout");
 
+            write_hello3_ok(&mut stream);
             let multi = read_resp_frame(&mut stream);
             assert_resp_command(multi, &[b"MULTI"]);
             stream.write_all(b"+OK\r\n").expect("write MULTI ack");
@@ -9914,16 +9921,16 @@ mod tests {
                 .expect("write HELLO -ERR");
             stream.flush().expect("flush HELLO -ERR");
 
-            // 2. Three pipelined commands — read each frame as a separate
-            //    RESP array. read_resp_frame asserts each frame is consumed
-            //    fully before returning, but pipeline writes all three in
-            //    one combined buffer; that's fine because the buffer's
-            //    framing boundaries are explicit per RESP.
-            let cmd1 = read_resp_frame(&mut stream);
+            // 2. Three pipelined commands. Pipeline writes all three frames
+            //    in one combined buffer, so the scripted server must retain
+            //    unread bytes between decode calls instead of dropping any
+            //    frames that arrived in the first socket read.
+            let mut command_buf = Vec::new();
+            let cmd1 = read_resp_frame_from_buffer(&mut stream, &mut command_buf);
             assert_resp_command(cmd1, &[b"GET", b"k1"]);
-            let cmd2 = read_resp_frame(&mut stream);
+            let cmd2 = read_resp_frame_from_buffer(&mut stream, &mut command_buf);
             assert_resp_command(cmd2, &[b"GET", b"k2"]);
-            let cmd3 = read_resp_frame(&mut stream);
+            let cmd3 = read_resp_frame_from_buffer(&mut stream, &mut command_buf);
             assert_resp_command(cmd3, &[b"GET", b"k3"]);
 
             // 3. Three responses in one combined write: Ok, -ERR, Ok.
@@ -9937,7 +9944,7 @@ mod tests {
             // 5. Health check — pipeline should have defused the discard
             //    guard so the SAME RedisConnection comes back from the pool
             //    for the next command. Read PING + reply PONG.
-            let ping = read_resp_frame(&mut stream);
+            let ping = read_resp_frame_from_buffer(&mut stream, &mut command_buf);
             assert_resp_command(ping, &[b"PING"]);
             stream
                 .write_all(&RespValue::SimpleString("PONG".to_string()).encode())
