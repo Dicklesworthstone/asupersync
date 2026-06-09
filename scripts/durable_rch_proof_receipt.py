@@ -298,7 +298,11 @@ def outcome_status(classification: str) -> str:
 
 
 def proof_status(classification: str) -> str:
-    return "fresh-rch-pass" if classification == "pass" else "blocked"
+    if classification == "pass":
+        return "fresh-rch-pass"
+    if classification == "stale_progress_canceled":
+        return "stale-evidence"
+    return "blocked"
 
 
 def refusal_reasons(classification: str, submission: dict[str, Any], outcome: dict[str, Any]) -> list[str]:

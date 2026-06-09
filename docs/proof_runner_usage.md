@@ -448,6 +448,30 @@ canceled, failed, and handoff templates are not green proof. No template may be
 used to claim release-readiness, workspace-health, live-rch-fleet-availability,
 or unrelated-proof-lanes.
 
+## Durable RCH Deterministic E2E Scenarios
+
+The durable RCH detached-proof scenario corpus is
+`artifacts/durable_rch_proof_e2e_scenarios_v1.json`, checked by
+`tests/durable_rch_proof_e2e_contract.rs`, with contract version
+`durable-rch-proof-e2e-scenarios-v1`. The suite replays synthetic submission,
+receipt-capture, CLI status/query, policy-refusal, duplicate-submission, and
+mail-template handoff cases without invoking live RCH, live Agent Mail, or
+tracker mutation.
+
+Use the corpus when reviewing durable proof closeouts that mention terminal
+pass, Cargo failure, client disconnect, stale_progress_canceled, heartbeat-stale
+infrastructure, local fallback, stale HEAD, dirty frontier overlap,
+wrong-feature-set, wrong command envelope, unsupported broad claims, or duplicate
+lane plus HEAD submissions. The scenario matrix verifies that partial, stale,
+canceled, local-fallback, stale-head, dirty-overlap, wrong-feature-set, and broad
+claim cases all fail closed and do not become green proof.
+
+Synthetic fixtures do not prove live RCH fleet availability. Synthetic fixtures
+do not prove release readiness, broad workspace health, or unrelated proof-lane
+correctness. Closeout still needs a focused remote Cargo proof for the contract
+test, and any cited receipt must keep its exact manifest lane, source HEAD,
+command fingerprint, receipt id, first blocker, and refusal reason codes visible.
+
 ## Proof-Lane Resource Envelopes
 
 The proof runner reads resource-envelope metadata from

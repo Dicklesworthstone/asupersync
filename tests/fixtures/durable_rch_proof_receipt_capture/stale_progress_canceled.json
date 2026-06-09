@@ -9,7 +9,7 @@
     "lifecycle_state": "terminal_stale",
     "max_first_blocker_lines": 8,
     "outcome_status": "stale",
-    "proof_evidence_status": "blocked",
+    "proof_evidence_status": "stale-evidence",
     "refusal_reason_codes": [
       "failed-proof-status"
     ],
