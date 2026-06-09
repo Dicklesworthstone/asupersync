@@ -45,7 +45,14 @@ jobs:
 
       - name: Regenerate dashboard artifacts
         run: |
-          python3 scripts/generate_tokio_parity_dashboard.py
+          generated_at="$(python3 - <<'PY'
+          import json
+
+          with open("docs/tokio_parity_dashboard.json", "r", encoding="utf-8") as handle:
+              print(json.load(handle)["generated_at"])
+          PY
+          )"
+          python3 scripts/generate_tokio_parity_dashboard.py --generated-at "$generated_at"
 
       - name: Hard-fail if dashboard artifacts drift
         run: |
