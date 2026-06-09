@@ -1,0 +1,79 @@
+{
+  "fixture_id": "missing-source-section-refused",
+  "expected_contract_verdict": {
+    "decision": "refused",
+    "reason_codes": [
+      "missing-required-section"
+    ]
+  },
+  "receipt": {
+    "schema_version": "durable-rch-proof-receipt-v1",
+    "receipt_id": "drpr-20260609-proof-lane-manifest-contract-missing-source",
+    "submission_id": "rch-sub-20260609-0001",
+    "generated_at": "2026-06-09T06:00:00Z",
+    "manifest_lane_id": "proof-lane-manifest-contract",
+    "manifest_guarantee_ids": [
+      "proof-lane-manifest-verifier"
+    ],
+    "claim_scope": "proof-lane-manifest-verifier",
+    "proof_evidence_status": "fresh-rch-pass",
+    "lifecycle_state": "terminal_pass",
+    "terminal_classification": "pass",
+    "command": {
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "asupersync",
+        "--test",
+        "proof_lane_manifest_contract",
+        "--",
+        "--nocapture"
+      ],
+      "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+      "env_fingerprint": "sha256:proof-lane-manifest-contract-env",
+      "env_allowlist": [
+        "CARGO_INCREMENTAL",
+        "CARGO_PROFILE_TEST_DEBUG",
+        "CARGO_TARGET_DIR",
+        "RUSTFLAGS"
+      ],
+      "remote_required": true,
+      "local_fallback_allowed": false,
+      "local_fallback_markers": []
+    },
+    "rch_provenance": {
+      "worker_id": "vmi-proof-01",
+      "remote_route_segments": [
+        "rch-daemon",
+        "vmi-proof-01"
+      ],
+      "submitted_at": "2026-06-09T05:56:00Z",
+      "started_at": "2026-06-09T05:56:05Z",
+      "finished_at": "2026-06-09T05:57:30Z",
+      "detector_progress_stale": false,
+      "detector_heartbeat_stale": false
+    },
+    "outcome": {
+      "status": "pass",
+      "exit_code": 0,
+      "output_digest": "sha256:terminal-output",
+      "first_blocker_lines": [],
+      "cancellation_reason": null,
+      "staleness_reason": null
+    },
+    "claim_boundaries": {
+      "citable": false,
+      "covers": "This receipt is intentionally missing its source section and must not be citable.",
+      "explicit_not_covered": [
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability"
+      ],
+      "refusal_reason_codes": [
+        "missing-required-section"
+      ]
+    }
+  }
+}
