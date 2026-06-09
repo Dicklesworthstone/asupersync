@@ -3461,10 +3461,19 @@ mod tests {
         let config = BoundedLoadConfig::new(u32::MAX, 1, u32::MAX);
         let endpoint = test_endpoint(1).with_weight(u32::MAX);
 
+        // br-asupersync-qfgsh1: extreme u32 policy inputs are treated as overflow
+        // attacks and clamped to a bounded, safe capacity rather than allowed to
+        // saturate to u32::MAX (which would defeat the load-bound). The contract is
+        // that capacity_for never panics and never returns an unbounded value: with
+        // min_capacity == 1 the bounded fallback floors at the minimum capacity.
+        let capacity = config.capacity_for(&endpoint);
         assert_eq!(
-            config.capacity_for(&endpoint),
-            u32::MAX,
-            "bounded-load capacity must saturate instead of panicking on extreme valid u32 policy inputs"
+            capacity, 1,
+            "bounded-load capacity must clamp extreme inputs to the bounded fallback instead of saturating to u32::MAX or panicking"
+        );
+        assert!(
+            capacity <= 100_000,
+            "bounded-load capacity must stay within the hardened upper bound"
         );
     }
 

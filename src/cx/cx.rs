@@ -2386,7 +2386,13 @@ impl<Caps> Cx<Caps> {
         let context = obs.context.clone();
         drop(obs);
         let mut entry = entry.with_context(&context);
-        if include_timestamps && entry.timestamp() == Time::from_nanos(1_000_000_000) {
+        // `LogEntry::new`/`info` initialize `timestamp` to `Time::ZERO`, which is
+        // the "unset" sentinel: when the caller did not supply an explicit
+        // timestamp we fill it in from the context's timer driver. The previous
+        // sentinel (`Time::from_nanos(1_000_000_000)`) never matched the actual
+        // default, so auto-timestamping silently never fired and entries kept
+        // `Time::ZERO`.
+        if include_timestamps && entry.timestamp() == Time::ZERO {
             let now = self
                 .handles
                 .timer_driver

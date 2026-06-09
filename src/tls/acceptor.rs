@@ -1222,10 +1222,15 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    // `Certificate` and the PEM fixtures below are only consumed by the
+    // rustls-backed, `#[cfg(feature = "tls")]`-gated tests; gate the import
+    // and constants the same way so the non-`tls` build has no unused items.
+    #[cfg(feature = "tls")]
     use crate::tls::Certificate;
 
     // Self-signed test certificate and key (for testing only)
     // Generated with: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
+    #[cfg(feature = "tls")]
     const TEST_CERT_PEM: &[u8] = br"-----BEGIN CERTIFICATE-----
 MIIDGjCCAgKgAwIBAgIUEOa/xZnL2Xclme2QSueCrHSMLnEwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDIyNjIyMjk1MloXDTM2MDIy
@@ -1246,6 +1251,7 @@ FPAy+SbPl3+sqPbes5IqAQO9jhjb0w0/5RlSTPtiKetb6gAA7Yqw+yZWkBN0WDye
 Lru15URJw9pE1Uae8IuzyzHiF1fnn45swnvW3Szb
 -----END CERTIFICATE-----";
 
+    #[cfg(feature = "tls")]
     const TEST_KEY_PEM: &[u8] = br"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDHUmoIekMgc9Hg
 fUsOtveAdULOgq6MA3Id04rDsJMsp3MlsPJvAlipny9mmrTHCFgqkd0Y7jK/vItP
@@ -1275,6 +1281,13 @@ kMtbiQcfyyxjefyCA0OvdWEXrvnRZYNEBosyX/ko7Bl2IRBFP6ahQhj7jHqm2+/J
 SrXuVI5uunTgPWuOtJOP+KM=
 -----END PRIVATE KEY-----";
 
+    // These builder/PEM-parsing tests exercise the rustls-backed
+    // `from_pem` constructors, which only parse real certificates when the
+    // `tls` feature is enabled (otherwise the disabled-mode stubs return an
+    // error and `.unwrap()` panics). Gate them on `tls` to match the sibling
+    // `test_build_acceptor` below, so the default/test-internals build that
+    // omits `tls` does not run cert-parsing tests against the stub.
+    #[cfg(feature = "tls")]
     #[test]
     fn test_builder_new() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -1283,6 +1296,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         assert!(builder.alpn_protocols.is_empty());
     }
 
+    #[cfg(feature = "tls")]
     #[test]
     fn test_builder_alpn_http() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -1294,6 +1308,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         );
     }
 
+    #[cfg(feature = "tls")]
     #[test]
     fn test_builder_alpn_h2() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -1303,6 +1318,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         assert!(builder.alpn_required);
     }
 
+    #[cfg(feature = "tls")]
     #[test]
     fn test_builder_alpn_grpc() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -1312,6 +1328,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
         assert!(builder.alpn_required);
     }
 
+    #[cfg(feature = "tls")]
     #[test]
     fn test_client_auth_default() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
@@ -1320,12 +1337,14 @@ SrXuVI5uunTgPWuOtJOP+KM=
         assert!(matches!(builder.client_auth, ClientAuth::None));
     }
 
+    #[cfg(feature = "tls")]
     #[test]
     fn test_certificate_from_pem() {
         let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
         assert_eq!(certs.len(), 1);
     }
 
+    #[cfg(feature = "tls")]
     #[test]
     fn test_private_key_from_pem() {
         let _key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
