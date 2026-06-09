@@ -130,6 +130,7 @@ artifacts/*
 !artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json
 !artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json
 !artifacts/fifth_wave_live_swarm_telemetry_heatmap_v1.json
+!artifacts/fifth_wave_numa_scheduler_locality_lab_v1.json
 !artifacts/generated_smoke_artifact_inventory_v1.json
 
 # Generated smoke-run output roots. These are retained local evidence, not
