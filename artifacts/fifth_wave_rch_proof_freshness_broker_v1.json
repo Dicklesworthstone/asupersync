@@ -1,0 +1,338 @@
+{
+  "schema_version": "fifth-wave-rch-proof-freshness-broker-v1",
+  "bead_id": "asupersync-rch-proof-freshness-broker-u9iy0g",
+  "purpose": "Define a deterministic proof freshness broker contract for classifying RCH receipts, coordinating Agent Mail handoffs, and refusing stale or over-broad proof claims.",
+  "source_of_truth": {
+    "broker_artifact": "artifacts/fifth_wave_rch_proof_freshness_broker_v1.json",
+    "contract_test": "tests/fifth_wave_rch_proof_freshness_broker_contract.rs",
+    "swarm_atlas": "artifacts/fifth_wave_swarm_control_plane_atlas_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "durable_rch_final_signoff": "artifacts/durable_rch_proof_final_signoff_v1.json",
+    "durable_rch_receipt_contract": "artifacts/durable_rch_proof_receipt_contract_v1.json",
+    "proof_runner_runbook": "docs/proof_runner_usage.md",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "broker_contract_lane": {
+    "lane_id": "fifth-wave-rch-proof-freshness-broker",
+    "owner_bead": "asupersync-rch-proof-freshness-broker-u9iy0g",
+    "proof_command_id": "fifth-wave-rch-proof-freshness-broker-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_rch_proof_freshness_broker CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_rch_proof_freshness_broker_contract -- --nocapture",
+    "resource_envelope": {
+      "class_id": "artifact-contract-medium",
+      "timeout_seconds": 1200,
+      "memory_mb": 4096,
+      "remote_required": true,
+      "local_fallback_allowed": false,
+      "resource_pressure": "medium",
+      "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_rch_proof_freshness_broker"
+    },
+    "covers": [
+      "receipt_freshness_schema",
+      "stale_progress_refusal",
+      "local_fallback_refusal",
+      "narrow_claim_scope_refusal",
+      "agent_mail_handoff_templates"
+    ],
+    "does_not_cover": [
+      "does not prove release readiness",
+      "does not prove broad workspace health",
+      "does not prove live RCH fleet availability",
+      "does not implement RCH daemon scheduling",
+      "does not authorize local Cargo fallback"
+    ]
+  },
+  "receipt_schema": {
+    "required_fields": [
+      "receipt_id",
+      "status",
+      "rch_build_id",
+      "command",
+      "manifest_lane_id",
+      "claim_scope",
+      "head_commit",
+      "tree_fingerprint",
+      "dirty_tree_caveat",
+      "worker_id",
+      "remote_observed",
+      "local_fallback_observed",
+      "exit_code",
+      "started_at",
+      "completed_at",
+      "last_heartbeat_at",
+      "last_progress_at",
+      "progress_age_secs",
+      "test_evidence",
+      "owner_agent",
+      "handoff_agent",
+      "agent_mail_thread",
+      "decision"
+    ],
+    "status_values": [
+      "fresh-rch-pass",
+      "failed-rch-test",
+      "stale-progress",
+      "heartbeat-stale",
+      "active-project-exclusion",
+      "canceled-owned",
+      "canceled-peer-with-handoff",
+      "canceled-peer-rch-recommended",
+      "local-fallback-refused",
+      "zero-test-filter",
+      "stale-head",
+      "broad-claim-refused",
+      "malformed"
+    ],
+    "freshness_window_seconds": 86400,
+    "required_remote_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- env ",
+    "forbidden_transcript_markers": [
+      "[RCH] local",
+      "Executing command locally",
+      "local fallback accepted",
+      "falling back to local execution",
+      "RCH_REQUIRE_REMOTE=0"
+    ]
+  },
+  "classification_rules": [
+    {
+      "rule_id": "fresh-remote-pass",
+      "input_status": "fresh-rch-pass",
+      "required_conditions": [
+        "remote_observed=true",
+        "local_fallback_observed=false",
+        "exit_code=0",
+        "head_commit matches expected head",
+        "test_evidence is nonzero",
+        "command maps exactly to manifest_lane_id"
+      ],
+      "proof_allowed": true,
+      "claim_scope": "exact manifest lane only"
+    },
+    {
+      "rule_id": "stale-progress-not-proof",
+      "input_status": "stale-progress",
+      "required_conditions": [
+        "heartbeat remains fresh",
+        "progress_age_secs exceeds broker stale threshold",
+        "RCH status reports detector_progress_stale=true"
+      ],
+      "proof_allowed": false,
+      "claim_scope": "stale evidence only"
+    },
+    {
+      "rule_id": "heartbeat-stale-infra-blocked",
+      "input_status": "heartbeat-stale",
+      "required_conditions": [
+        "heartbeat_age_secs exceeds broker heartbeat threshold",
+        "worker liveness is unknown"
+      ],
+      "proof_allowed": false,
+      "claim_scope": "infrastructure blocker only"
+    },
+    {
+      "rule_id": "active-project-exclusion-wait",
+      "input_status": "active-project-exclusion",
+      "required_conditions": [
+        "another project-scoped build is active",
+        "queued command was refused without local fallback"
+      ],
+      "proof_allowed": false,
+      "claim_scope": "queue contention only"
+    },
+    {
+      "rule_id": "local-fallback-refused",
+      "input_status": "local-fallback-refused",
+      "required_conditions": [
+        "remote_required=true",
+        "RCH refuses to execute locally",
+        "no test evidence is accepted"
+      ],
+      "proof_allowed": false,
+      "claim_scope": "local fallback refusal only"
+    },
+    {
+      "rule_id": "zero-test-filter-not-proof",
+      "input_status": "zero-test-filter",
+      "required_conditions": [
+        "cargo command reached test harness",
+        "observed test count is zero"
+      ],
+      "proof_allowed": false,
+      "claim_scope": "bad filter only"
+    },
+    {
+      "rule_id": "narrow-command-refuses-broad-claim",
+      "input_status": "broad-claim-refused",
+      "required_conditions": [
+        "command covers fewer surfaces than requested claim",
+        "claim mentions broad workspace health, release readiness, live fleet availability, performance improvement, or no regression"
+      ],
+      "proof_allowed": false,
+      "claim_scope": "refusal reason only"
+    }
+  ],
+  "operator_decision_table": [
+    {
+      "decision": "cite_green_receipt",
+      "when": "receipt status is fresh-rch-pass and command maps exactly to the requested manifest lane",
+      "allowed_for_peer_builds": true,
+      "requires_agent_mail": false,
+      "mail_template_id": "green-receipt-closeout"
+    },
+    {
+      "decision": "wait_for_active_peer",
+      "when": "active peer build has fresh progress or no RCH stale-progress recommendation",
+      "allowed_for_peer_builds": true,
+      "requires_agent_mail": true,
+      "mail_template_id": "wait-for-peer-build"
+    },
+    {
+      "decision": "cancel_owned_stale_build",
+      "when": "owned build has detector_progress_stale=true and RCH recommends cancellation",
+      "allowed_for_peer_builds": false,
+      "requires_agent_mail": false,
+      "mail_template_id": "owned-stale-cancel"
+    },
+    {
+      "decision": "request_peer_handoff",
+      "when": "peer build is stale-progress but RCH has not yet recommended cancellation or ownership is unclear",
+      "allowed_for_peer_builds": true,
+      "requires_agent_mail": true,
+      "mail_template_id": "peer-handoff-request"
+    },
+    {
+      "decision": "cancel_peer_after_rch_recommendation",
+      "when": "peer build repeatedly blocks the project lane, RCH status recommends the exact cancel command, and a targeted Agent Mail notice cites the build id before cancellation",
+      "allowed_for_peer_builds": true,
+      "requires_agent_mail": true,
+      "mail_template_id": "peer-stale-cancel-notice"
+    },
+    {
+      "decision": "record_blocked_without_proof",
+      "when": "RCH refuses local fallback or no admissible worker is available",
+      "allowed_for_peer_builds": true,
+      "requires_agent_mail": true,
+      "mail_template_id": "blocked-no-local-fallback"
+    }
+  ],
+  "agent_mail_templates": [
+    {
+      "template_id": "green-receipt-closeout",
+      "subject": "[{bead_id}] RCH proof passed",
+      "required_body_tokens": [
+        "rch_build_id",
+        "remote worker",
+        "test evidence",
+        "claim scope",
+        "no local fallback"
+      ]
+    },
+    {
+      "template_id": "wait-for-peer-build",
+      "subject": "Waiting for active RCH proof lane",
+      "required_body_tokens": [
+        "active_build_id",
+        "owner if known",
+        "command",
+        "will not cancel",
+        "requested gap if needed"
+      ]
+    },
+    {
+      "template_id": "owned-stale-cancel",
+      "subject": "Canceling owned stale RCH build",
+      "required_body_tokens": [
+        "active_build_id",
+        "detector_progress_stale",
+        "reason",
+        "next proof command"
+      ]
+    },
+    {
+      "template_id": "peer-handoff-request",
+      "subject": "Requesting handoff for stale RCH build",
+      "required_body_tokens": [
+        "active_build_id",
+        "progress_age_secs",
+        "owner if known",
+        "requested action"
+      ]
+    },
+    {
+      "template_id": "peer-stale-cancel-notice",
+      "subject": "Canceling stale peer RCH build to free proof lane",
+      "required_body_tokens": [
+        "active_build_id",
+        "RCH recommended cancel",
+        "will not touch source files",
+        "next proof command"
+      ]
+    },
+    {
+      "template_id": "blocked-no-local-fallback",
+      "subject": "RCH proof blocked without local fallback",
+      "required_body_tokens": [
+        "refusal reason",
+        "remote required",
+        "no local fallback",
+        "next retry condition"
+      ]
+    }
+  ],
+  "failure_fixtures": [
+    {
+      "fixture_id": "stale-progress-claimed-green",
+      "mutated_status": "stale-progress",
+      "mutated_claim": "fresh-rch-pass",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "stale progress receipts are not proof"
+    },
+    {
+      "fixture_id": "local-fallback-accepted",
+      "mutated_status": "local-fallback-refused",
+      "mutated_claim": "fresh-rch-pass",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "local fallback evidence is never accepted"
+    },
+    {
+      "fixture_id": "zero-test-green",
+      "mutated_status": "zero-test-filter",
+      "mutated_claim": "fresh-rch-pass",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "zero-test filters do not prove behavior"
+    },
+    {
+      "fixture_id": "narrow-proof-release-claim",
+      "mutated_status": "fresh-rch-pass",
+      "mutated_claim": "release readiness",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "narrow proof lanes cannot imply release readiness"
+    },
+    {
+      "fixture_id": "peer-cancel-without-notice",
+      "mutated_status": "canceled-peer-rch-recommended",
+      "mutated_claim": "valid cancellation",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "peer cancellation requires targeted Agent Mail notice and exact RCH recommendation"
+    }
+  ],
+  "non_claims": [
+    "does not prove release readiness",
+    "does not prove broad workspace health",
+    "does not prove live RCH fleet availability",
+    "does not implement RCH daemon scheduling",
+    "does not prove performance improvement",
+    "does not prove no regression",
+    "does not authorize local Cargo fallback",
+    "does not implement fourth-wave runtime admission control"
+  ],
+  "closeout_requirements": [
+    "RCH-backed broker contract test passes remotely with nonzero test evidence",
+    "receipt statuses reject stale-progress, local-fallback, zero-test, stale-head, and broad-claim evidence",
+    "Agent Mail closeout cites build id, worker id, test evidence, and claim scope",
+    "br dep cycles reports no dependency cycles",
+    "bv --robot-triage shows downstream proof-lane work remains actionable",
+    "commits stay on main and mirror main to master"
+  ]
+}
