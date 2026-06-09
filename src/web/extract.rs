@@ -24,7 +24,7 @@ use crate::bytes::Bytes;
 use serde::de::{
     self, DeserializeOwned, DeserializeSeed, IntoDeserializer, SeqAccess, Unexpected, Visitor,
 };
-use serde::{Deserialize, forward_to_deserialize_any};
+use serde::forward_to_deserialize_any;
 
 // ─── Request Type ────────────────────────────────────────────────────────────
 
