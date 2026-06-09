@@ -1541,7 +1541,11 @@ jobs:
             echo "rch is required for Run unit tests" >&2
             exit 1
           fi
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_unit" cargo test --lib --all-features
+          feature_args=(--all-features)
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            feature_args=(--features ci-cross-platform)
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_unit" cargo test --lib "${feature_args[@]}"
 
       - name: Run integration tests
         run: |
@@ -1551,7 +1555,11 @@ jobs:
             echo "rch is required for Run integration tests" >&2
             exit 1
           fi
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_integration" cargo test --test '*' --all-features
+          feature_args=(--all-features)
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            feature_args=(--features ci-cross-platform)
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_integration" cargo test --test '*' "${feature_args[@]}"
 
       - name: Run doc tests
         run: |
@@ -1561,7 +1569,11 @@ jobs:
             echo "rch is required for Run doc tests" >&2
             exit 1
           fi
-          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_doctest" cargo test --doc --all-features
+          feature_args=(--all-features)
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            feature_args=(--features ci-cross-platform)
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_doctest" cargo test --doc "${feature_args[@]}"
 
   coverage:
     name: Coverage (llvm-cov)
@@ -1606,7 +1618,6 @@ jobs:
             bash -lc "
               set -euo pipefail
               rustup component add llvm-tools-preview
-              cargo install cargo-llvm-cov --locked
               mkdir -p coverage
               cargo llvm-cov --lib --all-features \
                 --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
@@ -2525,7 +2536,6 @@ jobs:
             bash -lc "
               set -euo pipefail
               rustup component add llvm-tools-preview
-              cargo install cargo-llvm-cov --locked
               cargo llvm-cov test -p asupersync --all-features --summary-only
             " 2>&1 | tee ci-summaries/quic_h3_coverage.txt
 

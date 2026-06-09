@@ -424,6 +424,9 @@ impl PlatformCapabilities {
     }
 
     fn detect_filesystem_type(path: &Path) -> Outcome<String, CapabilityError> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = path;
+
         // Platform-specific filesystem detection
         #[cfg(target_os = "linux")]
         {
@@ -437,7 +440,6 @@ impl PlatformCapabilities {
 
         #[cfg(target_os = "windows")]
         {
-            let _ = path;
             Outcome::Ok(FS_TYPE_NTFS.to_string()) // Assume NTFS on Windows
         }
 
