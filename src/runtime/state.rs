@@ -4318,23 +4318,44 @@ impl RuntimeState {
                                 created_at: region.created_at,
                                 validation_level: CancelValidationLevel::Basic,
                             };
-                            let validation_result = self.validate_region_protocol_transition(
-                                region_id,
-                                RegionEvent::FinalizerCompleted, // Use FinalizerCompleted for close
-                                &context,
+                            // An empty region (no draining tasks, no running
+                            // finalizers) is driven straight to the validator's
+                            // terminal `Finalized` state by the earlier
+                            // `RequestClose`/`Cancel` transition in this same
+                            // close progression. In that case the close-complete
+                            // step must NOT re-issue `FinalizerCompleted`: the
+                            // region is already finalized, and feeding a further
+                            // event to the terminal state would (correctly) be
+                            // rejected by the validator, registering a spurious
+                            // protocol violation. Only validate the
+                            // `FinalizerCompleted` transition when the validator
+                            // has not already reached `Finalized`.
+                            let already_finalized = matches!(
+                                self.cancel_protocol_validator
+                                    .lock()
+                                    .region_state(region_id),
+                                Some(crate::cancel::protocol_state_machines::RegionState::Finalized)
                             );
-                            if matches!(
-                                validation_result,
-                                TransitionResult::Invalid { .. }
-                                    | TransitionResult::InvariantViolation { .. }
-                            ) {
-                                log_cancel_protocol_violation(
-                                    "region close completion",
-                                    &validation_result,
-                                );
-                                // Protocol violation detected - invalidate region snapshot cache
-                                self.read_biased_draining_region_snapshot.invalidate();
-                                // Continue with transition but log violation
+                            if !already_finalized {
+                                let validation_result = self
+                                    .validate_region_protocol_transition(
+                                        region_id,
+                                        RegionEvent::FinalizerCompleted, // Use FinalizerCompleted for close
+                                        &context,
+                                    );
+                                if matches!(
+                                    validation_result,
+                                    TransitionResult::Invalid { .. }
+                                        | TransitionResult::InvariantViolation { .. }
+                                ) {
+                                    log_cancel_protocol_violation(
+                                        "region close completion",
+                                        &validation_result,
+                                    );
+                                    // Protocol violation detected - invalidate region snapshot cache
+                                    self.read_biased_draining_region_snapshot.invalidate();
+                                    // Continue with transition but log violation
+                                }
                             }
 
                             let old_state = region.state();
@@ -6483,6 +6504,37 @@ mod tests {
         id
     }
 
+    /// Inserts a task representing same-region cleanup work (an async
+    /// finalizer) into a region that may already be in `Finalizing`.
+    ///
+    /// Normal `add_task` admission is rejected once a region stops accepting
+    /// work (Closing/Draining/Finalizing). Cleanup work must still be
+    /// admissible during `Finalizing`, which is exactly what
+    /// `add_cleanup_task` allows — so tests that drive a region into
+    /// `Finalizing` before registering an async-finalizer task must use this
+    /// helper rather than `insert_task`.
+    fn insert_cleanup_task(state: &mut RuntimeState, region: RegionId) -> TaskId {
+        let idx = state.insert_task(TaskRecord::new(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            region,
+            Budget::INFINITE,
+        ));
+        let id = TaskId::from_arena(idx);
+        state.task_mut(id).expect("task missing").id = id;
+        let added = state
+            .regions
+            .get_mut(region.arena_index())
+            .expect("region missing")
+            .add_cleanup_task(id);
+        crate::assert_with_log!(
+            added.is_ok(),
+            "cleanup task added to region",
+            true,
+            added.is_ok()
+        );
+        id
+    }
+
     #[test]
     fn cx_trace_emits_user_trace_event() {
         init_test("cx_trace_emits_user_trace_event");
@@ -6885,8 +6937,9 @@ mod tests {
         region_record.begin_close(None);
         region_record.begin_finalize();
 
-        // Add a running task (representing an async finalizer)
-        let task = insert_task(&mut state, region);
+        // Add a running task (representing an async finalizer). The region is
+        // already Finalizing, so this must be admitted as cleanup work.
+        let task = insert_cleanup_task(&mut state, region);
         state.task_mut(task).expect("task").start_running();
 
         // Should NOT be able to close because a task is running
@@ -6940,8 +6993,9 @@ mod tests {
         // would now return true. Inject a synthetic active async
         // finalizer entry to simulate the window between
         // `run_sync_finalizers_tracked` returning an Async finalizer
-        // and `task_completed` clearing the barrier.
-        let finalizer_task = insert_task(&mut state, region);
+        // and `task_completed` clearing the barrier. The region is already
+        // Finalizing, so the finalizer task must be admitted as cleanup work.
+        let finalizer_task = insert_cleanup_task(&mut state, region);
         state.active_async_finalizers.insert(region, finalizer_task);
 
         let can_close = state.can_region_complete_close(region);
@@ -7987,6 +8041,15 @@ mod tests {
         state.register_sync_finalizer(region, move || o2.lock().push(2));
         state.register_sync_finalizer(region, move || o3.lock().push(3));
 
+        // Finalizers may only be popped/executed once the region has entered
+        // the Finalizing state (br-asupersync-vks0tm); drive the region there
+        // before draining the finalizer stack.
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
+
         // Pop and execute in LIFO order
         while let Some(finalizer) = state.pop_region_finalizer(region) {
             if let Finalizer::Sync(f) = finalizer {
@@ -8021,6 +8084,14 @@ mod tests {
         });
         state.register_async_finalizer(region, async {});
         state.register_sync_finalizer(region, || {}); // Another sync
+
+        // Finalizers may only run once the region is Finalizing
+        // (br-asupersync-vks0tm).
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
 
         // First pass: runs the top Sync(empty), stops at Async
         let async_finalizer = state.run_sync_finalizers(region);
@@ -8074,6 +8145,13 @@ mod tests {
         crate::assert_with_log!(registered, "registered", true, registered);
 
         state.now = Time::from_nanos(20);
+        // Finalizers may only run once the region is Finalizing
+        // (br-asupersync-vks0tm).
+        {
+            let region_record = state.regions.get(region.arena_index()).expect("region");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+        }
         let pending_async = state.run_sync_finalizers(region);
         crate::assert_with_log!(
             pending_async.is_none(),
@@ -8419,21 +8497,25 @@ mod tests {
             .expect("async finalizer task missing")
             .complete(Outcome::Ok(()));
         let _ = state.task_completed(task_id);
+        // Finalizer-history events are timestamped with the runtime's logical
+        // clock, which `RuntimeState::new()` initializes to a non-zero default
+        // (not `Time::ZERO`). Compare against that actual clock value.
+        let now = state.now;
         crate::assert_with_log!(
             state.finalizer_history
                 == vec![
                     FinalizerHistoryEvent::Registered {
                         id: 0,
                         region,
-                        time: Time::ZERO,
+                        time: now,
                     },
                     FinalizerHistoryEvent::Ran {
                         id: 0,
-                        time: Time::ZERO,
+                        time: now,
                     },
                     FinalizerHistoryEvent::RegionClosed {
                         region,
-                        time: Time::ZERO,
+                        time: now,
                     },
                 ],
             "history records cleanup execution and close once the finalizer task finishes",
