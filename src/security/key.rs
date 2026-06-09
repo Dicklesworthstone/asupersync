@@ -558,38 +558,50 @@ mod tests {
     /// boundary.
     #[test]
     fn from_bytes_rejects_weak_inputs() {
-        // (1) All zeros: distinct=1 < 8 → InsufficientByteDiversity.
+        // The validator walks the bytes in a single pass, checking the
+        // per-byte concentration cap (MAX_BYTE_FREQUENCY = 4) DURING the
+        // count and the distinct/Hamming bounds only after. So any input
+        // where a single value repeats more than 4 times is rejected by
+        // `ExcessiveByteConcentration` first — which is the cheapest,
+        // earliest fail-closed signal. The security-relevant invariant is
+        // simply that every weak input is REJECTED; the exact variant is a
+        // by-product of validation order.
+
+        // (1) All zeros: byte 0 hits frequency 5 on the 5th byte →
+        // ExcessiveByteConcentration fires before the distinct check.
         let err = AuthKey::from_bytes([0u8; AUTH_KEY_SIZE]).expect_err("all-zero rejected");
         assert!(matches!(
             err,
             AuthKeyError::WeakKey {
-                reason: WeakKeyReason::InsufficientByteDiversity { distinct: 1, .. }
+                reason: WeakKeyReason::ExcessiveByteConcentration { byte_value: 0, .. }
             }
         ));
 
-        // (2) All 0xFF: distinct=1 → InsufficientByteDiversity (also
-        // would fail Hamming weight if it got that far).
+        // (2) All 0xFF: byte 0xFF hits frequency 5 → ExcessiveByteConcentration.
         let err = AuthKey::from_bytes([0xFFu8; AUTH_KEY_SIZE]).expect_err("all-FF rejected");
         assert!(matches!(
             err,
             AuthKeyError::WeakKey {
-                reason: WeakKeyReason::InsufficientByteDiversity { distinct: 1, .. }
+                reason: WeakKeyReason::ExcessiveByteConcentration {
+                    byte_value: 0xFF,
+                    ..
+                }
             }
         ));
 
-        // (3) [42u8; 32]: the canonical 'developer test sentinel'.
-        // distinct=1, weight = 32 × popcount(42) = 32 × 3 = 96 (in
-        // bounds), so InsufficientByteDiversity catches it first.
+        // (3) [42u8; 32]: the canonical 'developer test sentinel'. Byte 42
+        // hits frequency 5 → ExcessiveByteConcentration.
         let err = AuthKey::from_bytes([42u8; AUTH_KEY_SIZE]).expect_err("[42; 32] rejected");
         assert!(matches!(
             err,
             AuthKeyError::WeakKey {
-                reason: WeakKeyReason::InsufficientByteDiversity { distinct: 1, .. }
+                reason: WeakKeyReason::ExcessiveByteConcentration { byte_value: 42, .. }
             }
         ));
 
-        // (4) 7 distinct values (just below MIN_DISTINCT_BYTES = 8):
-        // pick values 0..7 repeated. distinct = 7 → reject.
+        // (4) 7 distinct values 0..=6 cycled across 32 bytes: value 0
+        // appears at indices 0,7,14,21,28 → frequency 5 →
+        // ExcessiveByteConcentration fires before the distinct=7 check.
         let mut weak = [0u8; AUTH_KEY_SIZE];
         for (i, b) in weak.iter_mut().enumerate() {
             *b = (i % 7) as u8;
@@ -598,7 +610,7 @@ mod tests {
         assert!(matches!(
             err,
             AuthKeyError::WeakKey {
-                reason: WeakKeyReason::InsufficientByteDiversity { distinct: 7, .. }
+                reason: WeakKeyReason::ExcessiveByteConcentration { .. }
             }
         ));
 
@@ -676,11 +688,14 @@ mod tests {
     fn derive_subkey_matches_rfc6238_sha256_time_59_vector() {
         // RFC 6238 Appendix B, SHA-256 test secret for 8-digit TOTP vectors.
         let secret = *b"12345678901234567890123456789012";
-        // br-asupersync-q3terg: this RFC test vector has 10 distinct
-        // byte values ('0'..='9') and a Hamming weight of ~96 (each
-        // ASCII digit has popcount in [2, 4]) — well within the
-        // entropy validator's bounds, so plain from_bytes accepts.
-        let key = AuthKey::from_bytes(secret).expect("RFC 6238 vector accepted");
+        // br-asupersync-q3terg: this RFC test vector has only 10 distinct
+        // byte values ('0'..='9'), below the strengthened entropy floor of
+        // MIN_DISTINCT_BYTES = 16, so plain `from_bytes` (correctly) rejects
+        // it. This is a known-answer test for the HMAC-SHA256 derivation
+        // math, not for the entropy gate, so we load the canonical RFC
+        // secret through the known-strong-source bypass (`from_hmac_derived`)
+        // exactly as a TOTP provisioning path would for a fixed RFC vector.
+        let key = AuthKey::from_hmac_derived(secret).expect("RFC 6238 vector loaded");
 
         // Time = 59s, T0 = 0, X = 30 => moving factor = 1.
         let moving_factor = 1u64.to_be_bytes();
@@ -843,40 +858,68 @@ mod tests {
     // Tests for strengthened validation (asupersync-uw3asa fix)
     #[test]
     fn test_strengthened_validation_rejects_weak_keys() {
-        // Test 1: Insufficient byte diversity (old threshold was 8, new is 16)
-        let low_diversity = [0u8; 32]; // Only 1 distinct byte
+        // The validator checks the per-byte concentration cap
+        // (MAX_BYTE_FREQUENCY = 4) DURING the counting pass, before the
+        // distinct-byte and Hamming-weight bounds. So to exercise the
+        // diversity and Hamming branches we must use inputs that keep every
+        // byte's frequency <= 4 (otherwise ExcessiveByteConcentration fires
+        // first). Trivial saturated inputs like [0u8; 32] / [0xFF; 32] are
+        // covered separately by `from_bytes_rejects_weak_inputs`.
+
+        // Test 1: Insufficient byte diversity (threshold is MIN_DISTINCT_BYTES
+        // = 16). 8 distinct values, each appearing exactly 4 times: freq cap
+        // satisfied (==4), distinct = 8 < 16 → InsufficientByteDiversity.
+        let mut low_diversity = [0u8; 32];
+        for (i, b) in low_diversity.iter_mut().enumerate() {
+            *b = (i / 4) as u8; // values 0..=7, each x4
+        }
         match AuthKey::from_bytes(low_diversity) {
             Err(AuthKeyError::WeakKey {
                 reason: WeakKeyReason::InsufficientByteDiversity { distinct, minimum },
             }) => {
-                assert_eq!(distinct, 1);
+                assert_eq!(distinct, 8);
                 assert_eq!(minimum, MIN_DISTINCT_BYTES);
             }
-            _ => panic!("Expected InsufficientByteDiversity error"),
+            other => panic!("Expected InsufficientByteDiversity error, got {other:?}"),
         }
 
-        // Test 2: Extreme Hamming weight - too low (old min was 8, new is 64)
-        let low_hamming = [1u8; 32]; // Only 32 bits set, well below new minimum
+        // Test 2: Extreme Hamming weight - too low (min is MIN_HAMMING_WEIGHT
+        // = 64). 16 distinct low-popcount values (so the diversity check
+        // passes), each appearing twice (freq <= 4), total weight = 44 < 64.
+        let low_popcount: [u8; 16] = [0, 1, 2, 4, 8, 16, 32, 64, 128, 3, 5, 6, 9, 10, 12, 17];
+        let mut low_hamming = [0u8; 32];
+        for (i, b) in low_hamming.iter_mut().enumerate() {
+            *b = low_popcount[i % 16];
+        }
         match AuthKey::from_bytes(low_hamming) {
             Err(AuthKeyError::WeakKey {
                 reason: WeakKeyReason::ExtremeHammingWeight { weight, .. },
             }) => {
-                assert_eq!(weight, 32);
+                assert_eq!(weight, 44);
                 assert!(weight < MIN_HAMMING_WEIGHT);
             }
-            _ => panic!("Expected ExtremeHammingWeight error for low weight"),
+            other => panic!("Expected ExtremeHammingWeight error for low weight, got {other:?}"),
         }
 
-        // Test 3: Extreme Hamming weight - too high (old max was 248, new is 192)
-        let high_hamming = [0xFFu8; 32]; // All bits set = 256 bits, above new maximum
+        // Test 3: Extreme Hamming weight - too high (max is MAX_HAMMING_WEIGHT
+        // = 192). 16 distinct high-popcount values, each appearing twice,
+        // total weight = 212 > 192.
+        let high_popcount: [u8; 16] = [
+            0xFF, 0xFE, 0xFD, 0xFB, 0xF7, 0xEF, 0xDF, 0xBF, 0x7F, 0xFC, 0xFA, 0xF6, 0xEE, 0xDE,
+            0xBE, 0x7E,
+        ];
+        let mut high_hamming = [0u8; 32];
+        for (i, b) in high_hamming.iter_mut().enumerate() {
+            *b = high_popcount[i % 16];
+        }
         match AuthKey::from_bytes(high_hamming) {
             Err(AuthKeyError::WeakKey {
                 reason: WeakKeyReason::ExtremeHammingWeight { weight, .. },
             }) => {
-                assert_eq!(weight, 256);
+                assert_eq!(weight, 212);
                 assert!(weight > MAX_HAMMING_WEIGHT);
             }
-            _ => panic!("Expected ExtremeHammingWeight error for high weight"),
+            other => panic!("Expected ExtremeHammingWeight error for high weight, got {other:?}"),
         }
 
         // Test 4: Byte concentration attack (new validation)
