@@ -255,6 +255,12 @@ pub fn apply_env_overrides(
         config.adaptive_cancel_streak_epoch_steps =
             parse_u32(ENV_ADAPTIVE_CANCEL_EPOCH_STEPS, &val)?;
     }
+
+    // Blocking pool min/max are applied independently above. Normalize after
+    // overrides so setting either value alone cannot leave min_threads greater
+    // than max_threads.
+    config.blocking.normalize();
+
     Ok(())
 }
 
@@ -642,6 +648,26 @@ mod tests {
                 assert_eq!(config.blocking.max_threads, 16);
             },
         );
+    }
+
+    #[test]
+    fn env_overrides_blocking_threads_normalizes_partial_override() {
+        with_env(ENV_BLOCKING_MIN_THREADS, "8", || {
+            let mut config = RuntimeConfig::default();
+            apply_env_overrides(&mut config).unwrap();
+            assert_eq!(config.blocking.min_threads, 8);
+            assert_eq!(config.blocking.max_threads, 8);
+        });
+
+        with_env(ENV_BLOCKING_MAX_THREADS, "4", || {
+            let mut config = RuntimeConfig::default();
+            config.blocking.min_threads = 6;
+
+            apply_env_overrides(&mut config).unwrap();
+
+            assert_eq!(config.blocking.min_threads, 6);
+            assert_eq!(config.blocking.max_threads, 6);
+        });
     }
 
     #[test]

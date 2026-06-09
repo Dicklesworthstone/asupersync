@@ -564,10 +564,15 @@ fn combined_metamorphic_properties() {
         Duration::from_secs(9),
     ];
 
+    // Record history under the SAME task type the scenario snapshots use
+    // (`create_task_snapshot` tags tasks as "test"). The adaptive warning
+    // threshold is keyed by task type, so recording history under a different
+    // type ("integration") left the scenarios with no history, falling back to
+    // the 15s fallback threshold and suppressing the expected warnings.
     for (i, &duration) in history_durations.iter().enumerate() {
         fixture.monitor.record_completion(
             TaskId::from_arena(ArenaIndex::new(i as u32, 0)),
-            "integration",
+            "test",
             duration,
             Some(base_time + duration),
             base_time + duration,
@@ -652,19 +657,24 @@ mod property_tests {
             let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
             let region_id = RegionId::from_arena(ArenaIndex::new(1, 0));
 
-            // Base scenario
+            // Base scenario. Compute `now` in nanoseconds with a single rounding
+            // step (deadline_ns * fraction) so the base and scaled timelines are
+            // EXACT multiples of each other. The previous formulation truncated
+            // the base to whole seconds before multiplying while scaling the
+            // scaled case in nanoseconds, so the two `now` values were not exact
+            // scalings. Near the warning-threshold boundary, that rounding
+            // asymmetry tipped one timeline over the threshold and not the
+            // other, making the equality assertion intermittently fail.
+            let base_deadline_ns = base_deadline_secs * 1_000_000_000;
             let base_created = Time::from_nanos(0);
-            let base_deadline = Time::from_nanos(base_deadline_secs * 1_000_000_000);
-            let base_now = Time::from_nanos((base_deadline_secs as f64 * progress_fraction) as u64 * 1_000_000_000);
+            let base_deadline = Time::from_nanos(base_deadline_ns);
+            let base_now_ns = (base_deadline_ns as f64 * progress_fraction) as u64;
+            let base_now = Time::from_nanos(base_now_ns);
 
-            // Scaled scenario
+            // Scaled scenario: exact scaling of the base timeline by `scale_factor`.
             let scaled_created = Time::from_nanos(0);
-            let scaled_deadline = Time::from_nanos(base_deadline_secs * scale_factor * 1_000_000_000);
-            let scaled_now = Time::from_nanos(
-                ((base_deadline_secs * scale_factor) as f64
-                    * progress_fraction
-                    * 1_000_000_000.0) as u64,
-            );
+            let scaled_deadline = Time::from_nanos(base_deadline_ns * scale_factor);
+            let scaled_now = Time::from_nanos(base_now_ns * scale_factor);
 
             let task1 = DeadlineMonitorFixture::create_task_snapshot(
                 task_id, region_id, base_created, Some(base_deadline), Some(base_now), 1
