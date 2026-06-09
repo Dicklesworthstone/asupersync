@@ -1,0 +1,120 @@
+{
+  "contract_version": "capacity-ticket-agent-admission-contract-v1",
+  "owner_bead": "asupersync-capacity-ticket-agent-admission-od29tn",
+  "created_date": "2026-06-09",
+  "description": "Contract for the explicit capacity-ticket API used by agent-swarm admission fixtures. It proves deterministic ticket planning from Cx or captured budget envelopes, child split/lend meet semantics, fail-closed required dimensions, release/revoke/unreleased receipts, and no ambient authority in the ticket API. It deliberately does not prove production scheduler performance, automatic admission control, broad workspace health, or RCH fleet availability.",
+  "proof_lane": {
+    "lane_id": "capacity-ticket-agent-admission-contract",
+    "manifest_guarantee_id": "capacity-ticket-agent-admission-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_capacity_ticket_agent_admission CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test capacity_ticket_agent_admission_contract -- --nocapture",
+    "remote_required": true,
+    "local_fallback_allowed": false,
+    "expected_signal": "capacity_ticket_agent_admission_contract tests pass"
+  },
+  "api_surface": {
+    "module": "asupersync::cx::capacity_ticket",
+    "public_types": [
+      "CapacityTicket",
+      "CapacityTicketId",
+      "CapacityTicketReceipt",
+      "CapacityTicketReceiptStatus",
+      "CapacityTicketRefusal",
+      "CapacityTicketRequest",
+      "CapacityTicketWorkKind"
+    ],
+    "public_functions": [
+      "request_capacity_ticket",
+      "request_capacity_ticket_from_budget"
+    ],
+    "required_behaviors": [
+      "requests bind owner_region and owner_task explicitly",
+      "requests validate required dimensions with CapabilityBudget::plan_child",
+      "split and lend child tickets can only inherit or tighten parent envelopes",
+      "release and revoke receipts are obligation_leak_free",
+      "unreleased receipts fail closed with obligation_leak_free=false",
+      "the API uses no ambient globals or background tasks"
+    ]
+  },
+  "receipt_statuses": [
+    "released",
+    "revoked",
+    "unreleased"
+  ],
+  "work_kinds": [
+    "core_runtime",
+    "agent_swarm_admission",
+    "proof_artifact",
+    "operator_diagnostics",
+    "optional_background"
+  ],
+  "source_paths": [
+    {
+      "path": "src/cx/capacity_ticket.rs",
+      "required_markers": [
+        "pub struct CapacityTicket",
+        "pub struct CapacityTicketId",
+        "pub struct CapacityTicketRequest",
+        "pub enum CapacityTicketWorkKind",
+        "pub enum CapacityTicketReceiptStatus",
+        "pub fn request_capacity_ticket",
+        "pub fn request_capacity_ticket_from_budget",
+        "plan_child_capability_budget",
+        "CapabilityBudget::plan_child",
+        "obligation_leak_free",
+        "no_ambient_authority"
+      ],
+      "forbidden_markers": [
+        "static mut",
+        "lazy_static!",
+        "thread_local!",
+        "std::env",
+        "tokio::",
+        "async_std::",
+        "smol::"
+      ]
+    },
+    {
+      "path": "src/cx/mod.rs",
+      "required_markers": [
+        "pub mod capacity_ticket;",
+        "CapacityTicket",
+        "request_capacity_ticket"
+      ],
+      "forbidden_markers": [
+        "tokio::"
+      ]
+    },
+    {
+      "path": "tests/capacity_ticket_agent_admission_contract.rs",
+      "required_markers": [
+        "capacity_ticket_contract_artifact_is_remote_required_and_no_local_fallback",
+        "capacity_ticket_budget_semantics_fail_closed_and_preserve_owner",
+        "split_lend_and_receipts_are_meet_based_and_leak_visible"
+      ],
+      "forbidden_markers": [
+        "RCH_REQUIRE_REMOTE=0",
+        "RCH_ALLOW_LOCAL=1"
+      ]
+    },
+    {
+      "path": "docs/capacity_ticket_agent_admission.md",
+      "required_markers": [
+        "Capacity Ticket Agent Admission",
+        "No Ambient Authority",
+        "Failure Policy",
+        "Validation"
+      ],
+      "forbidden_markers": [
+        "RCH_REQUIRE_REMOTE=0",
+        "RCH_ALLOW_LOCAL=1"
+      ]
+    }
+  ],
+  "does_not_prove": [
+    "No automatic scheduler admission policy is enabled by this API.",
+    "No production host throughput, latency, fairness, or memory regression claim is made.",
+    "No fourth-wave governor or proof-lane planner claim is replaced by this contract.",
+    "No broad cargo check, clippy, rustdoc, all-target, or workspace-health claim is made.",
+    "No RCH fleet availability claim is made beyond the cited focused command transcript."
+  ]
+}

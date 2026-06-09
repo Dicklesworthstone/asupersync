@@ -38,6 +38,7 @@
 //! - [`Scope`]: API for spawning tasks and creating child regions
 
 pub mod cap;
+pub mod capacity_ticket;
 pub mod cx;
 pub mod macaroon;
 pub mod registry;
@@ -47,6 +48,11 @@ pub mod wrappers;
 pub use cap::{
     All as AllCaps, CapMask, CapSet, CapSetRuntimeMask, HasIo, HasRandom, HasRemote, HasSpawn,
     HasTime, None as NoCaps, SubsetOf,
+};
+pub use capacity_ticket::{
+    CapacityTicket, CapacityTicketId, CapacityTicketReceipt, CapacityTicketReceiptStatus,
+    CapacityTicketRefusal, CapacityTicketRequest, CapacityTicketWorkKind, request_capacity_ticket,
+    request_capacity_ticket_from_budget,
 };
 pub use cx::{Cx, SpanGuard};
 pub use macaroon::{
