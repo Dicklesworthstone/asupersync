@@ -495,6 +495,40 @@ impl GlobalInjector {
         None
     }
 
+    /// Removes every pending entry for `task` from the timed lane.
+    ///
+    /// Returns `true` if at least one entry was removed. Used when a task is
+    /// promoted to the cancel lane: a stale timed entry left behind would be a
+    /// duplicate-dispatch hazard because the global timed heap, unlike the
+    /// per-worker [`super::priority::PriorityScheduler`], has no `scheduled`-set
+    /// tombstoning to lazily skip it on pop. The heap has no key-based removal,
+    /// so we filter and rebuild; this is O(n) but only runs on cancel promotion.
+    pub fn remove_timed(&self, task: TaskId) -> bool {
+        if self.timed_count.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        let mut queue = self.timed_queue.lock();
+        let original_len = queue.heap.len();
+        if original_len == 0 {
+            return false;
+        }
+        let retained: BinaryHeap<TimedTask> =
+            queue.heap.drain().filter(|t| t.task != task).collect();
+        let removed = original_len - retained.len();
+        queue.heap = retained;
+        let earliest = queue
+            .heap
+            .peek()
+            .map_or(u64::MAX, |t| t.deadline.as_nanos());
+        self.cached_earliest_deadline
+            .store(earliest, Ordering::Relaxed);
+        drop(queue);
+        for _ in 0..removed {
+            self.decrement_timed_count();
+        }
+        removed > 0
+    }
+
     /// Pops a task from the ready lane.
     ///
     /// Returns `None` if the ready lane is empty.

@@ -1,7 +1,6 @@
 ---
 source: src/runtime/scheduler/three_lane.rs
-assertion_line: 14753
-expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n    loaded_scheduler_state_dump(), \"cancel_streak\":\n    cancel_streak_scheduler_state_dump(), \"deadline_ordering\":\n    deadline_ordering_scheduler_state_dump(),\n    \"decision_trace_complex_scenario\": decision_trace_complex_scenario_dump(),\n})"
+expression: dump
 ---
 {
   "cancel_streak": {
@@ -39,7 +38,7 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
       "witness_hash": 6666412354065563291
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 2468,
+      "avg_monitoring_overhead_ns": "[scrubbed-ns]",
       "monitored_workers": 0,
       "operations_monitored": 14,
       "violations_by_severity": [
@@ -82,14 +81,14 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
     "ready_count": 0,
     "scenario": "cancel_streak",
     "starvation_stats": {
-      "avg_task_wait_time_ns": 0,
+      "avg_task_wait_time_ns": "[scrubbed-ns]",
       "currently_starved_tasks": 0,
       "max_priority_inversion_gap": 0,
-      "max_task_wait_time_ns": 78697,
+      "max_task_wait_time_ns": "[scrubbed-ns]",
       "pattern_detected": false,
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
-      "total_tracked_wait_time_ns": 0,
+      "total_tracked_wait_time_ns": "[scrubbed-ns]",
       "tracked_tasks_count": 0
     },
     "tracked_tasks": [],
@@ -125,7 +124,7 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
       "witness_hash": 4116930190356074755
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 2152,
+      "avg_monitoring_overhead_ns": "[scrubbed-ns]",
       "monitored_workers": 0,
       "operations_monitored": 8,
       "violations_by_severity": [
@@ -168,21 +167,21 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
     "ready_count": 0,
     "scenario": "deadline_ordering",
     "starvation_stats": {
-      "avg_task_wait_time_ns": 34155,
+      "avg_task_wait_time_ns": "[scrubbed-ns]",
       "currently_starved_tasks": 0,
       "max_priority_inversion_gap": 0,
-      "max_task_wait_time_ns": 5199,
+      "max_task_wait_time_ns": "[scrubbed-ns]",
       "pattern_detected": false,
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
-      "total_tracked_wait_time_ns": 136623,
+      "total_tracked_wait_time_ns": "[scrubbed-ns]",
       "tracked_tasks_count": 4
     },
     "tracked_tasks": [
       {
-        "enqueue_time_ns": 32313149292,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32313149292,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 10,
@@ -192,9 +191,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_1]"
       },
       {
-        "enqueue_time_ns": 32313158519,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32313158519,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 50,
@@ -204,9 +203,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_2]"
       },
       {
-        "enqueue_time_ns": 32313162917,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32313162917,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 0,
@@ -216,9 +215,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_3]"
       },
       {
-        "enqueue_time_ns": 32313167025,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32313167025,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 0,
@@ -265,7 +264,7 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
       "witness_hash": 7563505245648140092
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 1892,
+      "avg_monitoring_overhead_ns": "[scrubbed-ns]",
       "monitored_workers": 0,
       "operations_monitored": 19,
       "violations_by_severity": [
@@ -308,21 +307,21 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
     "ready_count": 0,
     "scenario": "decision_trace_complex_scenario",
     "starvation_stats": {
-      "avg_task_wait_time_ns": 63389,
+      "avg_task_wait_time_ns": "[scrubbed-ns]",
       "currently_starved_tasks": 0,
       "max_priority_inversion_gap": 0,
-      "max_task_wait_time_ns": 67095,
+      "max_task_wait_time_ns": "[scrubbed-ns]",
       "pattern_detected": false,
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
-      "total_tracked_wait_time_ns": 316947,
+      "total_tracked_wait_time_ns": "[scrubbed-ns]",
       "tracked_tasks_count": 5
     },
     "tracked_tasks": [
       {
-        "enqueue_time_ns": 32314222507,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32314222507,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 40,
@@ -332,9 +331,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_6]"
       },
       {
-        "enqueue_time_ns": 32314225422,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32314225422,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 30,
@@ -344,9 +343,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_7]"
       },
       {
-        "enqueue_time_ns": 32314229700,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32314229700,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 20,
@@ -356,9 +355,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_8]"
       },
       {
-        "enqueue_time_ns": 32314232646,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32314232646,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 10,
@@ -368,9 +367,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_9]"
       },
       {
-        "enqueue_time_ns": 32314239368,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32314239368,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 0,
@@ -410,7 +409,7 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
       "witness_hash": 11950537627865327450
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 180,
+      "avg_monitoring_overhead_ns": "[scrubbed-ns]",
       "monitored_workers": 0,
       "operations_monitored": 2,
       "violations_by_severity": [
@@ -453,14 +452,14 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
     "ready_count": 0,
     "scenario": "empty",
     "starvation_stats": {
-      "avg_task_wait_time_ns": 0,
+      "avg_task_wait_time_ns": "[scrubbed-ns]",
       "currently_starved_tasks": 0,
       "max_priority_inversion_gap": 0,
-      "max_task_wait_time_ns": 0,
+      "max_task_wait_time_ns": "[scrubbed-ns]",
       "pattern_detected": false,
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
-      "total_tracked_wait_time_ns": 0,
+      "total_tracked_wait_time_ns": "[scrubbed-ns]",
       "tracked_tasks_count": 0
     },
     "tracked_tasks": [],
@@ -494,7 +493,7 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
       "witness_hash": 11950537627865327450
     },
     "invariant_stats": {
-      "avg_monitoring_overhead_ns": 4159,
+      "avg_monitoring_overhead_ns": "[scrubbed-ns]",
       "monitored_workers": 0,
       "operations_monitored": 5,
       "violations_by_severity": [
@@ -537,21 +536,21 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
     "ready_count": 0,
     "scenario": "loaded",
     "starvation_stats": {
-      "avg_task_wait_time_ns": 41600,
+      "avg_task_wait_time_ns": "[scrubbed-ns]",
       "currently_starved_tasks": 0,
       "max_priority_inversion_gap": 0,
-      "max_task_wait_time_ns": 0,
+      "max_task_wait_time_ns": "[scrubbed-ns]",
       "pattern_detected": false,
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
-      "total_tracked_wait_time_ns": 124802,
+      "total_tracked_wait_time_ns": "[scrubbed-ns]",
       "tracked_tasks_count": 3
     },
     "tracked_tasks": [
       {
-        "enqueue_time_ns": 32311235695,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32311235695,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 40,
@@ -561,9 +560,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_0]"
       },
       {
-        "enqueue_time_ns": 32311260702,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32311260702,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 90,
@@ -573,9 +572,9 @@ expression: "json!({\n    \"empty\": empty_scheduler_state_dump(), \"loaded\":\n
         "task_id": "[TASK_1]"
       },
       {
-        "enqueue_time_ns": 32311274367,
+        "enqueue_time_ns": "[scrubbed-ns]",
         "is_cancelled": false,
-        "last_update_ns": 32311274367,
+        "last_update_ns": "[scrubbed-ns]",
         "lifecycle_state": "enqueued",
         "owner_worker": null,
         "priority": 0,

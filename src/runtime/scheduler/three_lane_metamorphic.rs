@@ -77,10 +77,11 @@ impl TestTask {
 fn mr1_priority_ordering_preservation() {
     proptest!(|(
         worker_count in 1usize..=4,
-        task_priorities: Vec<u8>
+        // Bounded length so no input is rejected: a free `Vec<u8>` routinely
+        // exceeds MAX_TASKS_PER_TEST and exhausted proptest's global reject
+        // budget (the old `prop_assume!` only passed by luck of generation order).
+        task_priorities in proptest::collection::vec(any::<u8>(), 1..=MAX_TASKS_PER_TEST),
     )| {
-        prop_assume!(!task_priorities.is_empty() && task_priorities.len() <= MAX_TASKS_PER_TEST);
-
         prop_assert!(worker_count > 0);
 
         // Create tasks with different priorities
@@ -167,16 +168,15 @@ fn mr2_fairness_counter_monotonicity() {
                 cancel_streak = 0;
             }
 
-            // Invariant: cancel streak should never exceed the limit
+            // Invariant: cancel streak never exceeds the limit. The model above
+            // enforces fairness directly — a cancel dispatch arriving while the
+            // streak is already at the limit falls through (resets to 0) instead
+            // of incrementing — so this bound is the complete correctness
+            // statement. (The previous companion assertion fired on the very
+            // dispatch that *reached* the limit, treating a legal limit-hitting
+            // cancel as a violation; that is mathematically false and is removed.)
             prop_assert!(cancel_streak <= effective_limit,
                 "Cancel streak {} exceeded limit {}", cancel_streak, effective_limit);
-
-            // If we hit the limit, next dispatch must be non-cancel (fairness)
-            if cancel_streak == effective_limit {
-                prop_assert!(!is_cancel_dispatch ||
-                    dispatch_sequence.len() == 1, // Unless it's the only dispatch
-                    "Fairness violation: cancel work continued after hitting limit");
-            }
         }
     });
 }
@@ -191,12 +191,12 @@ fn mr2_fairness_counter_monotonicity() {
 #[test]
 fn mr3_work_conservation() {
     proptest!(|(
-        initial_tasks: Vec<u8>,
-        operations: Vec<u8>
+        // Bounded strategies so no input is rejected: free `Vec<u8>` routinely
+        // exceeds the 15/20 length caps, which exhausted proptest's global reject
+        // budget before enough cases ran.
+        initial_tasks in proptest::collection::vec(any::<u8>(), 1..=15),
+        operations in proptest::collection::vec(any::<u8>(), 0..=20),
     )| {
-        prop_assume!(!initial_tasks.is_empty() && initial_tasks.len() <= 15);
-        prop_assume!(operations.len() <= 20);
-
         let mut task_set = HashSet::new();
         let mut completed_tasks = HashSet::new();
         let mut next_task_id = 1u64;
@@ -221,6 +221,7 @@ fn mr3_work_conservation() {
         }
 
         let initial_count = task_set.len();
+        let mut spawned_count = 0usize;
 
         // Perform operations
         for &op in &operations {
@@ -230,6 +231,7 @@ fn mr3_work_conservation() {
                     let task_id = test_task_id(next_task_id);
                     task_set.insert(task_id);
                     next_task_id += 1;
+                    spawned_count += 1;
                 }
                 1 => {
                     // Complete a task (remove from system)
@@ -249,13 +251,18 @@ fn mr3_work_conservation() {
                 _ => unreachable!(),
             }
 
-            // Conservation invariant: all tasks are accounted for
+            // Conservation invariant: every task ever introduced is accounted for
+            // as either still-in-system or completed. Completions move a task from
+            // `task_set` to `completed_tasks` without changing the running total,
+            // so the conserved quantity is exactly initial + spawned-so-far.
+            // (The previous check counted spawns with
+            // `operations.iter().take((op as usize) + 1)`, which used the
+            // operation VALUE as an index — meaningless — and spuriously fired.)
             let current_total = task_set.len() + completed_tasks.len();
-            let expected_total = initial_count +
-                operations.iter().take((op as usize) + 1).filter(|&&x| x % 4 == 0).count();
+            let expected_total = initial_count + spawned_count;
 
-            prop_assert!(current_total <= expected_total,
-                "Task conservation violation: {} tasks in system but expected ≤ {}",
+            prop_assert_eq!(current_total, expected_total,
+                "Task conservation violation: {} tasks accounted for but expected {}",
                 current_total, expected_total);
         }
     });
@@ -271,11 +278,15 @@ fn mr3_work_conservation() {
 #[test]
 fn mr4_queue_consistency() {
     proptest!(|(
-        push_sequence: Vec<u16>,
+        // Bounded length so no input is rejected (a free `Vec<u16>` routinely
+        // exceeds 20 and exhausted proptest's global reject budget).
+        push_sequence in proptest::collection::vec(any::<u16>(), 1..=20),
         pop_count in 0usize..=10
     )| {
-        prop_assume!(!push_sequence.is_empty() && push_sequence.len() <= 20);
-        prop_assume!(pop_count <= push_sequence.len());
+        // Clamp rather than `prop_assume!(pop_count <= len)`: freely generated
+        // `push_sequence` is frequently shorter than `pop_count`, so the assume
+        // rejected inputs. Clamping keeps every input usable.
+        let pop_count = pop_count.min(push_sequence.len());
 
         // Evaluate FIFO queue behavior.
         let mut queue = VecDeque::new();
@@ -438,24 +449,32 @@ fn mr6_backpressure_compliance() {
 #[test]
 fn mr7_waker_determinism() {
     proptest!(|(
-        task_ids: Vec<u16>,
-        wake_order_a: Vec<usize>,
-        wake_order_b: Vec<usize>
+        // Bounded strategies so no input is ever rejected: a non-empty task set,
+        // a wake-index list, and a rotation amount used to derive a DIFFERENT
+        // wake ORDER of the SAME operations. The previous version generated two
+        // independent `wake_order` vecs and required both to equal task_ids.len()
+        // via prop_assume — which both exhausted the reject budget AND compared
+        // two unrelated index lists (so the set/multiset equality was not even a
+        // valid metamorphic relation).
+        task_ids in proptest::collection::vec(any::<u16>(), 1..=10),
+        wake_indices in proptest::collection::vec(any::<usize>(), 1..=20),
+        rotation in 0usize..20,
     )| {
-        prop_assume!(!task_ids.is_empty() && task_ids.len() <= 10);
-        prop_assume!(wake_order_a.len() == task_ids.len());
-        prop_assume!(wake_order_b.len() == task_ids.len());
-
-        // Create permutations of the same task set
+        // Wake order A: the operations as given.
         let mut tasks_a = Vec::new();
-        let mut tasks_b = Vec::new();
-
-        for &order_idx in &wake_order_a {
+        for &order_idx in &wake_indices {
             let task_idx = order_idx % task_ids.len();
             tasks_a.push(task_ids[task_idx]);
         }
 
-        for &order_idx in &wake_order_b {
+        // Wake order B: the SAME multiset of wake operations in a different
+        // order (a rotation of the index list). Determinism means the resulting
+        // task set / multiset must be invariant under wake reordering.
+        let mut rotated = wake_indices.clone();
+        let rot = rotation % rotated.len();
+        rotated.rotate_left(rot);
+        let mut tasks_b = Vec::new();
+        for &order_idx in &rotated {
             let task_idx = order_idx % task_ids.len();
             tasks_b.push(task_ids[task_idx]);
         }
@@ -495,12 +514,12 @@ fn mr7_waker_determinism() {
 #[test]
 fn mr8_batch_processing_invariance() {
     proptest!(|(
-        tasks: Vec<u8>,
-        batch_sizes: Vec<usize>
+        tasks in proptest::collection::vec(any::<u8>(), 1..=20),
+        // Generate batch sizes already inside [1, 10] rather than assuming it:
+        // a free `Vec<usize>` produces arbitrary huge values that almost never
+        // satisfy `size <= 10`, which exhausted proptest's global reject budget.
+        batch_sizes in proptest::collection::vec(1usize..=10, 1..=5),
     )| {
-        prop_assume!(!tasks.is_empty() && tasks.len() <= 20);
-        prop_assume!(!batch_sizes.is_empty() && batch_sizes.len() <= 5);
-        prop_assume!(batch_sizes.iter().all(|&size| size > 0 && size <= 10));
 
         // Individual processing
         let mut individual_result = 0u64;
@@ -537,11 +556,14 @@ mod integration_tests {
         let cancel_limit = 5u32;
         let mut cancel_streak = 0u32;
 
-        // Evaluate mixed priority dispatch with fairness enforcement.
+        // Evaluate mixed priority dispatch with fairness enforcement. Cancel work
+        // takes strict priority, so a run of cancels is dispatched back-to-back
+        // until the fairness limit (5) is reached; only then must Ready work be
+        // dispatched. A Ready inserted mid-run would reset the streak, so the
+        // scenario keeps five CONSECUTIVE cancels before the trailing Ready.
         let dispatch_sequence = [
             PriorityClass::Cancel,
             PriorityClass::Cancel,
-            PriorityClass::Ready, // Available but preempted
             PriorityClass::Cancel,
             PriorityClass::Cancel,
             PriorityClass::Cancel, // Hit limit (5)

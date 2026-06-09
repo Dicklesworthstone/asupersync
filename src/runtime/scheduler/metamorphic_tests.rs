@@ -59,7 +59,10 @@ fn generate_task_ids(count: usize, seed: u64) -> Vec<TaskId> {
 
 /// Create runtime state that naturally asks the governor to drain obligations.
 fn create_drain_obligation_state() -> Arc<ContendedMutex<RuntimeState>> {
+    // RuntimeState::new() bases `now` at 1s; reset to zero before creating the
+    // obligation so the advance to 1s gives it a 1s age (driving DrainObligations).
     let mut state = RuntimeState::new();
+    state.now = Time::ZERO;
     let root = state.create_root_region(Budget::unlimited());
     let (task_id, _handle) = state
         .create_task(root, Budget::unlimited(), async {})
@@ -468,6 +471,10 @@ fn mr_drain_widened_bound() {
         );
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
+        // Exercise the Lyapunov drain boost directly; the decision-contract
+        // modulation layer would otherwise bias the suggestion toward
+        // MeetDeadlines under its default prior and mask the 2*L drain widening.
+        worker.disable_decision_contract_for_test();
 
         // Generate and inject tasks
         let ready_task_ids = generate_task_ids(ready_tasks, seed);
@@ -711,6 +718,10 @@ fn mr_composite_cancel_drain_consistency() {
         );
         let mut workers_drain = scheduler_drain.take_workers();
         let worker_drain = &mut workers_drain[0];
+        // Exercise the Lyapunov drain boost directly; the decision-contract layer
+        // would otherwise bias the suggestion to MeetDeadlines under its default
+        // prior and mask the 2*L drain widening this MR asserts.
+        worker_drain.disable_decision_contract_for_test();
 
         // Generate same workload for both
         let ready_tasks = generate_task_ids(2, seed);

@@ -1,6 +1,5 @@
 ---
 source: src/runtime/scheduler/three_lane.rs
-assertion_line: 14000
 expression: lyapunov_governor_decision_history_fixed_seed_json(0xC0DE_CAFE_BEEF_0191)
 ---
 {
@@ -23,7 +22,7 @@ expression: lyapunov_governor_decision_history_fixed_seed_json(0xC0DE_CAFE_BEEF_
         "obligation_age_sum_ns": 0,
         "pending_obligations": 0,
         "ready_queue_depth": 0,
-        "time_ns": 0
+        "time_ns": 1000000000
       },
       "suggestion": "no_preference"
     },
@@ -53,21 +52,21 @@ expression: lyapunov_governor_decision_history_fixed_seed_json(0xC0DE_CAFE_BEEF_
       "phase": "drain_obligations",
       "potential": {
         "deadlines": 0.0,
-        "obligations": 0.0,
+        "obligations": 5.0,
         "regions": 0.0,
         "tasks": 1.0,
-        "total": 1.0
+        "total": 6.0
       },
       "snapshot": {
         "deadline_pressure": 0.0,
         "draining_regions": 0,
         "live_tasks": 1,
-        "obligation_age_sum_ns": 0,
+        "obligation_age_sum_ns": 1000000000,
         "pending_obligations": 1,
         "ready_queue_depth": 1,
         "time_ns": 1000000000
       },
-      "suggestion": "no_preference"
+      "suggestion": "drain_obligations"
     },
     {
       "dispatch_task": "TaskId(9903:1)",
@@ -86,7 +85,7 @@ expression: lyapunov_governor_decision_history_fixed_seed_json(0xC0DE_CAFE_BEEF_
         "obligation_age_sum_ns": 0,
         "pending_obligations": 0,
         "ready_queue_depth": 1,
-        "time_ns": 0
+        "time_ns": 1000000000
       },
       "suggestion": "drain_regions"
     }
