@@ -241,11 +241,13 @@ impl Ord for ScheduledContent {
             .priority_class
             .cmp(&other.item.priority_class)
             .then_with(|| {
-                // Within same priority class, higher efficiency ratio first
-                other
-                    .item
+                // Within same priority class, higher efficiency ratio first.
+                // This is a max-heap (BinaryHeap), so the greatest element is
+                // popped first; the higher-efficiency item must therefore
+                // compare as greater.
+                self.item
                     .efficiency_ratio()
-                    .partial_cmp(&self.item.efficiency_ratio())
+                    .partial_cmp(&other.item.efficiency_ratio())
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .then_with(|| {
