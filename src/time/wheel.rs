@@ -2442,16 +2442,15 @@ mod tests {
 
         for (deadline, level_name) in &test_cases {
             let counter = Arc::new(AtomicU64::new(0));
-            let handle = wheel.register(*deadline, counter_waker(counter.clone()));
-
             let initial_len = wheel.len();
             let initial_overflow = wheel.overflow_count();
+            let handle = wheel.register(*deadline, counter_waker(counter.clone()));
 
             // Verify timer was registered
             let registered = if level_name == &"overflow" {
                 wheel.overflow_count() > initial_overflow
             } else {
-                wheel.len() > 0
+                wheel.len() > initial_len
             };
             crate::assert_with_log!(
                 registered,
@@ -2482,10 +2481,10 @@ mod tests {
                 );
             } else {
                 crate::assert_with_log!(
-                    wheel.len() < initial_len,
+                    wheel.len() == initial_len,
                     &format!("timer removed from wheel at {level_name}"),
-                    true,
-                    wheel.len() < initial_len
+                    initial_len,
+                    wheel.len()
                 );
             }
 
@@ -2671,11 +2670,28 @@ mod tests {
 
                 if should_have_fired {
                     crate::assert_with_log!(
-                        did_fire,
-                        &format!("{name} fired at advance_time={advance_time:?}"),
+                        after_count > 0,
+                        &format!("{name} has fired by advance_time={advance_time:?}"),
                         true,
-                        did_fire
+                        after_count > 0
                     );
+                    if before_counts[i] == 0 {
+                        crate::assert_with_log!(
+                            did_fire,
+                            &format!(
+                                "{name} fired when first due at advance_time={advance_time:?}"
+                            ),
+                            true,
+                            did_fire
+                        );
+                    } else {
+                        crate::assert_with_log!(
+                            after_count == before_counts[i],
+                            &format!("{name} does not fire again at advance_time={advance_time:?}"),
+                            before_counts[i],
+                            after_count
+                        );
+                    }
                 } else {
                     crate::assert_with_log!(
                         !did_fire,

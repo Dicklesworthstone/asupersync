@@ -4451,8 +4451,11 @@ mod tests {
         // Give all waiters time to poll without notifications
         thread::sleep(Duration::from_millis(20));
 
-        // Send one notification to wake one waiter
-        notify2.notify_one();
+        // Release every waiter before joining their threads. The earlier
+        // polling phase already proved they do not complete spuriously.
+        for _ in 0..num_waiters {
+            notify2.notify_one();
+        }
 
         // Collect results
         for handle in waiter_handles {

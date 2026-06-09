@@ -977,7 +977,9 @@ mod tests {
         assert!(Pin::new(&mut fut_a).poll(&mut poll_cx).is_pending());
 
         // Add 2 more arrivals concurrently to reach parties=4
-        // (A, C plus 2 new ones). Use a thread for the second.
+        // (A, C plus 2 new ones). The original A/C futures must stay
+        // alive; dropping them would cancel their arrivals and leave a
+        // replacement wait blocked behind an impossible quorum.
         let b_extra1 = Arc::clone(&barrier);
         let h1 = std::thread::spawn(move || {
             let cx: Cx = Cx::for_testing();
@@ -989,18 +991,10 @@ mod tests {
             block_on(b_extra2.wait(&cx)).expect("extra2 wait failed")
         });
 
-        // Drive A and C to completion via block_on. Two of the four
-        // (A, C, extra1, extra2) will be the leader.
-        std::thread::sleep(Duration::from_millis(50));
-        // Drop A and C futures; reissue via block_on so we can wait
-        // for trip without polling shenanigans. (For the test we just
-        // need to demonstrate the barrier does trip with the missing
-        // B's slot now removed.)
-        drop((fut_a, fut_c));
-        let cx: Cx = Cx::for_testing();
-        let r1 = block_on(barrier.wait(&cx)).expect("post-drop wait 1 failed");
-        let cx: Cx = Cx::for_testing();
-        let r2 = block_on(barrier.wait(&cx)).expect("post-drop wait 2 failed");
+        // Drive A and C to completion in the same generation. If B's
+        // slot removal accidentally removed C, this quorum cannot form.
+        let r1 = block_on(fut_a).expect("original A wait failed");
+        let r2 = block_on(fut_c).expect("original C wait failed");
         let r3 = h1.join().expect("h1 failed");
         let r4 = h2.join().expect("h2 failed");
 

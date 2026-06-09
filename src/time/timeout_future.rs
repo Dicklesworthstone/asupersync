@@ -205,8 +205,9 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         if self.completed || self.timed_out {
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
         }
-        // Poll the inner future first — if it's ready, return its result
-        // even if the timeout has also elapsed, to avoid losing completed work.
+        // Prefer completed work at the timeout boundary. This preserves the
+        // crate-wide contract that a ready inner future is not lost just because
+        // the timeout boundary is observed in the same scheduler turn.
         // SAFETY: We require F: Unpin, so this is safe
         match Pin::new(&mut self.future).poll(cx) {
             Poll::Ready(output) => {
@@ -217,8 +218,7 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
             Poll::Pending => {}
         }
 
-        // Check the timeout explicitly using the provided time
-        if self.sleep.poll_with_time(now).is_ready() {
+        if self.sleep.poll_ready_with_time(now).is_ready() {
             self.completed = true;
             self.timed_out = true;
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
@@ -228,10 +228,7 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         // the same time domain as the explicit `now`. Falling back to a
         // wall-clock sleep here makes manual/virtual-time polls observe an
         // unrelated clock and can spuriously expire after long test suites.
-        let has_ambient_timer = crate::cx::Cx::current()
-            .and_then(|current| current.timer_driver())
-            .is_some();
-        if self.sleep.has_custom_time_getter() || has_ambient_timer {
+        if self.sleep.has_custom_time_getter() || self.sleep.has_timer_driver_for_poll() {
             match Pin::new(&mut self.sleep).poll(cx) {
                 Poll::Ready(()) => {
                     self.completed = true;
@@ -258,9 +255,8 @@ impl<F: Future> Future for TimeoutFuture<F> {
             return Poll::Ready(Err(Elapsed::new(this.sleep.deadline())));
         }
 
-        // Poll the inner future first — if it's ready, we should return its
-        // result even if the timeout has also elapsed. This avoids losing
-        // completed work at the boundary.
+        let deadline = this.sleep.deadline();
+        // Prefer completed work at the timeout boundary.
         match this.future.poll(cx) {
             Poll::Ready(output) => {
                 *this.completed = true;
@@ -270,8 +266,6 @@ impl<F: Future> Future for TimeoutFuture<F> {
             Poll::Pending => {}
         }
 
-        // Poll the sleep future to register wakeup (e.g. background thread in standalone mode)
-        let deadline = this.sleep.deadline();
         match Pin::new(this.sleep).poll(cx) {
             Poll::Ready(()) => {
                 *this.completed = true;
@@ -355,6 +349,7 @@ mod tests {
     use std::future::Future;
     use std::future::{pending, ready};
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
     // =========================================================================
@@ -653,6 +648,39 @@ mod tests {
     }
 
     #[test]
+    fn poll_with_time_ready_inner_wins_elapsed_deadline_boundary() {
+        let mut t = TimeoutFuture::new(ready("done"), Time::from_secs(10));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = t.poll_with_time(&mut cx, Time::from_secs(10));
+
+        assert!(matches!(result, Poll::Ready(Ok("done"))));
+    }
+
+    #[test]
+    fn poll_with_time_elapsed_deadline_clears_registered_timer() {
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer_driver = crate::time::TimerDriverHandle::with_virtual_clock(clock);
+        let mut t = TimeoutFuture {
+            future: pending::<()>(),
+            sleep: Sleep::with_timer_driver(Time::from_secs(10), timer_driver.clone()),
+            completed: false,
+            timed_out: false,
+        };
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Pin::new(&mut t).poll(&mut cx).is_pending());
+        assert_eq!(timer_driver.pending_count(), 1);
+
+        let result = t.poll_with_time(&mut cx, Time::from_secs(10));
+
+        assert!(matches!(result, Poll::Ready(Err(_))));
+        assert_eq!(timer_driver.pending_count(), 0);
+    }
+
+    #[test]
     fn poll_with_time_returns_elapsed_after_success_completion() {
         let mut t = TimeoutFuture::new(ready(42), Time::from_secs(10));
         let waker = noop_waker();
@@ -735,6 +763,18 @@ mod tests {
         set_current_time(12_000_000_000);
         let resumed = Pin::new(&mut t).poll(&mut cx);
         assert!(matches!(resumed, Poll::Ready(Ok("done"))));
+    }
+
+    #[test]
+    fn poll_ready_inner_wins_elapsed_deadline_boundary() {
+        set_current_time(10_000_000_000);
+        let mut t = TimeoutFuture::with_time_getter(ready("done"), Time::from_secs(10), test_now);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = Pin::new(&mut t).poll(&mut cx);
+
+        assert!(matches!(result, Poll::Ready(Ok("done"))));
     }
 
     // =========================================================================
