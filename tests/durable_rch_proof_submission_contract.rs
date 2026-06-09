@@ -87,6 +87,104 @@ fn reason_codes(record: &Value) -> Vec<String> {
         .collect()
 }
 
+fn run_cli(args: &[&str]) -> Output {
+    Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .args(args)
+        .current_dir(repo_root())
+        .output()
+        .expect("run durable proof CLI")
+}
+
+fn cli_json(args: &[&str]) -> Value {
+    let output = run_cli(args);
+    assert!(
+        output.status.success(),
+        "durable proof CLI failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("CLI output must be JSON")
+}
+
+fn accepted_submission() -> Value {
+    submission_json(&[])["submission"].clone()
+}
+
+fn value_str(value: &Value, key: &str) -> String {
+    value[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("{key} must be a string"))
+        .to_string()
+}
+
+fn job_store(submissions: Vec<Value>, receipts: Vec<Value>) -> tempfile::NamedTempFile {
+    write_json_fixture(&json!({
+        "submissions": submissions,
+        "receipts": receipts,
+    }))
+}
+
+fn receipt_for(
+    submission: &Value,
+    lifecycle_state: &str,
+    terminal_classification: &str,
+    proof_evidence_status: &str,
+    citable: bool,
+    refusal_reasons: &[&str],
+) -> Value {
+    json!({
+        "schema_version": "durable-rch-proof-receipt-v1",
+        "receipt_id": format!("drpr-{terminal_classification}"),
+        "submission_id": submission["submission_id"],
+        "generated_at": GENERATED_AT,
+        "manifest_lane_id": submission["manifest_lane_id"],
+        "manifest_guarantee_ids": submission["manifest_guarantee_ids"],
+        "claim_scope": submission["claim_scope"],
+        "proof_evidence_status": proof_evidence_status,
+        "lifecycle_state": lifecycle_state,
+        "terminal_classification": terminal_classification,
+        "command": submission["command"],
+        "source": submission["source"],
+        "rch_provenance": {
+            "worker_id": "vmi1227854",
+            "remote_route_segments": ["rch-daemon", "vmi1227854"],
+            "submitted_at": "2026-06-09T08:40:00Z",
+            "started_at": "2026-06-09T08:40:10Z",
+            "finished_at": "2026-06-09T08:41:00Z",
+            "detector_progress_stale": terminal_classification == "stale_progress_canceled",
+            "detector_heartbeat_stale": false
+        },
+        "outcome": {
+            "status": if terminal_classification == "pass" { "pass" } else { "fail" },
+            "exit_code": if terminal_classification == "pass" { 0 } else { 101 },
+            "output_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "first_blocker_lines": ["error: contract failed"],
+            "cancellation_reason": if terminal_classification == "operator_canceled" {
+                "operator-requested"
+            } else {
+                ""
+            },
+            "staleness_reason": if terminal_classification == "stale_progress_canceled" {
+                "progress-stale"
+            } else {
+                ""
+            }
+        },
+        "claim_boundaries": {
+            "citable": citable,
+            "covers": "focused durable RCH lane only",
+            "explicit_not_covered": [
+                "release-readiness",
+                "workspace-health",
+                "live-rch-fleet-availability"
+            ],
+            "refusal_reason_codes": refusal_reasons
+        }
+    })
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -344,4 +442,313 @@ fn record_output_writes_to_explicit_tmp_path_and_rejects_tracker_paths() {
         refused["submission"]["terminal_classification"].as_str(),
         Some("cargo_failure")
     );
+}
+
+#[test]
+fn status_running_submission_surfaces_lane_head_and_progress_metadata() {
+    let mut submission = accepted_submission();
+    submission["lifecycle_state"] = Value::String("running".to_string());
+    submission["rch_provenance"] = json!({
+        "worker_id": "vmi1227854",
+        "remote_route_segments": ["rch-daemon", "vmi1227854"],
+        "submitted_at": "2026-06-09T08:40:00Z",
+        "started_at": "2026-06-09T08:40:10Z",
+        "finished_at": "",
+        "detector_progress_stale": false,
+        "detector_heartbeat_stale": false
+    });
+    let submission_id = value_str(&submission, "submission_id");
+    let store = job_store(vec![submission], vec![]);
+    let record = cli_json(&[
+        "status",
+        "--job-store",
+        store.path().to_str().expect("store path"),
+        "--submission-id",
+        &submission_id,
+        "--generated-at",
+        GENERATED_AT,
+    ]);
+
+    assert_eq!(
+        record["schema_version"].as_str(),
+        Some("durable-rch-proof-cli-v1")
+    );
+    assert_eq!(record["operation"].as_str(), Some("status"));
+    assert_eq!(record["decision"].as_str(), Some("accepted"));
+    assert_eq!(record["lifecycle_state"].as_str(), Some("running"));
+    assert_eq!(record["manifest_lane_id"].as_str(), Some(LANE_ID));
+    assert_eq!(record["source"]["head_commit"].as_str(), Some(HEAD));
+    assert_eq!(
+        record["command"]["command_fingerprint"]
+            .as_str()
+            .map(|text| text.starts_with("sha256:")),
+        Some(true)
+    );
+    assert_eq!(
+        record["rch_provenance"]["worker_id"].as_str(),
+        Some("vmi1227854")
+    );
+    assert_eq!(
+        record["rch_provenance"]["detector_progress_stale"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(record["terminal"].as_bool(), Some(false));
+}
+
+#[test]
+fn status_terminal_pass_receipt_marks_receipt_citable() {
+    let submission = accepted_submission();
+    let submission_id = value_str(&submission, "submission_id");
+    let receipt = receipt_for(
+        &submission,
+        "terminal_pass",
+        "pass",
+        "fresh-rch-pass",
+        true,
+        &[],
+    );
+    let store = job_store(vec![submission], vec![receipt]);
+    let record = cli_json(&[
+        "status",
+        "--job-store",
+        store.path().to_str().expect("store path"),
+        "--submission-id",
+        &submission_id,
+        "--generated-at",
+        GENERATED_AT,
+    ]);
+
+    assert_eq!(record["decision"].as_str(), Some("accepted"));
+    assert_eq!(record["receipt_available"].as_bool(), Some(true));
+    assert_eq!(record["receipt_id"].as_str(), Some("drpr-pass"));
+    assert_eq!(record["lifecycle_state"].as_str(), Some("terminal_pass"));
+    assert_eq!(
+        record["proof_evidence_status"].as_str(),
+        Some("fresh-rch-pass")
+    );
+    assert_eq!(record["claim_boundaries"]["citable"].as_bool(), Some(true));
+    assert_eq!(record["terminal"].as_bool(), Some(true));
+}
+
+#[test]
+fn query_terminal_fail_includes_refusal_reasons_and_receipt() {
+    let submission = accepted_submission();
+    let submission_id = value_str(&submission, "submission_id");
+    let receipt = receipt_for(
+        &submission,
+        "terminal_fail",
+        "cargo_failure",
+        "blocked",
+        false,
+        &["failed-proof-status"],
+    );
+    let store = job_store(vec![submission], vec![receipt]);
+    let record = cli_json(&[
+        "query",
+        "--job-store",
+        store.path().to_str().expect("store path"),
+        "--submission-id",
+        &submission_id,
+        "--claim",
+        "proof-lane-manifest-contract",
+        "--generated-at",
+        GENERATED_AT,
+    ]);
+
+    assert_eq!(record["operation"].as_str(), Some("query"));
+    assert_eq!(record["decision"].as_str(), Some("refused"));
+    assert!(reason_codes(&record).contains(&"failed-proof-status".to_string()));
+    assert_eq!(
+        record["receipt"]["terminal_classification"].as_str(),
+        Some("cargo_failure")
+    );
+    assert_eq!(record["claim_boundaries"]["citable"].as_bool(), Some(false));
+}
+
+#[test]
+fn status_terminal_stale_receipt_is_not_citable_green_proof() {
+    let submission = accepted_submission();
+    let submission_id = value_str(&submission, "submission_id");
+    let receipt = receipt_for(
+        &submission,
+        "terminal_stale",
+        "stale_progress_canceled",
+        "blocked",
+        false,
+        &["failed-proof-status"],
+    );
+    let store = job_store(vec![submission], vec![receipt]);
+    let record = cli_json(&[
+        "status",
+        "--job-store",
+        store.path().to_str().expect("store path"),
+        "--submission-id",
+        &submission_id,
+        "--generated-at",
+        GENERATED_AT,
+    ]);
+
+    assert_eq!(record["lifecycle_state"].as_str(), Some("terminal_stale"));
+    assert_eq!(
+        record["terminal_classification"].as_str(),
+        Some("stale_progress_canceled")
+    );
+    assert_eq!(
+        record["rch_provenance"]["detector_progress_stale"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(record["claim_boundaries"]["citable"].as_bool(), Some(false));
+}
+
+#[test]
+fn unknown_submission_is_machine_readable_refusal() {
+    let store = job_store(vec![accepted_submission()], vec![]);
+    let record = cli_json(&[
+        "status",
+        "--job-store",
+        store.path().to_str().expect("store path"),
+        "--submission-id",
+        "drps-missing",
+        "--generated-at",
+        GENERATED_AT,
+    ]);
+
+    assert_eq!(record["decision"].as_str(), Some("refused"));
+    assert_eq!(record["lifecycle_state"].as_str(), Some("unknown"));
+    assert!(reason_codes(&record).contains(&"unknown-submission-id".to_string()));
+}
+
+#[test]
+fn query_refuses_unsupported_broad_claim_even_with_pass_receipt() {
+    let submission = accepted_submission();
+    let submission_id = value_str(&submission, "submission_id");
+    let receipt = receipt_for(
+        &submission,
+        "terminal_pass",
+        "pass",
+        "fresh-rch-pass",
+        true,
+        &[],
+    );
+    let store = job_store(vec![submission], vec![receipt]);
+    let record = cli_json(&[
+        "query",
+        "--job-store",
+        store.path().to_str().expect("store path"),
+        "--submission-id",
+        &submission_id,
+        "--claim",
+        "workspace-health",
+        "--generated-at",
+        GENERATED_AT,
+    ]);
+
+    assert_eq!(record["decision"].as_str(), Some("refused"));
+    assert!(reason_codes(&record).contains(&"broad-claim-unsupported".to_string()));
+    assert_eq!(record["receipt_available"].as_bool(), Some(true));
+    assert_eq!(record["claim_boundaries"]["citable"].as_bool(), Some(false));
+    assert_eq!(
+        record["receipt"]["claim_boundaries"]["citable"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn cancel_records_operator_cancellation_separately_from_cargo_failure() {
+    let submission = accepted_submission();
+    let submission_id = value_str(&submission, "submission_id");
+    let store = job_store(vec![submission.clone()], vec![]);
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let cancel_path = tempdir.path().join("cancel.json");
+    let record = cli_json(&[
+        "cancel",
+        "--job-store",
+        store.path().to_str().expect("store path"),
+        "--submission-id",
+        &submission_id,
+        "--agent",
+        "MistyMill",
+        "--reason-code",
+        "operator-requested",
+        "--generated-at",
+        GENERATED_AT,
+        "--record-output",
+        cancel_path.to_str().expect("cancel path"),
+    ]);
+
+    assert_eq!(record["decision"].as_str(), Some("accepted"));
+    assert_eq!(
+        record["lifecycle_state"].as_str(),
+        Some("terminal_canceled")
+    );
+    assert_eq!(
+        record["terminal_classification"].as_str(),
+        Some("operator_canceled")
+    );
+    assert_eq!(record["proof_evidence_status"].as_str(), Some("blocked"));
+    assert_eq!(
+        record["cancellation"]["not_cargo_failure"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        record["cancellation"]["rch_cancel_invoked"].as_bool(),
+        Some(false)
+    );
+    assert!(cancel_path.exists(), "cancel evidence should be written");
+
+    let canceled_store = write_json_fixture(&json!({
+        "submissions": [submission],
+        "cancellations": [record["cancellation"].clone()]
+    }));
+    let status = cli_json(&[
+        "status",
+        "--job-store",
+        canceled_store.path().to_str().expect("canceled store path"),
+        "--submission-id",
+        &submission_id,
+        "--generated-at",
+        GENERATED_AT,
+    ]);
+    assert_eq!(
+        status["lifecycle_state"].as_str(),
+        Some("terminal_canceled")
+    );
+    assert_eq!(
+        status["terminal_classification"].as_str(),
+        Some("operator_canceled")
+    );
+    assert_eq!(
+        status["cancellation"]["not_cargo_failure"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+fn human_status_output_is_single_line_and_concise() {
+    let submission = accepted_submission();
+    let submission_id = value_str(&submission, "submission_id");
+    let store = job_store(vec![submission], vec![]);
+    let output = run_cli(&[
+        "status",
+        "--job-store",
+        store.path().to_str().expect("store path"),
+        "--submission-id",
+        &submission_id,
+        "--generated-at",
+        GENERATED_AT,
+        "--output",
+        "human",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "human status failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).expect("human output UTF-8");
+    assert_eq!(text.lines().count(), 1);
+    assert!(text.contains("status accepted"));
+    assert!(text.contains("state=queued"));
+    assert!(text.contains(&submission_id));
 }
