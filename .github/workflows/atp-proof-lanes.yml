@@ -100,6 +100,7 @@ jobs:
     - name: Setup Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
+        toolchain: nightly
         components: rustfmt, clippy
 
     - name: Setup platform dependencies
@@ -144,6 +145,7 @@ jobs:
     - name: Setup Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
+        toolchain: nightly
         components: rustfmt, clippy
 
     - name: Setup platform dependencies
@@ -201,6 +203,7 @@ jobs:
     - name: Setup Rust toolchain
       uses: dtolnay/rust-toolchain@master
       with:
+        toolchain: nightly
         components: rustfmt, clippy
 
     - name: Setup platform dependencies
