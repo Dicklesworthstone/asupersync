@@ -3385,8 +3385,6 @@ mod tests {
     fn audit_mutex_lock_poll_waker_registration() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::thread;
-        use std::time::{Duration, Instant};
 
         // Audit test for Mutex::lock() poll behavior under contention.
         //
@@ -3398,191 +3396,107 @@ mod tests {
         // Verifies: waker registration, proper handoff, FIFO fairness
 
         let test_iterations = 200;
-        let mut successful_waker_calls = 0;
-        let failed_waker_calls = Arc::new(AtomicUsize::new(0));
+        let successful_waker_calls = Arc::new(AtomicUsize::new(0));
 
         for iteration in 0..test_iterations {
-            let mutex = Arc::new(Mutex::new(iteration));
-            let holder_can_proceed = Arc::new(AtomicBool::new(false));
+            let mutex = Mutex::new(iteration);
             let waker_was_called = Arc::new(AtomicBool::new(false));
-            let lock_acquired_after_wake = Arc::new(AtomicBool::new(false));
+            let cx = Cx::for_testing();
 
-            let mutex_holder = Arc::clone(&mutex);
-            let proceed_flag = Arc::clone(&holder_can_proceed);
+            let mut holder_future = std::pin::pin!(mutex.lock(&cx));
+            let holder_guard = {
+                let noop_waker = std::task::Waker::noop();
+                let mut context = std::task::Context::from_waker(noop_waker);
+                match holder_future.as_mut().poll(&mut context) {
+                    std::task::Poll::Ready(Ok(guard)) => guard,
+                    other => panic!(
+                        "iteration {}: holder should acquire uncontended mutex immediately, got {:?}",
+                        iteration, other
+                    ),
+                }
+            };
 
-            // Holder thread: Acquire lock and hold until signaled
-            let holder_handle = thread::spawn(move || {
-                let rt = crate::runtime::RuntimeBuilder::new()
-                    .worker_threads(1)
-                    .build()
-                    .expect("Failed to build runtime");
-
-                rt.block_on(async {
-                    let cx = Cx::for_testing();
-
-                    // Acquire the mutex
-                    let guard = mutex_holder
-                        .lock(&cx)
-                        .await
-                        .expect("Holder should successfully acquire mutex");
-
-                    // Signal that holder has the lock, waiter can start trying
-                    proceed_flag.store(true, Ordering::SeqCst);
-
-                    // Hold lock for a short time to create contention
-                    crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(5)).await;
-
-                    // Verify data integrity
-                    let value = *guard;
-                    assert_eq!(
-                        value, iteration,
-                        "Data should be preserved during lock hold"
-                    );
-
-                    // Lock will be released when guard drops
-                })
-            });
-
-            let mutex_contender = Arc::clone(&mutex);
-            let proceed_waiter = Arc::clone(&holder_can_proceed);
-            let waker_called = Arc::clone(&waker_was_called);
-            let acquired_flag = Arc::clone(&lock_acquired_after_wake);
-            let failed_count = Arc::clone(&failed_waker_calls);
-
-            // Contender thread: Wait for holder, then try to acquire
-            let contender_handle = thread::spawn(move || {
-                let rt = crate::runtime::RuntimeBuilder::new()
-                    .worker_threads(1)
-                    .build()
-                    .expect("Failed to build runtime");
-
-                rt.block_on(async {
-                    let cx = Cx::for_testing();
-
-                    // Wait for holder to acquire lock first
-                    while !proceed_waiter.load(Ordering::SeqCst) {
-                        crate::time::sleep(crate::types::Time::ZERO, Duration::from_micros(100))
-                            .await;
-                    }
-
-                    // Create a counting waker to verify wake calls
-                    let waker_called_clone = Arc::clone(&waker_called);
-                    struct CountingWaker {
-                        called: Arc<AtomicBool>,
-                    }
-
-                    impl std::task::Wake for CountingWaker {
-                        fn wake(self: Arc<Self>) {
-                            self.called.store(true, Ordering::SeqCst);
-                        }
-                        fn wake_by_ref(self: &Arc<Self>) {
-                            self.called.store(true, Ordering::SeqCst);
-                        }
-                    }
-
-                    let counting_waker = std::task::Waker::from(Arc::new(CountingWaker {
-                        called: waker_called_clone,
-                    }));
-
-                    // Try to acquire mutex - should block and register waker
-                    let lock_start = Instant::now();
-                    let mut lock_future = std::pin::pin!(mutex_contender.lock(&cx));
-
-                    // First poll should return Pending and register waker
-                    let mut context = std::task::Context::from_waker(&counting_waker);
-                    let first_poll = lock_future.as_mut().poll(&mut context);
-
-                    match first_poll {
-                        std::task::Poll::Ready(_) => {
-                            // Unexpected - holder should still have lock
-                            failed_count.fetch_add(1, Ordering::SeqCst);
-                            return (false, false, Duration::ZERO);
-                        }
-                        std::task::Poll::Pending => {
-                            // Expected - waker should be registered
-                        }
-                    }
-
-                    // Wait for the actual lock acquisition to complete
-                    let guard = lock_future
-                        .await
-                        .expect("Contender should eventually acquire mutex");
-
-                    let acquisition_time = lock_start.elapsed();
-
-                    // Verify waker was called during the wait
-                    let waker_called_result = waker_called.load(Ordering::SeqCst);
-                    acquired_flag.store(true, Ordering::SeqCst);
-
-                    // Verify data integrity
-                    let value = *guard;
-                    assert_eq!(value, iteration, "Data should be consistent after handoff");
-
-                    (true, waker_called_result, acquisition_time)
-                })
-            });
-
-            // Wait for completion
-            holder_handle.join().expect("Holder thread should complete");
-            let (acquired, waker_called, acquisition_time) = contender_handle
-                .join()
-                .expect("Contender thread should complete");
-
-            // Verify the lock was eventually acquired
-            assert!(
-                acquired,
-                "iteration {}: contender should acquire lock",
-                iteration
-            );
-            assert!(
-                lock_acquired_after_wake.load(Ordering::SeqCst),
-                "iteration {}: lock acquisition flag should be set",
-                iteration
-            );
-
-            // Verify waker was called during contention
-            if waker_called {
-                successful_waker_calls += 1;
+            // Create a counting waker to verify the registered waiter is woken
+            // exactly through the mutex handoff path. This test deliberately
+            // avoids runtimes, sleeps, and cross-thread scheduling so failure
+            // means the lock future did not register/wake correctly.
+            struct CountingWaker {
+                called: Arc<AtomicBool>,
+                count: Arc<AtomicUsize>,
             }
 
-            // Verify reasonable acquisition time (should be quick after wakeup)
+            impl std::task::Wake for CountingWaker {
+                fn wake(self: Arc<Self>) {
+                    self.called.store(true, Ordering::SeqCst);
+                    self.count.fetch_add(1, Ordering::SeqCst);
+                }
+                fn wake_by_ref(self: &Arc<Self>) {
+                    self.called.store(true, Ordering::SeqCst);
+                    self.count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+
+            let counting_waker = std::task::Waker::from(Arc::new(CountingWaker {
+                called: Arc::clone(&waker_was_called),
+                count: Arc::clone(&successful_waker_calls),
+            }));
+
+            let mut lock_future = std::pin::pin!(mutex.lock(&cx));
+            let mut context = std::task::Context::from_waker(&counting_waker);
+            match lock_future.as_mut().poll(&mut context) {
+                std::task::Poll::Pending => {}
+                other => panic!(
+                    "iteration {}: contended waiter should register and return Pending, got {:?}",
+                    iteration, other
+                ),
+            }
+
+            assert_eq!(
+                mutex.waiters(),
+                1,
+                "iteration {}: waiter should be registered while holder owns lock",
+                iteration
+            );
+
+            drop(holder_guard);
+
+            // Verify waker was called during contention
             assert!(
-                acquisition_time < Duration::from_millis(100),
-                "iteration {}: lock acquisition took {:?}, expected < 100ms",
-                iteration,
-                acquisition_time
+                waker_was_called.load(Ordering::SeqCst),
+                "iteration {}: registered waiter waker should be called when holder drops",
+                iteration
+            );
+
+            let guard = match lock_future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(Ok(guard)) => guard,
+                other => panic!(
+                    "iteration {}: woken waiter should acquire on next poll, got {:?}",
+                    iteration, other
+                ),
+            };
+
+            assert_eq!(
+                *guard, iteration,
+                "iteration {}: data should be consistent after handoff",
+                iteration
             );
         }
 
-        let failed_count = failed_waker_calls.load(Ordering::SeqCst);
+        let successful_waker_calls = successful_waker_calls.load(Ordering::SeqCst);
         let success_rate = (successful_waker_calls as f64) / (test_iterations as f64);
 
         println!(
-            "Mutex lock poll waker audit: {}/{} successful waker calls ({:.1}%), {} failures",
+            "Mutex lock poll waker audit: {}/{} successful waker calls ({:.1}%)",
             successful_waker_calls,
             test_iterations,
-            success_rate * 100.0,
-            failed_count
+            success_rate * 100.0
         );
 
         // Verify waker registration and calling works reliably
-        if success_rate < 0.90 {
-            panic!(
-                "❌ WAKER DEFECT: Only {:.1}% successful waker calls. \
-                 Expected >90% waker calls when mutex is contended. \
-                 This suggests poll_lock is not properly registering or calling wakers.",
-                success_rate * 100.0
-            );
-        }
-
-        if failed_count > test_iterations / 20 {
-            panic!(
-                "❌ POLLING DEFECT: {} failed acquisitions (>{} threshold). \
-                 Expected smooth handoff from holder to contender via waker.",
-                failed_count,
-                test_iterations / 20
-            );
-        }
+        assert_eq!(
+            successful_waker_calls, test_iterations,
+            "waker should be called exactly once per contended handoff"
+        );
 
         println!(
             "✅ SOUND: Mutex lock polling correctly registers wakers and handles contended acquisition"

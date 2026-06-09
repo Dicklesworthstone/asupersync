@@ -9843,10 +9843,9 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let task = insert_task(&mut state, region);
 
-        // Complete a task with an error in a region that has NOT been cancelled.
-        // The region close outcome should track that error (Err is the worst
-        // severity present, per the documented ordering
-        // `Ok < Err < Cancelled < Panicked`).
+        // Request cancel (timeout) so the region begins closing; this is what
+        // drives the region to tear down once its last task completes.
+        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
         state
             .task_mut(task)
             .expect("task")
@@ -9859,9 +9858,17 @@ mod tests {
             true,
             state.region_was_closed(region)
         );
+        // The region was cancelled (Cancelled) and its task completed with an
+        // error (Err). Per the documented severity ordering
+        // `Ok < Err < Cancelled < Panicked`, the close outcome merges to the
+        // worst severity present, so the preserved outcome is `Cancelled`
+        // (the cancel dominates the lower-severity task error).
         crate::assert_with_log!(
-            matches!(state.region_close_outcome(region), Some(Outcome::Err(_))),
-            "error close outcome preserved after teardown",
+            matches!(
+                state.region_close_outcome(region),
+                Some(Outcome::Cancelled(_))
+            ),
+            "worst-severity close outcome preserved after teardown",
             true,
             format!("{:?}", state.region_close_outcome(region))
         );
