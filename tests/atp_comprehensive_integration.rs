@@ -231,21 +231,28 @@ fn test_atp_c_compression_encryption_policies() {
     graph.add_root(file_obj).unwrap();
 
     // ATP-C4: Test manifest with compression and encryption policies
-    let policy = MetadataPolicy::default();
-    let mut manifest = Manifest::from_graph(&graph, policy).unwrap();
-
-    // Add compression policy
-    manifest.compression_policy = Some(compression_policy());
-
-    // Add encryption policy
-    manifest.encryption_policy = Some(encryption_policy());
+    let manifest = Manifest::from_graph_with_policies(
+        &graph,
+        MetadataPolicy::default(),
+        vec![HashAlgorithm::Sha256],
+        None,
+        None,
+        Some(compression_policy()),
+        Some(encryption_policy()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
     // Verify policies are reflected in canonical encoding
     let canonical_bytes = manifest.to_canonical_bytes();
     assert!(!canonical_bytes.is_empty());
 
     // Verify manifest validation passes with policies
-    assert!(manifest.validate().is_ok());
+    manifest
+        .validate()
+        .expect("manifest with compression and encryption policies should validate");
 }
 
 /// Test proof bundle generation from ATP-C5
@@ -390,13 +397,24 @@ fn test_atp_c_comprehensive_integration() {
     graph.add_root(stream).unwrap();
 
     // Generate canonical manifest with policies
-    let policy = MetadataPolicy::default();
-    let mut manifest = Manifest::from_graph(&graph, policy).unwrap();
-
-    manifest.compression_policy = Some(compression_policy());
+    let manifest = Manifest::from_graph_with_policies(
+        &graph,
+        MetadataPolicy::default(),
+        vec![HashAlgorithm::Sha256],
+        None,
+        None,
+        Some(compression_policy()),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
     // Validate manifest integrity
-    assert!(manifest.validate().is_ok());
+    manifest
+        .validate()
+        .expect("comprehensive ATP-C manifest should validate");
 
     // Generate proof bundle
     let bundle = proof_builder(
