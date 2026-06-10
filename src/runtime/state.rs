@@ -414,29 +414,80 @@ pub enum SpawnError {
     },
 }
 
+impl SpawnError {
+    /// Returns the stable machine-readable error code for this variant.
+    ///
+    /// Codes are allocated from the `ASUP-E00x` range (core runtime spawn
+    /// errors) of the asupersync error-code registry and are stable across
+    /// releases: agents and tooling may match on them. The same code is
+    /// embedded as the leading `[ASUP-ENNN]` token of the [`Display`]
+    /// rendering.
+    ///
+    /// [`Display`]: std::fmt::Display
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::RuntimeUnavailable => "ASUP-E001",
+            Self::RegionNotFound(_) => "ASUP-E002",
+            Self::RegionClosed(_) => "ASUP-E003",
+            Self::LocalSchedulerUnavailable => "ASUP-E004",
+            Self::NameRegistrationFailed { .. } => "ASUP-E005",
+            Self::RegionAtCapacity { .. } => "ASUP-E006",
+            Self::AuthorizationDenied { .. } => "ASUP-E007",
+        }
+    }
+}
+
 impl std::fmt::Display for SpawnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RuntimeUnavailable => write!(f, "runtime is no longer available"),
-            Self::RegionNotFound(id) => write!(f, "region not found: {id:?}"),
-            Self::RegionClosed(id) => write!(f, "region closed: {id:?}"),
-            Self::LocalSchedulerUnavailable => {
-                write!(f, "local spawn requires an active worker scheduler")
-            }
-            Self::NameRegistrationFailed { name, reason } => {
-                write!(f, "name registration failed: name={name} reason={reason}")
-            }
+            Self::RuntimeUnavailable => write!(
+                f,
+                "[ASUP-E001] runtime is no longer available — the runtime behind this \
+                 handle was dropped or shut down; spawn before shutdown begins, or hold \
+                 a strong runtime reference for the spawner's lifetime"
+            ),
+            Self::RegionNotFound(id) => write!(
+                f,
+                "[ASUP-E002] region not found: {id:?} — the region id is stale (its \
+                 region already closed); spawn into a live ancestor or re-check the \
+                 handle that produced this id"
+            ),
+            Self::RegionClosed(id) => write!(
+                f,
+                "[ASUP-E003] region closed: {id:?} — the target region is closing or \
+                 closed and admits no new tasks; spawn into a live region, or treat \
+                 this as the normal spawn-vs-shutdown race and stop spawning"
+            ),
+            Self::LocalSchedulerUnavailable => write!(
+                f,
+                "[ASUP-E004] local spawn requires an active worker scheduler — \
+                 spawn_local only works from a worker thread; use spawn for Send \
+                 tasks or move this call inside runtime worker context"
+            ),
+            Self::NameRegistrationFailed { name, reason } => write!(
+                f,
+                "[ASUP-E005] name registration failed: name={name} reason={reason} — \
+                 the service name is already leased or invalid; pick a unique name or \
+                 release/await the existing lease first"
+            ),
             Self::RegionAtCapacity {
                 region,
                 limit,
                 live,
             } => write!(
                 f,
-                "region admission limit reached: region={region:?} limit={limit} live={live}"
+                "[ASUP-E006] region admission limit reached: region={region:?} \
+                 limit={limit} live={live} — back-pressure point: await task \
+                 completions before spawning more, or raise the region's admission \
+                 limit if the capacity was misconfigured"
             ),
             Self::AuthorizationDenied { region, cx_id } => write!(
                 f,
-                "authorization denied: caller lacks permission to create tasks in region {region:?} (cx={cx_id})"
+                "[ASUP-E007] authorization denied: caller lacks permission to create \
+                 tasks in region {region:?} (cx={cx_id}) — the capability context was \
+                 narrowed without spawn rights; pass a Cx with HasSpawn for this \
+                 region, or spawn via the owning scope instead"
             ),
         }
     }
@@ -5718,6 +5769,57 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
+
+    #[test]
+    fn spawn_error_codes_are_stable_and_displayed() {
+        let region = RegionId::new_for_test(0, 1);
+        let cases: Vec<(SpawnError, &str)> = vec![
+            (SpawnError::RuntimeUnavailable, "ASUP-E001"),
+            (SpawnError::RegionNotFound(region), "ASUP-E002"),
+            (SpawnError::RegionClosed(region), "ASUP-E003"),
+            (SpawnError::LocalSchedulerUnavailable, "ASUP-E004"),
+            (
+                SpawnError::NameRegistrationFailed {
+                    name: "svc".to_string(),
+                    reason: "duplicate".to_string(),
+                },
+                "ASUP-E005",
+            ),
+            (
+                SpawnError::RegionAtCapacity {
+                    region,
+                    limit: 8,
+                    live: 8,
+                },
+                "ASUP-E006",
+            ),
+            (
+                SpawnError::AuthorizationDenied {
+                    region,
+                    cx_id: "cx-1".to_string(),
+                },
+                "ASUP-E007",
+            ),
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for (error, expected_code) in cases {
+            assert_eq!(error.code(), expected_code, "code() mapping is stable");
+            let rendered = error.to_string();
+            assert!(
+                rendered.starts_with(&format!("[{expected_code}]")),
+                "Display must lead with the machine-readable code token: {rendered}"
+            );
+            assert!(
+                rendered.contains(" \u{2014} "),
+                "Display must carry an actionable hint after the em dash: {rendered}"
+            );
+            assert!(
+                seen.insert(expected_code),
+                "duplicate error code {expected_code}"
+            );
+        }
+        assert_eq!(seen.len(), 7, "every variant has a distinct code");
+    }
 
     #[derive(Default)]
     struct TestMetrics {

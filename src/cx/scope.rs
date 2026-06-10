@@ -2366,13 +2366,13 @@ mod tests {
     fn region_budget_is_met_with_parent() {
         let mut state = RuntimeState::new();
         let cx = test_cx();
-        let parent = state.create_root_region(Budget::with_deadline_secs(10));
-        let scope = test_scope(parent, Budget::with_deadline_secs(10));
+        let parent = state.create_root_region(Budget::with_deadline_at_secs(10));
+        let scope = test_scope(parent, Budget::with_deadline_at_secs(10));
 
         let outcome = block_on(scope.region_with_budget(
             &mut state,
             &cx,
-            Budget::with_deadline_secs(30),
+            Budget::with_deadline_at_secs(30),
             crate::types::policy::FailFast,
             |child, _state| {
                 let child_id = child.region_id();

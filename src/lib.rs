@@ -338,6 +338,8 @@ pub mod public_api_golden_tests;
 pub mod raptorq_deep_dive_metamorphic_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod raptorq_rfc6330_conformance_tests;
+#[cfg(all(test, feature = "channel-mpsc-select-e2e"))]
+pub mod real_channel_mpsc_combinator_select_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_e2e_hardening_consolidation;
 #[cfg(all(test, feature = "h3-websocket-e2e"))]
@@ -415,16 +417,16 @@ pub use types::{
     CapabilityBudgetRefusal, CapabilityBudgetRequirements, NextjsBootstrapPhase,
     NextjsIntegrationSnapshot, NextjsNavigationType, NextjsRenderEnvironment, ObligationId,
     Outcome, OutcomeError, PanicPayload, Policy, ProgressiveLoadSlot, ProgressiveLoadSnapshot,
-    ReactProviderConfig, ReactProviderPhase, ReactProviderState, RegionId, Severity,
-    SuspenseBoundaryState, SuspenseDiagnosticEvent, SuspenseTaskConfig, SuspenseTaskSnapshot,
-    SystemPressure, TaskId, Time, TransitionTaskState, WASM_ABI_MAJOR_VERSION,
-    WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1, WASM_ABI_SIGNATURES_V1,
-    WasmAbiBoundaryEvent, WasmAbiCancellation, WasmAbiChangeClass, WasmAbiCompatibilityDecision,
-    WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope, WasmAbiPayloadShape,
-    WasmAbiRecoverability, WasmAbiSignature, WasmAbiSymbol, WasmAbiValue, WasmAbiVersion,
-    WasmAbiVersionBump, WasmAbortInteropSnapshot, WasmAbortInteropUpdate, WasmAbortPropagationMode,
-    WasmBoundaryState, WasmBoundaryTransitionError, WasmExportDispatcher, WasmHandleKind,
-    WasmHandleRef, WasmOutcomeExt, WasmTaskCancelRequest, WasmTaskSpawnBuilder,
+    ReactProviderConfig, ReactProviderPhase, ReactProviderState, RegionId, RemainingBudget,
+    Severity, SuspenseBoundaryState, SuspenseDiagnosticEvent, SuspenseTaskConfig,
+    SuspenseTaskSnapshot, SystemPressure, TaskId, Time, TransitionTaskState,
+    WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
+    WASM_ABI_SIGNATURES_V1, WasmAbiBoundaryEvent, WasmAbiCancellation, WasmAbiChangeClass,
+    WasmAbiCompatibilityDecision, WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope,
+    WasmAbiPayloadShape, WasmAbiRecoverability, WasmAbiSignature, WasmAbiSymbol, WasmAbiValue,
+    WasmAbiVersion, WasmAbiVersionBump, WasmAbortInteropSnapshot, WasmAbortInteropUpdate,
+    WasmAbortPropagationMode, WasmBoundaryState, WasmBoundaryTransitionError, WasmExportDispatcher,
+    WasmHandleKind, WasmHandleRef, WasmOutcomeExt, WasmTaskCancelRequest, WasmTaskSpawnBuilder,
     apply_abort_signal_event, apply_runtime_cancel_phase_event, classify_wasm_abi_compatibility,
     is_valid_bootstrap_transition, is_valid_wasm_boundary_transition, join_outcomes,
     outcome_to_error_boundary_action, outcome_to_suspense_state, outcome_to_transition_state,

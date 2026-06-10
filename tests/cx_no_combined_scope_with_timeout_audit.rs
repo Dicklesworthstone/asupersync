@@ -32,7 +32,7 @@
 //! Or via the `scope!` macro:
 //!
 //! ```ignore
-//! scope!(cx, budget: Budget::with_deadline_secs(5), {
+//! scope!(cx, budget: Budget::with_deadline_at_secs(5), {
 //!     // body — deadline enforced at every cx.checkpoint()
 //! })
 //! ```

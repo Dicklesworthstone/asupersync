@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_config_with_budget() {
-        let budget = Budget::with_deadline_secs(100);
+        let budget = Budget::with_deadline_at_secs(100);
         let cfg = TestConfig::new().with_budget(budget);
         assert_eq!(cfg.root_budget, budget);
     }

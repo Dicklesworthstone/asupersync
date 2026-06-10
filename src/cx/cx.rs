@@ -1615,6 +1615,52 @@ impl<Caps> Cx<Caps> {
         self.inner.read().capability_budget
     }
 
+    /// Returns the ambient budget tightened by a relative timeout.
+    ///
+    /// `now` comes from this context's clock (the timer driver in production,
+    /// virtual time in the lab), so the result is correct and deterministic
+    /// under both. Composition uses [`Budget::tightened_by_timeout`]: the
+    /// resulting deadline is `min(ambient_deadline, now + timeout)` — a
+    /// per-call timeout can never loosen an outer deadline. All other budget
+    /// dimensions are inherited unchanged.
+    ///
+    /// This is the canonical way to derive per-operation (request, statement,
+    /// RPC) budgets for deadline propagation.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// async fn query(cx: &Cx, sql: &str) -> Result<Rows, DbError> {
+    ///     // 30s statement timeout, but never beyond the request deadline.
+    ///     let budget = cx.budget_for_timeout(Duration::from_secs(30));
+    ///     run_with_budget(cx, budget, sql).await
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn budget_for_timeout(&self, timeout: Duration) -> Budget
+    where
+        Caps: cap::HasTime,
+    {
+        self.budget().tightened_by_timeout(self.now(), timeout)
+    }
+
+    /// Returns a point-in-time snapshot of this context's remaining budget.
+    ///
+    /// Thin wrapper over [`Budget::remaining`] using this context's clock via
+    /// [`now_for_observability`](Self::now_for_observability), so no
+    /// `HasTime` capability is required — this is a diagnostic read. The live
+    /// budget's quotas drain as the task runs; the snapshot is valid only at
+    /// the moment of the call.
+    ///
+    /// Canonical use is adaptive control flow: "do I have time and polls left
+    /// for another retry?"
+    #[inline]
+    #[must_use]
+    pub fn remaining_budget(&self) -> crate::types::RemainingBudget {
+        self.budget().remaining(self.now_for_observability())
+    }
+
     /// Computes the effective child capability budget without mutating this
     /// context.
     ///
@@ -2623,6 +2669,38 @@ impl<Caps> Cx<Caps> {
         }
     }
 
+    /// Registers the current task waker to be woken when this context is cancelled.
+    pub(crate) fn register_cancel_waker(&self, waker: &Waker) {
+        let mut inner = self.inner.write();
+        match inner.cancel_waker.as_ref() {
+            Some(existing) if existing.will_wake(waker) => {
+                inner.cancel_waker_registration_count =
+                    inner.cancel_waker_registration_count.saturating_add(1);
+            }
+            _ => {
+                inner.cancel_waker = Some(waker.clone());
+                inner.cancel_waker_registration_count = 1;
+            }
+        }
+    }
+
+    /// Clears a previously registered cancellation waker if it still belongs to this task.
+    pub(crate) fn clear_cancel_waker_if_current(&self, waker: &Waker) {
+        let mut inner = self.inner.write();
+        if inner
+            .cancel_waker
+            .as_ref()
+            .is_some_and(|existing| existing.will_wake(waker))
+        {
+            if inner.cancel_waker_registration_count > 1 {
+                inner.cancel_waker_registration_count -= 1;
+            } else {
+                inner.cancel_waker = None;
+                inner.cancel_waker_registration_count = 0;
+            }
+        }
+    }
+
     // ========================================================================
     // Cancel Attribution API
     // ========================================================================
@@ -3087,7 +3165,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// This is used by the `scope!` macro when a budget is specified:
     /// ```ignore
-    /// scope!(cx, budget: Budget::with_deadline_secs(5), {
+    /// scope!(cx, budget: Budget::with_deadline_at_secs(5), {
     ///     // body
     /// })
     /// ```
@@ -3466,6 +3544,79 @@ mod tests {
             None,
             Some(Arc::new(DetEntropy::new(seed))),
         )
+    }
+
+    fn test_cx_with_virtual_time(budget: Budget, now: Time) -> Cx<cap::All> {
+        let clock = Arc::new(crate::time::VirtualClock::starting_at(now));
+        Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            budget,
+            None,
+            None,
+            None,
+            Some(TimerDriverHandle::with_virtual_clock(clock)),
+            None,
+        )
+    }
+
+    #[test]
+    fn budget_for_timeout_uses_virtual_time_deterministically() {
+        // Virtual-time half of the wall/virtual test pair: with the clock
+        // pinned at t=100s, a 30s timeout must produce exactly t=130s.
+        let cx = test_cx_with_virtual_time(Budget::INFINITE, Time::from_secs(100));
+        let budget = cx.budget_for_timeout(Duration::from_secs(30));
+        assert_eq!(budget.deadline, Some(Time::from_secs(130)));
+    }
+
+    #[test]
+    fn budget_for_timeout_never_loosens_ambient_deadline() {
+        // Ambient deadline (t=110s) is sooner than now (100s) + 30s: the
+        // per-call timeout must NOT extend it past the caller's bound.
+        let ambient = Budget::new().with_deadline(Time::from_secs(110));
+        let cx = test_cx_with_virtual_time(ambient, Time::from_secs(100));
+        let budget = cx.budget_for_timeout(Duration::from_secs(30));
+        assert_eq!(budget.deadline, Some(Time::from_secs(110)));
+    }
+
+    #[test]
+    fn budget_for_timeout_inherits_non_deadline_dimensions() {
+        let ambient = Budget::new().with_poll_quota(64).with_cost_quota(5);
+        let cx = test_cx_with_virtual_time(ambient, Time::from_secs(1));
+        let budget = cx.budget_for_timeout(Duration::from_secs(2));
+        assert_eq!(budget.poll_quota, 64);
+        assert_eq!(budget.cost_quota, Some(5));
+        assert_eq!(budget.deadline, Some(Time::from_secs(3)));
+    }
+
+    #[test]
+    fn budget_for_timeout_wall_clock_fallback_keeps_contract() {
+        // Wall-clock half of the pair: without a timer driver, now() falls
+        // back to the wall clock. Exact instants are nondeterministic, so
+        // this asserts the clock-independent contract only: an open budget
+        // gains SOME deadline, and tightening never exceeds an ambient one.
+        let open = test_cx();
+        let bounded = open.budget_for_timeout(Duration::from_secs(30));
+        assert!(bounded.deadline.is_some());
+
+        let cx = Cx::for_testing_with_budget(Budget::new().with_deadline(Time::ZERO));
+        let tightened = cx.budget_for_timeout(Duration::from_secs(30));
+        // min(ambient, now + 30s) can never exceed the ambient deadline.
+        assert_eq!(tightened.deadline, Some(Time::ZERO));
+    }
+
+    #[test]
+    fn remaining_budget_snapshot_reflects_live_budget() {
+        let budget = Budget::new().with_poll_quota(42).with_cost_quota(7);
+        let cx = Cx::for_testing_with_budget(budget);
+        let left = cx.remaining_budget();
+        assert_eq!(left.polls, Some(42));
+        assert_eq!(left.cost, Some(7));
+        assert_eq!(left.deadline, None); // no deadline configured
+
+        let unlimited = test_cx().remaining_budget();
+        assert_eq!(unlimited.polls, None);
+        assert_eq!(unlimited.cost, None);
     }
 
     fn trace_message(event: &crate::trace::TraceEvent) -> &str {
@@ -4319,6 +4470,58 @@ mod tests {
             wakes.load(Ordering::SeqCst),
             1,
             "clearing cancellation must not spuriously wake the cancel waker"
+        );
+    }
+
+    #[test]
+    fn cancel_waker_registration_count_preserves_same_waker_until_last_clear() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Waker;
+
+        struct CountWaker(Arc<AtomicUsize>);
+
+        use std::task::Wake;
+        impl Wake for CountWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = test_cx();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountWaker(Arc::clone(&wakes))));
+
+        cx.register_cancel_waker(&waker);
+        cx.register_cancel_waker(&waker);
+
+        {
+            let inner = cx.inner.read();
+            assert!(inner.cancel_waker.is_some());
+            assert_eq!(inner.cancel_waker_registration_count, 2);
+        }
+
+        cx.clear_cancel_waker_if_current(&waker);
+        {
+            let inner = cx.inner.read();
+            assert!(inner.cancel_waker.is_some());
+            assert_eq!(inner.cancel_waker_registration_count, 1);
+        }
+
+        cx.clear_cancel_waker_if_current(&waker);
+        {
+            let inner = cx.inner.read();
+            assert!(inner.cancel_waker.is_none());
+            assert_eq!(inner.cancel_waker_registration_count, 0);
+        }
+
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            0,
+            "registration cleanup must not wake the task"
         );
     }
 

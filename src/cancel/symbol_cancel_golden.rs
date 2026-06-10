@@ -102,7 +102,7 @@ empty_broadcaster::empty_stats=initiated=0, duplicates=0, forwarded=0, pending_r
 
         let obj1 = ObjectId::new(0, 0x90ab_cdef);
         let obj2 = ObjectId::new(0, 0xfedc_ba09);
-        let budget = Budget::with_deadline_ns(500_000_000);
+        let budget = Budget::with_deadline_at_ns(500_000_000);
 
         let token1 = SymbolCancelToken::with_budget(obj1, budget, &mut rng);
         let token2 = SymbolCancelToken::new(obj2, &mut rng);

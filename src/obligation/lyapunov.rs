@@ -942,7 +942,7 @@ mod tests {
         // With D₀ = 1s (see StateSnapshot::from_runtime_state), a task with
         // 500ms slack contributes 0.5 pressure.
         let (_task_id, _handle) = state
-            .create_task(root, Budget::with_deadline_ns(500_000_000), async {})
+            .create_task(root, Budget::with_deadline_at_ns(500_000_000), async {})
             .expect("create_task must succeed");
 
         state.now = Time::ZERO;

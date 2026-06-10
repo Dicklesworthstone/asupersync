@@ -6656,7 +6656,7 @@ mod tests {
             root,
             TaskState::CancelRequested {
                 reason: CancelReason::user("test"),
-                cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms in ns
+                cleanup_budget: Budget::with_deadline_at_ns(100_000_000), // 100ms in ns
             },
         );
 
@@ -7217,7 +7217,7 @@ mod tests {
             root,
             TaskState::CancelRequested {
                 reason: CancelReason::user("test"),
-                cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms in ns
+                cleanup_budget: Budget::with_deadline_at_ns(100_000_000), // 100ms in ns
             },
         );
 
@@ -7453,7 +7453,7 @@ mod tests {
             complex_root,
             TaskState::CancelRequested {
                 reason: CancelReason::user("cleanup"),
-                cleanup_budget: Budget::with_deadline_ns(200_000_000), // 200ms in ns
+                cleanup_budget: Budget::with_deadline_at_ns(200_000_000), // 200ms in ns
             },
         );
 

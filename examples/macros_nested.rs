@@ -56,7 +56,7 @@ mod demo {
 
         let _ = scope!(cx, "outer", {
             let _outer = spawn!(async { 1 });
-            let _ = scope!(cx, budget: Budget::with_deadline_secs(5), {
+            let _ = scope!(cx, budget: Budget::with_deadline_at_secs(5), {
                 let _inner = spawn!(async { 2 });
                 0
             });

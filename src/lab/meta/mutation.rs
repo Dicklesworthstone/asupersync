@@ -532,8 +532,8 @@ fn baseline_deadline_monotone(harness: &mut MetaHarness) {
     let now = harness.now();
     let parent = harness.next_region();
     let child = harness.next_region();
-    let parent_budget = Budget::with_deadline_secs(10);
-    let child_budget = Budget::with_deadline_secs(5);
+    let parent_budget = Budget::with_deadline_at_secs(10);
+    let child_budget = Budget::with_deadline_at_secs(5);
     harness
         .oracles
         .deadline_monotone
@@ -548,7 +548,7 @@ fn mutation_deadline_monotone(harness: &mut MetaHarness) {
     let now = harness.now();
     let parent = harness.next_region();
     let child = harness.next_region();
-    let parent_budget = Budget::with_deadline_secs(10);
+    let parent_budget = Budget::with_deadline_at_secs(10);
     let child_budget = Budget::INFINITE;
     harness
         .oracles

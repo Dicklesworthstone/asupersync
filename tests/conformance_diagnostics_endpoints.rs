@@ -27,10 +27,10 @@ fn populated_runtime() -> (Diagnostics, RegionId, RegionId, TaskId) {
     let mut state = RuntimeState::new();
     let root = state.create_root_region(Budget::INFINITE);
     let child = state
-        .create_child_region(root, Budget::with_deadline_ns(500_000_000))
+        .create_child_region(root, Budget::with_deadline_at_ns(500_000_000))
         .expect("child region should be admitted");
     let (task, _handle) = state
-        .create_task(child, Budget::with_deadline_ns(50_000_000), async {})
+        .create_task(child, Budget::with_deadline_at_ns(50_000_000), async {})
         .expect("task should be admitted");
 
     state

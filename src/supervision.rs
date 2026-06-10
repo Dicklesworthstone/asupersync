@@ -4370,7 +4370,7 @@ mod tests {
 
         let spec = ChildSpec::new("worker-1", noop_start)
             .with_restart(SupervisionStrategy::Restart(RestartConfig::default()))
-            .with_shutdown_budget(Budget::with_deadline_secs(10))
+            .with_shutdown_budget(Budget::with_deadline_at_secs(10))
             .with_registration(NameRegistrationPolicy::Register {
                 name: "worker-1".to_string(),
                 collision: NameCollisionPolicy::Fail,
@@ -4438,7 +4438,7 @@ mod tests {
                 3,
                 Duration::from_secs(10),
             )))
-            .with_shutdown_budget(Budget::with_deadline_secs(2))
+            .with_shutdown_budget(Budget::with_deadline_at_secs(2))
             .depends_on("db")
             .with_start_immediately(false)
             .with_required(true);
@@ -4448,7 +4448,7 @@ mod tests {
                 3,
                 Duration::from_secs(10),
             )))
-            .with_shutdown_budget(Budget::with_deadline_secs(2))
+            .with_shutdown_budget(Budget::with_deadline_at_secs(2))
             .depends_on("db")
             .with_start_immediately(false)
             .with_required(true);
@@ -5289,7 +5289,7 @@ mod tests {
         let history = RestartHistory::new(config);
 
         // Budget with deadline 5 seconds from now, but we need 10 seconds
-        let budget = Budget::with_deadline_secs(15); // deadline at t=15s
+        let budget = Budget::with_deadline_at_secs(15); // deadline at t=15s
 
         // At t=12s (3 seconds remaining, need 10)
         let now_ns = 12_000_000_000u64;
@@ -5638,7 +5638,7 @@ mod tests {
         let history = RestartHistory::new(config);
 
         // Budget with deadline already in the past
-        let budget = Budget::with_deadline_secs(5); // deadline at t=5s
+        let budget = Budget::with_deadline_at_secs(5); // deadline at t=5s
 
         // At t=10s, deadline has passed
         let result = history.can_restart_with_budget(10_000_000_000, &budget);

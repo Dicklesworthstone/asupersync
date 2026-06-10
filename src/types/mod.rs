@@ -29,8 +29,8 @@ pub mod wasm_abi;
 
 pub use budget::{
     Budget, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
-    CapabilityBudgetRequirements, CurveBudget, CurveError, MinPlusCurve, backlog_bound,
-    delay_bound,
+    CapabilityBudgetRequirements, CurveBudget, CurveError, MinPlusCurve, RemainingBudget,
+    backlog_bound, delay_bound,
 };
 pub use builder::{BuildError, BuildResult};
 pub use cancel::{

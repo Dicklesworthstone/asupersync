@@ -438,7 +438,7 @@ impl SloCompiledBudget {
     /// Convert this projection into the runtime [`Budget`] type.
     #[must_use]
     pub fn to_budget(&self) -> Budget {
-        Budget::with_deadline_ns(self.cleanup_deadline_ns)
+        Budget::with_deadline_at_ns(self.cleanup_deadline_ns)
             .with_poll_quota(self.poll_quota)
             .with_cost_quota(self.cost_quota)
             .with_priority(self.priority)

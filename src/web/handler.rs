@@ -708,7 +708,7 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let deadline_budget = Budget::with_deadline_secs(7);
+        let deadline_budget = Budget::with_deadline_at_secs(7);
         let request_cx = runtime.request_cx_with_budget(deadline_budget);
         let expected_task = request_cx.task_id();
         let expected_region = request_cx.region_id();

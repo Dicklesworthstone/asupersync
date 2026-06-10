@@ -1246,7 +1246,7 @@ fn sharding_budget_limited_tasks() {
         let completed = Arc::clone(&completed);
         let (task_id, _handle) = runtime
             .state
-            .create_task(root, Budget::with_deadline_ns(1_000_000), async move {
+            .create_task(root, Budget::with_deadline_at_ns(1_000_000), async move {
                 asupersync::runtime::yield_now().await;
                 completed.fetch_add(1, Ordering::SeqCst);
             })

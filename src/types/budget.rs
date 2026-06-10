@@ -121,7 +121,7 @@
 //! let unlimited = Budget::unlimited();
 //!
 //! // With an absolute logical deadline
-//! let timed = Budget::with_deadline_secs(30);
+//! let timed = Budget::with_deadline_at_secs(30);
 //!
 //! // With a relative timeout from the current logical time
 //! # use std::time::Duration;
@@ -146,6 +146,23 @@ use std::time::Duration;
 /// Budgets form a product semiring for combination:
 /// - Deadlines/quotas use min (tighter wins)
 /// - Priority uses max (higher urgency wins)
+///
+/// # Choosing a deadline constructor
+///
+/// Absolute vs. relative time is the classic budget footgun. Pick from this
+/// table; the `at` / `timeout` words in the names mark the semantics:
+///
+/// | You have | You want | Use |
+/// |----------|----------|-----|
+/// | An absolute logical instant (`Time`) | deadline at that instant | [`with_deadline`](Self::with_deadline) |
+/// | An absolute instant in raw seconds/nanos | deadline at that instant | [`with_deadline_at_secs`](Self::with_deadline_at_secs) / [`with_deadline_at_ns`](Self::with_deadline_at_ns) |
+/// | `now` + a relative timeout | deadline replaced by `now + timeout` | [`with_timeout`](Self::with_timeout) |
+/// | `now` + a relative timeout | deadline tightened, never loosened | [`tightened_by_timeout`](Self::tightened_by_timeout) |
+/// | A `Cx` + a relative timeout | ambient budget tightened correctly | `Cx::budget_for_timeout` |
+///
+/// For deadline *propagation* across calls (HTTP → handler → DB), always use
+/// the tightening forms — replacing a deadline can silently extend it past
+/// the caller's bound.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     /// Absolute deadline by which work must complete.
@@ -156,6 +173,38 @@ pub struct Budget {
     pub cost_quota: Option<u64>,
     /// Scheduling priority (0 = lowest, 255 = highest).
     pub priority: u8,
+}
+
+/// A point-in-time snapshot of the remaining headroom in a [`Budget`].
+///
+/// Produced by [`Budget::remaining`]. Every dimension uses `None` to mean
+/// "effectively unlimited" (no deadline configured, `u32::MAX` poll quota, or
+/// no cost quota), so callers never need to know the sentinel encodings.
+///
+/// The canonical use is adaptive control flow such as "do I have time for
+/// another retry?":
+///
+/// ```
+/// # use asupersync::Budget;
+/// # use asupersync::types::id::Time;
+/// # use std::time::Duration;
+/// # let budget = Budget::new().with_deadline(Time::from_secs(30));
+/// # let now = Time::from_secs(29);
+/// # let estimated_attempt = Duration::from_secs(5);
+/// let left = budget.remaining(now);
+/// let can_retry = left.deadline.is_none_or(|d| d > estimated_attempt);
+/// # assert!(!can_retry);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemainingBudget {
+    /// Time left until the deadline, or `None` if no deadline is set or the
+    /// deadline has already passed with no remaining time (see
+    /// [`Budget::remaining_time`] for the exact past-deadline semantics).
+    pub deadline: Option<Duration>,
+    /// Polls left, or `None` if effectively unlimited.
+    pub polls: Option<u32>,
+    /// Cost units left, or `None` if no cost quota is configured.
+    pub cost: Option<u64>,
 }
 
 impl Budget {
@@ -218,21 +267,23 @@ impl Budget {
 
     /// Creates a budget with only an absolute deadline constraint (in seconds).
     ///
-    /// The value is a logical instant since the runtime epoch, not a timeout
-    /// duration. For a per-operation timeout, use
-    /// [`with_timeout`](Self::with_timeout) with the current logical time.
+    /// The `at` in the name is deliberate: the value is a logical instant
+    /// since the runtime epoch ("deadline AT t=30s"), not a timeout duration.
+    /// For a per-operation timeout, use [`with_timeout`](Self::with_timeout)
+    /// or [`tightened_by_timeout`](Self::tightened_by_timeout) with the
+    /// current logical time.
     ///
     /// # Example
     ///
     /// ```
     /// # use asupersync::Budget;
     /// # use asupersync::types::id::Time;
-    /// let budget = Budget::with_deadline_secs(30);
+    /// let budget = Budget::with_deadline_at_secs(30);
     /// assert_eq!(budget.deadline, Some(Time::from_secs(30)));
     /// ```
     #[inline]
     #[must_use]
-    pub const fn with_deadline_secs(secs: u64) -> Self {
+    pub const fn with_deadline_at_secs(secs: u64) -> Self {
         Self {
             deadline: Some(Time::from_secs(secs)),
             poll_quota: u32::MAX,
@@ -243,21 +294,23 @@ impl Budget {
 
     /// Creates a budget with only an absolute deadline constraint (in nanoseconds).
     ///
-    /// The value is a logical instant since the runtime epoch, not a timeout
-    /// duration. For a per-operation timeout, use
-    /// [`with_timeout`](Self::with_timeout) with the current logical time.
+    /// The `at` in the name is deliberate: the value is a logical instant
+    /// since the runtime epoch, not a timeout duration. For a per-operation
+    /// timeout, use [`with_timeout`](Self::with_timeout) or
+    /// [`tightened_by_timeout`](Self::tightened_by_timeout) with the current
+    /// logical time.
     ///
     /// # Example
     ///
     /// ```
     /// # use asupersync::Budget;
     /// # use asupersync::types::id::Time;
-    /// let budget = Budget::with_deadline_ns(30_000_000_000); // 30 seconds
+    /// let budget = Budget::with_deadline_at_ns(30_000_000_000); // 30 seconds
     /// assert_eq!(budget.deadline, Some(Time::from_nanos(30_000_000_000)));
     /// ```
     #[inline]
     #[must_use]
-    pub const fn with_deadline_ns(nanos: u64) -> Self {
+    pub const fn with_deadline_at_ns(nanos: u64) -> Self {
         Self {
             deadline: Some(Time::from_nanos(nanos)),
             poll_quota: u32::MAX,
@@ -301,6 +354,40 @@ impl Budget {
     pub fn with_timeout(mut self, now: Time, timeout: Duration) -> Self {
         self.deadline = Some(now + timeout);
         self
+    }
+
+    /// Tightens this budget with a relative timeout, never loosening it.
+    ///
+    /// Unlike [`with_timeout`](Self::with_timeout), which *replaces* any
+    /// existing deadline, this composes via [`meet`](Self::meet): the
+    /// resulting deadline is `min(existing_deadline, now + timeout)`. This is
+    /// the correct operation for deadline propagation — an outer 10s request
+    /// budget tightened by a 30s per-call timeout stays a 10s budget.
+    ///
+    /// All other dimensions (poll quota, cost quota, priority) are preserved.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
+    /// let now = Time::from_secs(100);
+    ///
+    /// // Ambient deadline at t=110s; a 30s timeout must NOT loosen it.
+    /// let ambient = Budget::new().with_deadline(Time::from_secs(110));
+    /// let tightened = ambient.tightened_by_timeout(now, Duration::from_secs(30));
+    /// assert_eq!(tightened.deadline, Some(Time::from_secs(110)));
+    ///
+    /// // No ambient deadline: the timeout becomes the deadline.
+    /// let open = Budget::new();
+    /// let bounded = open.tightened_by_timeout(now, Duration::from_secs(30));
+    /// assert_eq!(bounded.deadline, Some(Time::from_secs(130)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn tightened_by_timeout(self, now: Time, timeout: Duration) -> Self {
+        self.meet(Self::new().with_timeout(now, timeout))
     }
 
     /// Sets the poll quota.
@@ -473,8 +560,8 @@ impl Budget {
     /// ```
     /// # use asupersync::Budget;
     /// # use asupersync::types::id::Time;
-    /// let parent = Budget::with_deadline_secs(30);
-    /// let child = Budget::with_deadline_secs(10);
+    /// let parent = Budget::with_deadline_at_secs(30);
+    /// let child = Budget::with_deadline_at_secs(10);
     ///
     /// // Child deadline is tighter, so it wins
     /// let effective = parent.meet(child);
@@ -554,7 +641,7 @@ impl Budget {
     /// # use asupersync::Budget;
     /// # use asupersync::types::id::Time;
     /// # use std::time::Duration;
-    /// let budget = Budget::with_deadline_secs(30);
+    /// let budget = Budget::with_deadline_at_secs(30);
     /// let now = Time::from_secs(10);
     ///
     /// let remaining = budget.remaining_time(now);
@@ -612,6 +699,47 @@ impl Budget {
         self.cost_quota
     }
 
+    /// Returns a point-in-time snapshot of every remaining budget dimension.
+    ///
+    /// This aggregates [`remaining_time`](Self::remaining_time),
+    /// [`remaining_polls`](Self::remaining_polls), and
+    /// [`remaining_cost`](Self::remaining_cost) into one structure, mapping
+    /// "effectively unlimited" sentinel values to `None` so callers can write
+    /// `if let Some(left) = snapshot.polls` without knowing the sentinels.
+    ///
+    /// The snapshot is valid at the moment of the call only; quotas continue
+    /// to drain as the task runs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
+    /// let now = Time::from_secs(10);
+    /// let budget = Budget::new()
+    ///     .with_deadline(Time::from_secs(30))
+    ///     .with_poll_quota(100);
+    ///
+    /// let left = budget.remaining(now);
+    /// assert_eq!(left.deadline, Some(Duration::from_secs(20)));
+    /// assert_eq!(left.polls, Some(100));
+    /// assert_eq!(left.cost, None); // no cost quota configured
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn remaining(&self, now: Time) -> RemainingBudget {
+        RemainingBudget {
+            deadline: self.remaining_time(now),
+            polls: if self.poll_quota == u32::MAX {
+                None
+            } else {
+                Some(self.poll_quota)
+            },
+            cost: self.cost_quota,
+        }
+    }
+
     /// Converts the deadline to a timeout duration from the given time.
     ///
     /// Returns the same value as [`remaining_time`](Self::remaining_time).
@@ -623,7 +751,7 @@ impl Budget {
     /// # use asupersync::Budget;
     /// # use asupersync::types::id::Time;
     /// # use std::time::Duration;
-    /// let budget = Budget::with_deadline_secs(30);
+    /// let budget = Budget::with_deadline_at_secs(30);
     /// let now = Time::from_secs(5);
     ///
     /// // 25 seconds remaining
@@ -1279,6 +1407,80 @@ mod tests {
     }
 
     #[test]
+    fn tightened_by_timeout_never_loosens_existing_deadline() {
+        let now = Time::from_secs(100);
+        // Ambient deadline (t=110) is sooner than now + 30s (t=130): keep it.
+        let ambient = Budget::new().with_deadline(Time::from_secs(110));
+        let tightened = ambient.tightened_by_timeout(now, Duration::from_secs(30));
+        assert_eq!(tightened.deadline, Some(Time::from_secs(110)));
+    }
+
+    #[test]
+    fn tightened_by_timeout_tightens_looser_deadline() {
+        let now = Time::from_secs(100);
+        // Ambient deadline (t=500) is later than now + 30s (t=130): tighten.
+        let ambient = Budget::new().with_deadline(Time::from_secs(500));
+        let tightened = ambient.tightened_by_timeout(now, Duration::from_secs(30));
+        assert_eq!(tightened.deadline, Some(Time::from_secs(130)));
+    }
+
+    #[test]
+    fn tightened_by_timeout_bounds_open_budget() {
+        let now = Time::from_secs(100);
+        let bounded = Budget::new().tightened_by_timeout(now, Duration::from_secs(30));
+        assert_eq!(bounded.deadline, Some(Time::from_secs(130)));
+    }
+
+    #[test]
+    fn tightened_by_timeout_preserves_other_dimensions() {
+        let now = Time::from_secs(0);
+        let budget = Budget::new()
+            .with_poll_quota(77)
+            .with_cost_quota(11)
+            .with_priority(200)
+            .tightened_by_timeout(now, Duration::from_secs(1));
+        assert_eq!(budget.poll_quota, 77);
+        assert_eq!(budget.cost_quota, Some(11));
+        assert_eq!(budget.priority, 200);
+    }
+
+    #[test]
+    fn remaining_snapshot_maps_sentinels_to_none() {
+        let now = Time::from_secs(10);
+        let unlimited = Budget::new().remaining(now);
+        assert_eq!(unlimited.deadline, None);
+        assert_eq!(unlimited.polls, None);
+        assert_eq!(unlimited.cost, None);
+
+        let bounded = Budget::new()
+            .with_deadline(Time::from_secs(30))
+            .with_poll_quota(5)
+            .with_cost_quota(9)
+            .remaining(now);
+        assert_eq!(bounded.deadline, Some(Duration::from_secs(20)));
+        assert_eq!(bounded.polls, Some(5));
+        assert_eq!(bounded.cost, Some(9));
+    }
+
+    #[test]
+    fn remaining_snapshot_past_deadline_reports_none() {
+        let now = Time::from_secs(50);
+        let expired = Budget::new()
+            .with_deadline(Time::from_secs(30))
+            .remaining(now);
+        assert_eq!(expired.deadline, None);
+    }
+
+    #[test]
+    fn deadline_at_constructors_are_absolute_instants() {
+        // The rename's whole point: these are instants, not durations.
+        let secs = Budget::with_deadline_at_secs(30);
+        assert_eq!(secs.deadline, Some(Time::from_secs(30)));
+        let ns = Budget::with_deadline_at_ns(2_000_000_000);
+        assert_eq!(ns.deadline, Some(Time::from_nanos(2_000_000_000)));
+    }
+
+    #[test]
     fn with_poll_quota_sets_quota() {
         let budget = Budget::new().with_poll_quota(42);
         assert_eq!(budget.poll_quota, 42);
@@ -1676,7 +1878,7 @@ mod tests {
 
     #[test]
     fn with_deadline_secs_constructor() {
-        let budget = Budget::with_deadline_secs(30);
+        let budget = Budget::with_deadline_at_secs(30);
         assert_eq!(budget.deadline, Some(Time::from_secs(30)));
         assert_eq!(budget.poll_quota, u32::MAX);
         assert_eq!(budget.cost_quota, None);
@@ -1685,7 +1887,7 @@ mod tests {
 
     #[test]
     fn with_deadline_ns_constructor() {
-        let budget = Budget::with_deadline_ns(30_000_000_000);
+        let budget = Budget::with_deadline_at_ns(30_000_000_000);
         assert_eq!(budget.deadline, Some(Time::from_nanos(30_000_000_000)));
     }
 
@@ -1781,7 +1983,7 @@ mod tests {
 
     #[test]
     fn remaining_time_basic() {
-        let budget = Budget::with_deadline_secs(30);
+        let budget = Budget::with_deadline_at_secs(30);
         let now = Time::from_secs(10);
 
         let remaining = budget.remaining_time(now);
@@ -1796,13 +1998,13 @@ mod tests {
 
     #[test]
     fn remaining_time_past_deadline() {
-        let budget = Budget::with_deadline_secs(10);
+        let budget = Budget::with_deadline_at_secs(10);
         assert_eq!(budget.remaining_time(Time::from_secs(15)), None);
     }
 
     #[test]
     fn remaining_time_at_deadline() {
-        let budget = Budget::with_deadline_secs(10);
+        let budget = Budget::with_deadline_at_secs(10);
         assert_eq!(budget.remaining_time(Time::from_secs(10)), None);
     }
 
@@ -1832,7 +2034,7 @@ mod tests {
 
     #[test]
     fn to_timeout_is_alias_for_remaining_time() {
-        let budget = Budget::with_deadline_secs(30);
+        let budget = Budget::with_deadline_at_secs(30);
         let now = Time::from_secs(10);
 
         assert_eq!(budget.to_timeout(now), budget.remaining_time(now));

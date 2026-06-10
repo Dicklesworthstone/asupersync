@@ -244,7 +244,7 @@ fn forensic_dump_complex_hierarchy() {
         grandchild_id,
         TaskState::CancelRequested {
             reason: CancelReason::user("test cleanup"),
-            cleanup_budget: Budget::with_deadline_ns(100_000_000), // 100ms
+            cleanup_budget: Budget::with_deadline_at_ns(100_000_000), // 100ms
         },
     );
 

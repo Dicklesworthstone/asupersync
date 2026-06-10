@@ -6969,7 +6969,7 @@ mod tests {
 
         // Create a task with tight deadline that will miss
         let (_deadline_task_id, _deadline_handle) = state
-            .create_task(root, Budget::with_deadline_ns(50_000), async {})
+            .create_task(root, Budget::with_deadline_at_ns(50_000), async {})
             .expect("create deadline-miss task");
 
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
@@ -10111,7 +10111,7 @@ mod tests {
         state.now = Time::from_nanos(999_000_000);
         let root = state.create_root_region(Budget::unlimited());
         let (_task_id, _handle) = state
-            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .create_task(root, Budget::with_deadline_at_ns(1_000_000_000), async {})
             .expect("create task");
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
@@ -10148,7 +10148,7 @@ mod tests {
         state.now = Time::from_nanos(999_000_000);
         let root = state.create_root_region(Budget::unlimited());
         let (_task_id, _handle) = state
-            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .create_task(root, Budget::with_deadline_at_ns(1_000_000_000), async {})
             .expect("create deadline task");
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
@@ -10281,7 +10281,7 @@ mod tests {
         state.now = Time::from_nanos(999_000_000);
         let root = state.create_root_region(Budget::unlimited());
         let (_task_id, _handle) = state
-            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .create_task(root, Budget::with_deadline_at_ns(1_000_000_000), async {})
             .expect("create task");
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
@@ -10331,7 +10331,7 @@ mod tests {
         state.now = Time::from_nanos(999_000_000);
         let root = state.create_root_region(Budget::unlimited());
         let (_task_id, _handle) = state
-            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .create_task(root, Budget::with_deadline_at_ns(1_000_000_000), async {})
             .expect("create task");
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
@@ -14259,7 +14259,7 @@ mod tests {
             LyapunovGovernorDecisionFixture::MeetDeadlines => {
                 let root = state.create_root_region(Budget::unlimited());
                 let (_task_id, _handle) = state
-                    .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+                    .create_task(root, Budget::with_deadline_at_ns(1_000_000_000), async {})
                     .expect("create deadline-pressured task");
             }
             LyapunovGovernorDecisionFixture::DrainObligations => {
@@ -14388,7 +14388,7 @@ mod tests {
         state.now = Time::from_nanos(999_000_000);
         let root = state.create_root_region(Budget::unlimited());
         let (_task_id, _handle) = state
-            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .create_task(root, Budget::with_deadline_at_ns(1_000_000_000), async {})
             .expect("create deadline-pressured task");
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
@@ -14528,7 +14528,7 @@ mod tests {
             state.now = Time::from_nanos(999_000_000);
             let root = state.create_root_region(Budget::unlimited());
             let (_task_id, _handle) = state
-                .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+                .create_task(root, Budget::with_deadline_at_ns(1_000_000_000), async {})
                 .expect("create deadline-pressured task");
             let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
