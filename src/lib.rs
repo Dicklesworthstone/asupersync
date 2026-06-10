@@ -338,7 +338,7 @@ pub mod public_api_golden_tests;
 pub mod raptorq_deep_dive_metamorphic_tests;
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod raptorq_rfc6330_conformance_tests;
-#[cfg(all(test, feature = "channel-mpsc-select-e2e"))]
+#[cfg(feature = "channel-mpsc-select-e2e")]
 pub mod real_channel_mpsc_combinator_select_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_e2e_hardening_consolidation;
