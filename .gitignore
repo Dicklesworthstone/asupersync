@@ -132,6 +132,7 @@ artifacts/*
 !artifacts/fifth_wave_live_swarm_telemetry_heatmap_v1.json
 !artifacts/fifth_wave_numa_scheduler_locality_lab_v1.json
 !artifacts/generated_smoke_artifact_inventory_v1.json
+!artifacts/validation_frontier_inventory_v1.json
 
 # Generated smoke-run output roots. These are retained local evidence, not
 # source artifacts; the committed inventory above records ownership/checksums.
