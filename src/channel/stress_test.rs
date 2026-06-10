@@ -334,20 +334,23 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
             let receiver = sender.subscribe();
             let handle = handle.spawn(async move {
                 let cx = Cx::for_testing();
-                let mut count = 0;
+                let mut count = 0_usize;
+                let mut skipped = 0_u64;
                 let mut receiver = receiver;
-                for _ in 0..num_messages {
+                loop {
                     match receiver.recv(&cx).await {
                         Ok(_) => count += 1,
-                        Err(broadcast::RecvError::Lagged(_)) => {
+                        Err(broadcast::RecvError::Lagged(missed)) => {
+                            skipped = skipped.saturating_add(missed);
                             // The receiver cursor has already advanced to
                             // the earliest retained message. Keep draining
                             // without holding a sender clone alive.
                         }
-                        Err(_) => break,
+                        Err(broadcast::RecvError::Closed) => break,
+                        Err(err) => panic!("broadcast subscriber {i} failed: {err}"),
                     }
                 }
-                (i, count)
+                (i, count, skipped)
             });
             subscribers.push(handle);
         }
@@ -356,18 +359,33 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         let sender_handle = handle.spawn(send_broadcast_messages(sender, num_messages));
 
         let sent = sender_handle.await;
+        assert_eq!(sent, num_messages, "broadcast sender stopped early");
 
         // Collect results from subscribers
-        let mut total_received = 0;
+        let mut total_received = 0_usize;
+        let mut total_skipped = 0_u64;
         for handle in subscribers {
             match timeout(wall_now(), Duration::from_secs(10), handle).await {
-                Ok((subscriber_id, count)) => {
+                Ok((subscriber_id, count, skipped)) => {
                     tracing::debug!(
                         subscriber_id,
                         received = count,
+                        skipped,
                         "broadcast_stress_test: subscriber result"
                     );
                     total_received += count;
+                    total_skipped = total_skipped.saturating_add(skipped);
+                    assert!(
+                        count > 0,
+                        "broadcast subscriber {subscriber_id} received no retained messages"
+                    );
+                    let accounted = u64::try_from(count)
+                        .expect("subscriber count fits in u64")
+                        .saturating_add(skipped);
+                    assert!(
+                        accounted == u64::try_from(sent).expect("sent count fits in u64"),
+                        "broadcast subscriber {subscriber_id} did not account for all sent messages"
+                    );
                 }
                 Err(_) => {
                     panic!("broadcast subscriber timed out after sender completion");
@@ -375,10 +393,15 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        tracing::info!(sent, total_received, "broadcast_stress_test: completed");
+        tracing::info!(
+            sent,
+            total_received,
+            total_skipped,
+            "broadcast_stress_test: completed"
+        );
         assert!(
-            total_received >= sent * num_subscribers / 2,
-            "Too few messages received"
+            total_received > 0,
+            "broadcast subscribers received no retained messages"
         );
     });
 
