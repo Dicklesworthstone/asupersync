@@ -530,8 +530,7 @@ mod tests {
                     let id = mailbox.allocate_task_id();
                     owners.lock().unwrap().insert(id.as_u64(), producer);
                     order.push(id.as_u64());
-                    let req =
-                        SpawnRequest::new(id, test_region(), Budget::new(), noop_task(id));
+                    let req = SpawnRequest::new(id, test_region(), Budget::new(), noop_task(id));
                     mailbox.enqueue(req, Time::ZERO);
                 }
                 order
@@ -627,7 +626,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let seen = seen_reason.lock().unwrap();
         let reason = seen.as_ref().expect("slot received reason");
-        assert_eq!(reason.message, Some("region closed before admission".into()));
+        assert_eq!(
+            reason.message,
+            Some("region closed before admission".into())
+        );
     }
 
     #[test]
@@ -659,8 +661,7 @@ mod tests {
         let mailbox = SpawnMailbox::new();
         let id = mailbox.allocate_task_id();
         let budget = Budget::new().with_poll_quota(123).with_priority(7);
-        let req = SpawnRequest::new(id, test_region(), budget, noop_task(id))
-            .with_name("worker-a");
+        let req = SpawnRequest::new(id, test_region(), budget, noop_task(id)).with_name("worker-a");
         mailbox.enqueue(req, Time::ZERO);
 
         let req = mailbox.dequeue().expect("request queued");
