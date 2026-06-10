@@ -1,0 +1,190 @@
+{
+  "schema_version": "rch-stale-progress-contract-v1",
+  "contract_id": "rch-stale-progress-receipt-contract",
+  "bead_id": "asupersync-validation-frontier-v2-b5cjsv.4",
+  "helper": "scripts/rch_stale_progress_receipt.py",
+  "description": "Deterministic stale-progress receipt contract for remote-required RCH lanes that heartbeat without compiler progress or terminate through infrastructure cleanup. This contract is fixture-only and does not query live RCH, run Cargo, mutate beads, or send Agent Mail.",
+  "required_classifications": [
+    "heartbeat-live-progress-stale-wait",
+    "owned-stale-cancel-recommended",
+    "stale-progress-canceled",
+    "peer-owned-do-not-cancel",
+    "heartbeat-stale-infra",
+    "local-fallback-refused"
+  ],
+  "expected_summary": {
+    "scenario_count": 6,
+    "code_evidence_claimable_count": 0,
+    "proof_success_citable_count": 0,
+    "cancel_allowed_count": 2,
+    "retry_allowed_count": 2,
+    "peer_cancel_forbidden_count": 1,
+    "local_fallback_count": 1,
+    "heartbeat_stale_count": 1,
+    "highest_severity_scenario": "local-fallback-refusal"
+  },
+  "validation": {
+    "focused_rch_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture",
+    "script_self_check": "python3 scripts/rch_stale_progress_receipt.py --fixture artifacts/rch_stale_progress_receipt_contract_v1.json --generated-at 2026-06-10T12:40:00Z --output json"
+  },
+  "fixture": {
+    "schema_version": "rch-stale-progress-fixture-v1",
+    "fixture_id": "rch-stale-progress-contract-fixture",
+    "current_agent": "DarkStream",
+    "policy": {
+      "policy_id": "rch-stale-progress-fail-closed-v1",
+      "receipt_schema_version": "rch-stale-progress-receipt-v1",
+      "wait_for_fresh_heartbeat": true,
+      "never_cancel_peer_owned_builds": true,
+      "receipt_required_before_retry": true,
+      "code_evidence_claimable": false,
+      "progress_stale_after_secs": 600,
+      "heartbeat_stale_after_secs": 300,
+      "quiet_warning_seconds": 300,
+      "retry_policy": "retry only after a deterministic stale receipt or a real compiler/runtime diagnostic"
+    },
+    "scenario_defaults": {
+      "lane": {
+        "bead_id": "asupersync-validation-frontier-v2-b5cjsv.4",
+        "manifest_lane_id": "rch-stale-progress-receipt-contract",
+        "command_id": "rch-stale-progress-receipt-contract",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture",
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "source_fingerprint": "git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "rch_status": {
+        "build_id": 29880940465488050,
+        "project_id": "asupersync-42452dd6",
+        "worker_id": "vmi1227854",
+        "build_owner": "LilacBass",
+        "selected_target_dir": "/data/projects/asupersync/.rch-target-vmi1227854-job-29880940465488050",
+        "heartbeat_phase": "execute",
+        "heartbeat_detail": "remote_exec_start",
+        "heartbeat_age_secs": 1,
+        "progress_age_secs": 420,
+        "detector_confidence": 0.72,
+        "detector_progress_stale": false,
+        "detector_heartbeat_stale": false,
+        "detector_cancel_recommended": false,
+        "last_compiler_line": "Checking asupersync-conformance v0.3.4 (/data/projects/asupersync/conformance)",
+        "peer_owned_active_builds": [
+          29880940465488050
+        ],
+        "local_fallback_markers": []
+      },
+      "cancellation_outcome": null
+    },
+    "scenarios": [
+      {
+        "scenario_id": "heartbeat-live-progress-stale-wait",
+        "description": "The active same-project RCH build is heartbeat-live and past the quiet warning, but detector confidence has not recommended cancellation.",
+        "owned_by_current_agent": false
+      },
+      {
+        "scenario_id": "channel-mpsc-select-e2e-progress-stale",
+        "description": "The focused channel MPSC/select lane reaches the conformance tail, heartbeat stays fresh, progress crosses the stale threshold, and the current agent owns the build.",
+        "owned_by_current_agent": true,
+        "lane": {
+          "bead_id": "asupersync-validation-frontier-v2-b5cjsv.2",
+          "manifest_lane_id": "channel-mpsc-select-e2e-public-run",
+          "command_id": "channel-mpsc-select-e2e-public-run",
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_mpsc_select_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -p asupersync --bin channel_mpsc_select_e2e --features channel-mpsc-select-e2e",
+          "source_fingerprint": "git:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "rch_status": {
+          "build_id": 29880940465488021,
+          "build_owner": "DarkStream",
+          "selected_target_dir": "/data/projects/asupersync/.rch-target-vmi1227854-job-29880940465488021",
+          "progress_age_secs": 721,
+          "detector_confidence": 0.91,
+          "detector_progress_stale": true,
+          "detector_cancel_recommended": true,
+          "last_compiler_line": "Checking asupersync-conformance v0.3.4 (/data/projects/asupersync/conformance)",
+          "peer_owned_active_builds": []
+        }
+      },
+      {
+        "scenario_id": "owned-stale-canceled-cleanly",
+        "description": "The current agent owns the stale build and cancellation already completed with deterministic cleanup.",
+        "owned_by_current_agent": true,
+        "rch_status": {
+          "build_id": 29880940465488043,
+          "build_owner": "DarkStream",
+          "progress_age_secs": 900,
+          "detector_confidence": 0.97,
+          "detector_progress_stale": true,
+          "detector_cancel_recommended": true,
+          "last_compiler_line": "Checking asupersync-conformance v0.3.4 (/data/projects/asupersync/conformance)",
+          "peer_owned_active_builds": []
+        },
+        "cancellation_outcome": {
+          "operation_id": "cancel-29880940465488043",
+          "origin": "user",
+          "reason_code": "user",
+          "decision_path": [
+            "requested",
+            "term_sent",
+            "completed"
+          ],
+          "cleanup_ok": true,
+          "final_state": "completed"
+        }
+      },
+      {
+        "scenario_id": "peer-owned-progress-stale",
+        "description": "A peer-owned build is progress-stale; the receipt forbids cancellation and records the peer boundary.",
+        "owned_by_current_agent": false,
+        "rch_status": {
+          "build_id": 29880940465488046,
+          "build_owner": "LilacBass",
+          "progress_age_secs": 930,
+          "detector_confidence": 0.95,
+          "detector_progress_stale": true,
+          "detector_cancel_recommended": true,
+          "peer_owned_active_builds": [
+            29880940465488046
+          ]
+        }
+      },
+      {
+        "scenario_id": "heartbeat-stale-worker-infra",
+        "description": "The worker heartbeat is stale enough that the receipt becomes infrastructure evidence, not a source-code failure.",
+        "owned_by_current_agent": true,
+        "rch_status": {
+          "build_id": 29880940465488052,
+          "build_owner": "DarkStream",
+          "heartbeat_age_secs": 612,
+          "progress_age_secs": 1300,
+          "detector_confidence": 0.99,
+          "detector_progress_stale": true,
+          "detector_heartbeat_stale": true,
+          "detector_cancel_recommended": true,
+          "last_compiler_line": "Checking asupersync v0.3.4 (/data/projects/asupersync)",
+          "peer_owned_active_builds": []
+        }
+      },
+      {
+        "scenario_id": "local-fallback-refusal",
+        "description": "Remote-required validation cannot admit a worker and local fallback is explicitly refused.",
+        "owned_by_current_agent": true,
+        "rch_status": {
+          "build_id": 0,
+          "worker_id": "",
+          "build_owner": "DarkStream",
+          "heartbeat_age_secs": 0,
+          "progress_age_secs": 0,
+          "detector_confidence": 1.0,
+          "detector_progress_stale": false,
+          "detector_heartbeat_stale": false,
+          "detector_cancel_recommended": false,
+          "last_compiler_line": "",
+          "peer_owned_active_builds": [],
+          "local_fallback_markers": [
+            "[RCH] local (no admissible workers: critical_pressure=1,active_project_exclusion=1)"
+          ]
+        }
+      }
+    ]
+  }
+}

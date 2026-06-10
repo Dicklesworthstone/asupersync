@@ -143,7 +143,9 @@
       "code_evidence_claimable": false,
       "never_cancel_peer_owned_builds": true,
       "policy_id": "rch-stale-progress-fail-closed-v1",
+      "receipt_contract": "artifacts/rch_stale_progress_receipt_contract_v1.json",
       "receipt_required_before_retry": true,
+      "receipt_schema_version": "rch-stale-progress-receipt-v1",
       "retry_policy": "retry only after a deterministic stale receipt or a real compiler/runtime diagnostic",
       "wait_for_fresh_heartbeat": true
     },
@@ -355,6 +357,7 @@
     "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
     "durable-rch-final-signoff",
+    "rch-stale-progress-receipt",
     "proof-lane-manifest-verifier"
   ],
   "lanes": [
@@ -887,6 +890,26 @@
       ]
     },
     {
+      "lane_id": "rch-stale-progress-receipt-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture",
+      "guarantee_ids": [
+        "rch-stale-progress-receipt"
+      ],
+      "feature_flags": [],
+      "expected_signal": "rch_stale_progress_receipt_contract tests pass",
+      "source_paths": [
+        "artifacts/rch_stale_progress_receipt_contract_v1.json",
+        "docs/rch_stale_progress_receipt.md",
+        "scripts/rch_stale_progress_receipt.py",
+        "tests/rch_stale_progress_receipt_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ]
+    },
+    {
       "lane_id": "atp-native-quic-dependency-audit",
       "kind": "dependency_audit",
       "resource_envelope_class": "dependency-audit-light",
@@ -1066,6 +1089,12 @@
       "guarantee_id": "durable-rch-final-signoff",
       "lane_ids": [
         "durable-rch-proof-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "rch-stale-progress-receipt",
+      "lane_ids": [
+        "rch-stale-progress-receipt-contract"
       ]
     },
     {

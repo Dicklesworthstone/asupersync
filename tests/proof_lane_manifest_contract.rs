@@ -12,6 +12,8 @@ const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const MANIFEST_PROJECTION_GOLDEN_PATH: &str =
     "tests/fixtures/proof_lane_manifest/manifest_projection.json";
 const PROOF_REUSE_CONTRACT_PATH: &str = "artifacts/proof_reuse_cache_contract_v1.json";
+const RCH_STALE_PROGRESS_RECEIPT_CONTRACT_PATH: &str =
+    "artifacts/rch_stale_progress_receipt_contract_v1.json";
 const README_PATH: &str = "README.md";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -626,6 +628,15 @@ fn validation_frontier_policy(manifest: &Value) -> Result<&Value, String> {
         .ok_or_else(|| "validation frontier policy missing stale policy".to_string())?;
     if required_string(stale, "policy_id")? != "rch-stale-progress-fail-closed-v1" {
         return Err("stale progress policy id drifted".to_string());
+    }
+    if required_string(stale, "receipt_schema_version")? != "rch-stale-progress-receipt-v1" {
+        return Err("stale progress receipt schema version drifted".to_string());
+    }
+    if required_string(stale, "receipt_contract")? != RCH_STALE_PROGRESS_RECEIPT_CONTRACT_PATH {
+        return Err("stale progress receipt contract path drifted".to_string());
+    }
+    if !repo_path(RCH_STALE_PROGRESS_RECEIPT_CONTRACT_PATH).exists() {
+        return Err("stale progress receipt contract source must exist".to_string());
     }
     for required_true in [
         "wait_for_fresh_heartbeat",

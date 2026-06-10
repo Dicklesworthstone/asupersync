@@ -599,6 +599,40 @@ fn validate_blocked_frontier_record(
     Ok(())
 }
 
+fn validate_external_blocker_record(blocked: &Value) -> Result<(), String> {
+    let blocked = blocked
+        .as_object()
+        .ok_or_else(|| "blocked proof evidence row must have a blocker object".to_string())?;
+
+    for key in ["blocker_id", "blocked_at", "reason", "required_followup"] {
+        let value = blocked
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("blocked proof evidence row must include {key}"))?;
+        if value.trim().is_empty() {
+            return Err(format!("blocked proof evidence row {key} must be nonempty"));
+        }
+    }
+
+    let blocked_at = blocked
+        .get("blocked_at")
+        .and_then(Value::as_str)
+        .expect("blocked_at checked above");
+    if !(blocked_at.contains('T') && blocked_at.ends_with('Z')) {
+        return Err("blocked_at must be an ISO-8601 UTC timestamp".to_string());
+    }
+
+    let followup = blocked
+        .get("required_followup")
+        .and_then(Value::as_str)
+        .expect("required_followup checked above");
+    if !followup.contains("Rerun") {
+        return Err("blocked proof evidence rows must require a rerun follow-up".to_string());
+    }
+
+    Ok(())
+}
+
 #[test]
 fn snapshot_declares_schema_sources_and_required_categories() {
     let snapshot = json(SNAPSHOT_PATH);
@@ -634,7 +668,7 @@ fn snapshot_declares_schema_sources_and_required_categories() {
     );
     assert_eq!(
         actual.len(),
-        18,
+        19,
         "snapshot must cover the requested claim list"
     );
 }
@@ -772,11 +806,19 @@ fn fourth_wave_status_rows_preserve_child_lane_boundaries() {
             .unwrap_or_else(|| panic!("missing fourth-wave claim {claim_id}"));
         validate_claim_lane_mapping(entry, &lanes, &guarantees)
             .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            string(entry, "proof_evidence_status"),
-            "rerun-required",
-            "{claim_id}: fourth-wave status rows require fresh RCH reruns before proof citation"
+        let proof_evidence_status = string(entry, "proof_evidence_status");
+        assert!(
+            ["blocked", "rerun-required"].contains(&proof_evidence_status),
+            "{claim_id}: fourth-wave status rows require a rerun or explicit blocker before proof citation"
         );
+        if proof_evidence_status == "blocked" {
+            validate_external_blocker_record(
+                entry
+                    .get("blocked_frontier")
+                    .unwrap_or_else(|| panic!("{claim_id}: missing blocked_frontier")),
+            )
+            .unwrap_or_else(|error| panic!("{claim_id}: {error}"));
+        }
         assert!(
             string(entry, "notes").contains("does not prove")
                 || string(entry, "notes").contains("no-claim"),
@@ -795,6 +837,42 @@ fn fourth_wave_status_rows_preserve_child_lane_boundaries() {
             && string(aggregate, "notes").contains("production-on-by-default"),
         "aggregate row must stay scoped and non-performance"
     );
+}
+
+#[test]
+fn stale_progress_receipt_status_row_preserves_no_claim_boundaries() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+    let rows = array(&snapshot, "claim_categories");
+    let by_claim = rows
+        .iter()
+        .map(|entry| (string(entry, "claim_id").to_string(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let row = by_claim
+        .get("rch-stale-progress-receipts")
+        .expect("stale progress receipt claim row");
+
+    validate_claim_lane_mapping(row, &lanes, &guarantees).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(string(row, "status"), "green");
+    assert_eq!(string(row, "proof_evidence_status"), "rerun-required");
+    assert_eq!(
+        string_set(row, "manifest_lane_ids"),
+        BTreeSet::from(["rch-stale-progress-receipt-contract".to_string()])
+    );
+    let notes = string(row, "notes");
+    for non_claim in [
+        "does not prove source correctness",
+        "release readiness",
+        "live RCH fleet availability",
+        "permission to cancel peer-owned builds",
+    ] {
+        assert!(
+            notes.contains(non_claim),
+            "stale progress receipt row must preserve non-claim {non_claim:?}"
+        );
+    }
 }
 
 #[test]
@@ -951,10 +1029,13 @@ fn red_rows_carry_exact_validation_frontier_records() {
 
     for entry in array(&snapshot, "claim_categories") {
         let status = string(entry, "status");
+        let proof_evidence_status = string(entry, "proof_evidence_status");
         let blocked = entry.get("blocked_frontier").expect("blocked_frontier");
         if status == "red_blocked_external" {
             validate_blocked_frontier_record(blocked, &fixtures)
                 .unwrap_or_else(|error| panic!("{error}"));
+        } else if proof_evidence_status == "blocked" {
+            validate_external_blocker_record(blocked).unwrap_or_else(|error| panic!("{error}"));
         } else {
             assert!(
                 blocked.is_null(),

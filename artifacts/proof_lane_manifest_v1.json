@@ -225,6 +225,8 @@
     "description": "Machine-readable lane semantics for interpreting proof evidence without overclaiming compile-only, broad-frontier, conformance, or stale-progress outcomes.",
     "default_stale_progress_policy": {
       "policy_id": "rch-stale-progress-fail-closed-v1",
+      "receipt_schema_version": "rch-stale-progress-receipt-v1",
+      "receipt_contract": "artifacts/rch_stale_progress_receipt_contract_v1.json",
       "wait_for_fresh_heartbeat": true,
       "never_cancel_peer_owned_builds": true,
       "receipt_required_before_retry": true,
@@ -425,6 +427,7 @@
     "migration-readiness-planner-signoff",
     "shared-main-commit-guard",
     "durable-rch-final-signoff",
+    "rch-stale-progress-receipt",
     "proof-lane-manifest-verifier"
   ],
   "lanes": [
@@ -1511,6 +1514,48 @@
       }
     },
     {
+      "lane_id": "rch-stale-progress-receipt-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "rch-stale-progress-receipt"
+      ],
+      "covers": "The deterministic RCH stale-progress receipt schema, fixture classifier, Markdown report, operator policy, manifest/status mapping, and fail-closed no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not run live RCH, does not prove source correctness, does not prove release readiness, does not prove workspace health, and does not authorize canceling peer-owned builds.",
+      "expected_signal": "rch_stale_progress_receipt_contract tests pass",
+      "source_paths": [
+        "artifacts/rch_stale_progress_receipt_contract_v1.json",
+        "docs/rch_stale_progress_receipt.md",
+        "scripts/rch_stale_progress_receipt.py",
+        "tests/rch_stale_progress_receipt_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "stale receipt fixture no longer matches helper output",
+        "proof status row command drift",
+        "manifest validation-frontier stale policy drift"
+      ],
+      "escalation_notes": "Use this lane only for deterministic stale-progress receipt contract evidence. Stale progress remains non-citeable as a green Cargo proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rch-stale-progress-receipt"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
       "lane_id": "atp-native-quic-dependency-audit",
       "kind": "dependency_audit",
       "resource_envelope_class": "dependency-audit-light",
@@ -1738,6 +1783,13 @@
       "description": "Durable RCH final signoff aggregation, child proof evidence rows, refusal matrix, operator recipes, docs markers, manifest/status mapping, main-only closeout notes, ignored-artifact force-add note, and no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "durable-rch-proof-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "rch-stale-progress-receipt",
+      "description": "Deterministic stale-progress receipts for remote-required RCH lanes have a canonical verifier command and explicit no-claim boundaries.",
+      "lane_ids": [
+        "rch-stale-progress-receipt-contract"
       ]
     },
     {

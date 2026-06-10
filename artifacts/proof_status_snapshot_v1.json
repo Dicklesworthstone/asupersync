@@ -78,6 +78,7 @@
     "fourth-wave final aggregated signoff",
     "migration readiness planner signoff",
     "durable RCH final signoff",
+    "RCH stale-progress receipts",
     "formal Lean posture",
     "rustdoc/API examples"
   ],
@@ -584,6 +585,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Green maps only the durable RCH final signoff artifact, child proof evidence rows, refusal matrix, operator recipes, manifest/status mapping, docs markers, main-only closeout notes, ignored-artifact force-add note, and no-claim boundaries. It does not prove release readiness, broad workspace health, live RCH fleet availability, correctness of unrelated proof lanes, broad clippy, full release tests, or local Cargo fallback proof."
+    },
+    {
+      "claim_id": "rch-stale-progress-receipts",
+      "category": "RCH stale-progress receipts",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ],
+        "AGENTS.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "rch-stale-progress-receipt"
+      ],
+      "manifest_lane_ids": [
+        "rch-stale-progress-receipt-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the stale-progress receipt schema, helper, fixtures, docs, manifest/status mapping, operator policy, and no-claim boundaries. It does not prove source correctness, release readiness, workspace health, live RCH fleet availability, broad clippy, full release tests, a fresh RCH pass, or permission to cancel peer-owned builds."
     },
     {
       "claim_id": "formal-lean-posture",
