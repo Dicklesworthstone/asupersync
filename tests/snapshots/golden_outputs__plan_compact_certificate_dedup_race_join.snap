@@ -7,12 +7,8 @@ CompactCertificate {
         1,
     ),
     policy_bits: 29,
-    before_hash: PlanHash(
-        12664835006891767254,
-    ),
-    after_hash: PlanHash(
-        9330920261498496924,
-    ),
+    before_hash: PlanHash(9ab853b5bb73b95ab9b307e02357fb8e898496b7d3413557f419c0e7069e8e95),
+    after_hash: PlanHash(0cffa48607f55c8b136238a76fec2d8707a9fa8956a76be5c74b163cefb665d1),
     before_node_count: 6,
     after_node_count: 8,
     steps: [
