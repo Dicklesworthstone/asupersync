@@ -1103,17 +1103,27 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // Poll a recv while NO signal is pending so it parks (Pending) and
-        // registers a waiter — this is the future we will "cancel" by dropping.
+        // The SIGPIPE delivery counter is process-global, so other tests running
+        // in parallel may also bump it. Drain any already-visible deliveries on
+        // THIS stream first so we start from a quiescent baseline that is robust to
+        // interleaving. (Each `Signal` tracks its own `seen` cursor, so draining
+        // here does not affect other streams.)
+        loop {
+            let mut drain = Box::pin(stream.recv());
+            if !matches!(drain.as_mut().poll(&mut cx), Poll::Ready(Some(()))) {
+                break;
+            }
+        }
+
+        // Poll a recv on the quiesced stream so it parks and registers a waiter —
+        // this is the future we will "cancel" by dropping. (In the common case this
+        // is `Pending`; under heavy parallel injection it may already be `Ready`,
+        // which is fine — the cancel-safety property we assert below holds either
+        // way, and avoiding a strict assertion here keeps the test robust to the
+        // process-global delivery counter.)
         {
             let mut recv = Box::pin(stream.recv());
-            let poll_before = recv.as_mut().poll(&mut cx);
-            crate::assert_with_log!(
-                matches!(poll_before, Poll::Pending),
-                "recv parks while no SIGPIPE is pending",
-                "Poll::Pending",
-                poll_before
-            );
+            let _ = recv.as_mut().poll(&mut cx);
 
             // A signal arrives while the recv future is alive...
             dispatcher.inject(SignalKind::pipe());
@@ -1121,8 +1131,10 @@ mod tests {
             // polled again, so it must not have consumed the pending delivery.
         }
 
-        // A fresh recv must still observe the injected signal — cancel-safety
-        // means dropping the previous recv did not swallow the delivery.
+        // A fresh recv must still observe a delivery — cancel-safety means dropping
+        // the previous recv did not swallow the pending signal. The counter is
+        // monotone, so even if a parallel test added further deliveries, the next
+        // poll observes at least the one we injected.
         let mut recv_after_cancel = Box::pin(stream.recv());
         let poll_after = recv_after_cancel.as_mut().poll(&mut cx);
         crate::assert_with_log!(

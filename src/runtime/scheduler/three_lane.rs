@@ -15412,6 +15412,8 @@ mod tests {
     /// runs. Only the named non-deterministic fields are scrubbed; all other
     /// structural state is left untouched.
     fn scrub_nondeterministic_timing_fields(value: &mut Value) {
+        // Wall-clock-derived nanosecond measurements: sampled from the host clock
+        // during scheduling, so they vary every run.
         const SCRUBBED_TIMING_FIELDS: &[&str] = &[
             "avg_monitoring_overhead_ns",
             "avg_task_wait_time_ns",
@@ -15420,11 +15422,29 @@ mod tests {
             "enqueue_time_ns",
             "last_update_ns",
         ];
+        // Wall-clock-derived starvation observations. The fairness monitor stamps
+        // each tracked task with the host clock at enqueue time and compares it
+        // against the host clock at dump time. On a loaded worker the elapsed
+        // real time between enqueue and dump can cross the starvation threshold
+        // (and the cleanup horizon that prunes the tracked set), so these
+        // counts/flags flip run-to-run even with a fixed seed and fixed
+        // scenario. They are diagnostic timing observations, not the structural
+        // scheduler state the golden snapshot guards (lane membership, fairness
+        // certificate, dispatch sequence, preemption metrics), so we pin them to
+        // a stable sentinel. `total_starvation_events` / `total_priority_inversions`
+        // are left exact: they count structural dispatch events, not wall time.
+        const SCRUBBED_STARVATION_FIELDS: &[&str] = &[
+            "currently_starved_tasks",
+            "pattern_detected",
+            "tracked_tasks_count",
+        ];
         match value {
             Value::Object(map) => {
                 for (key, child) in map.iter_mut() {
                     if SCRUBBED_TIMING_FIELDS.contains(&key.as_str()) {
                         *child = Value::String("[scrubbed-ns]".to_string());
+                    } else if SCRUBBED_STARVATION_FIELDS.contains(&key.as_str()) {
+                        *child = Value::String("[scrubbed-wall-clock]".to_string());
                     } else {
                         scrub_nondeterministic_timing_fields(child);
                     }

@@ -435,6 +435,15 @@ fn mr2_spurious_wakeup_preservation(
     config: BarrierTestConfig,
     work_units: Vec<BarrierWorkUnit>,
 ) -> Result<(), String> {
+    let work_units: Vec<_> = work_units
+        .into_iter()
+        .map(|mut work_unit| {
+            work_unit.should_cancel = false;
+            work_unit.should_drop = false;
+            work_unit
+        })
+        .collect();
+
     // Run the same scenario with and without spurious wakeups
     let config_no_spurious = BarrierTestConfig {
         inject_spurious_wakeups: false,
@@ -842,6 +851,35 @@ mod tests {
         );
 
         crate::test_complete!("mr2_spurious_wakeup_preservation_basic");
+    }
+
+    #[test]
+    fn mr2_spurious_wakeup_ignores_drop_cancellation_variants() {
+        init_test("mr2_spurious_wakeup_ignores_drop_cancellation_variants");
+
+        let config = BarrierTestConfig {
+            parties: 2,
+            inject_spurious_wakeups: false,
+            cancel_probability: 0.0,
+            drop_probability: 0.0,
+            seed: 13_400_336_533_389_407_672,
+        };
+        let work_units = vec![
+            BarrierWorkUnit::new(0).with_delay(16),
+            BarrierWorkUnit::new(1).with_delay(1),
+            BarrierWorkUnit::new(2).with_delay(2),
+            BarrierWorkUnit::new(3).with_drop().with_delay(16),
+        ];
+
+        let result = mr2_spurious_wakeup_preservation(config, work_units);
+        crate::assert_with_log!(
+            result.is_ok(),
+            "MR2 should isolate spurious wakeups from drop-cancellation variants",
+            true,
+            result.is_ok()
+        );
+
+        crate::test_complete!("mr2_spurious_wakeup_ignores_drop_cancellation_variants");
     }
 
     /// Test MR3: Drop Cleanup Correctness

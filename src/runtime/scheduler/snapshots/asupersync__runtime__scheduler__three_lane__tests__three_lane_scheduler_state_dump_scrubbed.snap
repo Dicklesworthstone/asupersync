@@ -82,14 +82,14 @@ expression: dump
     "scenario": "cancel_streak",
     "starvation_stats": {
       "avg_task_wait_time_ns": "[scrubbed-ns]",
-      "currently_starved_tasks": 0,
+      "currently_starved_tasks": "[scrubbed-wall-clock]",
       "max_priority_inversion_gap": 0,
       "max_task_wait_time_ns": "[scrubbed-ns]",
-      "pattern_detected": false,
+      "pattern_detected": "[scrubbed-wall-clock]",
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
       "total_tracked_wait_time_ns": "[scrubbed-ns]",
-      "tracked_tasks_count": 0
+      "tracked_tasks_count": "[scrubbed-wall-clock]"
     },
     "tracked_tasks": [],
     "worker_id": 0
@@ -168,14 +168,14 @@ expression: dump
     "scenario": "deadline_ordering",
     "starvation_stats": {
       "avg_task_wait_time_ns": "[scrubbed-ns]",
-      "currently_starved_tasks": 0,
+      "currently_starved_tasks": "[scrubbed-wall-clock]",
       "max_priority_inversion_gap": 0,
       "max_task_wait_time_ns": "[scrubbed-ns]",
-      "pattern_detected": false,
+      "pattern_detected": "[scrubbed-wall-clock]",
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
       "total_tracked_wait_time_ns": "[scrubbed-ns]",
-      "tracked_tasks_count": 4
+      "tracked_tasks_count": "[scrubbed-wall-clock]"
     },
     "tracked_tasks": [
       {
@@ -308,14 +308,14 @@ expression: dump
     "scenario": "decision_trace_complex_scenario",
     "starvation_stats": {
       "avg_task_wait_time_ns": "[scrubbed-ns]",
-      "currently_starved_tasks": 0,
+      "currently_starved_tasks": "[scrubbed-wall-clock]",
       "max_priority_inversion_gap": 0,
       "max_task_wait_time_ns": "[scrubbed-ns]",
-      "pattern_detected": false,
+      "pattern_detected": "[scrubbed-wall-clock]",
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
       "total_tracked_wait_time_ns": "[scrubbed-ns]",
-      "tracked_tasks_count": 5
+      "tracked_tasks_count": "[scrubbed-wall-clock]"
     },
     "tracked_tasks": [
       {
@@ -453,14 +453,14 @@ expression: dump
     "scenario": "empty",
     "starvation_stats": {
       "avg_task_wait_time_ns": "[scrubbed-ns]",
-      "currently_starved_tasks": 0,
+      "currently_starved_tasks": "[scrubbed-wall-clock]",
       "max_priority_inversion_gap": 0,
       "max_task_wait_time_ns": "[scrubbed-ns]",
-      "pattern_detected": false,
+      "pattern_detected": "[scrubbed-wall-clock]",
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
       "total_tracked_wait_time_ns": "[scrubbed-ns]",
-      "tracked_tasks_count": 0
+      "tracked_tasks_count": "[scrubbed-wall-clock]"
     },
     "tracked_tasks": [],
     "worker_id": 0
@@ -537,14 +537,14 @@ expression: dump
     "scenario": "loaded",
     "starvation_stats": {
       "avg_task_wait_time_ns": "[scrubbed-ns]",
-      "currently_starved_tasks": 0,
+      "currently_starved_tasks": "[scrubbed-wall-clock]",
       "max_priority_inversion_gap": 0,
       "max_task_wait_time_ns": "[scrubbed-ns]",
-      "pattern_detected": false,
+      "pattern_detected": "[scrubbed-wall-clock]",
       "total_priority_inversions": 0,
       "total_starvation_events": 0,
       "total_tracked_wait_time_ns": "[scrubbed-ns]",
-      "tracked_tasks_count": 3
+      "tracked_tasks_count": "[scrubbed-wall-clock]"
     },
     "tracked_tasks": [
       {

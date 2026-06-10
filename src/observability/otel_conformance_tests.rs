@@ -1923,7 +1923,7 @@ mod tests {
             TracestateHeaderScenario {
                 name: "max_entry_size_limit".to_string(),
                 initial_tracestate_entries: vec![
-                    ("vendor1".to_string(), "a".repeat(256)), // At limit
+                    ("vendor1".to_string(), "a".repeat(248)), // Full `vendor=value` entry is 256 bytes
                     ("vendor2".to_string(), "b".repeat(300)), // Over limit, should be truncated/rejected
                     ("vendor3".to_string(), "valid".to_string()),
                 ],

@@ -79,7 +79,7 @@ fn setup_test_cx() -> (Arc<LabReactor>, impl Drop) {
     let reactor_dyn: Arc<dyn Reactor> = Arc::clone(&reactor) as Arc<dyn Reactor>;
     let driver = IoDriverHandle::new(reactor_dyn);
     let cx = Cx::new_with_observability(
-        RegionId::new_for_test(0, 0),
+        RegionId::new_for_test(0, 1),
         TaskId::new_for_test(0, 0),
         Budget::INFINITE,
         None,
