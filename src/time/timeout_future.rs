@@ -11,6 +11,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+#[inline]
+fn ambient_timer_now() -> Option<Time> {
+    crate::cx::Cx::current()
+        .and_then(|cx| cx.timer_driver())
+        .map(|timer| timer.now())
+}
+
 /// A future that wraps another future with a timeout.
 ///
 /// If the inner future doesn't complete before the deadline, `TimeoutFuture`
@@ -205,9 +212,16 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         if self.completed || self.timed_out {
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
         }
-        // Prefer completed work at the timeout boundary. This preserves the
-        // crate-wide contract that a ready inner future is not lost just because
-        // the timeout boundary is observed in the same scheduler turn.
+        let deadline = self.sleep.deadline();
+        if now > deadline && self.sleep.poll_ready_with_time(now).is_ready() {
+            self.completed = true;
+            self.timed_out = true;
+            return Poll::Ready(Err(Elapsed::new(deadline)));
+        }
+
+        // Prefer completed work at the exact timeout boundary. This preserves
+        // the crate-wide contract that a ready inner future is not lost just
+        // because the timeout boundary is observed in the same scheduler turn.
         // SAFETY: We require F: Unpin, so this is safe
         match Pin::new(&mut self.future).poll(cx) {
             Poll::Ready(output) => {
@@ -221,7 +235,7 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         if self.sleep.poll_ready_with_time(now).is_ready() {
             self.completed = true;
             self.timed_out = true;
-            return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
+            return Poll::Ready(Err(Elapsed::new(deadline)));
         }
 
         // Preserve wake registration only when the underlying sleep can use
@@ -256,7 +270,16 @@ impl<F: Future> Future for TimeoutFuture<F> {
         }
 
         let deadline = this.sleep.deadline();
-        // Prefer completed work at the timeout boundary.
+        if let Some(now) = ambient_timer_now()
+            && now > deadline
+            && this.sleep.poll_ready_with_time(now).is_ready()
+        {
+            *this.completed = true;
+            *this.timed_out = true;
+            return Poll::Ready(Err(Elapsed::new(deadline)));
+        }
+
+        // Prefer completed work at the exact timeout boundary.
         match this.future.poll(cx) {
             Poll::Ready(output) => {
                 *this.completed = true;
@@ -345,7 +368,10 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::cx::Cx;
     use crate::test_utils::init_test_logging;
+    use crate::time::{TimerDriverHandle, VirtualClock};
+    use crate::types::{Budget, RegionId, TaskId};
     use std::future::Future;
     use std::future::{pending, ready};
     use std::pin::Pin;
@@ -394,6 +420,41 @@ mod tests {
     }
 
     impl Unpin for CountingFuture {}
+
+    struct ReadyAtTime {
+        ready_at: Time,
+    }
+
+    impl Future for ReadyAtTime {
+        type Output = &'static str;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if Time::from_nanos(get_current_time()) >= self.ready_at {
+                Poll::Ready("done")
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Unpin for ReadyAtTime {}
+
+    struct ReadyWhenTimerReaches {
+        timer: TimerDriverHandle,
+        ready_at: Time,
+    }
+
+    impl Future for ReadyWhenTimerReaches {
+        type Output = &'static str;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.timer.now() >= self.ready_at {
+                Poll::Ready("done")
+            } else {
+                Poll::Pending
+            }
+        }
+    }
 
     #[test]
     fn new_creates_timeout() {
@@ -659,6 +720,27 @@ mod tests {
     }
 
     #[test]
+    fn poll_with_time_elapsed_wins_late_poll_before_later_ready_inner() {
+        set_current_time(0);
+        let mut t = TimeoutFuture::with_time_getter(
+            ReadyAtTime {
+                ready_at: Time::from_secs(50),
+            },
+            Time::from_secs(10),
+            test_now,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(t.poll_with_time(&mut cx, Time::ZERO).is_pending());
+
+        set_current_time(50_000_000_000);
+        let result = t.poll_with_time(&mut cx, Time::from_secs(50));
+
+        assert!(matches!(result, Poll::Ready(Err(_))));
+    }
+
+    #[test]
     fn poll_with_time_elapsed_deadline_clears_registered_timer() {
         let clock = Arc::new(crate::time::VirtualClock::new());
         let timer_driver = crate::time::TimerDriverHandle::with_virtual_clock(clock);
@@ -775,6 +857,39 @@ mod tests {
         let result = Pin::new(&mut t).poll(&mut cx);
 
         assert!(matches!(result, Poll::Ready(Ok("done"))));
+    }
+
+    #[test]
+    fn poll_elapsed_wins_late_timer_driver_poll_before_later_ready_inner() {
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let runtime_cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 12),
+            TaskId::new_for_test(0, 12),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(runtime_cx));
+        let mut t = TimeoutFuture::new(
+            ReadyWhenTimerReaches {
+                timer: timer.clone(),
+                ready_at: Time::from_secs(50),
+            },
+            Time::from_secs(10),
+        );
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(Pin::new(&mut t).poll(&mut task_cx).is_pending());
+
+        clock.set(Time::from_secs(50));
+        let result = Pin::new(&mut t).poll(&mut task_cx);
+
+        assert!(matches!(result, Poll::Ready(Err(_))));
     }
 
     // =========================================================================
