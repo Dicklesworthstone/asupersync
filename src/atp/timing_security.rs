@@ -148,8 +148,12 @@ fn cpuid_tsc_frequency_hz(max_basic_leaf: u32) -> Option<u64> {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
 fn cpuid(leaf: u32) -> core::arch::x86_64::CpuidResult {
-    core::arch::x86_64::__cpuid(leaf)
+    // SAFETY: `__cpuid` issues the CPUID instruction, which is unconditionally
+    // available on x86_64 and performs no memory access; it is `unsafe` only as a
+    // raw arch intrinsic. Mirrors the discipline in `read_tsc_ordered` below.
+    unsafe { core::arch::x86_64::__cpuid(leaf) }
 }
 
 #[cfg(target_arch = "x86_64")]
