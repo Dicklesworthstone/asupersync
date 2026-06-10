@@ -22,7 +22,10 @@ pub use obligation::SourceLocation;
 pub use obligation::{
     ObligationAbortReason, ObligationKind, ObligationRecord, ObligationResolution, ObligationState,
 };
-pub use region::{AdmissionError, AdmissionKind, RegionLimits, RegionRecord};
+pub use region::{
+    AdmissionError, AdmissionKind, PendingSpawnCounter, PendingSpawnReservation, RegionLimits,
+    RegionRecord,
+};
 pub use symbol_obligation_tracker::{
     EpochId, EpochWindow, ObligationGuard, SymbolObligation, SymbolObligationKind,
     SymbolObligationTracker,

@@ -63,6 +63,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+pub use crate::record::region::{PendingSpawnCounter, PendingSpawnReservation};
+
 /// Generation tag (MSB) marking a provisional spawn-mailbox `TaskId`.
 ///
 /// Arena generations start at 0 and increment once per slot reuse, so an
@@ -184,6 +186,7 @@ pub struct SpawnRequest {
     name: Option<Arc<str>>,
     task: StoredTask,
     on_unadmitted_cancel: Option<UnadmittedCancelFn>,
+    pending_reservation: Option<PendingSpawnReservation>,
 }
 
 /// Destructured [`SpawnRequest`] handed to the admission path.
@@ -200,6 +203,10 @@ pub struct SpawnRequestParts {
     pub task: StoredTask,
     /// Completion slot for cancel-before-admission.
     pub on_unadmitted_cancel: Option<UnadmittedCancelFn>,
+    /// Pending-spawn credit on the owning region. Admission must drop this
+    /// only *after* the task is in the region's task list
+    /// (decrement-after-successor-visibility; see [`PendingSpawnCounter`]).
+    pub pending_reservation: Option<PendingSpawnReservation>,
 }
 
 impl SpawnRequest {
@@ -216,6 +223,7 @@ impl SpawnRequest {
             name: None,
             task,
             on_unadmitted_cancel: None,
+            pending_reservation: None,
         }
     }
 
@@ -230,6 +238,21 @@ impl SpawnRequest {
     #[must_use]
     pub fn with_unadmitted_cancel(mut self, slot: UnadmittedCancelFn) -> Self {
         self.on_unadmitted_cancel = Some(slot);
+        self
+    }
+
+    /// Attaches the region's pending-spawn credit
+    /// (br-asupersync-dx-core-api-v2-u1z5hn.1.2).
+    ///
+    /// The reservation must have been taken (incrementing the region's
+    /// counter) *before* this request is enqueued, per the
+    /// increment-before-visibility contract. It is released exactly once:
+    /// by admission after the task joins the region's task list, or by
+    /// [`Self::resolve_cancelled`] after the future is destroyed, or by
+    /// dropping the request whole.
+    #[must_use]
+    pub fn with_pending_reservation(mut self, reservation: PendingSpawnReservation) -> Self {
+        self.pending_reservation = Some(reservation);
         self
     }
 
@@ -271,26 +294,32 @@ impl SpawnRequest {
             name: self.name,
             task: self.task,
             on_unadmitted_cancel: self.on_unadmitted_cancel,
+            pending_reservation: self.pending_reservation,
         }
     }
 
     /// Resolves a request that will never be admitted.
     ///
-    /// Drops the stored future without polling it and invokes the
-    /// cancel-before-admission slot (if any) exactly once with `reason`.
-    /// This is the drain path for region-close racing enqueue: the public
-    /// semantics are identical to spawning into a closing region today,
-    /// just observed later.
+    /// Drops the stored future without polling it, invokes the
+    /// cancel-before-admission slot (if any) exactly once with `reason`,
+    /// and releases the region's pending-spawn credit **last** — the region
+    /// must not observe its pending count reach zero until the future is
+    /// destroyed and the caller-visible handle resolved
+    /// (decrement-after-successor-visibility). This is the drain path for
+    /// region-close racing enqueue: the public semantics are identical to
+    /// spawning into a closing region today, just observed later.
     pub fn resolve_cancelled(self, reason: CancelReason) {
         let SpawnRequestParts {
             task,
             on_unadmitted_cancel,
+            pending_reservation,
             ..
         } = self.into_parts();
         drop(task);
         if let Some(slot) = on_unadmitted_cancel {
             slot(reason);
         }
+        drop(pending_reservation);
     }
 }
 
@@ -301,6 +330,7 @@ impl fmt::Debug for SpawnRequest {
             .field("region", &self.region)
             .field("name", &self.name)
             .field("has_cancel_slot", &self.on_unadmitted_cancel.is_some())
+            .field("has_reservation", &self.pending_reservation.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -678,5 +708,324 @@ mod tests {
         let parts = req.into_parts();
         assert_eq!(parts.budget, budget);
         assert!(parts.on_unadmitted_cancel.is_none());
+        assert!(parts.pending_reservation.is_none());
+    }
+
+    // === br-asupersync-dx-core-api-v2-u1z5hn.1.2: pending-spawn accounting ===
+
+    use crate::runtime::state::RuntimeState;
+    use crate::types::CancelKind;
+
+    /// Reservation travels inside the request; resolve_cancelled releases it
+    /// strictly AFTER the cancel slot fires (decrement-after-successor-
+    /// visibility): the slot must still observe the credit outstanding.
+    #[test]
+    fn resolve_cancelled_releases_reservation_after_slot() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let handle = state
+            .region(root)
+            .expect("root region exists")
+            .pending_spawn_handle();
+
+        let mailbox = SpawnMailbox::new();
+        let id = mailbox.allocate_task_id();
+        let count_seen_in_slot = Arc::new(AtomicUsize::new(usize::MAX));
+        let seen = Arc::clone(&count_seen_in_slot);
+        let handle_for_slot = Arc::clone(&handle);
+        let req = SpawnRequest::new(id, root, Budget::new(), noop_task(id))
+            .with_pending_reservation(handle.reserve())
+            .with_unadmitted_cancel(Box::new(move |_reason| {
+                seen.store(handle_for_slot.count() as usize, Ordering::SeqCst);
+            }));
+        assert_eq!(handle.count(), 1, "credit taken before enqueue");
+        mailbox.enqueue(req, Time::ZERO);
+
+        let req = mailbox.dequeue().expect("request queued");
+        req.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+        assert_eq!(
+            count_seen_in_slot.load(Ordering::SeqCst),
+            1,
+            "cancel slot must observe the credit still outstanding"
+        );
+        assert_eq!(handle.count(), 0, "credit released after resolve");
+    }
+
+    /// Parent AC 2(a): region close with N un-admitted spawn requests still
+    /// reaches quiescence — the close path refuses to finalize while credits
+    /// are outstanding, every request resolves Cancelled exactly once, and
+    /// the state machine then closes the region with zero leaks.
+    #[test]
+    fn region_close_with_unadmitted_requests_reaches_quiescence() {
+        const N: usize = 5;
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let region = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let handle = state
+            .region(region)
+            .expect("child region exists")
+            .pending_spawn_handle();
+
+        // Producer side (no state lock needed): reserve then enqueue.
+        let mailbox = SpawnMailbox::new();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        for _ in 0..N {
+            let id = mailbox.allocate_task_id();
+            let cancelled = Arc::clone(&cancelled);
+            let req = SpawnRequest::new(id, region, Budget::new(), noop_task(id))
+                .with_pending_reservation(handle.reserve())
+                .with_unadmitted_cancel(Box::new(move |reason| {
+                    assert_eq!(reason.kind, CancelKind::ParentCancelled);
+                    cancelled.fetch_add(1, Ordering::SeqCst);
+                }));
+            mailbox.enqueue(req, Time::ZERO);
+        }
+        assert_eq!(handle.count(), N as u32);
+
+        // Begin closing the region. With credits outstanding the state
+        // machine must not finalize, complete close, or report quiescence.
+        state
+            .region(region)
+            .expect("child region exists")
+            .begin_close(None);
+        state.advance_region_state(region);
+        assert!(
+            !state.can_region_finalize(region),
+            "pending spawns must block finalization"
+        );
+        assert!(!state.can_region_complete_close(region));
+        assert!(
+            !state.is_quiescent(),
+            "pending spawns must block runtime quiescence"
+        );
+        let mid_close_state = state.region(region).expect("region exists").state();
+        assert!(
+            !mid_close_state.is_terminal(),
+            "region must not close while requests are pending, got {mid_close_state:?}"
+        );
+
+        // Drain: the admission loop's region-closed path resolves each
+        // request Cancelled (admit-then-cancel semantics land with A1.3;
+        // resolve_cancelled is the never-admitted variant with identical
+        // public semantics).
+        let mut drained = Vec::new();
+        mailbox.dequeue_batch_into(N, &mut drained);
+        assert_eq!(drained.len(), N);
+        for req in drained {
+            req.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+        }
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            N,
+            "all N resolved Cancelled"
+        );
+        assert_eq!(handle.count(), 0);
+
+        // The state machine can now finalize and close to quiescence. A
+        // fully closed region is removed from the region table, so "gone"
+        // is the strongest success signal; a still-present record must be
+        // terminal.
+        state.advance_region_state(region);
+        assert!(
+            state
+                .region(region)
+                .is_none_or(|r| r.state() == crate::record::region::RegionState::Closed),
+            "region closes once pending spawns drain"
+        );
+        assert!(state.is_quiescent(), "runtime quiescent after drain");
+    }
+
+    /// AC3 race matrix, interleaving 1: credit visible before the request —
+    /// a close-side check between increment and publish sees the credit and
+    /// refuses, so the request cannot be stranded.
+    #[test]
+    fn race_matrix_close_check_between_increment_and_publish() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let region = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let handle = state
+            .region(region)
+            .expect("region exists")
+            .pending_spawn_handle();
+        let mailbox = SpawnMailbox::new();
+
+        // Producer step 1: reserve (increment) — request NOT yet published.
+        let reservation = handle.reserve();
+
+        // Closer runs its full check here: must refuse.
+        state
+            .region(region)
+            .expect("region exists")
+            .begin_close(None);
+        state.advance_region_state(region);
+        assert!(!state.can_region_finalize(region));
+        assert!(
+            !state
+                .region(region)
+                .expect("region exists")
+                .state()
+                .is_terminal()
+        );
+
+        // Producer step 2: publish.
+        let id = mailbox.allocate_task_id();
+        let req = SpawnRequest::new(id, region, Budget::new(), noop_task(id))
+            .with_pending_reservation(reservation);
+        mailbox.enqueue(req, Time::ZERO);
+
+        // Drain resolves the request; close then completes (a fully closed
+        // region is removed from the table).
+        let req = mailbox.dequeue().expect("published request");
+        req.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+        state.advance_region_state(region);
+        assert!(
+            state
+                .region(region)
+                .is_none_or(|r| r.state() == crate::record::region::RegionState::Closed),
+            "region closes once the pending request drains"
+        );
+    }
+
+    /// AC3 race matrix, interleaving 2: close completes first (count was 0),
+    /// then a late producer reserves + enqueues. The accounting stays
+    /// consistent: the late request resolves Cancelled, the counter returns
+    /// to zero, and global quiescence recovers. (The closed region itself is
+    /// already terminal — the admission loop's closed-region path is what
+    /// cancels the request, exactly the spawn-into-closing-region semantics.)
+    #[test]
+    fn race_matrix_late_enqueue_after_close_resolves_cancelled() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let region = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let handle = state
+            .region(region)
+            .expect("region exists")
+            .pending_spawn_handle();
+        let mailbox = SpawnMailbox::new();
+
+        // Close fully first. The region record is removed from the table
+        // once fully closed; the counter Arc survives detached.
+        state
+            .region(region)
+            .expect("region exists")
+            .begin_close(None);
+        state.advance_region_state(region);
+        assert!(
+            state
+                .region(region)
+                .is_none_or(|r| r.state() == crate::record::region::RegionState::Closed),
+            "clean close completes with no credits outstanding"
+        );
+
+        // Late producer: reserve + publish against the closed region.
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_in_slot = Arc::clone(&cancelled);
+        let id = mailbox.allocate_task_id();
+        let req = SpawnRequest::new(id, region, Budget::new(), noop_task(id))
+            .with_pending_reservation(handle.reserve())
+            .with_unadmitted_cancel(Box::new(move |_| {
+                cancelled_in_slot.fetch_add(1, Ordering::SeqCst);
+            }));
+        mailbox.enqueue(req, Time::ZERO);
+        // Post-removal window: once the closed region is recycled out of
+        // the region table, a late detached credit is no longer visible to
+        // the region-table-based quiescence predicate. Liveness for this
+        // window is owned by the admission loop's closed-region fallback
+        // (resolve Cancelled on next drain pass) and by A1.3 folding
+        // mailbox emptiness into the scheduler's idle/quiescence decision.
+        // What this slice guarantees: the request still resolves Cancelled
+        // exactly once and the accounting balances.
+
+        // Admission loop finds the region closed (gone) and cancels the
+        // request.
+        let req = mailbox.dequeue().expect("late request");
+        req.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.count(), 0);
+        assert!(mailbox.is_empty());
+        assert!(state.is_quiescent());
+    }
+
+    /// AC3 stress: concurrent producers (reserve + enqueue) race a drain
+    /// loop. Invariant: no request is ever lost — every enqueued request is
+    /// either resolved by the drain loop, and the counter balances to zero.
+    #[test]
+    fn race_stress_concurrent_producers_vs_drain() {
+        const PRODUCERS: usize = 4;
+        const PER_PRODUCER: usize = 250;
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let region = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let handle = state
+            .region(region)
+            .expect("region exists")
+            .pending_spawn_handle();
+
+        let mailbox = Arc::new(SpawnMailbox::new());
+        let resolved = Arc::new(AtomicUsize::new(0));
+
+        let mut producers = Vec::new();
+        for _ in 0..PRODUCERS {
+            let mailbox = Arc::clone(&mailbox);
+            let handle = Arc::clone(&handle);
+            producers.push(thread::spawn(move || {
+                for _ in 0..PER_PRODUCER {
+                    let id = mailbox.allocate_task_id();
+                    let req = SpawnRequest::new(
+                        id,
+                        RegionId::from_arena(ArenaIndex::new(0, 1)),
+                        Budget::new(),
+                        noop_task(id),
+                    )
+                    .with_pending_reservation(handle.reserve());
+                    mailbox.enqueue(req, Time::ZERO);
+                }
+            }));
+        }
+
+        // Drain loop racing the producers: keep resolving until all
+        // producers are done AND the counter says nothing is outstanding.
+        let drain_mailbox = Arc::clone(&mailbox);
+        let drain_handle = Arc::clone(&handle);
+        let drain_resolved = Arc::clone(&resolved);
+        let drainer = thread::spawn(move || {
+            loop {
+                while let Some(req) = drain_mailbox.dequeue() {
+                    req.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+                    drain_resolved.fetch_add(1, Ordering::SeqCst);
+                }
+                if drain_resolved.load(Ordering::SeqCst) == PRODUCERS * PER_PRODUCER {
+                    break;
+                }
+                std::thread::yield_now();
+                // Increment-before-visibility: a nonzero counter with an
+                // empty queue means a publish is in flight — keep spinning.
+                if drain_handle.count() == 0
+                    && drain_mailbox.is_empty()
+                    && drain_resolved.load(Ordering::SeqCst) == PRODUCERS * PER_PRODUCER
+                {
+                    break;
+                }
+            }
+        });
+
+        for p in producers {
+            p.join().expect("producer panicked");
+        }
+        drainer.join().expect("drainer panicked");
+
+        assert_eq!(resolved.load(Ordering::SeqCst), PRODUCERS * PER_PRODUCER);
+        assert_eq!(handle.count(), 0, "all credits balanced");
+        assert_eq!(handle.underflow_count(), 0);
+        assert!(mailbox.is_empty());
+        assert!(state.is_quiescent());
     }
 }

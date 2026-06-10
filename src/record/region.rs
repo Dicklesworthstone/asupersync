@@ -13,7 +13,8 @@ use crate::types::{
 };
 use parking_lot::RwLock;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 // Thread-local flag to detect reentrant calls and prevent deadlock
 thread_local! {
@@ -332,6 +333,105 @@ struct RegionInner {
     heap: RegionHeap,
 }
 
+/// br-asupersync-dx-core-api-v2-u1z5hn.1.2 — Shared pending-spawn counter.
+///
+/// Counts spawn requests that have been enqueued onto the spawn mailbox for
+/// this region but not yet admitted (or resolved cancelled). The counter is
+/// `Arc`-shared so producers can increment it **without holding the
+/// `RuntimeState` lock** — that is the entire point of the spawn mailbox —
+/// while the close path reads it under its normal locking.
+///
+/// # Ordering contract (the load-bearing invariant)
+///
+/// The counter must never *undercount* live spawn work:
+///
+/// 1. **Increment-before-visibility**: a producer increments (via
+///    [`PendingSpawnCounter::reserve`]) *before* the request is published to
+///    the mailbox. An observable request therefore always has its credit.
+/// 2. **Decrement-after-successor-visibility**: the reservation is dropped
+///    (decrementing) only *after* the request's successor state is in place —
+///    the task admitted into the region's task list, or the request resolved
+///    cancelled and its future destroyed. There is consequently a window
+///    where both the pending credit and the successor state are visible;
+///    that double-count is deliberate (close waits a little longer), the
+///    reverse gap (neither visible) can never occur.
+///
+/// All operations use `SeqCst`: this counter is touched once per spawn (not
+/// per poll), so the simpler proof beats the nanoseconds. See
+/// `artifacts/proof_notes/` for the full argument.
+#[derive(Debug, Default)]
+pub struct PendingSpawnCounter {
+    count: AtomicU32,
+    /// Decrements observed with the count already at zero. Structurally
+    /// unreachable through [`PendingSpawnReservation`]; counted rather than
+    /// panicking, mirroring `double_resolve_count`.
+    underflow_count: AtomicU32,
+}
+
+impl PendingSpawnCounter {
+    /// Creates a counter with no pending spawns.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Current number of pending (enqueued, not yet admitted) spawns.
+    #[inline]
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Reserves one pending-spawn credit (increment-before-visibility).
+    ///
+    /// Call this *before* publishing the spawn request to the mailbox. The
+    /// returned reservation releases the credit on drop; hold it until the
+    /// request is admitted or resolved cancelled.
+    #[must_use]
+    pub fn reserve(self: &Arc<Self>) -> PendingSpawnReservation {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        PendingSpawnReservation {
+            counter: Arc::clone(self),
+        }
+    }
+
+    /// Decrements observed at zero (diagnostic; expected to stay 0).
+    #[must_use]
+    pub fn underflow_count(&self) -> u32 {
+        self.underflow_count.load(Ordering::SeqCst)
+    }
+
+    fn release(&self) {
+        let result = self
+            .count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            });
+        if result.is_err() {
+            debug_assert!(false, "pending-spawn counter released below zero");
+            self.underflow_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// RAII credit for one enqueued-but-not-yet-admitted spawn request.
+///
+/// Created by [`PendingSpawnCounter::reserve`] *before* the request becomes
+/// visible to the scheduler; dropped exactly once when the request reaches
+/// its successor state (admitted, or resolved cancelled). Travelling inside
+/// the spawn request makes the release panic-safe: any path that destroys
+/// the request releases the credit.
+#[derive(Debug)]
+pub struct PendingSpawnReservation {
+    counter: Arc<PendingSpawnCounter>,
+}
+
+impl Drop for PendingSpawnReservation {
+    fn drop(&mut self) {
+        self.counter.release();
+    }
+}
+
 /// Internal record for a region in the runtime.
 #[derive(Debug)]
 pub struct RegionRecord {
@@ -352,6 +452,11 @@ pub struct RegionRecord {
     /// the double-resolve invariant violation that the previous
     /// `saturating_sub` shape silently masked.
     double_resolve_count: AtomicU64,
+    /// br-asupersync-dx-core-api-v2-u1z5hn.1.2 — Spawn requests enqueued
+    /// onto the spawn mailbox for this region but not yet admitted.
+    /// `Arc`-shared so producers increment without the state lock; the
+    /// close path treats a nonzero count as live children.
+    pending_spawns: Arc<PendingSpawnCounter>,
     /// Tracing span for region lifecycle (only active with tracing-integration feature).
     #[cfg(feature = "tracing-integration")]
     span: Span,
@@ -452,6 +557,7 @@ impl RegionRecord {
                 heap: RegionHeap::new(),
             }),
             double_resolve_count: AtomicU64::new(0),
+            pending_spawns: Arc::new(PendingSpawnCounter::new()),
             span,
         }
     }
@@ -591,12 +697,43 @@ impl RegionRecord {
         smallvec::SmallVec::from_slice(&inner.tasks)
     }
 
-    /// Returns true if the region has any live children, tasks, or pending obligations.
+    /// Returns true if the region has any live children, tasks, pending
+    /// obligations, or pending (not-yet-admitted) spawn requests.
     #[inline]
     #[must_use]
     pub fn has_live_work(&self) -> bool {
         let inner = self.inner.read();
-        !inner.children.is_empty() || !inner.tasks.is_empty() || inner.pending_obligations > 0
+        !inner.children.is_empty()
+            || !inner.tasks.is_empty()
+            || inner.pending_obligations > 0
+            || self.pending_spawns.count() > 0
+    }
+
+    /// Returns the number of spawn requests enqueued for this region but not
+    /// yet admitted (br-asupersync-dx-core-api-v2-u1z5hn.1.2).
+    #[inline]
+    #[must_use]
+    pub fn pending_spawn_count(&self) -> u32 {
+        self.pending_spawns.count()
+    }
+
+    /// Returns the shared pending-spawn counter handle.
+    ///
+    /// Producers clone this out of the record (under the state lock, once,
+    /// at spawn-capability setup) and then reserve credits on it without
+    /// the lock for each enqueue.
+    #[inline]
+    #[must_use]
+    pub fn pending_spawn_handle(&self) -> Arc<PendingSpawnCounter> {
+        Arc::clone(&self.pending_spawns)
+    }
+
+    /// Reserves one pending-spawn credit on this region
+    /// (increment-before-visibility; see [`PendingSpawnCounter`]).
+    #[inline]
+    #[must_use]
+    pub fn reserve_pending_spawn(&self) -> PendingSpawnReservation {
+        self.pending_spawns.reserve()
     }
 
     /// Adds a child region.
@@ -905,7 +1042,8 @@ impl RegionRecord {
         self.inner.read().heap.stats()
     }
 
-    /// Returns true if the region is quiescent (no tasks or children).
+    /// Returns true if the region is quiescent (no tasks, children,
+    /// obligations, finalizers, or pending spawn requests).
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
         let inner = self.inner.read();
@@ -913,6 +1051,7 @@ impl RegionRecord {
             && inner.tasks.is_empty()
             && inner.pending_obligations == 0
             && inner.finalizers.is_empty()
+            && self.pending_spawns.count() == 0
     }
 
     /// Requests cancellation of this region, recording the reason.
@@ -1029,7 +1168,12 @@ impl RegionRecord {
         if !(inner.children.is_empty()
             && inner.tasks.is_empty()
             && inner.pending_obligations == 0
-            && inner.finalizers.is_empty())
+            && inner.finalizers.is_empty()
+            // Pending (not-yet-admitted) spawn requests are live children:
+            // their credits were taken before the requests became visible,
+            // so a nonzero count here means the mailbox still holds work
+            // destined for this region (br-asupersync-dx-core-api-v2-u1z5hn.1.2).
+            && self.pending_spawns.count() == 0)
         {
             return false;
         }
@@ -3341,5 +3485,94 @@ mod tests {
             region.add_task(TaskId::new_for_test(2, 0)),
             Err(AdmissionError::Closed)
         ));
+    }
+
+    // === br-asupersync-dx-core-api-v2-u1z5hn.1.2: pending-spawn accounting ===
+
+    #[test]
+    fn pending_spawn_reservation_increments_and_releases_on_drop() {
+        let region = RegionRecord::new(RegionId::new_for_test(10, 0), None, Budget::default());
+        assert_eq!(region.pending_spawn_count(), 0);
+        let r1 = region.reserve_pending_spawn();
+        let r2 = region.reserve_pending_spawn();
+        assert_eq!(region.pending_spawn_count(), 2);
+        drop(r1);
+        assert_eq!(region.pending_spawn_count(), 1);
+        drop(r2);
+        assert_eq!(region.pending_spawn_count(), 0);
+        assert_eq!(region.pending_spawn_handle().underflow_count(), 0);
+    }
+
+    #[test]
+    fn pending_spawn_blocks_quiescence_and_live_work_predicates() {
+        let region = RegionRecord::new(RegionId::new_for_test(11, 0), None, Budget::default());
+        assert!(region.is_quiescent());
+        assert!(!region.has_live_work());
+        let reservation = region.reserve_pending_spawn();
+        assert!(
+            !region.is_quiescent(),
+            "pending spawn must block quiescence"
+        );
+        assert!(region.has_live_work(), "pending spawn is live work");
+        drop(reservation);
+        assert!(region.is_quiescent());
+        assert!(!region.has_live_work());
+    }
+
+    #[test]
+    fn pending_spawn_blocks_complete_close_until_released() {
+        let region = RegionRecord::new(RegionId::new_for_test(12, 0), None, Budget::default());
+        let reservation = region.reserve_pending_spawn();
+        // Drive the region to Finalizing with no tasks/children/finalizers.
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        // Close must refuse while the pending-spawn credit is outstanding.
+        assert!(
+            !region.complete_close(),
+            "complete_close must refuse with pending spawns"
+        );
+        assert_eq!(region.state(), RegionState::Finalizing);
+        drop(reservation);
+        assert!(
+            region.complete_close(),
+            "complete_close must succeed once pending spawns drain"
+        );
+        assert_eq!(region.state(), RegionState::Closed);
+    }
+
+    #[test]
+    fn pending_spawn_handle_is_shared_with_detached_producers() {
+        // Producers clone the handle out of the record once, then reserve
+        // without any access to the record (models the lock-free enqueue
+        // path the spawn mailbox uses).
+        let region = RegionRecord::new(RegionId::new_for_test(13, 0), None, Budget::default());
+        let handle = region.pending_spawn_handle();
+        let reservation = handle.reserve();
+        assert_eq!(region.pending_spawn_count(), 1);
+        drop(reservation);
+        assert_eq!(region.pending_spawn_count(), 0);
+    }
+
+    #[test]
+    fn pending_spawn_reservations_are_balanced_under_contention() {
+        // Only the counter handles cross threads (RegionRecord itself is
+        // not Send + Sync); this mirrors production, where detached
+        // producers hold the Arc'd counter, never the record.
+        let region = RegionRecord::new(RegionId::new_for_test(14, 0), None, Budget::default());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let handle = region.pending_spawn_handle();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..1_000 {
+                    let reservation = handle.reserve();
+                    drop(reservation);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("reservation thread panicked");
+        }
+        assert_eq!(region.pending_spawn_count(), 0);
+        assert_eq!(region.pending_spawn_handle().underflow_count(), 0);
     }
 }

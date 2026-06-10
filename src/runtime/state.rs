@@ -2988,10 +2988,9 @@ impl RuntimeState {
         self.live_task_count() == 0
             && self.pending_obligation_count() == 0
             && self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty)
-            && self
-                .regions
-                .iter()
-                .all(|(_, r)| r.finalizers_empty() && !r.state().is_closing())
+            && self.regions.iter().all(|(_, r)| {
+                r.finalizers_empty() && !r.state().is_closing() && r.pending_spawn_count() == 0
+            })
     }
 
     /// Applies the region policy when a child reaches a terminal outcome.
@@ -3397,7 +3396,13 @@ impl RuntimeState {
                 .is_none_or(|r| r.state().is_terminal())
         });
 
-        all_tasks_done && all_children_closed
+        // Pending (not-yet-admitted) spawn requests are un-admitted children:
+        // the drain phase must first admit-then-cancel or resolve them, so
+        // the region cannot enter Finalizing while any credit is outstanding
+        // (br-asupersync-dx-core-api-v2-u1z5hn.1.2).
+        let no_pending_spawns = region.pending_spawn_count() == 0;
+
+        all_tasks_done && all_children_closed && no_pending_spawns
     }
 
     /// Notifies that a task has completed.
@@ -4174,6 +4179,13 @@ impl RuntimeState {
 
         // All children must be fully closed and removed
         if region.child_count() > 0 {
+            return false;
+        }
+
+        // No spawn requests may still be sitting in the mailbox for this
+        // region (br-asupersync-dx-core-api-v2-u1z5hn.1.2). Mirrors the gate
+        // inside RegionRecord::complete_close.
+        if region.pending_spawn_count() > 0 {
             return false;
         }
 
