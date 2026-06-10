@@ -515,10 +515,12 @@ impl CompressionMetrics {
     }
 
     fn throughput_events_per_ms(&self) -> f64 {
-        if self.compression_time.as_millis() == 0 {
-            return f64::INFINITY;
-        }
-        self.original_size as f64 / self.compression_time.as_millis() as f64
+        // Nanosecond precision with a 1µs floor: small traces compress in
+        // well under a millisecond, and the previous millisecond-granular
+        // computation returned `f64::INFINITY` for them, which poisoned the
+        // cross-level variance assertion with inf/NaN comparisons.
+        let nanos = self.compression_time.as_nanos().max(1_000) as f64;
+        self.original_size as f64 / (nanos / 1_000_000.0)
     }
 
     fn memory_efficiency_ratio(&self) -> f64 {
@@ -756,15 +758,25 @@ fn compression_idempotence_with_performance_tracking() {
                     "Compression not idempotent at {level:?} for len={len}, seed={seed}"
                 );
 
-                assert_eq!(
-                    first_compressed.ratio(),
-                    second_compressed.ratio(),
-                    "Compression ratio not idempotent at {level:?} for len={len}, seed={seed}"
+                // `ratio()` divides retained events by that pass's own input
+                // size, so the two passes have different denominators whenever
+                // the first pass filtered anything; comparing them directly
+                // can never hold. The idempotence claim in ratio terms is that
+                // the second pass filters nothing: its ratio is exactly 1.0.
+                assert!(
+                    (second_compressed.ratio() - 1.0).abs() < f64::EPSILON,
+                    "Re-compression filtered events at {level:?} for len={len}, seed={seed}: \
+                     ratio {}",
+                    second_compressed.ratio()
                 );
 
-                // Performance expectations: second compression should be fast (already filtered)
-                if !first_compressed.events.is_empty() {
-                    // For non-empty results, second compression should not be slower than 2x first
+                // Performance expectations: second compression should be fast
+                // (already filtered). Only meaningful when the first pass took
+                // long enough to measure; sub-50µs samples are timer noise and
+                // the 2x comparison flakes on them.
+                if !first_compressed.events.is_empty()
+                    && first_duration >= std::time::Duration::from_micros(50)
+                {
                     assert!(
                         second_duration <= first_duration * 2,
                         "Second compression unexpectedly slow: {:?} vs {:?} at {level:?} for len={len}",

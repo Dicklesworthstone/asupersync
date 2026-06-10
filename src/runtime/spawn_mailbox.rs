@@ -305,11 +305,15 @@ impl fmt::Debug for SpawnRequest {
     }
 }
 
-/// Lock-free MPSC intake queue for spawn requests.
+/// Lock-free multi-producer intake queue for spawn requests.
 ///
 /// Producers enqueue from any thread without holding `RuntimeState`; the
-/// scheduler's admission path consumes. See module docs for capacity,
-/// backpressure, and trace-ordering contracts.
+/// scheduler's admission path consumes. The underlying queue is MPMC-safe,
+/// but the FIFO guarantees documented on [`Self::dequeue`] and
+/// [`Self::dequeue_batch_into`] are stated for a single logical consumer;
+/// with concurrent consumers each pop still returns the oldest *remaining*
+/// request, but the global drain order interleaves across consumers. See
+/// module docs for capacity, backpressure, and trace-ordering contracts.
 pub struct SpawnMailbox {
     queue: GlobalFifoQueue<SpawnRequest>,
     ids: SpawnIdAllocator,
@@ -363,8 +367,11 @@ impl SpawnMailbox {
             let region = request.region();
             trace.record_event(|seq| TraceEvent::task_spawn_enqueued(seq, now, task, region));
         }
-        self.queue.push(request);
+        // Count before publishing: a consumer can pop (and bump
+        // `total_dequeued`) the instant the push lands, and observers rely
+        // on `total_enqueued >= total_dequeued`.
         self.total_enqueued.fetch_add(1, Ordering::Relaxed);
+        self.queue.push(request);
     }
 
     /// Dequeues the oldest spawn request, if any.
