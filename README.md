@@ -1827,6 +1827,7 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`docs/wasm_canonical_examples.md`](./docs/wasm_canonical_examples.md) | **Browser Canonical Examples**: vanilla/TypeScript/React/Next scenario catalog with deterministic repro commands and artifact pointers |
 | [`docs/wasm_troubleshooting_compendium.md`](./docs/wasm_troubleshooting_compendium.md) | **Browser Troubleshooting Cookbook**: unsupported-runtime recovery paths, failure recipes, and deterministic verification commands |
 | [`docs/wasm_dx_error_taxonomy.md`](./docs/wasm_dx_error_taxonomy.md) | **Browser DX Error Taxonomy**: package error codes, diagnostics fields, recoverability classes, and actionable guidance |
+| [`docs/error_codes/registry.json`](./docs/error_codes/registry.json) | **Runtime Error-Code Registry**: stable `ASUP-Exxx` remediation codes, source status, and per-code docs under `docs/error_codes/` |
 | [`docs/wasm_typescript_package_topology.md`](./docs/wasm_typescript_package_topology.md) | **Browser Package Reference**: package ownership, exported API layers, lifecycle rules, and JS/TS upgrade playbook |
 | [`docs/wasm_abi_compatibility_policy.md`](./docs/wasm_abi_compatibility_policy.md) | **Browser ABI Compatibility Policy**: packaged ABI matrix, downgrade behavior, and consumer upgrade checklist |
 | [`docs/wasm_pilot_cohort_rubric.md`](./docs/wasm_pilot_cohort_rubric.md) | **Pilot Cohort Rubric**: deterministic intake scoring, risk tiers, exclusions, and onboarding acceptance criteria |

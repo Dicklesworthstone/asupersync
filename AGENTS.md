@@ -303,6 +303,25 @@ Asupersync is a library/runtime. Core code should not write to stdout/stderr.
 - Keep tests deterministic; avoid time-based logging outside the lab runtime.
 - If a CLI is added, keep its output minimal, deterministic, and documented.
 
+## Runtime Error-Code Registry
+
+Runtime failures that are meant for agents or operators should use stable
+`ASUP-Exxx` tokens and link back to the machine registry at
+[`docs/error_codes/registry.json`](./docs/error_codes/registry.json). The
+registry owns the code range, remediation summary, source status, and page path;
+the per-code markdown pages under `docs/error_codes/` own the human/agent
+runbook.
+
+When adding or wiring a code:
+
+1. Allocate it in `docs/error_codes/registry.json`.
+2. Add or update the matching `docs/error_codes/ASUP-ENNN.md` page using the
+   standard Symptom / Probable Causes / Fix / Example / Related template.
+3. Emit the exact leading `[ASUP-ENNN]` token in user-facing `Display`, panic,
+   or diagnostic text.
+4. Keep `tests/error_code_registry_contract.rs` green so source references,
+   registry rows, docs, and README/AGENTS discoverability stay consistent.
+
 ---
 
 ## Compiler Checks (CRITICAL)

@@ -1,0 +1,48 @@
+# Asupersync Error Codes
+
+The Asupersync runtime error namespace uses stable `ASUP-Exxx` tokens so
+agents, logs, tests, and operators can turn failures into a lookup path. The
+machine surface is [`registry.json`](./registry.json). Each code also has a
+short remediation page with the same template:
+
+- Symptom
+- Probable Causes
+- Fix
+- Example
+- Related
+
+`status = "live"` means the token is already emitted from `src/`.
+`status = "reserved"` means the code and remediation page are allocated for
+the next source-wiring slice. Reserved codes are still useful for issue
+triage, but tests must not claim they are emitted until a source reference
+lands.
+
+## First-Day Catalog
+
+| Code | Status | Area | Page |
+|------|--------|------|------|
+| ASUP-E001 | live | core-runtime | [Runtime unavailable](./ASUP-E001.md) |
+| ASUP-E002 | live | core-runtime | [Region not found](./ASUP-E002.md) |
+| ASUP-E003 | live | core-runtime | [Region closed](./ASUP-E003.md) |
+| ASUP-E004 | live | core-runtime | [Local scheduler unavailable](./ASUP-E004.md) |
+| ASUP-E005 | live | core-runtime | [Name registration failed](./ASUP-E005.md) |
+| ASUP-E006 | live | core-runtime | [Region at capacity](./ASUP-E006.md) |
+| ASUP-E007 | live | core-runtime | [Authorization denied](./ASUP-E007.md) |
+| ASUP-E101 | reserved | obligations | [Obligation leaked](./ASUP-E101.md) |
+| ASUP-E102 | reserved | obligations | [Obligation double resolve](./ASUP-E102.md) |
+| ASUP-E103 | reserved | obligations | [Root-region obligation](./ASUP-E103.md) |
+| ASUP-E104 | reserved | obligations | [Obligation abort missing](./ASUP-E104.md) |
+| ASUP-E105 | reserved | obligations | [Obligation drain timeout](./ASUP-E105.md) |
+| ASUP-E201 | reserved | channels-sync | [Channel closed](./ASUP-E201.md) |
+| ASUP-E202 | reserved | channels-sync | [Send permit leaked](./ASUP-E202.md) |
+| ASUP-E203 | reserved | channels-sync | [Receive cancelled](./ASUP-E203.md) |
+| ASUP-E204 | reserved | channels-sync | [Semaphore permit exhausted](./ASUP-E204.md) |
+| ASUP-E205 | reserved | channels-sync | [Lock-order violation](./ASUP-E205.md) |
+| ASUP-E301 | reserved | cancellation-drain | [Cancel drain timeout](./ASUP-E301.md) |
+| ASUP-E302 | reserved | cancellation-drain | [Race loser not drained](./ASUP-E302.md) |
+| ASUP-E303 | reserved | cancellation-drain | [Finalizer timeout](./ASUP-E303.md) |
+| ASUP-E401 | reserved | lab-replay | [Replay divergence](./ASUP-E401.md) |
+| ASUP-E402 | reserved | lab-replay | [Futurelock detected](./ASUP-E402.md) |
+| ASUP-E403 | reserved | lab-replay | [Lab seed nondeterminism](./ASUP-E403.md) |
+| ASUP-E501 | reserved | net-http | [HTTP deadline exhausted](./ASUP-E501.md) |
+| ASUP-E901 | reserved | config-build | [Config invalid](./ASUP-E901.md) |

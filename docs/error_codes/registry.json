@@ -1,0 +1,523 @@
+{
+  "schema_version": "asupersync-error-code-registry-v1",
+  "namespace": "ASUP-Exxx",
+  "updated": "2026-06-10",
+  "ranges": [
+    {
+      "range": "ASUP-E0xx",
+      "area": "core-runtime",
+      "summary": "Spawn, region admission, runtime availability, and budget setup failures."
+    },
+    {
+      "range": "ASUP-E1xx",
+      "area": "obligations",
+      "summary": "Permit, ack, lease, guard, leak, and obligation-lifecycle failures."
+    },
+    {
+      "range": "ASUP-E2xx",
+      "area": "channels-sync",
+      "summary": "Channel, mailbox, lock, semaphore, and cancel-aware synchronization failures."
+    },
+    {
+      "range": "ASUP-E3xx",
+      "area": "cancellation-drain",
+      "summary": "Cancellation protocol, loser drain, and finalizer completion failures."
+    },
+    {
+      "range": "ASUP-E4xx",
+      "area": "lab-replay",
+      "summary": "Deterministic lab runtime, replay, oracle, and futurelock diagnostics."
+    },
+    {
+      "range": "ASUP-E5xx",
+      "area": "net-http",
+      "summary": "Network, HTTP, protocol, and deadline propagation failures."
+    },
+    {
+      "range": "ASUP-E6xx",
+      "area": "database",
+      "summary": "Database client, pool, transaction, and statement-timeout failures."
+    },
+    {
+      "range": "ASUP-E7xx",
+      "area": "distributed-remote",
+      "summary": "Remote spawn, transport routing, ATP, and distributed runtime failures."
+    },
+    {
+      "range": "ASUP-E8xx",
+      "area": "raptorq",
+      "summary": "RaptorQ encode/decode, repair, and symbol-validation failures."
+    },
+    {
+      "range": "ASUP-E9xx",
+      "area": "config-build",
+      "summary": "Configuration, feature graph, build, and release-gate failures."
+    }
+  ],
+  "codes": [
+    {
+      "code": "ASUP-E001",
+      "name": "runtime-unavailable",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "The runtime behind a spawn handle is no longer available.",
+      "probable_causes": [
+        "The runtime was dropped before the spawn call.",
+        "Shutdown began before the caller enqueued the task."
+      ],
+      "remediation": [
+        "Hold a strong runtime handle for the spawner lifetime.",
+        "Stop spawning after shutdown starts and treat the error as terminal."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E001.md",
+      "since": "0.3.2",
+      "source_refs": [
+        "src/runtime/state.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E002",
+      "name": "region-not-found",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "A spawn target referenced a region id that is no longer present.",
+      "probable_causes": [
+        "The region id was cached past region close.",
+        "A test fixture reused a stale RegionId."
+      ],
+      "remediation": [
+        "Spawn into a live ancestor region.",
+        "Refresh the handle that produced the region id before retrying."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E002.md",
+      "since": "0.3.2",
+      "source_refs": [
+        "src/runtime/state.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E003",
+      "name": "region-closed",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "The target region is closing or closed and admits no new tasks.",
+      "probable_causes": [
+        "Spawn raced with region close.",
+        "The caller kept using a scope after the owning region began draining."
+      ],
+      "remediation": [
+        "Treat spawn-vs-shutdown as a normal cancellation race.",
+        "Move the spawn earlier or route work through a still-live parent region."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E003.md",
+      "since": "0.3.2",
+      "source_refs": [
+        "src/runtime/state.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E004",
+      "name": "local-scheduler-unavailable",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "A local spawn was attempted without an active worker scheduler.",
+      "probable_causes": [
+        "spawn_local was called outside a worker thread.",
+        "A fixture constructed runtime state without the local scheduler context."
+      ],
+      "remediation": [
+        "Use spawn for Send tasks.",
+        "Call spawn_local only from inside runtime worker context."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E004.md",
+      "since": "0.3.2",
+      "source_refs": [
+        "src/runtime/state.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E005",
+      "name": "name-registration-failed",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "Service name registration failed while spawning a named task.",
+      "probable_causes": [
+        "The service name is already leased.",
+        "The requested name is invalid for the registry."
+      ],
+      "remediation": [
+        "Pick a unique service name.",
+        "Release or await the existing name lease before retrying."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E005.md",
+      "since": "0.3.2",
+      "source_refs": [
+        "src/runtime/state.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E006",
+      "name": "region-at-capacity",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "Region admission rejected a spawn because the live-task limit was reached.",
+      "probable_causes": [
+        "The region has too many live child tasks.",
+        "Admission limits are lower than the workload envelope requires."
+      ],
+      "remediation": [
+        "Await existing task completions before spawning more.",
+        "Raise the region admission limit only after proving the capacity envelope."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E006.md",
+      "since": "0.3.2",
+      "source_refs": [
+        "src/runtime/state.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E007",
+      "name": "authorization-denied",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "The capability context lacks permission to create tasks in the target region.",
+      "probable_causes": [
+        "The Cx was narrowed without spawn rights.",
+        "Code attempted to spawn through a region it does not own."
+      ],
+      "remediation": [
+        "Pass a Cx with spawn capability for the target region.",
+        "Spawn through the owning scope instead of bypassing capability flow."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E007.md",
+      "since": "0.3.2",
+      "source_refs": [
+        "src/runtime/state.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E101",
+      "name": "obligation-leaked",
+      "area": "obligations",
+      "status": "reserved",
+      "summary": "An obligation reached leak handling without commit or abort.",
+      "probable_causes": [
+        "A guard, permit, ack, or lease was dropped without resolving.",
+        "A cancellation path skipped drain-phase cleanup."
+      ],
+      "remediation": [
+        "Find the holder task and obligation kind in the audit snapshot.",
+        "Ensure every acquire/reserve path has matching commit or abort cleanup."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E101.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E102",
+      "name": "obligation-double-resolve",
+      "area": "obligations",
+      "status": "reserved",
+      "summary": "An obligation was committed, aborted, or leaked more than once.",
+      "probable_causes": [
+        "Both normal completion and cancellation cleanup resolved the same token.",
+        "A retry path reused an obligation id after resolution."
+      ],
+      "remediation": [
+        "Make resolution idempotence explicit at the owner boundary.",
+        "Split token ownership so only one path can consume the obligation."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E102.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E103",
+      "name": "root-region-obligation",
+      "area": "obligations",
+      "status": "reserved",
+      "summary": "An obligation was created in the root region.",
+      "probable_causes": [
+        "A test fixture used the root RegionId for obligation-bearing code.",
+        "Runtime setup skipped child-region allocation before creating a permit."
+      ],
+      "remediation": [
+        "Move the fixture or runtime path into a non-root region.",
+        "Preserve the guard: root-region obligations hide leaks and break quiescence."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E103.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E104",
+      "name": "obligation-abort-missing",
+      "area": "obligations",
+      "status": "reserved",
+      "summary": "A cancellation path dropped work without aborting its obligation.",
+      "probable_causes": [
+        "A two-phase reserve/send path lost the reserved permit.",
+        "A cancellation branch returned before abort cleanup."
+      ],
+      "remediation": [
+        "Add abort cleanup to every early return after reservation.",
+        "Test cancellation between reserve and commit."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E104.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E105",
+      "name": "obligation-drain-timeout",
+      "area": "obligations",
+      "status": "reserved",
+      "summary": "Drain waited too long for obligation resolution.",
+      "probable_causes": [
+        "A holder task did not observe cancellation.",
+        "A blocking section prevented finalizer progress."
+      ],
+      "remediation": [
+        "Inspect holder task, obligation kind, and age in the audit snapshot.",
+        "Move blocking cleanup into a bounded drain path."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E105.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E201",
+      "name": "channel-closed",
+      "area": "channels-sync",
+      "status": "reserved",
+      "summary": "A send or receive operation observed a closed channel.",
+      "probable_causes": [
+        "All senders or receivers were dropped.",
+        "A region closed before channel users finished."
+      ],
+      "remediation": [
+        "Treat closure as normal shutdown if it follows region cancellation.",
+        "If unexpected, inspect owner region lifetime and channel endpoint drops."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E201.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E202",
+      "name": "send-permit-leaked",
+      "area": "channels-sync",
+      "status": "reserved",
+      "summary": "A two-phase send permit was reserved but never committed or aborted.",
+      "probable_causes": [
+        "Cancellation happened between reserve and send.",
+        "The permit owner was dropped without abort cleanup."
+      ],
+      "remediation": [
+        "Use the channel reserve/send guard pattern instead of manual state flags.",
+        "Add a test that cancels immediately after reserve."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E202.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E203",
+      "name": "receive-cancelled",
+      "area": "channels-sync",
+      "status": "reserved",
+      "summary": "A receive operation was cancelled before it could commit delivery.",
+      "probable_causes": [
+        "The caller's Cx was cancelled while waiting.",
+        "A race loser was not drained before observing channel state."
+      ],
+      "remediation": [
+        "Drain the losing receive future before reusing the channel.",
+        "Confirm the receive path preserves queued data on cancellation."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E203.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E204",
+      "name": "semaphore-permit-exhausted",
+      "area": "channels-sync",
+      "status": "reserved",
+      "summary": "A semaphore acquire could not obtain the requested permits.",
+      "probable_causes": [
+        "All permits are held or queued ahead under FIFO policy.",
+        "The request asked for more permits than the semaphore can issue."
+      ],
+      "remediation": [
+        "Respect FIFO no-queue-jump behavior when diagnosing availability.",
+        "Reduce permit count or split the work into smaller admitted units."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E204.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E205",
+      "name": "lock-order-violation",
+      "area": "channels-sync",
+      "status": "reserved",
+      "summary": "A code path acquired runtime locks outside the required order.",
+      "probable_causes": [
+        "Nested runtime/obligation locks were introduced in the wrong order.",
+        "A diagnostic query held one shard lock while entering another domain."
+      ],
+      "remediation": [
+        "Reorder acquisition to E(Config), D(Instrumentation), B(Regions), A(Tasks), C(Obligations).",
+        "Snapshot data under one lock and release it before querying another domain."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E205.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E301",
+      "name": "cancel-drain-timeout",
+      "area": "cancellation-drain",
+      "status": "reserved",
+      "summary": "Cancellation was requested but drain did not complete within budget.",
+      "probable_causes": [
+        "A child task ignored cancellation.",
+        "A finalizer or obligation holder blocked drain progress."
+      ],
+      "remediation": [
+        "Inspect pending children, finalizers, and obligations for the region.",
+        "Make cancellation checkpoints visible in long-running loops."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E301.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E302",
+      "name": "race-loser-not-drained",
+      "area": "cancellation-drain",
+      "status": "reserved",
+      "summary": "A race combinator returned before fully draining losing branches.",
+      "probable_causes": [
+        "The winner path forgot to await loser cancellation.",
+        "A loser future held obligations after the race completed."
+      ],
+      "remediation": [
+        "Cancel every losing branch and drive it to completion before returning.",
+        "Assert zero obligation leaks after race completion in lab tests."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E302.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E303",
+      "name": "finalizer-timeout",
+      "area": "cancellation-drain",
+      "status": "reserved",
+      "summary": "A region finalizer exceeded its configured completion budget.",
+      "probable_causes": [
+        "Cleanup performed unbounded I/O or blocking work.",
+        "A finalizer waited on a task in the same closing region."
+      ],
+      "remediation": [
+        "Move blocking cleanup behind an explicit bounded capability.",
+        "Avoid waiting on same-region tasks from finalizer code."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E303.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E401",
+      "name": "replay-divergence",
+      "area": "lab-replay",
+      "status": "reserved",
+      "summary": "A replay run diverged from its recorded deterministic trace.",
+      "probable_causes": [
+        "The code introduced nondeterministic ordering or ambient time.",
+        "A trace schema changed without migration or golden update."
+      ],
+      "remediation": [
+        "Compare the first-divergence event, not the final failure only.",
+        "Normalize ordering, timestamps, and ids before accepting new goldens."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E401.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E402",
+      "name": "futurelock-detected",
+      "area": "lab-replay",
+      "status": "reserved",
+      "summary": "The lab runtime detected no possible progress for a set of futures.",
+      "probable_causes": [
+        "Tasks are mutually waiting on each other.",
+        "A wake registration was lost or cancelled incorrectly."
+      ],
+      "remediation": [
+        "Inspect wait-for edges and the last wake event for each parked task.",
+        "Add a deterministic regression that reproduces the minimal parked set."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E402.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E403",
+      "name": "lab-seed-nondeterminism",
+      "area": "lab-replay",
+      "status": "reserved",
+      "summary": "Two runs with the same lab seed produced different outcomes.",
+      "probable_causes": [
+        "A data structure iteration order is nondeterministic.",
+        "The test used wall-clock time, random entropy, or global process state."
+      ],
+      "remediation": [
+        "Replace unordered iteration with stable ordering in trace-visible paths.",
+        "Route time and entropy through Cx capabilities."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E403.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E501",
+      "name": "http-deadline-exhausted",
+      "area": "net-http",
+      "status": "reserved",
+      "summary": "An HTTP request or response path exhausted its effective deadline.",
+      "probable_causes": [
+        "The request budget was smaller than the operation latency.",
+        "A child call failed to compose its timeout with the ambient budget."
+      ],
+      "remediation": [
+        "Use min-plus deadline composition: effective deadline is the meet of ambient and override.",
+        "Log inbound, consumed, and forwarded budget at every server/client hop."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E501.md",
+      "since": "reserved",
+      "source_refs": []
+    },
+    {
+      "code": "ASUP-E901",
+      "name": "config-invalid",
+      "area": "config-build",
+      "status": "reserved",
+      "summary": "Runtime or build configuration failed deterministic validation.",
+      "probable_causes": [
+        "A numeric bound is internally inconsistent.",
+        "A feature combination violates the supported proof-lane envelope."
+      ],
+      "remediation": [
+        "Normalize dependent values before constructing runtime state.",
+        "Map the failed claim to the proof-lane manifest before changing docs."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E901.md",
+      "since": "reserved",
+      "source_refs": []
+    }
+  ]
+}
