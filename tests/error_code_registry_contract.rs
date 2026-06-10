@@ -8,6 +8,13 @@ const ERROR_CODES_README: &str = "docs/error_codes/README.md";
 const README: &str = "README.md";
 const AGENTS: &str = "AGENTS.md";
 
+#[derive(Debug, Eq, PartialEq)]
+struct ReadmeCatalogEntry {
+    status: String,
+    area: String,
+    page_target: String,
+}
+
 fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
 }
@@ -56,6 +63,17 @@ fn extract_asup_codes(text: &str) -> BTreeSet<String> {
     codes
 }
 
+fn markdown_link_target(link: &str) -> &str {
+    let Some(open) = link.find("](") else {
+        panic!("catalog page cell must be a markdown link: {link}");
+    };
+    assert!(
+        link.ends_with(')'),
+        "catalog page link must close with ')': {link}"
+    );
+    &link[open + 2..link.len() - 1]
+}
+
 fn rust_source_files(root: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(root).unwrap_or_else(|err| panic!("failed to read {root:?}: {err}")) {
         let entry = entry.expect("directory entry should be readable");
@@ -81,9 +99,9 @@ fn src_asup_codes() -> BTreeSet<String> {
     codes
 }
 
-fn readme_catalog_statuses() -> BTreeMap<String, String> {
+fn readme_catalog_entries() -> BTreeMap<String, ReadmeCatalogEntry> {
     let readme = read(ERROR_CODES_README);
-    let mut statuses = BTreeMap::new();
+    let mut entries = BTreeMap::new();
     let mut in_catalog = false;
 
     for line in readme.lines() {
@@ -119,12 +137,19 @@ fn readme_catalog_statuses() -> BTreeMap<String, String> {
             "catalog row has invalid status: {line}"
         );
 
-        let prior = statuses.insert(code.to_string(), cells[1].to_string());
+        let prior = entries.insert(
+            code.to_string(),
+            ReadmeCatalogEntry {
+                status: cells[1].to_string(),
+                area: cells[2].to_string(),
+                page_target: markdown_link_target(cells[3]).to_string(),
+            },
+        );
         assert!(prior.is_none(), "duplicate README catalog row for {code}");
     }
 
-    assert!(!statuses.is_empty(), "README error-code catalog not found");
-    statuses
+    assert!(!entries.is_empty(), "README error-code catalog not found");
+    entries
 }
 
 #[test]
@@ -169,6 +194,11 @@ fn error_code_registry_schema_and_pages_are_complete() {
         );
 
         let doc_path = as_str(entry, "doc_path");
+        assert_eq!(
+            doc_path,
+            format!("docs/error_codes/{code}.md"),
+            "{code} doc path must use the canonical page name"
+        );
         assert!(
             doc_path.starts_with("docs/error_codes/"),
             "{code} doc path must stay under docs/error_codes"
@@ -191,24 +221,32 @@ fn error_code_registry_schema_and_pages_are_complete() {
 }
 
 #[test]
-fn error_code_readme_catalog_matches_registry_statuses() {
+fn error_code_readme_catalog_matches_registry_entries() {
     let registry: Value = serde_json::from_str(&read(REGISTRY)).expect("registry must be JSON");
-    let registry_statuses: BTreeMap<_, _> = registry["codes"]
+    let registry_entries: BTreeMap<_, _> = registry["codes"]
         .as_array()
         .expect("registry codes must be an array")
         .iter()
         .map(|entry| {
+            let doc_path = as_str(entry, "doc_path");
+            let page_path = doc_path
+                .strip_prefix("docs/error_codes/")
+                .unwrap_or_else(|| panic!("{doc_path} must stay under docs/error_codes"));
             (
                 as_str(entry, "code").to_string(),
-                as_str(entry, "status").to_string(),
+                ReadmeCatalogEntry {
+                    status: as_str(entry, "status").to_string(),
+                    area: as_str(entry, "area").to_string(),
+                    page_target: format!("./{page_path}"),
+                },
             )
         })
         .collect();
 
-    let readme_statuses = readme_catalog_statuses();
+    let readme_entries = readme_catalog_entries();
     assert_eq!(
-        readme_statuses, registry_statuses,
-        "docs/error_codes/README.md first-day catalog must mirror registry.json statuses"
+        readme_entries, registry_entries,
+        "docs/error_codes/README.md first-day catalog must mirror registry.json status, area, and page links"
     );
 }
 
