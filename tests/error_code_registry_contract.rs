@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const REGISTRY: &str = "docs/error_codes/registry.json";
+const ERROR_CODES_README: &str = "docs/error_codes/README.md";
 const README: &str = "README.md";
 const AGENTS: &str = "AGENTS.md";
 
@@ -80,6 +81,52 @@ fn src_asup_codes() -> BTreeSet<String> {
     codes
 }
 
+fn readme_catalog_statuses() -> BTreeMap<String, String> {
+    let readme = read(ERROR_CODES_README);
+    let mut statuses = BTreeMap::new();
+    let mut in_catalog = false;
+
+    for line in readme.lines() {
+        let trimmed = line.trim();
+        if trimmed == "| Code | Status | Area | Page |" {
+            in_catalog = true;
+            continue;
+        }
+
+        if !in_catalog {
+            continue;
+        }
+
+        if trimmed.starts_with("|------") {
+            continue;
+        }
+
+        if !trimmed.starts_with('|') {
+            break;
+        }
+
+        let cells: Vec<_> = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
+        assert_eq!(cells.len(), 4, "catalog row must have four columns: {line}");
+
+        let code = cells[0];
+        assert!(is_error_code(code), "catalog row has invalid code: {line}");
+        assert!(
+            matches!(cells[1], "live" | "reserved"),
+            "catalog row has invalid status: {line}"
+        );
+
+        let prior = statuses.insert(code.to_string(), cells[1].to_string());
+        assert!(prior.is_none(), "duplicate README catalog row for {code}");
+    }
+
+    assert!(!statuses.is_empty(), "README error-code catalog not found");
+    statuses
+}
+
 #[test]
 fn error_code_registry_schema_and_pages_are_complete() {
     let registry: Value = serde_json::from_str(&read(REGISTRY)).expect("registry must be JSON");
@@ -141,6 +188,28 @@ fn error_code_registry_schema_and_pages_are_complete() {
             );
         }
     }
+}
+
+#[test]
+fn error_code_readme_catalog_matches_registry_statuses() {
+    let registry: Value = serde_json::from_str(&read(REGISTRY)).expect("registry must be JSON");
+    let registry_statuses: BTreeMap<_, _> = registry["codes"]
+        .as_array()
+        .expect("registry codes must be an array")
+        .iter()
+        .map(|entry| {
+            (
+                as_str(entry, "code").to_string(),
+                as_str(entry, "status").to_string(),
+            )
+        })
+        .collect();
+
+    let readme_statuses = readme_catalog_statuses();
+    assert_eq!(
+        readme_statuses, registry_statuses,
+        "docs/error_codes/README.md first-day catalog must mirror registry.json statuses"
+    );
 }
 
 #[test]
