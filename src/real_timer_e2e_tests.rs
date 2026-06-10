@@ -372,7 +372,7 @@ impl RealTimerManager {
                     concurrent_operations: config.concurrency_level as u64,
                 };
 
-                let _ = sender.send(operation).await;
+                let _ = sender.send(operation);
             });
 
             handles.push(handle);
@@ -382,7 +382,7 @@ impl RealTimerManager {
 
         // Collect all results
         let mut operations = Vec::new();
-        while let Some(operation) = receiver.recv().await {
+        while let Ok(operation) = receiver.recv(cx).await {
             operations.push(operation);
         }
 

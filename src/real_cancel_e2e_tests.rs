@@ -179,7 +179,7 @@ impl RealCancelManager {
         let mut received_cancels = 0;
         let mut total_nodes = 0;
 
-        while let Some(status) = status_receiver.recv().await {
+        while let Ok(status) = status_receiver.recv(cx).await {
             match status {
                 TaskStatus::Created => total_nodes += 1,
                 TaskStatus::CancelReceived => {
@@ -238,7 +238,7 @@ impl RealCancelManager {
         current_level: usize,
         parent_id: Option<u64>,
         cancel_token: &CancelToken,
-        status_sender: &mpsc::UnboundedSender<TaskStatus>,
+        status_sender: &mpsc::Sender<TaskStatus>,
         hierarchy_nodes: &mut HashMap<u64, TaskHierarchyNode>,
     ) -> Result<(), AsupersyncError> {
         if remaining_depth == 0 {
@@ -262,7 +262,7 @@ impl RealCancelManager {
         hierarchy_nodes.insert(task_id, node);
         self.stats.tasks_spawned.fetch_add(1, Ordering::Relaxed);
 
-        let _ = status_sender.send(TaskStatus::Created).await;
+        let _ = status_sender.try_send(TaskStatus::Created);
 
         // Create child scope
         let child_cancel_token = cancel_token.clone();
@@ -280,7 +280,7 @@ impl RealCancelManager {
             let cancel_monitor = child_cx.spawn(async move {
                 monitor_cancel_token.cancelled().await;
                 monitor_cancel_received.store(true, Ordering::Relaxed);
-                let _ = monitor_status_sender.send(TaskStatus::CancelReceived).await;
+                let _ = monitor_status_sender.try_send(TaskStatus::CancelReceived);
             });
 
             // Recursively create child hierarchy
@@ -307,7 +307,7 @@ impl RealCancelManager {
 
             match work_result {
                 Outcome::Ok(()) => {
-                    let _ = child_status_sender.send(TaskStatus::Completed).await;
+                    let _ = child_status_sender.try_send(TaskStatus::Completed);
                     *completion_time.lock().unwrap() = Some(Instant::now());
                 }
                 Outcome::Cancelled => {
@@ -366,7 +366,7 @@ impl RealCancelManager {
 
         // Use timeout to avoid infinite wait
         let collection_result = timeout(Duration::from_millis(2000), async {
-            while let Some(status) = status_receiver.recv().await {
+            while let Ok(status) = status_receiver.recv(cx).await {
                 match status {
                     TaskStatus::Created => total_nodes += 1,
                     TaskStatus::CancelReceived => {
@@ -432,7 +432,7 @@ impl RealCancelManager {
         }
 
         self.stats.tasks_spawned.fetch_add(1, Ordering::Relaxed);
-        let _ = status_sender.send(TaskStatus::Created).await;
+        let _ = status_sender.send(TaskStatus::Created);
 
         cancel_scope(cx, |scope_cx| async move {
             self.stats.scopes_created.fetch_add(1, Ordering::Relaxed);
@@ -443,7 +443,7 @@ impl RealCancelManager {
 
             let cancel_monitor = scope_cx.spawn(async move {
                 monitor_cancel_token.cancelled().await;
-                let _ = monitor_status_sender.send(TaskStatus::CancelReceived).await;
+                let _ = monitor_status_sender.send(TaskStatus::CancelReceived);
             });
 
             // Spawn child nodes
@@ -478,7 +478,7 @@ impl RealCancelManager {
 
             match work_result {
                 Outcome::Ok(()) => {
-                    let _ = status_sender.send(TaskStatus::Completed).await;
+                    let _ = status_sender.send(TaskStatus::Completed);
                 }
                 _ => {
                     // Cancelled or timeout
@@ -525,7 +525,7 @@ impl RealCancelManager {
 
         // Wait for completion notifications
         let mut completed_levels = 0;
-        while let Some(level) = completion_receiver.recv().await {
+        while let Ok(level) = completion_receiver.recv(cx).await {
             completed_levels += 1;
             if completed_levels >= depth {
                 break;
@@ -582,7 +582,7 @@ impl RealCancelManager {
                 self.stats
                     .cancel_signals_received
                     .fetch_add(1, Ordering::Relaxed);
-                let _ = level_completion_sender.send(level).await;
+                let _ = level_completion_sender.send(level);
             });
 
             // Continue to next level of nesting
@@ -662,7 +662,7 @@ impl RealCancelManager {
         let mut total_results = 0;
         let mut cancelled_results = 0;
 
-        while let Some(result) = result_receiver.recv().await {
+        while let Ok(result) = result_receiver.recv(cx).await {
             total_results += 1;
             if result {
                 cancelled_results += 1;
@@ -730,7 +730,7 @@ impl RealCancelManager {
                     .await;
 
                     let was_cancelled = result.is_err();
-                    let _ = sender.send(was_cancelled).await;
+                    let _ = sender.send(was_cancelled);
                     was_cancelled
                 });
 
