@@ -56,6 +56,8 @@ impl CdcEngine {
         data: &[u8],
         params: &CdcParameters,
     ) -> Result<Vec<CdcChunkData>, ChunkingProfileError> {
+        Self::validate_params(params)?;
+
         if data.is_empty() {
             return Ok(Vec::new());
         }
@@ -67,6 +69,7 @@ impl CdcEngine {
         // Use normalization constant to compute boundary mask
         let mask_bits = Self::compute_mask_bits_from_constant(params.normalization_constant);
         let boundary_mask = (1u64 << mask_bits) - 1;
+        let target_chunk_size = params.min_chunk_size;
 
         // Initialize rolling hash with first window
         let initial_window = data.len().min(params.window_size);
@@ -86,9 +89,12 @@ impl CdcEngine {
             // Check for boundary conditions
             let hash_boundary = (rolling_hash.hash() & boundary_mask) == 0;
             let min_size_reached = chunk_size >= params.min_chunk_size;
+            let target_size_reached = chunk_size >= target_chunk_size;
             let max_size_reached = chunk_size >= params.max_chunk_size;
+            let structural_boundary =
+                target_size_reached && Self::is_structural_boundary(data, current_pos as usize);
 
-            if (hash_boundary && min_size_reached) || max_size_reached {
+            if min_size_reached && (hash_boundary || structural_boundary || max_size_reached) {
                 // Create chunk data for the completed chunk
                 let chunk_data = &data[last_boundary as usize..current_pos as usize];
                 let content_hash = Self::compute_content_hash(chunk_data);
@@ -116,6 +122,32 @@ impl CdcEngine {
         }
 
         Ok(chunks)
+    }
+
+    fn validate_params(params: &CdcParameters) -> Result<(), ChunkingProfileError> {
+        if params.window_size == 0 {
+            return Err(ChunkingProfileError::InvalidChunkParameters(
+                "CDC window size must be greater than zero".to_string(),
+            ));
+        }
+        if params.min_chunk_size == 0 {
+            return Err(ChunkingProfileError::InvalidChunkParameters(
+                "CDC min chunk size must be greater than zero".to_string(),
+            ));
+        }
+        if params.max_chunk_size < params.min_chunk_size {
+            return Err(ChunkingProfileError::InvalidChunkParameters(
+                "CDC max chunk size must be greater than or equal to min chunk size".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn is_structural_boundary(data: &[u8], current_pos: usize) -> bool {
+        current_pos > 0
+            && current_pos <= data.len()
+            && matches!(data[current_pos - 1], b'\n' | b'\r')
     }
 
     /// Compute mask bits from normalization constant.

@@ -9,9 +9,7 @@
 use asupersync::atp::manifest::{ChunkStrategy, ProofStrength};
 use asupersync::net::atp::chunk::ChunkingProfile;
 use asupersync::net::atp::chunk::dedupe::{CdcEngine, ChunkCache, ChunkReuseManager};
-use asupersync::net::atp::chunk::dedupe::{
-    CdcParameters, ChunkIdentity, ChunkReuseCriteria, ChunkVerification,
-};
+use asupersync::net::atp::chunk::dedupe::{CdcParameters, ChunkIdentity, ChunkReuseCriteria};
 use std::collections::HashMap;
 
 #[test]
@@ -176,17 +174,7 @@ fn test_chunk_cache_operations() {
     let mut cache = ChunkCache::new(10 * 1024 * 1024); // 10MB cache
 
     let chunk_data = b"test chunk content for caching".to_vec();
-    let chunk_hash = [1u8; 32];
-
-    let identity = ChunkIdentity {
-        content_hash: chunk_hash,
-        size_bytes: chunk_data.len() as u64,
-        capability_scope: "test-transfer".to_string(),
-        verification: ChunkVerification {
-            algorithm: "sha256".to_string(),
-            proof_strength: ProofStrength::Basic,
-        },
-    };
+    let identity = ChunkIdentity::from_data(&chunk_data, "test-transfer", ProofStrength::Basic);
 
     // Store chunk
     assert!(cache.store_chunk(&identity, &chunk_data).is_ok());
@@ -202,15 +190,8 @@ fn test_chunk_cache_operations() {
     assert_eq!(stats.cache_misses, 0);
 
     // Test non-existent chunk
-    let missing_identity = ChunkIdentity {
-        content_hash: [2u8; 32],
-        size_bytes: 100,
-        capability_scope: "test-transfer".to_string(),
-        verification: ChunkVerification {
-            algorithm: "sha256".to_string(),
-            proof_strength: ProofStrength::Basic,
-        },
-    };
+    let missing_identity =
+        ChunkIdentity::from_data(b"missing chunk", "test-transfer", ProofStrength::Basic);
 
     let missing = cache.retrieve_chunk(&missing_identity).unwrap();
     assert!(missing.is_none());
@@ -227,38 +208,18 @@ fn test_corrupted_cached_chunks() {
     let original_data = b"uncorrupted chunk data".to_vec();
     let corrupted_data = b"corrupted chunk data!!".to_vec(); // Same length, different content
 
-    let identity = ChunkIdentity {
-        content_hash: [1u8; 32], // Hash computed from original_data
-        size_bytes: original_data.len() as u64,
-        capability_scope: "test-transfer".to_string(),
-        verification: ChunkVerification {
-            algorithm: "sha256".to_string(),
-            proof_strength: ProofStrength::Enhanced,
-        },
-    };
+    let identity =
+        ChunkIdentity::from_data(&original_data, "test-transfer", ProofStrength::Enhanced);
 
     // Store original data
     assert!(cache.store_chunk(&identity, &original_data).is_ok());
 
-    // Manually corrupt the cache (simulate disk corruption)
-    // In real implementation, this would be detected by hash validation
-    cache.store_chunk(&identity, &corrupted_data).unwrap();
+    // Public cache insertion rejects bytes whose SHA-256 does not match the
+    // identity, preserving the already-stored valid chunk.
+    assert!(cache.store_chunk(&identity, &corrupted_data).is_err());
 
-    // Retrieval should detect corruption and return None
-    // (Real implementation would validate hash on retrieval)
     let retrieved = cache.retrieve_chunk(&identity).unwrap();
-    if let Some(data) = retrieved {
-        // Verify hash matches
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        let _computed_hash = hasher.finish();
-
-        // Should match original or be detected as corruption
-        assert!(data == original_data || data != corrupted_data);
-    }
+    assert_eq!(retrieved, Some(original_data));
 }
 
 #[test]
@@ -271,21 +232,14 @@ fn test_chunk_reuse_manager_cross_transfer() {
 
     // Content that appears in both transfers
     let shared_content = b"shared content block";
-    let shared_hash = [1u8; 32];
+    let shared_identity = manager
+        .store_chunk_for_reuse(shared_content, transfer1_id)
+        .unwrap();
+    let shared_hash = shared_identity.content_hash;
 
-    let shared_identity = ChunkIdentity {
-        content_hash: shared_hash,
-        size_bytes: shared_content.len() as u64,
-        capability_scope: transfer1_id.to_string(),
-        verification: ChunkVerification {
-            algorithm: "sha256".to_string(),
-            proof_strength: ProofStrength::Basic,
-        },
-    };
-
-    // Register chunks for first transfer
+    // Register a second transfer in the same capability scope.
     manager
-        .register_transfer_chunk(transfer1_id, &shared_identity)
+        .register_transfer_chunk(transfer2_id, &shared_identity)
         .unwrap();
 
     // Check if chunk can be reused for second transfer
@@ -321,21 +275,11 @@ fn test_chunk_reuse_security_isolation() {
     let secure_transfer = "secure-transfer";
     let public_transfer = "public-transfer";
 
-    let chunk_hash = [1u8; 32];
-    let secure_identity = ChunkIdentity {
-        content_hash: chunk_hash,
-        size_bytes: 1024,
-        capability_scope: secure_transfer.to_string(),
-        verification: ChunkVerification {
-            algorithm: "sha256".to_string(),
-            proof_strength: ProofStrength::Cryptographic,
-        },
-    };
-
-    // Register chunk for secure transfer
-    manager
-        .register_transfer_chunk(secure_transfer, &secure_identity)
+    let secure_content = vec![7u8; 1024];
+    let secure_identity = manager
+        .store_chunk_for_reuse(&secure_content, secure_transfer)
         .unwrap();
+    let chunk_hash = secure_identity.content_hash;
 
     // Public transfer should NOT be able to reuse secure chunks
     let reuse_criteria = ChunkReuseCriteria {
@@ -352,18 +296,6 @@ fn test_chunk_reuse_security_isolation() {
     );
 
     // Same capability scope should allow reuse
-    let _another_secure = "another-secure-transfer";
-    // Simulate same capability scope through matching prefix
-    let _same_scope_identity = ChunkIdentity {
-        content_hash: chunk_hash,
-        size_bytes: 1024,
-        capability_scope: secure_transfer.to_string(), // Same scope
-        verification: ChunkVerification {
-            algorithm: "sha256".to_string(),
-            proof_strength: ProofStrength::Cryptographic,
-        },
-    };
-
     let reusable = manager.find_reusable_chunks(secure_transfer, &[chunk_hash], &reuse_criteria);
     assert_eq!(
         reusable.len(),
