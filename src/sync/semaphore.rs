@@ -346,6 +346,32 @@ impl Semaphore {
         }
     }
 
+    /// Acquires `count` permits asynchronously as one all-or-nothing operation.
+    ///
+    /// This is named for parity with semaphore APIs that distinguish single and
+    /// bulk acquisition. It delegates to [`Semaphore::acquire`], whose `count`
+    /// argument is already atomic and cancel-safe.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # async fn example(cx: &asupersync::Cx) {
+    /// use asupersync::sync::Semaphore;
+    ///
+    /// let semaphore = Semaphore::new(3);
+    /// let permit = semaphore.acquire_many(cx, 2).await.unwrap();
+    /// assert_eq!(permit.count(), 2);
+    /// # }
+    /// ```
+    #[inline]
+    pub fn acquire_many<'a, 'b, Caps>(
+        &'a self,
+        cx: &'b Cx<Caps>,
+        count: usize,
+    ) -> AcquireFuture<'a, 'b, Caps> {
+        self.acquire(cx, count)
+    }
+
     /// Tries to acquire the given number of permits without waiting.
     #[inline]
     pub fn try_acquire(&self, count: usize) -> Result<SemaphorePermit<'_>, TryAcquireError> {
@@ -413,6 +439,15 @@ impl Semaphore {
         };
         drop(state);
         result
+    }
+
+    /// Tries to acquire `count` permits without waiting.
+    ///
+    /// The operation is all-or-nothing: it either returns a permit holding all
+    /// requested units or leaves the semaphore unchanged.
+    #[inline]
+    pub fn try_acquire_many(&self, count: usize) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+        self.try_acquire(count)
     }
 
     /// Adds permits back to the semaphore.
@@ -1287,6 +1322,80 @@ mod tests {
             sem.available_permits()
         );
         crate::test_complete!("acquire_decrements_permits");
+    }
+
+    #[test]
+    fn try_acquire_many_is_all_or_nothing() {
+        init_test("try_acquire_many_is_all_or_nothing");
+        let sem = Semaphore::new(3);
+
+        let held = sem.try_acquire_many(2).expect("bulk acquire");
+        crate::assert_with_log!(held.count() == 2, "held permits", 2usize, held.count());
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "available after bulk acquire",
+            1usize,
+            sem.available_permits()
+        );
+
+        let failed = sem.try_acquire_many(2);
+        crate::assert_with_log!(
+            failed.is_err(),
+            "bulk acquire fails atomically",
+            true,
+            failed.is_err()
+        );
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "failed bulk acquire unchanged",
+            1usize,
+            sem.available_permits()
+        );
+
+        drop(held);
+        crate::assert_with_log!(
+            sem.available_permits() == 3,
+            "permits released",
+            3usize,
+            sem.available_permits()
+        );
+        crate::test_complete!("try_acquire_many_is_all_or_nothing");
+    }
+
+    #[test]
+    fn acquire_many_waits_for_full_requested_count() {
+        init_test("acquire_many_waits_for_full_requested_count");
+        let cx = test_cx();
+        let sem = Semaphore::new(2);
+        let held = sem.try_acquire(1).expect("initial acquire");
+
+        let mut fut = sem.acquire_many(&cx, 2);
+        let pending = poll_once(&mut fut).is_none();
+        crate::assert_with_log!(pending, "bulk acquire waits", true, pending);
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "partial permits not consumed",
+            1usize,
+            sem.available_permits()
+        );
+
+        drop(held);
+        let permit = poll_once(&mut fut)
+            .expect("bulk acquire ready")
+            .expect("bulk acquire ok");
+        crate::assert_with_log!(
+            permit.count() == 2,
+            "bulk permit count",
+            2usize,
+            permit.count()
+        );
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "all permits acquired",
+            0usize,
+            sem.available_permits()
+        );
+        crate::test_complete!("acquire_many_waits_for_full_requested_count");
     }
 
     #[test]

@@ -81,10 +81,13 @@ legacy-internal-test-harnesses = []
 serialization-golden-harnesses = []
 # Opt-in umbrella for admitted, environment-gated real-service E2E proof lanes.
 real-service-e2e = [
+    "channel-mpsc-select-e2e",
     "h3-websocket-e2e",
     "obligation-cleanup-e2e",
     "raptorq-roundtrip-e2e",
 ]
+# Focused proof lane for the channel/MPSC combinator-selection E2E harness.
+channel-mpsc-select-e2e = []
 # Focused proof lane for the H3 WebSocket endpoint/result E2E harness.
 h3-websocket-e2e = []
 # Focused proof lane for the deterministic RaptorQ roundtrip E2E harness.

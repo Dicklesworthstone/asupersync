@@ -376,6 +376,8 @@ impl<T> Sender<T> {
     /// All receivers waiting on `changed()` will be woken.
     ///
     /// Stores a new latest value for current and future subscribers.
+    /// This method does not take a [`Cx`] because it never waits for capacity
+    /// and never holds a deferred send obligation across a cancellation point.
     ///
     /// This preserves the watch cell even when there are no active receivers.
     /// New subscribers created after a zero-receiver gap observe the most

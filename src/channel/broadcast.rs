@@ -359,6 +359,20 @@ impl<T: Clone> Sender<T> {
     /// the capability context was cancelled before the permit was granted
     /// (the message is returned). Returns
     /// `Ok(0)` if all receivers drop between reservation and commit.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # async fn example(cx: &asupersync::Cx) {
+    /// use asupersync::channel::broadcast;
+    ///
+    /// let (tx, mut rx) = broadcast::channel(4);
+    /// let delivered = tx.send(cx, "config-updated").unwrap();
+    ///
+    /// assert_eq!(delivered, 1);
+    /// assert_eq!(rx.try_recv().ok(), Some("config-updated"));
+    /// # }
+    /// ```
     #[inline]
     pub fn send(&self, cx: &Cx, msg: T) -> Result<usize, SendError<T>> {
         let permit = match self.reserve(cx) {

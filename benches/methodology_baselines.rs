@@ -225,6 +225,49 @@ fn bench_channel_send_recv(c: &mut Criterion) {
         );
     }
 
+    // MPSC bounded: batch receive throughput through the public recv_many API.
+    for &(count, batch_limit) in &[(100usize, 8usize), (1000, 32), (10_000, 128)] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(
+            BenchmarkId::new(
+                "mpsc_recv_many_throughput",
+                format!("{count}_limit{batch_limit}"),
+            ),
+            &(count, batch_limit),
+            |b, &(count, batch_limit)| {
+                b.iter_batched(
+                    || {
+                        let cx = Cx::for_testing();
+                        let (tx, rx) = mpsc::channel::<u64>(count);
+                        for value in 0..count as u64 {
+                            tx.try_send(value).expect("send");
+                        }
+                        (cx, rx, Vec::with_capacity(batch_limit))
+                    },
+                    |(cx, mut rx, mut buffer)| {
+                        let mut received = 0usize;
+                        while received < count {
+                            buffer.clear();
+                            let drained = futures_lite::future::block_on(rx.recv_many(
+                                &cx,
+                                &mut buffer,
+                                batch_limit,
+                            ))
+                            .expect("recv_many");
+                            if drained == 0 {
+                                break;
+                            }
+                            received += drained;
+                            black_box(&buffer);
+                        }
+                        black_box(received)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
     // Channel creation cost
     group.bench_function("mpsc_create_cap16", |b: &mut criterion::Bencher| {
         b.iter(|| {

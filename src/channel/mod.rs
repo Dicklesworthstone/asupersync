@@ -15,6 +15,40 @@
 //! - If cancelled after reserve: the permit's `Drop` impl aborts cleanly
 //! - The commit operation (`send`) is infallible once the permit is obtained
 //!
+//! Use bounded [`mpsc::channel`] by default. [`mpsc::unbounded_channel`] (also
+//! available as [`mpsc::unbounded`]) is available when the caller has a separate
+//! memory-pressure policy and needs a synchronous send path that never waits
+//! for capacity.
+//!
+//! # Choosing Send Discipline
+//!
+//! | Channel | Reserve/commit path | One-call send | Nonblocking receive |
+//! |---------|---------------------|---------------|---------------------|
+//! | [`mpsc`] bounded | `Sender::reserve(&cx).await` then `SendPermit::send(value)` | `Sender::send(&cx, value).await` | `Receiver::try_recv()` / `Receiver::recv_many(&cx, &mut buf, limit).await` |
+//! | [`mpsc`] unbounded | `UnboundedSender::reserve(&cx).await` then `SendPermit::send(value)` | `UnboundedSender::send(value)` | `UnboundedReceiver::try_recv()` / `UnboundedReceiver::recv_many(&cx, &mut buf, limit).await` |
+//! | [`broadcast`] | `Sender::reserve(&cx)` then `SendPermit::send(value)` | `Sender::send(&cx, value)` | `Receiver::try_recv()` |
+//! | [`oneshot`] | `Sender::reserve(&cx)` then `SendPermit::send(value)` | `Sender::send(&cx, value)` | `Receiver::try_recv()` |
+//! | [`watch`] | Latest-value update; no reservation needed | `Sender::send(value)` | `Receiver::borrow()` after `Receiver::changed(&cx).await` |
+//! | [`session`] tracked wrappers | Tracked reserve/commit with proofs | Tracked `send(...)` helpers | Underlying tracked receiver |
+//!
+//! # Convenience Surface Verdicts
+//!
+//! | Surface | Verdict | Notes |
+//! |---------|---------|-------|
+//! | Bounded [`mpsc`] `send(&cx, value)` | exists-covered | Async sugar delegates to `reserve(&cx).await` then permit commit. |
+//! | Unbounded [`mpsc`] `send(value)` | exists-covered | Capacity cannot wait; caller owns memory-pressure policy. |
+//! | [`broadcast`] `send(&cx, value)` | exists-covered | Sync sugar checks `Cx` before granting a permit and returns the receiver count at commit. |
+//! | [`oneshot`] `send(&cx, value)` | exists-covered | Consumes the sender, reserves with `Cx`, then commits or returns the value. |
+//! | [`watch`] `send(value)` | not-applicable two-phase | Latest-value update is synchronous and has no capacity wait or held send obligation. |
+//! | [`session`] tracked send helpers | tracked-wrapper | Session proofs wrap the underlying channel obligations. |
+//!
+//! Use reserve/commit when a task may hold the send right across awaits and
+//! must make the obligation explicit. Use one-call send when the value is ready
+//! now and the operation should either commit or report closure. Use `try_send`
+//! and `try_recv` for load-shed or polling loops that must not wait. Use
+//! `recv_many` when the receiver is a drain loop and batching lowers lock/wake
+//! overhead; it still observes `Cx` cancellation before consuming values.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -101,5 +135,8 @@ mod broadcast_no_message_loss_metamorphic;
 mod oneshot_exactly_once_metamorphic;
 
 // Re-export commonly used types from mpsc (the default channel)
-pub use mpsc::{Receiver, SendPermit, Sender, channel};
+pub use mpsc::{
+    Receiver, SendPermit, Sender, UnboundedReceiver, UnboundedSender, channel, unbounded,
+    unbounded_channel,
+};
 pub use session::{TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot};

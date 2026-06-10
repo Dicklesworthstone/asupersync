@@ -382,6 +382,19 @@ impl<T> Sender<T> {
     ///
     /// Returns `Err(SendError::Disconnected(value))` if the receiver was dropped,
     /// or `Err(SendError::Cancelled(value))` if the `Cx` is already cancelled.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # async fn example(cx: &asupersync::Cx) {
+    /// use asupersync::channel::oneshot;
+    ///
+    /// let (tx, mut rx) = oneshot::channel();
+    /// tx.send(cx, "finished").unwrap();
+    ///
+    /// assert_eq!(rx.try_recv().ok(), Some("finished"));
+    /// # }
+    /// ```
     #[inline]
     pub fn send(self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
         match self.reserve(cx) {
