@@ -332,7 +332,6 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         let mut subscribers = Vec::new();
         for i in 0..num_subscribers {
             let receiver = sender.subscribe();
-            let resubscribe_sender = sender.clone();
             let handle = handle.spawn(async move {
                 let cx = Cx::for_testing();
                 let mut count = 0;
@@ -341,8 +340,9 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
                     match receiver.recv(&cx).await {
                         Ok(_) => count += 1,
                         Err(broadcast::RecvError::Lagged(_)) => {
-                            // Reset receiver on lag
-                            receiver = resubscribe_sender.subscribe();
+                            // The receiver cursor has already advanced to
+                            // the earliest retained message. Keep draining
+                            // without holding a sender clone alive.
                         }
                         Err(_) => break,
                     }
@@ -360,13 +360,19 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         // Collect results from subscribers
         let mut total_received = 0;
         for handle in subscribers {
-            let (subscriber_id, count) = handle.await;
-            tracing::debug!(
-                subscriber_id,
-                received = count,
-                "broadcast_stress_test: subscriber result"
-            );
-            total_received += count;
+            match timeout(wall_now(), Duration::from_secs(10), handle).await {
+                Ok((subscriber_id, count)) => {
+                    tracing::debug!(
+                        subscriber_id,
+                        received = count,
+                        "broadcast_stress_test: subscriber result"
+                    );
+                    total_received += count;
+                }
+                Err(_) => {
+                    panic!("broadcast subscriber timed out after sender completion");
+                }
+            }
         }
 
         tracing::info!(sent, total_received, "broadcast_stress_test: completed");

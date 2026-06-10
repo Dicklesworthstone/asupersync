@@ -143,6 +143,15 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
+    static TEST_TIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_test_time() -> std::sync::MutexGuard<'static, ()> {
+        let guard = TEST_TIME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_test_time(0);
+        guard
+    }
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -218,6 +227,7 @@ mod tests {
     #[test]
     fn mr_throttle_zero_duration_split_matches_unsplit_identity() {
         init_test("mr_throttle_zero_duration_split_matches_unsplit_identity");
+        let _time_guard = lock_test_time();
         let input = vec![4, 1, 4, 2, 1, 3];
         let expected = collect_throttled(&input, Duration::ZERO, 10);
 
@@ -240,6 +250,7 @@ mod tests {
     #[test]
     fn mr_throttle_constant_time_nonzero_period_is_suffix_invariant() {
         init_test("mr_throttle_constant_time_nonzero_period_is_suffix_invariant");
+        let _time_guard = lock_test_time();
         let prefix = vec![9];
         let suffixes = [Vec::new(), vec![1], vec![1, 2, 3], vec![1, 2, 3, 5, 8, 13]];
         let expected = collect_throttled(&prefix, Duration::from_secs(1), 20);
@@ -309,6 +320,7 @@ mod tests {
     #[test]
     fn throttle_with_delay() {
         init_test("throttle_with_delay");
+        let _time_guard = lock_test_time();
         set_test_time(0);
         let mut stream =
             Throttle::with_time_getter(iter(vec![1, 2, 3]), Duration::from_millis(1), test_time);
@@ -346,6 +358,7 @@ mod tests {
     #[test]
     fn throttle_accessors() {
         init_test("throttle_accessors");
+        let _time_guard = lock_test_time();
         set_test_time(17);
         let mut stream =
             Throttle::with_time_getter(iter(vec![1, 2]), Duration::from_millis(100), test_time);
@@ -390,6 +403,7 @@ mod tests {
     #[test]
     fn throttle_yields_after_suppression_budget_on_always_ready_stream() {
         init_test("throttle_yields_after_suppression_budget_on_always_ready_stream");
+        let _time_guard = lock_test_time();
         set_test_time(0);
         let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wake_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -441,6 +455,7 @@ mod tests {
     #[test]
     fn throttle_does_not_repoll_exhausted_upstream() {
         init_test("throttle_does_not_repoll_exhausted_upstream");
+        let _time_guard = lock_test_time();
         set_test_time(0);
         let mut stream = Throttle::with_time_getter(
             OneThenDoneThenPanicStream::default(),

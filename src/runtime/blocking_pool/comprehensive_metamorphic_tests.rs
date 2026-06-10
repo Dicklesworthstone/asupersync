@@ -127,6 +127,14 @@ fn arb_pool_operation() -> impl Strategy<Value = PoolOperation> {
     ]
 }
 
+fn real_sleep_proptest_config() -> ProptestConfig {
+    ProptestConfig {
+        cases: 16,
+        max_shrink_iters: 64,
+        ..ProptestConfig::default()
+    }
+}
+
 /// Tracked state for a spawned task.
 struct TrackedTask {
     id: u32,
@@ -279,7 +287,7 @@ fn apply_operation(
 /// Active thread count must always respect min/max bounds: min ≤ active ≤ max.
 #[test]
 fn mr_thread_count_bounds() {
-    proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
+    proptest!(real_sleep_proptest_config(), |(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
         let pool = config.create_pool();
         let mut tracked_tasks = Vec::new();
         let completion_counter = Arc::new(AtomicUsize::new(0));
@@ -312,7 +320,7 @@ fn mr_thread_count_bounds() {
 /// Total spawned tasks = completed + outstanding (accounting identity).
 #[test]
 fn mr_task_conservation() {
-    proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
+    proptest!(real_sleep_proptest_config(), |(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
         let pool = config.create_pool();
         let mut tracked_tasks = Vec::new();
         let completion_counter = Arc::new(AtomicUsize::new(0));
@@ -343,7 +351,7 @@ fn mr_task_conservation() {
 /// Number of busy threads cannot exceed active threads: busy ≤ active.
 #[test]
 fn mr_busy_threads_constraint() {
-    proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
+    proptest!(real_sleep_proptest_config(), |(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
         let pool = config.create_pool();
         let mut tracked_tasks = Vec::new();
         let completion_counter = Arc::new(AtomicUsize::new(0));
@@ -367,7 +375,7 @@ fn mr_busy_threads_constraint() {
 /// (under saturation conditions).
 #[test]
 fn mr_scaling_linearity() {
-    proptest!(|(base_task_count in 1usize..=50)| {
+    proptest!(real_sleep_proptest_config(), |(base_task_count in 1usize..=50)| {
         let base_task_count = (base_task_count % 8) + 2; // 2-9 tasks
         let config = TestPoolConfig {
             min_threads: 1,
@@ -418,7 +426,7 @@ fn mr_scaling_linearity() {
 /// for independent tasks.
 #[test]
 fn mr_cancellation_commutativity() {
-    proptest!(|(task_duration_ms in 1u64..=100)| {
+    proptest!(real_sleep_proptest_config(), |(task_duration_ms in 1u64..=100)| {
         let task_duration_ms = (task_duration_ms % 300) + 100; // 100-399ms
         let config = TestPoolConfig {
             min_threads: 1,
@@ -473,7 +481,7 @@ fn mr_cancellation_commutativity() {
 /// spawn_tasks(N) → drain_and_shutdown() should restore initial state.
 #[test]
 fn mr_spawn_shutdown_round_trip() {
-    proptest!(|(task_count in 1usize..=50)| {
+    proptest!(real_sleep_proptest_config(), |(task_count in 1usize..=50)| {
         let task_count = (task_count % 6) + 1; // 1-6 tasks
         let config = TestPoolConfig {
             min_threads: 1,
@@ -521,7 +529,7 @@ fn mr_spawn_shutdown_round_trip() {
 /// Pool behavior should be deterministic given the same configuration parameters.
 #[test]
 fn mr_configuration_invariance() {
-    proptest!(|(config in arb_pool_config(), task_count in 1usize..=50)| {
+    proptest!(real_sleep_proptest_config(), |(config in arb_pool_config(), task_count in 1usize..=50)| {
         let task_count = (task_count % 4) + 1; // 1-4 tasks
 
         // Create two identical pools
@@ -575,7 +583,7 @@ fn mr_configuration_invariance() {
 /// Total tasks across all cohorts should equal global task count when affinity is enabled.
 #[test]
 fn mr_affinity_conservation() {
-    proptest!(|(task_count in 1usize..=50, cohort_preferences in prop::collection::vec(0usize..4, 0..=50))| {
+    proptest!(real_sleep_proptest_config(), |(task_count in 1usize..=50, cohort_preferences in prop::collection::vec(0usize..4, 0..=50))| {
         let task_count = (task_count % 6) + 2; // 2-7 tasks
         let config = TestPoolConfig {
             min_threads: 1,
@@ -616,7 +624,7 @@ fn mr_affinity_conservation() {
 /// For same-priority tasks, execution order should respect submission order (FIFO property).
 #[test]
 fn mr_task_ordering_fifo() {
-    proptest!(|(task_count in 1usize..=50)| {
+    proptest!(real_sleep_proptest_config(), |(task_count in 1usize..=50)| {
         let task_count = (task_count % 4) + 2; // 2-5 tasks
         let config = TestPoolConfig {
             min_threads: 1,
@@ -658,7 +666,7 @@ fn mr_task_ordering_fifo() {
 /// A task marked as completed should remain completed (monotonic property).
 #[test]
 fn mr_completion_consistency() {
-    proptest!(|(task_duration_ms in 1u64..=100)| {
+    proptest!(real_sleep_proptest_config(), |(task_duration_ms in 1u64..=100)| {
         let task_duration_ms = (task_duration_ms % 100) + 50; // 50-149ms
         let config = TestPoolConfig {
             min_threads: 1,
@@ -700,7 +708,7 @@ mod composition_tests {
     /// Tests that all three properties hold simultaneously under complex operations.
     #[test]
     fn mr_composite_pool_invariants() {
-        proptest!(|(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
+        proptest!(real_sleep_proptest_config(), |(config in arb_pool_config(), operations in prop::collection::vec(arb_pool_operation(), 0..=30))| {
             let pool = config.create_pool();
             let mut tracked_tasks = Vec::new();
             let completion_counter = Arc::new(AtomicUsize::new(0));

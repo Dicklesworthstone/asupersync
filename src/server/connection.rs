@@ -659,6 +659,7 @@ mod tests {
     use std::time::Duration;
 
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+    static TEST_TIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -667,6 +668,14 @@ mod tests {
 
     fn set_test_time(nanos: u64) {
         TEST_NOW.store(nanos, Ordering::Relaxed);
+    }
+
+    fn lock_test_time() -> std::sync::MutexGuard<'static, ()> {
+        let guard = TEST_TIME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_test_time(0);
+        guard
     }
 
     fn test_time() -> Time {
@@ -1212,6 +1221,7 @@ mod tests {
     #[test]
     fn drain_with_stats_timeout_uses_injected_shutdown_clock() {
         init_test("drain_with_stats_timeout_uses_injected_shutdown_clock");
+        let _time_guard = lock_test_time();
         set_test_time(0);
 
         let signal = ShutdownSignal::with_time_getter(test_time);
@@ -1467,6 +1477,7 @@ mod tests {
     #[test]
     fn connection_manager_time_getter_controls_connected_at() {
         init_test("connection_manager_time_getter_controls_connected_at");
+        let _time_guard = lock_test_time();
         let signal = ShutdownSignal::new();
         let manager = ConnectionManager::with_time_getter(None, signal, test_time);
 
@@ -1567,6 +1578,7 @@ mod tests {
     #[test]
     fn _368gxk_drop_idle_lists_connections_past_timeout() {
         init_test("368gxk_drop_idle_lists_connections_past_timeout");
+        let _time_guard = lock_test_time();
         let signal = ShutdownSignal::new();
         set_test_time(0);
         let manager = ConnectionManager::with_time_getter(None, signal, test_time)
@@ -1593,6 +1605,7 @@ mod tests {
     #[test]
     fn _368gxk_drop_idle_returns_empty_when_disabled() {
         init_test("368gxk_drop_idle_returns_empty_when_disabled");
+        let _time_guard = lock_test_time();
         let signal = ShutdownSignal::new();
         set_test_time(0);
         let manager = ConnectionManager::with_time_getter(None, signal, test_time);
@@ -1606,6 +1619,7 @@ mod tests {
     #[test]
     fn _368gxk_min_grace_floors_aggressive_timeout() {
         init_test("368gxk_min_grace_floors_aggressive_timeout");
+        let _time_guard = lock_test_time();
         let signal = ShutdownSignal::new();
         set_test_time(0);
         // Misconfigured: 1ms idle timeout would close every TCP
@@ -1629,6 +1643,7 @@ mod tests {
     #[test]
     fn _368gxk_clock_step_backwards_does_not_flag_world_idle() {
         init_test("368gxk_clock_step_backwards_does_not_flag_world_idle");
+        let _time_guard = lock_test_time();
         let signal = ShutdownSignal::new();
         set_test_time(1_000_000_000_000); // 1000s
         let manager = ConnectionManager::with_time_getter(None, signal, test_time)
@@ -1643,6 +1658,7 @@ mod tests {
     #[test]
     fn batch_per_ip_and_idle_compose_cleanly() {
         init_test("batch_per_ip_and_idle_compose_cleanly");
+        let _time_guard = lock_test_time();
         let signal = ShutdownSignal::new();
         set_test_time(0);
         let manager = ConnectionManager::with_time_getter(Some(64), signal, test_time)
