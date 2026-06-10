@@ -1,1 +1,3 @@
-include!("../../examples/channel_mpsc_select_e2e.rs");
+fn main() {
+    asupersync::real_channel_mpsc_combinator_select_integration_e2e_tests::run_all();
+}
