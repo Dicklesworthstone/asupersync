@@ -158,6 +158,8 @@ pub mod sharded_state_conformance;
 pub mod slo_policy;
 /// Async wrapper for blocking pool operations.
 pub mod spawn_blocking;
+/// Lock-free spawn-request intake decoupled from `RuntimeState`.
+pub mod spawn_mailbox;
 pub mod state;
 pub mod state_verifier;
 pub mod stored_task;
