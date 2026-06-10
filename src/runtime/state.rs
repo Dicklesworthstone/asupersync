@@ -5317,6 +5317,8 @@ pub enum EventKindSnapshot {
     LinkDropped,
     /// An exit signal was delivered to a linked task.
     ExitDelivered,
+    /// A spawn request was enqueued onto the spawn mailbox (pre-admission).
+    TaskSpawnEnqueued,
 }
 
 impl From<TraceEventKind> for EventKindSnapshot {
@@ -5363,6 +5365,7 @@ impl From<TraceEventKind> for EventKindSnapshot {
             TraceEventKind::LinkCreated => Self::LinkCreated,
             TraceEventKind::LinkDropped => Self::LinkDropped,
             TraceEventKind::ExitDelivered => Self::ExitDelivered,
+            TraceEventKind::TaskSpawnEnqueued => Self::TaskSpawnEnqueued,
         }
     }
 }

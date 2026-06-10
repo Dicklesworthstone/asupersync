@@ -528,3 +528,4 @@ Canonical taxonomy markers:
 - `link_created` => `link_ref, task_a, region_a, task_b, region_b`
 - `link_dropped` => `link_ref, task_a, region_a, task_b, region_b`
 - `exit_delivered` => `link_ref, from, to, failure_vt, reason`
+- `task_spawn_enqueued` => `task, region`

@@ -1679,7 +1679,6 @@ impl LabRuntime {
             // Task lost (should not happen if consistent)
             return;
         };
-        drop(cx);
 
         // Record the poll so futurelock detection uses the correct idle step count.
         let _ = self.state.update_task(task_id, |record| {

@@ -102,10 +102,12 @@ mod trace_event_schema_stability_tests {
             );
         }
 
-        // Test 1.2: Event kind count remains stable (41 variants as of schema v1)
+        // Test 1.2: Event kind count remains stable (42 variants: 41 as of
+        // schema v1, plus task_spawn_enqueued added with the spawn mailbox —
+        // br-asupersync-dx-core-api-v2-u1z5hn.1.1)
         assert_eq!(
             TraceEventKind::ALL.len(),
-            41,
+            42,
             "TraceEventKind count changed - this breaks schema compatibility"
         );
 

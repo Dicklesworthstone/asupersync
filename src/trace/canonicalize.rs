@@ -480,6 +480,7 @@ fn kind_discriminant(kind: TraceEventKind) -> u8 {
         TraceEventKind::WorkerDrainStarted => 38,
         TraceEventKind::WorkerDrainCompleted => 39,
         TraceEventKind::WorkerFinalizeCompleted => 40,
+        TraceEventKind::TaskSpawnEnqueued => 41,
     }
 }
 
