@@ -158,6 +158,18 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// Returns the stable ASUP error code for user-facing diagnostics.
+    #[must_use]
+    #[inline]
+    pub const fn asup_code(&self) -> Option<&'static str> {
+        match self {
+            Self::ChannelClosed => Some("ASUP-E201"),
+            Self::CancelTimeout => Some("ASUP-E301"),
+            Self::ConfigError => Some("ASUP-E901"),
+            _ => None,
+        }
+    }
+
     /// Returns the error category for this kind.
     #[must_use]
     #[inline]
@@ -839,6 +851,9 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(code) = self.kind.asup_code() {
+            write!(f, "[{code}] ")?;
+        }
         write!(f, "{:?}", self.kind)?;
         if let Some(msg) = &self.message {
             write!(f, ": {msg}")?;
@@ -983,6 +998,35 @@ mod tests {
     fn display_with_message() {
         let err = Error::new(ErrorKind::ChannelEmpty).with_message("no messages");
         assert_eq!(err.to_string(), "ChannelEmpty: no messages");
+    }
+
+    #[test]
+    fn asup_codes_are_stable_for_live_error_kinds() {
+        let cases = [
+            (ErrorKind::ChannelClosed, Some("ASUP-E201")),
+            (ErrorKind::CancelTimeout, Some("ASUP-E301")),
+            (ErrorKind::ConfigError, Some("ASUP-E901")),
+            (ErrorKind::ChannelEmpty, None),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(kind.asup_code(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn display_prefixes_live_asup_codes() {
+        let channel = Error::new(ErrorKind::ChannelClosed);
+        assert_eq!(channel.to_string(), "[ASUP-E201] ChannelClosed");
+
+        let drain = Error::new(ErrorKind::CancelTimeout);
+        assert_eq!(drain.to_string(), "[ASUP-E301] CancelTimeout");
+
+        let config = Error::new(ErrorKind::ConfigError).with_message("min_threads exceeds max");
+        assert_eq!(
+            config.to_string(),
+            "[ASUP-E901] ConfigError: min_threads exceeds max"
+        );
     }
 
     #[test]

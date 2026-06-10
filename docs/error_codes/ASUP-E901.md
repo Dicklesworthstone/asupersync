@@ -20,6 +20,12 @@ validation.
 If `min_threads` exceeds `max_threads`, normalize the pair before creating the
 blocking-pool configuration.
 
+The central `Error` display for `ErrorKind::ConfigError` starts with:
+
+```text
+[ASUP-E901] ConfigError
+```
+
 ## Related
 
 - `ASUP-E007`

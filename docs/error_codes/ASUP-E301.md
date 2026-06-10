@@ -20,6 +20,12 @@ budget.
 CPU-heavy loops should check the `Cx` cancellation state periodically and return
 through normal cleanup instead of spinning past drain budget.
 
+The central `Error` display for `ErrorKind::CancelTimeout` starts with:
+
+```text
+[ASUP-E301] CancelTimeout
+```
+
 ## Related
 
 - `ASUP-E003`

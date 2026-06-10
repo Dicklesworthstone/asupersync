@@ -293,7 +293,7 @@
       "code": "ASUP-E201",
       "name": "channel-closed",
       "area": "channels-sync",
-      "status": "reserved",
+      "status": "live",
       "summary": "A send or receive operation observed a closed channel.",
       "probable_causes": [
         "All senders or receivers were dropped.",
@@ -304,8 +304,10 @@
         "If unexpected, inspect owner region lifetime and channel endpoint drops."
       ],
       "doc_path": "docs/error_codes/ASUP-E201.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/error.rs"
+      ]
     },
     {
       "code": "ASUP-E202",
@@ -383,7 +385,7 @@
       "code": "ASUP-E301",
       "name": "cancel-drain-timeout",
       "area": "cancellation-drain",
-      "status": "reserved",
+      "status": "live",
       "summary": "Cancellation was requested but drain did not complete within budget.",
       "probable_causes": [
         "A child task ignored cancellation.",
@@ -394,8 +396,10 @@
         "Make cancellation checkpoints visible in long-running loops."
       ],
       "doc_path": "docs/error_codes/ASUP-E301.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/error.rs"
+      ]
     },
     {
       "code": "ASUP-E302",
@@ -509,7 +513,7 @@
       "code": "ASUP-E901",
       "name": "config-invalid",
       "area": "config-build",
-      "status": "reserved",
+      "status": "live",
       "summary": "Runtime or build configuration failed deterministic validation.",
       "probable_causes": [
         "A numeric bound is internally inconsistent.",
@@ -520,8 +524,10 @@
         "Map the failed claim to the proof-lane manifest before changing docs."
       ],
       "doc_path": "docs/error_codes/ASUP-E901.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/error.rs"
+      ]
     }
   ]
 }
