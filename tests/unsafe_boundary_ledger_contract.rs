@@ -540,8 +540,7 @@ fn compare_locators(
     for locator in ledger.difference(scanned) {
         let site_id = owner_by_locator
             .get(locator)
-            .map(String::as_str)
-            .unwrap_or("<unknown-site>");
+            .map_or("<unknown-site>", String::as_str);
         diagnostics.push(format!(
             "stale unsafe ledger row: site_id={} path={} line={} kind={} nearby={} suggested_action=update-or-remove-ledger-locator",
             site_id,
@@ -668,7 +667,7 @@ fn unsafe_boundary_ledger_matches_source_locators() {
 
 #[test]
 fn scanner_ignores_comments_strings_and_detects_macro_bodies() {
-    let source = r##"
+    let source = r#"
 fn sample() {
     let _text = "unsafe { string literal } #[allow(unsafe_code)]";
     // unsafe fn hidden() {}
@@ -679,7 +678,7 @@ fn sample() {
     #[allow(unsafe_code)]
     unsafe { core::ptr::read_volatile(&0) };
 }
-"##;
+"#;
     let hits = scan_source("synthetic.rs", source)
         .into_iter()
         .map(|hit| hit.locator)
