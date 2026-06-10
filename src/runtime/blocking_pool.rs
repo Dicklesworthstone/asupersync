@@ -1121,8 +1121,8 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
                 BlockingTaskDequeueKind::Global | BlockingTaskDequeueKind::Spill => 0,
             };
 
-            inner.busy_threads.fetch_add(1, Ordering::Relaxed);
             inner.pending_count.fetch_sub(1, Ordering::Relaxed);
+            inner.busy_threads.fetch_add(1, Ordering::Relaxed);
 
             // Check if task was cancelled before execution
             if task.cancelled.load(Ordering::Acquire) {
