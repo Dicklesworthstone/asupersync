@@ -66,6 +66,22 @@ fn t(nanos: u64) -> Time {
     Time::from_nanos(nanos)
 }
 
+fn synthetic_drained_race_loser(outcome: &Outcome<(), ()>) -> Outcome<(), ()> {
+    match outcome {
+        Outcome::Cancelled(_) => Outcome::Cancelled(CancelReason::race_loser()),
+        _ => outcome.clone(),
+    }
+}
+
+fn assert_valid_synthetic_race_loser(outcome: &Outcome<(), ()>, context: &str) {
+    if let Outcome::Cancelled(reason) = outcome {
+        assert!(
+            reason.kind.severity() >= CancelKind::RaceLost.severity(),
+            "{context}: cancelled synthetic race loser must be RaceLost-tier or stronger"
+        );
+    }
+}
+
 /// Stable seed namespace for adversarial witnesses.
 /// Each family uses a distinct base seed for reproducibility.
 const SEED_TIE: u64 = 0xADC0_0001;
@@ -355,8 +371,10 @@ fn wf_race_3_commutativity_all_outcome_pairs() {
 
     for a in &outcomes {
         for b in &outcomes {
-            let (w1, _, l1) = race2_outcomes(RaceWinner::First, a.clone(), b.clone());
-            let (w2, _, l2) = race2_outcomes(RaceWinner::First, b.clone(), a.clone());
+            let loser_b = synthetic_drained_race_loser(b);
+            let loser_a = synthetic_drained_race_loser(a);
+            let (w1, _, l1) = race2_outcomes(RaceWinner::First, a.clone(), loser_b.clone());
+            let (w2, _, l2) = race2_outcomes(RaceWinner::First, b.clone(), loser_a.clone());
 
             // Winner severity: race always returns first arg as winner when First
             assert_eq!(
@@ -370,17 +388,38 @@ fn wf_race_3_commutativity_all_outcome_pairs() {
                 "WF-RACE.3: race(b,a) winner severity mismatch"
             );
 
-            // Loser: must be terminal
-            assert!(
-                l1.severity() <= Severity::Panicked,
-                "WF-RACE.3: loser must be terminal"
+            assert_eq!(
+                l1.severity(),
+                loser_b.severity(),
+                "WF-RACE.3: race(a,b) loser severity mismatch"
             );
-            assert!(
-                l2.severity() <= Severity::Panicked,
-                "WF-RACE.3: loser must be terminal"
+            assert_eq!(
+                l2.severity(),
+                loser_a.severity(),
+                "WF-RACE.3: race(b,a) loser severity mismatch"
             );
+            assert_valid_synthetic_race_loser(&l1, "WF-RACE.3 race(a,b)");
+            assert_valid_synthetic_race_loser(&l2, "WF-RACE.3 race(b,a)");
         }
     }
+}
+
+#[test]
+fn wf_race_3_rejects_weak_cancelled_loser() {
+    init_test_logging();
+
+    let result = std::panic::catch_unwind(|| {
+        race2_outcomes(
+            RaceWinner::First,
+            Outcome::<(), ()>::Ok(()),
+            Outcome::<(), ()>::Cancelled(CancelReason::user("synthetic weak loser")),
+        );
+    });
+
+    assert!(
+        result.is_err(),
+        "WF-RACE.3: race2_outcomes must fail closed when a drained loser is Cancelled(User)"
+    );
 }
 
 /// WF-RACE.4: Multi-participant race — all N-1 losers drain.
