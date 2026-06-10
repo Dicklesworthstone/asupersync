@@ -135,7 +135,7 @@ mod trace_event_schema_stability_tests {
         // Test 1.4: Browser trace schema validation succeeds
         let schema = browser_trace_schema_v1();
         assert_eq!(schema.schema_version, "browser-trace-schema-v1");
-        assert_eq!(schema.event_specs.len(), 41);
+        assert_eq!(schema.event_specs.len(), 42);
 
         validate_browser_trace_schema(&schema)
             .expect("Browser trace schema validation should succeed");
@@ -694,6 +694,13 @@ mod trace_event_schema_stability_tests {
         // Basic task lifecycle events
         events.push(TraceEvent::spawn(seq, base_time, task_id(1), region_id(1)));
         seq += 1;
+        events.push(TraceEvent::task_spawn_enqueued(
+            seq,
+            base_time,
+            task_id(1),
+            region_id(1),
+        ));
+        seq += 1;
         events.push(TraceEvent::schedule(
             seq,
             base_time,
@@ -1040,10 +1047,10 @@ mod trace_event_schema_stability_tests {
             );
         }
 
-        // Should cover multiple different event kinds
-        assert!(
-            kind_counts.len() >= 15,
-            "Test suite should cover at least 15 different event kinds"
+        assert_eq!(
+            kind_counts.len(),
+            TraceEventKind::ALL.len(),
+            "Comprehensive event suite should cover every TraceEventKind"
         );
 
         // Requirement 2: Add logical timestamps and verify monotonicity
