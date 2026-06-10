@@ -163,6 +163,8 @@ impl ErrorKind {
     #[inline]
     pub const fn asup_code(&self) -> Option<&'static str> {
         match self {
+            Self::ObligationLeak => Some("ASUP-E101"),
+            Self::ObligationAlreadyResolved => Some("ASUP-E102"),
             Self::ChannelClosed => Some("ASUP-E201"),
             Self::CancelTimeout => Some("ASUP-E301"),
             Self::ConfigError => Some("ASUP-E901"),
@@ -1003,6 +1005,8 @@ mod tests {
     #[test]
     fn asup_codes_are_stable_for_live_error_kinds() {
         let cases = [
+            (ErrorKind::ObligationLeak, Some("ASUP-E101")),
+            (ErrorKind::ObligationAlreadyResolved, Some("ASUP-E102")),
             (ErrorKind::ChannelClosed, Some("ASUP-E201")),
             (ErrorKind::CancelTimeout, Some("ASUP-E301")),
             (ErrorKind::ConfigError, Some("ASUP-E901")),
@@ -1016,6 +1020,15 @@ mod tests {
 
     #[test]
     fn display_prefixes_live_asup_codes() {
+        let leak = Error::new(ErrorKind::ObligationLeak);
+        assert_eq!(leak.to_string(), "[ASUP-E101] ObligationLeak");
+
+        let double_resolve = Error::new(ErrorKind::ObligationAlreadyResolved);
+        assert_eq!(
+            double_resolve.to_string(),
+            "[ASUP-E102] ObligationAlreadyResolved"
+        );
+
         let channel = Error::new(ErrorKind::ChannelClosed);
         assert_eq!(channel.to_string(), "[ASUP-E201] ChannelClosed");
 

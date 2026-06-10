@@ -212,6 +212,7 @@
       "doc_path": "docs/error_codes/ASUP-E101.md",
       "since": "0.3.4",
       "source_refs": [
+        "src/error.rs",
         "src/obligation/graded.rs"
       ]
     },
@@ -219,7 +220,7 @@
       "code": "ASUP-E102",
       "name": "obligation-double-resolve",
       "area": "obligations",
-      "status": "reserved",
+      "status": "live",
       "summary": "An obligation was committed, aborted, or leaked more than once.",
       "probable_causes": [
         "Both normal completion and cancellation cleanup resolved the same token.",
@@ -230,8 +231,10 @@
         "Split token ownership so only one path can consume the obligation."
       ],
       "doc_path": "docs/error_codes/ASUP-E102.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/error.rs"
+      ]
     },
     {
       "code": "ASUP-E103",

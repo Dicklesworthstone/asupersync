@@ -19,6 +19,13 @@
 Use a single guard that owns the obligation token and exposes one consuming
 `commit` or `abort` operation.
 
+The central `Error` display for `ErrorKind::ObligationAlreadyResolved` starts
+with:
+
+```text
+[ASUP-E102] ObligationAlreadyResolved
+```
+
 ## Related
 
 - `ASUP-E101`

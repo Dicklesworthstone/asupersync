@@ -32,6 +32,12 @@ Typed obligation tokens use the same code and start with:
 [ASUP-E101] OBLIGATION TOKEN LEAKED
 ```
 
+The central `Error` display for `ErrorKind::ObligationLeak` starts with:
+
+```text
+[ASUP-E101] ObligationLeak
+```
+
 ## Related
 
 - `ASUP-E104`
