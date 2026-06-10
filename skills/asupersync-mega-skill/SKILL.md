@@ -11,6 +11,9 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 This skill is primarily for agents integrating Asupersync into other projects or extracting maximum architectural leverage from it in greenfield systems. It also covers repo-internal work when that is the actual task.
 
 For codebase orientation, types, module map, and workspace layout see [SOURCE-MAP.md](references/SOURCE-MAP.md).
+For repo-internal testing choices, use the compact agent router at
+[`../../TESTING_FOR_AGENTS.md`](../../TESTING_FOR_AGENTS.md) before drilling into
+`TESTING.md`.
 
 ## Quick Orient
 
@@ -102,6 +105,14 @@ Start with RuntimeBuilder + Cx + Scope. Graduate to AppSpec + supervision when y
 
 Macro guidance: `scope!` is useful. Manual APIs are still the safest authoritative path. Do not assume proc-macro surfaces are automatically the best default path for every task.
 
+Agent-native v2 entry points:
+
+- Public API navigation: `artifacts/api_surface_map_v1.json` once br-asupersync-agent-native-dx-zxqaqs.1 lands
+- Error remediation lookup: `docs/error_codes/registry.json` once br-asupersync-agent-native-dx-zxqaqs.2 lands
+- Testing router: [`../../TESTING_FOR_AGENTS.md`](../../TESTING_FOR_AGENTS.md)
+- Full testing contract: [`../../TESTING.md`](../../TESTING.md)
+- Mandatory repo rules: [`../../AGENTS.md`](../../AGENTS.md)
+
 ## Standard Workflow
 
 - For brownfield work, run the read-only planner first: `python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness`.
@@ -128,7 +139,8 @@ Macro guidance: `scope!` is useful. Manual APIs are still the safest authoritati
 | Get more than parity and maximize Asupersync leverage | [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) → [BUDGET-OUTCOME-CAPABILITIES](references/BUDGET-OUTCOME-CAPABILITIES.md) → [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [TESTING-FORENSICS](references/TESTING-FORENSICS.md) |
 | Design a supervised long-lived service | [SUPERVISION-OTP](references/SUPERVISION-OTP.md) → [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md) |
 | Choose the right channel/sync/combinator | [PRIMITIVES-AND-ORCHESTRATION-CHOOSER](references/PRIMITIVES-AND-ORCHESTRATION-CHOOSER.md) |
-| Add deterministic tests | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
+| Add deterministic tests inside this repo | [`../../TESTING_FOR_AGENTS.md`](../../TESTING_FOR_AGENTS.md) → [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
+| Add deterministic tests in a consuming project | [TESTING-FORENSICS](references/TESTING-FORENSICS.md) → [LAB-TRACE-DPOR](references/LAB-TRACE-DPOR.md) |
 | Debug a runtime error | [ERROR-TAXONOMY](references/ERROR-TAXONOMY.md) → [TROUBLESHOOTING](references/TROUBLESHOOTING.md) |
 | Tune runtime performance | [RUNTIME-CONTROLS](references/RUNTIME-CONTROLS.md) → [SCHEDULER-INTERNALS](references/SCHEDULER-INTERNALS.md) |
 | See what to lead with vs use only when required | [STACK-SURFACES](references/STACK-SURFACES.md) → [TOKIO-REPLACEMENT-MATRIX](references/TOKIO-REPLACEMENT-MATRIX.md) |

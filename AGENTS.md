@@ -341,6 +341,10 @@ When adding or changing primitives, add tests that assert the core invariants:
 
 Prefer deterministic lab-runtime tests for concurrency-sensitive behavior.
 
+Agents choosing a test strategy should start with `TESTING_FOR_AGENTS.md`; it is
+the compact decision tree for unit, lab, exploration, and scenario-YAML e2e
+recipes. `TESTING.md` remains the detailed contract.
+
 ### Unit Tests
 
 ```bash
