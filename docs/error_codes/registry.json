@@ -199,7 +199,7 @@
       "code": "ASUP-E101",
       "name": "obligation-leaked",
       "area": "obligations",
-      "status": "reserved",
+      "status": "live",
       "summary": "An obligation reached leak handling without commit or abort.",
       "probable_causes": [
         "A guard, permit, ack, or lease was dropped without resolving.",
@@ -210,8 +210,10 @@
         "Ensure every acquire/reserve path has matching commit or abort cleanup."
       ],
       "doc_path": "docs/error_codes/ASUP-E101.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/obligation/graded.rs"
+      ]
     },
     {
       "code": "ASUP-E102",
@@ -235,7 +237,7 @@
       "code": "ASUP-E103",
       "name": "root-region-obligation",
       "area": "obligations",
-      "status": "reserved",
+      "status": "live",
       "summary": "An obligation was created in the root region.",
       "probable_causes": [
         "A test fixture used the root RegionId for obligation-bearing code.",
@@ -246,8 +248,10 @@
         "Preserve the guard: root-region obligations hide leaks and break quiescence."
       ],
       "doc_path": "docs/error_codes/ASUP-E103.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/obligation/graded.rs"
+      ]
     },
     {
       "code": "ASUP-E104",

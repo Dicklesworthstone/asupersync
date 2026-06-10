@@ -20,6 +20,18 @@ or aborted.
 If a send permit is reserved and cancellation wins before `send`, abort the
 permit during drain so the channel does not report a leak.
 
+The current graded obligation panic starts with:
+
+```text
+[ASUP-E101] OBLIGATION LEAKED
+```
+
+Typed obligation tokens use the same code and start with:
+
+```text
+[ASUP-E101] OBLIGATION TOKEN LEAKED
+```
+
 ## Related
 
 - `ASUP-E104`

@@ -19,6 +19,12 @@
 In tests, use a non-root synthetic region instead of `ArenaIndex::new(0, 0)`
 when creating permits or guards.
 
+The typed token reserve guard starts with:
+
+```text
+[ASUP-E103] Cannot create obligation token in root region
+```
+
 ## Related
 
 - `ASUP-E101`

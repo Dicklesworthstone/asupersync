@@ -281,7 +281,7 @@ impl Drop for GradedObligation {
             // In lab/debug mode: panic to surface the bug immediately.
             // In production: this could log+metric instead of panicking.
             panic!(
-                "OBLIGATION LEAKED: {} obligation '{}' was dropped without being resolved. \
+                "[ASUP-E101] OBLIGATION LEAKED: {} obligation '{}' was dropped without being resolved. \
                  Call .resolve(Resolution::Commit) or .resolve(Resolution::Abort) before scope exit.",
                 self.kind, self.description,
             );
@@ -872,7 +872,7 @@ impl<K: TokenKind> ObligationToken<K> {
         // index 0, generation 0.
         assert!(
             region.as_u64() != 0,
-            "Cannot create obligation token in root region: obligations must be \
+            "[ASUP-E103] Cannot create obligation token in root region: obligations must be \
              scoped to non-root regions to prevent leaks. Description: {description}"
         );
 
@@ -970,7 +970,7 @@ impl<K: TokenKind> Drop for ObligationToken<K> {
             }
             panic!(
                 // ubs:ignore - intentional panic on leak in debug build
-                "OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
+                "[ASUP-E101] OBLIGATION TOKEN LEAKED: {} token '{}' was dropped without being consumed. \
                  Call .commit() or .abort() before scope exit.",
                 K::obligation_kind(),
                 self.description,
@@ -1131,6 +1131,17 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn panic_message(result: Result<(), Box<dyn std::any::Any + Send>>) -> String {
+        let payload = result.expect_err("operation should panic");
+        if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+            (*message).to_string()
+        } else {
+            "<non-string panic>".to_string()
+        }
+    }
+
     // ---- GradedObligation: correct usage -----------------------------------
 
     #[test]
@@ -1197,11 +1208,32 @@ mod tests {
     // ---- GradedObligation: leak detection ----------------------------------
 
     #[test]
-    #[should_panic(expected = "OBLIGATION LEAKED")]
+    #[should_panic(expected = "[ASUP-E101] OBLIGATION LEAKED")]
     fn obligation_drop_without_resolve_panics() {
         init_test("obligation_drop_without_resolve_panics");
         let _ob = GradedObligation::reserve(ObligationKind::IoOp, "leaked-io");
         // Dropped without resolving — should panic.
+    }
+
+    #[test]
+    fn obligation_drop_without_resolve_panic_carries_asup_e101() {
+        init_test("obligation_drop_without_resolve_panic_carries_asup_e101");
+        let message = panic_message(std::panic::catch_unwind(|| {
+            let _ob = GradedObligation::reserve(ObligationKind::IoOp, "leaked-io");
+        }));
+        crate::assert_with_log!(
+            message.contains("[ASUP-E101]"),
+            "error code",
+            true,
+            message.contains("[ASUP-E101]")
+        );
+        crate::assert_with_log!(
+            message.contains("OBLIGATION LEAKED"),
+            "diagnostic class",
+            true,
+            message.contains("OBLIGATION LEAKED")
+        );
+        crate::test_complete!("obligation_drop_without_resolve_panic_carries_asup_e101");
     }
 
     #[test]
@@ -1824,11 +1856,54 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
+    #[should_panic(expected = "[ASUP-E101] OBLIGATION TOKEN LEAKED")]
     fn token_drop_without_consume_panics() {
         init_test("token_drop_without_consume_panics");
         let _token: SendPermitToken = ObligationToken::reserve_test("leaked-token");
         // Dropped without commit or abort — should panic.
+    }
+
+    #[test]
+    fn token_drop_without_consume_panic_carries_asup_e101() {
+        init_test("token_drop_without_consume_panic_carries_asup_e101");
+        let message = panic_message(std::panic::catch_unwind(|| {
+            let _token: SendPermitToken = ObligationToken::reserve_test("leaked-token");
+        }));
+        crate::assert_with_log!(
+            message.contains("[ASUP-E101]"),
+            "error code",
+            true,
+            message.contains("[ASUP-E101]")
+        );
+        crate::assert_with_log!(
+            message.contains("OBLIGATION TOKEN LEAKED"),
+            "diagnostic class",
+            true,
+            message.contains("OBLIGATION TOKEN LEAKED")
+        );
+        crate::test_complete!("token_drop_without_consume_panic_carries_asup_e101");
+    }
+
+    #[test]
+    fn root_region_obligation_reserve_panic_carries_asup_e103() {
+        init_test("root_region_obligation_reserve_panic_carries_asup_e103");
+        let root_region = RegionId::from_arena(crate::util::ArenaIndex::new(0, 0));
+        let message = panic_message(std::panic::catch_unwind(|| {
+            let _token: SendPermitToken = ObligationToken::reserve("root-token", root_region);
+        }));
+        crate::assert_with_log!(
+            message.contains("[ASUP-E103]"),
+            "error code",
+            true,
+            message.contains("[ASUP-E103]")
+        );
+        crate::assert_with_log!(
+            message.contains("root region"),
+            "diagnostic class",
+            true,
+            message.contains("root region")
+        );
+        crate::test_complete!("root_region_obligation_reserve_panic_carries_asup_e103");
     }
 
     #[test]
