@@ -1,0 +1,120 @@
+{
+  "schema_version": "api-surface-map-config-v1",
+  "core_modules": [
+    "actor",
+    "app",
+    "bytes",
+    "cancel",
+    "channel",
+    "codec",
+    "combinator",
+    "config",
+    "cx",
+    "error",
+    "http",
+    "io",
+    "lab",
+    "net",
+    "obligation",
+    "observability",
+    "plan",
+    "raptorq",
+    "runtime",
+    "service",
+    "spork",
+    "stream",
+    "supervision",
+    "sync",
+    "time",
+    "trace",
+    "transport",
+    "types",
+    "web"
+  ],
+  "module_docs": {
+    "runtime": "Runtime builders, handles, scheduler state, and region lifecycle surfaces.",
+    "cx": "Capability context and structured concurrency scope APIs.",
+    "channel": "Cancel-correct channel primitives, including MPSC, oneshot, broadcast, and watch.",
+    "sync": "Cancel-aware mutex, rwlock, semaphore, pool, barrier, and once-cell primitives.",
+    "lab": "Deterministic lab runtime, virtual time, scenario runner, replay, and oracles.",
+    "http": "Native HTTP protocol and client/server surfaces.",
+    "web": "Router, extractors, handlers, and request-region web surfaces.",
+    "service": "Service and layer traits for middleware-style composition.",
+    "raptorq": "RaptorQ encoding, decoding, repair, and proof surfaces.",
+    "atp": "Native ATP object-transfer and dogfood workflow surfaces.",
+    "spork": "Supervised application topology and deterministic app harness surfaces.",
+    "database": "Optional SQLite, Postgres, and MySQL client and pool surfaces.",
+    "grpc": "Native gRPC client/server surfaces.",
+    "fs": "Native filesystem surfaces.",
+    "process": "Native process lifecycle surfaces.",
+    "signal": "Native signal handling surfaces."
+  },
+  "entry_points": [
+    {
+      "use_case": "run_async_main",
+      "symbol": "runtime::RuntimeBuilder",
+      "summary": "Build a runtime and enter an async main body.",
+      "example_path": "examples/external_consumer.rs"
+    },
+    {
+      "use_case": "structured_scope",
+      "symbol": "Cx + Scope",
+      "summary": "Own spawned work under a structured scope.",
+      "example_path": "examples/macros_basic.rs"
+    },
+    {
+      "use_case": "race_two_futures",
+      "symbol": "proc_macros::race!",
+      "summary": "Race futures with loser drain semantics.",
+      "example_path": "examples/macros_race.rs"
+    },
+    {
+      "use_case": "mpsc_select",
+      "symbol": "channel::mpsc",
+      "summary": "Use two-phase MPSC send/receive paths in an end-to-end example.",
+      "example_path": "examples/channel_mpsc_select_e2e.rs"
+    },
+    {
+      "use_case": "cancellation_injection",
+      "symbol": "lab::CancellationInjector",
+      "summary": "Inject cancellation at deterministic await points.",
+      "example_path": "examples/cancellation_injection.rs"
+    },
+    {
+      "use_case": "lab_scenario_yaml",
+      "symbol": "lab::ScenarioRunner",
+      "summary": "Load and run YAML-backed deterministic lab scenarios.",
+      "example_path": "tests/frankenlab_integration.rs"
+    },
+    {
+      "use_case": "http_client_pool",
+      "symbol": "http",
+      "summary": "Exercise HTTP client pooling and protocol behavior.",
+      "example_path": "src/real_http_h1_client_pool_integration_e2e_tests.rs"
+    },
+    {
+      "use_case": "supervised_app",
+      "symbol": "spork",
+      "summary": "Build a minimal supervised application topology.",
+      "example_path": "examples/spork_minimal_supervised_app.rs"
+    },
+    {
+      "use_case": "raptorq_transfer",
+      "symbol": "raptorq",
+      "summary": "Run a deterministic RaptorQ transfer workflow.",
+      "example_path": "src/real_raptorq_scheduler_e2e_tests.rs"
+    },
+    {
+      "use_case": "atp_daemon",
+      "symbol": "atp",
+      "summary": "Start from the native ATP daemon example.",
+      "example_path": "examples/atp_daemon_basic.rs"
+    },
+    {
+      "use_case": "prometheus_metrics",
+      "symbol": "observability",
+      "summary": "Expose metrics with the Prometheus example surface.",
+      "example_path": "examples/prometheus_metrics.rs"
+    }
+  ]
+}

@@ -1852,6 +1852,7 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`docs/security_threat_model.md`](./docs/security_threat_model.md) | **Security Review**: Threat model and security invariants |
 | [`formal/lean/coverage/README.md`](./formal/lean/coverage/README.md) | **Lean Coverage Program**: ontology, artifacts, CI profiles, and proof-health contracts |
 | [`formal/lean/coverage/proof_impact_closed_loop_report_v1.json`](./formal/lean/coverage/proof_impact_closed_loop_report_v1.json) | **Proof Impact Ledger**: reproducible correctness/reliability/performance closure evidence |
+| [`artifacts/api_surface_map_v1.json`](./artifacts/api_surface_map_v1.json) | **API Surface Map**: machine-readable root public exports and blessed agent entry points |
 | [`TESTING.md`](./TESTING.md) | **Testing Guide**: unit, conformance, E2E, fuzzing, CI |
 | [`AGENTS.md`](./AGENTS.md) | **AI Guidelines**: Rules for AI coding agents |
 | [`skills/asupersync-mega-skill/SKILL.md`](./skills/asupersync-mega-skill/SKILL.md) | **AI Agent Skill**: full in-repo skill for Tokio migration, greenfield Asupersync design, deterministic testing, runtime diagnostics, and repo-internal agent work |

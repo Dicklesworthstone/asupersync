@@ -345,6 +345,10 @@ Agents choosing a test strategy should start with `TESTING_FOR_AGENTS.md`; it is
 the compact decision tree for unit, lab, exploration, and scenario-YAML e2e
 recipes. `TESTING.md` remains the detailed contract.
 
+Agents navigating the public API should start with
+`artifacts/api_surface_map_v1.json`, the checked machine-readable map of root
+public exports and blessed entry points.
+
 ### Unit Tests
 
 ```bash

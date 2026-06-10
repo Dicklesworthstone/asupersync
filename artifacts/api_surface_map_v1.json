@@ -1,0 +1,4510 @@
+{
+  "counts": {
+    "entry_points": 11,
+    "modules": 119,
+    "root_exports": 293
+  },
+  "entry_points": [
+    {
+      "example": {
+        "exists": true,
+        "path": "examples/atp_daemon_basic.rs"
+      },
+      "summary": "Start from the native ATP daemon example.",
+      "symbol": "atp",
+      "use_case": "atp_daemon"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "examples/cancellation_injection.rs"
+      },
+      "summary": "Inject cancellation at deterministic await points.",
+      "symbol": "lab::CancellationInjector",
+      "use_case": "cancellation_injection"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "src/real_http_h1_client_pool_integration_e2e_tests.rs"
+      },
+      "summary": "Exercise HTTP client pooling and protocol behavior.",
+      "symbol": "http",
+      "use_case": "http_client_pool"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "tests/frankenlab_integration.rs"
+      },
+      "summary": "Load and run YAML-backed deterministic lab scenarios.",
+      "symbol": "lab::ScenarioRunner",
+      "use_case": "lab_scenario_yaml"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "examples/channel_mpsc_select_e2e.rs"
+      },
+      "summary": "Use two-phase MPSC send/receive paths in an end-to-end example.",
+      "symbol": "channel::mpsc",
+      "use_case": "mpsc_select"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "examples/prometheus_metrics.rs"
+      },
+      "summary": "Expose metrics with the Prometheus example surface.",
+      "symbol": "observability",
+      "use_case": "prometheus_metrics"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "examples/macros_race.rs"
+      },
+      "summary": "Race futures with loser drain semantics.",
+      "symbol": "proc_macros::race!",
+      "use_case": "race_two_futures"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "src/real_raptorq_scheduler_e2e_tests.rs"
+      },
+      "summary": "Run a deterministic RaptorQ transfer workflow.",
+      "symbol": "raptorq",
+      "use_case": "raptorq_transfer"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "examples/external_consumer.rs"
+      },
+      "summary": "Build a runtime and enter an async main body.",
+      "symbol": "runtime::RuntimeBuilder",
+      "use_case": "run_async_main"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "examples/macros_basic.rs"
+      },
+      "summary": "Own spawned work under a structured scope.",
+      "symbol": "Cx + Scope",
+      "use_case": "structured_scope"
+    },
+    {
+      "example": {
+        "exists": true,
+        "path": "examples/spork_minimal_supervised_app.rs"
+      },
+      "summary": "Build a minimal supervised application topology.",
+      "symbol": "spork",
+      "use_case": "supervised_app"
+    }
+  ],
+  "generated_by": "scripts/generate_api_surface_map.py",
+  "generation": {
+    "command": "rch exec -- python3 scripts/generate_api_surface_map.py --check",
+    "config_path": "/data/projects/asupersync/scripts/api_surface_map_config_v1.json",
+    "notes": [
+      "Default contract compares root public exports from src/lib.rs for fast drift detection.",
+      "Pass --rustdoc-json to extend item-level extraction without changing the artifact contract."
+    ],
+    "rustdoc_json_input": null,
+    "rustdoc_json_supported": true,
+    "source_kind": "src-lib-rs-root-export-scan",
+    "source_path": "/data/projects/asupersync/src/lib.rs"
+  },
+  "modules": [
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 163,
+      "name": "actor",
+      "signature": "pub mod actor",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 248,
+      "name": "actor_genserver_monitor_evidence_link_process_metamorphic_tests",
+      "signature": "pub mod actor_genserver_monitor_evidence_link_process_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 164,
+      "name": "adapter_certification",
+      "signature": "pub mod adapter_certification",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 165,
+      "name": "agent_swarm",
+      "signature": "pub mod agent_swarm",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 166,
+      "name": "app",
+      "signature": "pub mod app",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native ATP object-transfer and dogfood workflow surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 168,
+      "name": "atp",
+      "signature": "pub mod atp",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 250,
+      "name": "atp_timing_security_conformance_tests",
+      "signature": "pub mod atp_timing_security_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 169,
+      "name": "audit",
+      "signature": "pub mod audit",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 170,
+      "name": "bytes",
+      "signature": "pub mod bytes",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 252,
+      "name": "bytes_io_time_metamorphic_tests",
+      "signature": "pub mod bytes_io_time_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 171,
+      "name": "cancel",
+      "signature": "pub mod cancel",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 254,
+      "name": "cancel_cx_runtime_channel_metamorphic_tests",
+      "signature": "pub mod cancel_cx_runtime_channel_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Cancel-correct channel primitives, including MPSC, oneshot, broadcast, and watch.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 172,
+      "name": "channel",
+      "signature": "pub mod channel",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 256,
+      "name": "channel_ordering_conformance_tests",
+      "signature": "pub mod channel_ordering_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"cli\")]",
+      "doc": "",
+      "feature_flags": [
+        "cli"
+      ],
+      "kind": "module",
+      "line": 223,
+      "name": "cli",
+      "signature": "pub mod cli",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 258,
+      "name": "cli_metamorphic_tests",
+      "signature": "pub mod cli_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 173,
+      "name": "codec",
+      "signature": "pub mod codec",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 174,
+      "name": "combinator",
+      "signature": "pub mod combinator",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 260,
+      "name": "combinator_family_conformance_tests",
+      "signature": "pub mod combinator_family_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 175,
+      "name": "config",
+      "signature": "pub mod config",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 176,
+      "name": "conformance",
+      "signature": "pub mod conformance",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 178,
+      "name": "console",
+      "signature": "pub mod console",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "Capability context and structured concurrency scope APIs.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 179,
+      "name": "cx",
+      "signature": "pub mod cx",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 262,
+      "name": "cx_obligation_trace_metamorphic_tests",
+      "signature": "pub mod cx_obligation_trace_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 264,
+      "name": "cx_scheduler_remote_metamorphic_tests",
+      "signature": "pub mod cx_scheduler_remote_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(any(feature = \"sqlite\", feature = \"postgres\", feature = \"mysql\"))]",
+      "doc": "Optional SQLite, Postgres, and MySQL client and pool surfaces.",
+      "feature_flags": [
+        "mysql",
+        "postgres",
+        "sqlite"
+      ],
+      "kind": "module",
+      "line": 225,
+      "name": "database",
+      "signature": "pub mod database",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 266,
+      "name": "database_grpc_metamorphic_tests",
+      "signature": "pub mod database_grpc_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 268,
+      "name": "database_pool_transaction_metamorphic_tests",
+      "signature": "pub mod database_pool_transaction_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 270,
+      "name": "database_primitives_conformance_tests",
+      "signature": "pub mod database_primitives_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 180,
+      "name": "decoding",
+      "signature": "pub mod decoding",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 272,
+      "name": "deterministic_state_golden_tests",
+      "signature": "pub mod deterministic_state_golden_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 181,
+      "name": "distributed",
+      "signature": "pub mod distributed",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 274,
+      "name": "distributed_obligation_metamorphic_tests",
+      "signature": "pub mod distributed_obligation_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 276,
+      "name": "distributed_primitives_conformance_tests",
+      "signature": "pub mod distributed_primitives_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 278,
+      "name": "distributed_security_codec_conformance_tests",
+      "signature": "pub mod distributed_security_codec_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 280,
+      "name": "distributed_service_messaging_metamorphic_tests",
+      "signature": "pub mod distributed_service_messaging_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 182,
+      "name": "encoding",
+      "signature": "pub mod encoding",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 183,
+      "name": "epoch",
+      "signature": "pub mod epoch",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 184,
+      "name": "error",
+      "signature": "pub mod error",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 282,
+      "name": "error_message_golden_tests",
+      "signature": "pub mod error_message_golden_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 185,
+      "name": "evidence",
+      "signature": "pub mod evidence",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 186,
+      "name": "evidence_sink",
+      "signature": "pub mod evidence_sink",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native filesystem surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 234,
+      "name": "fs",
+      "signature": "pub mod fs",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 284,
+      "name": "fs_config_metamorphic_tests",
+      "signature": "pub mod fs_config_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 286,
+      "name": "fs_protocol_conformance_tests",
+      "signature": "pub mod fs_protocol_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 187,
+      "name": "gen_server",
+      "signature": "pub mod gen_server",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(all( test, any( feature = \"legacy-internal-test-harnesses\", feature = \"serialization-golden-harnesses\" ) ))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses",
+        "serialization-golden-harnesses"
+      ],
+      "kind": "module",
+      "line": 294,
+      "name": "golden_artifacts_tests",
+      "signature": "pub mod golden_artifacts_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native gRPC client/server surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 236,
+      "name": "grpc",
+      "signature": "pub mod grpc",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 296,
+      "name": "grpc_protocol_conformance_tests",
+      "signature": "pub mod grpc_protocol_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Native HTTP protocol and client/server surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 188,
+      "name": "http",
+      "signature": "pub mod http",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 298,
+      "name": "http_grpc_protocol_metamorphic_tests",
+      "signature": "pub mod http_grpc_protocol_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 189,
+      "name": "io",
+      "signature": "pub mod io",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 300,
+      "name": "io_bytes_time_conformance_tests",
+      "signature": "pub mod io_bytes_time_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Deterministic lab runtime, virtual time, scenario runner, replay, and oracles.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 190,
+      "name": "lab",
+      "signature": "pub mod lab",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 302,
+      "name": "lab_determinism_conformance_tests",
+      "signature": "pub mod lab_determinism_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 304,
+      "name": "lab_trace_observability_security_metamorphic_tests",
+      "signature": "pub mod lab_trace_observability_security_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 191,
+      "name": "link",
+      "signature": "pub mod link",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 238,
+      "name": "messaging",
+      "signature": "pub mod messaging",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all( test, any( feature = \"legacy-internal-test-harnesses\", feature = \"serialization-golden-harnesses\" ) ))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses",
+        "serialization-golden-harnesses"
+      ],
+      "kind": "module",
+      "line": 312,
+      "name": "messaging_primitives_conformance_tests",
+      "signature": "pub mod messaging_primitives_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 314,
+      "name": "messaging_scheduler_deep_metamorphic_tests",
+      "signature": "pub mod messaging_scheduler_deep_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 192,
+      "name": "migration",
+      "signature": "pub mod migration",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 193,
+      "name": "monitor",
+      "signature": "pub mod monitor",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 194,
+      "name": "net",
+      "signature": "pub mod net",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 316,
+      "name": "net_cli_audit_conformance_tests",
+      "signature": "pub mod net_cli_audit_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 318,
+      "name": "net_http_metamorphic_tests",
+      "signature": "pub mod net_http_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 195,
+      "name": "obligation",
+      "signature": "pub mod obligation",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 320,
+      "name": "obligation_choreography_record_metamorphic_tests",
+      "signature": "pub mod obligation_choreography_record_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 322,
+      "name": "obligation_combinator_metamorphic_tests",
+      "signature": "pub mod obligation_combinator_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 324,
+      "name": "obligation_leak_conformance_tests",
+      "signature": "pub mod obligation_leak_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 196,
+      "name": "observability",
+      "signature": "pub mod observability",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 197,
+      "name": "plan",
+      "signature": "pub mod plan",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 326,
+      "name": "plan_trace_metamorphic_tests",
+      "signature": "pub mod plan_trace_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "module",
+      "line": 450,
+      "name": "proc_macros",
+      "signature": "pub mod proc_macros",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native process lifecycle surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 240,
+      "name": "process",
+      "signature": "pub mod process",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all( test, any( feature = \"legacy-internal-test-harnesses\", feature = \"serialization-golden-harnesses\" ) ))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses",
+        "serialization-golden-harnesses"
+      ],
+      "kind": "module",
+      "line": 334,
+      "name": "protocol_serialization_golden_tests",
+      "signature": "pub mod protocol_serialization_golden_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 336,
+      "name": "public_api_golden_tests",
+      "signature": "pub mod public_api_golden_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "RaptorQ encoding, decoding, repair, and proof surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 198,
+      "name": "raptorq",
+      "signature": "pub mod raptorq",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 338,
+      "name": "raptorq_deep_dive_metamorphic_tests",
+      "signature": "pub mod raptorq_deep_dive_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 340,
+      "name": "raptorq_rfc6330_conformance_tests",
+      "signature": "pub mod raptorq_rfc6330_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"channel-mpsc-select-e2e\")]",
+      "doc": "",
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "kind": "module",
+      "line": 342,
+      "name": "real_channel_mpsc_combinator_select_integration_e2e_tests",
+      "signature": "pub mod real_channel_mpsc_combinator_select_integration_e2e_tests",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"real-service-e2e\"))]",
+      "doc": "",
+      "feature_flags": [
+        "real-service-e2e"
+      ],
+      "kind": "module",
+      "line": 344,
+      "name": "real_e2e_hardening_consolidation",
+      "signature": "pub mod real_e2e_hardening_consolidation",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"h3-websocket-e2e\"))]",
+      "doc": "",
+      "feature_flags": [
+        "h3-websocket-e2e"
+      ],
+      "kind": "module",
+      "line": 346,
+      "name": "real_http_h3_server_websocket_upgrade_e2e_tests",
+      "signature": "pub mod real_http_h3_server_websocket_upgrade_e2e_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"obligation-cleanup-e2e\")]",
+      "doc": "",
+      "feature_flags": [
+        "obligation-cleanup-e2e"
+      ],
+      "kind": "module",
+      "line": 348,
+      "name": "real_obligation_leak_check_e2e_tests",
+      "signature": "pub mod real_obligation_leak_check_e2e_tests",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"raptorq-roundtrip-e2e\"))]",
+      "doc": "",
+      "feature_flags": [
+        "raptorq-roundtrip-e2e"
+      ],
+      "kind": "module",
+      "line": 350,
+      "name": "real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests",
+      "signature": "pub mod real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 199,
+      "name": "record",
+      "signature": "pub mod record",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 200,
+      "name": "remote",
+      "signature": "pub mod remote",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "Runtime builders, handles, scheduler state, and region lifecycle surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 201,
+      "name": "runtime",
+      "signature": "pub mod runtime",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 352,
+      "name": "runtime_state_machine_conformance_tests",
+      "signature": "pub mod runtime_state_machine_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 354,
+      "name": "scheduler_priority_conformance_tests",
+      "signature": "pub mod scheduler_priority_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 202,
+      "name": "security",
+      "signature": "pub mod security",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 242,
+      "name": "server",
+      "signature": "pub mod server",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 356,
+      "name": "server_session_evidence_epoch_spork_metamorphic_tests",
+      "signature": "pub mod server_session_evidence_epoch_spork_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Service and layer traits for middleware-style composition.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 203,
+      "name": "service",
+      "signature": "pub mod service",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 358,
+      "name": "service_layer_conformance_tests",
+      "signature": "pub mod service_layer_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 204,
+      "name": "session",
+      "signature": "pub mod session",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native signal handling surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 244,
+      "name": "signal",
+      "signature": "pub mod signal",
+      "stability": "native-only"
+    },
+    {
+      "cfg": null,
+      "doc": "Supervised application topology and deterministic app harness surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 205,
+      "name": "spork",
+      "signature": "pub mod spork",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 206,
+      "name": "stream",
+      "signature": "pub mod stream",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 207,
+      "name": "supervision",
+      "signature": "pub mod supervision",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 360,
+      "name": "supervision_genserver_actor_io_fs_metamorphic_tests",
+      "signature": "pub mod supervision_genserver_actor_io_fs_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Cancel-aware mutex, rwlock, semaphore, pool, barrier, and once-cell primitives.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 208,
+      "name": "sync",
+      "signature": "pub mod sync",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 362,
+      "name": "sync_primitives_conformance_tests",
+      "signature": "pub mod sync_primitives_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 364,
+      "name": "sync_scheduler_metamorphic_tests",
+      "signature": "pub mod sync_scheduler_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(any(test, feature = \"test-internals\"))]",
+      "doc": "",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "kind": "module",
+      "line": 366,
+      "name": "test_logging",
+      "signature": "pub mod test_logging",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(any(test, feature = \"test-internals\"))]",
+      "doc": "",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "kind": "module",
+      "line": 368,
+      "name": "test_ndjson",
+      "signature": "pub mod test_ndjson",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(any(test, feature = \"test-internals\"))]",
+      "doc": "",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "kind": "module",
+      "line": 370,
+      "name": "test_utils",
+      "signature": "pub mod test_utils",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 209,
+      "name": "time",
+      "signature": "pub mod time",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 372,
+      "name": "timer_wheel_conformance_tests",
+      "signature": "pub mod timer_wheel_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 226,
+      "name": "tls",
+      "signature": "pub mod tls",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 374,
+      "name": "tls_test_helpers_comprehensive_tests",
+      "signature": "pub mod tls_test_helpers_comprehensive_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 210,
+      "name": "trace",
+      "signature": "pub mod trace",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 376,
+      "name": "trace_causality_conformance_tests",
+      "signature": "pub mod trace_causality_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 211,
+      "name": "tracing_compat",
+      "signature": "pub mod tracing_compat",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 212,
+      "name": "transport",
+      "signature": "pub mod transport",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 213,
+      "name": "types",
+      "signature": "pub mod types",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 214,
+      "name": "util",
+      "signature": "pub mod util",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "Router, extractors, handlers, and request-region web surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 215,
+      "name": "web",
+      "signature": "pub mod web",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 378,
+      "name": "web_protocol_conformance_tests",
+      "signature": "pub mod web_protocol_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 380,
+      "name": "web_tls_codec_raptorq_metamorphic_tests",
+      "signature": "pub mod web_tls_codec_raptorq_metamorphic_tests",
+      "stability": "test-internals"
+    }
+  ],
+  "root_exports": [
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 163,
+      "name": "actor",
+      "signature": "pub mod actor",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 248,
+      "name": "actor_genserver_monitor_evidence_link_process_metamorphic_tests",
+      "signature": "pub mod actor_genserver_monitor_evidence_link_process_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 164,
+      "name": "adapter_certification",
+      "signature": "pub mod adapter_certification",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 165,
+      "name": "agent_swarm",
+      "signature": "pub mod agent_swarm",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 166,
+      "name": "app",
+      "signature": "pub mod app",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native ATP object-transfer and dogfood workflow surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 168,
+      "name": "atp",
+      "signature": "pub mod atp",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 250,
+      "name": "atp_timing_security_conformance_tests",
+      "signature": "pub mod atp_timing_security_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 169,
+      "name": "audit",
+      "signature": "pub mod audit",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 170,
+      "name": "bytes",
+      "signature": "pub mod bytes",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 252,
+      "name": "bytes_io_time_metamorphic_tests",
+      "signature": "pub mod bytes_io_time_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 171,
+      "name": "cancel",
+      "signature": "pub mod cancel",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 254,
+      "name": "cancel_cx_runtime_channel_metamorphic_tests",
+      "signature": "pub mod cancel_cx_runtime_channel_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Cancel-correct channel primitives, including MPSC, oneshot, broadcast, and watch.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 172,
+      "name": "channel",
+      "signature": "pub mod channel",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 256,
+      "name": "channel_ordering_conformance_tests",
+      "signature": "pub mod channel_ordering_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"cli\")]",
+      "doc": "",
+      "feature_flags": [
+        "cli"
+      ],
+      "kind": "module",
+      "line": 223,
+      "name": "cli",
+      "signature": "pub mod cli",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 258,
+      "name": "cli_metamorphic_tests",
+      "signature": "pub mod cli_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 173,
+      "name": "codec",
+      "signature": "pub mod codec",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 174,
+      "name": "combinator",
+      "signature": "pub mod combinator",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 260,
+      "name": "combinator_family_conformance_tests",
+      "signature": "pub mod combinator_family_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 175,
+      "name": "config",
+      "signature": "pub mod config",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 176,
+      "name": "conformance",
+      "signature": "pub mod conformance",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 178,
+      "name": "console",
+      "signature": "pub mod console",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "Capability context and structured concurrency scope APIs.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 179,
+      "name": "cx",
+      "signature": "pub mod cx",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 262,
+      "name": "cx_obligation_trace_metamorphic_tests",
+      "signature": "pub mod cx_obligation_trace_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 264,
+      "name": "cx_scheduler_remote_metamorphic_tests",
+      "signature": "pub mod cx_scheduler_remote_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(any(feature = \"sqlite\", feature = \"postgres\", feature = \"mysql\"))]",
+      "doc": "Optional SQLite, Postgres, and MySQL client and pool surfaces.",
+      "feature_flags": [
+        "mysql",
+        "postgres",
+        "sqlite"
+      ],
+      "kind": "module",
+      "line": 225,
+      "name": "database",
+      "signature": "pub mod database",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 266,
+      "name": "database_grpc_metamorphic_tests",
+      "signature": "pub mod database_grpc_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 268,
+      "name": "database_pool_transaction_metamorphic_tests",
+      "signature": "pub mod database_pool_transaction_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 270,
+      "name": "database_primitives_conformance_tests",
+      "signature": "pub mod database_primitives_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 180,
+      "name": "decoding",
+      "signature": "pub mod decoding",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 272,
+      "name": "deterministic_state_golden_tests",
+      "signature": "pub mod deterministic_state_golden_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 181,
+      "name": "distributed",
+      "signature": "pub mod distributed",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 274,
+      "name": "distributed_obligation_metamorphic_tests",
+      "signature": "pub mod distributed_obligation_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 276,
+      "name": "distributed_primitives_conformance_tests",
+      "signature": "pub mod distributed_primitives_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 278,
+      "name": "distributed_security_codec_conformance_tests",
+      "signature": "pub mod distributed_security_codec_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 280,
+      "name": "distributed_service_messaging_metamorphic_tests",
+      "signature": "pub mod distributed_service_messaging_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 182,
+      "name": "encoding",
+      "signature": "pub mod encoding",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 183,
+      "name": "epoch",
+      "signature": "pub mod epoch",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 184,
+      "name": "error",
+      "signature": "pub mod error",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 282,
+      "name": "error_message_golden_tests",
+      "signature": "pub mod error_message_golden_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 185,
+      "name": "evidence",
+      "signature": "pub mod evidence",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 186,
+      "name": "evidence_sink",
+      "signature": "pub mod evidence_sink",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native filesystem surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 234,
+      "name": "fs",
+      "signature": "pub mod fs",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 284,
+      "name": "fs_config_metamorphic_tests",
+      "signature": "pub mod fs_config_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 286,
+      "name": "fs_protocol_conformance_tests",
+      "signature": "pub mod fs_protocol_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 187,
+      "name": "gen_server",
+      "signature": "pub mod gen_server",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(all( test, any( feature = \"legacy-internal-test-harnesses\", feature = \"serialization-golden-harnesses\" ) ))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses",
+        "serialization-golden-harnesses"
+      ],
+      "kind": "module",
+      "line": 294,
+      "name": "golden_artifacts_tests",
+      "signature": "pub mod golden_artifacts_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native gRPC client/server surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 236,
+      "name": "grpc",
+      "signature": "pub mod grpc",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 296,
+      "name": "grpc_protocol_conformance_tests",
+      "signature": "pub mod grpc_protocol_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Native HTTP protocol and client/server surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 188,
+      "name": "http",
+      "signature": "pub mod http",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 298,
+      "name": "http_grpc_protocol_metamorphic_tests",
+      "signature": "pub mod http_grpc_protocol_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 189,
+      "name": "io",
+      "signature": "pub mod io",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 300,
+      "name": "io_bytes_time_conformance_tests",
+      "signature": "pub mod io_bytes_time_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Deterministic lab runtime, virtual time, scenario runner, replay, and oracles.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 190,
+      "name": "lab",
+      "signature": "pub mod lab",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 302,
+      "name": "lab_determinism_conformance_tests",
+      "signature": "pub mod lab_determinism_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 304,
+      "name": "lab_trace_observability_security_metamorphic_tests",
+      "signature": "pub mod lab_trace_observability_security_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 191,
+      "name": "link",
+      "signature": "pub mod link",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 238,
+      "name": "messaging",
+      "signature": "pub mod messaging",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all( test, any( feature = \"legacy-internal-test-harnesses\", feature = \"serialization-golden-harnesses\" ) ))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses",
+        "serialization-golden-harnesses"
+      ],
+      "kind": "module",
+      "line": 312,
+      "name": "messaging_primitives_conformance_tests",
+      "signature": "pub mod messaging_primitives_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 314,
+      "name": "messaging_scheduler_deep_metamorphic_tests",
+      "signature": "pub mod messaging_scheduler_deep_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 192,
+      "name": "migration",
+      "signature": "pub mod migration",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 193,
+      "name": "monitor",
+      "signature": "pub mod monitor",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 194,
+      "name": "net",
+      "signature": "pub mod net",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 316,
+      "name": "net_cli_audit_conformance_tests",
+      "signature": "pub mod net_cli_audit_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 318,
+      "name": "net_http_metamorphic_tests",
+      "signature": "pub mod net_http_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 195,
+      "name": "obligation",
+      "signature": "pub mod obligation",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 320,
+      "name": "obligation_choreography_record_metamorphic_tests",
+      "signature": "pub mod obligation_choreography_record_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 322,
+      "name": "obligation_combinator_metamorphic_tests",
+      "signature": "pub mod obligation_combinator_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 324,
+      "name": "obligation_leak_conformance_tests",
+      "signature": "pub mod obligation_leak_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 196,
+      "name": "observability",
+      "signature": "pub mod observability",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 197,
+      "name": "plan",
+      "signature": "pub mod plan",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 326,
+      "name": "plan_trace_metamorphic_tests",
+      "signature": "pub mod plan_trace_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "module",
+      "line": 450,
+      "name": "proc_macros",
+      "signature": "pub mod proc_macros",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native process lifecycle surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 240,
+      "name": "process",
+      "signature": "pub mod process",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all( test, any( feature = \"legacy-internal-test-harnesses\", feature = \"serialization-golden-harnesses\" ) ))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses",
+        "serialization-golden-harnesses"
+      ],
+      "kind": "module",
+      "line": 334,
+      "name": "protocol_serialization_golden_tests",
+      "signature": "pub mod protocol_serialization_golden_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 336,
+      "name": "public_api_golden_tests",
+      "signature": "pub mod public_api_golden_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "RaptorQ encoding, decoding, repair, and proof surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 198,
+      "name": "raptorq",
+      "signature": "pub mod raptorq",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 338,
+      "name": "raptorq_deep_dive_metamorphic_tests",
+      "signature": "pub mod raptorq_deep_dive_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 340,
+      "name": "raptorq_rfc6330_conformance_tests",
+      "signature": "pub mod raptorq_rfc6330_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"channel-mpsc-select-e2e\")]",
+      "doc": "",
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "kind": "module",
+      "line": 342,
+      "name": "real_channel_mpsc_combinator_select_integration_e2e_tests",
+      "signature": "pub mod real_channel_mpsc_combinator_select_integration_e2e_tests",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"real-service-e2e\"))]",
+      "doc": "",
+      "feature_flags": [
+        "real-service-e2e"
+      ],
+      "kind": "module",
+      "line": 344,
+      "name": "real_e2e_hardening_consolidation",
+      "signature": "pub mod real_e2e_hardening_consolidation",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"h3-websocket-e2e\"))]",
+      "doc": "",
+      "feature_flags": [
+        "h3-websocket-e2e"
+      ],
+      "kind": "module",
+      "line": 346,
+      "name": "real_http_h3_server_websocket_upgrade_e2e_tests",
+      "signature": "pub mod real_http_h3_server_websocket_upgrade_e2e_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"obligation-cleanup-e2e\")]",
+      "doc": "",
+      "feature_flags": [
+        "obligation-cleanup-e2e"
+      ],
+      "kind": "module",
+      "line": 348,
+      "name": "real_obligation_leak_check_e2e_tests",
+      "signature": "pub mod real_obligation_leak_check_e2e_tests",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"raptorq-roundtrip-e2e\"))]",
+      "doc": "",
+      "feature_flags": [
+        "raptorq-roundtrip-e2e"
+      ],
+      "kind": "module",
+      "line": 350,
+      "name": "real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests",
+      "signature": "pub mod real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 199,
+      "name": "record",
+      "signature": "pub mod record",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 200,
+      "name": "remote",
+      "signature": "pub mod remote",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "Runtime builders, handles, scheduler state, and region lifecycle surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 201,
+      "name": "runtime",
+      "signature": "pub mod runtime",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 352,
+      "name": "runtime_state_machine_conformance_tests",
+      "signature": "pub mod runtime_state_machine_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 354,
+      "name": "scheduler_priority_conformance_tests",
+      "signature": "pub mod scheduler_priority_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 202,
+      "name": "security",
+      "signature": "pub mod security",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 242,
+      "name": "server",
+      "signature": "pub mod server",
+      "stability": "native-only"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 356,
+      "name": "server_session_evidence_epoch_spork_metamorphic_tests",
+      "signature": "pub mod server_session_evidence_epoch_spork_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Service and layer traits for middleware-style composition.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 203,
+      "name": "service",
+      "signature": "pub mod service",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 358,
+      "name": "service_layer_conformance_tests",
+      "signature": "pub mod service_layer_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 204,
+      "name": "session",
+      "signature": "pub mod session",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(not(target_arch = \"wasm32\"))]",
+      "doc": "Native signal handling surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 244,
+      "name": "signal",
+      "signature": "pub mod signal",
+      "stability": "native-only"
+    },
+    {
+      "cfg": null,
+      "doc": "Supervised application topology and deterministic app harness surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 205,
+      "name": "spork",
+      "signature": "pub mod spork",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 206,
+      "name": "stream",
+      "signature": "pub mod stream",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 207,
+      "name": "supervision",
+      "signature": "pub mod supervision",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 360,
+      "name": "supervision_genserver_actor_io_fs_metamorphic_tests",
+      "signature": "pub mod supervision_genserver_actor_io_fs_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "Cancel-aware mutex, rwlock, semaphore, pool, barrier, and once-cell primitives.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 208,
+      "name": "sync",
+      "signature": "pub mod sync",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 362,
+      "name": "sync_primitives_conformance_tests",
+      "signature": "pub mod sync_primitives_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 364,
+      "name": "sync_scheduler_metamorphic_tests",
+      "signature": "pub mod sync_scheduler_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(any(test, feature = \"test-internals\"))]",
+      "doc": "",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "kind": "module",
+      "line": 366,
+      "name": "test_logging",
+      "signature": "pub mod test_logging",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(any(test, feature = \"test-internals\"))]",
+      "doc": "",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "kind": "module",
+      "line": 368,
+      "name": "test_ndjson",
+      "signature": "pub mod test_ndjson",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(any(test, feature = \"test-internals\"))]",
+      "doc": "",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "kind": "module",
+      "line": 370,
+      "name": "test_utils",
+      "signature": "pub mod test_utils",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 209,
+      "name": "time",
+      "signature": "pub mod time",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 372,
+      "name": "timer_wheel_conformance_tests",
+      "signature": "pub mod timer_wheel_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 226,
+      "name": "tls",
+      "signature": "pub mod tls",
+      "stability": "preview"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 374,
+      "name": "tls_test_helpers_comprehensive_tests",
+      "signature": "pub mod tls_test_helpers_comprehensive_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 210,
+      "name": "trace",
+      "signature": "pub mod trace",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 376,
+      "name": "trace_causality_conformance_tests",
+      "signature": "pub mod trace_causality_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 211,
+      "name": "tracing_compat",
+      "signature": "pub mod tracing_compat",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 212,
+      "name": "transport",
+      "signature": "pub mod transport",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 213,
+      "name": "types",
+      "signature": "pub mod types",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 214,
+      "name": "util",
+      "signature": "pub mod util",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "Router, extractors, handlers, and request-region web surfaces.",
+      "feature_flags": [],
+      "kind": "module",
+      "line": 215,
+      "name": "web",
+      "signature": "pub mod web",
+      "stability": "core"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 378,
+      "name": "web_protocol_conformance_tests",
+      "signature": "pub mod web_protocol_conformance_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(all(test, feature = \"legacy-internal-test-harnesses\"))]",
+      "doc": "",
+      "feature_flags": [
+        "legacy-internal-test-harnesses"
+      ],
+      "kind": "module",
+      "line": 380,
+      "name": "web_tls_codec_raptorq_metamorphic_tests",
+      "signature": "pub mod web_tls_codec_raptorq_metamorphic_tests",
+      "stability": "test-internals"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 446,
+      "name": "asupersync_macros::join",
+      "signature": "pub use asupersync_macros::join",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 446,
+      "name": "asupersync_macros::join_all",
+      "signature": "pub use asupersync_macros::join_all",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 446,
+      "name": "asupersync_macros::race",
+      "signature": "pub use asupersync_macros::race",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 446,
+      "name": "asupersync_macros::scope",
+      "signature": "pub use asupersync_macros::scope",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": "#[cfg(feature = \"proc-macros\")]",
+      "doc": "",
+      "feature_flags": [
+        "proc-macros"
+      ],
+      "kind": "reexport",
+      "line": 446,
+      "name": "asupersync_macros::spawn",
+      "signature": "pub use asupersync_macros::spawn",
+      "stability": "feature-gated"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::AdaptiveConfig",
+      "signature": "pub use config::AdaptiveConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::BackoffConfig",
+      "signature": "pub use config::BackoffConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::ConfigError",
+      "signature": "pub use config::ConfigError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::ConfigLoader",
+      "signature": "pub use config::ConfigLoader",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::EncodingConfig",
+      "signature": "pub use config::EncodingConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::PathSelectionStrategy",
+      "signature": "pub use config::PathSelectionStrategy",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::RaptorQConfig",
+      "signature": "pub use config::RaptorQConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::ResourceConfig",
+      "signature": "pub use config::ResourceConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::RuntimeProfile",
+      "signature": "pub use config::RuntimeProfile",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::SecurityConfig",
+      "signature": "pub use config::SecurityConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::TimeoutConfig",
+      "signature": "pub use config::TimeoutConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 383,
+      "name": "config::TransportConfig",
+      "signature": "pub use config::TransportConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 177,
+      "name": "conformance::traceability",
+      "signature": "pub use conformance::traceability",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 388,
+      "name": "cx::Cx",
+      "signature": "pub use cx::Cx",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 388,
+      "name": "cx::Scope",
+      "signature": "pub use cx::Scope",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 389,
+      "name": "decoding::DecodingConfig",
+      "signature": "pub use decoding::DecodingConfig",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 389,
+      "name": "decoding::DecodingError",
+      "signature": "pub use decoding::DecodingError",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 389,
+      "name": "decoding::DecodingPipeline",
+      "signature": "pub use decoding::DecodingPipeline",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 389,
+      "name": "decoding::DecodingProgress",
+      "signature": "pub use decoding::DecodingProgress",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 389,
+      "name": "decoding::RejectReason",
+      "signature": "pub use decoding::RejectReason",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 389,
+      "name": "decoding::SymbolAcceptResult",
+      "signature": "pub use decoding::SymbolAcceptResult",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 393,
+      "name": "encoding::EncodedSymbol",
+      "signature": "pub use encoding::EncodedSymbol",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 393,
+      "name": "encoding::EncodingError",
+      "signature": "pub use encoding::EncodingError",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 393,
+      "name": "encoding::EncodingPipeline",
+      "signature": "pub use encoding::EncodingPipeline",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 393,
+      "name": "encoding::EncodingStats",
+      "signature": "pub use encoding::EncodingStats",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::BarrierResult",
+      "signature": "pub use epoch::BarrierResult",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::BarrierTrigger",
+      "signature": "pub use epoch::BarrierTrigger",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::Epoch",
+      "signature": "pub use epoch::Epoch",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochBarrier",
+      "signature": "pub use epoch::EpochBarrier",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochBulkheadError",
+      "signature": "pub use epoch::EpochBulkheadError",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochCircuitBreakerError",
+      "signature": "pub use epoch::EpochCircuitBreakerError",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochClock",
+      "signature": "pub use epoch::EpochClock",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochConfig",
+      "signature": "pub use epoch::EpochConfig",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochContext",
+      "signature": "pub use epoch::EpochContext",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochError",
+      "signature": "pub use epoch::EpochError",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochId",
+      "signature": "pub use epoch::EpochId",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochJoin2",
+      "signature": "pub use epoch::EpochJoin2",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochPolicy",
+      "signature": "pub use epoch::EpochPolicy",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochRace2",
+      "signature": "pub use epoch::EpochRace2",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochScoped",
+      "signature": "pub use epoch::EpochScoped",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochSelect",
+      "signature": "pub use epoch::EpochSelect",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochSource",
+      "signature": "pub use epoch::EpochSource",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochState",
+      "signature": "pub use epoch::EpochState",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::EpochTransitionBehavior",
+      "signature": "pub use epoch::EpochTransitionBehavior",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::SymbolValidityWindow",
+      "signature": "pub use epoch::SymbolValidityWindow",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::bulkhead_call_in_epoch",
+      "signature": "pub use epoch::bulkhead_call_in_epoch",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::bulkhead_call_weighted_in_epoch",
+      "signature": "pub use epoch::bulkhead_call_weighted_in_epoch",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::circuit_breaker_call_in_epoch",
+      "signature": "pub use epoch::circuit_breaker_call_in_epoch",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::epoch_join2",
+      "signature": "pub use epoch::epoch_join2",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::epoch_race2",
+      "signature": "pub use epoch::epoch_race2",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 394,
+      "name": "epoch::epoch_select",
+      "signature": "pub use epoch::epoch_select",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::AcquireError",
+      "signature": "pub use error::AcquireError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::BackoffHint",
+      "signature": "pub use error::BackoffHint",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::Error",
+      "signature": "pub use error::Error",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::ErrorCategory",
+      "signature": "pub use error::ErrorCategory",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::ErrorKind",
+      "signature": "pub use error::ErrorKind",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::Recoverability",
+      "signature": "pub use error::Recoverability",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::RecoveryAction",
+      "signature": "pub use error::RecoveryAction",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::RecvError",
+      "signature": "pub use error::RecvError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::Result",
+      "signature": "pub use error::Result",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::ResultExt",
+      "signature": "pub use error::ResultExt",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 402,
+      "name": "error::SendError",
+      "signature": "pub use error::SendError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 406,
+      "name": "lab::LabConfig",
+      "signature": "pub use lab::LabConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 406,
+      "name": "lab::LabRuntime",
+      "signature": "pub use lab::LabRuntime",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::CancelRequest",
+      "signature": "pub use remote::CancelRequest",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::CompensationResult",
+      "signature": "pub use remote::CompensationResult",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::ComputationName",
+      "signature": "pub use remote::ComputationName",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::DedupDecision",
+      "signature": "pub use remote::DedupDecision",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::IdempotencyKey",
+      "signature": "pub use remote::IdempotencyKey",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::IdempotencyRecord",
+      "signature": "pub use remote::IdempotencyRecord",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::IdempotencyRequestFingerprint",
+      "signature": "pub use remote::IdempotencyRequestFingerprint",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::IdempotencyStore",
+      "signature": "pub use remote::IdempotencyStore",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::Lease",
+      "signature": "pub use remote::Lease",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::LeaseError",
+      "signature": "pub use remote::LeaseError",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::LeaseRenewal",
+      "signature": "pub use remote::LeaseRenewal",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::LeaseState",
+      "signature": "pub use remote::LeaseState",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::NodeId",
+      "signature": "pub use remote::NodeId",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::Phase0RemoteFailure",
+      "signature": "pub use remote::Phase0RemoteFailure",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::Phase0RetryPolicy",
+      "signature": "pub use remote::Phase0RetryPolicy",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::Phase0SimulationConfig",
+      "signature": "pub use remote::Phase0SimulationConfig",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::RemoteCap",
+      "signature": "pub use remote::RemoteCap",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::RemoteError",
+      "signature": "pub use remote::RemoteError",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::RemoteHandle",
+      "signature": "pub use remote::RemoteHandle",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::RemoteMessage",
+      "signature": "pub use remote::RemoteMessage",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::RemoteOutcome",
+      "signature": "pub use remote::RemoteOutcome",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::RemoteTaskId",
+      "signature": "pub use remote::RemoteTaskId",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::ResultDelivery",
+      "signature": "pub use remote::ResultDelivery",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::Saga",
+      "signature": "pub use remote::Saga",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::SagaState",
+      "signature": "pub use remote::SagaState",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::SagaStepError",
+      "signature": "pub use remote::SagaStepError",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::SpawnAck",
+      "signature": "pub use remote::SpawnAck",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::SpawnAckStatus",
+      "signature": "pub use remote::SpawnAckStatus",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::SpawnRejectReason",
+      "signature": "pub use remote::SpawnRejectReason",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::SpawnRequest",
+      "signature": "pub use remote::SpawnRequest",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 407,
+      "name": "remote::spawn_remote",
+      "signature": "pub use remote::spawn_remote",
+      "stability": "preview"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::Budget",
+      "signature": "pub use types::Budget",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::CancelKind",
+      "signature": "pub use types::CancelKind",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::CancelReason",
+      "signature": "pub use types::CancelReason",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::CapabilityBudget",
+      "signature": "pub use types::CapabilityBudget",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::CapabilityBudgetDimension",
+      "signature": "pub use types::CapabilityBudgetDimension",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::CapabilityBudgetRefusal",
+      "signature": "pub use types::CapabilityBudgetRefusal",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::CapabilityBudgetRequirements",
+      "signature": "pub use types::CapabilityBudgetRequirements",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::NextjsBootstrapPhase",
+      "signature": "pub use types::NextjsBootstrapPhase",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::NextjsIntegrationSnapshot",
+      "signature": "pub use types::NextjsIntegrationSnapshot",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::NextjsNavigationType",
+      "signature": "pub use types::NextjsNavigationType",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::NextjsRenderEnvironment",
+      "signature": "pub use types::NextjsRenderEnvironment",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::ObligationId",
+      "signature": "pub use types::ObligationId",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::Outcome",
+      "signature": "pub use types::Outcome",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::OutcomeError",
+      "signature": "pub use types::OutcomeError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::PanicPayload",
+      "signature": "pub use types::PanicPayload",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::Policy",
+      "signature": "pub use types::Policy",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::ProgressiveLoadSlot",
+      "signature": "pub use types::ProgressiveLoadSlot",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::ProgressiveLoadSnapshot",
+      "signature": "pub use types::ProgressiveLoadSnapshot",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::ReactProviderConfig",
+      "signature": "pub use types::ReactProviderConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::ReactProviderPhase",
+      "signature": "pub use types::ReactProviderPhase",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::ReactProviderState",
+      "signature": "pub use types::ReactProviderState",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::RegionId",
+      "signature": "pub use types::RegionId",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::RemainingBudget",
+      "signature": "pub use types::RemainingBudget",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::Severity",
+      "signature": "pub use types::Severity",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::SuspenseBoundaryState",
+      "signature": "pub use types::SuspenseBoundaryState",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::SuspenseDiagnosticEvent",
+      "signature": "pub use types::SuspenseDiagnosticEvent",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::SuspenseTaskConfig",
+      "signature": "pub use types::SuspenseTaskConfig",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::SuspenseTaskSnapshot",
+      "signature": "pub use types::SuspenseTaskSnapshot",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::SystemPressure",
+      "signature": "pub use types::SystemPressure",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::TaskId",
+      "signature": "pub use types::TaskId",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::Time",
+      "signature": "pub use types::Time",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::TransitionTaskState",
+      "signature": "pub use types::TransitionTaskState",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WASM_ABI_MAJOR_VERSION",
+      "signature": "pub use types::WASM_ABI_MAJOR_VERSION",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WASM_ABI_MINOR_VERSION",
+      "signature": "pub use types::WASM_ABI_MINOR_VERSION",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WASM_ABI_SIGNATURES_V1",
+      "signature": "pub use types::WASM_ABI_SIGNATURES_V1",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WASM_ABI_SIGNATURE_FINGERPRINT_V1",
+      "signature": "pub use types::WASM_ABI_SIGNATURE_FINGERPRINT_V1",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiBoundaryEvent",
+      "signature": "pub use types::WasmAbiBoundaryEvent",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiCancellation",
+      "signature": "pub use types::WasmAbiCancellation",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiChangeClass",
+      "signature": "pub use types::WasmAbiChangeClass",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiCompatibilityDecision",
+      "signature": "pub use types::WasmAbiCompatibilityDecision",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiErrorCode",
+      "signature": "pub use types::WasmAbiErrorCode",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiFailure",
+      "signature": "pub use types::WasmAbiFailure",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiOutcomeEnvelope",
+      "signature": "pub use types::WasmAbiOutcomeEnvelope",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiPayloadShape",
+      "signature": "pub use types::WasmAbiPayloadShape",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiRecoverability",
+      "signature": "pub use types::WasmAbiRecoverability",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiSignature",
+      "signature": "pub use types::WasmAbiSignature",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiSymbol",
+      "signature": "pub use types::WasmAbiSymbol",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiValue",
+      "signature": "pub use types::WasmAbiValue",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiVersion",
+      "signature": "pub use types::WasmAbiVersion",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbiVersionBump",
+      "signature": "pub use types::WasmAbiVersionBump",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbortInteropSnapshot",
+      "signature": "pub use types::WasmAbortInteropSnapshot",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbortInteropUpdate",
+      "signature": "pub use types::WasmAbortInteropUpdate",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmAbortPropagationMode",
+      "signature": "pub use types::WasmAbortPropagationMode",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmBoundaryState",
+      "signature": "pub use types::WasmBoundaryState",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmBoundaryTransitionError",
+      "signature": "pub use types::WasmBoundaryTransitionError",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmExportDispatcher",
+      "signature": "pub use types::WasmExportDispatcher",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmHandleKind",
+      "signature": "pub use types::WasmHandleKind",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmHandleRef",
+      "signature": "pub use types::WasmHandleRef",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmOutcomeExt",
+      "signature": "pub use types::WasmOutcomeExt",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmTaskCancelRequest",
+      "signature": "pub use types::WasmTaskCancelRequest",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::WasmTaskSpawnBuilder",
+      "signature": "pub use types::WasmTaskSpawnBuilder",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::apply_abort_signal_event",
+      "signature": "pub use types::apply_abort_signal_event",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::apply_runtime_cancel_phase_event",
+      "signature": "pub use types::apply_runtime_cancel_phase_event",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::classify_wasm_abi_compatibility",
+      "signature": "pub use types::classify_wasm_abi_compatibility",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::is_valid_bootstrap_transition",
+      "signature": "pub use types::is_valid_bootstrap_transition",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::is_valid_wasm_boundary_transition",
+      "signature": "pub use types::is_valid_wasm_boundary_transition",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::join_outcomes",
+      "signature": "pub use types::join_outcomes",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::outcome_to_error_boundary_action",
+      "signature": "pub use types::outcome_to_error_boundary_action",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::outcome_to_suspense_state",
+      "signature": "pub use types::outcome_to_suspense_state",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::outcome_to_transition_state",
+      "signature": "pub use types::outcome_to_transition_state",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::required_wasm_abi_bump",
+      "signature": "pub use types::required_wasm_abi_bump",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::validate_wasm_boundary_transition",
+      "signature": "pub use types::validate_wasm_boundary_transition",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::wasm_abi_signature_fingerprint",
+      "signature": "pub use types::wasm_abi_signature_fingerprint",
+      "stability": "core"
+    },
+    {
+      "cfg": null,
+      "doc": "",
+      "feature_flags": [],
+      "kind": "reexport",
+      "line": 415,
+      "name": "types::wasm_boundary_state_for_cancel_phase",
+      "signature": "pub use types::wasm_boundary_state_for_cancel_phase",
+      "stability": "core"
+    }
+  ],
+  "schema_version": "api-surface-map-v1"
+}
