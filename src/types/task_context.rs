@@ -139,6 +139,8 @@ pub struct CxInner {
     pub cancel_acknowledged: bool,
     /// Waker used to schedule cancellation promptly.
     pub cancel_waker: Option<Waker>,
+    /// Number of live users that registered the current cancellation waker.
+    pub cancel_waker_registration_count: u32,
     /// Current mask depth.
     pub mask_depth: u32,
     /// Progress checkpoint state.
@@ -173,6 +175,7 @@ impl CxInner {
             cancel_reason: None,
             cancel_acknowledged: false,
             cancel_waker: None,
+            cancel_waker_registration_count: 0,
             mask_depth: 0,
             checkpoint_state: CheckpointState::new(),
             fast_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

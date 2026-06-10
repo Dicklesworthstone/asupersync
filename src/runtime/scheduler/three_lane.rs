@@ -6043,6 +6043,9 @@ impl ThreeLaneWorker {
                         .is_some_and(|existing| existing.will_wake(&w));
                     if needs_update {
                         guard.cancel_waker = Some(w.clone());
+                        guard.cancel_waker_registration_count = 1;
+                    } else if guard.cancel_waker_registration_count == 0 {
+                        guard.cancel_waker_registration_count = 1;
                     }
                 }
                 (w, priority)

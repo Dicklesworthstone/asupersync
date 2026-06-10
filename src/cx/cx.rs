@@ -2329,7 +2329,7 @@ impl<Caps> Cx<Caps> {
     /// user trace event into that buffer and also emits to the log collector.
     /// Without a trace buffer, it still records the log entry.
     pub fn trace(&self, message: &str) {
-        self.log(LogEntry::trace(message));
+        self.log_if_collector(|| LogEntry::trace(message));
         let Some(trace) = self.trace_buffer() else {
             return;
         };
@@ -2359,11 +2359,13 @@ impl<Caps> Cx<Caps> {
     /// ]);
     /// ```
     pub fn trace_with_fields(&self, message: &str, fields: &[(&str, &str)]) {
-        let mut entry = LogEntry::trace(message);
-        for &(k, v) in fields {
-            entry = entry.with_field(k, v);
-        }
-        self.log(entry);
+        self.log_if_collector(|| {
+            let mut entry = LogEntry::trace(message);
+            for &(k, v) in fields {
+                entry = entry.with_field(k, v);
+            }
+            entry
+        });
         let Some(trace) = self.trace_buffer() else {
             return;
         };
@@ -2424,6 +2426,10 @@ impl<Caps> Cx<Caps> {
 
     /// Logs a structured entry to the attached collector, if present.
     pub fn log(&self, entry: LogEntry) {
+        self.log_if_collector(|| entry);
+    }
+
+    fn log_if_collector(&self, build_entry: impl FnOnce() -> LogEntry) {
         let obs = self.observability.read();
         let Some(collector) = obs.collector.clone() else {
             return;
@@ -2431,7 +2437,7 @@ impl<Caps> Cx<Caps> {
         let include_timestamps = obs.include_timestamps;
         let context = obs.context.clone();
         drop(obs);
-        let mut entry = entry.with_context(&context);
+        let mut entry = build_entry().with_context(&context);
         // `LogEntry::new`/`info` initialize `timestamp` to `Time::ZERO`, which is
         // the "unset" sentinel: when the caller did not supply an explicit
         // timestamp we fill it in from the context's timer driver. The previous
@@ -4454,6 +4460,7 @@ mod tests {
         {
             let mut inner = cx.inner.write();
             inner.cancel_waker = Some(waker);
+            inner.cancel_waker_registration_count = 1;
         }
 
         cx.set_cancel_requested(true);

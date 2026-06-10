@@ -458,10 +458,11 @@ impl<T> OnceCell<T> {
         self.value.into_inner()
     }
 
-    /// Waits for initialization to complete.
+    /// Waits for the cell to become initialized.
     ///
     /// Returns immediately if the cell is already initialized.
-    /// If another task is initializing, waits for it to complete.
+    /// If the cell is uninitialized or another task is initializing it, waits
+    /// until a value is set.
     ///
     /// # Cancel Safety
     ///
@@ -484,6 +485,7 @@ impl<T> OnceCell<T> {
             cell: self,
             cx,
             waiter_id: None,
+            cancel_waker: None,
         }
         .await
     }
@@ -672,6 +674,8 @@ struct CancelAwareWaitInit<'a, T, Caps = crate::cx::cap::All> {
     cx: &'a crate::cx::Cx<Caps>,
     /// Tracks registered waiter identity to prevent unbounded queue growth.
     waiter_id: Option<u64>,
+    /// Tracks the task waker registered with the cancellation context.
+    cancel_waker: Option<Waker>,
 }
 
 impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
@@ -680,29 +684,41 @@ impl<T, Caps> std::future::Future for CancelAwareWaitInit<'_, T, Caps> {
     fn poll(self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        // Check cancellation first
+        if this.cell.state.load(Ordering::Acquire) == INITIALIZED {
+            return Poll::Ready(Ok(()));
+        }
+
         if this.cx.checkpoint().is_err() {
             return Poll::Ready(Err(OnceCellError::Cancelled));
         }
 
-        let state = this.cell.state.load(Ordering::Acquire);
-        if state == INITIALIZING {
-            this.cell
-                .register_waker(task_cx.waker(), &mut this.waiter_id);
-            // Double-check after registering.
-            if this.cell.state.load(Ordering::Acquire) == INITIALIZING {
-                // Check cancellation again after registering waker
-                if this.cx.checkpoint().is_err() {
-                    return Poll::Ready(Err(OnceCellError::Cancelled));
-                }
-                Poll::Pending
-            } else {
-                // Do not clear waiter_id here for same reason as WaitInit
-                Poll::Ready(Ok(()))
+        let should_register_cancel_waker = match &mut this.cancel_waker {
+            Some(existing) if existing.will_wake(task_cx.waker()) => false,
+            Some(existing) => {
+                existing.clone_from(task_cx.waker());
+                true
             }
-        } else {
-            Poll::Ready(Ok(()))
+            None => {
+                this.cancel_waker = Some(task_cx.waker().clone());
+                true
+            }
+        };
+        if should_register_cancel_waker {
+            this.cx.register_cancel_waker(task_cx.waker());
         }
+
+        this.cell
+            .register_waker(task_cx.waker(), &mut this.waiter_id);
+
+        if this.cell.state.load(Ordering::Acquire) == INITIALIZED {
+            return Poll::Ready(Ok(()));
+        }
+
+        if this.cx.checkpoint().is_err() {
+            return Poll::Ready(Err(OnceCellError::Cancelled));
+        }
+
+        Poll::Pending
     }
 }
 
@@ -711,6 +727,9 @@ impl<T, Caps> Drop for CancelAwareWaitInit<'_, T, Caps> {
         if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately
             self.cell.remove_waiter_for_cancellation(waiter_id);
+        }
+        if let Some(waker) = &self.cancel_waker {
+            self.cx.clear_cancel_waker_if_current(waker);
         }
     }
 }
@@ -814,6 +833,115 @@ mod tests {
             cell.get().copied()
         );
         crate::test_complete!("wait_accepts_detached_no_cap_context");
+    }
+
+    #[test]
+    fn wait_on_uninitialized_cell_pends_until_set() {
+        init_test("wait_on_uninitialized_cell_pends_until_set");
+        let cell = OnceCell::new();
+        let cx = crate::cx::Cx::for_testing();
+        let waker_counts = Arc::new(CountWaker::default());
+        let waker = Waker::from(Arc::clone(&waker_counts));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut wait = Box::pin(cell.wait(&cx));
+        let initial_poll_pending = Future::poll(wait.as_mut(), &mut task_cx).is_pending();
+
+        crate::assert_with_log!(
+            initial_poll_pending,
+            "uninitialized wait pending",
+            true,
+            initial_poll_pending
+        );
+        let waiter_count = cell
+            .waiters
+            .lock()
+            .expect("waiters lock should not be poisoned")
+            .waiters
+            .len();
+        crate::assert_with_log!(
+            waiter_count == 1,
+            "one waiter registered",
+            1usize,
+            waiter_count
+        );
+
+        cell.set(17).expect("set should initialize and wake waiter");
+        let wake_count = waker_counts.count();
+        crate::assert_with_log!(
+            wake_count == 1,
+            "registered waiter woken",
+            1usize,
+            wake_count
+        );
+        let completed_after_set = matches!(
+            Future::poll(wait.as_mut(), &mut task_cx),
+            Poll::Ready(Ok(()))
+        );
+        crate::assert_with_log!(
+            completed_after_set,
+            "wait completes after set",
+            true,
+            completed_after_set
+        );
+        let queue_drained = cell
+            .waiters
+            .lock()
+            .expect("waiters lock should not be poisoned")
+            .waiters
+            .is_empty();
+        crate::assert_with_log!(
+            queue_drained,
+            "waiter queue drained after set",
+            true,
+            queue_drained
+        );
+        crate::test_complete!("wait_on_uninitialized_cell_pends_until_set");
+    }
+
+    #[test]
+    fn cancelled_wait_on_uninitialized_cell_removes_waiter() {
+        init_test("cancelled_wait_on_uninitialized_cell_removes_waiter");
+        let cell: OnceCell<u32> = OnceCell::new();
+        let cx = crate::cx::Cx::for_testing();
+        let waker_counts = Arc::new(CountWaker::default());
+        let waker = Waker::from(Arc::clone(&waker_counts));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut wait = Box::pin(cell.wait(&cx));
+        let initial_poll_pending = Future::poll(wait.as_mut(), &mut task_cx).is_pending();
+
+        crate::assert_with_log!(
+            initial_poll_pending,
+            "wait pending before cancellation",
+            true,
+            initial_poll_pending
+        );
+        cx.cancel_fast(crate::types::CancelKind::User);
+        let wake_count = waker_counts.count();
+        crate::assert_with_log!(
+            wake_count == 1,
+            "context cancellation wakes waiter",
+            1usize,
+            wake_count
+        );
+        let cancelled = matches!(
+            Future::poll(wait.as_mut(), &mut task_cx),
+            Poll::Ready(Err(OnceCellError::Cancelled))
+        );
+        crate::assert_with_log!(cancelled, "wait reports cancellation", true, cancelled);
+        drop(wait);
+        let queue_drained = cell
+            .waiters
+            .lock()
+            .expect("waiters lock should not be poisoned")
+            .waiters
+            .is_empty();
+        crate::assert_with_log!(
+            queue_drained,
+            "cancelled waiter removed",
+            true,
+            queue_drained
+        );
+        crate::test_complete!("cancelled_wait_on_uninitialized_cell_removes_waiter");
     }
 
     #[test]
@@ -3164,9 +3292,11 @@ mod tests {
             let stress_cell = Arc::new(OnceCell::<u32>::new());
             let iterations = 20;
             let mut handles = Vec::new();
+            let (cancelled_done_tx, cancelled_done_rx) = std::sync::mpsc::channel();
 
             for i in 0..iterations {
                 let stress_cell_clone = stress_cell.clone();
+                let cancelled_done_tx = cancelled_done_tx.clone();
                 let handle = thread::spawn(move || {
                     block_on(async {
                         let cx = Cx::for_testing();
@@ -3180,14 +3310,47 @@ mod tests {
                         let result = stress_cell_clone.wait(&cx).await;
                         let duration = start.elapsed();
 
+                        if i % 2 == 0 {
+                            cancelled_done_tx
+                                .send((i, result, duration))
+                                .expect("main thread should receive cancelled waiter result");
+                        }
+
                         (i, result, duration)
                     })
                 });
                 handles.push(handle);
             }
+            drop(cancelled_done_tx);
 
-            // Initialize after starting waiters
-            thread::sleep(Duration::from_millis(10));
+            // Wait for the pre-cancelled waiters to observe cancellation
+            // before initializing. Otherwise a heavily loaded test worker can
+            // schedule a cancelled thread only after set(), where wait() is
+            // documented to succeed because the cell is already initialized.
+            for _ in 0..(iterations / 2) {
+                let (waiter_id, result, duration) = cancelled_done_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("cancelled waiters should complete before initialization");
+
+                match result {
+                    Err(OnceCellError::Cancelled) => {
+                        if duration > Duration::from_millis(30) {
+                            panic!(
+                                "❌ DEFECT: Cancelled waiter {} took {:?}, expected quick return",
+                                waiter_id, duration
+                            );
+                        }
+                    }
+                    other => {
+                        panic!(
+                            "❌ DEFECT: Waiter {} with cancelled context got {:?}, expected Err(Cancelled)",
+                            waiter_id, other
+                        );
+                    }
+                }
+            }
+
+            // Initialize after cancelled waiters have proved the cancel-aware path.
             let _ = stress_cell.set(123);
 
             // Collect results

@@ -1575,54 +1575,70 @@ impl LabRuntime {
             return;
         }
 
-        // 3. Prepare context and enforce budget
-        let priority = self.state.task(task_id).map_or(0, |record| {
-            record.cx_inner.as_ref().map_or(0, |inner| {
-                let mut guard = inner.write();
+        // 3. Prepare context, enforce budget, and take any cached wakers.
+        let (priority, cached_waker, cached_cancel_waker, current_cx, cx_inner) = self
+            .state
+            .update_task(task_id, |record| {
+                let priority = record.cx_inner.as_ref().map_or(0, |inner| {
+                    let mut guard = inner.write();
 
-                // Enforce poll quota
-                if guard.budget.consume_poll().is_none() {
-                    guard.cancel_requested = true;
-                    guard
-                        .fast_cancel
-                        .store(true, std::sync::atomic::Ordering::Release);
-                    if let Some(existing) = &mut guard.cancel_reason {
-                        existing.strengthen(&crate::types::CancelReason::poll_quota());
-                    } else {
-                        guard.cancel_reason = Some(crate::types::CancelReason::poll_quota());
+                    // Enforce poll quota
+                    if guard.budget.consume_poll().is_none() {
+                        guard.cancel_requested = true;
+                        guard
+                            .fast_cancel
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        if let Some(existing) = &mut guard.cancel_reason {
+                            existing.strengthen(&crate::types::CancelReason::poll_quota());
+                        } else {
+                            guard.cancel_reason = Some(crate::types::CancelReason::poll_quota());
+                        }
                     }
-                }
 
-                guard.budget.priority
+                    guard.budget.priority
+                });
+
+                (
+                    priority,
+                    record.cached_waker.take(),
+                    record.cached_cancel_waker.take(),
+                    record.cx.clone(),
+                    record.cx_inner.clone(),
+                )
             })
-        });
+            .unwrap_or((0, None, None, None, None));
 
-        let waker = Waker::from(Arc::new(TaskWaker {
-            task_id,
-            priority,
-            scheduler: self.scheduler.clone(),
-        }));
+        let waker = match cached_waker {
+            Some((waker, cached_priority)) if cached_priority == priority => waker,
+            _ => Waker::from(Arc::new(TaskWaker {
+                task_id,
+                priority,
+                scheduler: self.scheduler.clone(),
+            })),
+        };
         let mut cx = Context::from_waker(&waker);
 
         // Set cancel_waker so abort_with_reason can reschedule cancelled tasks.
-        if let Some(record) = self.state.task(task_id) {
-            if let Some(inner) = record.cx_inner.as_ref() {
-                let cancel_waker = Waker::from(Arc::new(CancelTaskWaker {
+        let cancel_waker_for_cache = cx_inner.as_ref().map(|_| match cached_cancel_waker {
+            Some((waker, cached_priority)) if cached_priority == priority => (waker, priority),
+            _ => (
+                Waker::from(Arc::new(CancelTaskWaker {
                     task_id,
                     priority,
                     scheduler: self.scheduler.clone(),
-                }));
-                {
-                    let mut guard = inner.write();
-                    guard.cancel_waker = Some(cancel_waker);
-                }
-            }
+                })),
+                priority,
+            ),
+        });
+
+        if let (Some(inner), Some((cancel_waker, _))) =
+            (cx_inner.as_ref(), cancel_waker_for_cache.as_ref())
+        {
+            let mut guard = inner.write();
+            guard.cancel_waker = Some(cancel_waker.clone());
+            guard.cancel_waker_registration_count = 1;
         }
 
-        let current_cx = self
-            .state
-            .task(task_id)
-            .and_then(|record| record.cx.clone());
         let _cx_guard = crate::cx::Cx::set_current(current_cx);
 
         let started_running = self
@@ -1663,6 +1679,7 @@ impl LabRuntime {
             // Task lost (should not happen if consistent)
             return;
         };
+        drop(cx);
 
         // Record the poll so futurelock detection uses the correct idle step count.
         let _ = self.state.update_task(task_id, |record| {
@@ -1834,6 +1851,10 @@ impl LabRuntime {
 
                 // Record task yielding
                 self.replay_recorder.record_task_yielded(task_id);
+                let _ = self.state.update_task(task_id, |record| {
+                    record.cached_waker = Some((waker, priority));
+                    record.cached_cancel_waker = cancel_waker_for_cache;
+                });
 
                 // 6. Post-poll chaos injection (spurious wakeups for pending tasks)
                 self.inject_post_poll_chaos(task_id, priority);

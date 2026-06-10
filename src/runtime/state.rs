@@ -3462,7 +3462,12 @@ impl RuntimeState {
                 // hazard. `take()` is idempotent on None (no allocation, no
                 // wake) and keeps the cleared Waker alive only briefly inside
                 // the guard scope.
-                let _evicted = inner.write().cancel_waker.take();
+                let _evicted = {
+                    let mut guard = inner.write();
+                    let evicted = guard.cancel_waker.take();
+                    guard.cancel_waker_registration_count = 0;
+                    evicted
+                };
             }
 
             self.record_task_complete(task);
@@ -6213,7 +6218,11 @@ mod tests {
                 .as_ref()
                 .expect("cx_inner")
                 .clone();
-            cx_inner.write().cancel_waker = Some(std::task::Waker::noop().clone());
+            {
+                let mut guard = cx_inner.write();
+                guard.cancel_waker = Some(std::task::Waker::noop().clone());
+                guard.cancel_waker_registration_count = 1;
+            }
 
             let inner_for_thread = std::sync::Arc::clone(&cx_inner);
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -6224,6 +6233,7 @@ mod tests {
                 while !stop_for_thread.load(Ordering::Relaxed) {
                     let mut g = inner_for_thread.write();
                     g.cancel_waker = Some(std::task::Waker::noop().clone());
+                    g.cancel_waker_registration_count = 1;
                     drop(g);
                     std::thread::yield_now();
                 }
@@ -6252,7 +6262,12 @@ mod tests {
             // never a half-initialized state. We only assert task_completed
             // didn't panic and that the lock is reacquirable (no poisoning
             // from a torn write).
-            let final_state = cx_inner.write().cancel_waker.take();
+            let final_state = {
+                let mut guard = cx_inner.write();
+                let final_state = guard.cancel_waker.take();
+                guard.cancel_waker_registration_count = 0;
+                final_state
+            };
             crate::assert_with_log!(
                 final_state.is_none() || final_state.is_some(),
                 "trial completes with well-formed Option (no torn write/poisoning)",
