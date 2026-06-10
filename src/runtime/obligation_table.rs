@@ -700,6 +700,44 @@ impl ObligationTable {
     }
 
     /// Returns counts across all obligations in the table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::record::{ObligationKind, SourceLocation};
+    /// use asupersync::runtime::ObligationTable;
+    /// use asupersync::runtime::obligation_table::ObligationCreateArgs;
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut table = ObligationTable::new();
+    /// let task = TaskId::testing_default();
+    /// let region = RegionId::testing_default();
+    /// let base = |kind, region, now| ObligationCreateArgs {
+    ///     kind,
+    ///     holder: task,
+    ///     region,
+    ///     now,
+    ///     description: None,
+    ///     acquired_at: SourceLocation::unknown(),
+    ///     acquire_backtrace: None,
+    /// };
+    ///
+    /// table.create(base(ObligationKind::Lease, region, Time::from_nanos(10)));
+    /// let ack = table.create(base(ObligationKind::Ack, region, Time::from_nanos(20)));
+    /// table.commit(ack, Time::from_nanos(30))?;
+    ///
+    /// assert_eq!(table.counts().total(), 2);
+    /// assert_eq!(table.counts_for_region(region).pending, 1);
+    /// assert_eq!(table.counts_for_task(task).total(), 2);
+    /// assert_eq!(table.counts_for_kind(ObligationKind::Ack).committed, 1);
+    /// assert_eq!(
+    ///     table
+    ///         .counts_for_region_and_kind(region, ObligationKind::Lease)
+    ///         .pending,
+    ///     1
+    /// );
+    /// # Ok::<(), asupersync::error::Error>(())
+    /// ```
     #[must_use]
     pub fn counts(&self) -> ObligationCounts {
         ObligationCounts::from_records(self.obligations.iter().map(|(_, record)| record))
@@ -754,6 +792,28 @@ impl ObligationTable {
     }
 
     /// Returns the lifecycle state for `id`, if it is known to this table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::record::{ObligationKind, ObligationState, SourceLocation};
+    /// use asupersync::runtime::ObligationTable;
+    /// use asupersync::runtime::obligation_table::ObligationCreateArgs;
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut table = ObligationTable::new();
+    /// let id = table.create(ObligationCreateArgs {
+    ///     kind: ObligationKind::Lease,
+    ///     holder: TaskId::testing_default(),
+    ///     region: RegionId::testing_default(),
+    ///     now: Time::from_nanos(10),
+    ///     description: None,
+    ///     acquired_at: SourceLocation::unknown(),
+    ///     acquire_backtrace: None,
+    /// });
+    ///
+    /// assert_eq!(table.obligation_state(id), Some(ObligationState::Reserved));
+    /// ```
     #[must_use]
     pub fn obligation_state(&self, id: ObligationId) -> Option<crate::record::ObligationState> {
         self.obligations
@@ -764,6 +824,36 @@ impl ObligationTable {
     /// Returns owned audit snapshots for every obligation.
     ///
     /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::record::{ObligationKind, SourceLocation};
+    /// use asupersync::runtime::ObligationTable;
+    /// use asupersync::runtime::obligation_table::ObligationCreateArgs;
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut table = ObligationTable::new();
+    /// let task = TaskId::testing_default();
+    /// let region = RegionId::testing_default();
+    /// let base = |kind, holder| ObligationCreateArgs {
+    ///     kind,
+    ///     holder,
+    ///     region,
+    ///     now: Time::from_nanos(10),
+    ///     description: None,
+    ///     acquired_at: SourceLocation::unknown(),
+    ///     acquire_backtrace: None,
+    /// };
+    ///
+    /// table.create(base(ObligationKind::Lease, task));
+    /// table.create(base(ObligationKind::Ack, task));
+    ///
+    /// assert_eq!(table.audit(Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(table.audit_region(region, Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(table.audit_task(task, Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(table.audit_kind(ObligationKind::Lease, Time::from_nanos(30)).len(), 1);
+    /// ```
     #[must_use]
     pub fn audit(&self, now: Time) -> Vec<ObligationAuditRecord> {
         let mut records: Vec<_> = self

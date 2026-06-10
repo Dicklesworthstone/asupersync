@@ -118,6 +118,15 @@ pub fn panic_leak_count() -> u64 {
 ///
 /// This is the structured diagnostic form of [`panic_leak_count`]. It is safe to
 /// call while handling a panic and never mutates obligation state.
+///
+/// # Examples
+///
+/// ```
+/// use asupersync::obligation::graded::{panic_leak_count, panic_leaks};
+///
+/// let snapshot = panic_leaks();
+/// assert_eq!(snapshot.total_leaked, panic_leak_count());
+/// ```
 #[must_use]
 pub fn panic_leaks() -> PanicLeakSnapshot {
     PanicLeakSnapshot {

@@ -236,6 +236,27 @@ impl LedgerStats {
 }
 
 /// Count summary for a filtered obligation snapshot.
+///
+/// # Examples
+///
+/// ```
+/// use asupersync::obligation::ledger::ObligationLedger;
+/// use asupersync::record::ObligationKind;
+/// use asupersync::types::{RegionId, TaskId, Time};
+///
+/// let mut ledger = ObligationLedger::new();
+/// let task = TaskId::testing_default();
+/// let region = RegionId::testing_default();
+///
+/// let _pending = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(10));
+/// let committed = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(20));
+/// ledger.commit(committed, Time::from_nanos(30));
+///
+/// let region_counts = ledger.counts_for_region(region);
+/// assert_eq!(region_counts.pending, 1);
+/// assert_eq!(region_counts.resolved(), 1);
+/// assert_eq!(region_counts.total(), 2);
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ObligationCounts {
     /// Obligations still pending and blocking quiescence.
@@ -285,6 +306,25 @@ impl ObligationCounts {
 ///
 /// This is the public read-only audit shape. It intentionally copies the fields
 /// operators and tests need without cloning the record's optional backtrace.
+///
+/// # Examples
+///
+/// ```
+/// use asupersync::obligation::ledger::ObligationLedger;
+/// use asupersync::record::{ObligationKind, ObligationState};
+/// use asupersync::types::{RegionId, TaskId, Time};
+///
+/// let mut ledger = ObligationLedger::new();
+/// let task = TaskId::testing_default();
+/// let region = RegionId::testing_default();
+/// let token = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(10));
+/// let id = token.id();
+///
+/// let audit = ledger.audit_region(region, Time::from_nanos(25));
+/// assert_eq!(audit[0].id, id);
+/// assert_eq!(audit[0].state, ObligationState::Reserved);
+/// assert_eq!(audit[0].age_ns, 15);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObligationAuditRecord {
     /// Unique obligation ID.
@@ -974,6 +1014,33 @@ impl ObligationLedger {
     }
 
     /// Returns counts across all obligations in deterministic ledger order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::obligation::ledger::ObligationLedger;
+    /// use asupersync::record::ObligationKind;
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut ledger = ObligationLedger::new();
+    /// let task = TaskId::testing_default();
+    /// let region = RegionId::testing_default();
+    ///
+    /// let _lease = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(10));
+    /// let ack = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(20));
+    /// ledger.commit(ack, Time::from_nanos(30));
+    ///
+    /// assert_eq!(ledger.counts().total(), 2);
+    /// assert_eq!(ledger.counts_for_region(region).pending, 1);
+    /// assert_eq!(ledger.counts_for_task(task).total(), 2);
+    /// assert_eq!(ledger.counts_for_kind(ObligationKind::Ack).committed, 1);
+    /// assert_eq!(
+    ///     ledger
+    ///         .counts_for_region_and_kind(region, ObligationKind::Lease)
+    ///         .pending,
+    ///     1
+    /// );
+    /// ```
     #[must_use]
     pub fn counts(&self) -> ObligationCounts {
         ObligationCounts::from_records(self.obligations.values())
@@ -1024,6 +1091,22 @@ impl ObligationLedger {
     }
 
     /// Returns the lifecycle state for `id`, if it is known to this ledger.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::obligation::ledger::ObligationLedger;
+    /// use asupersync::record::{ObligationKind, ObligationState};
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut ledger = ObligationLedger::new();
+    /// let task = TaskId::testing_default();
+    /// let region = RegionId::testing_default();
+    /// let token = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(10));
+    /// let id = token.id();
+    ///
+    /// assert_eq!(ledger.obligation_state(id), Some(ObligationState::Reserved));
+    /// ```
     #[must_use]
     pub fn obligation_state(&self, id: ObligationId) -> Option<ObligationState> {
         self.obligations.get(&id).map(|record| record.state)
@@ -1032,6 +1115,25 @@ impl ObligationLedger {
     /// Returns owned audit snapshots for every obligation.
     ///
     /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::obligation::ledger::ObligationLedger;
+    /// use asupersync::record::ObligationKind;
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut ledger = ObligationLedger::new();
+    /// let task = TaskId::testing_default();
+    /// let region = RegionId::testing_default();
+    /// let _lease = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(10));
+    /// let _ack = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(20));
+    ///
+    /// assert_eq!(ledger.audit(Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(ledger.audit_region(region, Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(ledger.audit_task(task, Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(ledger.audit_kind(ObligationKind::Lease, Time::from_nanos(30)).len(), 1);
+    /// ```
     #[must_use]
     pub fn audit(&self, now: Time) -> Vec<ObligationAuditRecord> {
         self.obligations
