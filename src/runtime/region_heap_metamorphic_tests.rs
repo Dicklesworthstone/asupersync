@@ -218,7 +218,11 @@ mod metamorphic_tests {
         assert_eq!(heap2.stats().live, 0, "heap2 live after reclaim_all");
         assert_eq!(heap2.len(), 0, "heap2 len after reclaim_all");
         // heap1 still holds its remaining live allocation.
-        assert_eq!(heap1.stats().live, 1, "heap1 live unaffected by heap2 reclaim");
+        assert_eq!(
+            heap1.stats().live,
+            1,
+            "heap1 live unaffected by heap2 reclaim"
+        );
 
         // Cleanup: reclaim_all empties heap1 as well.
         heap1.reclaim_all();

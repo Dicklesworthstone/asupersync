@@ -213,7 +213,7 @@
     {
       "section_id": "br_tracker_status",
       "description": "Read-only tracker rows for bead status, dependency readiness, and stale-evidence boundaries.",
-      "owner_source": ".beads/issues.jsonl",
+      "owner_source": "asupersync-bt63nr.1",
       "implementation_source": "br ready --json",
       "required_fields": [
         "bead_id",

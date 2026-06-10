@@ -15,7 +15,9 @@
 //! # Usage
 //!
 //! ```rust
-//! use asupersync::lab::oracle::waker_dedup::{WakerDedupOracle, WakerDedupConfig};
+//! use asupersync::lab::oracle::waker_dedup::{
+//!     ChannelId, EnforcementMode, WakerDedupConfig, WakerDedupOracle, WakerId,
+//! };
 //!
 //! let mut oracle = WakerDedupOracle::new(WakerDedupConfig {
 //!     track_queued_state: true,
@@ -25,10 +27,12 @@
 //!     ..Default::default()
 //! });
 //!
-//! // Hook into waker operations
-//! oracle.on_waker_registered(waker_id, channel_id, is_queued);
-//! oracle.on_waker_wake_requested(waker_id, reason);
-//! oracle.on_waker_actually_woken(waker_id);
+//! // Hook into waker operations.
+//! let waker_id = WakerId(1);
+//! let channel_id = ChannelId(1);
+//! oracle.on_waker_registered(waker_id, channel_id, true, None);
+//! oracle.on_waker_wake_requested(waker_id, "send completed".to_string(), None);
+//! oracle.on_waker_actually_woken(waker_id, None);
 //! oracle.on_waker_dropped(waker_id);
 //! ```
 

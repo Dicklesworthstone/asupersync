@@ -97,6 +97,8 @@ def repo_relative(path: Path) -> str:
 
 def load_issues(path: Path) -> dict[str, dict[str, Any]]:
     issues: dict[str, dict[str, Any]] = {}
+    if not path.exists():
+        return issues
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             row = json.loads(line)

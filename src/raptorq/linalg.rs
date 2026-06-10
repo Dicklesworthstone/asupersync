@@ -672,16 +672,19 @@ pub fn row_scale_add_batch_multi(destinations: &mut [&mut [u8]], sources: &[&[u8
 /// # Usage in Gaussian Elimination
 ///
 /// ```rust
-/// // During elimination, collect batchable operations:
-/// let candidates = collect_batch_candidates(&matrix, pivot_row, pivot_col);
-/// if candidates.len() >= 2 {
-///     row_scale_add_batch_multi(&mut candidates, coefficient);
-/// } else {
-///     // Fall back to sequential processing
-///     for (dst, src) in candidates {
-///         row_scale_add(&mut dst, &src, coefficient);
-///     }
-/// }
+/// use asupersync::raptorq::linalg::collect_batch_candidates;
+///
+/// let matrix = vec![
+///     vec![1, 0, 0],
+///     vec![1, 2, 3],
+///     vec![0, 4, 5],
+///     vec![1, 6, 7],
+/// ];
+/// let candidates = collect_batch_candidates(&matrix, 0, 0);
+///
+/// assert_eq!(candidates.len(), 2);
+/// assert_eq!(candidates[0], (vec![1, 0, 0], vec![1, 2, 3]));
+/// assert_eq!(candidates[1], (vec![1, 0, 0], vec![1, 6, 7]));
 /// ```
 pub fn collect_batch_candidates(
     matrix: &[Vec<u8>],

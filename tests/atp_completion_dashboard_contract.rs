@@ -51,6 +51,38 @@ fn dashboard_json() -> Value {
 }
 
 #[test]
+fn dashboard_treats_missing_tracker_as_release_blocking_data() {
+    let dashboard: Value = serde_json::from_str(&run_dashboard(&[
+        "--format=json",
+        "--generated-at",
+        LIVE_GENERATED_AT,
+        "--as-of-date",
+        LIVE_AS_OF_DATE,
+        "--issues",
+        "target/atp-completion-dashboard-test/missing-issues.jsonl",
+    ]))
+    .expect("dashboard json parses");
+
+    assert_eq!(
+        dashboard["source_of_truth"]["tracker"].as_str(),
+        Some("target/atp-completion-dashboard-test/missing-issues.jsonl")
+    );
+    assert_eq!(
+        dashboard["summary"]["ready_to_close_top_epic"].as_bool(),
+        Some(false),
+        "missing tracker export must fail closed rather than crashing or going green"
+    );
+    assert!(
+        dashboard["release_gates"]
+            .as_array()
+            .expect("release gate rows")
+            .iter()
+            .any(|row| row["dashboard_status"].as_str() == Some("red_missing_bead")),
+        "missing tracker export should leave required gates visibly missing"
+    );
+}
+
+#[test]
 fn contract_declares_required_workstreams_questions_and_nr_gates() {
     let contract = contract_json();
     assert_eq!(

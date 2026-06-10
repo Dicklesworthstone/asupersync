@@ -466,7 +466,7 @@ use std::path::PathBuf;
 /// ```
 /// use asupersync::test_utils::EvidenceSink;
 ///
-/// let evidence = EvidenceSink::for_test("my_test");
+/// let mut evidence = EvidenceSink::for_test("my_test");
 /// evidence.phase("setup");
 /// evidence.event("task_spawn", &[("task_id", "1"), ("name", "worker")]);
 /// evidence.outcome("passed");

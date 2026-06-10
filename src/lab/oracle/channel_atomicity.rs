@@ -15,7 +15,9 @@
 //! # Usage
 //!
 //! ```rust
-//! use asupersync::lab::oracle::channel_atomicity::{ChannelAtomicityOracle, ChannelAtomicityConfig};
+//! use asupersync::lab::oracle::channel_atomicity::{
+//!     ChannelAtomicityConfig, ChannelAtomicityOracle, ChannelId, EnforcementMode, ReservationId,
+//! };
 //!
 //! let mut oracle = ChannelAtomicityOracle::new(ChannelAtomicityConfig {
 //!     track_reservations: true,
@@ -25,10 +27,14 @@
 //!     ..Default::default()
 //! });
 //!
-//! // Hook into channel operations
-//! oracle.on_reservation_created(reservation_id, channel_id, Some(trace_id));
-//! oracle.on_reservation_committed(reservation_id, data_size);
-//! oracle.on_reservation_aborted(reservation_id, reason);
+//! // Hook into channel operations.
+//! let channel_id = ChannelId(1);
+//! let committed = ReservationId(1);
+//! let aborted = ReservationId(2);
+//! oracle.on_reservation_created(committed, channel_id, None);
+//! oracle.on_reservation_committed(committed, 64);
+//! oracle.on_reservation_created(aborted, channel_id, None);
+//! oracle.on_reservation_aborted(aborted, "sender cancelled".to_string());
 //! ```
 
 use crate::trace::distributed::DistTraceId;
