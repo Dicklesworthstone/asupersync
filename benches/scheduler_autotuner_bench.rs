@@ -392,7 +392,7 @@ fn run_replay_backed_scheduler_dispatch(
     scheduler.set_adaptive_batch_profile_for_test(Some(knobs.ready_batch_profile));
 
     for id in 0..dispatch_tasks {
-        let task_id = u32::try_from(id).map_or(max_task_id, |value| value);
+        let task_id = u32::try_from(id).unwrap_or(max_task_id);
         scheduler.inject_ready(bench_task(task_id), 50);
     }
 

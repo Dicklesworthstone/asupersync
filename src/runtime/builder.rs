@@ -2226,6 +2226,19 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Selects the spawn admission mode
+    /// (br-asupersync-dx-core-api-v2-u1z5hn.1.3).
+    ///
+    /// `Direct` (default) creates tasks synchronously under the state lock.
+    /// `Mailbox` routes spawns through the lock-free spawn mailbox; scheduler
+    /// workers admit them at dispatch time. Direct stays the default until
+    /// the spawn-throughput bench evidence justifies flipping it.
+    #[must_use]
+    pub fn spawn_admission(mut self, mode: crate::runtime::config::SpawnAdmissionMode) -> Self {
+        self.config.spawn_admission = mode;
+        self
+    }
+
     /// Set an explicit worker-to-cohort mapping for locality-aware stealing.
     ///
     /// The mapping must contain exactly one cohort label per worker thread at
@@ -3753,6 +3766,12 @@ struct RuntimeInner {
     scheduler: ThreeLaneScheduler,
     worker_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     root_region: crate::types::RegionId,
+    /// Lock-free spawn intake (Some only in `SpawnAdmissionMode::Mailbox`).
+    spawn_mailbox: Option<Arc<crate::runtime::spawn_mailbox::SpawnMailbox>>,
+    /// Root-region pending-spawn counter handle for mailbox-mode producers.
+    root_pending_spawns: Option<Arc<crate::record::region::PendingSpawnCounter>>,
+    /// Timer handle for producer-side enqueue timestamps in mailbox mode.
+    spawn_clock: Option<TimerDriverHandle>,
     /// Blocking pool for synchronous operations.
     blocking_pool: Option<crate::runtime::blocking_pool::BlockingPool>,
     /// Shutdown signal for the deadline monitor thread.
@@ -3910,6 +3929,24 @@ impl RuntimeInner {
                 .set_worker_cohort_map(&mapping.worker_to_cohort)
                 .expect("validated worker cohort map should apply to scheduler");
         }
+        let (spawn_mailbox, root_pending_spawns, spawn_clock) =
+            if config.spawn_admission == crate::runtime::config::SpawnAdmissionMode::Mailbox {
+                let guard = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::with_trace(
+                    guard.trace_handle(),
+                ));
+                let pending = guard
+                    .region(root_region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle);
+                let clock = guard.timer_driver_handle();
+                drop(guard);
+                scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+                (Some(mailbox), pending, clock)
+            } else {
+                (None, None, None)
+            };
         let workers = scheduler.take_workers();
 
         let deadline_monitor = host_services.start_deadline_monitor(&config, &state);
@@ -3929,6 +3966,9 @@ impl RuntimeInner {
                 scheduler,
                 worker_threads: Mutex::new(Vec::new()),
                 root_region,
+                spawn_mailbox,
+                root_pending_spawns,
+                spawn_clock,
                 blocking_pool,
                 deadline_monitor_shutdown: deadline_monitor.shutdown,
                 deadline_monitor_thread: deadline_monitor.thread,
@@ -3997,6 +4037,50 @@ impl RuntimeInner {
             let result = CatchUnwind { inner: future }.await;
             complete_task(&join_state_for_task, result);
         };
+
+        // Mailbox admission mode (br-asupersync-dx-core-api-v2-u1z5hn.1.3):
+        // reserve the root region's pending-spawn credit, then enqueue the
+        // erased request without touching the RuntimeState lock. Scheduler
+        // workers admit at dispatch time; cancel-before-admission resolves
+        // the join handle through the cancel slot (this JoinHandle models
+        // cancellation as a panic payload on the awaiter, matching the
+        // existing dropped-before-completion semantics).
+        if let Some(mailbox) = &self.spawn_mailbox {
+            let reservation = self
+                .root_pending_spawns
+                .as_ref()
+                .map(|counter| counter.reserve());
+            let join_state_for_cancel = Arc::clone(&join_state);
+            let provisional = mailbox.allocate_task_id();
+            let outcome_wrapped = async move {
+                wrapped.await;
+                crate::types::Outcome::Ok(())
+            };
+            let mut request = crate::runtime::spawn_mailbox::SpawnRequest::new(
+                provisional,
+                self.root_region,
+                Budget::new(),
+                crate::runtime::stored_task::StoredTask::new_with_id(outcome_wrapped, provisional),
+            )
+            .with_unadmitted_cancel(Box::new(move |reason| {
+                complete_task(
+                    &join_state_for_cancel,
+                    Err(Box::new(format!(
+                        "spawn cancelled before admission: {reason}"
+                    ))),
+                );
+            }));
+            if let Some(reservation) = reservation {
+                request = request.with_pending_reservation(reservation);
+            }
+            let now = self
+                .spawn_clock
+                .as_ref()
+                .map_or(crate::types::Time::ZERO, TimerDriverHandle::now);
+            mailbox.enqueue(request, now);
+            self.scheduler.notify_spawn_enqueued();
+            return Ok(JoinHandle::new(join_state));
+        }
 
         let task_id = {
             let mut guard = self

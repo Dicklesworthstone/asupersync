@@ -601,6 +601,11 @@ harness = false
 required-features = ["test-internals", "criterion-benches"]
 
 [[bench]]
+name = "spawn_throughput"
+harness = false
+required-features = ["test-internals", "criterion-benches"]
+
+[[bench]]
 name = "load_balancer_benchmark"
 harness = false
 required-features = ["criterion-benches"]

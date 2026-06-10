@@ -1890,11 +1890,29 @@ pub struct SecurityConfig {
     pub spawn_authorization_key: Option<AuthKey>,
 }
 
+/// How spawn requests reach the runtime
+/// (br-asupersync-dx-core-api-v2-u1z5hn.1.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpawnAdmissionMode {
+    /// Spawns create the task synchronously under the `RuntimeState` lock
+    /// (the historical path). Default until mailbox bench evidence lands;
+    /// flipping the default is a separate commit for clean bisection.
+    #[default]
+    Direct,
+    /// Spawns enqueue a `SpawnRequest` onto the lock-free spawn mailbox;
+    /// scheduler workers admit at dispatch time under the state lock they
+    /// already hold. Admission failures resolve through the request's
+    /// completion slots (RegionClosed -> cancelled, quota -> SpawnError).
+    Mailbox,
+}
+
 /// Concrete scheduler, blocking-pool, tracing, and policy settings for a runtime.
 #[derive(Clone)]
 pub struct RuntimeConfig {
     /// Number of worker threads (default: available parallelism).
     pub worker_threads: usize,
+    /// Spawn admission mode: synchronous direct path or lock-free mailbox.
+    pub spawn_admission: SpawnAdmissionMode,
     /// Optional explicit worker-to-cohort mapping for locality-aware steals.
     pub worker_cohort_map: Option<WorkerCohortMapping>,
     /// Deterministic scheduler placement mode used with worker cohorts.
@@ -2173,6 +2191,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             worker_threads: Self::default_worker_threads(),
+            spawn_admission: SpawnAdmissionMode::default(),
             worker_cohort_map: None,
             scheduler_placement_mode: SchedulerPlacementMode::default(),
             thread_stack_size: 2 * 1024 * 1024,
@@ -9418,6 +9437,7 @@ mod tests {
     fn zero_minimums_config() -> RuntimeConfig {
         RuntimeConfig {
             worker_threads: 0,
+            spawn_admission: SpawnAdmissionMode::default(),
             worker_cohort_map: None,
             scheduler_placement_mode: SchedulerPlacementMode::default(),
             thread_stack_size: 0,
@@ -9720,6 +9740,7 @@ mod tests {
         init_test("test_normalize_preserves_custom_values");
         let mut config = RuntimeConfig {
             worker_threads: 4,
+            spawn_admission: SpawnAdmissionMode::default(),
             worker_cohort_map: None,
             scheduler_placement_mode: SchedulerPlacementMode::LatencyFirst,
             thread_stack_size: 1024,

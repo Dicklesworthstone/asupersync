@@ -1316,6 +1316,9 @@ pub struct ThreeLaneScheduler {
     worker_cohort_map: Option<Vec<usize>>,
     /// Number of configured worker cohorts used for locality-aware stealing.
     cohort_count: usize,
+    /// Lock-free spawn intake drained by workers at dispatch time
+    /// (br-asupersync-dx-core-api-v2-u1z5hn.1.3). `None` in direct mode.
+    spawn_mailbox: Option<Arc<crate::runtime::spawn_mailbox::SpawnMailbox>>,
 }
 
 /// Discriminator for [`ThreeLaneScheduler::schedule_internal`]
@@ -1557,6 +1560,7 @@ impl ThreeLaneScheduler {
                 task_table: task_table.clone(),
                 parker,
                 coordinator: Arc::clone(&coordinator),
+                spawn_mailbox: None,
                 rng: DetRng::new(id as u64),
                 shutdown: Arc::clone(&shutdown),
                 io_driver: io_driver.clone(),
@@ -1633,6 +1637,7 @@ impl ThreeLaneScheduler {
             workers,
             shutdown,
             coordinator,
+            spawn_mailbox: None,
             timer_driver,
             state: Arc::clone(state),
             task_table,
@@ -2564,6 +2569,26 @@ impl ThreeLaneScheduler {
     }
 
     /// Extract workers to run them in threads.
+    /// Attaches the spawn mailbox to this scheduler and all not-yet-taken
+    /// workers (br-asupersync-dx-core-api-v2-u1z5hn.1.3). Call before
+    /// [`Self::take_workers`].
+    pub fn attach_spawn_mailbox(
+        &mut self,
+        mailbox: Arc<crate::runtime::spawn_mailbox::SpawnMailbox>,
+    ) {
+        for worker in &mut self.workers {
+            worker.spawn_mailbox = Some(Arc::clone(&mailbox));
+        }
+        self.spawn_mailbox = Some(mailbox);
+    }
+
+    /// Wakes one worker after a producer enqueued a spawn request, closing
+    /// the lost-wakeup race against a fully parked fleet (enqueue happens
+    /// outside the scheduler, so park-side rechecks alone cannot see it).
+    pub fn notify_spawn_enqueued(&self) {
+        self.coordinator.wake_one();
+    }
+
     pub fn take_workers(&mut self) -> Vec<ThreeLaneWorker> {
         if let Some(worker) = self.workers.first_mut() {
             worker.preemption_metrics.governor_throttled_spawns = worker
@@ -2675,6 +2700,8 @@ pub struct ThreeLaneWorker {
     pub parker: Parker,
     /// Coordination for waking other workers.
     pub(crate) coordinator: Arc<WorkerCoordinator>,
+    /// Lock-free spawn intake to drain at dispatch time (mailbox mode only).
+    pub(crate) spawn_mailbox: Option<Arc<crate::runtime::spawn_mailbox::SpawnMailbox>>,
     /// Deterministic RNG for stealing decisions.
     pub rng: DetRng,
     /// Shutdown signal.
@@ -4290,6 +4317,10 @@ impl ThreeLaneWorker {
                 if !self.fast_queue.is_empty()
                     || self.global.has_cancel_work()
                     || self.global.has_ready_work()
+                    || self
+                        .spawn_mailbox
+                        .as_ref()
+                        .is_some_and(|mailbox| !mailbox.is_empty())
                 {
                     break;
                 }
@@ -4324,7 +4355,11 @@ impl ThreeLaneWorker {
                             (local.has_runnable_work(now), local.next_deadline())
                         };
                         let local_ready_has_work = !self.local_ready.lock().is_empty();
-                        if local_has_runnable || local_ready_has_work {
+                        let spawn_mailbox_has_work = self
+                            .spawn_mailbox
+                            .as_ref()
+                            .is_some_and(|mailbox| !mailbox.is_empty());
+                        if local_has_runnable || local_ready_has_work || spawn_mailbox_has_work {
                             break;
                         }
                         // Park with timeout based on next timer deadline.
@@ -4581,11 +4616,78 @@ impl ThreeLaneWorker {
     /// lock; only when the fast paths are empty does the lock cost
     /// reappear at Phase 3b.
     #[allow(clippy::too_many_lines)]
+    /// Drains a bounded batch from the spawn mailbox and admits each
+    /// request under the state lock (br-asupersync-dx-core-api-v2-u1z5hn.1.3).
+    ///
+    /// Admission failures resolve *after* the lock is released: completion
+    /// slots are user code and must not run under the runtime lock.
+    /// Admitted tasks are injected into the global ready lane so any worker
+    /// can pick them up.
+    fn drain_spawn_admissions(&mut self) {
+        const SPAWN_ADMISSION_BATCH: usize = 16;
+
+        let Some(mailbox) = self.spawn_mailbox.as_ref() else {
+            return;
+        };
+        if mailbox.is_empty() {
+            return;
+        }
+        let mailbox = Arc::clone(mailbox);
+        let mut requests = Vec::with_capacity(SPAWN_ADMISSION_BATCH);
+        if mailbox.dequeue_batch_into(SPAWN_ADMISSION_BATCH, &mut requests) == 0 {
+            return;
+        }
+
+        let mut admitted: SmallVec<[(TaskId, u8); 16]> = SmallVec::new();
+        let mut denied: SmallVec<
+            [(
+                crate::runtime::spawn_mailbox::SpawnRequestParts,
+                crate::runtime::state::SpawnError,
+            ); 4],
+        > = SmallVec::new();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for request in requests {
+                match state.admit_spawn_request(request.into_parts()) {
+                    crate::runtime::state::SpawnAdmission::Admitted { task_id, priority } => {
+                        admitted.push((task_id, priority));
+                    }
+                    crate::runtime::state::SpawnAdmission::Denied { parts, error } => {
+                        denied.push((parts, error));
+                    }
+                }
+            }
+        }
+
+        for (parts, error) in denied {
+            match error {
+                crate::runtime::state::SpawnError::RegionClosed(_)
+                | crate::runtime::state::SpawnError::RegionNotFound(_) => {
+                    parts.resolve_cancelled(crate::types::CancelReason::new(
+                        crate::types::CancelKind::ParentCancelled,
+                    ));
+                }
+                other => parts.resolve_failed(other),
+            }
+        }
+        for (task_id, priority) in admitted {
+            self.global.inject_ready(task_id, priority);
+        }
+    }
+
     pub fn next_task(&mut self) -> Option<TaskId> {
         // PHASE 0: Process expired timers (fires wakers, which may inject tasks).
         if let Some(timer) = &self.timer_driver {
             let _ = timer.process_timers();
         }
+
+        // PHASE 0.5: Admit pending spawn-mailbox requests
+        // (br-asupersync-dx-core-api-v2-u1z5hn.1.3). One atomic emptiness
+        // check in direct mode / idle mailbox; bounded batch otherwise.
+        self.drain_spawn_admissions();
 
         // Consult the governor for scheduling suggestion (amortised).
         let suggestion = self.governor_suggest();

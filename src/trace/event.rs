@@ -191,6 +191,8 @@ pub enum TraceEventKind {
     ExitDelivered,
     /// A spawn request was enqueued onto the spawn mailbox (pre-admission).
     TaskSpawnEnqueued,
+    /// A mailbox spawn request was admitted into its region (task created).
+    TaskAdmitted,
 }
 
 impl TraceEventKind {
@@ -198,7 +200,7 @@ impl TraceEventKind {
     ///
     /// Keep this list in sync with the enum definition and
     /// `docs/spork_deterministic_ordering.md` taxonomy section.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 43] = [
         Self::Spawn,
         Self::Schedule,
         Self::Yield,
@@ -241,6 +243,7 @@ impl TraceEventKind {
         Self::LinkDropped,
         Self::ExitDelivered,
         Self::TaskSpawnEnqueued,
+        Self::TaskAdmitted,
     ];
 
     /// Stable, grep-friendly taxonomy name.
@@ -289,6 +292,7 @@ impl TraceEventKind {
             Self::LinkDropped => "link_dropped",
             Self::ExitDelivered => "exit_delivered",
             Self::TaskSpawnEnqueued => "task_spawn_enqueued",
+            Self::TaskAdmitted => "task_admitted",
         }
     }
 
@@ -302,7 +306,8 @@ impl TraceEventKind {
             | Self::Wake
             | Self::Poll
             | Self::Complete
-            | Self::TaskSpawnEnqueued => "task, region",
+            | Self::TaskSpawnEnqueued
+            | Self::TaskAdmitted => "task, region",
             Self::CancelRequest | Self::CancelAck => "task, region, reason",
             Self::WorkerCancelRequested
             | Self::WorkerCancelAcknowledged
@@ -357,7 +362,8 @@ pub const fn browser_trace_category_for_kind(kind: TraceEventKind) -> BrowserTra
         | TraceEventKind::Complete
         | TraceEventKind::Checkpoint
         | TraceEventKind::FuturelockDetected
-        | TraceEventKind::TaskSpawnEnqueued => BrowserTraceCategory::Scheduler,
+        | TraceEventKind::TaskSpawnEnqueued
+        | TraceEventKind::TaskAdmitted => BrowserTraceCategory::Scheduler,
         TraceEventKind::TimeAdvance
         | TraceEventKind::TimerScheduled
         | TraceEventKind::TimerFired
@@ -1708,6 +1714,10 @@ impl TraceEvent {
         /// Creates a task-spawn-enqueued event (spawn-mailbox intake, pre-admission).
         task_spawn_enqueued(task: TaskId, region: RegionId) => TaskSpawnEnqueued,
             TraceData::Task { task, region };
+        /// Creates a task-admitted event (spawn-mailbox admission; task carries the
+        /// canonical arena id, pairing with the enqueue event by per-region FIFO order).
+        task_admitted(task: TaskId, region: RegionId) => TaskAdmitted,
+            TraceData::Task { task, region };
         /// Creates a cancel request event.
         cancel_request(task: TaskId, region: RegionId, reason: CancelReason) => CancelRequest,
             TraceData::Cancel { task, region, reason };
@@ -2160,7 +2170,7 @@ mod tests {
 
     #[test]
     fn all_array_has_42_kinds() {
-        assert_eq!(TraceEventKind::ALL.len(), 42);
+        assert_eq!(TraceEventKind::ALL.len(), 43);
     }
 
     #[test]

@@ -378,6 +378,30 @@ impl LoserDrainHistoryRecorder {
     }
 }
 
+/// Outcome of [`RuntimeState::admit_spawn_request`].
+///
+/// Not `Debug`: the denied arm carries the request parts, whose erased
+/// future and completion slots are opaque.
+pub enum SpawnAdmission {
+    /// The request was admitted; the caller must schedule the task
+    /// (`inject_ready(task_id, priority)`) after releasing the state lock.
+    Admitted {
+        /// Canonical arena task id (replaces the provisional mailbox id).
+        task_id: TaskId,
+        /// Scheduling priority from the request budget.
+        priority: u8,
+    },
+    /// The request was denied; the caller must resolve it after releasing
+    /// the state lock (`resolve_cancelled` for `RegionClosed`/`RegionNotFound`,
+    /// `resolve_failed` otherwise).
+    Denied {
+        /// The unresolved request parts (slots + credit intact).
+        parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
+        /// Why admission refused.
+        error: SpawnError,
+    },
+}
+
 /// Errors that can occur when spawning a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnError {
@@ -2136,6 +2160,156 @@ impl RuntimeState {
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
 
         Ok((task_id, handle))
+    }
+
+    /// Admits one spawn-mailbox request into the runtime
+    /// (br-asupersync-dx-core-api-v2-u1z5hn.1.3).
+    ///
+    /// Runs under the state lock the scheduler already holds at its
+    /// admission point. Mirrors [`Self::create_task_infrastructure`] —
+    /// task-record allocation, cancel-protocol registration, region
+    /// admission, capability-context linkage, spawn trace — but the future
+    /// arrives pre-erased (the producer owns the completion slot), so no
+    /// oneshot channel or [`crate::runtime::TaskHandle`] is built.
+    ///
+    /// The request's provisional task id (spawn-mailbox namespace) is
+    /// replaced by the canonical arena id; `StoredTask::set_task_id` records
+    /// the mapping for poll tracing, and the `TaskAdmitted` trace event
+    /// carries the arena id (pairing with `TaskSpawnEnqueued` by per-region
+    /// FIFO order). The pending-spawn credit is released only after the task
+    /// is in the region's task list and its future stored
+    /// (decrement-after-successor-visibility).
+    ///
+    /// On denial the request travels back to the caller, who must resolve it
+    /// (`resolve_cancelled` / `resolve_failed`) **after** releasing the state
+    /// lock — completion slots are user code and must not run under the
+    /// runtime lock.
+    pub fn admit_spawn_request(
+        &mut self,
+        parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
+    ) -> SpawnAdmission {
+        let region = parts.region;
+        let budget = parts.budget;
+
+        // Region liveness first: missing or non-Open regions deny without
+        // touching the task table.
+        let Some(region_record) = self.regions.get(region.arena_index()) else {
+            return SpawnAdmission::Denied {
+                parts,
+                error: SpawnError::RegionNotFound(region),
+            };
+        };
+        if !region_record.state().can_accept_work() {
+            return SpawnAdmission::Denied {
+                parts,
+                error: SpawnError::RegionClosed(region),
+            };
+        }
+
+        let now = self.current_runtime_time();
+        let idx = self.insert_pooled_task_with(|idx, record| {
+            record.id = TaskId::from_arena(idx);
+            record.owner = region;
+            record.created_at = now;
+            record.deadline = budget.deadline;
+            record.polls_remaining = budget.poll_quota;
+            #[cfg(feature = "tracing-integration")]
+            {
+                record.created_instant = crate::time::wall_now();
+            }
+        });
+        let task_id = TaskId::from_arena(idx);
+
+        {
+            let mut validator = self.cancel_protocol_validator.lock();
+            validator.register_task(task_id, region);
+        }
+        let context = TaskContext {
+            task_id,
+            region_id: region,
+            spawned_at: now,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result =
+            self.validate_task_protocol_transition(task_id, TaskEvent::Start, &context);
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation("mailbox spawn admission", &validation_result);
+        }
+
+        // Region admission (quota + closed re-check under the region lock).
+        let admission = self
+            .regions
+            .get(region.arena_index())
+            .expect("region checked above")
+            .add_task(task_id);
+        if let Err(err) = admission {
+            self.recycle_task(task_id);
+            let error = match err {
+                AdmissionError::Closed => SpawnError::RegionClosed(region),
+                AdmissionError::LimitReached { limit, live, .. } => SpawnError::RegionAtCapacity {
+                    region,
+                    limit,
+                    live,
+                },
+            };
+            return SpawnAdmission::Denied { parts, error };
+        }
+
+        // Capability context, linked exactly as create_task_infrastructure
+        // does, so cancellation and observability behave identically.
+        let entropy = self.entropy_source.fork(task_id);
+        let observability = self
+            .observability
+            .as_ref()
+            .map(|obs| obs.for_task(region, task_id));
+        let logical_clock = self
+            .logical_clock_mode
+            .build_handle(self.timer_driver_handle());
+        let cx = crate::cx::Cx::new_with_drivers(
+            region,
+            task_id,
+            budget,
+            observability,
+            self.io_driver_handle(),
+            None,
+            self.timer_driver_handle(),
+            Some(entropy),
+        )
+        .with_blocking_pool_handle(self.blocking_pool_handle())
+        .with_logical_clock(logical_clock);
+        cx.set_trace_buffer(self.trace_handle());
+        cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+        self.update_task(task_id, |record| {
+            record.set_cx_inner(cx.inner.clone());
+            record.set_cx(cx.clone());
+        });
+
+        // Store the producer-wrapped future under the canonical arena id.
+        let crate::runtime::spawn_mailbox::SpawnRequestParts {
+            mut task,
+            pending_reservation,
+            ..
+        } = parts;
+        task.set_task_id(task_id);
+        self.tasks.store_spawned_task(task_id, task);
+
+        self.record_task_spawn(task_id, region);
+        self.record_task_trace_event(task_id, |seq| {
+            TraceEvent::task_admitted(seq, now, task_id, region)
+        });
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+
+        // Successor state (task list + stored future) is visible; release
+        // the pending-spawn credit last.
+        drop(pending_reservation);
+
+        SpawnAdmission::Admitted {
+            task_id,
+            priority: budget.priority,
+        }
     }
 
     /// Creates a task with authorization checks.
@@ -5331,6 +5505,8 @@ pub enum EventKindSnapshot {
     ExitDelivered,
     /// A spawn request was enqueued onto the spawn mailbox (pre-admission).
     TaskSpawnEnqueued,
+    /// A mailbox spawn request was admitted into its region (task created).
+    TaskAdmitted,
 }
 
 impl From<TraceEventKind> for EventKindSnapshot {
@@ -5378,6 +5554,7 @@ impl From<TraceEventKind> for EventKindSnapshot {
             TraceEventKind::LinkDropped => Self::LinkDropped,
             TraceEventKind::ExitDelivered => Self::ExitDelivered,
             TraceEventKind::TaskSpawnEnqueued => Self::TaskSpawnEnqueued,
+            TraceEventKind::TaskAdmitted => Self::TaskAdmitted,
         }
     }
 }

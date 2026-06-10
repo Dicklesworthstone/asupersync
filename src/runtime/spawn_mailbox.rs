@@ -54,6 +54,7 @@
 //! same request (a consumer can only observe the request after the push).
 
 use crate::runtime::scheduler::global_queue::GlobalFifoQueue;
+use crate::runtime::state::SpawnError;
 use crate::runtime::stored_task::StoredTask;
 use crate::trace::TraceBufferHandle;
 use crate::trace::event::TraceEvent;
@@ -170,6 +171,15 @@ impl fmt::Debug for SpawnIdAllocator {
 /// `Outcome::Cancelled(reason)`; it is invoked at most once.
 pub type UnadmittedCancelFn = Box<dyn FnOnce(CancelReason) + Send>;
 
+/// Completion slot invoked when admission rejects a spawn request with a
+/// non-cancellation error (for example, the region is at capacity).
+///
+/// The slot must resolve the caller-visible join handle with
+/// `Err(SpawnError)`; it is invoked at most once. Slots run after the
+/// admission path releases the `RuntimeState` lock and must not re-enter
+/// the runtime state.
+pub type AdmissionErrorFn = Box<dyn FnOnce(SpawnError) + Send>;
+
 /// A spawn request travelling through the [`SpawnMailbox`].
 ///
 /// Carries everything admission needs to create the task record under the
@@ -186,6 +196,7 @@ pub struct SpawnRequest {
     name: Option<Arc<str>>,
     task: StoredTask,
     on_unadmitted_cancel: Option<UnadmittedCancelFn>,
+    on_admission_error: Option<AdmissionErrorFn>,
     pending_reservation: Option<PendingSpawnReservation>,
 }
 
@@ -203,6 +214,9 @@ pub struct SpawnRequestParts {
     pub task: StoredTask,
     /// Completion slot for cancel-before-admission.
     pub on_unadmitted_cancel: Option<UnadmittedCancelFn>,
+    /// Completion slot for non-cancellation admission failures
+    /// (quota/capacity); falls back to the cancel slot when absent.
+    pub on_admission_error: Option<AdmissionErrorFn>,
     /// Pending-spawn credit on the owning region. Admission must drop this
     /// only *after* the task is in the region's task list
     /// (decrement-after-successor-visibility; see [`PendingSpawnCounter`]).
@@ -223,6 +237,7 @@ impl SpawnRequest {
             name: None,
             task,
             on_unadmitted_cancel: None,
+            on_admission_error: None,
             pending_reservation: None,
         }
     }
@@ -238,6 +253,19 @@ impl SpawnRequest {
     #[must_use]
     pub fn with_unadmitted_cancel(mut self, slot: UnadmittedCancelFn) -> Self {
         self.on_unadmitted_cancel = Some(slot);
+        self
+    }
+
+    /// Attaches the admission-error completion slot
+    /// (br-asupersync-dx-core-api-v2-u1z5hn.1.3).
+    ///
+    /// Fired when admission rejects the request with a non-cancellation
+    /// error (for example `SpawnError::RegionAtCapacity`). When absent, the
+    /// cancel slot receives a cancellation describing the failure instead,
+    /// so the caller-visible handle always resolves.
+    #[must_use]
+    pub fn with_admission_error_slot(mut self, slot: AdmissionErrorFn) -> Self {
+        self.on_admission_error = Some(slot);
         self
     }
 
@@ -294,6 +322,7 @@ impl SpawnRequest {
             name: self.name,
             task: self.task,
             on_unadmitted_cancel: self.on_unadmitted_cancel,
+            on_admission_error: self.on_admission_error,
             pending_reservation: self.pending_reservation,
         }
     }
@@ -309,15 +338,49 @@ impl SpawnRequest {
     /// region-close racing enqueue: the public semantics are identical to
     /// spawning into a closing region today, just observed later.
     pub fn resolve_cancelled(self, reason: CancelReason) {
-        let SpawnRequestParts {
+        self.into_parts().resolve_cancelled(reason);
+    }
+}
+
+impl SpawnRequestParts {
+    /// Resolves a destructured request that will never be admitted.
+    ///
+    /// Same contract as [`SpawnRequest::resolve_cancelled`]: future dropped
+    /// unpolled, cancel slot fired at most once, pending-spawn credit
+    /// released last.
+    pub fn resolve_cancelled(self, reason: CancelReason) {
+        let Self {
             task,
             on_unadmitted_cancel,
             pending_reservation,
             ..
-        } = self.into_parts();
+        } = self;
         drop(task);
         if let Some(slot) = on_unadmitted_cancel {
             slot(reason);
+        }
+        drop(pending_reservation);
+    }
+
+    /// Resolves a destructured request rejected by admission with `error`.
+    ///
+    /// Future dropped unpolled; the admission-error slot fires with the
+    /// error, falling back to the cancel slot (with a descriptive reason)
+    /// when no error slot was attached so the caller-visible handle always
+    /// resolves; the pending-spawn credit is released last.
+    pub fn resolve_failed(self, error: SpawnError) {
+        let Self {
+            task,
+            on_unadmitted_cancel,
+            on_admission_error,
+            pending_reservation,
+            ..
+        } = self;
+        drop(task);
+        if let Some(slot) = on_admission_error {
+            slot(error);
+        } else if let Some(slot) = on_unadmitted_cancel {
+            slot(CancelReason::user("spawn admission failed"));
         }
         drop(pending_reservation);
     }
@@ -1027,5 +1090,255 @@ mod tests {
         assert_eq!(handle.underflow_count(), 0);
         assert!(mailbox.is_empty());
         assert!(state.is_quiescent());
+    }
+
+    // === br-asupersync-dx-core-api-v2-u1z5hn.1.3: admission ===
+
+    use crate::record::region::RegionLimits;
+    use crate::runtime::state::{SpawnAdmission, SpawnError};
+    use crate::trace::event::TraceEventKind as Kind;
+
+    /// Successful admission: provisional id replaced by a canonical arena
+    /// id, task joins the region's task list, future stored, credit
+    /// released, Spawn + TaskAdmitted trace events emitted in order after
+    /// the enqueue event.
+    #[test]
+    fn admit_spawn_request_success_end_to_end() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let handle = state
+            .region(root)
+            .expect("root region exists")
+            .pending_spawn_handle();
+
+        let mailbox = SpawnMailbox::with_trace(state.trace_handle());
+        let provisional = mailbox.allocate_task_id();
+        let req = SpawnRequest::new(provisional, root, Budget::new(), noop_task(provisional))
+            .with_pending_reservation(handle.reserve());
+        mailbox.enqueue(req, Time::ZERO);
+
+        let parts = mailbox.dequeue().expect("queued").into_parts();
+        let admission = state.admit_spawn_request(parts);
+        let SpawnAdmission::Admitted { task_id, priority } = admission else {
+            panic!("expected admission to succeed");
+        };
+        assert!(
+            !is_spawn_mailbox_id(task_id),
+            "admitted id must be a canonical arena id, got {task_id:?}"
+        );
+        assert_eq!(priority, Budget::new().priority);
+        assert_eq!(handle.count(), 0, "credit released after admission");
+        assert_eq!(
+            state.region(root).expect("root exists").task_count(),
+            1,
+            "task joined the region"
+        );
+        assert!(
+            state.get_stored_future(task_id).is_some(),
+            "future stored under the arena id"
+        );
+
+        let kinds: Vec<Kind> = state
+            .trace_handle()
+            .snapshot()
+            .iter()
+            .map(|e| e.kind)
+            .filter(|k| {
+                matches!(
+                    k,
+                    Kind::TaskSpawnEnqueued | Kind::Spawn | Kind::TaskAdmitted
+                )
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![Kind::TaskSpawnEnqueued, Kind::Spawn, Kind::TaskAdmitted],
+            "admission trace ordering"
+        );
+    }
+
+    /// RegionClosed denial: admission returns the parts; resolving them
+    /// cancelled fires the cancel slot and balances the credit.
+    #[test]
+    fn admit_spawn_request_region_closed_resolves_cancelled() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let region = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let handle = state
+            .region(region)
+            .expect("region exists")
+            .pending_spawn_handle();
+
+        let mailbox = SpawnMailbox::new();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_slot = Arc::clone(&cancelled);
+        let id = mailbox.allocate_task_id();
+        let req = SpawnRequest::new(id, region, Budget::new(), noop_task(id))
+            .with_pending_reservation(handle.reserve())
+            .with_unadmitted_cancel(Box::new(move |_| {
+                cancelled_slot.fetch_add(1, Ordering::SeqCst);
+            }));
+        mailbox.enqueue(req, Time::ZERO);
+
+        // Close begins; the region can no longer accept work.
+        state
+            .region(region)
+            .expect("region exists")
+            .begin_close(None);
+
+        let parts = mailbox.dequeue().expect("queued").into_parts();
+        let SpawnAdmission::Denied { parts, error } = state.admit_spawn_request(parts) else {
+            panic!("expected denial for closing region");
+        };
+        assert!(matches!(error, SpawnError::RegionClosed(r) if r == region));
+        // Caller resolves after releasing the (conceptual) lock.
+        parts.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.count(), 0);
+        // The denied task never entered the region.
+        assert_eq!(state.region(region).expect("region exists").task_count(), 0);
+    }
+
+    /// Quota denial: region at capacity routes through resolve_failed and
+    /// the admission-error slot receives SpawnError::RegionAtCapacity.
+    #[test]
+    fn admit_spawn_request_quota_resolves_failed() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let region = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        state
+            .region(region)
+            .expect("region exists")
+            .set_limits(RegionLimits {
+                max_tasks: Some(0),
+                ..RegionLimits::UNLIMITED
+            });
+        let handle = state
+            .region(region)
+            .expect("region exists")
+            .pending_spawn_handle();
+
+        let mailbox = SpawnMailbox::new();
+        let failed: Arc<Mutex<Option<SpawnError>>> = Arc::new(Mutex::new(None));
+        let failed_slot = Arc::clone(&failed);
+        let id = mailbox.allocate_task_id();
+        let req = SpawnRequest::new(id, region, Budget::new(), noop_task(id))
+            .with_pending_reservation(handle.reserve())
+            .with_admission_error_slot(Box::new(move |err| {
+                *failed_slot.lock().unwrap() = Some(err);
+            }));
+        mailbox.enqueue(req, Time::ZERO);
+
+        let parts = mailbox.dequeue().expect("queued").into_parts();
+        let SpawnAdmission::Denied { parts, error } = state.admit_spawn_request(parts) else {
+            panic!("expected quota denial");
+        };
+        assert!(matches!(error, SpawnError::RegionAtCapacity { .. }));
+        parts.resolve_failed(error);
+        let seen = failed.lock().unwrap();
+        assert!(
+            matches!(
+                seen.as_ref(),
+                Some(SpawnError::RegionAtCapacity { limit: 0, .. })
+            ),
+            "error slot received the capacity error, got {seen:?}"
+        );
+        assert_eq!(handle.count(), 0);
+    }
+
+    /// Parent AC 2(b): admission order is mailbox FIFO and replay-stable —
+    /// two identical runs produce identical trace fingerprints (event kind
+    /// sequence + task/region ids) and identical arena id assignment.
+    #[test]
+    fn admission_order_deterministic_across_identical_runs() {
+        fn run_once() -> Vec<(Kind, u64, u64)> {
+            const K: usize = 8;
+            let mut state = RuntimeState::new();
+            let root = state.create_root_region(Budget::INFINITE);
+            let handle = state
+                .region(root)
+                .expect("root exists")
+                .pending_spawn_handle();
+            let mailbox = SpawnMailbox::with_trace(state.trace_handle());
+            for _ in 0..K {
+                let id = mailbox.allocate_task_id();
+                let req = SpawnRequest::new(id, root, Budget::new(), noop_task(id))
+                    .with_pending_reservation(handle.reserve());
+                mailbox.enqueue(req, Time::ZERO);
+            }
+            // Drain in batches to exercise the batch path too.
+            let mut batch = Vec::new();
+            while mailbox.dequeue_batch_into(3, &mut batch) > 0 {}
+            for req in batch {
+                match state.admit_spawn_request(req.into_parts()) {
+                    SpawnAdmission::Admitted { .. } => {}
+                    SpawnAdmission::Denied { .. } => panic!("unexpected denial"),
+                }
+            }
+            state
+                .trace_handle()
+                .snapshot()
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        Kind::TaskSpawnEnqueued | Kind::Spawn | Kind::TaskAdmitted
+                    )
+                })
+                .map(|e| {
+                    let (task, region) = match &e.data {
+                        crate::trace::event::TraceData::Task { task, region } => {
+                            (task.as_u64(), region.as_u64())
+                        }
+                        other => panic!("unexpected trace data {other:?}"),
+                    };
+                    (e.kind, task, region)
+                })
+                .collect()
+        }
+
+        let first = run_once();
+        let second = run_once();
+        assert_eq!(
+            first.len(),
+            8 * 3,
+            "K enqueue + K spawn + K admitted events"
+        );
+        assert_eq!(first, second, "replay fingerprint must be identical");
+    }
+
+    /// End-to-end: a real multi-worker runtime in mailbox admission mode
+    /// spawns futures through the lock-free intake, workers admit them at
+    /// dispatch time, and every join handle resolves with the task's value.
+    /// Also exercises the parked-fleet wakeup (notify_spawn_enqueued) since
+    /// workers may be idle when the producer enqueues.
+    #[test]
+    fn mailbox_mode_runtime_spawns_and_joins_end_to_end() {
+        const TASKS: usize = 50;
+        let runtime = crate::runtime::builder::RuntimeBuilder::new()
+            .worker_threads(2)
+            .spawn_admission(crate::runtime::config::SpawnAdmissionMode::Mailbox)
+            .build()
+            .expect("build mailbox-mode runtime");
+        let handle = runtime.handle();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut joins = Vec::new();
+        for i in 0..TASKS {
+            let counter = Arc::clone(&counter);
+            joins.push(handle.spawn(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                i
+            }));
+        }
+        for (i, join) in joins.into_iter().enumerate() {
+            let value = runtime.block_on(join);
+            assert_eq!(value, i, "join handle resolves with the task value");
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), TASKS);
     }
 }
