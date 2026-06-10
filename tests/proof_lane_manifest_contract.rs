@@ -65,6 +65,7 @@ fn manifest_projection(manifest: &Value) -> Value {
         "bead_id": manifest["bead_id"].clone(),
         "command_policy": manifest["command_policy"].clone(),
         "resource_envelope_policy": manifest["resource_envelope_policy"].clone(),
+        "validation_frontier_v2_policy": manifest["validation_frontier_v2_policy"].clone(),
         "source_of_truth": manifest["source_of_truth"].clone(),
         "documentation_contract": manifest["documentation_contract"].clone(),
         "required_guarantee_ids": manifest["required_guarantee_ids"].clone(),
@@ -79,6 +80,7 @@ struct ManifestProjectionText {
     bead_id: Value,
     command_policy: CommandPolicyProjectionText,
     resource_envelope_policy: ResourceEnvelopePolicyProjectionText,
+    validation_frontier_v2_policy: Value,
     source_of_truth: SourceOfTruthProjectionText,
     documentation_contract: DocumentationContractProjectionText,
     required_guarantee_ids: Value,
@@ -191,6 +193,7 @@ fn manifest_projection_text(manifest: &Value) -> ManifestProjectionText {
                 })
                 .collect(),
         },
+        validation_frontier_v2_policy: manifest["validation_frontier_v2_policy"].clone(),
         source_of_truth: SourceOfTruthProjectionText {
             manifest: source_of_truth["manifest"].clone(),
             contract_test: source_of_truth["contract_test"].clone(),
@@ -606,6 +609,168 @@ fn validate_lane_proof_reuse_policy(lane: &Value, manifest: &Value) -> Result<()
     Ok(())
 }
 
+fn validation_frontier_policy(manifest: &Value) -> Result<&Value, String> {
+    let policy = manifest
+        .get("validation_frontier_v2_policy")
+        .ok_or_else(|| "manifest missing validation_frontier_v2_policy".to_string())?;
+
+    if required_string(policy, "policy_id")? != "validation-frontier-v2-lane-semantics" {
+        return Err("validation frontier policy id drifted".to_string());
+    }
+    if required_string(policy, "schema_version")? != "validation-frontier-v2" {
+        return Err("validation frontier schema version drifted".to_string());
+    }
+
+    let stale = policy
+        .get("default_stale_progress_policy")
+        .ok_or_else(|| "validation frontier policy missing stale policy".to_string())?;
+    if required_string(stale, "policy_id")? != "rch-stale-progress-fail-closed-v1" {
+        return Err("stale progress policy id drifted".to_string());
+    }
+    for required_true in [
+        "wait_for_fresh_heartbeat",
+        "never_cancel_peer_owned_builds",
+        "receipt_required_before_retry",
+    ] {
+        if !required_bool(stale, required_true)? {
+            return Err(format!("stale progress policy must set {required_true}"));
+        }
+    }
+    if required_bool(stale, "code_evidence_claimable")? {
+        return Err("stale progress policy must not make code evidence claimable".to_string());
+    }
+    required_string(stale, "retry_policy")?;
+
+    Ok(policy)
+}
+
+fn lane_validation_semantics(lane: &Value, manifest: &Value) -> Result<Value, String> {
+    let policy = validation_frontier_policy(manifest)?;
+    let lane_id = required_string(lane, "lane_id")?;
+    let lane_kind = required_string(lane, "kind")?;
+
+    if let Some(override_row) = policy
+        .get("lane_overrides")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row.get("lane_id").and_then(Value::as_str) == Some(lane_id))
+        })
+    {
+        return Ok(override_row.clone());
+    }
+
+    let mut matched = Vec::new();
+    for class in policy
+        .get("lane_classes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "validation frontier lane_classes must be an array".to_string())?
+    {
+        let class_kinds = string_set_result(class, "lane_kinds")?;
+        if class_kinds.contains(lane_kind) {
+            matched.push(class.clone());
+        }
+    }
+
+    match matched.len() {
+        1 => Ok(matched.remove(0)),
+        0 => Err(format!(
+            "{lane_id}: lane kind {lane_kind} has no validation frontier class"
+        )),
+        _ => Err(format!(
+            "{lane_id}: lane kind {lane_kind} maps to multiple validation frontier classes"
+        )),
+    }
+}
+
+fn validate_lane_validation_frontier_v2(lane: &Value, manifest: &Value) -> Result<(), String> {
+    let lane_id = required_string(lane, "lane_id")?;
+    let semantics = lane_validation_semantics(lane, manifest)?;
+    let lane_class = required_string(&semantics, "lane_class")?;
+    let roots = string_set_result(&semantics, "expected_graph_roots")?;
+    let _heavy_edges = string_set_result(&semantics, "expected_heavy_edges")?;
+    let no_claims = string_set_result(&semantics, "no_claim_boundaries")?;
+    let max_expected_crates = required_u64(&semantics, "max_expected_crates")?;
+
+    if roots.is_empty() {
+        return Err(format!("{lane_id}: expected_graph_roots must be nonempty"));
+    }
+    if no_claims.is_empty() {
+        return Err(format!("{lane_id}: no_claim_boundaries must be nonempty"));
+    }
+    if max_expected_crates == 0 {
+        return Err(format!("{lane_id}: max_expected_crates must be positive"));
+    }
+
+    match lane_class {
+        "dependency_graph" | "compile_only" | "broad_frontier" | "run_exact" | "run_filtered"
+        | "conformance" | "rustdoc" | "fuzz_smoke" | "formal" | "artifact_contract" => {}
+        other => {
+            return Err(format!("{lane_id}: unknown lane_class {other}"));
+        }
+    }
+
+    if lane_class == "compile_only" {
+        for forbidden_claim in ["test-execution", "runtime-behavior", "release-readiness"] {
+            if !no_claims.contains(forbidden_claim) {
+                return Err(format!(
+                    "{lane_id}: compile_only lane must not claim {forbidden_claim}"
+                ));
+            }
+        }
+    }
+
+    if lane_class == "conformance" {
+        let guard = required_object(
+            validation_frontier_policy(manifest)?,
+            "conformance_masquerade_guard",
+        )?;
+        let required_root = guard
+            .get("required_expected_graph_root")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "conformance guard missing required root".to_string())?;
+        let required_boundary = guard
+            .get("required_no_claim_boundary")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "conformance guard missing required boundary".to_string())?;
+        if !roots.contains(required_root) {
+            return Err(format!(
+                "{lane_id}: conformance lane must declare expected graph root {required_root}"
+            ));
+        }
+        if !no_claims.contains(required_boundary) {
+            return Err(format!(
+                "{lane_id}: conformance lane must not claim {required_boundary}"
+            ));
+        }
+    }
+
+    if lane_id == "channel-mpsc-select-e2e-public-run" {
+        if lane_class != "run_exact" {
+            return Err("channel focused lane must remain run_exact".to_string());
+        }
+        if roots.contains("conformance") {
+            return Err("channel focused lane must not include conformance graph root".to_string());
+        }
+        for boundary in [
+            "broad-lib-test-frontier",
+            "conformance-crate",
+            "release-readiness",
+        ] {
+            if !no_claims.contains(boundary) {
+                return Err(format!(
+                    "channel focused lane missing no-claim boundary {boundary}"
+                ));
+            }
+        }
+        if max_expected_crates > 200 {
+            return Err("channel focused lane graph budget is too broad".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_durable_receipt_candidate_policy(manifest: &Value) -> Result<(), String> {
     let proof_reuse_policy = manifest
         .get("proof_reuse_policy")
@@ -912,6 +1077,94 @@ fn every_lane_has_rch_command_scope_limits_and_live_paths() {
             );
         }
     }
+}
+
+#[test]
+fn every_lane_has_validation_frontier_v2_semantics() {
+    let manifest = manifest();
+    validation_frontier_policy(&manifest).unwrap_or_else(|error| panic!("{error}"));
+
+    let lanes = array(&manifest, "lanes");
+    for lane in lanes {
+        validate_lane_validation_frontier_v2(lane, &manifest)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    let channel = lane_by_id(lanes, "channel-mpsc-select-e2e-public-run");
+    let channel_semantics =
+        lane_validation_semantics(channel, &manifest).expect("channel lane semantics");
+    assert_eq!(
+        channel_semantics["lane_class"].as_str(),
+        Some("run_exact"),
+        "channel focused public runner must remain an exact execution lane"
+    );
+    assert!(
+        string_set_result(&channel_semantics, "no_claim_boundaries")
+            .expect("channel no-claim boundaries")
+            .contains("conformance-crate"),
+        "channel focused public runner must explicitly not claim conformance coverage"
+    );
+}
+
+#[test]
+fn validation_frontier_v2_overclaims_are_rejected() {
+    let manifest = manifest();
+    let lanes = array(&manifest, "lanes");
+
+    let mut compile_overclaim = manifest.clone();
+    let compile_class = compile_overclaim["validation_frontier_v2_policy"]["lane_classes"]
+        .as_array_mut()
+        .expect("lane classes")
+        .iter_mut()
+        .find(|class| class["lane_class"].as_str() == Some("compile_only"))
+        .expect("compile_only class");
+    compile_class["no_claim_boundaries"]
+        .as_array_mut()
+        .expect("compile no-claim boundaries")
+        .retain(|boundary| boundary.as_str() != Some("test-execution"));
+    let error = validate_lane_validation_frontier_v2(
+        lane_by_id(lanes, "all-targets-check"),
+        &compile_overclaim,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("test-execution"),
+        "compile-only overclaim should reject missing test-execution boundary: {error}"
+    );
+
+    let mut conformance_masquerade = manifest.clone();
+    let channel_override =
+        conformance_masquerade["validation_frontier_v2_policy"]["lane_overrides"]
+            .as_array_mut()
+            .expect("lane overrides")
+            .iter_mut()
+            .find(|override_row| {
+                override_row["lane_id"].as_str() == Some("channel-mpsc-select-e2e-public-run")
+            })
+            .expect("channel override");
+    channel_override["lane_class"] = json!("conformance");
+    let error = validate_lane_validation_frontier_v2(
+        lane_by_id(lanes, "channel-mpsc-select-e2e-public-run"),
+        &conformance_masquerade,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("conformance") || error.contains("focused-feature-proof"),
+        "conformance masquerade should be rejected: {error}"
+    );
+
+    let mut stale_policy_overclaim = manifest.clone();
+    stale_policy_overclaim["validation_frontier_v2_policy"]["default_stale_progress_policy"]["never_cancel_peer_owned_builds"] =
+        json!(false);
+    let error = validate_lane_validation_frontier_v2(
+        lane_by_id(lanes, "proof-lane-manifest-contract"),
+        &stale_policy_overclaim,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("never_cancel_peer_owned_builds"),
+        "stale policy must fail closed on peer-cancel ambiguity: {error}"
+    );
 }
 
 #[test]

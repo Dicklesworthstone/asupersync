@@ -219,6 +219,184 @@
       "workspace-health"
     ]
   },
+  "validation_frontier_v2_policy": {
+    "policy_id": "validation-frontier-v2-lane-semantics",
+    "schema_version": "validation-frontier-v2",
+    "description": "Machine-readable lane semantics for interpreting proof evidence without overclaiming compile-only, broad-frontier, conformance, or stale-progress outcomes.",
+    "default_stale_progress_policy": {
+      "policy_id": "rch-stale-progress-fail-closed-v1",
+      "wait_for_fresh_heartbeat": true,
+      "never_cancel_peer_owned_builds": true,
+      "receipt_required_before_retry": true,
+      "code_evidence_claimable": false,
+      "retry_policy": "retry only after a deterministic stale receipt or a real compiler/runtime diagnostic"
+    },
+    "lane_classes": [
+      {
+        "lane_class": "dependency_graph",
+        "lane_kinds": [
+          "dependency_graph",
+          "dependency_audit"
+        ],
+        "expected_graph_roots": [
+          "Cargo.toml"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 256,
+        "no_claim_boundaries": [
+          "test-execution",
+          "runtime-behavior",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_class": "compile_only",
+        "lane_kinds": [
+          "compile_frontier",
+          "lint_frontier",
+          "format_frontier"
+        ],
+        "expected_graph_roots": [
+          "Cargo.toml",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "workspace feature graph"
+        ],
+        "max_expected_crates": 700,
+        "no_claim_boundaries": [
+          "test-execution",
+          "runtime-behavior",
+          "conformance",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_class": "broad_frontier",
+        "lane_kinds": [
+          "test_frontier"
+        ],
+        "expected_graph_roots": [
+          "Cargo.toml",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "test-internals",
+          "integration test harnesses"
+        ],
+        "max_expected_crates": 900,
+        "no_claim_boundaries": [
+          "focused-change-proof",
+          "release-readiness-without-clean-tree",
+          "fresh-rch-pass-without-rerun"
+        ]
+      },
+      {
+        "lane_class": "rustdoc",
+        "lane_kinds": [
+          "documentation_frontier"
+        ],
+        "expected_graph_roots": [
+          "README.md",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "rustdoc doctest graph"
+        ],
+        "max_expected_crates": 700,
+        "no_claim_boundaries": [
+          "test-execution",
+          "runtime-behavior",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_class": "formal",
+        "lane_kinds": [
+          "formal_frontier"
+        ],
+        "expected_graph_roots": [
+          "formal/lean"
+        ],
+        "expected_heavy_edges": [
+          "Lean proof graph"
+        ],
+        "max_expected_crates": 1,
+        "no_claim_boundaries": [
+          "cargo-compile",
+          "runtime-behavior",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_class": "artifact_contract",
+        "lane_kinds": [
+          "artifact_contract"
+        ],
+        "expected_graph_roots": [
+          "artifacts",
+          "tests"
+        ],
+        "expected_heavy_edges": [
+          "focused verifier test graph"
+        ],
+        "max_expected_crates": 700,
+        "no_claim_boundaries": [
+          "broad-workspace-health",
+          "runtime-behavior",
+          "release-readiness"
+        ]
+      }
+    ],
+    "lane_overrides": [
+      {
+        "lane_id": "channel-mpsc-select-e2e-public-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "Cargo.toml",
+          "src/bin/channel_mpsc_select_e2e.rs",
+          "examples/channel_mpsc_select_e2e.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 160,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "examples-benches-fuzz",
+          "performance",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_id": "fuzz-manifest-smoke",
+        "lane_class": "fuzz_smoke",
+        "expected_graph_roots": [
+          "fuzz/Cargo.toml",
+          "fuzz/fuzz_targets"
+        ],
+        "expected_heavy_edges": [
+          "fuzz-only OTLP generated-message graph"
+        ],
+        "max_expected_crates": 900,
+        "no_claim_boundaries": [
+          "production-consumer-proof",
+          "default-production-graph",
+          "metrics-production-graph",
+          "release-readiness"
+        ]
+      }
+    ],
+    "conformance_masquerade_guard": {
+      "conformance_lane_class": "conformance",
+      "required_expected_graph_root": "conformance",
+      "required_no_claim_boundary": "focused-feature-proof"
+    }
+  },
   "required_guarantee_ids": [
     "default-production-tokio-free",
     "metrics-production-tokio-free",
