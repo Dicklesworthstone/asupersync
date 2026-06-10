@@ -232,6 +232,21 @@ fn focused_channel_regression_rows_capture_rch_stale_boundary() {
     );
     assert_eq!(string_field(green, "conformance_expected"), "not_expected");
 
+    let example = rows
+        .get("channel-mpsc-select-e2e-public-run")
+        .expect("channel public run row");
+    assert_eq!(string_field(example, "source"), "proof_lane_manifest_v1");
+    assert_eq!(string_field(example, "target_kind"), "test_frontier");
+    assert_eq!(string_field(example, "cfg_test_enabled"), "no");
+    assert_eq!(
+        string_field(example, "dev_dependency_edges"),
+        "none_expected"
+    );
+    assert_eq!(
+        string_field(example, "conformance_expected"),
+        "not_expected"
+    );
+
     for lane_id in [
         "channel-mpsc-select-e2e-lib-tests-check",
         "channel-mpsc-select-e2e-filtered-run",
@@ -277,6 +292,7 @@ fn documentation_cites_inventory_and_no_claim_boundaries() {
         "artifacts/validation_frontier_inventory_v1.json",
         "tests/validation_frontier_inventory_contract.rs",
         "channel-mpsc-select-e2e",
+        "channel-mpsc-select-e2e-public-run",
         "unknown_needs_vf2",
         "compile_only",
         "RCH stale-progress evidence must not be cited as code failure evidence",

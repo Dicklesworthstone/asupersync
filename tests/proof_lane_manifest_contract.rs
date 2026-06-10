@@ -948,6 +948,7 @@ fn every_lane_declares_fail_closed_resource_envelope() {
 
     for (lane_id, expected_class) in [
         ("lib-tests", "test-frontier-heavy"),
+        ("channel-mpsc-select-e2e-public-run", "test-frontier-heavy"),
         ("all-targets-check", "compile-frontier-heavy"),
         ("clippy-all-targets", "lint-frontier-heavy"),
         ("fuzz-manifest-smoke", "compile-frontier-heavy"),

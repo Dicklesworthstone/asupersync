@@ -159,6 +159,7 @@
     "feature-gated-native-surfaces",
     "fuzz-manifest-smoke",
     "lib-test-frontier",
+    "channel-mpsc-select-e2e-public-run",
     "all-target-compile-frontier",
     "clippy-frontier",
     "rustfmt-frontier",
@@ -329,6 +330,28 @@
       "source_paths": [
         "src/lib.rs",
         "Cargo.toml"
+      ]
+    },
+    {
+      "lane_id": "channel-mpsc-select-e2e-public-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_mpsc_select_public_run CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -p asupersync --bin channel_mpsc_select_e2e --features channel-mpsc-select-e2e",
+      "guarantee_ids": [
+        "channel-mpsc-select-e2e-public-run"
+      ],
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "expected_signal": "binary exits 0 after assertion-only public API scenarios or reports the first compile/runtime diagnostic",
+      "source_paths": [
+        "Cargo.toml",
+        "src/bin/channel_mpsc_select_e2e.rs",
+        "examples/channel_mpsc_select_e2e.rs",
+        "src/lib.rs",
+        "src/channel/mpsc.rs",
+        "src/combinator/select.rs"
       ]
     },
     {
@@ -757,6 +780,12 @@
       "guarantee_id": "lib-test-frontier",
       "lane_ids": [
         "lib-tests"
+      ]
+    },
+    {
+      "guarantee_id": "channel-mpsc-select-e2e-public-run",
+      "lane_ids": [
+        "channel-mpsc-select-e2e-public-run"
       ]
     },
     {

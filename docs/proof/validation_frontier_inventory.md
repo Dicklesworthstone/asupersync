@@ -32,6 +32,7 @@ diagnostic for the channel code.
 | --- | --- | --- | --- | --- |
 | `default-production-tokio-tree` | manifest | production normal dependency graph | `not_expected` | mapped, not rerun in VF1 |
 | `lib-tests` | manifest | broad lib test frontier | `not_expected` | mapped, not rerun in VF1 |
+| `channel-mpsc-select-e2e-public-run` | manifest | focused binary execution without cfg(test) | `not_expected` | green build `29880940465488044` |
 | `all-targets-check` | manifest | broad compile frontier | `unknown_needs_vf2` | mapped, not rerun in VF1 |
 | `agents-test-all-test-internals` | AGENTS.md | broad workspace/default-package test frontier | `expected` | unknown until VF2 |
 | `channel-mpsc-select-e2e-lib-check` | observed | focused lib compile | `not_expected` | green build `29880940465487991` |
@@ -44,7 +45,9 @@ diagnostic for the channel code.
 `unknown_needs_vf2` means the current repository state does not yet prove the
 boundary. VF2 must decide whether the broad graph edge is intentional. If the
 edge is not intentional, VF2 should split or quarantine targets so focused proof
-lanes finish without compiling unrelated conformance/dev-test surfaces.
+lanes finish without compiling unrelated conformance/dev-test surfaces. The
+`channel-mpsc-select-e2e-public-run` lane is the split public-API execution
+path for the channel regression; it does not replace broad cfg(test) coverage.
 
 ## Operator Guidance
 

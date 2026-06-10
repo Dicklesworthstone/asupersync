@@ -198,6 +198,31 @@
       "current_rch_behavior": "mapped_not_rerun_in_vf1"
     },
     {
+      "lane_id": "channel-mpsc-select-e2e-public-run",
+      "source": "proof_lane_manifest_v1",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_mpsc_select_public_run CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -p asupersync --bin channel_mpsc_select_e2e --features channel-mpsc-select-e2e",
+      "intended_guarantee": "Focused channel MPSC/select public API scenarios execute through a normal binary target.",
+      "package_or_surface": "asupersync",
+      "target_kind": "test_frontier",
+      "features": [
+        "channel-mpsc-select-e2e"
+      ],
+      "cfg_test_enabled": "no",
+      "dev_dependency_edges": "none_expected",
+      "conformance_expected": "not_expected",
+      "normal_edge_tokio_expectation": "not_applicable",
+      "resource_envelope_class": "test-frontier-heavy",
+      "current_rch_behavior": "green_observed",
+      "observed_builds": [
+        {
+          "build_id": 29880940465488044,
+          "worker_id": "vmi1227854",
+          "outcome": "exit_0",
+          "conformance_compile": "not_observed"
+        }
+      ]
+    },
+    {
       "lane_id": "all-targets-check",
       "source": "proof_lane_manifest_v1",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",

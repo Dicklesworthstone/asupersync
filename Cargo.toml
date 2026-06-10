@@ -28,6 +28,7 @@ include = [
     "README.md",
     "LICENSE",
     "assets/dashboard.html",
+    "examples/channel_mpsc_select_e2e.rs",
     "src/**",
     "scripts/generate_rfc6330_vectors.rs",
     "!src/observability/otel_conformance_tests.rs",
@@ -271,6 +272,11 @@ path = "scripts/generate_rfc6330_vectors.rs"
 name = "atpd"
 path = "src/bin/atpd.rs"
 required-features = ["atpd-daemon"]
+
+[[bin]]
+name = "channel_mpsc_select_e2e"
+path = "src/bin/channel_mpsc_select_e2e.rs"
+required-features = ["channel-mpsc-select-e2e"]
 
 [dependencies]
 # Phase 0: prefer std/core; avoid bringing in executors/runtimes.
@@ -712,6 +718,10 @@ path = "tests/atp/per_module/logging_redaction_contract.rs"
 [[example]]
 name = "spork_minimal_supervised_app"
 required-features = ["test-internals"]
+
+[[example]]
+name = "channel_mpsc_select_e2e"
+required-features = ["channel-mpsc-select-e2e"]
 
 [profile.release]
 opt-level = 3
