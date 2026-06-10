@@ -6866,8 +6866,32 @@ mod tests {
         })
     }
 
+    /// Builds a `RuntimeState` whose timer driver is a fixed `VirtualClock`.
+    ///
+    /// The scheduler state-dump fixtures must be deterministic regardless of
+    /// concurrent load. `ThreeLaneWorker::current_time_ns()` (used to stamp
+    /// fairness-monitor enqueue/dispatch/skip times and to detect starvation)
+    /// falls back to `wall_now()` when no timer driver is attached. Under heavy
+    /// parallel test load the real elapsed time between enqueue and the dump's
+    /// dispatch/verify calls can cross the 100ms starvation threshold, flipping
+    /// `total_starvation_events` / `currently_starved_tasks` / wait-time fields
+    /// run-to-run. Pinning a `VirtualClock` freezes `current_time_ns()` so
+    /// enqueue and dispatch observe identical virtual time (zero elapsed wait),
+    /// making every fairness/starvation observation deterministic and the
+    /// golden snapshot load-independent. The clock is propagated into the
+    /// worker by the scheduler constructor (it reads `timer_driver_handle()`
+    /// from the state).
+    fn state_with_virtual_clock() -> Arc<ContendedMutex<RuntimeState>> {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000_000_000)));
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        state.now = Time::from_nanos(1_000_000_000);
+        Arc::new(ContendedMutex::new("runtime_state", state))
+    }
+
     fn empty_scheduler_state_dump() -> Value {
-        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let state = state_with_virtual_clock();
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         let worker = &mut scheduler.workers[0];
         worker.verify_scheduler_invariants();
@@ -6875,7 +6899,7 @@ mod tests {
     }
 
     fn loaded_scheduler_state_dump() -> Value {
-        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let state = state_with_virtual_clock();
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         let worker = &mut scheduler.workers[0];
 
@@ -6888,7 +6912,7 @@ mod tests {
     }
 
     fn cancel_streak_scheduler_state_dump() -> Value {
-        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let state = state_with_virtual_clock();
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2);
         let worker = &mut scheduler.workers[0];
 
@@ -6909,7 +6933,7 @@ mod tests {
     }
 
     fn deadline_ordering_scheduler_state_dump() -> Value {
-        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let state = state_with_virtual_clock();
         let mut scheduler = ThreeLaneScheduler::new(1, &state);
         let worker = &mut scheduler.workers[0];
 
@@ -6932,7 +6956,12 @@ mod tests {
     }
 
     fn decision_trace_complex_scenario_dump() -> Value {
+        use crate::time::{TimerDriverHandle, VirtualClock};
         let mut state = RuntimeState::new();
+        // Pin a VirtualClock so the worker's current_time_ns() is deterministic
+        // under concurrent load (see state_with_virtual_clock for rationale).
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(100_000)));
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
         state.now = Time::from_nanos(100_000); // Set current time to 100μs
 
         // Create root region and tasks with deadlines for deadline miss scenario
@@ -14208,12 +14237,11 @@ mod tests {
         use crate::time::{TimerDriverHandle, VirtualClock};
 
         let mut state = RuntimeState::new();
-        let timer_driver = match fixture {
+        match fixture {
             LyapunovGovernorDecisionFixture::MeetDeadlines => {
                 let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(999_000_000)));
-                state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+                state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
                 state.now = Time::from_nanos(999_000_000);
-                Some(TimerDriverHandle::with_virtual_clock(clock))
             }
             LyapunovGovernorDecisionFixture::DrainObligations => {
                 // Reset to zero so the obligation created below is timestamped at
@@ -14222,11 +14250,10 @@ mod tests {
                 // bases `now` at 1s, which would otherwise yield a zero-age
                 // obligation and defeat the drain scenario.
                 state.now = Time::ZERO;
-                None
             }
             LyapunovGovernorDecisionFixture::DrainRegions
-            | LyapunovGovernorDecisionFixture::Quiescent => None,
-        };
+            | LyapunovGovernorDecisionFixture::Quiescent => {}
+        }
 
         match fixture {
             LyapunovGovernorDecisionFixture::MeetDeadlines => {
@@ -14257,6 +14284,20 @@ mod tests {
             }
             LyapunovGovernorDecisionFixture::Quiescent => {}
         }
+
+        // Pin a VirtualClock at the fixture's final `state.now` for every
+        // fixture (not just MeetDeadlines). `ThreeLaneWorker::current_time_ns()`
+        // is consulted by the fairness monitor during `next_task()`; without a
+        // timer driver it falls back to `wall_now()`, which is load-dependent.
+        // Although this step's serialized JSON only captures `state.now`-derived
+        // values, freezing `current_time_ns()` removes the wall-clock fallback
+        // entirely so the fixture is deterministic regardless of concurrent
+        // load.
+        let frozen_now = state.now;
+        let timer_driver = {
+            let clock = Arc::new(VirtualClock::starting_at(frozen_now));
+            Some(TimerDriverHandle::with_virtual_clock(clock))
+        };
 
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
         let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 2, true, 1);
@@ -15412,39 +15453,33 @@ mod tests {
     /// runs. Only the named non-deterministic fields are scrubbed; all other
     /// structural state is left untouched.
     fn scrub_nondeterministic_timing_fields(value: &mut Value) {
-        // Wall-clock-derived nanosecond measurements: sampled from the host clock
-        // during scheduling, so they vary every run.
-        const SCRUBBED_TIMING_FIELDS: &[&str] = &[
-            "avg_monitoring_overhead_ns",
-            "avg_task_wait_time_ns",
-            "max_task_wait_time_ns",
-            "total_tracked_wait_time_ns",
-            "enqueue_time_ns",
-            "last_update_ns",
-        ];
-        // Wall-clock-derived starvation observations. The fairness monitor stamps
-        // each tracked task with the host clock at enqueue time and compares it
-        // against the host clock at dump time. On a loaded worker the elapsed
-        // real time between enqueue and dump can cross the starvation threshold
-        // (and the cleanup horizon that prunes the tracked set), so these
-        // counts/flags flip run-to-run even with a fixed seed and fixed
-        // scenario. They are diagnostic timing observations, not the structural
-        // scheduler state the golden snapshot guards (lane membership, fairness
-        // certificate, dispatch sequence, preemption metrics), so we pin them to
-        // a stable sentinel. `total_starvation_events` / `total_priority_inversions`
-        // are left exact: they count structural dispatch events, not wall time.
-        const SCRUBBED_STARVATION_FIELDS: &[&str] = &[
-            "currently_starved_tasks",
-            "pattern_detected",
-            "tracked_tasks_count",
-        ];
+        // The state-dump fixtures now pin a `VirtualClock` as the worker timer
+        // driver (see `state_with_virtual_clock`), so `current_time_ns()` is
+        // frozen: every fairness-monitor enqueue/dispatch/skip observes the same
+        // virtual instant. That makes the previously load-flaky fields fully
+        // deterministic and they are now asserted exactly in the golden:
+        //   - `avg_task_wait_time_ns` / `max_task_wait_time_ns` /
+        //     `total_tracked_wait_time_ns` (zero elapsed virtual wait),
+        //   - `currently_starved_tasks` / `pattern_detected` /
+        //     `tracked_tasks_count` (no virtual time crosses the 100ms
+        //     starvation threshold), and
+        //   - per-task `enqueue_time_ns` / `last_update_ns` (fixed virtual
+        //     stamps).
+        //
+        // The ONLY field that remains wall-clock-derived is
+        // `avg_monitoring_overhead_ns`: it is measured with `Instant::now()` /
+        // `Instant::elapsed()` inside the invariant monitor (the real cost of
+        // running `verify_scheduler_invariants`), which no virtual clock can
+        // control. It is incidental telemetry, not structural scheduler state,
+        // so it is pinned to a stable sentinel. Everything else — lane
+        // membership, fairness certificate, dispatch sequence, preemption
+        // metrics, starvation counters — is left exact.
+        const SCRUBBED_TIMING_FIELDS: &[&str] = &["avg_monitoring_overhead_ns"];
         match value {
             Value::Object(map) => {
                 for (key, child) in map.iter_mut() {
                     if SCRUBBED_TIMING_FIELDS.contains(&key.as_str()) {
                         *child = Value::String("[scrubbed-ns]".to_string());
-                    } else if SCRUBBED_STARVATION_FIELDS.contains(&key.as_str()) {
-                        *child = Value::String("[scrubbed-wall-clock]".to_string());
                     } else {
                         scrub_nondeterministic_timing_fields(child);
                     }
