@@ -3810,9 +3810,7 @@ mod tests {
             Some("true")
         );
         assert_eq!(
-            fields
-                .get("available_endpoint_bucket")
-                .map(String::as_str),
+            fields.get("available_endpoint_bucket").map(String::as_str),
             Some("3-5")
         );
         assert_eq!(
