@@ -798,6 +798,8 @@ mod tests {
 
         t.reset(Time::from_secs(20));
         let resumed = t.poll_with_time(&mut cx, Time::from_secs(12));
+        assert!(resumed.is_pending());
+        let resumed = t.poll_with_time(&mut cx, Time::from_secs(12));
         assert!(matches!(resumed, Poll::Ready(Ok("done"))));
     }
 
