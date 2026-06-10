@@ -337,7 +337,12 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
                 let mut count = 0_usize;
                 let mut skipped = 0_u64;
                 let mut receiver = receiver;
-                loop {
+                let expected = u64::try_from(num_messages).expect("message count fits in u64");
+                while u64::try_from(count)
+                    .expect("subscriber count fits in u64")
+                    .saturating_add(skipped)
+                    < expected
+                {
                     match receiver.recv(&cx).await {
                         Ok(_) => count += 1,
                         Err(broadcast::RecvError::Lagged(missed)) => {
