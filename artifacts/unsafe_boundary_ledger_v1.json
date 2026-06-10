@@ -46,11 +46,11 @@
     "other": "Unclassified boundary requiring follow-up before enforcement closes."
   },
   "summary": {
-    "boundary_rows": 94,
-    "operation_count": 820,
+    "boundary_rows": 92,
+    "operation_count": 821,
     "operation_kind_counts": {
-      "allow_unsafe_code": 84,
-      "unsafe_block": 622,
+      "allow_unsafe_code": 86,
+      "unsafe_block": 621,
       "unsafe_fn": 94,
       "unsafe_impl": 20,
       "unsafe_trait": 0
@@ -73,7 +73,7 @@
       "simd-kernel": 1,
       "stream-test-boundary": 1,
       "sync-internal-cell": 6,
-      "test-or-lab-harness": 26
+      "test-or-lab-harness": 24
     }
   },
   "sites": [
@@ -1389,27 +1389,6 @@
       ]
     },
     {
-      "site_id": "unsafe-src-channel-atomicity-test-rs",
-      "path": "src/channel/atomicity_test.rs",
-      "category": "test-or-lab-harness",
-      "scope": "file-or-item-boundary",
-      "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
-      "why_safe_rust_is_insufficient": "Initial inventory row: this path contains one or more unsafe operations or unsafe-code allow scopes. UNSAFE-2 must enforce exact live-site matching and may split this row into narrower item rows where useful.",
-      "safety_invariant": "Raw wakers, raw pointers, and test-only OS probes must remain scoped to deterministic fixtures and must not leak into production APIs.",
-      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; this inventory row records the current boundary and must be refined before closing UNSAFE-2 if exact per-block enforcement needs a narrower row.",
-      "explicit_no_claims": [
-        "This row is an inventory and schema baseline, not fresh execution proof for every platform path.",
-        "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
-      ],
-      "operation_locators": [
-        {
-          "kind": "unsafe_block",
-          "line": 508,
-          "pattern": "let receiver = unsafe { std::ptr::read(&channel.receiver) };"
-        }
-      ]
-    },
-    {
       "site_id": "unsafe-src-config-rs",
       "path": "src/config.rs",
       "category": "env-var-mutation",
@@ -2067,6 +2046,11 @@
         "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
       ],
       "operation_locators": [
+        {
+          "kind": "allow_unsafe_code",
+          "line": 60,
+          "pattern": "allow(unsafe_code, clippy::cast_ptr_alignment, clippy::ptr_as_ptr)"
+        },
         {
           "kind": "unsafe_block",
           "line": 1968,
@@ -3856,6 +3840,11 @@
           "pattern": "unsafe { GetExtendedUdpTable(table, size, 0, family, UDP_TABLE_OWNER_PID, 0) }"
         },
         {
+          "kind": "allow_unsafe_code",
+          "line": 5895,
+          "pattern": "#[allow(unsafe_code, clippy::unnecessary_cast)]"
+        },
+        {
           "kind": "unsafe_block",
           "line": 5899,
           "pattern": "let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, rlim.as_mut_ptr()) };"
@@ -3864,6 +3853,11 @@
           "kind": "unsafe_block",
           "line": 5903,
           "pattern": "let rlim = unsafe { rlim.assume_init() };"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 5910,
+          "pattern": "#[allow(unsafe_code, clippy::unnecessary_cast)]"
         },
         {
           "kind": "unsafe_block",
@@ -4085,6 +4079,9 @@
           "line": 1042,
           "pattern": "#[allow(unsafe_code)]"
         }
+      ],
+      "unsafe_operation_child_sites": [
+        "none: these are narrow legacy test-only allow scopes around cancel-path invariant tests; the lexical scanner finds no active unsafe operation inside the scoped functions"
       ]
     },
     {
@@ -4258,6 +4255,9 @@
           "line": 4415,
           "pattern": "#[allow(unsafe_code)]"
         }
+      ],
+      "unsafe_operation_child_sites": [
+        "none: this is a narrow legacy test-only allow scope around a pool cancel-safety invariant test; the lexical scanner finds no active unsafe operation inside the scoped function"
       ]
     },
     {
@@ -4920,6 +4920,9 @@
           "line": 3,
           "pattern": "#![allow(unsafe_code)]"
         }
+      ],
+      "unsafe_operation_child_sites": [
+        "none: this conformance test crate file has a legacy file-level allow but the lexical scanner finds no active unsafe operation in the file"
       ]
     },
     {
@@ -5381,27 +5384,6 @@
           "kind": "unsafe_block",
           "line": 500,
           "pattern": "unsafe { Waker::from_raw(raw) }"
-        }
-      ]
-    },
-    {
-      "site_id": "unsafe-tests-scheduler-thread-priority-design-audit-rs",
-      "path": "tests/scheduler_thread_priority_design_audit.rs",
-      "category": "test-or-lab-harness",
-      "scope": "file-or-item-boundary",
-      "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
-      "why_safe_rust_is_insufficient": "Initial inventory row: this path contains one or more unsafe operations or unsafe-code allow scopes. UNSAFE-2 must enforce exact live-site matching and may split this row into narrower item rows where useful.",
-      "safety_invariant": "Raw wakers, raw pointers, and test-only OS probes must remain scoped to deterministic fixtures and must not leak into production APIs.",
-      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md; this inventory row records the current boundary and must be refined before closing UNSAFE-2 if exact per-block enforcement needs a narrower row.",
-      "explicit_no_claims": [
-        "This row is an inventory and schema baseline, not fresh execution proof for every platform path.",
-        "Test-only, conformance, fuzz, and compat-boundary rows do not prove core runtime production safety."
-      ],
-      "operation_locators": [
-        {
-          "kind": "allow_unsafe_code",
-          "line": 371,
-          "pattern": "#[allow(unsafe_code)]. SCHED_FIFO / sched_setscheduler \\"
         }
       ]
     },

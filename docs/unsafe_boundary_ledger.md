@@ -87,8 +87,24 @@ New unsafe code is acceptable only when all of these are true:
 
 ## Follow-Up Contract
 
-UNSAFE-2 should add a checked scanner that compares live source against this
-ledger and fails when:
+UNSAFE-2 adds `tests/unsafe_boundary_ledger_contract.rs`, wired through the
+`unsafe-boundary-ledger-contract` lane in
+`artifacts/proof_lane_manifest_v1.json` and the matching row in
+`artifacts/proof_status_snapshot_v1.json`.
+
+The canonical proof command is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_unsafe_boundary_ledger_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test unsafe_boundary_ledger_contract -- --nocapture
+```
+
+The scanner is lexical: it masks comments, string literals, character literals,
+and raw strings before searching for active unsafe syntax. It detects unsafe
+blocks, unsafe functions, unsafe impls, unsafe traits, and unsafe-code allow
+scopes, including unsafe blocks inside macro bodies. It is not a Rust type
+checker or safety proof.
+
+The contract fails when:
 
 - a new unsafe block, unsafe fn, unsafe impl, unsafe trait, or unsafe-code allow
   scope appears without a row;
@@ -96,3 +112,8 @@ ledger and fails when:
 - a broad allow scope has no child-site list or explicit local justification;
 - diagnostics cannot identify the path, line, site kind, and suggested row
   skeleton.
+
+Passing this lane proves only that the ledger and source locators are aligned.
+It does not prove unsafe correctness, execute platform-specific FFI paths, prove
+every cfg-gated host path, or replace the category-specific evidence listed
+above.

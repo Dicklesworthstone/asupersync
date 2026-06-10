@@ -79,6 +79,7 @@
     "migration readiness planner signoff",
     "durable RCH final signoff",
     "RCH stale-progress receipts",
+    "unsafe boundary ledger contract",
     "formal Lean posture",
     "rustdoc/API examples"
   ],
@@ -612,6 +613,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Green maps only the stale-progress receipt schema, helper, fixtures, docs, manifest/status mapping, operator policy, and no-claim boundaries. It does not prove source correctness, release readiness, workspace health, live RCH fleet availability, broad clippy, full release tests, a fresh RCH pass, or permission to cancel peer-owned builds."
+    },
+    {
+      "claim_id": "unsafe-boundary-ledger-contract",
+      "category": "unsafe boundary ledger contract",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ],
+        "AGENTS.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "unsafe-boundary-ledger-contract"
+      ],
+      "manifest_lane_ids": [
+        "unsafe-boundary-ledger-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_unsafe_boundary_ledger_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test unsafe_boundary_ledger_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the lexical unsafe-boundary ledger contract, source locator scan, stale-row detection, unledgered-site diagnostics, docs alignment, manifest row, and proof-status row. It does not prove unsafe correctness, execute platform FFI, prove every cfg-gated path on every host, prove release readiness, or replace category-specific safety evidence."
     },
     {
       "claim_id": "formal-lean-posture",

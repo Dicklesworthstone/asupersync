@@ -428,6 +428,7 @@
     "shared-main-commit-guard",
     "durable-rch-final-signoff",
     "rch-stale-progress-receipt",
+    "unsafe-boundary-ledger-contract",
     "proof-lane-manifest-verifier"
   ],
   "lanes": [
@@ -1475,6 +1476,46 @@
       }
     },
     {
+      "lane_id": "unsafe-boundary-ledger-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_unsafe_boundary_ledger_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test unsafe_boundary_ledger_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "unsafe-boundary-ledger-contract"
+      ],
+      "covers": "Unsafe-boundary ledger schema, source locator scan, stale-row detection, unledgered-site diagnostics, docs alignment, manifest row, and proof-status row stay aligned.",
+      "explicit_not_covered": "This lexical contract does not prove unsafe correctness, does not execute platform FFI, does not prove every cfg-gated path on every host, and does not replace category-specific safety evidence.",
+      "expected_signal": "unsafe_boundary_ledger_contract tests pass",
+      "source_paths": [
+        "artifacts/unsafe_boundary_ledger_v1.json",
+        "docs/unsafe_boundary_ledger.md",
+        "tests/unsafe_boundary_ledger_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "peer-owned dirty source adds unsafe without updating the ledger",
+        "Rust syntax pattern appears outside the lexical scanner's supported surface",
+        "manifest or proof-status snapshot mapping drift"
+      ],
+      "escalation_notes": "Use this lane only for unsafe-boundary ledger drift detection and proof metadata alignment. Passing it is not a safety proof for any specific unsafe operation.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "unsafe-boundary-ledger-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
       "lane_id": "proof-lane-manifest-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1790,6 +1831,13 @@
       "description": "Deterministic stale-progress receipts for remote-required RCH lanes have a canonical verifier command and explicit no-claim boundaries.",
       "lane_ids": [
         "rch-stale-progress-receipt-contract"
+      ]
+    },
+    {
+      "guarantee_id": "unsafe-boundary-ledger-contract",
+      "description": "Unsafe-boundary ledger source locator coverage, stale-row detection, unledgered-site diagnostics, docs alignment, manifest mapping, and proof-status row have a canonical verifier command.",
+      "lane_ids": [
+        "unsafe-boundary-ledger-contract"
       ]
     },
     {
