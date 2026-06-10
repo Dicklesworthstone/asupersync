@@ -235,6 +235,105 @@ impl LedgerStats {
     }
 }
 
+/// Count summary for a filtered obligation snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObligationCounts {
+    /// Obligations still pending and blocking quiescence.
+    pub pending: usize,
+    /// Obligations committed successfully.
+    pub committed: usize,
+    /// Obligations aborted cleanly.
+    pub aborted: usize,
+    /// Obligations marked leaked.
+    pub leaked: usize,
+}
+
+impl ObligationCounts {
+    /// Builds counts from a deterministic or filtered obligation record stream.
+    #[must_use]
+    pub fn from_records<'a>(records: impl IntoIterator<Item = &'a ObligationRecord>) -> Self {
+        let mut counts = Self::default();
+        for record in records {
+            counts.record_state(record.state);
+        }
+        counts
+    }
+
+    /// Total obligations represented by this snapshot.
+    #[must_use]
+    pub const fn total(self) -> usize {
+        self.pending + self.committed + self.aborted + self.leaked
+    }
+
+    /// Total terminal obligations represented by this snapshot.
+    #[must_use]
+    pub const fn resolved(self) -> usize {
+        self.committed + self.aborted + self.leaked
+    }
+
+    fn record_state(&mut self, state: ObligationState) {
+        match state {
+            ObligationState::Reserved => self.pending += 1,
+            ObligationState::Committed => self.committed += 1,
+            ObligationState::Aborted => self.aborted += 1,
+            ObligationState::Leaked => self.leaked += 1,
+        }
+    }
+}
+
+/// Owned diagnostic snapshot for one obligation record.
+///
+/// This is the public read-only audit shape. It intentionally copies the fields
+/// operators and tests need without cloning the record's optional backtrace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObligationAuditRecord {
+    /// Unique obligation ID.
+    pub id: ObligationId,
+    /// Obligation kind.
+    pub kind: ObligationKind,
+    /// Task holding or formerly holding the obligation.
+    pub holder: TaskId,
+    /// Owning region.
+    pub region: RegionId,
+    /// Current lifecycle state.
+    pub state: ObligationState,
+    /// Time when the obligation was reserved.
+    pub reserved_at: Time,
+    /// Time when the obligation entered a terminal state, if any.
+    pub resolved_at: Option<Time>,
+    /// Saturating age at the snapshot time, in nanoseconds.
+    pub age_ns: u64,
+    /// Optional caller-provided diagnostic description.
+    pub description: Option<String>,
+    /// Source location where the obligation was acquired.
+    pub acquired_at: SourceLocation,
+    /// Reason for abort, if applicable.
+    pub abort_reason: Option<ObligationAbortReason>,
+    /// Whether the live record carried a captured backtrace.
+    pub has_acquire_backtrace: bool,
+}
+
+impl ObligationAuditRecord {
+    /// Copies diagnostic fields from a live obligation record.
+    #[must_use]
+    pub fn from_record(record: &ObligationRecord, now: Time) -> Self {
+        Self {
+            id: record.id,
+            kind: record.kind,
+            holder: record.holder,
+            region: record.region,
+            state: record.state,
+            reserved_at: record.reserved_at,
+            resolved_at: record.resolved_at,
+            age_ns: now.duration_since(record.reserved_at),
+            description: record.description.clone(),
+            acquired_at: record.acquired_at,
+            abort_reason: record.abort_reason,
+            has_acquire_backtrace: record.acquire_backtrace.is_some(),
+        }
+    }
+}
+
 /// A leaked obligation diagnostic for the leak oracle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeakedObligation {
@@ -874,6 +973,109 @@ impl ObligationLedger {
         self.stats.pending
     }
 
+    /// Returns counts across all obligations in deterministic ledger order.
+    #[must_use]
+    pub fn counts(&self) -> ObligationCounts {
+        ObligationCounts::from_records(self.obligations.values())
+    }
+
+    /// Returns counts for obligations belonging to `region`.
+    #[must_use]
+    pub fn counts_for_region(&self, region: RegionId) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .values()
+                .filter(|record| record.region == region),
+        )
+    }
+
+    /// Returns counts for obligations held by `task`.
+    #[must_use]
+    pub fn counts_for_task(&self, task: TaskId) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .values()
+                .filter(|record| record.holder == task),
+        )
+    }
+
+    /// Returns counts for obligations of `kind`.
+    #[must_use]
+    pub fn counts_for_kind(&self, kind: ObligationKind) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .values()
+                .filter(|record| record.kind == kind),
+        )
+    }
+
+    /// Returns counts for obligations matching both `region` and `kind`.
+    #[must_use]
+    pub fn counts_for_region_and_kind(
+        &self,
+        region: RegionId,
+        kind: ObligationKind,
+    ) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .values()
+                .filter(|record| record.region == region && record.kind == kind),
+        )
+    }
+
+    /// Returns the lifecycle state for `id`, if it is known to this ledger.
+    #[must_use]
+    pub fn obligation_state(&self, id: ObligationId) -> Option<ObligationState> {
+        self.obligations.get(&id).map(|record| record.state)
+    }
+
+    /// Returns owned audit snapshots for every obligation.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit(&self, now: Time) -> Vec<ObligationAuditRecord> {
+        self.obligations
+            .values()
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect()
+    }
+
+    /// Returns owned audit snapshots for obligations belonging to `region`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_region(&self, region: RegionId, now: Time) -> Vec<ObligationAuditRecord> {
+        self.obligations
+            .values()
+            .filter(|record| record.region == region)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect()
+    }
+
+    /// Returns owned audit snapshots for obligations held by `task`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_task(&self, task: TaskId, now: Time) -> Vec<ObligationAuditRecord> {
+        self.obligations
+            .values()
+            .filter(|record| record.holder == task)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect()
+    }
+
+    /// Returns owned audit snapshots for obligations of `kind`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_kind(&self, kind: ObligationKind, now: Time) -> Vec<ObligationAuditRecord> {
+        self.obligations
+            .values()
+            .filter(|record| record.kind == kind)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect()
+    }
+
     /// Returns the number of pending obligations for a specific region.
     #[must_use]
     pub fn pending_for_region(&self, region: RegionId) -> usize {
@@ -1259,6 +1461,97 @@ mod tests {
         let r1_clean = ledger.is_region_clean(r1);
         crate::assert_with_log!(!r1_clean, "r1 not clean", false, r1_clean);
         crate::test_complete!("pending_for_region");
+    }
+
+    #[test]
+    fn audit_counts_are_filterable_and_deterministic() {
+        init_test("audit_counts_are_filterable_and_deterministic");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let other_task = TaskId::from_arena(ArenaIndex::new(2, 0));
+        let region = make_region();
+        let other_region = other_region();
+
+        let pending = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(10),
+        );
+        let pending_id = pending.id();
+        let committed = ledger.acquire(ObligationKind::Ack, task, region, Time::from_nanos(20));
+        let committed_id = committed.id();
+        let aborted = ledger.acquire(
+            ObligationKind::Lease,
+            other_task,
+            other_region,
+            Time::from_nanos(30),
+        );
+        let aborted_id = aborted.id();
+        let leaked = ledger.acquire(ObligationKind::IoOp, task, region, Time::from_nanos(40));
+        let leaked_id = leaked.id();
+
+        ledger.commit(committed, Time::from_nanos(50));
+        ledger.abort(aborted, Time::from_nanos(60), ObligationAbortReason::Cancel);
+        ledger.mark_leaked(leaked_id, Time::from_nanos(70));
+
+        let region_counts = ledger.counts_for_region(region);
+        crate::assert_with_log!(
+            region_counts.pending == 1,
+            "region pending",
+            1usize,
+            region_counts.pending
+        );
+        crate::assert_with_log!(
+            region_counts.committed == 1,
+            "region committed",
+            1usize,
+            region_counts.committed
+        );
+        crate::assert_with_log!(
+            region_counts.leaked == 1,
+            "region leaked",
+            1usize,
+            region_counts.leaked
+        );
+        let region_kind_count = ledger
+            .counts_for_region_and_kind(region, ObligationKind::SendPermit)
+            .pending;
+        crate::assert_with_log!(
+            region_kind_count == 1,
+            "region kind pending",
+            1usize,
+            region_kind_count
+        );
+        let task_total = ledger.counts_for_task(task).total();
+        crate::assert_with_log!(task_total == 3, "task total", 3usize, task_total);
+        let lease_aborted = ledger.counts_for_kind(ObligationKind::Lease).aborted;
+        crate::assert_with_log!(lease_aborted == 1, "kind aborted", 1usize, lease_aborted);
+        let aborted_state = ledger.obligation_state(aborted_id);
+        crate::assert_with_log!(
+            aborted_state == Some(ObligationState::Aborted),
+            "obligation state",
+            Some(ObligationState::Aborted),
+            aborted_state
+        );
+
+        let audit = ledger.audit_region(region, Time::from_nanos(100));
+        let audit_ids: Vec<_> = audit.iter().map(|record| record.id).collect();
+        crate::assert_with_log!(
+            audit_ids == vec![pending_id, committed_id, leaked_id],
+            "audit ids sorted",
+            vec![pending_id, committed_id, leaked_id],
+            audit_ids.clone()
+        );
+        crate::assert_with_log!(audit[0].age_ns == 90, "pending age", 90u64, audit[0].age_ns);
+        crate::assert_with_log!(
+            audit[2].state == ObligationState::Leaked,
+            "leaked audit state",
+            ObligationState::Leaked,
+            audit[2].state
+        );
+        let _ = pending;
+        crate::test_complete!("audit_counts_are_filterable_and_deterministic");
     }
 
     #[test]

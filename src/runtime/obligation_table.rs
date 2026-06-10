@@ -5,6 +5,7 @@
 //! in the sharded runtime state (each table behind its own lock).
 
 use crate::error::{Error, ErrorKind};
+use crate::obligation::ledger::{ObligationAuditRecord, ObligationCounts};
 use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord, SourceLocation};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::{Arena, ArenaIndex};
@@ -698,6 +699,130 @@ impl ObligationTable {
         self.pending_by_kind[kind_index(kind)]
     }
 
+    /// Returns counts across all obligations in the table.
+    #[must_use]
+    pub fn counts(&self) -> ObligationCounts {
+        ObligationCounts::from_records(self.obligations.iter().map(|(_, record)| record))
+    }
+
+    /// Returns counts for obligations belonging to `region`.
+    #[must_use]
+    pub fn counts_for_region(&self, region: RegionId) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| record.region == region),
+        )
+    }
+
+    /// Returns counts for obligations held by `task`.
+    #[must_use]
+    pub fn counts_for_task(&self, task: TaskId) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| record.holder == task),
+        )
+    }
+
+    /// Returns counts for obligations of `kind`.
+    #[must_use]
+    pub fn counts_for_kind(&self, kind: ObligationKind) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| record.kind == kind),
+        )
+    }
+
+    /// Returns counts for obligations matching both `region` and `kind`.
+    #[must_use]
+    pub fn counts_for_region_and_kind(
+        &self,
+        region: RegionId,
+        kind: ObligationKind,
+    ) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| record.region == region && record.kind == kind),
+        )
+    }
+
+    /// Returns the lifecycle state for `id`, if it is known to this table.
+    #[must_use]
+    pub fn obligation_state(&self, id: ObligationId) -> Option<crate::record::ObligationState> {
+        self.obligations
+            .get(id.arena_index())
+            .map(|record| record.state)
+    }
+
+    /// Returns owned audit snapshots for every obligation.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit(&self, now: Time) -> Vec<ObligationAuditRecord> {
+        let mut records: Vec<_> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| ObligationAuditRecord::from_record(record, now))
+            .collect();
+        records.sort_unstable_by_key(|record| record.id);
+        records
+    }
+
+    /// Returns owned audit snapshots for obligations belonging to `region`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_region(&self, region: RegionId, now: Time) -> Vec<ObligationAuditRecord> {
+        let mut records: Vec<_> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| record)
+            .filter(|record| record.region == region)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect();
+        records.sort_unstable_by_key(|record| record.id);
+        records
+    }
+
+    /// Returns owned audit snapshots for obligations held by `task`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_task(&self, task: TaskId, now: Time) -> Vec<ObligationAuditRecord> {
+        let mut records: Vec<_> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| record)
+            .filter(|record| record.holder == task)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect();
+        records.sort_unstable_by_key(|record| record.id);
+        records
+    }
+
+    /// Returns owned audit snapshots for obligations of `kind`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_kind(&self, kind: ObligationKind, now: Time) -> Vec<ObligationAuditRecord> {
+        let mut records: Vec<_> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| record)
+            .filter(|record| record.kind == kind)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect();
+        records.sort_unstable_by_key(|record| record.id);
+        records
+    }
+
     /// Returns the running sum of `reserved_at.as_nanos()` across all pending
     /// obligations. Combined with the current virtual time, yields the total
     /// obligation age in O(1) — see
@@ -915,6 +1040,50 @@ mod tests {
         assert_eq!(table.for_task(task2).count(), 1);
         assert_eq!(table.for_region(region1).count(), 2);
         assert_eq!(table.for_region(region2).count(), 1);
+    }
+
+    #[test]
+    fn audit_counts_and_state_queries_are_deterministic() {
+        let mut table = ObligationTable::new();
+        let task1 = test_task_id(1);
+        let task2 = test_task_id(2);
+        let region1 = test_region_id(1);
+        let region2 = test_region_id(2);
+
+        let pending = make_obligation(&mut table, ObligationKind::SendPermit, task1, region1);
+        let committed = make_obligation(&mut table, ObligationKind::Ack, task1, region1);
+        let aborted = make_obligation(&mut table, ObligationKind::Lease, task2, region2);
+        let leaked = make_obligation(&mut table, ObligationKind::IoOp, task1, region1);
+
+        table.commit(committed, Time::from_nanos(50)).unwrap();
+        table
+            .abort(aborted, Time::from_nanos(60), ObligationAbortReason::Cancel)
+            .unwrap();
+        table.mark_leaked(leaked, Time::from_nanos(70)).unwrap();
+
+        let region_counts = table.counts_for_region(region1);
+        assert_eq!(region_counts.pending, 1);
+        assert_eq!(region_counts.committed, 1);
+        assert_eq!(region_counts.leaked, 1);
+        assert_eq!(
+            table
+                .counts_for_region_and_kind(region1, ObligationKind::SendPermit)
+                .pending,
+            1
+        );
+        assert_eq!(table.counts_for_task(task1).total(), 3);
+        assert_eq!(table.counts_for_kind(ObligationKind::Lease).aborted, 1);
+        assert_eq!(
+            table.obligation_state(aborted),
+            Some(ObligationState::Aborted)
+        );
+
+        let audit = table.audit_region(region1, Time::from_nanos(100));
+        let audit_ids: Vec<_> = audit.iter().map(|record| record.id).collect();
+        assert_eq!(audit_ids, vec![pending, committed, leaked]);
+        assert_eq!(audit[0].age_ns, 100);
+        assert_eq!(audit[1].resolved_at, Some(Time::from_nanos(50)));
+        assert_eq!(audit[2].state, ObligationState::Leaked);
     }
 
     #[test]

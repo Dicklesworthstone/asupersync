@@ -84,3 +84,4 @@ pub use leak_check::{
     LeakChecker, ObligationAnalyzer, ObligationVar, RuntimeObligationValidator,
     StaticLeakCheckContract, VarState, static_leak_check_contract,
 };
+pub use ledger::{ObligationAuditRecord, ObligationCounts};

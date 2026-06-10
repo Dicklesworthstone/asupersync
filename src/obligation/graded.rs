@@ -99,12 +99,30 @@ impl PanicLeakTracker {
 /// Global panic leak tracker instance.
 static PANIC_LEAK_TRACKER: LazyLock<PanicLeakTracker> = LazyLock::new(PanicLeakTracker::new);
 
+/// Snapshot of obligation leaks observed during panic unwinding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanicLeakSnapshot {
+    /// Total obligations dropped unresolved while the thread was already panicking.
+    pub total_leaked: u64,
+}
+
 /// Returns the number of obligations that have leaked during panic unwinding.
 ///
 /// This is useful for tests and monitoring to ensure that the "no obligation leaks"
 /// invariant is maintained even during exceptional circumstances.
 pub fn panic_leak_count() -> u64 {
     PANIC_LEAK_TRACKER.leak_count()
+}
+
+/// Returns a snapshot of leaks recorded during panic unwinding.
+///
+/// This is the structured diagnostic form of [`panic_leak_count`]. It is safe to
+/// call while handling a panic and never mutates obligation state.
+#[must_use]
+pub fn panic_leaks() -> PanicLeakSnapshot {
+    PanicLeakSnapshot {
+        total_leaked: PANIC_LEAK_TRACKER.leak_count(),
+    }
 }
 
 // ============================================================================
@@ -1175,6 +1193,32 @@ mod tests {
         init_test("obligation_drop_without_resolve_panics");
         let _ob = GradedObligation::reserve(ObligationKind::IoOp, "leaked-io");
         // Dropped without resolving — should panic.
+    }
+
+    #[test]
+    fn panic_leaks_snapshot_records_unwind_drop() {
+        init_test("panic_leaks_snapshot_records_unwind_drop");
+        let before = panic_leaks();
+        let result = std::panic::catch_unwind(|| {
+            let _ob = GradedObligation::reserve(ObligationKind::Lease, "panic-unwind");
+            panic!("force unwind with unresolved obligation");
+        });
+        crate::assert_with_log!(result.is_err(), "panic captured", true, result.is_err());
+
+        let after = panic_leaks();
+        crate::assert_with_log!(
+            after.total_leaked >= before.total_leaked.saturating_add(1),
+            "panic leak recorded",
+            before.total_leaked.saturating_add(1),
+            after.total_leaked
+        );
+        crate::assert_with_log!(
+            panic_leak_count() == after.total_leaked,
+            "count compatibility",
+            after.total_leaked,
+            panic_leak_count()
+        );
+        crate::test_complete!("panic_leaks_snapshot_records_unwind_drop");
     }
 
     // ---- GradedScope: correct usage ----------------------------------------
