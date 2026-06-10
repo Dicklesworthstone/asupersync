@@ -62,7 +62,14 @@ fn root_export_names_from_source(source: &str) -> BTreeSet<String> {
 }
 
 fn brace_delta(line: &str) -> i32 {
-    line.matches('{').count() as i32 - line.matches('}').count() as i32
+    let opens = line.matches('{').count();
+    let closes = line.matches('}').count();
+
+    if opens >= closes {
+        i32::try_from(opens - closes).expect("brace delta must fit in i32")
+    } else {
+        -i32::try_from(closes - opens).expect("brace delta must fit in i32")
+    }
 }
 
 fn expand_pub_use(raw: &str) -> Vec<String> {
@@ -139,17 +146,13 @@ fn api_surface_map_tracks_root_public_exports() {
             "entry missing line: {entry}"
         );
         assert!(
-            matches!(entry["kind"].as_str(), Some("module") | Some("reexport")),
+            matches!(entry["kind"].as_str(), Some("module" | "reexport")),
             "entry has invalid kind: {entry}"
         );
         assert!(
             matches!(
                 entry["stability"].as_str(),
-                Some("core")
-                    | Some("preview")
-                    | Some("native-only")
-                    | Some("feature-gated")
-                    | Some("test-internals")
+                Some("core" | "preview" | "native-only" | "feature-gated" | "test-internals")
             ),
             "entry has invalid stability class: {entry}"
         );
