@@ -4366,6 +4366,8 @@ mod tests {
         // 3. Generation counter prevents spurious Ready returns
         // 4. No false positives from rapid polling
 
+        use std::sync::atomic::AtomicBool;
+
         let notify = Arc::new(Notify::new());
         let poll_count = Arc::new(AtomicU32::new(0));
         let spurious_ready_count = Arc::new(AtomicU32::new(0));
@@ -4378,6 +4380,18 @@ mod tests {
 
             poll_count.store(0, Ordering::Release);
             spurious_ready_count.store(0, Ordering::Release);
+
+            // Causal barrier: the waiter sets this AFTER it has finished its
+            // no-notify polling phase. The main thread must observe it before
+            // calling notify_one(). This makes the "all polls are Pending"
+            // assertion robust under heavy parallel load, where a wall-clock
+            // sleep can elapse (and notify_one() fire) before the freshly
+            // spawned waiter thread is even scheduled to begin polling. A
+            // notification consumed by the first poll is a *real* (early)
+            // notification, not a spurious wakeup — ordering it after the
+            // polling phase keeps the genuine anti-spurious-wakeup check intact.
+            let polling_done = Arc::new(AtomicBool::new(false));
+            let polling_done_clone = polling_done.clone();
 
             // Spawn waiter that polls many times
             let waiter_handle = thread::spawn(move || {
@@ -4416,15 +4430,28 @@ mod tests {
                         }
                     }
 
-                    // After 100 polls with no notify, we should still get Pending
-                    // Now wait for actual notification
+                    // After 100 polls with no notify, we proved no spurious
+                    // Ready. Signal the main thread that it is now safe to
+                    // deliver the real notification, then await it.
+                    polling_done_clone.store(true, Ordering::Release);
                     notified_fut.await;
                     (0, false) // false = no spurious ready
                 })
             });
 
-            // Give waiter time to poll many times without notification
-            thread::sleep(Duration::from_millis(10));
+            // Wait until the waiter has completed its no-notify polling phase
+            // before delivering the real notification. Spin on the barrier with
+            // a short yield; fall back after a generous bound so a genuine hang
+            // still surfaces (the waiter never finishing 100 Pending polls would
+            // be a real defect, not flakiness).
+            let mut spins = 0u32;
+            while !polling_done.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+                spins += 1;
+                if spins > 10_000 {
+                    break; // ~10s safety bound; let join() surface any defect
+                }
+            }
 
             // NOW send actual notification - this should wake the waiter
             notify.notify_one();
@@ -4449,10 +4476,16 @@ mod tests {
         // Test multiple waiters polling same Notify without notifications
         let mut waiter_handles = Vec::new();
         let num_waiters = 4;
+        // Counts how many waiters have finished their no-notify polling phase.
+        // The main thread waits for all of them before delivering any
+        // notification, so a real (early) notify_one() can never be consumed
+        // mid-poll and miscounted as spurious under heavy parallel load.
+        let waiters_polled = Arc::new(AtomicU32::new(0));
 
         for waiter_id in 0..num_waiters {
             let notify2_clone = notify2.clone();
             let ready_without_notify_clone = ready_without_notify_count.clone();
+            let waiters_polled_clone = waiters_polled.clone();
 
             let handle = thread::spawn(move || {
                 block_on(async {
@@ -4473,6 +4506,7 @@ mod tests {
 
                         if matches!(poll_result, Poll::Ready(())) {
                             ready_without_notify_clone.fetch_add(1, Ordering::AcqRel);
+                            waiters_polled_clone.fetch_add(1, Ordering::AcqRel);
                             return waiter_id;
                         }
 
@@ -4481,6 +4515,7 @@ mod tests {
                     }
 
                     // All 50 polls returned Pending, now wait for real notification
+                    waiters_polled_clone.fetch_add(1, Ordering::AcqRel);
                     notified_fut.await;
                     waiter_id
                 })
@@ -4488,8 +4523,18 @@ mod tests {
             waiter_handles.push(handle);
         }
 
-        // Give all waiters time to poll without notifications
-        thread::sleep(Duration::from_millis(20));
+        // Wait until every waiter has completed its no-notify polling phase
+        // before releasing them. This removes the wall-clock race in which a
+        // notify_one() could be consumed by a not-yet-polling waiter and
+        // miscounted as a spurious Ready under load.
+        let mut spins = 0u32;
+        while waiters_polled.load(Ordering::Acquire) < num_waiters {
+            thread::sleep(Duration::from_millis(1));
+            spins += 1;
+            if spins > 10_000 {
+                break; // ~10s safety bound; let join() surface any defect
+            }
+        }
 
         // Release every waiter before joining their threads. The earlier
         // polling phase already proved they do not complete spuriously.
