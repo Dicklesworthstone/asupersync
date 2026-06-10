@@ -20,6 +20,12 @@ limit was reached.
 For a fan-out loop, add a bounded concurrency limit and await completions before
 starting more work.
 
+The central `Error` display for `ErrorKind::AdmissionDenied` starts with:
+
+```text
+[ASUP-E006] AdmissionDenied
+```
+
 ## Related
 
 - `ASUP-E003`

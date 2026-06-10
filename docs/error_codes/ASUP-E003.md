@@ -20,6 +20,12 @@ therefore admits no new tasks.
 If a worker sees this during graceful shutdown, stop producing new child work
 and let the region drain.
 
+The central `Error` display for `ErrorKind::RegionClosed` starts with:
+
+```text
+[ASUP-E003] RegionClosed
+```
+
 ## Related
 
 - `ASUP-E002`

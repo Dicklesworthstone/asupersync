@@ -112,6 +112,7 @@
       "doc_path": "docs/error_codes/ASUP-E003.md",
       "since": "0.3.2",
       "source_refs": [
+        "src/error.rs",
         "src/runtime/state.rs"
       ]
     },
@@ -172,6 +173,7 @@
       "doc_path": "docs/error_codes/ASUP-E006.md",
       "since": "0.3.2",
       "source_refs": [
+        "src/error.rs",
         "src/runtime/state.rs"
       ]
     },

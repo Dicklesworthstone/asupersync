@@ -165,6 +165,8 @@ impl ErrorKind {
         match self {
             Self::ObligationLeak => Some("ASUP-E101"),
             Self::ObligationAlreadyResolved => Some("ASUP-E102"),
+            Self::RegionClosed => Some("ASUP-E003"),
+            Self::AdmissionDenied => Some("ASUP-E006"),
             Self::ChannelClosed => Some("ASUP-E201"),
             Self::CancelTimeout => Some("ASUP-E301"),
             Self::ConfigError => Some("ASUP-E901"),
@@ -1007,6 +1009,8 @@ mod tests {
         let cases = [
             (ErrorKind::ObligationLeak, Some("ASUP-E101")),
             (ErrorKind::ObligationAlreadyResolved, Some("ASUP-E102")),
+            (ErrorKind::RegionClosed, Some("ASUP-E003")),
+            (ErrorKind::AdmissionDenied, Some("ASUP-E006")),
             (ErrorKind::ChannelClosed, Some("ASUP-E201")),
             (ErrorKind::CancelTimeout, Some("ASUP-E301")),
             (ErrorKind::ConfigError, Some("ASUP-E901")),
@@ -1031,6 +1035,12 @@ mod tests {
 
         let channel = Error::new(ErrorKind::ChannelClosed);
         assert_eq!(channel.to_string(), "[ASUP-E201] ChannelClosed");
+
+        let region = Error::new(ErrorKind::RegionClosed);
+        assert_eq!(region.to_string(), "[ASUP-E003] RegionClosed");
+
+        let admission = Error::new(ErrorKind::AdmissionDenied);
+        assert_eq!(admission.to_string(), "[ASUP-E006] AdmissionDenied");
 
         let drain = Error::new(ErrorKind::CancelTimeout);
         assert_eq!(drain.to_string(), "[ASUP-E301] CancelTimeout");
