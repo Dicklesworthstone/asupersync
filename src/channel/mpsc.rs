@@ -11,6 +11,12 @@
 //!   permit.send(message)?;               // Phase 2: commit (surfaces disconnection)
 //! ```
 //!
+//! For work that explicitly accepts caller-owned memory growth, [`unbounded_channel`]
+//! returns dedicated [`UnboundedSender`] / [`UnboundedReceiver`] handles. The
+//! unbounded sender has a synchronous [`UnboundedSender::send`] method because
+//! capacity reservation cannot wait; it still shares the same close, wake, and
+//! receiver-drain behavior as the bounded channel.
+//!
 //! # Obligation Tracking
 //!
 //! Each `SendPermit` represents an obligation that must be resolved:
@@ -208,8 +214,14 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ChannelShared<T> {
 impl<T> ChannelInner<T> {
     #[inline]
     fn new(capacity: usize) -> Self {
+        let queue = if capacity == usize::MAX {
+            VecDeque::new()
+        } else {
+            VecDeque::with_capacity(capacity)
+        };
+
         Self {
-            queue: VecDeque::with_capacity(capacity),
+            queue,
             reserved: 0,
             send_wakers: TokenSlab::with_capacity(4),
             waiter_queue: VecDeque::with_capacity(4),
@@ -221,7 +233,7 @@ impl<T> ChannelInner<T> {
     /// Returns the number of used slots (queued + reserved).
     #[inline]
     fn used_slots(&self) -> usize {
-        self.queue.len() + self.reserved
+        self.queue.len().saturating_add(self.reserved)
     }
 
     /// Returns true if there's capacity for another reservation.
@@ -261,6 +273,34 @@ impl<T> ChannelInner<T> {
             .front()
             .and_then(|&token| self.send_wakers.get(token))
             .cloned()
+    }
+
+    /// Returns distinct live sender wakers for slots that are currently free.
+    ///
+    /// The waiters stay queued until their `Reserve` futures actually poll and
+    /// acquire capacity; this only broadcasts the newly available capacity.
+    #[inline]
+    fn sender_wakers_for_freed_slots(
+        &mut self,
+        freed_slots: usize,
+        capacity: usize,
+    ) -> SmallVec<[Waker; 4]> {
+        let wake_budget = freed_slots.min(capacity.saturating_sub(self.used_slots()));
+        if wake_budget == 0 {
+            return SmallVec::new();
+        }
+
+        self.prune_stale_waiter_front();
+        let mut wakers = SmallVec::new();
+        for &token in &self.waiter_queue {
+            if wakers.len() == wake_budget {
+                break;
+            }
+            if let Some(waker) = self.send_wakers.get(token) {
+                wakers.push(waker.clone());
+            }
+        }
+        wakers
     }
 
     /// Records a cancellation or abort event without exposing payloads.
@@ -360,6 +400,48 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let receiver = Receiver { shared };
 
     (sender, receiver)
+}
+
+/// Creates an unbounded MPSC channel.
+///
+/// This channel never applies sender-side capacity backpressure. Prefer
+/// [`channel`] by default; use this constructor only when the caller owns a
+/// separate memory-pressure policy.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::channel::mpsc;
+///
+/// let (tx, mut rx) = mpsc::unbounded_channel();
+/// assert!(tx.send("ready").is_ok());
+/// assert_eq!(rx.try_recv().ok(), Some("ready"));
+/// ```
+#[inline]
+#[must_use]
+pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
+    let (sender, receiver) = channel(usize::MAX);
+    (
+        UnboundedSender { inner: sender },
+        UnboundedReceiver { inner: receiver },
+    )
+}
+
+/// Alias for [`unbounded_channel`].
+///
+/// # Example
+///
+/// ```
+/// use asupersync::channel::mpsc;
+///
+/// let (tx, mut rx) = mpsc::unbounded();
+/// assert!(tx.send(7).is_ok());
+/// assert_eq!(rx.try_recv().ok(), Some(7));
+/// ```
+#[inline]
+#[must_use]
+pub fn unbounded<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
+    unbounded_channel()
 }
 
 /// The sending side of an MPSC channel.
@@ -832,6 +914,114 @@ impl<T> Clone for WeakSender<T> {
     }
 }
 
+/// The sending side of an unbounded MPSC channel.
+#[derive(Debug)]
+pub struct UnboundedSender<T> {
+    inner: Sender<T>,
+}
+
+impl<T> UnboundedSender<T> {
+    /// Reserves a slot for an explicit two-phase unbounded send.
+    #[inline]
+    #[must_use]
+    pub fn reserve<'a>(&'a self, cx: &'a Cx) -> Reserve<'a, T> {
+        self.inner.reserve(cx)
+    }
+
+    /// Attempts to reserve a slot without blocking.
+    #[inline]
+    pub fn try_reserve(&self) -> Result<SendPermit<'_, T>, SendError<()>> {
+        self.inner.try_reserve()
+    }
+
+    /// Sends a value into the channel without waiting for capacity.
+    ///
+    /// Returns [`SendError::Disconnected`] with the original value if the
+    /// receiver has been dropped.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use asupersync::channel::mpsc;
+    ///
+    /// let (tx, mut rx) = mpsc::unbounded_channel();
+    /// tx.send("message").expect("receiver is live");
+    /// assert_eq!(rx.try_recv().ok(), Some("message"));
+    /// ```
+    #[inline]
+    pub fn send(&self, value: T) -> Result<(), SendError<T>> {
+        match self.try_reserve() {
+            Ok(permit) => permit.try_send(value),
+            Err(SendError::<()>::Disconnected(())) => Err(SendError::Disconnected(value)),
+            Err(SendError::<()>::Full(())) => Err(SendError::Full(value)),
+            Err(SendError::<()>::Cancelled(())) => Err(SendError::Cancelled(value)),
+        }
+    }
+
+    /// Returns true if the receiver has been dropped.
+    #[inline]
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    /// Returns the unbounded capacity sentinel.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    /// Returns an opt-in redacted telemetry snapshot for this sender.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> MpscTelemetrySnapshot {
+        self.inner.telemetry_snapshot(channel_id)
+    }
+
+    /// Returns a weak reference to this sender.
+    #[inline]
+    #[must_use]
+    pub fn downgrade(&self) -> WeakUnboundedSender<T> {
+        WeakUnboundedSender {
+            inner: self.inner.downgrade(),
+        }
+    }
+}
+
+impl<T> Clone for UnboundedSender<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+/// A weak reference to an unbounded sender.
+#[derive(Debug)]
+pub struct WeakUnboundedSender<T> {
+    inner: WeakSender<T>,
+}
+
+impl<T> WeakUnboundedSender<T> {
+    /// Attempts to upgrade this weak sender to a strong sender.
+    #[inline]
+    #[must_use]
+    pub fn upgrade(&self) -> Option<UnboundedSender<T>> {
+        self.inner.upgrade().map(|inner| UnboundedSender { inner })
+    }
+}
+
+impl<T> Clone for WeakUnboundedSender<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 /// A permit to send a single value.
 #[derive(Debug)]
 #[must_use = "SendPermit must be consumed via send() or abort()"]
@@ -986,6 +1176,46 @@ impl<T> Receiver<T> {
         }
     }
 
+    /// Creates a receive future that appends up to `limit` values into `buffer`.
+    ///
+    /// The future waits until at least one value is available unless `limit` is
+    /// zero or the channel is closed and fully drained. It returns the number of
+    /// appended values. A return value of zero means either `limit == 0` or no
+    /// more values can arrive.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # async fn example(cx: &asupersync::Cx) {
+    /// use asupersync::channel::mpsc;
+    ///
+    /// let (tx, mut rx) = mpsc::channel(4);
+    /// tx.try_send(1).unwrap();
+    /// tx.try_send(2).unwrap();
+    ///
+    /// let mut batch = Vec::new();
+    /// let count = rx.recv_many(cx, &mut batch, 8).await.unwrap();
+    /// assert_eq!(count, 2);
+    /// assert_eq!(batch, vec![1, 2]);
+    /// # }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn recv_many<'a, Caps>(
+        &'a mut self,
+        cx: &'a Cx<Caps>,
+        buffer: &'a mut Vec<T>,
+        limit: usize,
+    ) -> RecvMany<'a, T, Caps> {
+        RecvMany {
+            receiver: self,
+            cx,
+            buffer,
+            limit,
+            polled: false,
+        }
+    }
+
     /// Polls the receive operation directly without constructing a temporary future.
     ///
     /// This is useful in manual `poll_*` implementations that need to avoid
@@ -1024,6 +1254,57 @@ impl<T> Receiver<T> {
         }
 
         // Skip waker clone if unchanged — common on re-poll.
+        match &inner.recv_waker {
+            Some(existing) if existing.will_wake(task_cx.waker()) => {}
+            _ => inner.recv_waker = Some(task_cx.waker().clone()),
+        }
+        Poll::Pending
+    }
+
+    /// Polls a batch receive operation directly.
+    ///
+    /// See [`Receiver::recv_many`] for completion semantics.
+    #[inline]
+    pub fn poll_recv_many<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+        buffer: &mut Vec<T>,
+        limit: usize,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<Result<usize, RecvError>> {
+        if limit == 0 {
+            return Poll::Ready(Ok(0));
+        }
+
+        if cx.checkpoint().is_err() {
+            cx.trace("mpsc::recv_many cancelled");
+            let mut inner = self.shared.inner.lock();
+            inner.recv_waker = None;
+            inner.record_cancellation();
+            return Poll::Ready(Err(RecvError::Cancelled));
+        }
+
+        let mut inner = self.shared.inner.lock();
+        let target = limit.min(inner.queue.len());
+
+        if target > 0 {
+            buffer.extend(inner.queue.drain(..target));
+            inner.recv_waker = None;
+            let sender_wakers = inner.sender_wakers_for_freed_slots(target, self.shared.capacity);
+            drop(inner);
+            for waker in sender_wakers {
+                waker.wake();
+            }
+            return Poll::Ready(Ok(target));
+        }
+
+        if self.shared.sender_count.load(Ordering::Acquire) == 0
+            || self.shared.receiver_dropped.load(Ordering::Relaxed)
+        {
+            inner.recv_waker = None;
+            return Poll::Ready(Ok(0));
+        }
+
         match &inner.recv_waker {
             Some(existing) if existing.will_wake(task_cx.waker()) => {}
             _ => inner.recv_waker = Some(task_cx.waker().clone()),
@@ -1132,6 +1413,36 @@ impl<T, Caps> Drop for Recv<'_, T, Caps> {
     }
 }
 
+/// Future returned by [`Receiver::recv_many`].
+pub struct RecvMany<'a, T, Caps = crate::cx::cap::All> {
+    receiver: &'a mut Receiver<T>,
+    cx: &'a Cx<Caps>,
+    buffer: &'a mut Vec<T>,
+    limit: usize,
+    polled: bool,
+}
+
+impl<T, Caps> Future for RecvMany<'_, T, Caps> {
+    type Output = Result<usize, RecvError>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        this.polled = true;
+        this.receiver
+            .poll_recv_many(this.cx, this.buffer, this.limit, ctx)
+    }
+}
+
+impl<T, Caps> Drop for RecvMany<'_, T, Caps> {
+    fn drop(&mut self) {
+        if self.polled {
+            let mut inner = self.receiver.shared.inner.lock();
+            inner.recv_waker = None;
+        }
+    }
+}
+
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let (wakers, _items) = {
@@ -1157,6 +1468,133 @@ impl<T> Drop for Receiver<T> {
         for waker in wakers {
             waker.wake();
         }
+    }
+}
+
+/// The receiving side of an unbounded MPSC channel.
+pub struct UnboundedReceiver<T> {
+    inner: Receiver<T>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for UnboundedReceiver<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnboundedReceiver")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<T> UnboundedReceiver<T> {
+    /// Closes the channel, preventing any further messages from being sent.
+    #[inline]
+    pub fn close(&mut self) {
+        self.inner.close();
+    }
+
+    /// Creates a receive future for the next value.
+    #[inline]
+    #[must_use]
+    pub fn recv<'a, Caps>(&'a mut self, cx: &'a Cx<Caps>) -> Recv<'a, T, Caps> {
+        self.inner.recv(cx)
+    }
+
+    /// Creates a receive future that appends up to `limit` values into `buffer`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # async fn example(cx: &asupersync::Cx) {
+    /// use asupersync::channel::mpsc;
+    ///
+    /// let (tx, mut rx) = mpsc::unbounded_channel();
+    /// tx.send("a").unwrap();
+    /// tx.send("b").unwrap();
+    ///
+    /// let mut batch = Vec::new();
+    /// let count = rx.recv_many(cx, &mut batch, 1).await.unwrap();
+    /// assert_eq!(count, 1);
+    /// assert_eq!(batch, vec!["a"]);
+    /// # }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn recv_many<'a, Caps>(
+        &'a mut self,
+        cx: &'a Cx<Caps>,
+        buffer: &'a mut Vec<T>,
+        limit: usize,
+    ) -> RecvMany<'a, T, Caps> {
+        self.inner.recv_many(cx, buffer, limit)
+    }
+
+    /// Polls the receive operation directly without constructing a temporary future.
+    #[inline]
+    pub fn poll_recv<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<Result<T, RecvError>> {
+        self.inner.poll_recv(cx, task_cx)
+    }
+
+    /// Polls a batch receive operation directly.
+    #[inline]
+    pub fn poll_recv_many<Caps>(
+        &mut self,
+        cx: &Cx<Caps>,
+        buffer: &mut Vec<T>,
+        limit: usize,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<Result<usize, RecvError>> {
+        self.inner.poll_recv_many(cx, buffer, limit, task_cx)
+    }
+
+    /// Attempts to receive a value without blocking.
+    #[inline]
+    pub fn try_recv(&mut self) -> Result<T, RecvError> {
+        self.inner.try_recv()
+    }
+
+    /// Returns true if all senders have been dropped.
+    #[inline]
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    /// Returns true if there are any queued messages.
+    #[inline]
+    #[must_use]
+    pub fn has_messages(&self) -> bool {
+        self.inner.has_messages()
+    }
+
+    /// Returns the number of queued messages.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns true if the queue is empty.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Returns the unbounded capacity sentinel.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
+    /// Returns an opt-in redacted telemetry snapshot for this receiver.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> MpscTelemetrySnapshot {
+        self.inner.telemetry_snapshot(channel_id)
     }
 }
 
@@ -1607,6 +2045,338 @@ mod tests {
         let ok = matches!(value, Ok(42));
         crate::assert_with_log!(ok, "try_recv value", true, ok);
         crate::test_complete!("try_recv_when_empty");
+    }
+
+    #[test]
+    fn recv_many_drains_up_to_limit_and_reports_closed_empty() {
+        init_test("recv_many_drains_up_to_limit_and_reports_closed_empty");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<usize>(8);
+        let mut buffer = vec![99];
+
+        for value in 0..5 {
+            tx.try_send(value).expect("send queued value");
+        }
+
+        let first = block_on(rx.recv_many(&cx, &mut buffer, 3)).expect("recv_many first batch");
+        crate::assert_with_log!(first == 3, "first batch size", 3usize, first);
+        crate::assert_with_log!(
+            buffer == vec![99, 0, 1, 2],
+            "first batch values",
+            vec![99, 0, 1, 2],
+            buffer.clone()
+        );
+
+        let second = block_on(rx.recv_many(&cx, &mut buffer, 8)).expect("recv_many second batch");
+        crate::assert_with_log!(second == 2, "second batch size", 2usize, second);
+        crate::assert_with_log!(
+            buffer == vec![99, 0, 1, 2, 3, 4],
+            "all batch values",
+            vec![99, 0, 1, 2, 3, 4],
+            buffer.clone()
+        );
+
+        drop(tx);
+        let closed = block_on(rx.recv_many(&cx, &mut buffer, 8)).expect("closed empty batch");
+        crate::assert_with_log!(closed == 0, "closed empty count", 0usize, closed);
+        crate::test_complete!("recv_many_drains_up_to_limit_and_reports_closed_empty");
+    }
+
+    #[test]
+    fn recv_many_limit_zero_returns_immediately() {
+        init_test("recv_many_limit_zero_returns_immediately");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<usize>(2);
+        let mut buffer = Vec::new();
+
+        tx.try_send(1).expect("send queued value");
+        let count = block_on(rx.recv_many(&cx, &mut buffer, 0)).expect("zero limit");
+        crate::assert_with_log!(count == 0, "zero limit count", 0usize, count);
+        crate::assert_with_log!(
+            buffer.is_empty(),
+            "buffer unchanged",
+            true,
+            buffer.is_empty()
+        );
+        crate::assert_with_log!(
+            rx.try_recv().expect("queued value remains") == 1,
+            "queued value preserved",
+            1usize,
+            1usize
+        );
+        crate::test_complete!("recv_many_limit_zero_returns_immediately");
+    }
+
+    #[test]
+    fn recv_many_wakes_one_sender_per_freed_slot() {
+        init_test("recv_many_wakes_one_sender_per_freed_slot");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<usize>(2);
+
+        tx.try_send(1).expect("first send fills slot");
+        tx.try_send(2).expect("second send fills slot");
+
+        let wake_count_a = Arc::new(AtomicUsize::new(0));
+        let waker_a = counting_waker(Arc::clone(&wake_count_a));
+        let mut ctx_a = Context::from_waker(&waker_a);
+        let mut reserve_a = Box::pin(tx.reserve(&cx));
+        crate::assert_with_log!(
+            reserve_a.as_mut().poll(&mut ctx_a).is_pending(),
+            "reserve A waits while channel full",
+            true,
+            true
+        );
+
+        let wake_count_b = Arc::new(AtomicUsize::new(0));
+        let waker_b = counting_waker(Arc::clone(&wake_count_b));
+        let mut ctx_b = Context::from_waker(&waker_b);
+        let mut reserve_b = Box::pin(tx.reserve(&cx));
+        crate::assert_with_log!(
+            reserve_b.as_mut().poll(&mut ctx_b).is_pending(),
+            "reserve B waits behind A",
+            true,
+            true
+        );
+
+        let mut buffer = Vec::new();
+        let drained = block_on(rx.recv_many(&cx, &mut buffer, 2)).expect("recv_many drains both");
+        crate::assert_with_log!(drained == 2, "recv_many drained count", 2usize, drained);
+        crate::assert_with_log!(
+            buffer == vec![1, 2],
+            "recv_many drained values",
+            vec![1, 2],
+            buffer.clone()
+        );
+        crate::assert_with_log!(
+            wake_count_a.load(Ordering::SeqCst) == 1,
+            "recv_many wakes head waiter",
+            1usize,
+            wake_count_a.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            wake_count_b.load(Ordering::SeqCst) == 1,
+            "recv_many wakes next waiter for second freed slot",
+            1usize,
+            wake_count_b.load(Ordering::SeqCst)
+        );
+
+        let permit_a = match reserve_a.as_mut().poll(&mut ctx_a) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("reserve A should acquire freed capacity"),
+        };
+        crate::assert_with_log!(
+            wake_count_b.load(Ordering::SeqCst) >= 1,
+            "reserve B keeps wake for its freed slot",
+            "at least one wake",
+            wake_count_b.load(Ordering::SeqCst)
+        );
+
+        let permit_b = match reserve_b.as_mut().poll(&mut ctx_b) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("reserve B should acquire second freed slot"),
+        };
+
+        crate::assert_with_log!(
+            matches!(permit_a.send(3), Outcome::Ok(())),
+            "permit A commits",
+            "Ok(())",
+            "Ok(())"
+        );
+        crate::assert_with_log!(
+            matches!(permit_b.send(4), Outcome::Ok(())),
+            "permit B commits",
+            "Ok(())",
+            "Ok(())"
+        );
+
+        crate::assert_with_log!(
+            rx.try_recv().expect("first cascaded value") == 3,
+            "first cascaded value",
+            3usize,
+            3usize
+        );
+        crate::assert_with_log!(
+            rx.try_recv().expect("second cascaded value") == 4,
+            "second cascaded value",
+            4usize,
+            4usize
+        );
+        crate::test_complete!("recv_many_wakes_one_sender_per_freed_slot");
+    }
+
+    #[test]
+    fn unbounded_channel_send_recv_fifo_without_capacity_wait() {
+        init_test("unbounded_channel_send_recv_fifo_without_capacity_wait");
+        let (tx, mut rx) = unbounded_channel::<usize>();
+
+        crate::assert_with_log!(
+            tx.capacity() == usize::MAX && rx.capacity() == usize::MAX,
+            "unbounded capacity sentinel",
+            usize::MAX,
+            tx.capacity()
+        );
+
+        for value in 0..128 {
+            tx.send(value).expect("unbounded send should not wait");
+        }
+
+        crate::assert_with_log!(rx.len() == 128, "queued values", 128, rx.len());
+
+        for expected in 0..128 {
+            let actual = rx.try_recv().expect("queued value");
+            crate::assert_with_log!(actual == expected, "fifo value", expected, actual);
+        }
+
+        crate::assert_with_log!(rx.is_empty(), "empty after drain", true, rx.is_empty());
+        crate::test_complete!("unbounded_channel_send_recv_fifo_without_capacity_wait");
+    }
+
+    #[test]
+    fn unbounded_alias_matches_unbounded_channel_behavior() {
+        init_test("unbounded_alias_matches_unbounded_channel_behavior");
+        let (tx, mut rx) = unbounded::<usize>();
+
+        tx.send(5).expect("unbounded alias send");
+        crate::assert_with_log!(
+            tx.capacity() == usize::MAX,
+            "alias sender capacity",
+            usize::MAX,
+            tx.capacity()
+        );
+        crate::assert_with_log!(
+            rx.try_recv().expect("alias queued value") == 5,
+            "alias receive",
+            5usize,
+            5usize
+        );
+        crate::test_complete!("unbounded_alias_matches_unbounded_channel_behavior");
+    }
+
+    #[test]
+    fn unbounded_sender_clone_keeps_receiver_open_until_last_sender_drops() {
+        init_test("unbounded_sender_clone_keeps_receiver_open_until_last_sender_drops");
+        let (tx, mut rx) = unbounded_channel::<i32>();
+        let tx_clone = tx.clone();
+
+        drop(tx);
+        crate::assert_with_log!(
+            !rx.is_closed(),
+            "clone keeps receiver open",
+            false,
+            rx.is_closed()
+        );
+
+        tx_clone.send(7).expect("send through clone");
+        drop(tx_clone);
+
+        crate::assert_with_log!(rx.is_closed(), "last sender closed", true, rx.is_closed());
+        crate::assert_with_log!(
+            rx.try_recv().expect("queued value") == 7,
+            "queued value",
+            7,
+            7
+        );
+        crate::assert_with_log!(
+            matches!(rx.try_recv(), Err(RecvError::Disconnected)),
+            "disconnected after drain",
+            "Disconnected",
+            "Disconnected"
+        );
+        crate::test_complete!("unbounded_sender_clone_keeps_receiver_open_until_last_sender_drops");
+    }
+
+    #[test]
+    fn unbounded_send_returns_value_when_receiver_dropped() {
+        init_test("unbounded_send_returns_value_when_receiver_dropped");
+        let (tx, rx) = unbounded_channel::<String>();
+        drop(rx);
+
+        let result = tx.send("payload".to_owned());
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Disconnected(ref value)) if value == "payload"),
+            "disconnected returns payload",
+            "payload",
+            format!("{result:?}")
+        );
+        crate::test_complete!("unbounded_send_returns_value_when_receiver_dropped");
+    }
+
+    #[test]
+    fn unbounded_receiver_recv_accepts_cx_path() {
+        init_test("unbounded_receiver_recv_accepts_cx_path");
+        let cx = test_cx();
+        let (tx, mut rx) = unbounded_channel::<i32>();
+
+        tx.send(11).expect("send");
+        let value = block_on(rx.recv(&cx)).expect("recv through cx path");
+        crate::assert_with_log!(value == 11, "recv value", 11, value);
+        crate::test_complete!("unbounded_receiver_recv_accepts_cx_path");
+    }
+
+    #[test]
+    fn unbounded_receiver_recv_many_batches() {
+        init_test("unbounded_receiver_recv_many_batches");
+        let cx = test_cx();
+        let (tx, mut rx) = unbounded_channel::<usize>();
+        let mut buffer = Vec::new();
+
+        for value in 10..15 {
+            tx.send(value).expect("unbounded send");
+        }
+
+        let count = block_on(rx.recv_many(&cx, &mut buffer, 4)).expect("recv_many batch");
+        crate::assert_with_log!(count == 4, "batch size", 4usize, count);
+        crate::assert_with_log!(
+            buffer == vec![10, 11, 12, 13],
+            "batch values",
+            vec![10, 11, 12, 13],
+            buffer.clone()
+        );
+        crate::assert_with_log!(
+            rx.try_recv().expect("remaining value") == 14,
+            "remaining value",
+            14usize,
+            14usize
+        );
+        crate::test_complete!("unbounded_receiver_recv_many_batches");
+    }
+
+    #[test]
+    fn unbounded_sender_supports_explicit_two_phase_send() {
+        init_test("unbounded_sender_supports_explicit_two_phase_send");
+        let (tx, mut rx) = unbounded_channel::<i32>();
+
+        let permit = tx.try_reserve().expect("unbounded try_reserve");
+        let outcome = permit.send(21);
+        crate::assert_with_log!(
+            matches!(outcome, Outcome::Ok(())),
+            "two-phase send outcome",
+            "Ok",
+            format!("{outcome:?}")
+        );
+        crate::assert_with_log!(rx.try_recv().expect("recv") == 21, "recv value", 21, 21);
+        crate::test_complete!("unbounded_sender_supports_explicit_two_phase_send");
+    }
+
+    #[test]
+    fn weak_unbounded_sender_obeys_sender_liveness() {
+        init_test("weak_unbounded_sender_obeys_sender_liveness");
+        let (tx, mut rx) = unbounded_channel::<i32>();
+        let weak = tx.downgrade();
+
+        let upgraded = weak.upgrade().expect("sender is alive");
+        upgraded.send(13).expect("send through upgraded sender");
+        drop(tx);
+        drop(upgraded);
+
+        crate::assert_with_log!(weak.upgrade().is_none(), "weak sees closed", true, true);
+        crate::assert_with_log!(
+            rx.try_recv().expect("queued value") == 13,
+            "queued value",
+            13,
+            13
+        );
+        crate::test_complete!("weak_unbounded_sender_obeys_sender_liveness");
     }
 
     #[test]
@@ -3109,6 +3879,60 @@ pub mod backpressure_metamorphic {
         }
     }
 
+    fn run_unbounded_pending_recv_drop_case(
+        cx: &crate::cx::Cx,
+        messages: &[u32],
+        drop_pending_recv_first: bool,
+    ) -> (Vec<u32>, (usize, usize, usize, bool), usize) {
+        let (sender, mut receiver) = unbounded_channel::<u32>();
+        let shared = Arc::clone(&sender.inner.shared);
+
+        if drop_pending_recv_first {
+            let waker = metamorphic_noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut recv_fut = Box::pin(receiver.recv(cx));
+            assert!(
+                matches!(recv_fut.as_mut().poll(&mut task_cx), Poll::Pending),
+                "empty unbounded receiver should register a pending recv"
+            );
+            drop(recv_fut);
+
+            let recv_waker_cleared = shared.inner.lock().recv_waker.is_none();
+            assert!(
+                recv_waker_cleared,
+                "dropping a pending recv future must clear its registered waker"
+            );
+        }
+
+        for &message in messages {
+            sender
+                .send(message)
+                .expect("unbounded send should succeed while receiver is live");
+        }
+        drop(sender);
+
+        let mut transcript = Vec::with_capacity(messages.len());
+        while let Ok(value) = receiver.try_recv() {
+            transcript.push(value);
+        }
+        assert!(
+            matches!(receiver.try_recv(), Err(RecvError::Disconnected)),
+            "drained unbounded receiver should report disconnection"
+        );
+
+        let final_state = {
+            let inner = shared.inner.lock();
+            (
+                inner.queue.len(),
+                inner.reserved,
+                inner.send_wakers.len(),
+                inner.recv_waker.is_some(),
+            )
+        };
+        let remaining_senders = shared.sender_count.load(Ordering::Acquire);
+        (transcript, final_state, remaining_senders)
+    }
+
     /// MR1: Capacity Conservation
     ///
     /// Invariant: total_capacity = queued + reserved + available
@@ -3504,6 +4328,81 @@ pub mod backpressure_metamorphic {
                         }
                         .await;
                     }).unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
+                });
+                Ok(())
+            })
+            .expect("Property test failed");
+    }
+
+    /// MR2d: cancelling a pending unbounded receive is observationally a no-op.
+    ///
+    /// Property: registering and dropping a pending receive future before any
+    /// messages arrive must not change the eventual FIFO transcript, must not
+    /// lose messages, and must not leave a stale receive waker.
+    #[test]
+    fn metamorphic_unbounded_pending_recv_drop_preserves_drain_transcript() {
+        use proptest::test_runner::TestRunner;
+
+        let strategy = proptest::collection::vec(any::<u16>(), 0..=64)
+            .prop_flat_map(|messages| (Just(messages), any::<u64>()));
+        let mut runner = TestRunner::default();
+
+        runner
+            .run(&strategy, |(messages, seed)| {
+                crate::lab::runtime::test(seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
+                                async {
+                                    let messages: Vec<u32> =
+                                        messages.into_iter().map(u32::from).collect();
+
+                                    let baseline =
+                                        run_unbounded_pending_recv_drop_case(&cx, &messages, false);
+                                    let transformed =
+                                        run_unbounded_pending_recv_drop_case(&cx, &messages, true);
+
+                                    assert_eq!(
+                                        baseline.0, messages,
+                                        "baseline unbounded drain transcript drifted"
+                                    );
+                                    assert_eq!(
+                                        transformed.0, messages,
+                                        "pending recv drop changed unbounded drain transcript"
+                                    );
+                                    assert_eq!(
+                                        transformed.0, baseline.0,
+                                        "pending recv drop lost or reordered messages"
+                                    );
+                                    assert_eq!(
+                                        baseline.1,
+                                        (0, 0, 0, false),
+                                        "baseline leaked queue/reservation/waker state"
+                                    );
+                                    assert_eq!(
+                                        transformed.1, baseline.1,
+                                        "pending recv drop left stale channel state"
+                                    );
+                                    assert_eq!(
+                                        baseline.2, 0,
+                                        "baseline left live unbounded senders"
+                                    );
+                                    assert_eq!(
+                                        transformed.2, baseline.2,
+                                        "pending recv drop changed sender teardown"
+                                    );
+
+                                    Ok(())
+                                }
+                                .await;
+                        })
+                        .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
                     assert_lab_report_success(report);
