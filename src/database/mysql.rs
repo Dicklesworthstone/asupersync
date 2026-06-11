@@ -6086,10 +6086,13 @@ mod tests {
 
             let sql = command_sql(&read_client_command(&mut stream));
             assert_eq!(sql, "SELECT 1");
-            // Column count + one column definition, then stall before any
-            // row/terminator so the client parks inside the row loop.
+            // Column count + one column definition + the column-phase EOF
+            // terminator (capabilities=0 → !CLIENT_DEPRECATE_EOF), then
+            // stall before any row/terminator so the client parks inside
+            // the row loop — the only phase with a per-packet checkpoint.
             write_response_packet(&mut stream, 1, vec![0x01]);
             write_response_packet(&mut stream, 2, column_definition_payload("value"));
+            write_response_packet(&mut stream, 3, eof_packet_payload(0));
             columns_sent_tx.send(()).expect("signal columns sent");
             // Hold the socket open until the client has finished draining;
             // dropping early would surface a read error instead of the
