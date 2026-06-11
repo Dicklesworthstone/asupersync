@@ -1529,8 +1529,6 @@ impl LabRuntime {
         self.deadline_monitor.as_mut()
     }
 
-    /// Executes a single step.
-    #[allow(clippy::too_many_lines)]
     /// Returns the lab's deterministic spawn mailbox.
     ///
     /// Requests enqueued here (with pending-spawn credits, per the A1.2
@@ -1568,6 +1566,8 @@ impl LabRuntime {
         }
     }
 
+    /// Executes a single step.
+    #[allow(clippy::too_many_lines)]
     fn step(&mut self) {
         self.steps += 1;
         self.drain_spawn_admissions();
