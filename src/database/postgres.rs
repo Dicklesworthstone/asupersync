@@ -8742,7 +8742,13 @@ mod tests {
     fn read_until_contains(peer: &mut std::net::TcpStream, needle: &[u8]) -> Vec<u8> {
         use std::io::Read;
 
-        peer.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+        // br-asupersync-uvqpga: 2s rather than 200ms — on a loaded test
+        // worker the client thread can easily be descheduled past 200ms,
+        // and a panicking responder helper does not reliably unblock the
+        // main thread when sibling helpers hold try_clone'd copies of the
+        // peer socket (the prepared_cache_eviction hang). 2s matches the
+        // MySQL test-server convention.
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .expect("set_read_timeout");
 
         let mut seen = Vec::new();
