@@ -368,8 +368,9 @@ tokio::spawn(async move {
 });
 ```
 
-All spawned tasks must go through `scope.spawn()` or the `AsupersyncExecutor`
-which routes to the correct region.
+All spawned tasks must go through `Cx::spawn`, `Cx::spawn_in(&scope, ...)`, the
+state-threaded boot path `Scope::spawn_registered`, or the
+`AsupersyncExecutor` which routes to the correct region.
 
 ### 5.4 NEVER: Swallow Cancellation
 
@@ -529,7 +530,7 @@ With this adapter architecture, users can:
 
 | From (Tokio) | To (Asupersync + Adapter) |
 |-------|------|
-| `tokio::spawn(future)` | `scope.spawn(&mut state, &cx, \|cx\| future)` |
+| `tokio::spawn(future)` | `cx.spawn(\|cx\| async move { future.await })` or `cx.spawn_in(&scope, \|cx\| future)` |
 | `tokio::time::sleep(dur)` | `asupersync::time::sleep(dur)` |
 | `tokio::net::TcpListener::bind(addr)` | `asupersync::net::TcpListener::bind(addr)` |
 | `#[tokio::main]` | `asupersync::runtime::run(...)` |

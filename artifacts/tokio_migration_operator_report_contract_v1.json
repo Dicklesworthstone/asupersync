@@ -137,7 +137,7 @@
       "state": "partial_evidence",
       "scenario_id": "TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP",
       "source_idiom": "tokio::spawn + JoinHandle",
-      "asupersync_rewrite": "Scope::spawn with region-owned TaskHandle::join(&Cx)",
+      "asupersync_rewrite": "Cx::spawn/Cx::spawn_in with region-owned TaskHandle::join(&Cx)",
       "required_cx_capability_surface": "Cx plus Scope region ownership",
       "invariant_gained": "region_close_quiescence",
       "risk_remaining": "correctness evidence exists, but performance evidence is missing",
@@ -169,7 +169,7 @@
         "proof_ref": "asupersync-shdwrk"
       },
       "operator_next_step": "Generate miglat performance evidence before recommending this rewrite beyond correctness review.",
-      "projection_hash": 6505052651722473426
+      "projection_hash": 9137148253294091462
     },
     {
       "report_id": "TM-OPERATOR-REFUSE-STALE-MUTEX",

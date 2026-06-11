@@ -788,7 +788,7 @@ raptorq
 
 ```
 Cx::scope or scope! macro
-    -> Scope::spawn (wired through runtime state)
+    -> Cx::spawn / Cx::spawn_in (runtime-wired) or Scope::spawn_registered (boot path)
         -> Runtime scheduler
             -> Task polls
                 -> cx.checkpoint() (cancellation observation)

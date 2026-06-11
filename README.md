@@ -51,32 +51,35 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 
 ## Quick Example
 
-Current API note: the structured-concurrency surface is explicit today. Child
-regions take `&mut RuntimeState`, a parent `&Cx`, and an explicit policy.
+Current API note: runtime-wired code spawns through `Cx::spawn` for the current
+region, or `Cx::spawn_in` for an explicit scope's region. The remaining
+`Scope::spawn_registered` API is the synchronous boot/test path for call sites
+that already hold `&mut RuntimeState`.
 
 ```rust
-use asupersync::{Cx, Error, LabConfig, LabRuntime, Outcome, Scope};
-use asupersync::runtime::{RegionCreateError, RuntimeState};
-use asupersync::types::policy::FailFast;
+use asupersync::{Cx, Error, LabConfig, LabRuntime, Outcome};
+use asupersync::runtime::{RuntimeBuilder, SpawnError};
 
-// Structured concurrency: a child region closes to quiescence before returning.
-async fn main_task(
-    scope: &Scope<'_>,
-    state: &mut RuntimeState,
-    cx: &Cx,
-) -> Result<Outcome<(), Error>, RegionCreateError> {
-    scope
-        .region(state, cx, FailFast, |child, state| async move {
-            child
-                .spawn(state, cx, |task_cx| async move { worker_a(&task_cx).await })
-                .expect("spawn worker_a");
-            child
-                .spawn(state, cx, |task_cx| async move { worker_b(&task_cx).await })
-                .expect("spawn worker_b");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = RuntimeBuilder::current_thread().build()?;
+    runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a runtime Cx");
+        main_task(&cx).await
+    })?;
+    Ok(())
+}
 
-            Outcome::ok(())
-        })
-        .await
+// Structured concurrency: spawned tasks are owned by the current region and
+// joined before the parent task finishes.
+async fn main_task(cx: &Cx) -> Result<(), SpawnError> {
+    let mut worker_a = cx.spawn(|task_cx| async move { worker_a(&task_cx).await })?;
+    let mut worker_b = cx.spawn(|task_cx| async move { worker_b(&task_cx).await })?;
+
+    let a = worker_a.join(cx).await.expect("worker_a joins");
+    let b = worker_b.join(cx).await.expect("worker_b joins");
+    assert!(matches!(a, Outcome::Ok(())));
+    assert!(matches!(b, Outcome::Ok(())));
+    Ok(())
 }
 
 // Cancellation is a protocol, not a flag.
@@ -114,7 +117,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 
 | tokio | asupersync | Key difference |
 |-------|-----------|----------------|
-| `tokio::spawn(fut)` | `scope.spawn(&mut state, &cx, \|cx\| fut)` | Task is owned by a region; cannot orphan. Factory receives its own `Cx`. |
+| `tokio::spawn(fut)` | `cx.spawn(\|cx\| async move { fut.await })` or `cx.spawn_in(&scope, \|cx\| fut)` | Task is owned by a region; cannot orphan. Factory receives its own `Cx`. |
 | `JoinHandle<T>` | `TaskHandle<T>` | `.join(&cx).await` returns `Result<T, JoinError>`. JoinError is Cancelled or Panicked. |
 | `tokio::spawn_blocking(f)` | `spawn_blocking(f)` | Same idea. Runs closure on a blocking pool thread. |
 | `tokio::select!` | `Select::new(a, b).await` | Returns `Either::Left(a)` / `Either::Right(b)`. Futures must be `Unpin`. Use `Scope::race` for auto-drain of losers. |
@@ -182,23 +185,26 @@ async fn main() {
 
 ```rust
 use asupersync::channel::mpsc;
+use asupersync::Cx;
 use asupersync::time::sleep;
 use std::time::Duration;
 
-async fn run(cx: &Cx, scope: &Scope) {
+async fn run(cx: &Cx) {
     let (tx, mut rx) = mpsc::channel::<i32>(10);
 
-    scope.spawn(&mut state, cx, move |cx| async move {
+    let mut producer = cx.spawn(move |cx| async move {
         for i in 0..5 {
             let permit = tx.reserve(&cx).await.unwrap(); // cancel-safe
             permit.send(i);                               // cannot fail
             sleep(cx.now(), Duration::from_millis(100)).await;
         }
-    });
+    }).expect("spawn producer");
 
     while let Ok(val) = rx.recv(&cx).await {
         println!("got: {val}");
     }
+
+    let _ = producer.join(cx).await;
 }
 ```
 
@@ -223,12 +229,12 @@ scope
         &cx,
         asupersync::types::policy::FailFast,
         |sub, state| async move {
-            sub.spawn(state, &cx, |task_cx| async move {
+            sub.spawn_registered(state, &cx, |task_cx| async move {
                 task_cx.checkpoint()?;
                 Outcome::ok(())
             })
                 .expect("spawn task_a");
-            sub.spawn(state, &cx, |task_cx| async move {
+            sub.spawn_registered(state, &cx, |task_cx| async move {
                 task_cx.checkpoint()?;
                 Outcome::ok(())
             })
@@ -612,7 +618,9 @@ pub enum CancelKind {
 pub struct Cx { /* ... */ }
 
 impl Cx {
-    pub fn spawn<F>(&self, f: F) -> TaskHandle;
+    pub fn spawn<F, Fut>(&self, f: F) -> Result<TaskHandle<Fut::Output>, SpawnError>;
+    pub fn spawn_in<F, Fut, P>(&self, scope: &Scope<'_, P>, f: F)
+        -> Result<TaskHandle<Fut::Output>, SpawnError>;
     pub fn checkpoint(&self) -> Result<(), Cancelled>;
     pub fn mask(&self) -> MaskGuard;  // Defer cancellation
     pub fn trace(&self, event: TraceEvent);

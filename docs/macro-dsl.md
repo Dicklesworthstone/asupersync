@@ -226,8 +226,7 @@ Manual API usage (today):
 
 ```rust,ignore
 let scope = cx.scope();
-let (handle, stored) = scope.spawn(&mut state, &cx, |cx| async move { work(cx).await })?;
-state.store_spawned_task(handle.task_id(), stored);
+let handle = scope.spawn_registered(&mut state, &cx, |cx| async move { work(cx).await })?;
 let result = handle.join(&cx).await?;
 ```
 

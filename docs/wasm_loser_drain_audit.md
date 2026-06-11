@@ -52,7 +52,7 @@ requires an explicit `join(cx).await` after abort.
 `src/cx/scope.rs:976`
 
 ```
-1. Spawns both futures as tasks via scope.spawn()
+1. Spawns both futures as region-owned tasks via `Scope::spawn_registered`
 2. Creates JoinFutures with drop_reason = DropReason::RaceLoser
 3. Wraps in Select combinator (biased left-first polling)
 4. Select returns winner → loser JoinFuture DROPPED

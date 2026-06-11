@@ -126,7 +126,7 @@ Persistent homology, sheaf theory, separation logic, Dialectica interpretation, 
 
 **Evidence chain:**
 - I4§F1: "&Cx propagation is viral: it infects every function signature, every trait bound, every library boundary"
-- B6§F4: Asupersync spawn is `scope.spawn(&mut state, &cx, move |cx| async move { ... })` vs Swift's `async let result = doWork()`
+- B6§F4: Asupersync spawn is now `cx.spawn(move |cx| async move { ... })` / `cx.spawn_in(&scope, ...)` for runtime-wired code, with `Scope::spawn_registered` retained for synchronous boot paths, vs Swift's `async let result = doWork()`
 - I4§F2: "None of the examples show a realistic end-to-end application"
 - F3§F2: "The ergonomic cost is real" — proc macros mitigate but don't solve
 

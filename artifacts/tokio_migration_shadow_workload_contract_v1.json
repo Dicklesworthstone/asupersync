@@ -141,8 +141,8 @@
       "scenario_class": "spawn-join-ownership",
       "tokio_idiom": "tokio_spawn_join_handle",
       "tokio_source_surface": "tokio::spawn + JoinHandle",
-      "asupersync_rewrite": "Scope::spawn with region-owned TaskHandle::join(&Cx)",
-      "asupersync_contract_surface": "src/cx/scope.rs",
+      "asupersync_rewrite": "Cx::spawn/Cx::spawn_in with region-owned TaskHandle::join(&Cx)",
+      "asupersync_contract_surface": "src/cx/cx.rs",
       "deterministic_seed": "0xA55A000000000004",
       "workload_scale": {
         "small_mode_tasks": 768,

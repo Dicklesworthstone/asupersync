@@ -47,7 +47,7 @@ All size budgets are tracked as both uncompressed `.wasm` bytes and gzip bytes.
 |---|---|---:|---:|---:|
 | `M-PERF-04A` | `tx.reserve()+send()` p95 (single producer/consumer harness) | <= 8 us | > 8 us | > 12 us |
 | `M-PERF-04B` | timeout arm+cancel p95 (timer wheel adapter harness) | <= 15 us | > 15 us | > 24 us |
-| `M-PERF-04C` | `scope.spawn()+join()` p95 (small task body) | <= 40 us | > 40 us | > 65 us |
+| `M-PERF-04C` | `Cx::spawn()+join()` p95 (small task body) | <= 40 us | > 40 us | > 65 us |
 | `M-PERF-04D` | deterministic replay load+step overhead vs baseline | <= +12% | > +12% | > +20% |
 
 Policy:
