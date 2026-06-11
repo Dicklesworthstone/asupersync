@@ -1172,16 +1172,23 @@ impl SqliteConnection {
                 // budget-derived statement timeout for the duration of this
                 // operation. Wall-clock by necessity — the deadline fires on
                 // a blocking-pool thread that has no virtual-time access.
+                // Arming must succeed before the op runs: silently running
+                // without the requested bound would void the contract.
                 if let Some(limit) = timeout {
                     let deadline = std::time::Instant::now() + limit;
                     conn.progress_handler(
                         TIMEOUT_PROGRESS_OPS,
                         Some(move || std::time::Instant::now() >= deadline),
-                    );
+                    )
+                    .map_err(|e| {
+                        SqliteError::Sqlite(format!("failed to arm statement timeout: {e}"))
+                    })?;
                 }
                 let result = f(conn);
                 if timeout.is_some() {
-                    conn.progress_handler(0, None::<fn() -> bool>);
+                    // Best-effort disarm; failure here implies a broken db
+                    // handle, which every subsequent operation will surface.
+                    let _ = conn.progress_handler(0, None::<fn() -> bool>);
                 }
                 let result = match (timeout, result) {
                     (Some(limit), Err(err)) if sqlite_error_is_interrupt(&err) => {

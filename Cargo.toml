@@ -359,8 +359,10 @@ chrono = { version = "0.4", features = ["serde"], optional = true }
 env_logger = { version = "0.11", optional = true }
 # YAML parsing for FrankenLab scenario files (CLI feature)
 serde_yaml = { version = "0.9", optional = true }
-# SQLite async wrapper - bundled by default for portability
-rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+# SQLite async wrapper - bundled by default for portability; "hooks" enables
+# progress_handler for budget-derived statement timeouts
+# (br-asupersync-server-stack-hardening-eeexl1.1.2)
+rusqlite = { version = "0.39", features = ["bundled", "hooks"], optional = true }
 # SQL parser for secure SQL surface validation (asupersync-dn5hn8)
 sqlparser = { version = "0.52", optional = true }
 # SHA-256 for HMAC-SHA256 (Macaroon caveat chains) and PostgreSQL SCRAM
