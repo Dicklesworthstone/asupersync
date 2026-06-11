@@ -322,15 +322,16 @@ mod pg {
             PgConnection::connect(cx, &self.url).await
         }
 
-        // async is required by the AsyncConnectionManager trait signature
-        // even though this optimistic implementation never awaits.
-        #[allow(clippy::unused_async)]
-        async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
+        fn is_valid(
+            &self,
+            _cx: &Cx,
+            _conn: &mut Self::Connection,
+        ) -> impl std::future::Future<Output = bool> {
             // Cheap optimistic validity: rely on protocol-level errors at the
             // next real query rather than spending a round-trip on Sync ping.
             // Connection validity under fault is exercised separately by the
             // backoff test which forces the connect path.
-            true
+            std::future::ready(true)
         }
     }
 

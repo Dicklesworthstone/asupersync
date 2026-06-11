@@ -7821,7 +7821,11 @@ mod tests {
                 read_only: true,
             };
             assert!(tx.is_read_only(), "transaction must retain READ ONLY mode");
-            tx.execute_static_sql(&cx, "INSERT INTO widgets (id) VALUES (1)")
+            // A write statement that passes the client-side injection
+            // heuristics (INSERT INTO trips the " into " pattern and never
+            // reaches the wire — br-asupersync-uvqpga); the fake server
+            // replies with the READ ONLY rejection regardless of query text.
+            tx.execute_static_sql(&cx, "UPDATE widgets SET id = 2")
                 .await
         });
 
@@ -8015,13 +8019,65 @@ mod tests {
     fn connect_validates_charset_compatibility_without_post_auth_set_names_query() {
         use std::io::ErrorKind;
 
+        let cx = Cx::for_testing();
+        let handshake_caps = capability::CLIENT_PROTOCOL_41
+            | capability::CLIENT_SECURE_CONNECTION
+            | capability::CLIENT_PLUGIN_AUTH;
+
+        // Part 1: a hostile charset value is rejected fail-closed during the
+        // handshake — before the handshake response is written — so the
+        // injection payload never reaches the wire as a post-auth
+        // SET NAMES/SET CHARACTER SET query (br-asupersync-uvqpga: the
+        // legacy expectation of connect success predates the fail-closed
+        // charset-compatibility contract).
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
-        let handshake = handshake_packet_bytes(
-            capability::CLIENT_PROTOCOL_41
-                | capability::CLIENT_SECURE_CONNECTION
-                | capability::CLIENT_PLUGIN_AUTH,
-        );
+        let handshake = handshake_packet_bytes(handshake_caps);
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .expect("set read timeout");
+
+            stream
+                .write_all(&handshake)
+                .expect("write handshake packet");
+            stream.flush().expect("flush handshake packet");
+
+            let mut header = [0u8; 4];
+            let err = stream
+                .read_exact(&mut header)
+                .expect_err("hostile charset must abort before any handshake response bytes");
+            assert!(
+                matches!(
+                    err.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::UnexpectedEof
+                ),
+                "expected silent abort before handshake response, got {err:?}"
+            );
+        });
+
+        let outcome = run(MySqlConnection::connect(
+            &cx,
+            &format!(
+                "mysql://user:p%C3%A4ss@127.0.0.1:{}/db?charset=utf8mb4%27%3BSELECT%201--",
+                addr.port()
+            ),
+        ));
+        match outcome {
+            Outcome::Err(MySqlError::InvalidParameter(msg)) => {
+                assert!(msg.contains("charset mismatch"), "got: {msg}");
+            }
+            other => panic!("expected fail-closed charset rejection, got {other:?}"),
+        }
+        server.join().expect("join hostile-charset server");
+
+        // Part 2: a compatible charset connects successfully with the charset
+        // resolved during the handshake — no post-auth COM_QUERY follows.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handshake = handshake_packet_bytes(handshake_caps);
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept client");
@@ -8068,25 +8124,26 @@ mod tests {
             );
         });
 
-        let cx = Cx::for_testing();
         let outcome = run(MySqlConnection::connect(
             &cx,
             &format!(
-                "mysql://user:p%C3%A4ss@127.0.0.1:{}/db?charset=utf8mb4%27%3BSELECT%201--",
+                "mysql://user:p%C3%A4ss@127.0.0.1:{}/db?charset=utf8mb4",
                 addr.port()
             ),
         ));
-
-        match outcome {
-            Outcome::Ok(_conn) => {}
+        // Keep the connection alive until the server's no-post-auth-query
+        // window has elapsed; dropping it early would turn the expected
+        // read timeout into an EOF race.
+        let conn = match outcome {
+            Outcome::Ok(conn) => conn,
             other => {
                 panic!(
                     "expected connect success with charset validation during handshake, got {other:?}"
                 )
             }
-        }
-
+        };
         server.join().expect("join server");
+        drop(conn);
     }
 
     #[test]
@@ -8246,7 +8303,10 @@ mod tests {
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
                 stream,
-                connection_id: 0,
+                // The statement must inherit this id as its owner
+                // (br-asupersync-uvqpga: was 0, contradicting the
+                // owner_connection_id assertion below).
+                connection_id: 41,
                 capabilities: 0,
                 charset: 0,
                 status_flags: 0,
@@ -8406,7 +8466,28 @@ mod tests {
                 stream
                     .write_all(&packet.bytes)
                     .expect("write prepare OK response");
-                stream.flush().expect("flush prepare OK response");
+
+                // num_params=2 obligates the server to send the parameter
+                // definitions plus the metadata EOF terminator (capabilities=0
+                // → !CLIENT_DEPRECATE_EOF); without them the client correctly
+                // blocks reading metadata (br-asupersync-uvqpga).
+                for seq in [2_u8, 3] {
+                    let mut param_packet = PacketBuffer::new();
+                    param_packet.set_sequence(seq);
+                    param_packet.buf = column_definition_payload("param");
+                    let param_packet = param_packet.build_packet();
+                    stream
+                        .write_all(&param_packet.bytes)
+                        .expect("write parameter metadata");
+                }
+                let mut eof = PacketBuffer::new();
+                eof.set_sequence(4);
+                eof.buf = eof_packet_payload(0);
+                let eof = eof.build_packet();
+                stream
+                    .write_all(&eof.bytes)
+                    .expect("write parameter metadata EOF");
+                stream.flush().expect("flush prepare response");
             }
         });
 
@@ -9124,7 +9205,7 @@ mod tests {
 
     #[test]
     fn test_null_terminated_string_missing_null() {
-        let data = [b'a', b'b', b'c']; // No null terminator
+        let data = *b"abc"; // No null terminator
         let mut reader = PacketReader::new(&data);
         let err = reader.read_null_terminated().unwrap_err();
         assert!(matches!(err, MySqlError::Protocol(_)));

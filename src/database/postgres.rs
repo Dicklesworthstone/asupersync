@@ -6429,6 +6429,7 @@ impl PgConnection {
             oid::TIMESTAMP => PgValue::Text(decode_binary_timestamp_to_text(data)?),
             oid::INTERVAL => PgValue::Text(decode_binary_interval_to_text(data)?),
             oid::NUMERIC => PgValue::Text(decode_binary_numeric_to_text(data)?),
+            oid::UUID => PgValue::Text(decode_binary_uuid_to_text(data)?),
             oid::BYTEA => PgValue::Bytes(data.to_vec()),
             oid::JSONB => {
                 if data.first() == Some(&1) {
@@ -7416,6 +7417,25 @@ fn decode_binary_numeric_to_text(data: &[u8]) -> Result<String, PgError> {
     } else {
         Ok(format!("{sign_prefix}{integer}.{fractional}"))
     }
+}
+
+fn decode_binary_uuid_to_text(data: &[u8]) -> Result<String, PgError> {
+    if data.len() != 16 {
+        return Err(PgError::Protocol(format!(
+            "UUID requires exactly 16 bytes, got {}",
+            data.len()
+        )));
+    }
+
+    use std::fmt::Write as _;
+    let mut rendered = String::with_capacity(36);
+    for (index, byte) in data.iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            rendered.push('-');
+        }
+        let _ = write!(rendered, "{byte:02x}");
+    }
+    Ok(rendered)
 }
 
 const POSTGRES_EPOCH_UNIX_DAYS: i64 = 10_957;
@@ -9870,16 +9890,35 @@ mod tests {
         std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
 
         let cx = crate::cx::Cx::for_testing();
+
+        // The channel-name contract is validate-then-quote
+        // (br-asupersync-uvqpga): injection attempts are rejected before any
+        // wire write rather than escaped onto the wire.
         match run(conn.listen(&cx, "jobs\";UNLISTEN *;--")) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("ASCII letters"), "got: {msg}");
+            }
+            other => panic!("expected Protocol rejection, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+
+        match run(conn.listen(&cx, "jobs.high_priority")) {
             Outcome::Ok(()) => {}
             other => panic!("expected successful LISTEN, got {other:?}"),
         }
 
-        let written = read_until_contains(&mut peer, b"LISTEN \"jobs\"\";UNLISTEN *;--\"\0");
+        let expected = b"LISTEN \"jobs.high_priority\"\0";
+        let written = read_until_contains(&mut peer, expected);
         assert!(
             written
-                .windows(b"LISTEN \"jobs\"\";UNLISTEN *;--\"\0".len())
-                .any(|window| window == b"LISTEN \"jobs\"\";UNLISTEN *;--\"\0")
+                .windows(expected.len())
+                .any(|window| window == expected)
+        );
+        assert!(
+            !written
+                .windows(b"UNLISTEN *".len())
+                .any(|window| window == b"UNLISTEN *"),
+            "rejected channel name must not reach the wire"
         );
     }
 
@@ -9890,17 +9929,34 @@ mod tests {
         std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
 
         let cx = crate::cx::Cx::for_testing();
+
+        // Same validate-then-quote contract as listen
+        // (br-asupersync-uvqpga): hostile names never reach the socket.
         match run(conn.unlisten(&cx, "jobs\";LISTEN attacker;--")) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("ASCII letters"), "got: {msg}");
+            }
+            other => panic!("expected Protocol rejection, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+
+        match run(conn.unlisten(&cx, "jobs.high_priority")) {
             Outcome::Ok(()) => {}
             other => panic!("expected successful UNLISTEN, got {other:?}"),
         }
 
-        let expected = b"UNLISTEN \"jobs\"\";LISTEN attacker;--\"\0";
+        let expected = b"UNLISTEN \"jobs.high_priority\"\0";
         let written = read_until_contains(&mut peer, expected);
         assert!(
             written
                 .windows(expected.len())
                 .any(|window| window == expected)
+        );
+        assert!(
+            !written
+                .windows(b"LISTEN attacker".len())
+                .any(|window| window == b"LISTEN attacker"),
+            "rejected channel name must not reach the wire"
         );
     }
 
@@ -10309,56 +10365,46 @@ mod tests {
     }
 
     #[test]
-    fn begin_with_isolation_cancelled_before_verify_query_rolls_back_to_idle() {
+    fn begin_with_isolation_cancelled_mid_exchange_fails_closed() {
         let (mut conn, mut peer) = make_test_connection_with_peer();
         let cx = Cx::for_testing();
         let cancel_cx = cx.clone();
 
         let io_thread = std::thread::spawn(move || {
-            let mut client_bytes =
+            let client_bytes =
                 read_until_contains(&mut peer, b"BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE");
             cancel_cx.cancel_fast(CancelKind::User);
-
+            // One response wakes a client already blocked in read_message so
+            // it observes the cancellation at the response-loop checkpoint;
+            // nothing further is scripted because the client tears the
+            // exchange down fail-closed instead of draining to ReadyForQuery.
             std::io::Write::write_all(&mut peer, &backend_message(b'C', b"BEGIN\0"))
                 .expect("write BEGIN CommandComplete");
-            std::io::Write::write_all(&mut peer, &ready_for_query(b'T'))
-                .expect("write BEGIN ReadyForQuery");
-            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"ROLLBACK\0"))
-                .expect("write ROLLBACK CommandComplete");
-            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
-                .expect("write ROLLBACK ReadyForQuery");
-
-            if !client_bytes
-                .windows(b"ROLLBACK".len())
-                .any(|window| window == b"ROLLBACK")
-            {
-                client_bytes.extend(read_until_contains(&mut peer, b"ROLLBACK"));
-            }
             client_bytes
         });
 
         let outcome = run(conn.begin_with_isolation(&cx, IsolationLevel::Serializable, false));
         assert_user_cancelled(outcome);
+        // Cancellation observed while the BEGIN exchange is still in flight
+        // takes the wire-cancel + fail-closed teardown path
+        // (cancel_in_flight): the half-consumed protocol stream cannot be
+        // safely reused, so no in-band compensating ROLLBACK is attempted on
+        // this socket (br-asupersync-uvqpga). The pre-cancelled and
+        // cancelled-during-verify begin paths keep their rollback/orphan
+        // coverage in begin_with_isolation_rollback_on_cancel_verification
+        // and begin_with_isolation_cancelled_during_verify_marks_orphan_cleanup.
         assert!(
-            !conn.inner.closed,
-            "successful compensating rollback should return the connection to idle"
-        );
-        assert_eq!(conn.inner.transaction_status, b'I');
-        assert!(
-            !conn.inner.needs_rollback,
-            "successful compensating rollback should not leave orphan cleanup markers behind"
-        );
-        assert!(
-            !conn.inner.needs_discard,
-            "successful compensating rollback should keep the connection reusable"
+            conn.inner.closed,
+            "cancel observed mid-exchange must tear the connection down fail-closed"
         );
 
         let client_bytes = io_thread.join().expect("postgres peer thread should exit");
+        let begin_frame = b"BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE";
         assert!(
             client_bytes
-                .windows(b"ROLLBACK".len())
-                .any(|window| window == b"ROLLBACK"),
-            "client should issue a compensating ROLLBACK before surfacing cancellation"
+                .windows(begin_frame.len())
+                .any(|window| window == begin_frame),
+            "client should have issued the BEGIN before cancellation"
         );
     }
 
@@ -12163,7 +12209,13 @@ mod tests {
 
     #[test]
     fn build_bind_execute_msg_matches_psql_prepared_statement_wire_bytes() {
-        let params: Vec<&dyn ToSql> = vec![&42i32];
+        // psql sends parameters as text; our typed integer encoding is
+        // deliberately binary (count=1 global compression, covered by
+        // build_bind_msg_encodes_single_global_binary_format_count), so the
+        // byte-exact differential uses a text-typed parameter
+        // (br-asupersync-uvqpga).
+        let text_param = String::from("42");
+        let params: Vec<&dyn ToSql> = vec![&text_param];
         let bind = build_bind_msg("", "s", &params, Format::Text).unwrap();
         let execute = build_execute_msg("", 0).unwrap();
 
@@ -12418,7 +12470,7 @@ mod tests {
 
     #[test]
     fn fuzz_apply_ready_for_query_accepts_transaction_state_bytes() {
-        for status in [b'I', b'T', b'E'] {
+        for status in *b"ITE" {
             let (result, final_status) = fuzz_apply_ready_for_query(&[status], b'I');
             match result {
                 Ok(parsed) => assert_eq!(parsed, status),
@@ -13293,15 +13345,15 @@ mod tests {
                     payload_len: 4,
                 },
             ),
+            // Channel names outside the strict identifier charset are
+            // fail-closed on the inbound parser too: the client can never be
+            // subscribed to such a channel under the validate-then-quote
+            // listen contract (br-asupersync-uvqpga).
             case(
-                "valid-quoted-identifier-chars",
+                "quoted-identifier-chars-rejected",
                 b"jobs.queue\"blue",
                 Vec::new(),
-                Expected::Ok {
-                    process_id: 42,
-                    channel: "jobs.queue\"blue",
-                    payload_len: 0,
-                },
+                Expected::ErrContains("ASCII letters"),
             ),
             case(
                 "payload-exact-limit",
@@ -14674,9 +14726,10 @@ mod tests {
             // Test 1: Single chunk with complete rows
             let full_chunk = build_copy_data_message(&test_data.text_format);
             assert_eq!(full_chunk[0], b'd');
+            // The wire length field includes itself (br-asupersync-uvqpga).
             let chunk_length =
                 u32::from_be_bytes([full_chunk[1], full_chunk[2], full_chunk[3], full_chunk[4]]);
-            assert_eq!(chunk_length, test_data.text_format.len() as u32);
+            assert_eq!(chunk_length, test_data.text_format.len() as u32 + 4);
 
             // Test 2: Multiple chunks with row boundaries
             let row1 = b"123\tJohn Doe\ttrue\n";
@@ -14692,8 +14745,8 @@ mod tests {
             let chunk1_len = u32::from_be_bytes([chunk1[1], chunk1[2], chunk1[3], chunk1[4]]);
             let chunk2_len = u32::from_be_bytes([chunk2[1], chunk2[2], chunk2[3], chunk2[4]]);
 
-            assert_eq!(chunk1_len, row1.len() as u32);
-            assert_eq!(chunk2_len, row2.len() as u32);
+            assert_eq!(chunk1_len, row1.len() as u32 + 4);
+            assert_eq!(chunk2_len, row2.len() as u32 + 4);
 
             // Test 3: Verify chunk data integrity
             assert_eq!(&chunk1[5..], row1);
@@ -14745,12 +14798,23 @@ mod tests {
             // In a real implementation, this would flush all pending COPY data
             // Here we test that the message format is correct for triggering flush
 
-            // Verify the message can be parsed as a proper protocol message
+            // Verify the message can be parsed as a proper protocol message.
+            // The wire length field includes itself, so a payload-free
+            // CopyDone parses as 4, never 0 (br-asupersync-uvqpga: this
+            // previously contradicted the length assertion above).
             let mut cursor = Cursor::new(&copy_done_msg[1..]); // Skip type byte
             let mut length_buf = [0u8; 4];
             cursor.read_exact(&mut length_buf).unwrap();
             let parsed_length = u32::from_be_bytes(length_buf);
-            assert_eq!(parsed_length, 0);
+            assert_eq!(
+                parsed_length, 4,
+                "CopyDone wire length counts only the length field itself"
+            );
+            assert_eq!(
+                cursor.position() as usize,
+                copy_done_msg.len() - 1,
+                "no payload bytes may follow the CopyDone length field"
+            );
         }
 
         #[test]
@@ -15663,8 +15727,7 @@ mod tests {
                 .iter()
                 .flatten()
                 .next()
-                .map(|bytes| bytes_fingerprint(bytes))
-                .unwrap_or_else(|| "none".to_string());
+                .map_or_else(|| "none".to_string(), |bytes| bytes_fingerprint(bytes));
             captures
                 .lock()
                 .expect("captures lock")
@@ -17204,7 +17267,7 @@ mod tests {
                 PgValue::Text("hello".to_string()),
             ),
             // TEXT with empty string
-            (oid::TEXT, b"".as_slice(), PgValue::Text("".to_string())),
+            (oid::TEXT, b"".as_slice(), PgValue::Text(String::new())),
             // BOOL true
             (oid::BOOL, b"t".as_slice(), PgValue::Bool(true)),
             // BOOL false
@@ -17459,17 +17522,18 @@ mod tests {
                     let id_value = row.get("id").expect("id column should exist");
                     let data_value = row.get("data").expect("data column should exist");
 
-                    // Verify data consistency
-                    if let (PgValue::Text(id_str), PgValue::Text(data_str)) = (id_value, data_value)
-                    {
-                        let expected_id = processed_count.to_string();
-                        assert_eq!(*id_str, expected_id, "ID should match row index");
+                    // Verify data consistency. Text-format INT4 decodes to a
+                    // typed Int4 value, not Text (br-asupersync-uvqpga).
+                    if let (PgValue::Int4(id), PgValue::Text(data_str)) = (id_value, data_value) {
+                        assert_eq!(*id, processed_count, "ID should match row index");
                         assert!(
                             data_str.contains(&format!("row_data_{}", processed_count)),
                             "Data should contain row index"
                         );
                     } else {
-                        panic!("Expected text values for both columns");
+                        panic!(
+                            "Expected Int4 id and Text data, got id={id_value:?} data={data_value:?}"
+                        );
                     }
 
                     processed_count += 1;
@@ -17566,13 +17630,14 @@ mod tests {
                 .any(|window| window == oid::INT4.to_be_bytes()),
             "Parse frame should carry the inferred INT4 parameter OID"
         );
+        assert!(written.contains(&b'B'), "Bind frame should be present");
+        // Typed integer params are binary-encoded on the wire: 4-byte length
+        // prefix followed by the big-endian value (br-asupersync-uvqpga).
         assert!(
-            written.iter().any(|byte| *byte == b'B'),
-            "Bind frame should be present"
-        );
-        assert!(
-            written.windows(2).any(|window| window == b"42"),
-            "Bind frame should serialize the parameter value"
+            written
+                .windows(8)
+                .any(|window| window == [0, 0, 0, 4, 0, 0, 0, 42]),
+            "Bind frame should serialize the parameter value as length-prefixed binary"
         );
         assert!(
             written

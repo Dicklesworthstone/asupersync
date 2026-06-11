@@ -410,7 +410,12 @@ fn resolve_sqlite_open_path(path: &Path) -> Result<PathBuf, SqliteError> {
     Ok(canonical_parent.join(file_name))
 }
 
-fn validate_sqlite_open_path(path: &Path) -> Result<(), SqliteError> {
+/// Lexical path checks that must run on the raw, pre-resolution input:
+/// canonicalization erases `~` and `..` components, so running these after
+/// resolution would either mask the rejection (traversal that resolves to an
+/// allowed directory) or surface it as an unrelated Io error (tilde paths
+/// whose literal `~` parent does not exist).
+fn validate_sqlite_open_path_lexical(path: &Path) -> Result<(), SqliteError> {
     let raw = path.as_os_str().to_string_lossy();
     if raw.starts_with('~') {
         return Err(SqliteError::UnsafePath(
@@ -428,6 +433,11 @@ fn validate_sqlite_open_path(path: &Path) -> Result<(), SqliteError> {
         ));
     }
 
+    Ok(())
+}
+
+fn validate_sqlite_open_path(path: &Path) -> Result<(), SqliteError> {
+    validate_sqlite_open_path_lexical(path)?;
     let resolved = resolve_sqlite_open_path(path)?;
     validate_resolved_sqlite_path(&resolved)
 }
@@ -1351,6 +1361,10 @@ impl SqliteConnection {
 
         let handle = pool.spawn(move || {
             let result = (|| {
+                // SECURITY: lexical tilde/parent-traversal rejection must see the
+                // raw input before canonicalization erases those components
+                // (br-asupersync-uvqpga: open() previously skipped these checks).
+                validate_sqlite_open_path_lexical(&path)?;
                 // SECURITY FIX: Resolve path once and use same resolved path for both validation and opening
                 // Eliminates TOCTOU vulnerability where symlinks could change between check and use
                 let resolved_path = resolve_sqlite_open_path(&path)?;
@@ -4735,8 +4749,12 @@ mod tests {
             }
 
             /// Helper to check current journal mode.
+            ///
+            /// PRAGMA is rejected by the checked SQL surface
+            /// (asupersync-dn5hn8), so these conformance helpers go through
+            /// the explicit *_unchecked API (br-asupersync-uvqpga).
             async fn get_journal_mode(conn: &SqliteConnection, cx: &Cx) -> String {
-                let rows = match conn.query(cx, "PRAGMA journal_mode", &[]).await {
+                let rows = match conn.query_unchecked(cx, "PRAGMA journal_mode", &[]).await {
                     Outcome::Ok(rows) => rows,
                     other => panic!("Failed to query journal_mode: {other:?}"),
                 };
@@ -4756,7 +4774,7 @@ mod tests {
                 mode: &str,
             ) -> Outcome<String, SqliteError> {
                 let sql = format!("PRAGMA journal_mode = {}", mode);
-                match conn.query(cx, &sql, &[]).await {
+                match conn.query_unchecked(cx, &sql, &[]).await {
                     Outcome::Ok(rows) => Outcome::Ok(
                         rows[0]
                             .get_idx(0)
@@ -4809,16 +4827,29 @@ mod tests {
             run_test_with_cx(|cx| async move {
                 let test_data = JournalModeTestData::new();
 
-                // Open connection - should default to DELETE mode
+                // asupersync connection defaults enable WAL on open
+                // (configure_connection_defaults), so the DELETE starting
+                // point must be established explicitly
+                // (br-asupersync-uvqpga).
                 let conn = match SqliteConnection::open(&cx, test_data.get_db_path()).await {
                     Outcome::Ok(conn) => conn,
                     other => panic!("Failed to open connection: {other:?}"),
                 };
 
-                // Verify initial journal mode is DELETE
                 let initial_mode = JournalModeTestData::get_journal_mode(&conn, &cx).await;
                 assert_eq!(
                     initial_mode.to_lowercase(),
+                    "wal",
+                    "asupersync connection defaults should enable WAL"
+                );
+
+                let delete_result =
+                    match JournalModeTestData::set_journal_mode(&conn, &cx, "DELETE").await {
+                        Outcome::Ok(mode) => mode,
+                        other => panic!("Failed to set DELETE mode: {other:?}"),
+                    };
+                assert_eq!(
+                    delete_result.to_lowercase(),
                     "delete",
                     "Should start in DELETE mode"
                 );
@@ -4973,9 +5004,12 @@ mod tests {
                 JournalModeTestData::setup_test_data(&conn, &cx).await;
                 JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
 
-                // Begin transaction and modify data
+                // Begin transaction and modify data. Transaction-control
+                // statements are rejected by the checked SQL surface
+                // (asupersync-dn5hn8), so this crash-simulation batch uses the
+                // explicit *_unchecked API (br-asupersync-uvqpga).
                 match conn
-                    .execute_batch(
+                    .execute_batch_unchecked(
                         &cx,
                         "
                     BEGIN TRANSACTION;
