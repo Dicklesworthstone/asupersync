@@ -58,11 +58,16 @@ use crate::runtime::state::SpawnError;
 use crate::runtime::stored_task::StoredTask;
 use crate::trace::TraceBufferHandle;
 use crate::trace::event::TraceEvent;
+use crate::types::Outcome;
 use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
 use crate::util::{ArenaIndex, CachePadded};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 
 pub use crate::record::region::{PendingSpawnCounter, PendingSpawnReservation};
 
@@ -180,6 +185,84 @@ pub type UnadmittedCancelFn = Box<dyn FnOnce(CancelReason) + Send>;
 /// the runtime state.
 pub type AdmissionErrorFn = Box<dyn FnOnce(SpawnError) + Send>;
 
+/// Erased future type produced by a spawn factory.
+pub type SpawnBoxFuture = Pin<Box<dyn Future<Output = Outcome<(), ()>> + Send>>;
+
+/// Erased spawn factory (br-asupersync-4h8lye / A2.1).
+///
+/// Receives the child capability context that **admission** builds (canonical
+/// arena task id, full driver handles) and returns the task future. The
+/// factory is invoked by [`LazyFactoryTask`] at the task's *first poll* — on
+/// a worker, outside the `RuntimeState` lock — never during admission.
+pub type SpawnFactoryFn = Box<dyn FnOnce(crate::cx::Cx) -> SpawnBoxFuture + Send>;
+
+/// Identity of an admitted task, published to producers via
+/// [`SpawnRequest::with_admitted_slot`].
+#[derive(Debug, Clone)]
+pub struct AdmittedTask {
+    /// Canonical arena task id (replaces the provisional mailbox id).
+    pub task_id: TaskId,
+    /// Weak handle to the admission-built capability context, for
+    /// handle-side abort plumbing (A2.2).
+    pub cx_inner: std::sync::Weak<parking_lot::RwLock<crate::types::task_context::CxInner>>,
+}
+
+/// What a [`SpawnRequest`] carries to admission.
+pub enum SpawnPayload {
+    /// A pre-erased future, wrapped by the producer (A1 path; the producer
+    /// already had everything it needed — e.g. `RuntimeInner::spawn`).
+    Task(StoredTask),
+    /// A factory awaiting the admission-built child `Cx` (A2 path; the
+    /// factory-receives-its-own-Cx discipline with the canonical task id).
+    Factory(SpawnFactoryFn),
+}
+
+impl fmt::Debug for SpawnPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Task(_) => f.write_str("SpawnPayload::Task"),
+            Self::Factory(_) => f.write_str("SpawnPayload::Factory"),
+        }
+    }
+}
+
+/// Adapter stored for factory spawns: first poll invokes the factory with
+/// the admission-built `Cx` (worker thread, no runtime lock held), then
+/// delegates every poll to the produced future.
+pub struct LazyFactoryTask {
+    factory: Option<(SpawnFactoryFn, crate::cx::Cx)>,
+    inner: Option<SpawnBoxFuture>,
+}
+
+impl LazyFactoryTask {
+    /// Pairs a factory with the admission-built child context.
+    #[must_use]
+    pub fn new(factory: SpawnFactoryFn, cx: crate::cx::Cx) -> Self {
+        Self {
+            factory: Some((factory, cx)),
+            inner: None,
+        }
+    }
+}
+
+impl Future for LazyFactoryTask {
+    type Output = Outcome<(), ()>;
+
+    fn poll(mut self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.inner.is_none() {
+            let Some((factory, cx)) = self.factory.take() else {
+                return Poll::Ready(Outcome::Ok(()));
+            };
+            self.inner = Some(factory(cx));
+        }
+        self.inner
+            .as_mut()
+            .expect("inner future set above")
+            .as_mut()
+            .poll(task_cx)
+    }
+}
+
 /// A spawn request travelling through the [`SpawnMailbox`].
 ///
 /// Carries everything admission needs to create the task record under the
@@ -194,10 +277,11 @@ pub struct SpawnRequest {
     region: RegionId,
     budget: Budget,
     name: Option<Arc<str>>,
-    task: StoredTask,
+    payload: SpawnPayload,
     on_unadmitted_cancel: Option<UnadmittedCancelFn>,
     on_admission_error: Option<AdmissionErrorFn>,
     pending_reservation: Option<PendingSpawnReservation>,
+    admitted_slot: Option<Arc<OnceLock<AdmittedTask>>>,
 }
 
 /// Destructured [`SpawnRequest`] handed to the admission path.
@@ -210,8 +294,8 @@ pub struct SpawnRequestParts {
     pub budget: Budget,
     /// Optional debug name.
     pub name: Option<Arc<str>>,
-    /// The erased future to store.
-    pub task: StoredTask,
+    /// The work to admit (pre-erased future, or factory awaiting its Cx).
+    pub payload: SpawnPayload,
     /// Completion slot for cancel-before-admission.
     pub on_unadmitted_cancel: Option<UnadmittedCancelFn>,
     /// Completion slot for non-cancellation admission failures
@@ -221,6 +305,8 @@ pub struct SpawnRequestParts {
     /// only *after* the task is in the region's task list
     /// (decrement-after-successor-visibility; see [`PendingSpawnCounter`]).
     pub pending_reservation: Option<PendingSpawnReservation>,
+    /// Producer-shared slot admission fills with the canonical identity.
+    pub admitted_slot: Option<Arc<OnceLock<AdmittedTask>>>,
 }
 
 impl SpawnRequest {
@@ -230,16 +316,47 @@ impl SpawnRequest {
     /// and identifiable as provisional ([`is_spawn_mailbox_id`]).
     #[must_use]
     pub fn new(task_id: TaskId, region: RegionId, budget: Budget, task: StoredTask) -> Self {
+        Self::with_payload(task_id, region, budget, SpawnPayload::Task(task))
+    }
+
+    /// Creates a factory spawn request (br-asupersync-4h8lye / A2.1): the
+    /// factory receives the admission-built child `Cx` at the task's first
+    /// poll, on a worker, outside the runtime lock.
+    #[must_use]
+    pub fn new_with_factory(
+        task_id: TaskId,
+        region: RegionId,
+        budget: Budget,
+        factory: SpawnFactoryFn,
+    ) -> Self {
+        Self::with_payload(task_id, region, budget, SpawnPayload::Factory(factory))
+    }
+
+    fn with_payload(
+        task_id: TaskId,
+        region: RegionId,
+        budget: Budget,
+        payload: SpawnPayload,
+    ) -> Self {
         Self {
             task_id,
             region,
             budget,
             name: None,
-            task,
+            payload,
             on_unadmitted_cancel: None,
             on_admission_error: None,
             pending_reservation: None,
+            admitted_slot: None,
         }
+    }
+
+    /// Attaches a producer-shared slot that admission fills with the
+    /// canonical task identity (arena id + Cx weak handle).
+    #[must_use]
+    pub fn with_admitted_slot(mut self, slot: Arc<OnceLock<AdmittedTask>>) -> Self {
+        self.admitted_slot = Some(slot);
+        self
     }
 
     /// Attaches a debug name.
@@ -320,10 +437,11 @@ impl SpawnRequest {
             region: self.region,
             budget: self.budget,
             name: self.name,
-            task: self.task,
+            payload: self.payload,
             on_unadmitted_cancel: self.on_unadmitted_cancel,
             on_admission_error: self.on_admission_error,
             pending_reservation: self.pending_reservation,
+            admitted_slot: self.admitted_slot,
         }
     }
 
@@ -350,12 +468,12 @@ impl SpawnRequestParts {
     /// released last.
     pub fn resolve_cancelled(self, reason: CancelReason) {
         let Self {
-            task,
+            payload,
             on_unadmitted_cancel,
             pending_reservation,
             ..
         } = self;
-        drop(task);
+        drop(payload);
         if let Some(slot) = on_unadmitted_cancel {
             slot(reason);
         }
@@ -370,13 +488,13 @@ impl SpawnRequestParts {
     /// resolves; the pending-spawn credit is released last.
     pub fn resolve_failed(self, error: SpawnError) {
         let Self {
-            task,
+            payload,
             on_unadmitted_cancel,
             on_admission_error,
             pending_reservation,
             ..
         } = self;
-        drop(task);
+        drop(payload);
         if let Some(slot) = on_admission_error {
             slot(error);
         } else if let Some(slot) = on_unadmitted_cancel {
@@ -1340,5 +1458,174 @@ mod tests {
             assert_eq!(value, i, "join handle resolves with the task value");
         }
         assert_eq!(counter.load(Ordering::SeqCst), TASKS);
+    }
+
+    // === br-asupersync-4h8lye (A2.1): factory spawns + lab drain ===
+
+    use crate::lab::{LabConfig, LabRuntime};
+
+    fn factory_request(
+        mailbox: &SpawnMailbox,
+        region: RegionId,
+        ran: &Arc<AtomicUsize>,
+        completed: &Arc<AtomicUsize>,
+    ) -> SpawnRequest {
+        let id = mailbox.allocate_task_id();
+        let ran = Arc::clone(ran);
+        let completed = Arc::clone(completed);
+        SpawnRequest::new_with_factory(
+            id,
+            region,
+            Budget::new(),
+            Box::new(move |cx: crate::cx::Cx| {
+                ran.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    !is_spawn_mailbox_id(cx.task_id()),
+                    "factory must receive the admission-built Cx with the \
+                     canonical arena id, got {:?}",
+                    cx.task_id()
+                );
+                Box::pin(async move {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                    Outcome::Ok(())
+                })
+            }),
+        )
+    }
+
+    /// The factory runs at the task's FIRST POLL on the lab step loop —
+    /// not during admission under the state lock.
+    #[test]
+    fn factory_runs_at_first_poll_not_at_admission() {
+        let mut lab = LabRuntime::new(LabConfig::new(7));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let handle = lab
+            .state
+            .region(root)
+            .expect("root exists")
+            .pending_spawn_handle();
+        let mailbox = lab.spawn_mailbox();
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let req = factory_request(&mailbox, root, &ran, &completed)
+            .with_pending_reservation(handle.reserve());
+        mailbox.enqueue(req, Time::ZERO);
+
+        // Admit WITHOUT polling: drain directly against state.
+        let parts = mailbox.dequeue().expect("queued").into_parts();
+        let admission = lab.state.admit_spawn_request(parts);
+        let crate::runtime::state::SpawnAdmission::Admitted { task_id, priority } = admission
+        else {
+            panic!("expected admission");
+        };
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "factory must NOT run during admission"
+        );
+
+        // Schedule + run: factory fires on first poll, future completes.
+        lab.scheduler.lock().schedule(task_id, priority);
+        lab.run_until_quiescent();
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "factory ran exactly once");
+        assert_eq!(completed.load(Ordering::SeqCst), 1, "task completed");
+    }
+
+    /// Admission fills the producer-shared admitted slot with the arena id
+    /// and a live Cx weak handle.
+    #[test]
+    fn admitted_slot_filled_with_canonical_identity() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let mailbox = SpawnMailbox::new();
+        let slot: Arc<OnceLock<AdmittedTask>> = Arc::new(OnceLock::new());
+        let ran = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let req =
+            factory_request(&mailbox, root, &ran, &completed).with_admitted_slot(Arc::clone(&slot));
+        let provisional = req.task_id();
+        mailbox.enqueue(req, Time::ZERO);
+
+        let parts = mailbox.dequeue().expect("queued").into_parts();
+        let crate::runtime::state::SpawnAdmission::Admitted { task_id, .. } =
+            state.admit_spawn_request(parts)
+        else {
+            panic!("expected admission");
+        };
+        let admitted = slot.get().expect("slot filled at admission");
+        assert_eq!(admitted.task_id, task_id);
+        assert_ne!(
+            admitted.task_id, provisional,
+            "arena id replaces provisional"
+        );
+        assert!(
+            admitted.cx_inner.upgrade().is_some(),
+            "cx weak handle is live while the task exists"
+        );
+    }
+
+    /// Lab step loop drains the mailbox FIFO and runs factory tasks to
+    /// completion; two identical runs produce identical admitted ids.
+    #[test]
+    fn lab_step_drains_factory_spawns_deterministically() {
+        fn run_once() -> (usize, Vec<u64>) {
+            const K: usize = 6;
+            let mut lab = LabRuntime::new(LabConfig::new(11));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let handle = lab
+                .state
+                .region(root)
+                .expect("root exists")
+                .pending_spawn_handle();
+            let mailbox = lab.spawn_mailbox();
+            let ran = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let mut slots = Vec::new();
+            for _ in 0..K {
+                let slot: Arc<OnceLock<AdmittedTask>> = Arc::new(OnceLock::new());
+                let req = factory_request(&mailbox, root, &ran, &completed)
+                    .with_pending_reservation(handle.reserve())
+                    .with_admitted_slot(Arc::clone(&slot));
+                mailbox.enqueue(req, Time::ZERO);
+                slots.push(slot);
+            }
+            // The mailbox gates quiescence via pending credits, so a plain
+            // run_until_quiescent drives admission + execution end to end.
+            lab.run_until_quiescent();
+            assert_eq!(completed.load(Ordering::SeqCst), K);
+            assert_eq!(handle.count(), 0, "credits balanced after admission");
+            let ids = slots
+                .iter()
+                .map(|s| s.get().expect("admitted").task_id.as_u64())
+                .collect();
+            (ran.load(Ordering::SeqCst), ids)
+        }
+
+        let (ran_a, ids_a) = run_once();
+        let (ran_b, ids_b) = run_once();
+        assert_eq!(ran_a, 6);
+        assert_eq!(ids_a, ids_b, "admitted arena ids replay-identical");
+    }
+
+    /// Cancel-before-admission with a factory payload: the factory is
+    /// dropped uninvoked and the cancel slot fires.
+    #[test]
+    fn factory_request_cancelled_before_admission_never_runs() {
+        let mailbox = SpawnMailbox::new();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_slot = Arc::clone(&cancelled);
+        let req = factory_request(&mailbox, test_region(), &ran, &completed)
+            .with_unadmitted_cancel(Box::new(move |_| {
+                cancelled_slot.fetch_add(1, Ordering::SeqCst);
+            }));
+        mailbox.enqueue(req, Time::ZERO);
+
+        let req = mailbox.dequeue().expect("queued");
+        req.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "factory never invoked");
+        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
     }
 }

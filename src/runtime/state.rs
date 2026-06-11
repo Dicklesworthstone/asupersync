@@ -2287,14 +2287,35 @@ impl RuntimeState {
             record.set_cx(cx.clone());
         });
 
-        // Store the producer-wrapped future under the canonical arena id.
+        // Store the work under the canonical arena id. Factory payloads are
+        // wrapped in a LazyFactoryTask so the user factory runs at first
+        // poll on a worker — never here under the state lock
+        // (br-asupersync-4h8lye / A2.1).
         let crate::runtime::spawn_mailbox::SpawnRequestParts {
-            mut task,
+            payload,
             pending_reservation,
+            admitted_slot,
             ..
         } = parts;
-        task.set_task_id(task_id);
-        self.tasks.store_spawned_task(task_id, task);
+        let stored = match payload {
+            crate::runtime::spawn_mailbox::SpawnPayload::Task(mut task) => {
+                task.set_task_id(task_id);
+                task
+            }
+            crate::runtime::spawn_mailbox::SpawnPayload::Factory(factory) => {
+                StoredTask::new_with_id(
+                    crate::runtime::spawn_mailbox::LazyFactoryTask::new(factory, cx.clone()),
+                    task_id,
+                )
+            }
+        };
+        self.tasks.store_spawned_task(task_id, stored);
+        if let Some(slot) = admitted_slot {
+            let _ = slot.set(crate::runtime::spawn_mailbox::AdmittedTask {
+                task_id,
+                cx_inner: std::sync::Arc::downgrade(&cx.inner),
+            });
+        }
 
         self.record_task_spawn(task_id, region);
         self.record_task_trace_event(task_id, |seq| {

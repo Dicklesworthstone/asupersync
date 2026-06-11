@@ -704,6 +704,9 @@ pub struct LabRuntime {
     pub state: RuntimeState,
     /// Lab reactor for deterministic I/O simulation.
     lab_reactor: Arc<LabReactor>,
+    /// Deterministic spawn intake (br-asupersync-4h8lye / A2.1): requests
+    /// enqueued here are admitted in FIFO order at the top of each step.
+    spawn_mailbox: Arc<crate::runtime::spawn_mailbox::SpawnMailbox>,
     /// Tokens seen for I/O submissions (for trace emission).
     seen_io_tokens: DetHashSet<usize>,
     /// Scheduler.
@@ -773,6 +776,7 @@ impl LabRuntime {
         Self {
             state,
             lab_reactor,
+            spawn_mailbox: Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::new()),
             seen_io_tokens: DetHashSet::default(),
             scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
             config,
@@ -1527,8 +1531,46 @@ impl LabRuntime {
 
     /// Executes a single step.
     #[allow(clippy::too_many_lines)]
+    /// Returns the lab's deterministic spawn mailbox.
+    ///
+    /// Requests enqueued here (with pending-spawn credits, per the A1.2
+    /// contract) are admitted in FIFO order at the start of the next step,
+    /// so `run_until_quiescent` observes them as live work end to end.
+    #[must_use]
+    pub fn spawn_mailbox(&self) -> Arc<crate::runtime::spawn_mailbox::SpawnMailbox> {
+        Arc::clone(&self.spawn_mailbox)
+    }
+
+    /// Admits every pending spawn request in FIFO order
+    /// (br-asupersync-4h8lye / A2.1). Lab is single-threaded, so denial
+    /// slots run inline; admitted tasks join the lab scheduler at their
+    /// budget priority. Deterministic: admission order is exactly enqueue
+    /// order, and the admitted arena ids depend only on prior state.
+    fn drain_spawn_admissions(&mut self) {
+        if self.spawn_mailbox.is_empty() {
+            return;
+        }
+        while let Some(request) = self.spawn_mailbox.dequeue() {
+            match self.state.admit_spawn_request(request.into_parts()) {
+                crate::runtime::state::SpawnAdmission::Admitted { task_id, priority } => {
+                    self.scheduler.lock().schedule(task_id, priority);
+                }
+                crate::runtime::state::SpawnAdmission::Denied { parts, error } => match error {
+                    crate::runtime::state::SpawnError::RegionClosed(_)
+                    | crate::runtime::state::SpawnError::RegionNotFound(_) => {
+                        parts.resolve_cancelled(crate::types::CancelReason::new(
+                            crate::types::CancelKind::ParentCancelled,
+                        ));
+                    }
+                    other => parts.resolve_failed(other),
+                },
+            }
+        }
+    }
+
     fn step(&mut self) {
         self.steps += 1;
+        self.drain_spawn_admissions();
         let rng_value = self.rng.next_u64();
         if self.steps < 50 {
             crate::tracing_compat::trace!(
