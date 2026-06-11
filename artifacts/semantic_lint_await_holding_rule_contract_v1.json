@@ -1,0 +1,90 @@
+{
+  "contract_version": "semantic-lint-await-holding-rule-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+  "rule_id": "await-while-holding-capability-resource",
+  "source_of_truth": {
+    "inventory": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "contract": "artifacts/semantic_lint_await_holding_rule_contract_v1.json",
+    "contract_test": "tests/semantic_lint_await_holding_contract.rs",
+    "runner": "scripts/semantic_lint.py",
+    "docs": "docs/semantic_lint_await_holding_rule.md",
+    "positive_guard_fixture": "tests/fixtures/semantic_lint/await_holding/positive_mutex_guard.rs",
+    "positive_permit_fixture": "tests/fixtures/semantic_lint/await_holding/positive_permit.rs",
+    "negative_fixture": "tests/fixtures/semantic_lint/await_holding/negative_drop_before_await.rs",
+    "valid_allow_fixture": "tests/fixtures/semantic_lint/await_holding/valid_allow.rs",
+    "invalid_allow_fixture": "tests/fixtures/semantic_lint/await_holding/invalid_allow.rs"
+  },
+  "implementation": {
+    "selected_engine": "rustc-hir",
+    "runner_default_engine": "auto",
+    "result_schema": "semantic-lint-results-v1",
+    "candidate_scanner": true,
+    "requires_future_hir_confirmation": true,
+    "no_source_rewrites": true,
+    "no_runtime_behavior_change": true
+  },
+  "target_paths": [
+    "src/sync/",
+    "src/channel/",
+    "src/obligation/",
+    "src/cx/registry.rs",
+    "src/database/"
+  ],
+  "candidate_policy": {
+    "reports": [
+      "obvious local lock guard binding reaches a later .await before drop(name)",
+      "obvious local permit, lease, reserve, or capability token binding reaches a later .await before drop(name)"
+    ],
+    "accepts": [
+      "explicit drop(name) before the later await",
+      "allowed fixture-only await-holding candidates with reason and owner"
+    ],
+    "diagnostic_must_name": "live across .await"
+  },
+  "allow_marker": {
+    "format": "asupersync-lint:allow await-while-holding-capability-resource reason=<short reason> owner=<asupersync-bead-id>",
+    "locations": [
+      "same line as finding",
+      "immediately preceding line"
+    ],
+    "requires": [
+      "reason",
+      "owner"
+    ],
+    "owner_must_match": "^asupersync-[A-Za-z0-9_.-]+$",
+    "invalid_marker_does_not_suppress": true
+  },
+  "fixtures": [
+    {
+      "path": "tests/fixtures/semantic_lint/await_holding/positive_mutex_guard.rs",
+      "expected_verdict": "fail",
+      "expected_kind": "await_while_holding_guard"
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/await_holding/positive_permit.rs",
+      "expected_verdict": "fail",
+      "expected_kind": "await_while_holding_permit"
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/await_holding/negative_drop_before_await.rs",
+      "expected_verdict": "pass",
+      "expected_findings": 0
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/await_holding/valid_allow.rs",
+      "expected_verdict": "pass",
+      "expected_suppressed": 1
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/await_holding/invalid_allow.rs",
+      "expected_verdict": "fail",
+      "expected_invalid_allow_markers": 1
+    }
+  ],
+  "no_claims": [
+    "does not close every rule required by asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+    "does not provide complete rustc-HIR type-aware guard lifetime tracking",
+    "does not prove every guard, permit, lease, or capability token in the repository is dropped before await",
+    "does not rewrite source code"
+  ]
+}

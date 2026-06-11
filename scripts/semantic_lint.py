@@ -18,11 +18,13 @@ CLEANUP_BUDGET_RULE_ID = "unbounded-cleanup-budget"
 CORE_TOKIO_RULE_ID = "core-tokio-feature-leakage"
 LOOP_CHECKPOINT_RULE_ID = "loop-without-cx-checkpoint"
 IGNORED_OUTCOME_RULE_ID = "ignored-outcome-severity"
+AWAIT_HOLDING_RULE_ID = "await-while-holding-capability-resource"
 SCHEMA_VERSION = "semantic-lint-results-v1"
 ALLOW_PREFIX = "asupersync-lint:allow"
 OWNER_RE = re.compile(r"^asupersync-[A-Za-z0-9_.-]+$")
 LOOP_CHECKPOINT_ENGINE = "hybrid-rustc-hir-ast-grep"
 IGNORED_OUTCOME_ENGINE = "rustc-hir"
+AWAIT_HOLDING_ENGINE = "rustc-hir"
 LOOP_CHECKPOINT_TARGET_PREFIXES = (
     "src/runtime/",
     "src/lab/",
@@ -39,8 +41,42 @@ IGNORED_OUTCOME_TARGET_PREFIXES = (
     "src/trace/",
     "tests/fixtures/semantic_lint/ignored_outcome/",
 )
+AWAIT_HOLDING_TARGET_PREFIXES = (
+    "src/sync/",
+    "src/channel/",
+    "src/obligation/",
+    "src/cx/registry.rs",
+    "src/database/",
+    "tests/fixtures/semantic_lint/await_holding/",
+)
 LOOP_START_RE = re.compile(r"\b(?:loop\s*\{|while\s+true\s*\{)")
 IGNORED_OUTCOME_RE = re.compile(r"\blet\s+_\s*=\s*[^;]*\bOutcome::")
+AWAIT_HOLDING_BINDING_RE = re.compile(
+    r"\blet\s+(?:mut\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?P<expr>[^;]*(?:\.(?:lock|read|write|reserve|acquire|checkout)\s*\("
+    r"|\bNameLease\b|\bPermit\b|\bLease\b|\bGuard\b)[^;]*)\s*;"
+)
+AWAIT_HOLDING_RESOURCE_NAME_TOKENS = (
+    "guard",
+    "permit",
+    "lease",
+    "resource",
+    "token",
+    "checkout",
+)
+AWAIT_HOLDING_EXPLICIT_TYPE_TOKENS = (
+    "NameLease",
+    "Permit",
+    "Lease",
+    "Guard",
+)
+AWAIT_HOLDING_RESOLUTION_METHODS = (
+    "send",
+    "commit",
+    "abort",
+    "release",
+    "close",
+)
 LOOP_CHECKPOINT_TOKENS = (
     ".checkpoint(",
     "checkpoint(cx",
@@ -1305,6 +1341,199 @@ def build_ignored_outcome_result(files: list[Path], engine: str, cwd: Path) -> d
     }
 
 
+def is_await_holding_target_scope(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return any(normalized.startswith(prefix) for prefix in AWAIT_HOLDING_TARGET_PREFIXES)
+
+
+def collect_await_holding_files(
+    paths: Iterable[str],
+    cwd: Path,
+    all_paths: bool,
+) -> list[Path]:
+    files: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = cwd / path
+        if path.is_dir():
+            files.extend(child for child in path.rglob("*.rs") if child.is_file())
+        elif path.is_file() and path.suffix == ".rs":
+            files.append(path)
+
+    unique = sorted({path.resolve() for path in files}, key=lambda item: repo_relative(item, cwd))
+    if all_paths:
+        return unique
+    return [
+        path
+        for path in unique
+        if is_await_holding_target_scope(repo_relative(path, cwd))
+    ]
+
+
+def classify_await_holding_binding(name: str, expr: str) -> tuple[str, str, str]:
+    searchable = f"{name} {expr}".lower()
+    if any(
+        token in searchable
+        for token in ("permit", "lease", "reserve", "acquire", "checkout", "token")
+    ):
+        return (
+            "await-with-live-permit-or-lease",
+            "await_while_holding_permit",
+            "permit, lease, or capability token is live across .await",
+        )
+    return (
+        "await-with-live-lock-guard",
+        "await_while_holding_guard",
+        "lock guard is live across .await",
+    )
+
+
+def is_obvious_await_holding_binding(name: str, expr: str) -> bool:
+    normalized_name = name.lower().lstrip("_")
+    if any(token in normalized_name for token in AWAIT_HOLDING_RESOURCE_NAME_TOKENS):
+        return True
+    return any(token in expr for token in AWAIT_HOLDING_EXPLICIT_TYPE_TOKENS)
+
+
+def explicit_drop_for(masked_line: str, name: str) -> bool:
+    return re.search(rf"\bdrop\s*\(\s*{re.escape(name)}\s*\)", masked_line) is not None
+
+
+def explicit_resolution_for(masked_line: str, name: str) -> bool:
+    escaped_name = re.escape(name)
+    if explicit_drop_for(masked_line, name):
+        return True
+    return any(
+        re.search(rf"\b{escaped_name}\s*\.\s*{method}\s*\(", masked_line) is not None
+        for method in AWAIT_HOLDING_RESOLUTION_METHODS
+    )
+
+
+def brace_delta(masked_line: str) -> int:
+    return masked_line.count("{") - masked_line.count("}")
+
+
+def build_await_holding_result(files: list[Path], engine: str, cwd: Path) -> dict[str, object]:
+    findings: list[dict[str, object]] = []
+    suppressed: list[dict[str, object]] = []
+    candidate_awaits = 0
+
+    for path in files:
+        rel = repo_relative(path, cwd)
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+        masked_lines = [strip_simple_comments_and_strings(line) for line in raw_lines]
+        scope_depth_after_line: list[int] = []
+        scope_depth = 0
+        for masked_line in masked_lines:
+            scope_depth += brace_delta(masked_line)
+            scope_depth_after_line.append(scope_depth)
+
+        for line_index, masked_line in enumerate(masked_lines):
+            match = AWAIT_HOLDING_BINDING_RE.search(masked_line)
+            if not match:
+                continue
+
+            name = match.group("name")
+            expr = match.group("expr")
+            if not is_obvious_await_holding_binding(name, expr):
+                continue
+            pattern_id, kind, diagnostic = classify_await_holding_binding(name, expr)
+            binding_scope_depth = max(scope_depth_after_line[line_index], 0)
+            for await_line_index in range(line_index + 1, len(masked_lines)):
+                if scope_depth_after_line[await_line_index - 1] < binding_scope_depth:
+                    break
+                await_line = masked_lines[await_line_index]
+                if explicit_resolution_for(await_line, name):
+                    break
+                if ".await" not in await_line:
+                    continue
+
+                candidate_awaits += 1
+                column = await_line.find(".await") + 1
+                marker = allow_marker_for(
+                    raw_lines,
+                    await_line_index + 1,
+                    AWAIT_HOLDING_RULE_ID,
+                )
+                base = {
+                    "rule_id": AWAIT_HOLDING_RULE_ID,
+                    "path": rel,
+                    "line": await_line_index + 1,
+                    "column": column,
+                    "matched_text": raw_lines[await_line_index].strip(),
+                    "pattern_id": pattern_id,
+                    "binding_name": name,
+                    "binding_line": line_index + 1,
+                }
+                if marker and marker["valid"]:
+                    suppressed.append(
+                        {
+                            **base,
+                            "owner": marker["owner"],
+                            "reason": marker["reason"],
+                        }
+                    )
+                    break
+                if marker and not marker["valid"]:
+                    findings.append(
+                        {
+                            **base,
+                            "kind": "invalid_allow_marker",
+                            "severity": "error",
+                            "diagnostic": "invalid allow marker metadata for await-holding resource risk",
+                            "allow_marker_errors": marker["errors"],
+                        }
+                    )
+                findings.append(
+                    {
+                        **base,
+                        "kind": kind,
+                        "severity": "warning",
+                        "diagnostic": diagnostic,
+                    }
+                )
+                break
+
+    findings.sort(
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["column"],
+            item["kind"],
+            item["pattern_id"],
+        )
+    )
+    suppressed.sort(
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["column"],
+            item["pattern_id"],
+        )
+    )
+    scanned = [repo_relative(path, cwd) for path in files]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "rule_id": AWAIT_HOLDING_RULE_ID,
+        "engine": engine,
+        "engine_fallback": False,
+        "verdict": "pass" if not findings else "fail",
+        "scanned_files": scanned,
+        "findings": findings,
+        "suppressed": suppressed,
+        "summary": {
+            "files_scanned": len(scanned),
+            "findings": len(findings),
+            "suppressed": len(suppressed),
+            "candidate_awaits": candidate_awaits,
+            "invalid_allow_markers": sum(
+                1 for finding in findings if finding["kind"] == "invalid_allow_marker"
+            ),
+        },
+    }
+
+
 def unsupported_engine_result(
     files: list[Path],
     cwd: Path,
@@ -1350,6 +1579,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                 CORE_TOKIO_RULE_ID,
                 LOOP_CHECKPOINT_RULE_ID,
                 IGNORED_OUTCOME_RULE_ID,
+                AWAIT_HOLDING_RULE_ID,
             ]
         ),
         help="semantic lint rule id to run",
@@ -1364,6 +1594,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "cargo-metadata",
             LOOP_CHECKPOINT_ENGINE,
             IGNORED_OUTCOME_ENGINE,
+            AWAIT_HOLDING_ENGINE,
         ],
         help="analysis engine; auto prefers ast-grep and falls back deterministically",
     )
@@ -1461,11 +1692,42 @@ def main(argv: list[str]) -> int:
             return 0
         return 0 if result["verdict"] == "pass" else 1
 
+    if args.rule == AWAIT_HOLDING_RULE_ID:
+        files = collect_await_holding_files(args.paths, cwd, args.all_paths)
+        engine = AWAIT_HOLDING_ENGINE if args.engine == "auto" else args.engine
+        if engine != AWAIT_HOLDING_ENGINE:
+            result = unsupported_engine_result(
+                files,
+                cwd,
+                rule_id=AWAIT_HOLDING_RULE_ID,
+                engine=engine,
+                diagnostic=(
+                    "await-while-holding-capability-resource requires the "
+                    "rustc-hir engine"
+                ),
+            )
+        else:
+            result = build_await_holding_result(files, engine, cwd)
+
+        output = json.dumps(result, indent=2, sort_keys=True)
+        if args.json:
+            print(output)
+        else:
+            print(output)
+        if args.exit_zero:
+            return 0
+        return 0 if result["verdict"] == "pass" else 1
+
     rule = RULES[args.rule]
     files = collect_rust_files(args.paths, cwd, args.all_paths, rule)
 
     engine = args.engine
-    if engine in {"cargo-metadata", LOOP_CHECKPOINT_ENGINE, IGNORED_OUTCOME_ENGINE}:
+    if engine in {
+        "cargo-metadata",
+        LOOP_CHECKPOINT_ENGINE,
+        IGNORED_OUTCOME_ENGINE,
+        AWAIT_HOLDING_ENGINE,
+    }:
         result = unsupported_engine_result(
             files,
             cwd,
