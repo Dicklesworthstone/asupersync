@@ -32,11 +32,13 @@
   ],
   "candidate_policy": {
     "reports": [
-      "obvious local lock guard binding reaches a later .await before drop(name)",
-      "obvious local permit, lease, reserve, or capability token binding reaches a later .await before drop(name)"
+      "obvious local lock guard binding with an ownership-looking binding name or explicit type reaches a later .await before explicit resolution",
+      "obvious local permit, lease, resource, or capability token binding with an ownership-looking binding name or explicit type reaches a later .await before explicit resolution"
     ],
     "accepts": [
       "explicit drop(name) before the later await",
+      "explicit name.send(...), name.commit(...), name.abort(...), name.release(...), or name.close(...) before the later await",
+      "bindings whose local name and type do not make resource ownership obvious in this candidate-scanner slice",
       "allowed fixture-only await-holding candidates with reason and owner"
     ],
     "diagnostic_must_name": "live across .await"

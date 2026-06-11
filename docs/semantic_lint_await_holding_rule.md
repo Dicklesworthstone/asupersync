@@ -13,8 +13,11 @@ registry, and database paths:
 - `src/cx/registry.rs`
 - `src/database/`
 
-The first slice reports obvious local bindings where a guard, permit, lease, or
-capability token reaches a later `.await` before an explicit `drop(name)`.
+The first slice reports obvious local bindings where the binding name or type
+marks it as a guard, permit, lease, resource, or capability token, and that
+binding reaches a later `.await` before an explicit resolution such as
+`drop(name)`, `name.send(...)`, `name.commit(...)`, `name.abort(...)`,
+`name.release(...)`, or `name.close(...)`.
 
 Example:
 
@@ -35,4 +38,4 @@ drop(guard);
 This is not a complete rustc-HIR implementation. It is a deterministic
 candidate scanner with fixtures, docs, and no source rewrites; future work still
 needs type-aware confirmation for aliases, tuple fields, helper-returned guards,
-and drops performed by helper calls.
+generic `Result<Permit>` values, and drops performed by helper calls.
