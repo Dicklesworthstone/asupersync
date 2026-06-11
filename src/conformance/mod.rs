@@ -140,6 +140,8 @@ impl TestConfig {
 pub struct TaskHandle<T> {
     /// The task ID once the runtime has registered the task.
     task_id: Arc<Mutex<Option<TaskId>>>,
+    /// Optional late-bound ID probe for mailbox-admitted runtime handles.
+    id_probe: Option<Arc<dyn Fn() -> Option<TaskId> + Send + Sync>>,
     /// Boxed future that resolves to the task outcome.
     result: Pin<Box<dyn Future<Output = Outcome<T, ()>> + Send>>,
 }
@@ -152,16 +154,19 @@ impl<T> TaskHandle<T> {
     ) -> Self {
         Self {
             task_id: Arc::new(Mutex::new(Some(task_id))),
+            id_probe: None,
             result: Box::pin(result),
         }
     }
 
-    fn pending(
+    fn pending_with_id_probe(
         task_id: Arc<Mutex<Option<TaskId>>>,
         result: impl Future<Output = Outcome<T, ()>> + Send + 'static,
+        id_probe: Arc<dyn Fn() -> Option<TaskId> + Send + Sync>,
     ) -> Self {
         Self {
             task_id,
+            id_probe: Some(id_probe),
             result: Box::pin(result),
         }
     }
@@ -169,7 +174,18 @@ impl<T> TaskHandle<T> {
     /// Get the task ID.
     #[must_use]
     pub fn id(&self) -> Option<TaskId> {
-        *self.task_id.lock()
+        if let Some(task_id) = *self.task_id.lock() {
+            return Some(task_id);
+        }
+
+        if let Some(probe) = &self.id_probe
+            && let Some(task_id) = probe()
+        {
+            *self.task_id.lock() = Some(task_id);
+            return Some(task_id);
+        }
+
+        None
     }
 }
 
@@ -562,10 +578,6 @@ impl LabConformanceSession {
     }
 }
 
-fn schedule_lab_task(runtime: &crate::lab::LabRuntime, task_id: TaskId, priority: u8) {
-    runtime.scheduler.lock().schedule(task_id, priority);
-}
-
 fn request_lab_region_cancel(
     runtime: &mut crate::lab::LabRuntime,
     region_id: RegionId,
@@ -659,45 +671,63 @@ impl ConformanceTarget for LabRuntimeTarget {
         let task_id = Arc::new(Mutex::new(None));
         let join_cx = cx.clone();
         let op_cx = cx.clone();
-        let task_id_for_op = Arc::clone(&task_id);
+        let task_id_for_join = Arc::clone(&task_id);
+        let runtime_handle = Arc::new(Mutex::new(None));
+        let runtime_handle_for_op = Arc::clone(&runtime_handle);
+        let runtime_handle_for_join = Arc::clone(&runtime_handle);
+        let runtime_handle_for_probe = Arc::clone(&runtime_handle);
         let (registration_tx, mut registration_rx) = oneshot::channel();
 
-        session.enqueue(Box::new(move |runtime| {
+        session.enqueue(Box::new(move |_runtime| {
             let scope = op_cx.scope_with_budget(budget);
-            let handle = scope
-                .spawn_registered(&mut runtime.state, &op_cx, move |_child_cx| f)
-                .expect("failed to create runtime-backed conformance task");
-            let task_id_value = handle.task_id();
-            *task_id_for_op.lock() = Some(task_id_value);
-
-            let priority = runtime
-                .state
-                .task(task_id_value)
-                .and_then(|record| record.cx_inner.as_ref())
-                .map_or(budget.priority, |inner| inner.read().budget.priority);
-            schedule_lab_task(runtime, task_id_value, priority);
-
-            let _ = registration_tx.send(&op_cx, handle);
+            let handle = op_cx
+                .spawn_in(&scope, move |_child_cx| f)
+                .expect("failed to enqueue runtime-backed conformance task");
+            *runtime_handle_for_op.lock() = Some(handle);
+            let _ = registration_tx.send(&op_cx, ());
         }));
 
-        TaskHandle::pending(task_id, async move {
-            let mut handle = registration_rx
-                .recv_uninterruptible()
-                .await
-                .expect("conformance task registration dropped before delivery");
-            match handle.join(&join_cx).await {
-                Ok(value) => Outcome::Ok(value),
-                Err(crate::runtime::task_handle::JoinError::Cancelled(reason)) => {
-                    Outcome::Cancelled(reason)
-                }
-                Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
-                    Outcome::Panicked(payload)
-                }
-                Err(crate::runtime::task_handle::JoinError::PolledAfterCompletion) => {
-                    Outcome::Err(())
-                }
+        let id_probe: Arc<dyn Fn() -> Option<TaskId> + Send + Sync> = Arc::new(move || {
+            let guard = runtime_handle_for_probe.lock();
+            let handle = guard.as_ref()?;
+            let task_id = handle.task_id();
+            if crate::runtime::spawn_mailbox::is_spawn_mailbox_id(task_id) {
+                None
+            } else {
+                Some(task_id)
             }
-        })
+        });
+
+        TaskHandle::pending_with_id_probe(
+            task_id,
+            async move {
+                registration_rx
+                    .recv_uninterruptible()
+                    .await
+                    .expect("conformance task registration dropped before delivery");
+                let mut handle = runtime_handle_for_join
+                    .lock()
+                    .take()
+                    .expect("conformance runtime handle missing after registration");
+                let current_task_id = handle.task_id();
+                if !crate::runtime::spawn_mailbox::is_spawn_mailbox_id(current_task_id) {
+                    *task_id_for_join.lock() = Some(current_task_id);
+                }
+                match handle.join(&join_cx).await {
+                    Ok(value) => Outcome::Ok(value),
+                    Err(crate::runtime::task_handle::JoinError::Cancelled(reason)) => {
+                        Outcome::Cancelled(reason)
+                    }
+                    Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
+                        Outcome::Panicked(payload)
+                    }
+                    Err(crate::runtime::task_handle::JoinError::PolledAfterCompletion) => {
+                        Outcome::Err(())
+                    }
+                }
+            },
+            id_probe,
+        )
     }
 
     fn create_region(cx: &Cx, budget: Budget) -> RegionHandle {
