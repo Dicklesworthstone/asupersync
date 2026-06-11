@@ -466,8 +466,8 @@
       "code": "ASUP-E402",
       "name": "futurelock-detected",
       "area": "lab-replay",
-      "status": "reserved",
-      "summary": "The lab runtime detected no possible progress for a set of futures.",
+      "status": "live",
+      "summary": "The lab runtime detected a task that stopped being polled while it still held obligations.",
       "probable_causes": [
         "Tasks are mutually waiting on each other.",
         "A wake registration was lost or cancelled incorrectly."
@@ -477,8 +477,10 @@
         "Add a deterministic regression that reproduces the minimal parked set."
       ],
       "doc_path": "docs/error_codes/ASUP-E402.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.3",
+      "source_refs": [
+        "src/lab/runtime.rs"
+      ]
     },
     {
       "code": "ASUP-E403",

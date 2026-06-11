@@ -2,8 +2,8 @@
 
 ## Symptom
 
-`[ASUP-E402]` means the lab runtime detected no possible progress for a set of
-futures.
+`[ASUP-E402]` means the lab runtime detected a task that stopped being polled
+while it still held one or more obligations.
 
 ## Probable Causes
 
@@ -16,6 +16,12 @@ futures.
 - Add a deterministic regression that reproduces the minimal parked set.
 
 ## Example
+
+The panic/display text starts with:
+
+```text
+[ASUP-E402] futurelock detected: <task> in <region> idle=<steps> held=<obligations>
+```
 
 If task A waits for task B while task B waits on a permit held by task A, reduce
 the trace to those two wait edges and fix ownership.

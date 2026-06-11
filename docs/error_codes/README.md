@@ -42,7 +42,7 @@ lands.
 | ASUP-E302 | reserved | cancellation-drain | [Race loser not drained](./ASUP-E302.md) |
 | ASUP-E303 | reserved | cancellation-drain | [Finalizer timeout](./ASUP-E303.md) |
 | ASUP-E401 | reserved | lab-replay | [Replay divergence](./ASUP-E401.md) |
-| ASUP-E402 | reserved | lab-replay | [Futurelock detected](./ASUP-E402.md) |
+| ASUP-E402 | live | lab-replay | [Futurelock detected](./ASUP-E402.md) |
 | ASUP-E403 | reserved | lab-replay | [Lab seed nondeterminism](./ASUP-E403.md) |
 | ASUP-E501 | reserved | net-http | [HTTP deadline exhausted](./ASUP-E501.md) |
 | ASUP-E901 | live | config-build | [Config invalid](./ASUP-E901.md) |

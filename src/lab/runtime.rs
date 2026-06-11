@@ -2552,7 +2552,7 @@ impl LabRuntime {
 
             assert!(
                 !self.config.panic_on_futurelock,
-                "futurelock detected: {task} in {region} idle={idle_steps} held={held:?}"
+                "[ASUP-E402] futurelock detected: {task} in {region} idle={idle_steps} held={held:?}"
             );
         }
     }
@@ -2925,7 +2925,7 @@ impl std::fmt::Display for InvariantViolation {
                 held,
             } => write!(
                 f,
-                "futurelock: {task} in {region} idle={idle_steps} held={held:?}"
+                "[ASUP-E402] futurelock: {task} in {region} idle={idle_steps} held={held:?}"
             ),
             Self::CancellationProtocol { violation } => {
                 write!(f, "cancellation protocol violation: {violation}")
@@ -3803,7 +3803,32 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "futurelock detected")]
+    fn futurelock_display_includes_error_code() {
+        init_test("futurelock_display_includes_error_code");
+        let task = TaskId::from_arena(ArenaIndex::new(2, 0));
+        let region = RegionId::from_arena(ArenaIndex::new(3, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(4, 0));
+        let violation = InvariantViolation::Futurelock {
+            task,
+            region,
+            idle_steps: 8,
+            held: vec![obligation],
+        };
+
+        let rendered = violation.to_string();
+        let has_code = rendered.starts_with("[ASUP-E402] futurelock:");
+        crate::assert_with_log!(has_code, "futurelock display error code", true, has_code);
+        crate::assert_with_log!(
+            rendered.contains("idle=8"),
+            "futurelock display idle steps",
+            true,
+            rendered.contains("idle=8")
+        );
+        crate::test_complete!("futurelock_display_includes_error_code");
+    }
+
+    #[test]
+    #[should_panic(expected = "[ASUP-E402] futurelock detected")]
     fn futurelock_can_panic() {
         init_test("futurelock_can_panic");
         let config = LabConfig::new(42).futurelock_max_idle_steps(1);
