@@ -22,8 +22,11 @@ pub fn with_deadline<'a, P: Policy>(scope: &Scope<'a, P>, deadline: Time) -> Sco
         .map_or(deadline, |existing| existing.min(deadline));
     let new_budget = current_budget.with_deadline(new_deadline);
 
-    // Create new scope with updated budget
-    Scope::new(scope.region_id(), new_budget)
+    // Create a new scope with the updated budget, preserving the source
+    // scope's capability budget and pending-spawn counter — deadline
+    // tightening must not widen resource envelopes or detach the region's
+    // spawn accounting (br-asupersync-iwt7w3).
+    Scope::new_with_capability_budget(scope.region_id(), new_budget, scope.capability_budget())
         .with_pending_spawn_counter(scope.pending_spawn_counter_handle())
 }
 
@@ -316,6 +319,37 @@ mod tests {
             new_scope.budget().priority
         );
         crate::test_complete!("with_deadline_preserves_non_deadline_budget_fields");
+    }
+
+    #[test]
+    fn with_deadline_preserves_capability_budget() {
+        init_test("with_deadline_preserves_capability_budget");
+        let capability_budget = crate::types::CapabilityBudget::new()
+            .with_memory_bytes(4096)
+            .with_cpu_units(17)
+            .with_io_bytes(2048);
+        let scope = Scope::<FailFast>::new_with_capability_budget(
+            test_region(),
+            Budget::INFINITE,
+            capability_budget,
+        );
+
+        let new_scope = with_deadline(&scope, Time::from_secs(5));
+        crate::assert_with_log!(
+            new_scope.capability_budget() == capability_budget,
+            "capability budget preserved across deadline tightening",
+            capability_budget,
+            new_scope.capability_budget()
+        );
+
+        let timeout_scope = with_timeout(&scope, Duration::from_secs(1), Time::ZERO);
+        crate::assert_with_log!(
+            timeout_scope.capability_budget() == capability_budget,
+            "capability budget preserved across with_timeout",
+            capability_budget,
+            timeout_scope.capability_budget()
+        );
+        crate::test_complete!("with_deadline_preserves_capability_budget");
     }
 
     #[test]
