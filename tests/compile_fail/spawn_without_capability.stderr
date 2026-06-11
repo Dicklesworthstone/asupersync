@@ -1,0 +1,19 @@
+error[E0599]: the method `spawn` exists for struct `asupersync::Cx<CapSet<false, false, false, false, false>>`, but its trait bounds were not satisfied
+ --> tests/compile_fail/spawn_without_capability.rs:9:16
+  |
+9 |       let _ = cx.spawn(|_cx| async move { 42_u32 });
+  |                  ^^^^^ method cannot be called due to unsatisfied trait bounds
+  |
+ ::: src/cx/cap.rs
+  |
+  | / pub struct CapSet<
+  | |     const SPAWN: bool,
+  | |     const TIME: bool,
+  | |     const RANDOM: bool,
+  | |     const IO: bool,
+  | |     const REMOTE: bool,
+  | | >;
+  | |_- doesn't satisfy `_: HasSpawn`
+  |
+  = note: the following trait bounds were not satisfied:
+          `CapSet<false, false, false, false, false>: HasSpawn`
