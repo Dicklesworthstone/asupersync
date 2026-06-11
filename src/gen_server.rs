@@ -2265,6 +2265,17 @@ mod tests {
         )
     }
 
+    fn lab_spawn_cx(runtime: &crate::lab::LabRuntime, region: RegionId, budget: Budget) -> Cx {
+        Cx::new(region, TaskId::testing_default(), budget)
+            .with_spawn_gateway(runtime.state.spawn_gateway())
+            .with_pending_spawn_counter(
+                runtime
+                    .state
+                    .region(region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            )
+    }
+
     // ---- Simple Counter GenServer ----
 
     #[derive(Debug)]
@@ -2478,7 +2489,7 @@ mod tests {
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
         let (handle, stored) = scope
@@ -2488,24 +2499,17 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let mut client_handle = cx
+            .spawn(move |cx| async move {
                 server_ref
                     .call(&cx, CounterCall::Add(5))
                     .await
                     .expect("should call Add(5)")
             })
             .expect("should spawn client task for call test");
-        let client_task_id = client_handle.task_id();
-        runtime
-            .state
-            .store_spawned_task(client_task_id, client_stored);
 
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        {
-            runtime.scheduler.lock().schedule(client_task_id, 0);
         }
         runtime.run_until_idle();
 
