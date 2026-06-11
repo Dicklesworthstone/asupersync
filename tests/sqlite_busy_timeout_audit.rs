@@ -28,13 +28,11 @@ async fn sqlite_busy_timeout_behavior_audit() {
 
     let conn1 = SqliteConnection::open(&cx, &db_path)
         .await
-        .expect("open first connection")
-        .unwrap();
+        .expect("open first connection");
 
     let conn2 = SqliteConnection::open(&cx, &db_path)
         .await
-        .expect("open second connection")
-        .unwrap();
+        .expect("open second connection");
 
     // Create test table
     conn1
@@ -137,13 +135,11 @@ async fn sqlite_busy_timeout_classification_audit() {
 
     let conn1 = SqliteConnection::open(&cx, &db_path)
         .await
-        .expect("open connection")
-        .unwrap();
+        .expect("open connection");
 
     let conn2 = SqliteConnection::open(&cx, &db_path)
         .await
-        .expect("open second connection")
-        .unwrap();
+        .expect("open second connection");
 
     // Create test table and start exclusive transaction
     conn1
