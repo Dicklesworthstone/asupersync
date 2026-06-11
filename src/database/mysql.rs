@@ -4217,7 +4217,36 @@ impl MySqlConnection {
     }
 
     /// Execute a prepared statement that returns rows.
+    ///
+    /// br-asupersync-1cjrtx: drain-parity wrapper — mirrors the
+    /// `query_unchecked_internal` pattern so prepared statements get the
+    /// same drop-time KILL coverage (br-asupersync-22i5tn) and drain-phase
+    /// wire cancel (br-asupersync-server-stack-hardening-eeexl1.1.2) as the
+    /// simple-protocol paths. Prepared statements are data statements by
+    /// construction, so no control-verb exemption applies here; the killer
+    /// connection itself uses the simple protocol and cannot re-enter this
+    /// path.
     pub async fn query_prepared(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        let was_closed_at_entry = self.inner.closed;
+        self.inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.query_prepared_inner_impl(cx, stmt, params).await;
+        if matches!(result, Outcome::Cancelled(_)) && self.inner.closed && !was_closed_at_entry {
+            self.wire_cancel_in_drain(cx).await;
+        }
+        self.inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    async fn query_prepared_inner_impl(
         &mut self,
         cx: &Cx,
         stmt: &MySqlStatement,
@@ -4333,7 +4362,30 @@ impl MySqlConnection {
     }
 
     /// Execute a prepared statement that does not return rows.
+    ///
+    /// br-asupersync-1cjrtx: see [`Self::query_prepared`] — same drain-parity
+    /// wrapper (drop-time KILL coverage + drain-phase wire cancel).
     pub async fn execute_prepared(
+        &mut self,
+        cx: &Cx,
+        stmt: &MySqlStatement,
+        params: &[&dyn ToSql],
+    ) -> Outcome<u64, MySqlError> {
+        let was_closed_at_entry = self.inner.closed;
+        self.inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.execute_prepared_inner_impl(cx, stmt, params).await;
+        if matches!(result, Outcome::Cancelled(_)) && self.inner.closed && !was_closed_at_entry {
+            self.wire_cancel_in_drain(cx).await;
+        }
+        self.inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    async fn execute_prepared_inner_impl(
         &mut self,
         cx: &Cx,
         stmt: &MySqlStatement,
@@ -6122,6 +6174,76 @@ mod tests {
         // resolved. This fixture has no stored options, so the wire cancel
         // takes its distinct skip path — the ordering guarantee is what
         // this test pins down.
+        let events = user_trace_messages(&trace, "client.wire_cancel proto=mysql ");
+        assert_eq!(events.len(), 1, "got {events:?}");
+        assert!(
+            events[0].contains("outcome=skipped reason=no_stored_options"),
+            "{}",
+            events[0]
+        );
+        server.join().expect("server thread");
+    }
+
+    /// br-asupersync-1cjrtx (drain parity): prepared-statement execution
+    /// cancelled mid-exchange runs the drain-phase wire cancel BEFORE the
+    /// Cancelled outcome resolves — closing the gap where prepared paths
+    /// had neither drop-time KILL coverage nor the drain-phase gate.
+    #[test]
+    fn prepared_mid_exchange_cancel_runs_drain_wire_cancel_before_resolving() {
+        init_test("mysql_prepared_mid_exchange_cancel_runs_drain_wire_cancel_before_resolving");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let cx = Cx::for_testing();
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+
+        let stmt = MySqlStatement {
+            statement_id: 7,
+            owner_connection_id: 41,
+            owner_prepared_statement_epoch: 0,
+            param_count: 0,
+            column_count: 1,
+            params: Vec::new(),
+            columns: Vec::new(),
+        };
+
+        let (columns_sent_tx, columns_sent_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let payload = read_client_command(&mut stream);
+            assert_eq!(payload[0], command::COM_STMT_EXECUTE, "expected execute");
+            // Column count + one column definition + column-phase EOF
+            // terminator, then stall before any row/terminator so the
+            // client parks inside the binary row loop (the phase with a
+            // per-packet checkpoint).
+            write_response_packet(&mut stream, 1, vec![0x01]);
+            write_response_packet(&mut stream, 2, column_definition_payload("value"));
+            write_response_packet(&mut stream, 3, eof_packet_payload(0));
+            columns_sent_tx.send(()).expect("signal columns sent");
+            std::thread::sleep(Duration::from_millis(500));
+        });
+
+        let mut fut = Box::pin(conn.query_prepared(&cx, &stmt, &[]));
+        let first = run(futures_lite::future::poll_once(fut.as_mut()));
+        assert!(
+            first.is_none(),
+            "prepared query must not complete on the first poll"
+        );
+
+        columns_sent_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("server sent column packets");
+        std::thread::sleep(Duration::from_millis(50));
+        cx.cancel_fast(CancelKind::User);
+
+        match run(fut) {
+            Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+
         let events = user_trace_messages(&trace, "client.wire_cancel proto=mysql ");
         assert_eq!(events.len(), 1, "got {events:?}");
         assert!(

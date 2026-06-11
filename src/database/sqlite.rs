@@ -969,6 +969,11 @@ pub struct SqliteRowStream {
     handle: crate::runtime::blocking_pool::BlockingTaskHandle,
     counters: Arc<SqliteRowStreamCounters>,
     finished: bool,
+    /// br-asupersync-1cjrtx: interrupt handle shared with the owning
+    /// connection so abandoning or cancelling the stream aborts an
+    /// in-flight long VM step instead of letting it run to the next
+    /// row boundary.
+    interrupt: Arc<rusqlite::InterruptHandle>,
 }
 
 impl fmt::Debug for SqliteRowStream {
@@ -988,7 +993,7 @@ impl SqliteRowStream {
         }
 
         if cx.checkpoint().is_err() {
-            self.finish();
+            self.cancel_in_drain(cx).await;
             return Outcome::Cancelled(
                 cx.cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -1009,7 +1014,7 @@ impl SqliteRowStream {
                 Outcome::Ok(None)
             }
             Err(mpsc::RecvError::Cancelled) => {
-                self.finish();
+                self.cancel_in_drain(cx).await;
                 Outcome::Cancelled(
                     cx.cancel_reason()
                         .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -1019,6 +1024,53 @@ impl SqliteRowStream {
                 "sqlite row stream receive unexpectedly returned empty".to_string(),
             )),
         }
+    }
+
+    /// br-asupersync-1cjrtx: drain-phase wire cancel for the row stream —
+    /// mirrors `run_connection_op`'s cancelled-receive path. Interrupts the
+    /// in-flight statement, then waits (bounded, cancellation-masked) for
+    /// the worker to acknowledge before the stream resolves Cancelled, so
+    /// the connection mutex is free when the caller observes the outcome.
+    async fn cancel_in_drain(&mut self, cx: &Cx) {
+        /// Bounded drain window for awaiting the interrupted worker.
+        const MASKED_DRAIN_POLLS: u32 = 1024;
+
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.handle.cancel();
+        if !self.handle.is_done() {
+            self.interrupt.interrupt();
+            cx.trace("client.wire_cancel proto=sqlite outcome=interrupt_sent op=row_stream");
+            let drained = crate::combinator::commit_section(cx, MASKED_DRAIN_POLLS, async {
+                loop {
+                    match self.receiver.recv(cx).await {
+                        // Discard in-flight rows / the worker's terminal
+                        // error while waiting for it to wind down.
+                        Ok(_) => {
+                            if self.handle.is_done() {
+                                break true;
+                            }
+                        }
+                        Err(mpsc::RecvError::Disconnected) => break true,
+                        // Masked-poll budget exhausted (or anomalous recv
+                        // state): stop draining rather than spinning.
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await;
+            if drained {
+                cx.trace("client.wire_cancel proto=sqlite drain=job_completed op=row_stream");
+            } else {
+                cx.trace(
+                    "client.wire_cancel proto=sqlite drain=masked_poll_budget_exhausted \
+                     fallback=abandon_job op=row_stream",
+                );
+            }
+        }
+        self.receiver.close();
     }
 
     /// Returns bounded-memory counters for this stream.
@@ -1032,6 +1084,16 @@ impl SqliteRowStream {
             self.finished = true;
             self.receiver.close();
             self.handle.cancel();
+            // br-asupersync-1cjrtx: abort an in-flight long VM step instead
+            // of letting an abandoned stream's statement run to its next
+            // row boundary. The is_done guard narrows the inherent
+            // sqlite3_interrupt race (a statement finishing concurrently);
+            // the worst case is a retryable interrupt of a neighbouring
+            // statement, which sqlite documents as expected interrupt
+            // semantics.
+            if !self.handle.is_done() {
+                self.interrupt.interrupt();
+            }
         }
     }
 }
@@ -1081,7 +1143,9 @@ pub struct SqliteConnection {
     /// blocking statement (`sqlite3_interrupt`) when the `Cx` is cancelled
     /// while the connection mutex is held by a pool worker — the handle is
     /// `Send + Sync` and safe to invoke after the connection closed.
-    interrupt: rusqlite::InterruptHandle,
+    /// `Arc` so row streams can carry their own reference
+    /// (br-asupersync-1cjrtx).
+    interrupt: Arc<rusqlite::InterruptHandle>,
     /// br-asupersync-server-stack-hardening-eeexl1.1.2: per-connection
     /// statement-timeout override. The effective per-operation timeout is
     /// `min(remaining Cx budget, this override)`; see
@@ -1306,7 +1370,7 @@ impl SqliteConnection {
 
         match rx.recv(cx).await {
             Ok(Ok(conn)) => {
-                let interrupt = conn.get_interrupt_handle();
+                let interrupt = Arc::new(conn.get_interrupt_handle());
                 Outcome::Ok(Self {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool_clone,
@@ -1368,7 +1432,7 @@ impl SqliteConnection {
 
         match rx.recv(cx).await {
             Ok(Ok(conn)) => {
-                let interrupt = conn.get_interrupt_handle();
+                let interrupt = Arc::new(conn.get_interrupt_handle());
                 Outcome::Ok(Self {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool_clone,
@@ -1648,6 +1712,24 @@ impl SqliteConnection {
             );
         }
 
+        // br-asupersync-1cjrtx: streams get the same budget-derived
+        // statement timeout as one-shot operations.
+        let timeout =
+            crate::database::effective_statement_timeout(cx, self.statement_timeout_override);
+        if let Some(limit) = timeout {
+            let remaining_ns = crate::database::remaining_budget(cx)
+                .map_or_else(|| "none".to_string(), |d| d.as_nanos().to_string());
+            let base_ms = self.statement_timeout_override.map_or_else(
+                || "none".to_string(),
+                |d| crate::database::statement_timeout_millis(d).to_string(),
+            );
+            cx.trace(&format!(
+                "client.budget_forwarded proto=sqlite base_ms={base_ms} \
+                 remaining_ns={remaining_ns} statement_timeout_ms={} op=row_stream",
+                crate::database::statement_timeout_millis(limit)
+            ));
+        }
+
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
         let inner = Arc::clone(&self.inner);
@@ -1656,49 +1738,89 @@ impl SqliteConnection {
         let (sender, receiver) = mpsc::channel(SQLITE_ROW_STREAM_CHANNEL_CAPACITY);
 
         let handle = self.pool.spawn(move || {
+            /// SQLite VM instructions between deadline checks — see
+            /// `run_connection_op`.
+            const TIMEOUT_PROGRESS_OPS: i32 = 1000;
+
             let result = (|| {
                 let guard = inner.lock();
                 let conn = guard.get()?;
-                let params_refs: Vec<&dyn rusqlite::ToSql> =
-                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-
-                let mut stmt = conn
-                    .prepare_cached(&sql)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-
-                let column_names: Vec<String> = stmt
-                    .column_names()
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect();
-                let columns: BTreeMap<String, usize> = column_names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| (name.clone(), i))
-                    .collect();
-                let columns = Arc::new(columns);
-                let column_count = stmt.column_count();
-
-                let mut rows = stmt
-                    .query(params_refs.as_slice())
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-
-                while let Some(row) = rows
-                    .next()
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?
-                {
-                    worker_counters.rows_stepped.fetch_add(1, Ordering::AcqRel);
-                    let row =
-                        sqlite_row_from_rusqlite_row(row, column_count, &column_names, &columns)?;
-                    if !send_sqlite_stream_message(&sender, &worker_counters, Ok(row)) {
-                        break;
-                    }
+                if let Some(limit) = timeout {
+                    let deadline = std::time::Instant::now() + limit;
+                    conn.progress_handler(
+                        TIMEOUT_PROGRESS_OPS,
+                        Some(move || std::time::Instant::now() >= deadline),
+                    )
+                    .map_err(|e| {
+                        SqliteError::Sqlite(format!("failed to arm statement timeout: {e}"))
+                    })?;
                 }
-                drop(rows);
-                drop(stmt);
+
+                // Inner closure so the disarm below runs on EVERY exit path
+                // of the statement work — a `?` escaping with the handler
+                // still armed would impose a stale deadline on the next
+                // operation that borrows this connection.
+                let body_result = (|| {
+                    let params_refs: Vec<&dyn rusqlite::ToSql> =
+                        params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+
+                    let mut stmt = conn
+                        .prepare_cached(&sql)
+                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                    let column_names: Vec<String> = stmt
+                        .column_names()
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect();
+                    let columns: BTreeMap<String, usize> = column_names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| (name.clone(), i))
+                        .collect();
+                    let columns = Arc::new(columns);
+                    let column_count = stmt.column_count();
+
+                    let mut rows = stmt
+                        .query(params_refs.as_slice())
+                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+
+                    while let Some(row) = rows
+                        .next()
+                        .map_err(|e| SqliteError::Sqlite(e.to_string()))?
+                    {
+                        worker_counters.rows_stepped.fetch_add(1, Ordering::AcqRel);
+                        let row = sqlite_row_from_rusqlite_row(
+                            row,
+                            column_count,
+                            &column_names,
+                            &columns,
+                        )?;
+                        if !send_sqlite_stream_message(&sender, &worker_counters, Ok(row)) {
+                            break;
+                        }
+                    }
+                    Ok(())
+                })();
+
+                if timeout.is_some() {
+                    // Best-effort disarm — see `run_connection_op`.
+                    let _ = conn.progress_handler(0, None::<fn() -> bool>);
+                }
                 drop(guard);
-                Ok(())
+                body_result
             })();
+
+            // br-asupersync-1cjrtx: relabel a deadline-progress-handler
+            // abort as the dedicated timeout error (mirrors
+            // `run_connection_op`); a consumer-driven interrupt discards
+            // the message during the drain instead.
+            let result = match (timeout, result) {
+                (Some(limit), Err(err)) if sqlite_error_is_interrupt(&err) => {
+                    Err(SqliteError::StatementTimeout { limit })
+                }
+                (_, result) => result,
+            };
 
             if let Err(err) = result {
                 let _ = send_sqlite_stream_message(&sender, &worker_counters, Err(err));
@@ -1710,6 +1832,7 @@ impl SqliteConnection {
             handle,
             counters,
             finished: false,
+            interrupt: Arc::clone(&self.interrupt),
         })
     }
 
@@ -2938,6 +3061,147 @@ mod tests {
                 other => panic!("connection unusable after drain: {other:?}"),
             }
         });
+    }
+
+    /// br-asupersync-1cjrtx (drain parity): cancelling a row stream
+    /// mid-statement interrupts the in-flight VM work and waits for the
+    /// worker to acknowledge before resolving Cancelled — the connection
+    /// is provably usable immediately afterwards.
+    #[test]
+    fn row_stream_cancel_interrupts_and_drains() {
+        init_test_logging();
+        let (cx, trace) = traced_cx_with_budget(Budget::INFINITE);
+
+        let conn = block_on(async {
+            match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            }
+        });
+
+        let mut stream = block_on(async {
+            match conn.query_stream_unchecked(&cx, INFINITE_QUERY, &[]).await {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed: {other:?}"),
+            }
+        });
+
+        let mut fut = Box::pin(stream.next(&cx));
+        let first = block_on(futures_lite::future::poll_once(fut.as_mut()));
+        assert!(first.is_none(), "runaway stream must not yield a first row");
+
+        // Let the worker actually start executing the statement.
+        std::thread::sleep(Duration::from_millis(100));
+        cx.cancel_fast(crate::types::CancelKind::User);
+
+        let drain_started = std::time::Instant::now();
+        match block_on(fut) {
+            Outcome::Cancelled(reason) => {
+                assert_eq!(reason.kind, crate::types::CancelKind::User);
+            }
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+        assert!(
+            drain_started.elapsed() < Duration::from_secs(5),
+            "interrupt must end the runaway stream promptly"
+        );
+
+        let interrupts = user_trace_messages(&trace, "client.wire_cancel proto=sqlite ");
+        assert!(
+            interrupts
+                .iter()
+                .any(|m| m.contains("outcome=interrupt_sent") && m.contains("op=row_stream")),
+            "expected stream interrupt trace, got {interrupts:?}"
+        );
+
+        // Drain really released the connection mutex.
+        let fresh_cx = create_test_cx();
+        block_on(async {
+            match conn.query_unchecked(&fresh_cx, "SELECT 1", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
+                other => panic!("connection unusable after stream drain: {other:?}"),
+            }
+        });
+    }
+
+    /// br-asupersync-1cjrtx: the budget-derived statement timeout also
+    /// bounds streamed statements; the abort surfaces through the stream
+    /// as the dedicated `StatementTimeout` error.
+    #[test]
+    fn row_stream_statement_timeout_aborts_runaway_query() {
+        init_test_logging();
+        let (cx, trace) = traced_cx_with_budget(Budget::INFINITE);
+
+        block_on(async {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            conn.set_statement_timeout_override(Some(Duration::from_millis(50)));
+
+            let mut stream = match conn.query_stream_unchecked(&cx, INFINITE_QUERY, &[]).await {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed: {other:?}"),
+            };
+
+            match stream.next(&cx).await {
+                Outcome::Err(SqliteError::StatementTimeout { limit }) => {
+                    assert_eq!(limit, Duration::from_millis(50));
+                }
+                other => panic!("expected StatementTimeout from stream, got {other:?}"),
+            }
+        });
+
+        let forwarded = user_trace_messages(&trace, "client.budget_forwarded proto=sqlite ");
+        assert!(
+            forwarded
+                .iter()
+                .any(|m| m.contains("op=row_stream") && m.contains("statement_timeout_ms=50")),
+            "expected stream forwarded-budget trace, got {forwarded:?}"
+        );
+    }
+
+    /// br-asupersync-1cjrtx: dropping (abandoning) a stream mid-statement
+    /// interrupts the runaway VM work so the connection mutex frees
+    /// promptly instead of after the statement's natural completion.
+    #[test]
+    fn dropped_row_stream_interrupts_runaway_statement() {
+        init_test_logging();
+        let cx = create_test_cx();
+
+        let conn = block_on(async {
+            match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            }
+        });
+
+        let stream = block_on(async {
+            match conn.query_stream_unchecked(&cx, INFINITE_QUERY, &[]).await {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed: {other:?}"),
+            }
+        });
+
+        // Let the worker start the statement, then abandon the stream.
+        std::thread::sleep(Duration::from_millis(100));
+        drop(stream);
+
+        // The interrupt fired by Drop frees the connection promptly; a
+        // bounded-time follow-up query proves it (without the interrupt the
+        // infinite statement would hold the mutex indefinitely).
+        let started = std::time::Instant::now();
+        block_on(async {
+            match conn.query_unchecked(&cx, "SELECT 1", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
+                other => panic!("connection unusable after stream drop: {other:?}"),
+            }
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "dropped stream must free the connection promptly, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
