@@ -730,6 +730,61 @@ pub struct EvidenceIngestionReport {
     pub events: Vec<IngestionEvent>,
 }
 
+/// Deterministic analysis report over normalized doctor evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorEvidenceAnalysisReport {
+    /// Analyzer schema version.
+    pub analyzer_version: String,
+    /// Ingestion run identifier.
+    pub run_id: String,
+    /// Number of emitted findings.
+    pub finding_count: usize,
+    /// Findings ordered lexically by `finding_id`.
+    pub findings: Vec<DoctorEvidenceFinding>,
+}
+
+/// One finding emitted by the doctor evidence analyzer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorEvidenceFinding {
+    /// Stable finding identifier.
+    pub finding_id: String,
+    /// Diagnostic family identifier.
+    pub diagnostic_family: String,
+    /// Severity (`critical`, `high`, `medium`, `low`).
+    pub severity: String,
+    /// Confidence score (`0..=100`).
+    pub confidence: u8,
+    /// Runtime, proof, or operator surfaces affected by this finding.
+    pub affected_surfaces: Vec<String>,
+    /// Deterministic likely-cause summary.
+    pub likely_cause: String,
+    /// Evidence identifiers or rejected artifact ids supporting this finding.
+    pub evidence_refs: Vec<String>,
+    /// Repro/proof command the operator should run next.
+    pub next_proof_command: String,
+    /// Optional runtime error code token and docs path.
+    pub asup_error_code: Option<String>,
+    /// Optional non-executing remediation recipe suggestion.
+    pub remediation_recipe: Option<DoctorEvidenceRemediationRecipe>,
+}
+
+/// Non-executing remediation recipe suggestion derived from analyzer evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorEvidenceRemediationRecipe {
+    /// Stable recipe identifier.
+    pub recipe_id: String,
+    /// Linked remediation recipe contract version.
+    pub recipe_contract_version: String,
+    /// Risk class (`observe`, `rerun`, `edit-suggestion`, `destructive-forbidden`).
+    pub risk_class: String,
+    /// Fix intent aligned with the remediation recipe DSL allowlist.
+    pub fix_intent: String,
+    /// Deterministic operator action. This is guidance only and never executes.
+    pub operator_action: String,
+    /// Verification command to run after applying any human-approved change.
+    pub verification_command: String,
+}
+
 /// Typed definition for one required field in the logging envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoggingFieldSpec {
@@ -3528,6 +3583,7 @@ const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
 const INVARIANT_ANALYZER_VERSION: &str = "doctor-invariant-analyzer-v1";
 const LOCK_CONTENTION_ANALYZER_VERSION: &str = "doctor-lock-contention-analyzer-v1";
+const DOCTOR_EVIDENCE_ANALYZER_VERSION: &str = "doctor-evidence-analyzer-v1";
 const LOCK_ORDER_CANONICAL: &str =
     "E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations)";
 const DEFAULT_VISUAL_VIEWPORT_WIDTH: u16 = 132;
@@ -7263,6 +7319,613 @@ pub fn validate_evidence_ingestion_report(report: &EvidenceIngestionReport) -> R
     rejected_keys.clear();
 
     Ok(())
+}
+
+/// Analyzes normalized doctor evidence into deterministic findings and recipe suggestions.
+#[must_use]
+pub fn analyze_doctor_evidence_report(
+    report: &EvidenceIngestionReport,
+) -> DoctorEvidenceAnalysisReport {
+    let mut findings = Vec::new();
+
+    for record in &report.records {
+        if let Some(finding) = classify_doctor_evidence_record(record) {
+            findings.push(finding);
+        }
+    }
+    for rejected in &report.rejected {
+        if let Some(finding) = classify_rejected_doctor_artifact(rejected) {
+            findings.push(finding);
+        }
+    }
+
+    findings.sort_by(|left, right| {
+        (
+            left.finding_id.as_str(),
+            left.diagnostic_family.as_str(),
+            left.severity.as_str(),
+        )
+            .cmp(&(
+                right.finding_id.as_str(),
+                right.diagnostic_family.as_str(),
+                right.severity.as_str(),
+            ))
+    });
+
+    DoctorEvidenceAnalysisReport {
+        analyzer_version: DOCTOR_EVIDENCE_ANALYZER_VERSION.to_string(),
+        run_id: report.run_id.clone(),
+        finding_count: findings.len(),
+        findings,
+    }
+}
+
+/// Validates deterministic invariants for [`DoctorEvidenceAnalysisReport`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, required fields, or recipe-class constraints are invalid.
+pub fn validate_doctor_evidence_analysis_report(
+    report: &DoctorEvidenceAnalysisReport,
+) -> Result<(), String> {
+    if report.analyzer_version != DOCTOR_EVIDENCE_ANALYZER_VERSION {
+        return Err(format!(
+            "unexpected analyzer_version {}",
+            report.analyzer_version
+        ));
+    }
+    if report.run_id.trim().is_empty() {
+        return Err("analysis run_id must be non-empty".to_string());
+    }
+    if report.finding_count != report.findings.len() {
+        return Err("finding_count must match findings length".to_string());
+    }
+
+    let finding_ids = report
+        .findings
+        .iter()
+        .map(|finding| finding.finding_id.clone())
+        .collect::<Vec<_>>();
+    if !finding_ids.is_empty() {
+        validate_lexical_string_set(&finding_ids, "analysis.findings.finding_id")?;
+    }
+
+    let recipe_contract = remediation_recipe_contract();
+    for finding in &report.findings {
+        if !is_slug_like(&finding.finding_id) || !finding.finding_id.starts_with("doctor-evidence:")
+        {
+            return Err(format!(
+                "finding_id must use doctor-evidence:* slug format: {}",
+                finding.finding_id
+            ));
+        }
+        if finding.diagnostic_family.trim().is_empty()
+            || finding.likely_cause.trim().is_empty()
+            || finding.next_proof_command.trim().is_empty()
+        {
+            return Err(format!(
+                "finding {} has empty required diagnostic fields",
+                finding.finding_id
+            ));
+        }
+        if !matches!(
+            finding.severity.as_str(),
+            "critical" | "high" | "medium" | "low"
+        ) {
+            return Err(format!(
+                "finding {} has invalid severity {}",
+                finding.finding_id, finding.severity
+            ));
+        }
+        validate_lexical_string_set(
+            &finding.affected_surfaces,
+            &format!("finding {} affected_surfaces", finding.finding_id),
+        )?;
+        validate_lexical_string_set(
+            &finding.evidence_refs,
+            &format!("finding {} evidence_refs", finding.finding_id),
+        )?;
+        for exposed in finding_secret_scan_values(finding) {
+            if contains_unredacted_secret_marker(exposed) {
+                return Err(format!(
+                    "finding {} exposes an unredacted secret marker",
+                    finding.finding_id
+                ));
+            }
+        }
+
+        if let Some(recipe) = &finding.remediation_recipe {
+            if !recipe.recipe_id.starts_with("recipe-") || !is_slug_like(&recipe.recipe_id) {
+                return Err(format!(
+                    "recipe_id must use recipe-* slug format: {}",
+                    recipe.recipe_id
+                ));
+            }
+            if recipe.recipe_contract_version != REMEDIATION_RECIPE_CONTRACT_VERSION {
+                return Err(format!(
+                    "recipe {} has unexpected contract version {}",
+                    recipe.recipe_id, recipe.recipe_contract_version
+                ));
+            }
+            if !matches!(
+                recipe.risk_class.as_str(),
+                "observe" | "rerun" | "edit-suggestion" | "destructive-forbidden"
+            ) {
+                return Err(format!(
+                    "recipe {} has invalid risk class {}",
+                    recipe.recipe_id, recipe.risk_class
+                ));
+            }
+            if !recipe_contract
+                .allowed_fix_intents
+                .iter()
+                .any(|intent| intent == &recipe.fix_intent)
+            {
+                return Err(format!(
+                    "recipe {} has unsupported fix_intent {}",
+                    recipe.recipe_id, recipe.fix_intent
+                ));
+            }
+            if recipe.operator_action.trim().is_empty()
+                || recipe.verification_command.trim().is_empty()
+                || recipe.operator_action.contains('\n')
+                || recipe.operator_action.contains('\r')
+                || recipe.verification_command.contains('\n')
+                || recipe.verification_command.contains('\r')
+            {
+                return Err(format!(
+                    "recipe {} has invalid operator action or verification command",
+                    recipe.recipe_id
+                ));
+            }
+            if contains_unredacted_secret_marker(&recipe.operator_action)
+                || contains_unredacted_secret_marker(&recipe.verification_command)
+            {
+                return Err(format!(
+                    "recipe {} exposes an unredacted secret marker",
+                    recipe.recipe_id
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn classify_doctor_evidence_record(record: &EvidenceRecord) -> Option<DoctorEvidenceFinding> {
+    let haystack = evidence_record_haystack(record);
+    let source_kind = record.provenance.source_kind.as_str();
+
+    if contains_any(
+        &haystack,
+        &[
+            "asup-e101",
+            "ack leak",
+            "lease leak",
+            "obligation leak",
+            "obligation leaked",
+            "permit leak",
+        ],
+    ) {
+        return Some(evidence_record_finding(
+            record,
+            "obligation_leak",
+            "critical",
+            95,
+            &["obligation", "runtime"],
+            "An obligation-bearing guard, permit, ack, or lease was not committed or aborted before drain.",
+            Some("ASUP-E101"),
+            "edit-suggestion",
+            "add_cancellation_checkpoint",
+            "Add commit/abort cleanup on every normal and cancellation exit for the owning obligation path.",
+            "rch exec -- cargo test --features test-internals obligation",
+        ));
+    }
+
+    if contains_any(
+        &haystack,
+        &[
+            "asup-e301",
+            "cancel drain timeout",
+            "close timeout",
+            "drain timeout",
+            "region close timeout",
+            "region-close timeout",
+        ],
+    ) {
+        return Some(evidence_record_finding(
+            record,
+            "region_close_timeout",
+            "critical",
+            91,
+            &["cancel", "region", "runtime"],
+            "Region close did not reach quiescence before the drain budget expired.",
+            Some("ASUP-E301"),
+            "edit-suggestion",
+            "adjust_timeout_budget",
+            "Inspect pending children, finalizers, and obligation holders before changing timeout budgets.",
+            "rch exec -- cargo test --features test-internals cancel drain",
+        ));
+    }
+
+    if contains_any(
+        &haystack,
+        &[
+            "asup-e402",
+            "futurelock",
+            "lost wake",
+            "no possible progress",
+            "parked set",
+        ],
+    ) {
+        return Some(evidence_record_finding(
+            record,
+            "futurelock",
+            "high",
+            89,
+            &["lab", "scheduler"],
+            "The deterministic lab observed parked futures with no remaining progress edge.",
+            Some("ASUP-E402"),
+            "edit-suggestion",
+            "add_cancellation_checkpoint",
+            "Reduce the wait-for graph to the minimal parked set before changing scheduler wake paths.",
+            "rch exec -- cargo test --features test-internals lab futurelock",
+        ));
+    }
+
+    if source_kind == "rch_receipt"
+        && contains_any(
+            &haystack,
+            &[
+                "heartbeat live",
+                "progress stale",
+                "progress-stale",
+                "stale progress",
+                "stuck_detector",
+            ],
+        )
+    {
+        return Some(evidence_record_finding(
+            record,
+            "stale_rch_proof",
+            "medium",
+            86,
+            &["proof", "rch"],
+            "The remote proof produced stale-progress or stuck-detector evidence instead of a Rust diagnostic.",
+            None,
+            "rerun",
+            "harden_retry_backoff",
+            "Rerun the focused proof with remote-required admission and preserve the RCH receipt if it stalls again.",
+            "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness",
+        ));
+    }
+
+    if contains_any(
+        &haystack,
+        &[
+            "local fallback",
+            "local fallback marker",
+            "local_fallback",
+            "location=local",
+            "no-local-fallback violation",
+        ],
+    ) {
+        return Some(evidence_record_finding(
+            record,
+            "local_fallback_marker",
+            "high",
+            88,
+            &["proof", "rch"],
+            "A remote-required proof lane appears to have fallen back to local execution.",
+            None,
+            "destructive-forbidden",
+            "harden_retry_backoff",
+            "Do not clean local build artifacts automatically; rerun through RCH with remote-required admission.",
+            "RCH_REQUIRE_REMOTE=1 rch exec -- cargo check -p asupersync --features cli --lib",
+        ));
+    }
+
+    if source_kind == "browser_package_readiness"
+        && contains_any(
+            &haystack,
+            &[
+                "browser unsupported",
+                "host unsupported",
+                "unsupported browser host",
+                "unsupported host",
+                "wasm host unsupported",
+            ],
+        )
+    {
+        return Some(evidence_record_finding(
+            record,
+            "browser_unsupported_host",
+            "high",
+            84,
+            &["browser", "config"],
+            "Browser-package readiness evidence indicates the selected host is outside the supported runtime envelope.",
+            Some("ASUP-E901"),
+            "edit-suggestion",
+            "harden_retry_backoff",
+            "Gate the browser packaging lane on the supported-host matrix before promoting readiness claims.",
+            "rch exec -- cargo test -p asupersync-browser-core",
+        ));
+    }
+
+    if contains_any(
+        &haystack,
+        &[
+            "claim stale",
+            "docs claim stale",
+            "documentation claim stale",
+            "stale docs claim",
+        ],
+    ) {
+        return Some(evidence_record_finding(
+            record,
+            "stale_docs_claim",
+            "medium",
+            82,
+            &["docs", "proof"],
+            "Documentation or proof-status text claims freshness that the evidence bundle does not substantiate.",
+            Some("ASUP-E901"),
+            "observe",
+            "harden_retry_backoff",
+            "Map the claim back to a manifest lane and update docs only after fresh proof evidence exists.",
+            "rch exec -- cargo test --test proof_status_snapshot_contract",
+        ));
+    }
+
+    if contains_any(
+        &haystack,
+        &[
+            "missing artifact",
+            "missing proof artifact",
+            "proof artifact missing",
+        ],
+    ) {
+        return Some(evidence_record_finding(
+            record,
+            "missing_proof_artifact",
+            "high",
+            87,
+            &["artifact", "proof"],
+            "A proof claim points at an artifact that is absent from the evidence bundle.",
+            Some("ASUP-E901"),
+            "observe",
+            "harden_retry_backoff",
+            "Regenerate the proof artifact before accepting or exporting the diagnostics report.",
+            "rch exec -- cargo test --test proof_lane_manifest_contract",
+        ));
+    }
+
+    None
+}
+
+fn classify_rejected_doctor_artifact(rejected: &RejectedArtifact) -> Option<DoctorEvidenceFinding> {
+    let haystack = format!(
+        "{} {} {} {}",
+        rejected.artifact_type, rejected.source_path, rejected.replay_pointer, rejected.reason
+    )
+    .to_ascii_lowercase();
+    let proof_like = matches!(
+        rejected.artifact_type.as_str(),
+        "proof_status" | "proof_lane_manifest" | "rch_receipt"
+    );
+
+    if proof_like
+        && contains_any(
+            &haystack,
+            &["malformed", "missing", "required metadata", "unsupported"],
+        )
+    {
+        let evidence_ref = format!("rejected:{}", rejected.artifact_id);
+        return Some(analysis_finding(
+            "missing_proof_artifact",
+            &evidence_ref,
+            "high",
+            86,
+            &["artifact", "proof"],
+            "A proof-like artifact was rejected before normalization, leaving the proof claim unsupported.",
+            vec![evidence_ref],
+            default_proof_command(
+                &rejected.replay_pointer,
+                "rch exec -- cargo test --test proof_lane_manifest_contract",
+            ),
+            Some("ASUP-E901"),
+            Some(analysis_recipe(
+                "missing_proof_artifact",
+                &rejected.artifact_id,
+                "observe",
+                "harden_retry_backoff",
+                "Regenerate the rejected proof artifact and rerun ingestion before promoting this proof claim.",
+                "rch exec -- cargo test --test proof_lane_manifest_contract",
+            )),
+        ));
+    }
+
+    None
+}
+
+fn evidence_record_finding(
+    record: &EvidenceRecord,
+    family: &str,
+    severity: &str,
+    confidence: u8,
+    affected_surfaces: &[&str],
+    likely_cause: &str,
+    asup_error_code: Option<&str>,
+    risk_class: &str,
+    fix_intent: &str,
+    operator_action: &str,
+    fallback_proof_command: &str,
+) -> DoctorEvidenceFinding {
+    analysis_finding(
+        family,
+        &record.evidence_id,
+        severity,
+        confidence,
+        affected_surfaces,
+        likely_cause,
+        vec![record.evidence_id.clone()],
+        default_proof_command(&record.replay_pointer, fallback_proof_command),
+        asup_error_code,
+        Some(analysis_recipe(
+            family,
+            &record.evidence_id,
+            risk_class,
+            fix_intent,
+            operator_action,
+            fallback_proof_command,
+        )),
+    )
+}
+
+fn analysis_finding(
+    family: &str,
+    source_id: &str,
+    severity: &str,
+    confidence: u8,
+    affected_surfaces: &[&str],
+    likely_cause: &str,
+    evidence_refs: Vec<String>,
+    next_proof_command: String,
+    asup_error_code: Option<&str>,
+    remediation_recipe: Option<DoctorEvidenceRemediationRecipe>,
+) -> DoctorEvidenceFinding {
+    let mut affected_surfaces = affected_surfaces
+        .iter()
+        .map(|surface| (*surface).to_string())
+        .collect::<Vec<_>>();
+    affected_surfaces.sort();
+    affected_surfaces.dedup();
+    let mut evidence_refs = evidence_refs;
+    evidence_refs.sort();
+    evidence_refs.dedup();
+
+    DoctorEvidenceFinding {
+        finding_id: format!(
+            "doctor-evidence:{}:{}",
+            family,
+            doctor_analysis_slug(source_id)
+        ),
+        diagnostic_family: family.to_string(),
+        severity: severity.to_string(),
+        confidence,
+        affected_surfaces,
+        likely_cause: likely_cause.to_string(),
+        evidence_refs,
+        next_proof_command,
+        asup_error_code: asup_error_code.map(|code| format!("{code} docs/error_codes/{code}.md")),
+        remediation_recipe,
+    }
+}
+
+fn analysis_recipe(
+    family: &str,
+    source_id: &str,
+    risk_class: &str,
+    fix_intent: &str,
+    operator_action: &str,
+    verification_command: &str,
+) -> DoctorEvidenceRemediationRecipe {
+    DoctorEvidenceRemediationRecipe {
+        recipe_id: format!(
+            "recipe-doctor-evidence-{}-{}",
+            family,
+            doctor_analysis_slug(source_id)
+        ),
+        recipe_contract_version: REMEDIATION_RECIPE_CONTRACT_VERSION.to_string(),
+        risk_class: risk_class.to_string(),
+        fix_intent: fix_intent.to_string(),
+        operator_action: operator_action.to_string(),
+        verification_command: verification_command.to_string(),
+    }
+}
+
+fn evidence_record_haystack(record: &EvidenceRecord) -> String {
+    format!(
+        "{} {} {} {} {} {} {} {}",
+        record.artifact_type,
+        record.source_path,
+        record.correlation_id,
+        record.scenario_id,
+        record.outcome_class,
+        record.summary,
+        record.replay_pointer,
+        record.provenance.source_kind,
+    )
+    .to_ascii_lowercase()
+}
+
+fn default_proof_command(replay_pointer: &str, fallback: &str) -> String {
+    let trimmed = replay_pointer.trim();
+    if trimmed.is_empty() || trimmed == "none" {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn doctor_analysis_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for ch in value.chars() {
+        let normalized = ch.to_ascii_lowercase();
+        let candidate = if normalized.is_ascii_lowercase()
+            || normalized.is_ascii_digit()
+            || matches!(normalized, ':' | '.' | '_' | '/')
+        {
+            normalized
+        } else {
+            '-'
+        };
+        if candidate == '-' {
+            if !last_was_dash {
+                slug.push(candidate);
+            }
+            last_was_dash = true;
+        } else {
+            slug.push(candidate);
+            last_was_dash = false;
+        }
+    }
+    let trimmed = slug.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn finding_secret_scan_values(finding: &DoctorEvidenceFinding) -> Vec<&str> {
+    let mut values = vec![
+        finding.finding_id.as_str(),
+        finding.diagnostic_family.as_str(),
+        finding.severity.as_str(),
+        finding.likely_cause.as_str(),
+        finding.next_proof_command.as_str(),
+    ];
+    values.extend(finding.affected_surfaces.iter().map(String::as_str));
+    values.extend(finding.evidence_refs.iter().map(String::as_str));
+    if let Some(asup_error_code) = &finding.asup_error_code {
+        values.push(asup_error_code.as_str());
+    }
+    values
+}
+
+fn contains_unredacted_secret_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("unredacted_secret")
+        || lower.contains("aws_secret_access_key")
+        || lower.contains("-----begin private key-----")
+        || lower.contains("authorization: bearer ")
+        || (lower.contains("token=") && !lower.contains("[redacted]"))
+        || (lower.contains("password=") && !lower.contains("[redacted]"))
 }
 
 fn validate_lexical_string_set(values: &[String], context: &str) -> Result<(), String> {
@@ -20675,6 +21338,66 @@ impl RuntimeState {
         ]
     }
 
+    fn evidence_analysis_d2_fixture() -> Vec<RuntimeArtifact> {
+        vec![
+            RuntimeArtifact {
+                artifact_id: "local-fallback-marker".to_string(),
+                artifact_type: "proof_status".to_string(),
+                source_path: "artifacts/proof-status-local.json".to_string(),
+                replay_pointer:
+                    "RCH_REQUIRE_REMOTE=1 rch exec -- cargo check -p asupersync --features cli --lib"
+                        .to_string(),
+                content: r#"{
+  "correlation_id": "local-fallback-marker",
+  "scenario_id": "doctor-d2-local-fallback",
+  "seed": "none",
+  "outcome_class": "failed",
+  "summary": "no-local-fallback violation: local fallback marker location=local"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "obligation-leak".to_string(),
+                artifact_type: "runtime_inspector".to_string(),
+                source_path: "artifacts/runtime-obligation.json".to_string(),
+                replay_pointer: "rch exec -- cargo test --features test-internals obligation"
+                    .to_string(),
+                content: r#"{
+  "correlation_id": "obligation-leak",
+  "scenario_id": "doctor-d2-obligation",
+  "seed": "none",
+  "outcome_class": "failed",
+  "summary": "ASUP-E101 obligation leak: permit leak in channel reserve path"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "proof-artifact-rejected".to_string(),
+                artifact_type: "proof_status".to_string(),
+                source_path: "artifacts/proof-status-malformed.json".to_string(),
+                replay_pointer: "rch exec -- cargo test --test proof_status_snapshot_contract"
+                    .to_string(),
+                content: "not-json".to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "stale-rch-proof".to_string(),
+                artifact_type: "rch_receipt".to_string(),
+                source_path: "artifacts/rch-stale-progress.json".to_string(),
+                replay_pointer:
+                    "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features cli"
+                        .to_string(),
+                content: r#"{
+  "correlation_id": "stale-rch-proof",
+  "scenario_id": "doctor-d2-rch",
+  "seed": "none",
+  "outcome_class": "failed",
+  "summary": "heartbeat live but progress-stale stuck_detector cancelled proof"
+}"#
+                .to_string(),
+            },
+        ]
+    }
+
     fn doctor_evidence_bundle(
         run_id: &str,
         source_profile: &str,
@@ -20868,6 +21591,62 @@ impl RuntimeState {
                 .provenance
                 .no_claim_boundary
                 .starts_with("does_not_prove:")
+        }));
+    }
+
+    #[test]
+    fn doctor_evidence_analysis_maps_findings_and_recipes() {
+        let ingestion_report =
+            ingest_runtime_artifacts("run-doctor-d2", &evidence_analysis_d2_fixture());
+        validate_evidence_ingestion_report(&ingestion_report).expect("ingestion report validates");
+
+        let analysis = analyze_doctor_evidence_report(&ingestion_report);
+        let analysis_again = analyze_doctor_evidence_report(&ingestion_report);
+        assert_eq!(analysis, analysis_again);
+        validate_doctor_evidence_analysis_report(&analysis).expect("analysis validates");
+        assert_eq!(analysis.finding_count, 4);
+
+        let families = analysis
+            .findings
+            .iter()
+            .map(|finding| finding.diagnostic_family.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "local_fallback_marker",
+            "missing_proof_artifact",
+            "obligation_leak",
+            "stale_rch_proof",
+        ] {
+            assert!(families.contains(expected), "missing family {expected}");
+        }
+
+        let risk_classes = analysis
+            .findings
+            .iter()
+            .filter_map(|finding| finding.remediation_recipe.as_ref())
+            .map(|recipe| recipe.risk_class.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "destructive-forbidden",
+            "edit-suggestion",
+            "observe",
+            "rerun",
+        ] {
+            assert!(
+                risk_classes.contains(expected),
+                "missing risk class {expected}"
+            );
+        }
+
+        assert!(analysis.findings.iter().any(|finding| {
+            finding
+                .asup_error_code
+                .as_deref()
+                .is_some_and(|code| code.contains("ASUP-E101"))
+        }));
+        assert!(analysis.findings.iter().all(|finding| {
+            finding.next_proof_command.contains("rch")
+                || finding.next_proof_command.contains("RCH_REQUIRE_REMOTE")
         }));
     }
 

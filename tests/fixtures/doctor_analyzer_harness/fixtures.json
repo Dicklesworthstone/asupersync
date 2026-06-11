@@ -60,6 +60,41 @@
         "min_rejected": 1,
         "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness ingestion_source_adapter_matrix"
       }
+    },
+    {
+      "fixture_id": "evidence_analysis_d2_matrix",
+      "description": "DoctorEvidenceBundle D2 analyzer matrix for runtime, proof, browser, docs-claim, and rejected proof-artifact diagnostics.",
+      "family": "evidence_analysis",
+      "artifact_profile": "evidence_analysis_d2_matrix_v1",
+      "expectation": {
+        "min_records": 8,
+        "min_rejected": 1,
+        "min_findings": 9,
+        "min_recipe_suggestions": 9,
+        "expected_families": [
+          "browser_unsupported_host",
+          "futurelock",
+          "local_fallback_marker",
+          "missing_proof_artifact",
+          "obligation_leak",
+          "region_close_timeout",
+          "stale_docs_claim",
+          "stale_rch_proof"
+        ],
+        "expected_risk_classes": [
+          "destructive-forbidden",
+          "edit-suggestion",
+          "observe",
+          "rerun"
+        ],
+        "expected_asup_codes": [
+          "ASUP-E101",
+          "ASUP-E301",
+          "ASUP-E402",
+          "ASUP-E901"
+        ],
+        "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness evidence_analysis_d2_matrix"
+      }
     }
   ]
 }

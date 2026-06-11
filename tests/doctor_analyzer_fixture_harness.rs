@@ -4,14 +4,15 @@
 #![cfg(feature = "cli")]
 
 use asupersync::cli::doctor::{
-    DOCTOR_EVIDENCE_SCHEMA_VERSION, DoctorEvidenceBundle, RuntimeArtifact,
-    analyze_workspace_invariants, analyze_workspace_lock_contention,
-    emit_lock_contention_structured_events, ingest_doctor_evidence_bundle, scan_workspace,
-    structured_logging_contract, validate_doctor_evidence_bundle,
+    DOCTOR_EVIDENCE_SCHEMA_VERSION, DoctorEvidenceBundle, DoctorEvidenceFinding, RuntimeArtifact,
+    analyze_doctor_evidence_report, analyze_workspace_invariants,
+    analyze_workspace_lock_contention, emit_lock_contention_structured_events,
+    ingest_doctor_evidence_bundle, scan_workspace, structured_logging_contract,
+    validate_doctor_evidence_analysis_report, validate_doctor_evidence_bundle,
     validate_evidence_ingestion_report, validate_structured_logging_event_stream,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -42,6 +43,7 @@ enum AnalyzerFamily {
     Invariant,
     LockContention,
     Ingestion,
+    EvidenceAnalysis,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -55,6 +57,10 @@ struct FixtureExpectation {
     min_violations: Option<usize>,
     min_records: Option<usize>,
     min_rejected: Option<usize>,
+    min_recipe_suggestions: Option<usize>,
+    expected_families: Option<Vec<String>>,
+    expected_risk_classes: Option<Vec<String>>,
+    expected_asup_codes: Option<Vec<String>>,
     repro_command: String,
 }
 
@@ -304,6 +310,140 @@ fn source_adapter_matrix_fixture() -> Vec<RuntimeArtifact> {
     ]
 }
 
+fn evidence_analysis_d2_matrix_fixture() -> Vec<RuntimeArtifact> {
+    vec![
+        RuntimeArtifact {
+            artifact_id: "browser-unsupported-host".to_string(),
+            artifact_type: "browser_package_readiness".to_string(),
+            source_path: "artifacts/browser-readiness.json".to_string(),
+            replay_pointer: "rch exec -- cargo test -p asupersync-browser-core".to_string(),
+            content: r#"{
+                "correlation_id": "browser-unsupported-host",
+                "scenario_id": "doctor-d2-browser",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "unsupported host for wasm browser package"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "futurelock-detected".to_string(),
+            artifact_type: "trace".to_string(),
+            source_path: "artifacts/futurelock-trace.json".to_string(),
+            replay_pointer: "rch exec -- cargo test --features test-internals lab futurelock"
+                .to_string(),
+            content: r#"{
+                "correlation_id": "futurelock-detected",
+                "scenario_id": "doctor-d2-futurelock",
+                "seed": "0xFUTURE",
+                "outcome_class": "failed",
+                "summary": "ASUP-E402 futurelock detected no possible progress in parked set"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "local-fallback-marker".to_string(),
+            artifact_type: "proof_status".to_string(),
+            source_path: "artifacts/proof-status-local.json".to_string(),
+            replay_pointer:
+                "RCH_REQUIRE_REMOTE=1 rch exec -- cargo check -p asupersync --features cli --lib"
+                    .to_string(),
+            content: r#"{
+                "correlation_id": "local-fallback-marker",
+                "scenario_id": "doctor-d2-local-fallback",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "no-local-fallback violation: local fallback marker location=local"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "missing-proof-artifact".to_string(),
+            artifact_type: "proof_lane_manifest".to_string(),
+            source_path: "artifacts/proof_lane_manifest_v1.json".to_string(),
+            replay_pointer: "rch exec -- cargo test --test proof_lane_manifest_contract"
+                .to_string(),
+            content: r#"{
+                "correlation_id": "missing-proof-artifact",
+                "scenario_id": "doctor-d2-missing-proof",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "missing proof artifact for manifest lane doctor-d2"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "obligation-leak".to_string(),
+            artifact_type: "runtime_inspector".to_string(),
+            source_path: "artifacts/runtime-obligation.json".to_string(),
+            replay_pointer: "rch exec -- cargo test --features test-internals obligation"
+                .to_string(),
+            content: r#"{
+                "correlation_id": "obligation-leak",
+                "scenario_id": "doctor-d2-obligation",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "ASUP-E101 obligation leak: permit leak in channel reserve path"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "proof-artifact-rejected".to_string(),
+            artifact_type: "proof_status".to_string(),
+            source_path: "artifacts/proof-status-malformed.json".to_string(),
+            replay_pointer: "rch exec -- cargo test --test proof_status_snapshot_contract"
+                .to_string(),
+            content: "not-json".to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "region-close-timeout".to_string(),
+            artifact_type: "runtime_inspector".to_string(),
+            source_path: "artifacts/runtime-region-close.json".to_string(),
+            replay_pointer: "rch exec -- cargo test --features test-internals cancel drain"
+                .to_string(),
+            content: r#"{
+                "correlation_id": "region-close-timeout",
+                "scenario_id": "doctor-d2-region-close",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "ASUP-E301 region-close timeout while waiting for child drain"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "stale-docs-claim".to_string(),
+            artifact_type: "tracker_context".to_string(),
+            source_path: ".beads/issues.jsonl".to_string(),
+            replay_pointer: "br show asupersync-idea-wizard-fifth-wave-3gaiun.1.2 --json"
+                .to_string(),
+            content: r#"{
+                "correlation_id": "stale-docs-claim",
+                "scenario_id": "doctor-d2-docs-claim",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "stale docs claim for proof-status snapshot"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "stale-rch-proof".to_string(),
+            artifact_type: "rch_receipt".to_string(),
+            source_path: "artifacts/rch-stale-progress.json".to_string(),
+            replay_pointer:
+                "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness"
+                    .to_string(),
+            content: r#"{
+                "correlation_id": "stale-rch-proof",
+                "scenario_id": "doctor-d2-rch",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "heartbeat live but progress-stale stuck_detector cancelled proof"
+            }"#
+            .to_string(),
+        },
+    ]
+}
+
 fn doctor_evidence_bundle(
     run_id: &str,
     source_profile: &str,
@@ -453,6 +593,7 @@ fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
             let artifacts = match profile {
                 "mixed_artifacts_v1" => mixed_artifacts_fixture(),
                 "source_adapter_matrix_v1" => source_adapter_matrix_fixture(),
+                "evidence_analysis_d2_matrix_v1" => evidence_analysis_d2_matrix_fixture(),
                 other => panic!("unsupported artifact profile {other}"),
             };
             let bundle = doctor_evidence_bundle(&run_id, profile, artifacts);
@@ -482,6 +623,78 @@ fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
                 &mut diagnostics,
             );
         }
+        AnalyzerFamily::EvidenceAnalysis => {
+            let profile = fixture
+                .artifact_profile
+                .as_deref()
+                .expect("evidence-analysis fixture requires artifact_profile");
+            let artifacts = match profile {
+                "evidence_analysis_d2_matrix_v1" => evidence_analysis_d2_matrix_fixture(),
+                other => panic!("unsupported artifact profile {other}"),
+            };
+            let bundle = doctor_evidence_bundle(&run_id, profile, artifacts);
+            validate_doctor_evidence_bundle(&bundle).expect("doctor evidence bundle validates");
+            let ingestion_report = ingest_doctor_evidence_bundle(&bundle);
+            validate_evidence_ingestion_report(&ingestion_report)
+                .expect("ingestion report validates");
+            let analysis = analyze_doctor_evidence_report(&ingestion_report);
+            let analysis_again = analyze_doctor_evidence_report(&ingestion_report);
+            if analysis != analysis_again {
+                diagnostics.push("evidence analyzer report is non-deterministic".to_string());
+            }
+            validate_doctor_evidence_analysis_report(&analysis)
+                .expect("evidence analysis report validates");
+            let recipe_suggestion_count = analysis
+                .findings
+                .iter()
+                .filter(|finding| finding.remediation_recipe.is_some())
+                .count();
+            metrics.insert(
+                "finding_count".to_string(),
+                analysis.finding_count.to_string(),
+            );
+            metrics.insert(
+                "record_count".to_string(),
+                ingestion_report.records.len().to_string(),
+            );
+            metrics.insert(
+                "recipe_suggestion_count".to_string(),
+                recipe_suggestion_count.to_string(),
+            );
+            metrics.insert(
+                "rejected_count".to_string(),
+                ingestion_report.rejected.len().to_string(),
+            );
+            apply_numeric_expectation(
+                fixture.expectation.min_findings,
+                analysis.finding_count,
+                "finding_count",
+                &mut diagnostics,
+            );
+            apply_numeric_expectation(
+                fixture.expectation.min_records,
+                ingestion_report.records.len(),
+                "record_count",
+                &mut diagnostics,
+            );
+            apply_numeric_expectation(
+                fixture.expectation.min_rejected,
+                ingestion_report.rejected.len(),
+                "rejected_count",
+                &mut diagnostics,
+            );
+            apply_numeric_expectation(
+                fixture.expectation.min_recipe_suggestions,
+                recipe_suggestion_count,
+                "recipe_suggestion_count",
+                &mut diagnostics,
+            );
+            apply_evidence_analysis_expectations(
+                &fixture.expectation,
+                &analysis.findings,
+                &mut diagnostics,
+            );
+        }
     }
 
     FixtureExecutionLog {
@@ -507,6 +720,7 @@ fn fixture_family_name(family: &AnalyzerFamily) -> &'static str {
         AnalyzerFamily::Invariant => "invariant",
         AnalyzerFamily::LockContention => "lock_contention",
         AnalyzerFamily::Ingestion => "ingestion",
+        AnalyzerFamily::EvidenceAnalysis => "evidence_analysis",
     }
 }
 
@@ -561,6 +775,50 @@ fn apply_scanner_expectations(
         for token in tokens {
             if !flattened.contains(&token.to_lowercase()) {
                 diagnostics.push(format!("warning corpus missing token `{token}`"));
+            }
+        }
+    }
+}
+
+fn apply_evidence_analysis_expectations(
+    expectation: &FixtureExpectation,
+    findings: &[DoctorEvidenceFinding],
+    diagnostics: &mut Vec<String>,
+) {
+    if let Some(expected_families) = &expectation.expected_families {
+        let observed_families = findings
+            .iter()
+            .map(|finding| finding.diagnostic_family.as_str())
+            .collect::<BTreeSet<_>>();
+        for family in expected_families {
+            if !observed_families.contains(family.as_str()) {
+                diagnostics.push(format!("missing evidence diagnostic family `{family}`"));
+            }
+        }
+    }
+
+    if let Some(expected_risk_classes) = &expectation.expected_risk_classes {
+        let observed_risk_classes = findings
+            .iter()
+            .filter_map(|finding| finding.remediation_recipe.as_ref())
+            .map(|recipe| recipe.risk_class.as_str())
+            .collect::<BTreeSet<_>>();
+        for risk_class in expected_risk_classes {
+            if !observed_risk_classes.contains(risk_class.as_str()) {
+                diagnostics.push(format!("missing remediation risk class `{risk_class}`"));
+            }
+        }
+    }
+
+    if let Some(expected_asup_codes) = &expectation.expected_asup_codes {
+        let observed_asup_codes = findings
+            .iter()
+            .filter_map(|finding| finding.asup_error_code.as_deref())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        for code in expected_asup_codes {
+            if !observed_asup_codes.contains(code) {
+                diagnostics.push(format!("missing ASUP code pointer `{code}`"));
             }
         }
     }
@@ -621,6 +879,28 @@ fn ingestion_source_adapter_matrix() {
     assert_eq!(
         log.metrics.get("rejected_count").map(String::as_str),
         Some("1")
+    );
+}
+
+#[test]
+fn evidence_analysis_d2_matrix() {
+    let pack = load_fixture_pack();
+    let log = run_fixture_by_id(&pack, "evidence_analysis_d2_matrix");
+    assert_eq!(
+        log.status,
+        "pass",
+        "fixture failed: {}",
+        serde_json::to_string_pretty(&log).expect("serialize fixture log")
+    );
+    assert_eq!(
+        log.metrics.get("finding_count").map(String::as_str),
+        Some("9")
+    );
+    assert_eq!(
+        log.metrics
+            .get("recipe_suggestion_count")
+            .map(String::as_str),
+        Some("9")
     );
 }
 
