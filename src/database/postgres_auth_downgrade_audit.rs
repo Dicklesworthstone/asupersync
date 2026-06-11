@@ -48,6 +48,8 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 deallocate_retry_queue: VecDeque::new(),
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
+                statement_timeout_override: None,
+                applied_statement_timeout_ms: None,
             },
         },
         peer_stream,

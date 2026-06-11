@@ -4654,6 +4654,13 @@ impl PgConnection {
         let mut affected_rows = 0u64;
         let mut saw_row_response = false;
         let mut invalidate_prepared_cache = false;
+        // br-asupersync-server-stack-hardening-eeexl1.1.2: the execute path
+        // was missing the session-discard reaction the query path has had
+        // since br-asupersync-r8f4pq — a user-issued `SET`/`RESET`/`DISCARD`
+        // through `execute_unchecked` left `needs_discard` unset, so a
+        // pooled connection could hand ambiguous session GUC/role state to
+        // its next tenant. Mirror the query loop exactly.
+        let mut discard_on_pool_return = false;
 
         loop {
             if cx.checkpoint().is_err() {
@@ -4674,6 +4681,7 @@ impl PgConnection {
                         }
                         invalidate_prepared_cache |=
                             Self::command_tag_requires_prepared_cache_invalidation(tag);
+                        discard_on_pool_return |= Self::command_tag_requires_session_discard(tag);
                     }
                 }
                 b'T' | b'D' => {
@@ -4690,6 +4698,9 @@ impl PgConnection {
                     self.inner.closed = false;
                     if let Err(e) = self.handle_ready_for_query(&data) {
                         return self.fail_in_flight(e);
+                    }
+                    if discard_on_pool_return {
+                        self.inner.needs_discard = true;
                     }
                     if saw_row_response {
                         return Outcome::Err(row_returning_execute_error("execute()", "query()"));

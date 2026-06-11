@@ -5923,25 +5923,28 @@ mod tests {
             assert_eq!(sql, "SET SESSION max_execution_time = 500");
             write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
 
+            // SELECT statements route through the public wrapper (where the
+            // timeout reconciliation lives) and pass the static-SQL security
+            // validator; the fake server answers with plain OK packets.
             let sql = command_sql(&read_client_command(&mut stream));
-            assert_eq!(sql, "INSERT INTO t VALUES (1)");
-            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0));
+            assert_eq!(sql, "SELECT 1");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
 
             let sql = command_sql(&read_client_command(&mut stream));
             assert_eq!(
-                sql, "INSERT INTO t VALUES (2)",
+                sql, "SELECT 2",
                 "unchanged effective timeout must not re-send SET"
             );
-            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0));
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
         });
 
-        match run(conn.query(&cx, "INSERT INTO t VALUES (1)")) {
+        match run(conn.query_static_sql(&cx, "SELECT 1")) {
             Outcome::Ok(rows) => assert!(rows.is_empty()),
-            other => panic!("expected insert success, got {other:?}"),
+            other => panic!("expected query success, got {other:?}"),
         }
-        match run(conn.query(&cx, "INSERT INTO t VALUES (2)")) {
+        match run(conn.query_static_sql(&cx, "SELECT 2")) {
             Outcome::Ok(rows) => assert!(rows.is_empty()),
-            other => panic!("expected insert success, got {other:?}"),
+            other => panic!("expected query success, got {other:?}"),
         }
         server.join().expect("server thread");
 
@@ -5989,24 +5992,21 @@ mod tests {
             );
 
             let sql = command_sql(&read_client_command(&mut stream));
-            assert_eq!(sql, "INSERT INTO t VALUES (1)");
-            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0));
+            assert_eq!(sql, "SELECT 1");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
 
             let sql = command_sql(&read_client_command(&mut stream));
-            assert_eq!(
-                sql, "INSERT INTO t VALUES (2)",
-                "unsupported variable must not be retried"
-            );
-            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0));
+            assert_eq!(sql, "SELECT 2", "unsupported variable must not be retried");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
         });
 
-        match run(conn.query(&cx, "INSERT INTO t VALUES (1)")) {
+        match run(conn.query_static_sql(&cx, "SELECT 1")) {
             Outcome::Ok(rows) => assert!(rows.is_empty()),
-            other => panic!("expected insert success despite unsupported variable, got {other:?}"),
+            other => panic!("expected query success despite unsupported variable, got {other:?}"),
         }
-        match run(conn.query(&cx, "INSERT INTO t VALUES (2)")) {
+        match run(conn.query_static_sql(&cx, "SELECT 2")) {
             Outcome::Ok(rows) => assert!(rows.is_empty()),
-            other => panic!("expected insert success, got {other:?}"),
+            other => panic!("expected query success, got {other:?}"),
         }
         server.join().expect("server thread");
 
@@ -6094,7 +6094,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(500));
         });
 
-        let mut fut = Box::pin(conn.query(&cx, "SELECT 1"));
+        let mut fut = Box::pin(conn.query_static_sql(&cx, "SELECT 1"));
         // First poll sends COM_QUERY and parks awaiting the response.
         let first = run(futures_lite::future::poll_once(fut.as_mut()));
         assert!(first.is_none(), "query must not complete on the first poll");

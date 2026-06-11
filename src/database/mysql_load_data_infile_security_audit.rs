@@ -81,6 +81,9 @@ fn make_test_connection(stream: crate::net::TcpStream, sequence: u8) -> MySqlCon
             max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
             prepared_statement_epoch: 0,
             query_in_flight: AtomicBool::new(false),
+            statement_timeout_override: None,
+            applied_max_execution_time_ms: None,
+            max_execution_time_unsupported: false,
         },
         options: None,
     }
