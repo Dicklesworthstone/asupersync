@@ -32,6 +32,7 @@ use crate::types::Time;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
+const REPLAY_DIVERGENCE_CODE: &str = "ASUP-E401";
 const LAB_SCENARIO_RUNNER_ADAPTER: &str = "lab.scenario_runner";
 
 // ---------------------------------------------------------------------------
@@ -85,7 +86,7 @@ impl std::fmt::Display for ScenarioRunnerError {
                 second,
             } => write!(
                 f,
-                "replay divergence at seed {seed}: \
+                "[{REPLAY_DIVERGENCE_CODE}] replay divergence at seed {seed}: \
                  first(event_hash={}, schedule_hash={}, steps={}) != \
                  second(event_hash={}, schedule_hash={}, steps={})",
                 first.event_hash,
@@ -1610,6 +1611,7 @@ mod tests {
             },
         };
         let msg = err.to_string();
+        assert!(msg.starts_with("[ASUP-E401]"));
         assert!(msg.contains("seed 42"));
         assert!(msg.contains("divergence"));
         crate::test_complete!("error_display_divergence");

@@ -16,6 +16,12 @@
 
 ## Example
 
+Replay divergence display text starts with:
+
+```text
+[ASUP-E401] replay divergence at event <index>: expected <event>, got <event>. <context>
+```
+
 If two same-seed runs produce different task order, inspect the first trace
 event where task ids or wake order differ.
 

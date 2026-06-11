@@ -450,7 +450,7 @@
       "code": "ASUP-E401",
       "name": "replay-divergence",
       "area": "lab-replay",
-      "status": "reserved",
+      "status": "live",
       "summary": "A replay run diverged from its recorded deterministic trace.",
       "probable_causes": [
         "The code introduced nondeterministic ordering or ambient time.",
@@ -461,8 +461,11 @@
         "Normalize ordering, timestamps, and ids before accepting new goldens."
       ],
       "doc_path": "docs/error_codes/ASUP-E401.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/lab/scenario_runner.rs",
+        "src/trace/replayer.rs"
+      ]
     },
     {
       "code": "ASUP-E402",

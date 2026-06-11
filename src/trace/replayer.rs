@@ -35,6 +35,8 @@ use crate::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadat
 use serde::Serialize;
 use std::fmt;
 
+const REPLAY_DIVERGENCE_CODE: &str = "ASUP-E401";
+
 // =============================================================================
 // Replay Mode
 // =============================================================================
@@ -87,7 +89,7 @@ impl fmt::Display for DivergenceError {
         );
         write!(
             f,
-            "Replay divergence at event {}: expected {}, got {:?}. {}",
+            "[{REPLAY_DIVERGENCE_CODE}] replay divergence at event {}: expected {}, got {:?}. {}",
             self.index, expected, self.actual, self.context
         )
     }
@@ -800,6 +802,7 @@ mod tests {
         };
 
         let msg = format!("{err}");
+        assert!(msg.starts_with("[ASUP-E401]"));
         assert!(msg.contains("event 5"));
         assert!(msg.contains("Different task scheduled"));
     }
@@ -814,6 +817,7 @@ mod tests {
         };
 
         let msg = format!("{err}");
+        assert!(msg.starts_with("[ASUP-E401]"));
         assert!(msg.contains("<trace_exhausted>"));
         assert!(msg.contains("event 7"));
     }
