@@ -354,7 +354,7 @@
       "code": "ASUP-E204",
       "name": "semaphore-permit-exhausted",
       "area": "channels-sync",
-      "status": "reserved",
+      "status": "live",
       "summary": "A semaphore acquire could not obtain the requested permits.",
       "probable_causes": [
         "All permits are held or queued ahead under FIFO policy.",
@@ -365,8 +365,10 @@
         "Reduce permit count or split the work into smaller admitted units."
       ],
       "doc_path": "docs/error_codes/ASUP-E204.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/sync/semaphore.rs"
+      ]
     },
     {
       "code": "ASUP-E205",

@@ -69,7 +69,7 @@ pub struct TryAcquireError;
 impl std::fmt::Display for TryAcquireError {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "no semaphore permits available")
+        write!(f, "[ASUP-E204] no semaphore permits available")
     }
 }
 
@@ -1806,6 +1806,23 @@ mod tests {
         );
         crate::assert_with_log!(sem.is_closed(), "is_closed", true, sem.is_closed());
         crate::test_complete!("try_acquire_fails_when_closed");
+    }
+
+    #[test]
+    fn try_acquire_error_display_has_asup_e204() {
+        init_test("try_acquire_error_display_has_asup_e204");
+        let sem = Semaphore::new(0);
+
+        let err = sem
+            .try_acquire(1)
+            .expect_err("empty semaphore should not issue a permit");
+        crate::assert_with_log!(
+            err.to_string() == "[ASUP-E204] no semaphore permits available",
+            "try_acquire error display token",
+            "[ASUP-E204] no semaphore permits available",
+            err.to_string()
+        );
+        crate::test_complete!("try_acquire_error_display_has_asup_e204");
     }
 
     #[test]

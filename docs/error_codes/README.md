@@ -36,7 +36,7 @@ lands.
 | ASUP-E201 | live | channels-sync | [Channel closed](./ASUP-E201.md) |
 | ASUP-E202 | reserved | channels-sync | [Send permit leaked](./ASUP-E202.md) |
 | ASUP-E203 | reserved | channels-sync | [Receive cancelled](./ASUP-E203.md) |
-| ASUP-E204 | reserved | channels-sync | [Semaphore permit exhausted](./ASUP-E204.md) |
+| ASUP-E204 | live | channels-sync | [Semaphore permit exhausted](./ASUP-E204.md) |
 | ASUP-E205 | reserved | channels-sync | [Lock-order violation](./ASUP-E205.md) |
 | ASUP-E301 | live | cancellation-drain | [Cancel drain timeout](./ASUP-E301.md) |
 | ASUP-E302 | reserved | cancellation-drain | [Race loser not drained](./ASUP-E302.md) |

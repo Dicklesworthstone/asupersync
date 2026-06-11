@@ -19,6 +19,12 @@
 If a waiter for two permits is queued first, a later one-permit `try_acquire`
 must not jump ahead even when one permit is currently free.
 
+The non-blocking error display starts with the stable token:
+
+```text
+[ASUP-E204] no semaphore permits available
+```
+
 ## Related
 
 - `ASUP-E006`
