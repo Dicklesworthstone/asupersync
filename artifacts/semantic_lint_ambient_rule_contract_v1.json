@@ -1,0 +1,124 @@
+{
+  "contract_version": "semantic-lint-ambient-rule-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+  "rule_id": "ambient-time-or-entropy-in-lab-sensitive-code",
+  "source_of_truth": {
+    "inventory": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "contract": "artifacts/semantic_lint_ambient_rule_contract_v1.json",
+    "contract_test": "tests/semantic_lint_ambient_contract.rs",
+    "runner": "scripts/semantic_lint.py",
+    "docs": "docs/semantic_lint_ambient_rule.md",
+    "positive_fixture": "tests/fixtures/semantic_lint/ambient/positive_system_time.rs",
+    "negative_fixture": "tests/fixtures/semantic_lint/ambient/negative_virtual_time.rs",
+    "valid_allow_fixture": "tests/fixtures/semantic_lint/ambient/valid_allow.rs",
+    "invalid_allow_fixture": "tests/fixtures/semantic_lint/ambient/invalid_allow.rs"
+  },
+  "implementation": {
+    "selected_engine": "ast-grep",
+    "runner_default_engine": "auto",
+    "portable_fallback": "contract-limited deterministic syntax matcher used only when ast-grep is unavailable",
+    "result_schema": "semantic-lint-results-v1",
+    "no_source_rewrites": true,
+    "no_runtime_behavior_change": true,
+    "fail_closed_missing_engine_when_ast_grep_is_required": true
+  },
+  "target_paths": [
+    "src/lab/",
+    "src/trace/",
+    "src/runtime/scheduler/",
+    "tests/"
+  ],
+  "ast_grep_patterns": [
+    {
+      "pattern_id": "system-time-now-qualified",
+      "pattern": "std::time::SystemTime::now()",
+      "risk": "host wall-clock time breaks deterministic replay"
+    },
+    {
+      "pattern_id": "system-time-now-imported",
+      "pattern": "SystemTime::now()",
+      "risk": "host wall-clock time breaks deterministic replay"
+    },
+    {
+      "pattern_id": "instant-now-qualified",
+      "pattern": "std::time::Instant::now()",
+      "risk": "host monotonic time breaks deterministic replay"
+    },
+    {
+      "pattern_id": "instant-now-imported",
+      "pattern": "Instant::now()",
+      "risk": "host monotonic time breaks deterministic replay"
+    },
+    {
+      "pattern_id": "wall-now-crate",
+      "pattern": "crate::time::wall_now()",
+      "risk": "crate wall-clock helper must be virtualized in lab-sensitive paths"
+    },
+    {
+      "pattern_id": "wall-now-imported",
+      "pattern": "wall_now()",
+      "risk": "wall-clock helper must be virtualized in lab-sensitive paths"
+    },
+    {
+      "pattern_id": "thread-rng-qualified",
+      "pattern": "rand::thread_rng()",
+      "risk": "ambient entropy breaks deterministic replay"
+    },
+    {
+      "pattern_id": "thread-rng-imported",
+      "pattern": "thread_rng()",
+      "risk": "ambient entropy breaks deterministic replay"
+    },
+    {
+      "pattern_id": "rand-rng-qualified",
+      "pattern": "rand::rng()",
+      "risk": "ambient entropy breaks deterministic replay"
+    },
+    {
+      "pattern_id": "rand-rng-imported",
+      "pattern": "rng()",
+      "risk": "ambient entropy breaks deterministic replay"
+    }
+  ],
+  "allow_marker": {
+    "format": "asupersync-lint:allow ambient-time-or-entropy-in-lab-sensitive-code reason=<short reason> owner=<asupersync-bead-id>",
+    "locations": [
+      "same line as finding",
+      "immediately preceding line"
+    ],
+    "requires": [
+      "reason",
+      "owner"
+    ],
+    "owner_must_match": "^asupersync-[A-Za-z0-9_.-]+$",
+    "invalid_marker_does_not_suppress": true
+  },
+  "fixtures": [
+    {
+      "path": "tests/fixtures/semantic_lint/ambient/positive_system_time.rs",
+      "expected_verdict": "fail",
+      "expected_findings": 3
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/ambient/negative_virtual_time.rs",
+      "expected_verdict": "pass",
+      "expected_findings": 0
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/ambient/valid_allow.rs",
+      "expected_verdict": "pass",
+      "expected_suppressed": 1
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/ambient/invalid_allow.rs",
+      "expected_verdict": "fail",
+      "expected_invalid_allow_markers": 1
+    }
+  ],
+  "no_claims": [
+    "does not close every rule required by asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+    "does not prove zero false positives across the entire repository",
+    "does not rewrite source code",
+    "does not replace rustc-hir rules needed for guard lifetimes across await"
+  ]
+}
