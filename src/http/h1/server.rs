@@ -13,6 +13,8 @@ use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
+use crate::types::Budget;
+use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_request_budget};
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -75,6 +77,22 @@ pub struct Http1Config {
     /// - `RejectUnknown`: Reject all requests (secure default for new deployments)
     /// - `AllowAll`: Accept any Host header (legacy insecure behavior)
     pub allowed_hosts: HostPolicy,
+    /// br-asupersync-server-stack-hardening-eeexl1.1.1: server-default
+    /// per-request timeout. When set, every request budget is tightened by
+    /// this duration at the server hop (meet semantics — it can only
+    /// tighten the connection budget, never extend it). `None` means no
+    /// server-imposed request deadline.
+    pub request_timeout: Option<Duration>,
+    /// Opt-in cap for the client-supplied `Request-Timeout` header. When
+    /// `None` (the default) the header is ignored entirely. When set, a
+    /// parseable header tightens the request budget by
+    /// `min(header, cap)` — a client can therefore never extend the budget
+    /// beyond the cap (or beyond what config/connection already imposed).
+    pub request_timeout_header_cap: Option<Duration>,
+    /// Bounded drain grace after a request-budget deadline or a
+    /// connection cancel: the handler gets this long to observe the
+    /// cancel and finish cleanly before the drop backstop.
+    pub request_drain_grace: Duration,
 }
 
 impl Default for Http1Config {
@@ -86,6 +104,9 @@ impl Default for Http1Config {
             max_requests_per_connection: Some(1000),
             idle_timeout: Some(Duration::from_mins(1)),
             allowed_hosts: HostPolicy::default(), // Secure by default: RejectUnknown
+            request_timeout: None,
+            request_timeout_header_cap: None,
+            request_drain_grace: Duration::from_millis(500),
         }
     }
 }
@@ -148,6 +169,74 @@ impl Http1Config {
         };
         self
     }
+
+    /// Set the server-default per-request timeout (see
+    /// [`Self::request_timeout`] field docs).
+    #[must_use]
+    pub fn request_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Opt in to the client `Request-Timeout` header with the given cap
+    /// (see [`Self::request_timeout_header_cap`] field docs).
+    #[must_use]
+    pub fn request_timeout_header_cap(mut self, cap: Option<Duration>) -> Self {
+        self.request_timeout_header_cap = cap;
+        self
+    }
+
+    /// Set the post-cancel drain grace for request handlers (see
+    /// [`Self::request_drain_grace`] field docs).
+    #[must_use]
+    pub fn request_drain_grace(mut self, grace: Duration) -> Self {
+        self.request_drain_grace = grace;
+        self
+    }
+}
+
+/// Parses the client `Request-Timeout` header into a duration.
+///
+/// Accepted forms (after ASCII-whitespace trim): a bare integer meaning
+/// **milliseconds** (`"1500"`), or an integer with an `ms`, `s`, or `m`
+/// suffix (`"1500ms"`, `"5s"`, `"2m"`). Fail-closed on anything else:
+///
+/// - missing header, empty value, or non-digit characters → `None`
+/// - more than one `Request-Timeout` header (ambiguous) → `None`
+/// - zero → `None` (a zero timeout cannot express a useful request)
+/// - more than 10 digits (would exceed ~115 days in ms) → `None`
+///
+/// `None` always means "fall back to the server-configured budget"; a
+/// malformed header can never weaken or extend anything.
+fn parse_request_timeout_header(headers: &[(String, String)]) -> Option<Duration> {
+    let mut found: Option<&str> = None;
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("request-timeout") {
+            if found.is_some() {
+                // Duplicate headers are ambiguous: fail closed.
+                return None;
+            }
+            found = Some(value);
+        }
+    }
+    let value = found?.trim();
+    let (digits, unit): (&str, fn(u64) -> Duration) = if let Some(d) = value.strip_suffix("ms") {
+        (d, Duration::from_millis)
+    } else if let Some(d) = value.strip_suffix('s') {
+        (d, Duration::from_secs)
+    } else if let Some(d) = value.strip_suffix('m') {
+        (d, |minutes| Duration::from_secs(minutes.saturating_mul(60)))
+    } else {
+        (value, Duration::from_millis)
+    };
+    if digits.is_empty() || digits.len() > 10 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let amount: u64 = digits.parse().ok()?;
+    if amount == 0 {
+        return None;
+    }
+    Some(unit(amount))
 }
 
 /// br-asupersync-t9yqht: extract the host portion of a `Host` header
@@ -679,44 +768,96 @@ where
 
             state.phase = ConnectionPhase::Processing;
 
-            // Process request through handler.
-            // Race against ForceClosing so slow handlers don't block shutdown.
-            let mut resp = if let Some(signal) = &self.shutdown_signal {
-                let mut handler_fut = std::pin::pin!((self.handler)(req));
-                let mut force_close_fut =
-                    std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+            // br-asupersync-server-stack-hardening-eeexl1.1.1: run the
+            // handler inside a server-hop request region. The request
+            // budget is the connection budget tightened by the configured
+            // request timeout and the (opt-in, cap-clamped) client
+            // `Request-Timeout` header; the region bridges connection
+            // cancel -> request cancel and enforces the deadline with a
+            // bounded protocol drain. When no runtime is installed on this
+            // thread, the legacy direct-call path is preserved unchanged.
+            let request_now = Cx::current()
+                .and_then(|cx| cx.timer_driver())
+                .map_or_else(wall_now, |timer| timer.now());
+            let conn_cx = Cx::current();
+            let base_budget = conn_cx.as_ref().map_or(Budget::INFINITE, Cx::budget);
+            let header_timeout = parse_request_timeout_header(&req.headers);
+            let (request_budget, budget_source) = derive_request_budget(
+                base_budget,
+                request_now,
+                self.config.request_timeout,
+                header_timeout,
+                self.config.request_timeout_header_cap,
+            );
 
-                let result = poll_fn(|cx| {
-                    // If already force-closing, bail immediately
-                    if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
-                        return Poll::Ready(None);
+            let mut forced_close = false;
+            let mut resp = match ServerRequestRegion::mint("h1", request_budget, request_now) {
+                Some(region) => {
+                    // Race the whole hop against ForceClosing so slow
+                    // handlers don't block shutdown (drop is the backstop).
+                    let hop = race_force_close(
+                        self.shutdown_signal.as_ref(),
+                        region.run_with_protocol_drain(
+                            budget_source,
+                            conn_cx,
+                            self.config.request_drain_grace,
+                            (self.handler)(req),
+                        ),
+                    )
+                    .await;
+                    match hop {
+                        None => {
+                            // Force-close interrupted the handler.
+                            state.phase = ConnectionPhase::Closing;
+                            break;
+                        }
+                        Some(ServerHopOutcome::Ok(resp)) => resp,
+                        Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
+                            // The connection is cancelled or the peer is
+                            // gone: nothing useful can be written back.
+                            state.requests_served += 1;
+                            state.phase = ConnectionPhase::Closing;
+                            break;
+                        }
+                        Some(ServerHopOutcome::Panicked(_)) => {
+                            // Panic isolation: the server survives; this
+                            // connection closes defensively after the 500.
+                            forced_close = true;
+                            hop_error_response(request_version, 500, "Internal Server Error")
+                        }
+                        Some(ServerHopOutcome::DeadlineExceeded) => {
+                            // The request was fully read and the response
+                            // framing is clean, so keep-alive may continue.
+                            hop_error_response(
+                                request_version,
+                                503,
+                                "request budget deadline exceeded",
+                            )
+                        }
                     }
-                    // Check if force-close arrived
-                    if force_close_fut.as_mut().poll(cx).is_ready() {
-                        return Poll::Ready(None);
-                    }
-                    // Drive the handler
-                    handler_fut.as_mut().poll(cx).map(Some)
-                })
-                .await;
-
-                if let Some(resp) = result {
-                    resp
-                } else {
-                    // Force-close interrupted the handler
-                    state.phase = ConnectionPhase::Closing;
-                    break;
                 }
-            } else {
-                (self.handler)(req).await
+                None => {
+                    // Legacy path: no runtime context on this thread.
+                    let Some(resp) =
+                        race_force_close(self.shutdown_signal.as_ref(), (self.handler)(req)).await
+                    else {
+                        // Force-close interrupted the handler.
+                        state.phase = ConnectionPhase::Closing;
+                        break;
+                    };
+                    resp
+                }
             };
 
             if request_method == Method::Head {
                 suppress_response_body_for_head(&mut resp);
             }
 
-            let close_after =
-                finalize_response_persistence(request_version, &mut resp, close_after);
+            let close_after = finalize_response_persistence(
+                request_version,
+                &mut resp,
+                close_after || forced_close,
+            );
 
             state.phase = ConnectionPhase::Writing;
 
@@ -750,6 +891,48 @@ where
         let _ = io.shutdown().await;
 
         Ok(state)
+    }
+}
+
+/// Races `fut` against the shutdown signal's ForceClosing phase.
+///
+/// Returns `None` when force-close interrupts the future (the future is
+/// dropped — drop is the cancellation backstop for shutdown). With no
+/// signal attached the future simply runs to completion.
+async fn race_force_close<F: Future>(signal: Option<&ShutdownSignal>, fut: F) -> Option<F::Output> {
+    let Some(signal) = signal else {
+        return Some(fut.await);
+    };
+    let mut fut = std::pin::pin!(fut);
+    let mut force_close_fut = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    poll_fn(|cx| {
+        // If already force-closing, bail immediately.
+        if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+            return Poll::Ready(None);
+        }
+        // Check if force-close arrived.
+        if force_close_fut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        // Drive the wrapped future.
+        fut.as_mut().poll(cx).map(Some)
+    })
+    .await
+}
+
+/// Minimal `text/plain` response for server-hop terminal outcomes
+/// (handler panic → 500, request budget deadline → 503).
+fn hop_error_response(version: Version, status: u16, body: &str) -> Response {
+    Response {
+        status,
+        reason: String::new(),
+        version,
+        headers: vec![(
+            "content-type".to_string(),
+            "text/plain; charset=utf-8".to_string(),
+        )],
+        body: body.as_bytes().to_vec(),
+        trailers: Vec::new(),
     }
 }
 
@@ -1887,5 +2070,295 @@ mod tests {
         let c2 = c;
         assert_eq!(c2.max_headers_size, 64 * 1024);
         assert!(c2.keep_alive);
+    }
+
+    // --- br-asupersync-server-stack-hardening-eeexl1.1.1: server-hop ---
+    // --- request regions, budgets, and Request-Timeout handling      ---
+
+    #[test]
+    fn parse_request_timeout_header_accepts_valid_forms() {
+        let cases: [(&str, Duration); 5] = [
+            ("1500", Duration::from_millis(1500)),
+            ("1500ms", Duration::from_millis(1500)),
+            ("5s", Duration::from_secs(5)),
+            ("2m", Duration::from_secs(120)),
+            ("  30  ", Duration::from_millis(30)),
+        ];
+        for (value, expected) in cases {
+            let headers = vec![("Request-Timeout".to_string(), value.to_string())];
+            assert_eq!(
+                parse_request_timeout_header(&headers),
+                Some(expected),
+                "value {value:?}"
+            );
+        }
+        // Case-insensitive header name.
+        let headers = vec![("REQUEST-TIMEOUT".to_string(), "5s".to_string())];
+        assert_eq!(
+            parse_request_timeout_header(&headers),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn parse_request_timeout_header_fails_closed() {
+        let bad_values = [
+            "", " ", "abc", "-5", "5.5s", "5 s", "1h", "0", "0ms", "0s",
+            "99999999999",   // 11 digits
+            "184467440737s", // overflow-adjacent garbage length
+            "5ss", "ms",
+        ];
+        for value in bad_values {
+            let headers = vec![("Request-Timeout".to_string(), value.to_string())];
+            assert_eq!(
+                parse_request_timeout_header(&headers),
+                None,
+                "value {value:?} must fail closed"
+            );
+        }
+        // Missing header.
+        assert_eq!(parse_request_timeout_header(&[]), None);
+        // Duplicate headers are ambiguous: fail closed.
+        let headers = vec![
+            ("Request-Timeout".to_string(), "5s".to_string()),
+            ("request-timeout".to_string(), "10s".to_string()),
+        ];
+        assert_eq!(parse_request_timeout_header(&headers), None);
+    }
+
+    #[test]
+    fn serve_handler_observes_config_derived_request_budget() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move {
+                let deadline_installed =
+                    Cx::with_current(|cx| cx.budget().deadline.is_some()).unwrap_or(false);
+                if deadline_installed {
+                    Response::new(200, "OK", b"deadline-installed")
+                } else {
+                    Response::new(500, "ERR", b"no-deadline")
+                }
+            },
+            localhost_server_config().request_timeout(Some(Duration::from_secs(30))),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve request");
+        assert_eq!(state.requests_served, 1);
+
+        let written = String::from_utf8(written.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            written.starts_with("HTTP/1.1 200 OK\r\n"),
+            "handler must observe the config-derived budget deadline: {written}"
+        );
+    }
+
+    #[test]
+    fn serve_request_timeout_maps_to_503() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move {
+                let now = Cx::current()
+                    .and_then(|cx| cx.timer_driver())
+                    .map_or_else(wall_now, |timer| timer.now());
+                crate::time::sleep(now, Duration::from_secs(600)).await;
+                Response::new(200, "OK", b"too late")
+            },
+            localhost_server_config()
+                .request_timeout(Some(Duration::from_millis(25)))
+                .request_drain_grace(Duration::from_millis(10)),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let started = std::time::Instant::now();
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve request");
+        assert_eq!(state.requests_served, 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "request timeout must bound the handler"
+        );
+
+        let written = String::from_utf8(written.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            written.starts_with("HTTP/1.1 503"),
+            "deadline exceeded must map to 503: {written}"
+        );
+        assert!(written.contains("request budget deadline exceeded"));
+    }
+
+    /// Parent AC 3 (security): a hostile `Request-Timeout` header cannot
+    /// extend the request budget beyond the configured cap.
+    #[test]
+    fn serve_header_timeout_clamped_by_cap_security() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nRequest-Timeout: 9999999s\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move {
+                let now = Cx::current()
+                    .and_then(|cx| cx.timer_driver())
+                    .map_or_else(wall_now, |timer| timer.now());
+                crate::time::sleep(now, Duration::from_secs(600)).await;
+                Response::new(200, "OK", b"too late")
+            },
+            localhost_server_config()
+                .request_timeout_header_cap(Some(Duration::from_millis(25)))
+                .request_drain_grace(Duration::from_millis(10)),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let started = std::time::Instant::now();
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve request");
+        assert_eq!(state.requests_served, 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the cap must bound a hostile header timeout"
+        );
+
+        let written = String::from_utf8(written.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            written.starts_with("HTTP/1.1 503"),
+            "cap-clamped header deadline must map to 503: {written}"
+        );
+    }
+
+    #[test]
+    fn serve_header_timeout_ignored_without_cap_opt_in() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nRequest-Timeout: 1ms\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move {
+                let now = Cx::current()
+                    .and_then(|cx| cx.timer_driver())
+                    .map_or_else(wall_now, |timer| timer.now());
+                crate::time::sleep(now, Duration::from_millis(50)).await;
+                Response::new(200, "OK", b"finished")
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve request");
+        assert_eq!(state.requests_served, 1);
+
+        let written = String::from_utf8(written.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            written.starts_with("HTTP/1.1 200 OK\r\n"),
+            "without cap opt-in the header must be ignored: {written}"
+        );
+    }
+
+    #[test]
+    fn serve_handler_panic_maps_to_500_and_closes_connection() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1Server::with_config(
+            |_req| async move { panic!("handler exploded") },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve must survive a handler panic");
+        assert_eq!(state.requests_served, 1);
+
+        let written = String::from_utf8(written.lock().unwrap().clone()).expect("utf8");
+        assert!(
+            written.starts_with("HTTP/1.1 500"),
+            "handler panic must map to 500: {written}"
+        );
+        assert!(
+            written.contains("Connection: close") || written.contains("connection: close"),
+            "connection must close after a handler panic: {written}"
+        );
+    }
+
+    #[test]
+    fn serve_emits_budget_trace_events_at_server_hop() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let trace_probe: Arc<Mutex<Option<crate::trace::TraceBufferHandle>>> =
+            Arc::new(Mutex::new(None));
+        let probe = Arc::clone(&trace_probe);
+        let server = Http1Server::with_config(
+            move |_req| {
+                let probe = Arc::clone(&probe);
+                async move {
+                    *probe.lock().unwrap() =
+                        Cx::with_current(|cx| cx.trace_buffer()).flatten();
+                    Response::new(200, "OK", b"ok")
+                }
+            },
+            localhost_server_config().request_timeout(Some(Duration::from_secs(30))),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve request");
+
+        let trace = trace_probe
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("request cx must carry the runtime trace buffer");
+        let messages: Vec<String> = trace
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == crate::trace::TraceEventKind::UserTrace)
+            .filter_map(|e| match &e.data {
+                crate::trace::event::TraceData::Message(msg)
+                    if msg.starts_with("server.budget_") =>
+                {
+                    Some(msg.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            messages.len(),
+            2,
+            "expected installed + consumed events, got {messages:?}"
+        );
+        assert!(messages[0].starts_with("server.budget_installed proto=h1 "));
+        assert!(messages[0].contains("source=config"));
+        assert!(messages[1].starts_with("server.budget_consumed proto=h1 "));
+        assert!(messages[1].contains("outcome=ok"));
     }
 }

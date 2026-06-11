@@ -37,10 +37,12 @@ use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::cx::scope::CatchUnwind;
 use crate::cx::{Cx, cap};
 use crate::error::Error;
+use crate::types::{Budget, CancelKind, Time};
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
 
@@ -563,6 +565,427 @@ where
         let region = RequestRegion::new(cx, request);
         region.run(&self.handler).into_response()
     }
+}
+
+// ─── Server-Hop Request Regions ─────────────────────────────────────────────
+// br-asupersync-server-stack-hardening-eeexl1.1.1: protocol-agnostic
+// per-request region executor for server hops (HTTP/1.1, gRPC-over-h2).
+// The protocol layer derives a request budget (meet semantics — tightening
+// only), mints a request-scoped Cx through the runtime boundary, and runs
+// the handler inside the region with panic isolation, deadline enforcement,
+// connection-cancel bridging, and a bounded protocol drain.
+
+/// Which budget sources tightened the request budget at the server hop.
+///
+/// Carried into the `server.budget_installed` trace event so operators can
+/// see whether a request deadline came from server config, a client header
+/// (always clamped by the configured cap), both, or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestBudgetSource {
+    /// Neither a server default nor a header timeout applied; the request
+    /// inherits the connection budget unchanged.
+    Inherited,
+    /// Only the server-configured default request timeout applied.
+    ServerConfig,
+    /// Only a client-supplied timeout header (clamped to the configured
+    /// cap) applied.
+    HeaderClamped,
+    /// Both the server default and a clamped header timeout applied.
+    ServerConfigAndHeader,
+}
+
+impl RequestBudgetSource {
+    /// Stable token used in budget trace events.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherited => "inherited",
+            Self::ServerConfig => "config",
+            Self::HeaderClamped => "header",
+            Self::ServerConfigAndHeader => "config+header",
+        }
+    }
+}
+
+/// Derives the effective per-request budget at a server hop.
+///
+/// Composition is pure meet (`Budget::meet` via
+/// [`Budget::tightened_by_timeout`]), so the result can only tighten
+/// `base` — never loosen it:
+///
+/// 1. `base` — the connection task's budget (deadline/quotas inherited).
+/// 2. `server_timeout` — the server-configured default request timeout.
+/// 3. `header_timeout` — the client-requested timeout, honored **only**
+///    when `header_cap` is configured, and clamped to that cap first.
+///
+/// # Security
+///
+/// A client header can never extend the request budget: with no cap
+/// configured the header is ignored entirely, and with a cap the header is
+/// clamped to `min(header, cap)` before the meet — which itself can only
+/// tighten whatever the connection and server config already imposed.
+#[must_use]
+pub fn derive_request_budget(
+    base: Budget,
+    now: Time,
+    server_timeout: Option<Duration>,
+    header_timeout: Option<Duration>,
+    header_cap: Option<Duration>,
+) -> (Budget, RequestBudgetSource) {
+    let mut budget = base;
+    let mut config_applied = false;
+    if let Some(timeout) = server_timeout {
+        budget = budget.tightened_by_timeout(now, timeout);
+        config_applied = true;
+    }
+    let mut header_applied = false;
+    if let (Some(requested), Some(cap)) = (header_timeout, header_cap) {
+        budget = budget.tightened_by_timeout(now, requested.min(cap));
+        header_applied = true;
+    }
+    let source = match (config_applied, header_applied) {
+        (false, false) => RequestBudgetSource::Inherited,
+        (true, false) => RequestBudgetSource::ServerConfig,
+        (false, true) => RequestBudgetSource::HeaderClamped,
+        (true, true) => RequestBudgetSource::ServerConfigAndHeader,
+    };
+    (budget, source)
+}
+
+/// Terminal outcome of running a handler inside a server-hop request region.
+#[derive(Debug)]
+pub enum ServerHopOutcome<R> {
+    /// Handler completed; its response is committed even if cancellation
+    /// raced completion (same commit semantics as [`RequestRegion::run`]).
+    Ok(R),
+    /// The request was cancelled before the handler produced a response
+    /// (pre-cancelled region, or connection cancel observed at entry).
+    Cancelled,
+    /// Handler panicked; contains a best-effort message.
+    Panicked(String),
+    /// The request budget deadline elapsed and the handler did not
+    /// complete within the drain grace.
+    DeadlineExceeded,
+    /// The connection was cancelled mid-request and the handler did not
+    /// complete within the drain grace.
+    ConnectionLost,
+}
+
+/// Installs a [`Cx`] as the ambient context for every poll of `inner`.
+///
+/// Unlike holding a [`Cx::set_current`] guard across `.await` points (which
+/// pins the ambient context to the *constructing* thread), this re-installs
+/// the context on whichever worker thread polls the future, so it is correct
+/// for work-stealing runtimes and keeps the wrapped future `Send`.
+#[pin_project::pin_project]
+pub struct AmbientCxScope<F> {
+    cx: Cx,
+    #[pin]
+    inner: F,
+}
+
+impl<F: Future> Future for AmbientCxScope<F> {
+    type Output = F::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        task_cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.project();
+        let _guard = Cx::set_current(Some(this.cx.clone()));
+        this.inner.poll(task_cx)
+    }
+}
+
+/// A server-hop request region: a request-scoped [`Cx`] minted at the
+/// runtime boundary plus the budget/trace bookkeeping for one request.
+///
+/// Mint one per request with [`Self::mint`], then either drive the full
+/// lifecycle with [`Self::run_with_protocol_drain`] (HTTP/1.1 server) or
+/// instrument a caller-driven dispatch with [`Self::instrumented`] +
+/// [`Self::finish`] (gRPC server hop).
+pub struct ServerRequestRegion {
+    cx: Cx,
+    started_at: Time,
+    protocol: &'static str,
+}
+
+impl ServerRequestRegion {
+    /// Mints a request region through the runtime boundary.
+    ///
+    /// Uses [`Runtime::current_request_cx_with_budget`] so the request Cx
+    /// inherits the runtime's drivers and capability mask (non-escalating;
+    /// see br-asupersync-ovztin). Returns `None` when no runtime is
+    /// installed on the current thread — callers must preserve their
+    /// legacy non-region path in that case. Test builds fall back to a
+    /// detached request context so lab/unit tests can exercise the region
+    /// without a full runtime.
+    #[must_use]
+    pub fn mint(protocol: &'static str, budget: Budget, now: Time) -> Option<Self> {
+        let cx = Self::mint_cx(budget)?;
+        Some(Self {
+            cx,
+            started_at: now,
+            protocol,
+        })
+    }
+
+    fn mint_cx(budget: Budget) -> Option<Cx> {
+        if let Some(cx) = crate::runtime::Runtime::current_request_cx_with_budget(budget) {
+            return Some(cx);
+        }
+        #[cfg(any(test, feature = "test-internals"))]
+        {
+            Some(Cx::for_request_with_budget(budget))
+        }
+        #[cfg(not(any(test, feature = "test-internals")))]
+        {
+            None
+        }
+    }
+
+    /// The request-scoped capability context.
+    #[must_use]
+    pub fn cx(&self) -> &Cx {
+        &self.cx
+    }
+
+    /// Wraps a caller-driven handler future with the per-poll ambient
+    /// install and emits the `server.budget_installed` event.
+    ///
+    /// The caller keeps driving the returned future (e.g. inside its own
+    /// deadline race) and must resolve the region with [`Self::finish`].
+    #[must_use]
+    pub fn instrumented<F: Future>(
+        &self,
+        source: RequestBudgetSource,
+        fut: F,
+    ) -> AmbientCxScope<F> {
+        self.emit_installed(source);
+        AmbientCxScope {
+            cx: self.cx.clone(),
+            inner: fut,
+        }
+    }
+
+    /// Requests cancellation of the region with [`CancelKind::Timeout`].
+    ///
+    /// For caller-driven dispatches that enforce their own deadline race
+    /// (gRPC): call this when the deadline fires so request-scoped children
+    /// observe the cancel before the handler future is dropped.
+    pub fn cancel_timeout(&self, message: &'static str) {
+        self.cx.cancel_with(CancelKind::Timeout, Some(message));
+    }
+
+    /// Emits the `server.budget_consumed` event and consumes the region.
+    ///
+    /// `outcome` must be one of the stable tokens: `ok`, `err`,
+    /// `cancelled`, `panicked`, `deadline_exceeded`, `connection_lost`.
+    pub fn finish(self, outcome: &'static str) {
+        self.emit_consumed(outcome);
+    }
+
+    fn emit_installed(&self, source: RequestBudgetSource) {
+        let budget = self.cx.budget();
+        let deadline = budget
+            .deadline
+            .map_or_else(|| "none".to_string(), |d| d.as_nanos().to_string());
+        let cost_quota = budget
+            .cost_quota
+            .map_or_else(|| "none".to_string(), |q| q.to_string());
+        self.cx.trace(&format!(
+            "server.budget_installed proto={} source={} deadline_ns={} poll_quota={} cost_quota={} priority={}",
+            self.protocol,
+            source.as_str(),
+            deadline,
+            budget.poll_quota,
+            cost_quota,
+            budget.priority,
+        ));
+    }
+
+    fn emit_consumed(&self, outcome: &'static str) {
+        let now = region_now(&self.cx);
+        let elapsed_ns = now.duration_since(self.started_at);
+        let remaining = self.cx.budget().deadline.map_or_else(
+            || "none".to_string(),
+            |d| d.duration_since(now).to_string(),
+        );
+        self.cx.trace(&format!(
+            "server.budget_consumed proto={} outcome={outcome} elapsed_ns={elapsed_ns} deadline_remaining_ns={remaining}",
+            self.protocol,
+        ));
+    }
+
+    /// Runs `fut` (the handler) inside this request region with the full
+    /// server-hop lifecycle:
+    ///
+    /// 1. **Install**: the request Cx becomes the ambient context for every
+    ///    poll of the handler ([`AmbientCxScope`]).
+    /// 2. **Pre-gate**: a region or connection that is already cancelled
+    ///    rejects the handler entirely ([`ServerHopOutcome::Cancelled`]).
+    /// 3. **Race**: the handler races the budget deadline and the
+    ///    connection's cancel signal (`conn_cx`).
+    /// 4. **Drain**: when the deadline fires or the connection cancels, the
+    ///    region is cancel-requested ([`CancelKind::Timeout`] /
+    ///    [`CancelKind::ParentCancelled`]) and the handler gets
+    ///    `drain_grace` to observe the cancel and finish. A response
+    ///    completed during drain is committed (never discarded — same
+    ///    semantics as [`RequestRegion::run`]).
+    /// 5. **Backstop**: a handler still pending after the grace is dropped
+    ///    (drop-based cancel) and the hop resolves
+    ///    [`ServerHopOutcome::DeadlineExceeded`] /
+    ///    [`ServerHopOutcome::ConnectionLost`].
+    ///
+    /// Budget trace events (`server.budget_installed`,
+    /// `server.budget_consumed`) are emitted on every path.
+    pub async fn run_with_protocol_drain<R, Fut>(
+        self,
+        source: RequestBudgetSource,
+        conn_cx: Option<Cx>,
+        drain_grace: Duration,
+        fut: Fut,
+    ) -> ServerHopOutcome<R>
+    where
+        Fut: Future<Output = R>,
+    {
+        self.emit_installed(source);
+
+        // Pre-handler gate: a cancelled region must not start new work.
+        if self.cx.checkpoint().is_err() {
+            self.finish("cancelled");
+            return ServerHopOutcome::Cancelled;
+        }
+        if conn_cx.as_ref().is_some_and(Cx::is_cancel_requested) {
+            self.cx.cancel_with(
+                CancelKind::ParentCancelled,
+                Some("connection cancelled before handler start"),
+            );
+            self.finish("cancelled");
+            return ServerHopOutcome::Cancelled;
+        }
+
+        enum PhaseA<R> {
+            Done(Result<R, Box<dyn std::any::Any + Send>>),
+            ConnCancelled,
+        }
+
+        let mut fut = std::pin::pin!(AmbientCxScope {
+            cx: self.cx.clone(),
+            inner: CatchUnwind { inner: fut },
+        });
+
+        // Phase A: drive the handler, watching the connection cancel
+        // signal on every poll (cancel wakes us via the registered waker).
+        let primary = std::future::poll_fn(|task_cx| {
+            if let std::task::Poll::Ready(out) = fut.as_mut().poll(task_cx) {
+                return std::task::Poll::Ready(PhaseA::Done(out));
+            }
+            if let Some(conn) = conn_cx.as_ref() {
+                if conn.is_cancel_requested() {
+                    return std::task::Poll::Ready(PhaseA::ConnCancelled);
+                }
+                conn.register_cancel_waker(task_cx.waker());
+                // Re-check after registration to close the cancel/register
+                // race window.
+                if conn.is_cancel_requested() {
+                    return std::task::Poll::Ready(PhaseA::ConnCancelled);
+                }
+            }
+            std::task::Poll::Pending
+        });
+
+        let phase_a = match self.cx.budget().deadline {
+            Some(deadline) => crate::time::timeout_at(deadline, primary).await,
+            None => Ok(primary.await),
+        };
+
+        match phase_a {
+            Ok(PhaseA::Done(Ok(response))) => {
+                self.finish("ok");
+                ServerHopOutcome::Ok(response)
+            }
+            Ok(PhaseA::Done(Err(payload))) => {
+                let message = extract_panic_message(&payload);
+                self.finish("panicked");
+                ServerHopOutcome::Panicked(message)
+            }
+            Ok(PhaseA::ConnCancelled) => {
+                self.cx.cancel_with(
+                    CancelKind::ParentCancelled,
+                    Some("connection cancelled while request in flight"),
+                );
+                match drain_until(&self.cx, drain_grace, fut.as_mut()).await {
+                    Some(Ok(response)) => {
+                        // Commit a response completed during drain: the
+                        // handler's work is a discharged obligation.
+                        self.finish("ok");
+                        ServerHopOutcome::Ok(response)
+                    }
+                    Some(Err(payload)) => {
+                        let message = extract_panic_message(&payload);
+                        self.finish("panicked");
+                        ServerHopOutcome::Panicked(message)
+                    }
+                    None => {
+                        self.finish("connection_lost");
+                        ServerHopOutcome::ConnectionLost
+                    }
+                }
+            }
+            Err(_elapsed) => {
+                self.cx.cancel_with(
+                    CancelKind::Timeout,
+                    Some("server request budget deadline exceeded"),
+                );
+                match drain_until(&self.cx, drain_grace, fut.as_mut()).await {
+                    Some(Ok(response)) => {
+                        self.finish("ok");
+                        ServerHopOutcome::Ok(response)
+                    }
+                    Some(Err(payload)) => {
+                        let message = extract_panic_message(&payload);
+                        self.finish("panicked");
+                        ServerHopOutcome::Panicked(message)
+                    }
+                    None => {
+                        self.finish("deadline_exceeded");
+                        ServerHopOutcome::DeadlineExceeded
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ServerRequestRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerRequestRegion")
+            .field("protocol", &self.protocol)
+            .field("started_at", &self.started_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Current time from the region's timer driver, falling back to wall time.
+fn region_now(cx: &Cx) -> Time {
+    cx.timer_driver()
+        .map_or_else(crate::time::wall_now, |timer| timer.now())
+}
+
+/// Awaits `fut` for at most `grace`, returning `None` on expiry (or when
+/// the grace is zero). Used for the bounded protocol drain after a region
+/// cancel: the handler gets one last window to observe the cancel and
+/// finish cleanly before the drop backstop.
+async fn drain_until<F>(cx: &Cx, grace: Duration, fut: F) -> Option<F::Output>
+where
+    F: Future + Unpin,
+{
+    if grace.is_zero() {
+        return None;
+    }
+    let now = region_now(cx);
+    crate::time::timeout(now, grace, fut).await.ok()
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -1528,6 +1951,351 @@ mod tests {
                     .await;
 
                 assert!(outcome.is_ok());
+            });
+        }
+    }
+
+    // --- Server-hop request regions (br-asupersync-server-stack-hardening-eeexl1.1.1) ---
+
+    mod server_hop {
+        use super::*;
+        use crate::runtime::RuntimeBuilder;
+        use crate::trace::event::{TraceData, TraceEventKind};
+        use crate::types::{Budget, CancelKind, Time};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        const NOW: Time = Time::from_secs(1_000);
+
+        // --- derive_request_budget: meet semantics + security ---
+
+        #[test]
+        fn derive_inherits_base_when_nothing_configured() {
+            let (budget, source) =
+                derive_request_budget(Budget::INFINITE, NOW, None, None, None);
+            assert_eq!(budget.deadline, None);
+            assert_eq!(source, RequestBudgetSource::Inherited);
+        }
+
+        #[test]
+        fn derive_applies_server_config_timeout() {
+            let (budget, source) = derive_request_budget(
+                Budget::INFINITE,
+                NOW,
+                Some(Duration::from_secs(30)),
+                None,
+                None,
+            );
+            assert_eq!(budget.deadline, Some(NOW + Duration::from_secs(30)));
+            assert_eq!(source, RequestBudgetSource::ServerConfig);
+        }
+
+        #[test]
+        fn derive_never_loosens_tighter_base() {
+            let base = Budget::new().with_timeout(NOW, Duration::from_secs(10));
+            let (budget, _) = derive_request_budget(
+                base,
+                NOW,
+                Some(Duration::from_secs(30)),
+                None,
+                None,
+            );
+            assert_eq!(
+                budget.deadline,
+                Some(NOW + Duration::from_secs(10)),
+                "a server timeout longer than the connection budget must not extend it"
+            );
+        }
+
+        #[test]
+        fn derive_header_clamped_by_cap() {
+            let (budget, source) = derive_request_budget(
+                Budget::INFINITE,
+                NOW,
+                None,
+                Some(Duration::from_secs(600)),
+                Some(Duration::from_secs(60)),
+            );
+            assert_eq!(
+                budget.deadline,
+                Some(NOW + Duration::from_secs(60)),
+                "header timeout must be clamped to the configured cap"
+            );
+            assert_eq!(source, RequestBudgetSource::HeaderClamped);
+        }
+
+        #[test]
+        fn derive_header_ignored_without_cap_opt_in() {
+            let (budget, source) = derive_request_budget(
+                Budget::INFINITE,
+                NOW,
+                None,
+                Some(Duration::from_millis(1)),
+                None,
+            );
+            assert_eq!(budget.deadline, None, "no cap configured => header ignored");
+            assert_eq!(source, RequestBudgetSource::Inherited);
+        }
+
+        #[test]
+        fn derive_header_tightens_within_cap_and_config() {
+            let (budget, source) = derive_request_budget(
+                Budget::INFINITE,
+                NOW,
+                Some(Duration::from_secs(30)),
+                Some(Duration::from_secs(5)),
+                Some(Duration::from_secs(60)),
+            );
+            assert_eq!(budget.deadline, Some(NOW + Duration::from_secs(5)));
+            assert_eq!(source, RequestBudgetSource::ServerConfigAndHeader);
+        }
+
+        /// Security (parent AC 3): a hostile header can never extend the
+        /// effective deadline beyond the cap, the server config, or the
+        /// connection budget — whichever is tightest.
+        #[test]
+        fn derive_security_hostile_header_cannot_extend() {
+            let huge = Duration::from_millis(u64::MAX);
+            let (budget, _) = derive_request_budget(
+                Budget::INFINITE,
+                NOW,
+                None,
+                Some(huge),
+                Some(Duration::from_secs(2)),
+            );
+            assert_eq!(budget.deadline, Some(NOW + Duration::from_secs(2)));
+
+            let base = Budget::new().with_timeout(NOW, Duration::from_secs(1));
+            let (budget, _) = derive_request_budget(
+                base,
+                NOW,
+                Some(Duration::from_secs(30)),
+                Some(huge),
+                Some(Duration::from_secs(120)),
+            );
+            assert_eq!(
+                budget.deadline,
+                Some(NOW + Duration::from_secs(1)),
+                "connection budget remains the binding constraint"
+            );
+        }
+
+        // --- run_with_protocol_drain lifecycle ---
+
+        fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+            RuntimeBuilder::current_thread()
+                .build()
+                .expect("build current-thread runtime")
+                .block_on(fut)
+        }
+
+        fn budget_trace_messages(events: &[crate::trace::event::TraceEvent]) -> Vec<String> {
+            events
+                .iter()
+                .filter(|e| e.kind == TraceEventKind::UserTrace)
+                .filter_map(|e| match &e.data {
+                    TraceData::Message(msg) if msg.starts_with("server.budget_") => {
+                        Some(msg.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn hop_ok_commits_response_and_emits_budget_events() {
+            block_on(async {
+                let region = ServerRequestRegion::mint("test", Budget::INFINITE, NOW)
+                    .expect("runtime installed");
+                let trace = region.cx().trace_buffer().expect("runtime trace buffer");
+                let outcome = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::Inherited,
+                        None,
+                        Duration::from_millis(10),
+                        async { 7_u32 },
+                    )
+                    .await;
+                assert!(matches!(outcome, ServerHopOutcome::Ok(7)));
+
+                let messages = budget_trace_messages(&trace.snapshot());
+                assert_eq!(messages.len(), 2, "installed + consumed: {messages:?}");
+                assert!(messages[0].starts_with("server.budget_installed proto=test "));
+                assert!(messages[0].contains("source=inherited"));
+                assert!(messages[1].starts_with("server.budget_consumed proto=test "));
+                assert!(messages[1].contains("outcome=ok"));
+            });
+        }
+
+        #[test]
+        fn hop_handler_sees_request_budget_via_ambient_cx() {
+            block_on(async {
+                let budget = Budget::INFINITE.tightened_by_timeout(NOW, Duration::from_secs(30));
+                let region = ServerRequestRegion::mint("test", budget, NOW)
+                    .expect("runtime installed");
+                let outcome = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::ServerConfig,
+                        None,
+                        Duration::from_millis(10),
+                        async {
+                            Cx::with_current(|cx| cx.budget().deadline.is_some())
+                                .unwrap_or(false)
+                        },
+                    )
+                    .await;
+                assert!(
+                    matches!(outcome, ServerHopOutcome::Ok(true)),
+                    "handler must observe the installed request budget deadline"
+                );
+            });
+        }
+
+        #[test]
+        fn hop_pre_cancelled_connection_rejects_handler() {
+            block_on(async {
+                let conn_cx = Cx::for_testing();
+                conn_cx.cancel_with(CancelKind::User, Some("client went away"));
+                let started = Arc::new(AtomicBool::new(false));
+                let started_probe = Arc::clone(&started);
+
+                let region = ServerRequestRegion::mint("test", Budget::INFINITE, NOW)
+                    .expect("runtime installed");
+                let outcome = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::Inherited,
+                        Some(conn_cx),
+                        Duration::from_millis(10),
+                        async move {
+                            started_probe.store(true, Ordering::SeqCst);
+                            0_u32
+                        },
+                    )
+                    .await;
+                assert!(matches!(outcome, ServerHopOutcome::Cancelled));
+                assert!(
+                    !started.load(Ordering::SeqCst),
+                    "a pre-cancelled connection must not start the handler"
+                );
+            });
+        }
+
+        #[test]
+        fn hop_panic_isolated_with_message() {
+            block_on(async {
+                let region = ServerRequestRegion::mint("test", Budget::INFINITE, NOW)
+                    .expect("runtime installed");
+                let outcome: ServerHopOutcome<u32> = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::Inherited,
+                        None,
+                        Duration::from_millis(10),
+                        async { panic!("handler exploded") },
+                    )
+                    .await;
+                match outcome {
+                    ServerHopOutcome::Panicked(msg) => assert!(msg.contains("handler exploded")),
+                    other => panic!("expected Panicked, got {other:?}"),
+                }
+            });
+        }
+
+        #[test]
+        fn hop_deadline_exceeded_after_drain_grace() {
+            block_on(async {
+                let now = crate::time::wall_now();
+                let budget = Budget::INFINITE.tightened_by_timeout(now, Duration::from_millis(20));
+                let region =
+                    ServerRequestRegion::mint("test", budget, now).expect("runtime installed");
+                let region_cx = region.cx().clone();
+                let outcome: ServerHopOutcome<u32> = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::ServerConfig,
+                        None,
+                        Duration::from_millis(10),
+                        async move {
+                            crate::time::sleep(now, Duration::from_secs(600)).await;
+                            0_u32
+                        },
+                    )
+                    .await;
+                assert!(matches!(outcome, ServerHopOutcome::DeadlineExceeded));
+                assert!(
+                    region_cx.cancelled_by(CancelKind::Timeout),
+                    "deadline expiry must cancel the request region with Timeout"
+                );
+            });
+        }
+
+        /// br-asupersync-bmc8m5 commit semantics on the server hop: a
+        /// handler that observes the cancel during the drain grace and
+        /// completes gets its response committed, not discarded.
+        #[test]
+        fn hop_deadline_drain_commits_completed_response() {
+            block_on(async {
+                let now = crate::time::wall_now();
+                let budget = Budget::INFINITE.tightened_by_timeout(now, Duration::from_millis(20));
+                let region =
+                    ServerRequestRegion::mint("test", budget, now).expect("runtime installed");
+                let handler = std::future::poll_fn(|task_cx| {
+                    Cx::with_current(|cx| {
+                        if cx.is_cancel_requested() {
+                            std::task::Poll::Ready(42_u32)
+                        } else {
+                            cx.register_cancel_waker(task_cx.waker());
+                            std::task::Poll::Pending
+                        }
+                    })
+                    .unwrap_or(std::task::Poll::Ready(0_u32))
+                });
+                let outcome = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::ServerConfig,
+                        None,
+                        Duration::from_millis(500),
+                        handler,
+                    )
+                    .await;
+                assert!(
+                    matches!(outcome, ServerHopOutcome::Ok(42)),
+                    "a response completed during drain must be committed, got {outcome:?}"
+                );
+            });
+        }
+
+        #[test]
+        fn hop_connection_cancel_mid_flight_resolves_connection_lost() {
+            block_on(async {
+                let conn_cx = Cx::for_testing();
+                let conn_for_handler = conn_cx.clone();
+                let region = ServerRequestRegion::mint("test", Budget::INFINITE, NOW)
+                    .expect("runtime installed");
+                let region_cx = region.cx().clone();
+                // First poll cancels the connection, then stays pending
+                // forever: the hop must observe the cancel, cancel the
+                // region, and resolve ConnectionLost after the grace.
+                let mut cancelled_conn = false;
+                let handler = std::future::poll_fn(move |_task_cx| {
+                    if !cancelled_conn {
+                        cancelled_conn = true;
+                        conn_for_handler.cancel_with(CancelKind::User, Some("peer disconnect"));
+                    }
+                    std::task::Poll::<u32>::Pending
+                });
+                let outcome = region
+                    .run_with_protocol_drain(
+                        RequestBudgetSource::Inherited,
+                        Some(conn_cx),
+                        Duration::from_millis(10),
+                        handler,
+                    )
+                    .await;
+                assert!(matches!(outcome, ServerHopOutcome::ConnectionLost));
+                assert!(
+                    region_cx.cancelled_by(CancelKind::ParentCancelled),
+                    "connection cancel must propagate to the request region"
+                );
             });
         }
     }

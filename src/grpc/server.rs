@@ -1312,17 +1312,59 @@ impl Server {
             let now = wall_clock_instant_now();
             let remaining_duration = std_deadline.saturating_duration_since(now);
 
+            // br-asupersync-server-stack-hardening-eeexl1.1.1: install a
+            // per-request Cx whose budget carries the (already cap-clamped)
+            // call deadline, so handlers observe the deadline through
+            // `Cx::current().budget()` and request-scoped children see the
+            // cancel when the deadline fires. The h2/gRPC hop keeps its
+            // existing timeout race and DEADLINE_EXCEEDED mapping.
+            let time_now = crate::time::wall_now();
+            let base_budget = Cx::current()
+                .map_or(crate::types::Budget::INFINITE, |ambient| ambient.budget());
+            let source = if request.metadata().get("grpc-timeout").is_some() {
+                crate::web::request_region::RequestBudgetSource::HeaderClamped
+            } else {
+                crate::web::request_region::RequestBudgetSource::ServerConfig
+            };
+            let budget = base_budget.tightened_by_timeout(time_now, remaining_duration);
+            let region = crate::web::request_region::ServerRequestRegion::mint(
+                "h2-grpc", budget, time_now,
+            );
+
             // Race handler vs deadline using the runtime timeout primitive.
             let handler_future = handler(request);
-            match crate::time::timeout(crate::time::wall_now(), remaining_duration, handler_future)
-                .await
-            {
-                Ok(result) => result,
-                Err(_timeout) => {
-                    // Deadline exceeded during handler execution
-                    // asupersync-gqbtfc: Clear AuthContext on timeout to prevent state leakage
-                    Self::clear_auth_context_from_request(&mut request_snapshot);
-                    return Err(Status::deadline_exceeded("Request deadline exceeded"));
+            match region {
+                Some(region) => {
+                    let scoped = region.instrumented(source, handler_future);
+                    match crate::time::timeout(time_now, remaining_duration, scoped).await {
+                        Ok(result) => {
+                            region.finish(if result.is_ok() { "ok" } else { "err" });
+                            result
+                        }
+                        Err(_timeout) => {
+                            // Deadline exceeded during handler execution:
+                            // cancel the request region (children observe it)
+                            // before the drop backstop, then map to status.
+                            region.cancel_timeout("grpc request deadline exceeded");
+                            region.finish("deadline_exceeded");
+                            // asupersync-gqbtfc: Clear AuthContext on timeout
+                            // to prevent state leakage
+                            Self::clear_auth_context_from_request(&mut request_snapshot);
+                            return Err(Status::deadline_exceeded("Request deadline exceeded"));
+                        }
+                    }
+                }
+                None => {
+                    match crate::time::timeout(time_now, remaining_duration, handler_future).await
+                    {
+                        Ok(result) => result,
+                        Err(_timeout) => {
+                            // Deadline exceeded during handler execution
+                            // asupersync-gqbtfc: Clear AuthContext on timeout to prevent state leakage
+                            Self::clear_auth_context_from_request(&mut request_snapshot);
+                            return Err(Status::deadline_exceeded("Request deadline exceeded"));
+                        }
+                    }
                 }
             }
         } else {
