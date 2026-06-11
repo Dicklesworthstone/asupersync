@@ -1,0 +1,93 @@
+{
+  "contract_version": "downstream-consumer-proof-v1",
+  "bead_id": "asupersync-validation-frontier-v2-b5cjsv.5",
+  "fixture_root": "tests/fixtures/downstream-consumer-proof",
+  "fixture_manifest": "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+  "package_name": "asupersync-downstream-consumer-proof",
+  "external_workspace_required": true,
+  "status_claim_id": "downstream-consumer-public-api-proof",
+  "positive_profiles": [
+    {
+      "profile_id": "default-public-surface-run",
+      "lane_id": "downstream-consumer-default-run",
+      "guarantee_id": "downstream-consumer-default-public-api",
+      "bin": "default_consumer",
+      "bin_path": "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs",
+      "fixture_features": [],
+      "root_feature_flags": [],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "expected_signal": "default_consumer exits 0 after exercising only root public re-exports"
+    },
+    {
+      "profile_id": "metrics-public-surface-run",
+      "lane_id": "downstream-consumer-metrics-run",
+      "guarantee_id": "downstream-consumer-metrics-public-api",
+      "bin": "metrics_consumer",
+      "bin_path": "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs",
+      "fixture_features": [
+        "metrics-profile"
+      ],
+      "root_feature_flags": [
+        "metrics"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
+      "expected_signal": "metrics_consumer exits 0 with the fixture's metrics-profile forwarding asupersync/metrics"
+    },
+    {
+      "profile_id": "channel-mpsc-select-public-surface-run",
+      "lane_id": "downstream-consumer-channel-profile-run",
+      "guarantee_id": "downstream-consumer-channel-public-api",
+      "bin": "channel_profile_consumer",
+      "bin_path": "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs",
+      "fixture_features": [
+        "channel-mpsc-select-e2e-profile"
+      ],
+      "root_feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
+      "expected_signal": "channel_profile_consumer exits 0 after resolving the feature-gated public channel runner without cfg(test)"
+    }
+  ],
+  "dependency_profiles": [
+    {
+      "profile_id": "default-no-tokio-tree",
+      "lane_id": "downstream-consumer-default-tokio-tree",
+      "guarantee_id": "downstream-consumer-default-tokio-free",
+      "fixture_features": [],
+      "root_feature_flags": [],
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio",
+      "expected_signal": "warning: nothing to print."
+    }
+  ],
+  "negative_fixtures": [
+    {
+      "profile_id": "internal-only-negative-check",
+      "lane_id": "downstream-consumer-internal-negative-check",
+      "guarantee_id": "downstream-consumer-internal-only-negative",
+      "bin": "internal_only_negative",
+      "bin_path": "tests/fixtures/downstream-consumer-proof/src/bin/internal_only_negative.rs",
+      "fixture_features": [],
+      "root_feature_flags": [],
+      "forbidden_reference": "asupersync::test_utils::init_test_logging",
+      "expected_error_code": "E0433",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_internal_negative CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' sh -c 'cargo check --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin internal_only_negative 2> /tmp/asupersync_downstream_consumer_negative.err && exit 1; grep -q \"could not find .*test_utils.* in .*asupersync\" /tmp/asupersync_downstream_consumer_negative.err'",
+      "expected_signal": "cargo check fails with E0433 because asupersync::test_utils is unavailable outside test-internals"
+    }
+  ],
+  "contract_profile": {
+    "lane_id": "downstream-consumer-proof-contract",
+    "guarantee_id": "downstream-consumer-proof-contract",
+    "fixture_features": [],
+    "root_feature_flags": [],
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture",
+    "expected_signal": "downstream_consumer_proof_contract tests pass"
+  },
+  "no_claim_boundaries": [
+    "broad-workspace-health",
+    "conformance-crate",
+    "performance",
+    "release-readiness",
+    "test-internals-public-api"
+  ]
+}

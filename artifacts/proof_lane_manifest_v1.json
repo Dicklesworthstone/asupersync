@@ -391,6 +391,64 @@
           "metrics-production-graph",
           "release-readiness"
         ]
+      },
+      {
+        "lane_id": "downstream-consumer-default-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "performance",
+          "release-readiness",
+          "workspace-health",
+          "test-internals-public-api"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-metrics-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
+        ],
+        "expected_heavy_edges": [
+          "metrics feature graph"
+        ],
+        "max_expected_crates": 320,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "performance",
+          "release-readiness",
+          "workspace-health",
+          "test-internals-public-api"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-channel-profile-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs"
+        ],
+        "expected_heavy_edges": [
+          "channel-mpsc-select-e2e feature graph"
+        ],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "examples-benches-fuzz",
+          "performance",
+          "release-readiness",
+          "workspace-health"
+        ]
       }
     ],
     "conformance_masquerade_guard": {
@@ -430,7 +488,13 @@
     "rch-stale-progress-receipt",
     "rch-topology-preflight-canary",
     "unsafe-boundary-ledger-contract",
-    "proof-lane-manifest-verifier"
+    "proof-lane-manifest-verifier",
+    "downstream-consumer-default-public-api",
+    "downstream-consumer-metrics-public-api",
+    "downstream-consumer-channel-public-api",
+    "downstream-consumer-default-tokio-free",
+    "downstream-consumer-internal-only-negative",
+    "downstream-consumer-proof-contract"
   ],
   "lanes": [
     {
@@ -1680,6 +1744,238 @@
           "workspace-health"
         ]
       }
+    },
+    {
+      "lane_id": "downstream-consumer-default-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-default-public-api"
+      ],
+      "covers": "Runs the downstream fixture as an external crate against default asupersync features using only root public re-exports.",
+      "explicit_not_covered": "feature profiles not listed in the fixture, test-internals public API, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "default_consumer exits 0 after exercising only root public re-exports",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public root re-export drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only as downstream-consumer public API evidence for the named fixture profile; do not cite it for broad workspace health or release readiness.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-default-public-api"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-metrics-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
+      "package": "asupersync",
+      "feature_flags": [
+        "metrics"
+      ],
+      "guarantee_ids": [
+        "downstream-consumer-metrics-public-api"
+      ],
+      "covers": "Runs the downstream fixture as an external crate while forwarding the asupersync metrics feature through the fixture feature profile.",
+      "explicit_not_covered": "feature profiles not listed in the fixture, test-internals public API, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "metrics_consumer exits 0 with the fixture's metrics-profile forwarding asupersync/metrics",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public root re-export drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only as downstream-consumer public API evidence for the named fixture profile; do not cite it for broad workspace health or release readiness.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-metrics-public-api"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-channel-profile-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
+      "package": "asupersync",
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "guarantee_ids": [
+        "downstream-consumer-channel-public-api"
+      ],
+      "covers": "Runs the downstream fixture as an external crate while resolving the channel-mpsc-select-e2e public feature-gated runner without cfg(test).",
+      "explicit_not_covered": "full channel E2E execution, test-internals public API, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "channel_profile_consumer exits 0 after resolving the feature-gated public channel runner without cfg(test)",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public root re-export drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only as downstream-consumer public API evidence for the named fixture profile; do not cite it for broad workspace health or release readiness.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-channel-public-api"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-default-tokio-tree",
+      "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio",
+      "package": "asupersync-downstream-consumer-proof",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-default-tokio-free"
+      ],
+      "covers": "Audits the external downstream fixture default normal dependency graph for tokio absence through cargo tree inversion.",
+      "explicit_not_covered": "metrics feature graph, fuzz graph, workspace graph, test execution, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs"
+      ],
+      "common_unrelated_blockers": [
+        "unexpected default dependency graph drift",
+        "cargo tree output format drift",
+        "remote worker cargo metadata pressure"
+      ],
+      "escalation_notes": "Use this lane only for the downstream default fixture no-tokio dependency graph; the root production no-tokio lanes remain the canonical production graph proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-default-tokio-free"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-internal-negative-check",
+      "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_internal_negative CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' sh -c 'cargo check --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin internal_only_negative 2> /tmp/asupersync_downstream_consumer_negative.err && exit 1; grep -q \"could not find .*test_utils.* in .*asupersync\" /tmp/asupersync_downstream_consumer_negative.err'",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-internal-only-negative"
+      ],
+      "covers": "Runs an expected-fail downstream compile check proving internal test helpers are not reachable without test-internals.",
+      "explicit_not_covered": "positive public API execution, test-internals-enabled behavior, workspace health, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "cargo check fails with E0433 because asupersync::test_utils is unavailable outside test-internals",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/internal_only_negative.rs"
+      ],
+      "common_unrelated_blockers": [
+        "compiler diagnostic wording drift",
+        "unexpected test-internals exposure",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "This lane is a negative public-boundary guard: success means the forbidden internal helper stayed unavailable to the external fixture.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-internal-only-negative"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-proof-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-proof-contract"
+      ],
+      "covers": "Verifies the downstream-consumer proof artifact, fixture layout, manifest lane mappings, negative fixture, and status snapshot claim wiring.",
+      "explicit_not_covered": "executing every downstream fixture command, fresh RCH proof for the fixture lanes, release-readiness, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "downstream_consumer_proof_contract tests pass",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "tests/downstream_consumer_proof_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "artifact schema drift",
+        "manifest/status mapping drift",
+        "fixture source path drift"
+      ],
+      "escalation_notes": "This is the focused verifier for VF5 metadata and fixture wiring; run the profile lanes for fresh downstream execution evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-proof-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     }
   ],
   "guarantees": [
@@ -1898,6 +2194,48 @@
       "description": "The proof-lane manifest has a canonical verifier command.",
       "lane_ids": [
         "proof-lane-manifest-contract"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-default-public-api",
+      "description": "default-public-surface-run is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-default-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-metrics-public-api",
+      "description": "metrics-public-surface-run is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-metrics-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-channel-public-api",
+      "description": "channel-mpsc-select-public-surface-run is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-channel-profile-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-default-tokio-free",
+      "description": "default-no-tokio-tree is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-default-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-internal-only-negative",
+      "description": "internal-only-negative-check is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-internal-negative-check"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-proof-contract",
+      "description": "downstream-consumer-proof-contract is represented by the VF5 artifact verifier lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-proof-contract"
       ]
     }
   ],

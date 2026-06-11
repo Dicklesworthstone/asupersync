@@ -81,7 +81,8 @@
     "RCH stale-progress receipts",
     "unsafe boundary ledger contract",
     "formal Lean posture",
-    "rustdoc/API examples"
+    "rustdoc/API examples",
+    "downstream consumer proof"
   ],
   "claim_categories": [
     {
@@ -694,6 +695,48 @@
       ],
       "blocked_frontier": null,
       "notes": "This is API-doc frontier evidence, not a substitute for integration, conformance, or fuzz lanes."
+    },
+    {
+      "claim_id": "downstream-consumer-public-api-proof",
+      "category": "downstream consumer proof",
+      "status": "yellow_frontier",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ],
+        "AGENTS.md": [
+          "Canonical proof-command manifest",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "downstream-consumer-default-public-api",
+        "downstream-consumer-metrics-public-api",
+        "downstream-consumer-channel-public-api",
+        "downstream-consumer-default-tokio-free",
+        "downstream-consumer-internal-only-negative",
+        "downstream-consumer-proof-contract"
+      ],
+      "manifest_lane_ids": [
+        "downstream-consumer-default-run",
+        "downstream-consumer-metrics-run",
+        "downstream-consumer-channel-profile-run",
+        "downstream-consumer-default-tokio-tree",
+        "downstream-consumer-internal-negative-check",
+        "downstream-consumer-proof-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_internal_negative CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' sh -c 'cargo check --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin internal_only_negative 2> /tmp/asupersync_downstream_consumer_negative.err && exit 1; grep -q \"could not find .*test_utils.* in .*asupersync\" /tmp/asupersync_downstream_consumer_negative.err'",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow frontier for the external downstream fixture: run the listed profile lanes for fresh proof. No-claim boundaries: broad-workspace-health, conformance-crate, performance, release-readiness, test-internals-public-api."
     }
   ],
   "proof_reuse_status_rows": [

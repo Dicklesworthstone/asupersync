@@ -1,0 +1,15 @@
+[package]
+name = "asupersync-downstream-consumer-proof"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = []
+metrics-profile = ["asupersync/metrics"]
+channel-mpsc-select-e2e-profile = ["asupersync/channel-mpsc-select-e2e"]
+
+[dependencies]
+asupersync = { path = "../../.." }

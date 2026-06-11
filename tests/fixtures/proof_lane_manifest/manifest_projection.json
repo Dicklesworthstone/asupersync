@@ -134,33 +134,30 @@
     ]
   },
   "validation_frontier_v2_policy": {
-    "conformance_masquerade_guard": {
-      "conformance_lane_class": "conformance",
-      "required_expected_graph_root": "conformance",
-      "required_no_claim_boundary": "focused-feature-proof"
-    },
-    "default_stale_progress_policy": {
-      "code_evidence_claimable": false,
-      "never_cancel_peer_owned_builds": true,
-      "policy_id": "rch-stale-progress-fail-closed-v1",
-      "receipt_contract": "artifacts/rch_stale_progress_receipt_contract_v1.json",
-      "receipt_required_before_retry": true,
-      "receipt_schema_version": "rch-stale-progress-receipt-v1",
-      "retry_policy": "retry only after a deterministic stale receipt or a real compiler/runtime diagnostic",
-      "wait_for_fresh_heartbeat": true
-    },
+    "policy_id": "validation-frontier-v2-lane-semantics",
+    "schema_version": "validation-frontier-v2",
     "description": "Machine-readable lane semantics for interpreting proof evidence without overclaiming compile-only, broad-frontier, conformance, or stale-progress outcomes.",
+    "default_stale_progress_policy": {
+      "policy_id": "rch-stale-progress-fail-closed-v1",
+      "receipt_schema_version": "rch-stale-progress-receipt-v1",
+      "receipt_contract": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+      "wait_for_fresh_heartbeat": true,
+      "never_cancel_peer_owned_builds": true,
+      "receipt_required_before_retry": true,
+      "code_evidence_claimable": false,
+      "retry_policy": "retry only after a deterministic stale receipt or a real compiler/runtime diagnostic"
+    },
     "lane_classes": [
       {
-        "expected_graph_roots": [
-          "Cargo.toml"
-        ],
-        "expected_heavy_edges": [],
         "lane_class": "dependency_graph",
         "lane_kinds": [
           "dependency_graph",
           "dependency_audit"
         ],
+        "expected_graph_roots": [
+          "Cargo.toml"
+        ],
+        "expected_heavy_edges": [],
         "max_expected_crates": 256,
         "no_claim_boundaries": [
           "test-execution",
@@ -170,18 +167,18 @@
         ]
       },
       {
+        "lane_class": "compile_only",
+        "lane_kinds": [
+          "compile_frontier",
+          "lint_frontier",
+          "format_frontier"
+        ],
         "expected_graph_roots": [
           "Cargo.toml",
           "src/lib.rs"
         ],
         "expected_heavy_edges": [
           "workspace feature graph"
-        ],
-        "lane_class": "compile_only",
-        "lane_kinds": [
-          "compile_frontier",
-          "lint_frontier",
-          "format_frontier"
         ],
         "max_expected_crates": 700,
         "no_claim_boundaries": [
@@ -193,6 +190,10 @@
         ]
       },
       {
+        "lane_class": "broad_frontier",
+        "lane_kinds": [
+          "test_frontier"
+        ],
         "expected_graph_roots": [
           "Cargo.toml",
           "src/lib.rs"
@@ -200,10 +201,6 @@
         "expected_heavy_edges": [
           "test-internals",
           "integration test harnesses"
-        ],
-        "lane_class": "broad_frontier",
-        "lane_kinds": [
-          "test_frontier"
         ],
         "max_expected_crates": 900,
         "no_claim_boundaries": [
@@ -213,16 +210,16 @@
         ]
       },
       {
+        "lane_class": "rustdoc",
+        "lane_kinds": [
+          "documentation_frontier"
+        ],
         "expected_graph_roots": [
           "README.md",
           "src/lib.rs"
         ],
         "expected_heavy_edges": [
           "rustdoc doctest graph"
-        ],
-        "lane_class": "rustdoc",
-        "lane_kinds": [
-          "documentation_frontier"
         ],
         "max_expected_crates": 700,
         "no_claim_boundaries": [
@@ -233,15 +230,15 @@
         ]
       },
       {
+        "lane_class": "formal",
+        "lane_kinds": [
+          "formal_frontier"
+        ],
         "expected_graph_roots": [
           "formal/lean"
         ],
         "expected_heavy_edges": [
           "Lean proof graph"
-        ],
-        "lane_class": "formal",
-        "lane_kinds": [
-          "formal_frontier"
         ],
         "max_expected_crates": 1,
         "no_claim_boundaries": [
@@ -252,16 +249,16 @@
         ]
       },
       {
+        "lane_class": "artifact_contract",
+        "lane_kinds": [
+          "artifact_contract"
+        ],
         "expected_graph_roots": [
           "artifacts",
           "tests"
         ],
         "expected_heavy_edges": [
           "focused verifier test graph"
-        ],
-        "lane_class": "artifact_contract",
-        "lane_kinds": [
-          "artifact_contract"
         ],
         "max_expected_crates": 700,
         "no_claim_boundaries": [
@@ -273,14 +270,14 @@
     ],
     "lane_overrides": [
       {
+        "lane_id": "channel-mpsc-select-e2e-public-run",
+        "lane_class": "run_exact",
         "expected_graph_roots": [
           "Cargo.toml",
           "src/bin/channel_mpsc_select_e2e.rs",
           "examples/channel_mpsc_select_e2e.rs"
         ],
         "expected_heavy_edges": [],
-        "lane_class": "run_exact",
-        "lane_id": "channel-mpsc-select-e2e-public-run",
         "max_expected_crates": 160,
         "no_claim_boundaries": [
           "broad-lib-test-frontier",
@@ -292,6 +289,8 @@
         ]
       },
       {
+        "lane_id": "fuzz-manifest-smoke",
+        "lane_class": "fuzz_smoke",
         "expected_graph_roots": [
           "fuzz/Cargo.toml",
           "fuzz/fuzz_targets"
@@ -299,8 +298,6 @@
         "expected_heavy_edges": [
           "fuzz-only OTLP generated-message graph"
         ],
-        "lane_class": "fuzz_smoke",
-        "lane_id": "fuzz-manifest-smoke",
         "max_expected_crates": 900,
         "no_claim_boundaries": [
           "production-consumer-proof",
@@ -308,10 +305,71 @@
           "metrics-production-graph",
           "release-readiness"
         ]
+      },
+      {
+        "lane_id": "downstream-consumer-default-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "performance",
+          "release-readiness",
+          "workspace-health",
+          "test-internals-public-api"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-metrics-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
+        ],
+        "expected_heavy_edges": [
+          "metrics feature graph"
+        ],
+        "max_expected_crates": 320,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "performance",
+          "release-readiness",
+          "workspace-health",
+          "test-internals-public-api"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-channel-profile-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs"
+        ],
+        "expected_heavy_edges": [
+          "channel-mpsc-select-e2e feature graph"
+        ],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "examples-benches-fuzz",
+          "performance",
+          "release-readiness",
+          "workspace-health"
+        ]
       }
     ],
-    "policy_id": "validation-frontier-v2-lane-semantics",
-    "schema_version": "validation-frontier-v2"
+    "conformance_masquerade_guard": {
+      "conformance_lane_class": "conformance",
+      "required_expected_graph_root": "conformance",
+      "required_no_claim_boundary": "focused-feature-proof"
+    }
   },
   "source_of_truth": {
     "manifest": "artifacts/proof_lane_manifest_v1.json",
@@ -360,7 +418,13 @@
     "rch-stale-progress-receipt",
     "rch-topology-preflight-canary",
     "unsafe-boundary-ledger-contract",
-    "proof-lane-manifest-verifier"
+    "proof-lane-manifest-verifier",
+    "downstream-consumer-default-public-api",
+    "downstream-consumer-metrics-public-api",
+    "downstream-consumer-channel-public-api",
+    "downstream-consumer-default-tokio-free",
+    "downstream-consumer-internal-only-negative",
+    "downstream-consumer-proof-contract"
   ],
   "lanes": [
     {
@@ -969,6 +1033,112 @@
         "artifacts/atp_quic_dependency_audit_gate_contract_v1.json",
         "artifacts/atp_native_quic_endpoint_contract_v1.json"
       ]
+    },
+    {
+      "lane_id": "downstream-consumer-default-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "guarantee_ids": [
+        "downstream-consumer-default-public-api"
+      ],
+      "feature_flags": [],
+      "expected_signal": "default_consumer exits 0 after exercising only root public re-exports",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs"
+      ]
+    },
+    {
+      "lane_id": "downstream-consumer-metrics-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
+      "guarantee_ids": [
+        "downstream-consumer-metrics-public-api"
+      ],
+      "feature_flags": [
+        "metrics"
+      ],
+      "expected_signal": "metrics_consumer exits 0 with the fixture's metrics-profile forwarding asupersync/metrics",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
+      ]
+    },
+    {
+      "lane_id": "downstream-consumer-channel-profile-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
+      "guarantee_ids": [
+        "downstream-consumer-channel-public-api"
+      ],
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "expected_signal": "channel_profile_consumer exits 0 after resolving the feature-gated public channel runner without cfg(test)",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs"
+      ]
+    },
+    {
+      "lane_id": "downstream-consumer-default-tokio-tree",
+      "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
+      "package": "asupersync-downstream-consumer-proof",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio",
+      "guarantee_ids": [
+        "downstream-consumer-default-tokio-free"
+      ],
+      "feature_flags": [],
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs"
+      ]
+    },
+    {
+      "lane_id": "downstream-consumer-internal-negative-check",
+      "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_internal_negative CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' sh -c 'cargo check --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin internal_only_negative 2> /tmp/asupersync_downstream_consumer_negative.err && exit 1; grep -q \"could not find .*test_utils.* in .*asupersync\" /tmp/asupersync_downstream_consumer_negative.err'",
+      "guarantee_ids": [
+        "downstream-consumer-internal-only-negative"
+      ],
+      "feature_flags": [],
+      "expected_signal": "cargo check fails with E0433 because asupersync::test_utils is unavailable outside test-internals",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/internal_only_negative.rs"
+      ]
+    },
+    {
+      "lane_id": "downstream-consumer-proof-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture",
+      "guarantee_ids": [
+        "downstream-consumer-proof-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "downstream_consumer_proof_contract tests pass",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "tests/downstream_consumer_proof_contract.rs"
+      ]
     }
   ],
   "guarantees": [
@@ -1156,6 +1326,42 @@
       "guarantee_id": "proof-lane-manifest-verifier",
       "lane_ids": [
         "proof-lane-manifest-contract"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-default-public-api",
+      "lane_ids": [
+        "downstream-consumer-default-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-metrics-public-api",
+      "lane_ids": [
+        "downstream-consumer-metrics-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-channel-public-api",
+      "lane_ids": [
+        "downstream-consumer-channel-profile-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-default-tokio-free",
+      "lane_ids": [
+        "downstream-consumer-default-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-internal-only-negative",
+      "lane_ids": [
+        "downstream-consumer-internal-negative-check"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-proof-contract",
+      "lane_ids": [
+        "downstream-consumer-proof-contract"
       ]
     }
   ]
