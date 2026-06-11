@@ -2324,5 +2324,205 @@ mod tests {
                 );
             });
         }
+
+        // --- AC2 lab matrix: normal / timeout / disconnect cells run as ---
+        // --- LabRuntime tasks under virtual time, oracle-clean each.    ---
+
+        mod lab_matrix {
+            use super::*;
+            use crate::lab::{AutoAdvanceTermination, LabConfig, LabRuntime};
+            use crate::runtime::StoredTask;
+            use crate::types::Outcome;
+            use std::sync::Mutex;
+
+            /// Owner-agnostic tag of a [`ServerHopOutcome`] for cross-task
+            /// assertion (the response type stays inside the lab task).
+            #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+            enum CellOutcome {
+                Ok,
+                Cancelled,
+                Panicked,
+                DeadlineExceeded,
+                ConnectionLost,
+            }
+
+            fn tag<R>(outcome: &ServerHopOutcome<R>) -> CellOutcome {
+                match outcome {
+                    ServerHopOutcome::Ok(_) => CellOutcome::Ok,
+                    ServerHopOutcome::Cancelled => CellOutcome::Cancelled,
+                    ServerHopOutcome::Panicked(_) => CellOutcome::Panicked,
+                    ServerHopOutcome::DeadlineExceeded => CellOutcome::DeadlineExceeded,
+                    ServerHopOutcome::ConnectionLost => CellOutcome::ConnectionLost,
+                }
+            }
+
+            /// Virtual `now` from the ambient (lab task) context.
+            fn ambient_now() -> Time {
+                Cx::with_current(|cx| {
+                    cx.timer_driver()
+                        .map_or_else(crate::time::wall_now, |timer| timer.now())
+                })
+                .unwrap_or_else(crate::time::wall_now)
+            }
+
+            /// Runs one matrix cell as a lab task to quiescence and
+            /// asserts the run is oracle-clean.
+            fn run_lab_cell(
+                seed: u64,
+                cell: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+            ) {
+                let mut lab = LabRuntime::new(LabConfig::new(seed));
+                let root = lab.state.create_root_region(Budget::INFINITE);
+                let system_cx = lab.state.create_system_cx();
+                let (tid, _handle, _task_cx, _result_tx) = lab
+                    .state
+                    .create_task_infrastructure::<()>(&system_cx, root, Budget::new(), false)
+                    .expect("create lab task infrastructure");
+                lab.state.store_spawned_task(
+                    tid,
+                    StoredTask::new_with_id(
+                        async move {
+                            cell.await;
+                            Outcome::Ok(())
+                        },
+                        tid,
+                    ),
+                );
+                lab.scheduler.lock().schedule(tid, 0);
+
+                let vt = lab.run_with_auto_advance();
+                assert_eq!(
+                    vt.termination,
+                    AutoAdvanceTermination::Quiescent,
+                    "lab cell must reach quiescence, got {vt:?}"
+                );
+                let report = lab.run_until_quiescent_with_report();
+                assert!(
+                    report.oracle_report.all_passed(),
+                    "oracle violations in lab cell: {:?}",
+                    report.oracle_report
+                );
+                assert!(
+                    report.invariant_violations.is_empty(),
+                    "invariant violations in lab cell: {:?}",
+                    report.invariant_violations
+                );
+            }
+
+            #[test]
+            fn lab_cell_normal_request_is_oracle_clean() {
+                let got: Arc<Mutex<Option<CellOutcome>>> = Arc::new(Mutex::new(None));
+                let slot = Arc::clone(&got);
+                run_lab_cell(
+                    11,
+                    Box::pin(async move {
+                        let now = ambient_now();
+                        let (budget, source) = derive_request_budget(
+                            Budget::INFINITE,
+                            now,
+                            Some(Duration::from_secs(30)),
+                            None,
+                            None,
+                        );
+                        let region = ServerRequestRegion::mint("lab", budget, now)
+                            .expect("mint from ambient lab cx");
+                        let outcome = region
+                            .run_with_protocol_drain(
+                                source,
+                                None,
+                                Duration::from_millis(5),
+                                async { 1_u8 },
+                            )
+                            .await;
+                        *slot.lock().unwrap() = Some(tag(&outcome));
+                    }),
+                );
+                assert_eq!(*got.lock().unwrap(), Some(CellOutcome::Ok));
+            }
+
+            #[test]
+            fn lab_cell_timeout_request_is_oracle_clean() {
+                let got: Arc<Mutex<Option<CellOutcome>>> = Arc::new(Mutex::new(None));
+                let slot = Arc::clone(&got);
+                run_lab_cell(
+                    23,
+                    Box::pin(async move {
+                        let now = ambient_now();
+                        let (budget, source) = derive_request_budget(
+                            Budget::INFINITE,
+                            now,
+                            Some(Duration::from_millis(10)),
+                            None,
+                            None,
+                        );
+                        let region = ServerRequestRegion::mint("lab", budget, now)
+                            .expect("mint from ambient lab cx");
+                        let outcome = region
+                            .run_with_protocol_drain(
+                                source,
+                                None,
+                                Duration::from_millis(5),
+                                async {
+                                    let handler_now = ambient_now();
+                                    crate::time::sleep(handler_now, Duration::from_secs(600)).await;
+                                    9_u8
+                                },
+                            )
+                            .await;
+                        *slot.lock().unwrap() = Some(tag(&outcome));
+                    }),
+                );
+                assert_eq!(
+                    *got.lock().unwrap(),
+                    Some(CellOutcome::DeadlineExceeded),
+                    "virtual-time deadline must bound the handler deterministically"
+                );
+            }
+
+            #[test]
+            fn lab_cell_disconnect_request_is_oracle_clean() {
+                let got: Arc<Mutex<Option<CellOutcome>>> = Arc::new(Mutex::new(None));
+                let slot = Arc::clone(&got);
+                let conn_cx = Cx::for_testing();
+                let conn_for_handler = conn_cx.clone();
+                run_lab_cell(
+                    37,
+                    Box::pin(async move {
+                        let now = ambient_now();
+                        let (budget, source) =
+                            derive_request_budget(Budget::INFINITE, now, None, None, None);
+                        let region = ServerRequestRegion::mint("lab", budget, now)
+                            .expect("mint from ambient lab cx");
+                        // First poll simulates the peer vanishing
+                        // mid-request, then the handler hangs forever:
+                        // the hop must cancel the region and resolve
+                        // ConnectionLost after the (virtual) drain grace.
+                        let mut disconnected = false;
+                        let handler = std::future::poll_fn(move |_task_cx| {
+                            if !disconnected {
+                                disconnected = true;
+                                conn_for_handler
+                                    .cancel_with(CancelKind::User, Some("peer disconnect"));
+                            }
+                            std::task::Poll::<u8>::Pending
+                        });
+                        let outcome = region
+                            .run_with_protocol_drain(
+                                source,
+                                Some(conn_cx),
+                                Duration::from_millis(5),
+                                handler,
+                            )
+                            .await;
+                        *slot.lock().unwrap() = Some(tag(&outcome));
+                    }),
+                );
+                assert_eq!(
+                    *got.lock().unwrap(),
+                    Some(CellOutcome::ConnectionLost),
+                    "disconnect must cancel the region and drain deterministically"
+                );
+            }
+        }
     }
 }
