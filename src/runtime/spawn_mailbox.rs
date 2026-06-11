@@ -1969,6 +1969,45 @@ mod tests {
 
     // === br-asupersync-hwjqyo (A2.2): Cx::spawn_in scope-targeting surface ===
 
+    /// `Cx::spawn_in` applies the SCOPE's planned capability budget to the
+    /// admitted child — not the calling cx's — matching the legacy
+    /// `Scope::spawn` contract (br-asupersync-4onmas).
+    #[test]
+    fn cx_spawn_in_applies_scope_capability_budget() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let planned = crate::types::CapabilityBudget::new()
+            .with_memory_bytes(2_048)
+            .with_cpu_units(64)
+            .with_artifact_bytes(128);
+        let scope: crate::cx::Scope<'static> =
+            crate::cx::Scope::new_with_capability_budget(root, Budget::INFINITE, planned)
+                .with_pending_spawn_counter(
+                    lab.state
+                        .region(root)
+                        .map(crate::record::RegionRecord::pending_spawn_handle),
+                );
+        let observed: Arc<std::sync::Mutex<Option<crate::types::CapabilityBudget>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let observed_in_child = Arc::clone(&observed);
+        parent_cx
+            .spawn_in(&scope, move |child| async move {
+                *observed_in_child
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(child.capability_budget());
+            })
+            .expect("cx.spawn_in");
+        lab.run_until_quiescent();
+        let observed = observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("child observed a capability budget");
+        assert_eq!(
+            observed, planned,
+            "child must carry the scope's planned capability budget"
+        );
+    }
+
     /// `Cx::spawn_in` routes the pending reservation to the scope's region
     /// counter and the admitted child runs there, without `RuntimeState` at
     /// the call site.

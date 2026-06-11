@@ -1,10 +1,11 @@
 //! Contract-backed proofs for the capability budget planner.
 
+use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::{RegionCreateError, RuntimeState};
 use asupersync::{
     Budget, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
-    CapabilityBudgetRequirements, Cx, TaskId,
+    CapabilityBudgetRequirements, Cx,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -431,52 +432,54 @@ fn cx_scope_region_and_task_paths_carry_capability_budget() {
         .with_io_bytes(8_192)
         .with_cleanup_budget(Budget::new().with_poll_quota(16))
         .with_artifact_bytes(512);
+    let mut runtime = LabRuntimeTarget::create_runtime(TestConfig::default());
+    let (scope_budget, task_budget) = LabRuntimeTarget::block_on(&mut runtime, async move {
+        let cx = Cx::current().expect("LabRuntimeTarget root task should install Cx");
+
+        cx.apply_child_capability_budget(inherited, all_requirements())
+            .expect("root cx capability budget should apply");
+
+        let scope = cx
+            .scope_with_budget_and_capability_budget(
+                Budget::new().with_poll_quota(64),
+                CapabilityBudget::new()
+                    .with_memory_bytes(2_048)
+                    .with_artifact_bytes(128),
+                all_requirements(),
+            )
+            .expect("scope should be admitted");
+
+        assert_eq!(scope.capability_budget().memory_bytes, Some(2_048));
+        assert_eq!(scope.capability_budget().cpu_units, Some(64));
+        assert_eq!(scope.capability_budget().io_bytes, Some(8_192));
+        assert_eq!(
+            scope
+                .capability_budget()
+                .cleanup_budget
+                .expect("cleanup budget")
+                .poll_quota,
+            16
+        );
+        assert_eq!(scope.capability_budget().artifact_bytes, Some(128));
+
+        let mut handle = cx
+            .spawn_in(
+                &scope,
+                |child_cx| async move { child_cx.capability_budget() },
+            )
+            .expect("spawned task should inherit scope capability budget");
+        let task_budget = handle
+            .join(&cx)
+            .await
+            .expect("spawned task should complete");
+
+        (scope.capability_budget(), task_budget)
+    });
+
+    assert_eq!(task_budget, scope_budget);
+
     let mut state = RuntimeState::new();
     let parent = state.create_root_region_with_capability_budget(Budget::INFINITE, inherited);
-    let cx: Cx = Cx::new(parent, TaskId::new_for_test(9_001, 0), Budget::INFINITE);
-
-    cx.apply_child_capability_budget(inherited, all_requirements())
-        .expect("root cx capability budget should apply");
-
-    let scope = cx
-        .scope_with_budget_and_capability_budget(
-            Budget::new().with_poll_quota(64),
-            CapabilityBudget::new()
-                .with_memory_bytes(2_048)
-                .with_artifact_bytes(128),
-            all_requirements(),
-        )
-        .expect("scope should be admitted");
-
-    assert_eq!(scope.capability_budget().memory_bytes, Some(2_048));
-    assert_eq!(scope.capability_budget().cpu_units, Some(64));
-    assert_eq!(scope.capability_budget().io_bytes, Some(8_192));
-    assert_eq!(
-        scope
-            .capability_budget()
-            .cleanup_budget
-            .expect("cleanup budget")
-            .poll_quota,
-        16
-    );
-    assert_eq!(scope.capability_budget().artifact_bytes, Some(128));
-
-    let (handle, _stored) = scope
-        .spawn(&mut state, &cx, |child_cx| async move {
-            child_cx.capability_budget()
-        })
-        .expect("spawned task should inherit scope capability budget");
-    let task_budget = state
-        .task(handle.task_id())
-        .expect("spawned task record")
-        .cx_inner
-        .as_ref()
-        .expect("spawned task cx")
-        .read()
-        .capability_budget;
-
-    assert_eq!(task_budget, scope.capability_budget());
-
     let child = state
         .create_child_region_with_capability_budget(
             parent,

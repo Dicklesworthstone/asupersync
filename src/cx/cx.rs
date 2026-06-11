@@ -3383,7 +3383,14 @@ where
         let Some(pending) = self.pending_spawn_counter_handle() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
-        Ok(self.spawn_via_gateway(self.region_id(), self.budget(), &gateway, &pending, f))
+        Ok(self.spawn_via_gateway(
+            self.region_id(),
+            self.budget(),
+            self.capability_budget(),
+            &gateway,
+            &pending,
+            f,
+        ))
     }
 
     /// Spawns a task into **`scope`'s region** without touching the
@@ -3450,7 +3457,14 @@ where
         let Some(pending) = pending else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
-        Ok(self.spawn_via_gateway(scope.region_id(), scope.budget(), &gateway, &pending, f))
+        Ok(self.spawn_via_gateway(
+            scope.region_id(),
+            scope.budget(),
+            scope.capability_budget(),
+            &gateway,
+            &pending,
+            f,
+        ))
     }
 
     /// Spawns a task into **`scope`'s region** and registers it through
@@ -3616,7 +3630,14 @@ where
         let Some(pending) = self.pending_spawn_counter_handle() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
-        self.spawn_local_via_lane(self.region_id(), self.budget(), &gateway, &pending, f)
+        self.spawn_local_via_lane(
+            self.region_id(),
+            self.budget(),
+            self.capability_budget(),
+            &gateway,
+            &pending,
+            f,
+        )
     }
 
     /// Spawns a `!Send` task into **`scope`'s region**, pinned to the
@@ -3653,7 +3674,14 @@ where
         let Some(pending) = pending else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
-        self.spawn_local_via_lane(scope.region_id(), scope.budget(), &gateway, &pending, f)
+        self.spawn_local_via_lane(
+            scope.region_id(),
+            scope.budget(),
+            scope.capability_budget(),
+            &gateway,
+            &pending,
+            f,
+        )
     }
 
     /// Producer-side machinery for the owner-pinned local spawn lane:
@@ -3666,6 +3694,7 @@ where
         &self,
         region: RegionId,
         budget: Budget,
+        capability_budget: crate::types::CapabilityBudget,
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
         f: F,
@@ -3694,8 +3723,11 @@ where
         let factory_tx = Arc::clone(&shared_tx);
         let factory: LocalSpawnFactoryFn = Box::new(move |admission_cx: Cx| {
             let task_id = admission_cx.task_id();
-            let child: Cx<Caps> =
-                admission_cx.overlay_parent_inheritance::<_, Caps>(&parent, task_id);
+            let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
+                &parent,
+                task_id,
+                capability_budget,
+            );
             let child_all = child.retype::<cap::All>();
             let fut = f(child);
             Box::pin(async move {
@@ -3784,6 +3816,7 @@ where
         &self,
         region: RegionId,
         budget: Budget,
+        capability_budget: crate::types::CapabilityBudget,
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
         f: F,
@@ -3810,8 +3843,11 @@ where
         let factory_tx = Arc::clone(&shared_tx);
         let factory: SpawnFactoryFn = Box::new(move |admission_cx: Cx| {
             let task_id = admission_cx.task_id();
-            let child: Cx<Caps> =
-                admission_cx.overlay_parent_inheritance::<_, Caps>(&parent, task_id);
+            let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
+                &parent,
+                task_id,
+                capability_budget,
+            );
             let child_all = child.retype::<cap::All>();
             let fut = f(child);
             Box::pin(async move {
@@ -3880,7 +3916,10 @@ where
     /// child context, mirroring `Scope::build_child_task_cx` exactly:
     /// observability and entropy fork from the parent; io-cap/registry/
     /// remote/blocking/evidence/macaroon/pressure handles copy from the
-    /// parent; the parent capability budget and runtime mask apply.
+    /// parent; `capability_budget` (the spawn target's planned envelope —
+    /// the parent cx's for `Cx::spawn`, the SCOPE's for `Cx::spawn_in`,
+    /// matching legacy `Scope::spawn` which applied the scope's;
+    /// br-asupersync-4onmas) and the parent runtime mask apply.
     /// State-side wiring (drivers, logical clock, trace buffer, loser-drain
     /// history, spawn gateway, region counter) stays as admission built it.
     /// The shared `CxInner` is untouched, so cancellation and budget flow
@@ -3889,6 +3928,7 @@ where
         mut self,
         parent: &Cx<PCaps>,
         task_id: TaskId,
+        capability_budget: crate::types::CapabilityBudget,
     ) -> Cx<Out> {
         let region = self.region_id();
         *self.observability.write() = parent.child_observability(region, task_id);
@@ -3906,7 +3946,7 @@ where
             }
         }
         let _ = self.apply_child_capability_budget(
-            parent.capability_budget(),
+            capability_budget,
             crate::types::CapabilityBudgetRequirements::NONE,
         );
         let mut typed = self.retype::<Out>();
