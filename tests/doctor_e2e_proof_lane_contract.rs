@@ -68,7 +68,10 @@ fn runner_emits_required_artifacts_and_fail_closed_events() {
         "CLI smoke",
         "stale-evidence rehearsal",
     ] {
-        assert!(RUNNER.contains(coverage), "runner missing coverage {coverage}");
+        assert!(
+            RUNNER.contains(coverage),
+            "runner missing coverage {coverage}"
+        );
     }
 
     for fallback_marker in [
@@ -94,7 +97,10 @@ fn orchestrator_registers_doctor_proof_lane() {
         "[doctor-e2e-proof-lane]=\"E2E-SUITE-DOCTOR-E2E-PROOF-LANE\"",
         "doctor-frankensuite-export doctor-e2e-proof-lane",
     ] {
-        assert!(RUN_ALL_E2E.contains(required), "orchestrator missing {required}");
+        assert!(
+            RUN_ALL_E2E.contains(required),
+            "orchestrator missing {required}"
+        );
     }
 }
 
@@ -144,11 +150,7 @@ fn proof_manifest_maps_doctor_e2e_contract_lane() {
     );
     string_array_contains(lane, "guarantee_ids", "doctor-e2e-proof-lane-contract");
     string_array_contains(lane, "source_paths", "scripts/run_doctor_e2e.sh");
-    string_array_contains(
-        lane,
-        "source_paths",
-        "docs/doctor_e2e_harness_contract.md",
-    );
+    string_array_contains(lane, "source_paths", "docs/doctor_e2e_harness_contract.md");
 
     let guarantee = find_by_id(
         array(&manifest, "guarantees"),
@@ -161,7 +163,11 @@ fn proof_manifest_maps_doctor_e2e_contract_lane() {
 #[test]
 fn status_snapshot_maps_doctor_e2e_without_overclaiming() {
     let status = json(STATUS);
-    string_array_contains(&status, "required_claim_categories", "doctor e2e proof lane");
+    string_array_contains(
+        &status,
+        "required_claim_categories",
+        "doctor e2e proof lane",
+    );
 
     let claim = find_by_id(
         array(&status, "claim_categories"),
@@ -170,12 +176,11 @@ fn status_snapshot_maps_doctor_e2e_without_overclaiming() {
     );
     assert_eq!(claim["category"].as_str(), Some("doctor e2e proof lane"));
     assert_eq!(claim["status"].as_str(), Some("green"));
-    assert_eq!(claim["proof_evidence_status"].as_str(), Some("rerun-required"));
-    string_array_contains(
-        claim,
-        "manifest_lane_ids",
-        "doctor-e2e-proof-lane-contract",
+    assert_eq!(
+        claim["proof_evidence_status"].as_str(),
+        Some("rerun-required")
     );
+    string_array_contains(claim, "manifest_lane_ids", "doctor-e2e-proof-lane-contract");
     string_array_contains(
         claim,
         "manifest_guarantee_ids",

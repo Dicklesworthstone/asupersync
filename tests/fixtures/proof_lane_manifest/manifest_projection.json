@@ -134,30 +134,33 @@
     ]
   },
   "validation_frontier_v2_policy": {
-    "policy_id": "validation-frontier-v2-lane-semantics",
-    "schema_version": "validation-frontier-v2",
-    "description": "Machine-readable lane semantics for interpreting proof evidence without overclaiming compile-only, broad-frontier, conformance, or stale-progress outcomes.",
-    "default_stale_progress_policy": {
-      "policy_id": "rch-stale-progress-fail-closed-v1",
-      "receipt_schema_version": "rch-stale-progress-receipt-v1",
-      "receipt_contract": "artifacts/rch_stale_progress_receipt_contract_v1.json",
-      "wait_for_fresh_heartbeat": true,
-      "never_cancel_peer_owned_builds": true,
-      "receipt_required_before_retry": true,
-      "code_evidence_claimable": false,
-      "retry_policy": "retry only after a deterministic stale receipt or a real compiler/runtime diagnostic"
+    "conformance_masquerade_guard": {
+      "conformance_lane_class": "conformance",
+      "required_expected_graph_root": "conformance",
+      "required_no_claim_boundary": "focused-feature-proof"
     },
+    "default_stale_progress_policy": {
+      "code_evidence_claimable": false,
+      "never_cancel_peer_owned_builds": true,
+      "policy_id": "rch-stale-progress-fail-closed-v1",
+      "receipt_contract": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+      "receipt_required_before_retry": true,
+      "receipt_schema_version": "rch-stale-progress-receipt-v1",
+      "retry_policy": "retry only after a deterministic stale receipt or a real compiler/runtime diagnostic",
+      "wait_for_fresh_heartbeat": true
+    },
+    "description": "Machine-readable lane semantics for interpreting proof evidence without overclaiming compile-only, broad-frontier, conformance, or stale-progress outcomes.",
     "lane_classes": [
       {
+        "expected_graph_roots": [
+          "Cargo.toml"
+        ],
+        "expected_heavy_edges": [],
         "lane_class": "dependency_graph",
         "lane_kinds": [
           "dependency_graph",
           "dependency_audit"
         ],
-        "expected_graph_roots": [
-          "Cargo.toml"
-        ],
-        "expected_heavy_edges": [],
         "max_expected_crates": 256,
         "no_claim_boundaries": [
           "test-execution",
@@ -167,18 +170,18 @@
         ]
       },
       {
-        "lane_class": "compile_only",
-        "lane_kinds": [
-          "compile_frontier",
-          "lint_frontier",
-          "format_frontier"
-        ],
         "expected_graph_roots": [
           "Cargo.toml",
           "src/lib.rs"
         ],
         "expected_heavy_edges": [
           "workspace feature graph"
+        ],
+        "lane_class": "compile_only",
+        "lane_kinds": [
+          "compile_frontier",
+          "lint_frontier",
+          "format_frontier"
         ],
         "max_expected_crates": 700,
         "no_claim_boundaries": [
@@ -190,10 +193,6 @@
         ]
       },
       {
-        "lane_class": "broad_frontier",
-        "lane_kinds": [
-          "test_frontier"
-        ],
         "expected_graph_roots": [
           "Cargo.toml",
           "src/lib.rs"
@@ -201,6 +200,10 @@
         "expected_heavy_edges": [
           "test-internals",
           "integration test harnesses"
+        ],
+        "lane_class": "broad_frontier",
+        "lane_kinds": [
+          "test_frontier"
         ],
         "max_expected_crates": 900,
         "no_claim_boundaries": [
@@ -210,16 +213,16 @@
         ]
       },
       {
-        "lane_class": "rustdoc",
-        "lane_kinds": [
-          "documentation_frontier"
-        ],
         "expected_graph_roots": [
           "README.md",
           "src/lib.rs"
         ],
         "expected_heavy_edges": [
           "rustdoc doctest graph"
+        ],
+        "lane_class": "rustdoc",
+        "lane_kinds": [
+          "documentation_frontier"
         ],
         "max_expected_crates": 700,
         "no_claim_boundaries": [
@@ -230,15 +233,15 @@
         ]
       },
       {
-        "lane_class": "formal",
-        "lane_kinds": [
-          "formal_frontier"
-        ],
         "expected_graph_roots": [
           "formal/lean"
         ],
         "expected_heavy_edges": [
           "Lean proof graph"
+        ],
+        "lane_class": "formal",
+        "lane_kinds": [
+          "formal_frontier"
         ],
         "max_expected_crates": 1,
         "no_claim_boundaries": [
@@ -249,16 +252,16 @@
         ]
       },
       {
-        "lane_class": "artifact_contract",
-        "lane_kinds": [
-          "artifact_contract"
-        ],
         "expected_graph_roots": [
           "artifacts",
           "tests"
         ],
         "expected_heavy_edges": [
           "focused verifier test graph"
+        ],
+        "lane_class": "artifact_contract",
+        "lane_kinds": [
+          "artifact_contract"
         ],
         "max_expected_crates": 700,
         "no_claim_boundaries": [
@@ -270,14 +273,14 @@
     ],
     "lane_overrides": [
       {
-        "lane_id": "channel-mpsc-select-e2e-public-run",
-        "lane_class": "run_exact",
         "expected_graph_roots": [
           "Cargo.toml",
           "src/bin/channel_mpsc_select_e2e.rs",
           "examples/channel_mpsc_select_e2e.rs"
         ],
         "expected_heavy_edges": [],
+        "lane_class": "run_exact",
+        "lane_id": "channel-mpsc-select-e2e-public-run",
         "max_expected_crates": 160,
         "no_claim_boundaries": [
           "broad-lib-test-frontier",
@@ -289,8 +292,6 @@
         ]
       },
       {
-        "lane_id": "fuzz-manifest-smoke",
-        "lane_class": "fuzz_smoke",
         "expected_graph_roots": [
           "fuzz/Cargo.toml",
           "fuzz/fuzz_targets"
@@ -298,6 +299,8 @@
         "expected_heavy_edges": [
           "fuzz-only OTLP generated-message graph"
         ],
+        "lane_class": "fuzz_smoke",
+        "lane_id": "fuzz-manifest-smoke",
         "max_expected_crates": 900,
         "no_claim_boundaries": [
           "production-consumer-proof",
@@ -307,13 +310,13 @@
         ]
       },
       {
-        "lane_id": "downstream-consumer-default-run",
-        "lane_class": "run_exact",
         "expected_graph_roots": [
           "tests/fixtures/downstream-consumer-proof/Cargo.toml",
           "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs"
         ],
         "expected_heavy_edges": [],
+        "lane_class": "run_exact",
+        "lane_id": "downstream-consumer-default-run",
         "max_expected_crates": 220,
         "no_claim_boundaries": [
           "broad-lib-test-frontier",
@@ -325,8 +328,6 @@
         ]
       },
       {
-        "lane_id": "downstream-consumer-metrics-run",
-        "lane_class": "run_exact",
         "expected_graph_roots": [
           "tests/fixtures/downstream-consumer-proof/Cargo.toml",
           "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
@@ -334,6 +335,8 @@
         "expected_heavy_edges": [
           "metrics feature graph"
         ],
+        "lane_class": "run_exact",
+        "lane_id": "downstream-consumer-metrics-run",
         "max_expected_crates": 320,
         "no_claim_boundaries": [
           "broad-lib-test-frontier",
@@ -345,8 +348,6 @@
         ]
       },
       {
-        "lane_id": "downstream-consumer-channel-profile-run",
-        "lane_class": "run_exact",
         "expected_graph_roots": [
           "tests/fixtures/downstream-consumer-proof/Cargo.toml",
           "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs"
@@ -354,6 +355,8 @@
         "expected_heavy_edges": [
           "channel-mpsc-select-e2e feature graph"
         ],
+        "lane_class": "run_exact",
+        "lane_id": "downstream-consumer-channel-profile-run",
         "max_expected_crates": 220,
         "no_claim_boundaries": [
           "broad-lib-test-frontier",
@@ -365,11 +368,8 @@
         ]
       }
     ],
-    "conformance_masquerade_guard": {
-      "conformance_lane_class": "conformance",
-      "required_expected_graph_root": "conformance",
-      "required_no_claim_boundary": "focused-feature-proof"
-    }
+    "policy_id": "validation-frontier-v2-lane-semantics",
+    "schema_version": "validation-frontier-v2"
   },
   "source_of_truth": {
     "manifest": "artifacts/proof_lane_manifest_v1.json",

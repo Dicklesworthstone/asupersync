@@ -224,7 +224,4 @@ fail closed when they contain RCH local fallback markers such as `[RCH] local (`
 `falling back to local`, `local fallback marker`, or `no-local-fallback
 violation`.
 
-No-claim boundary: doctor diagnoses evidence but does not certify broad
-workspace health. This proof lane does not certify release readiness, live RCH
-fleet availability, performance, broad workspace health, or source correctness
-outside the doctor proof lane.
+No-claim boundary: doctor diagnoses evidence but does not certify broad workspace health. This proof lane does not certify release readiness, live RCH fleet availability, performance, broad workspace health, or source correctness outside the doctor proof lane.
