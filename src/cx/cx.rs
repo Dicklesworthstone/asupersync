@@ -3537,6 +3537,205 @@ where
         })
     }
 
+    /// Spawns a `!Send` task into **this Cx's own region**, pinned to the
+    /// current worker thread (br-asupersync-i9y5wb / A2.2a).
+    ///
+    /// The v2 sibling of the legacy `Scope::spawn_local`: no
+    /// `&mut RuntimeState` at the call site. The factory is parked on the
+    /// calling worker's thread-local spawn lane and admitted by that same
+    /// worker at its next dispatch point — the factory and its future
+    /// never cross threads. The admitted task is pinned to this worker,
+    /// stored thread-locally, and scheduled on the non-stealable local
+    /// queue, so steal paths reject migration structurally.
+    ///
+    /// # Targeting
+    ///
+    /// Like [`Cx::spawn`], the child joins this context's region. Use
+    /// [`Cx::spawn_local_in`] to target a specific scope's region.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::LocalSchedulerUnavailable`] when the calling
+    /// thread is not a runtime worker (local spawns require an owner
+    /// worker; this includes the lab runtime and blocking-pool threads —
+    /// unlike the legacy path this never panics). Returns
+    /// [`SpawnError::RuntimeUnavailable`] when this Cx carries no spawn
+    /// gateway or region counter. Admission-time denials (region closing,
+    /// quota) resolve through the returned handle as
+    /// `JoinError::Cancelled`.
+    pub fn spawn_local<F, Fut>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let Some(pending) = self.pending_spawn_counter_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        self.spawn_local_via_lane(self.region_id(), self.budget(), &gateway, &pending, f)
+    }
+
+    /// Spawns a `!Send` task into **`scope`'s region**, pinned to the
+    /// current worker thread (br-asupersync-i9y5wb / A2.2a).
+    ///
+    /// The scope-targeting sibling of [`Cx::spawn_local`]: region
+    /// ownership, budget, and pending-spawn accounting come from `scope`
+    /// exactly as in [`Cx::spawn_in`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Cx::spawn_local`], plus
+    /// [`SpawnError::RuntimeUnavailable`] when `scope` carries no
+    /// pending-spawn counter for its region (see [`Cx::spawn_in`]).
+    pub fn spawn_local_in<F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> Fut + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let pending = scope.pending_spawn_counter_handle().or_else(|| {
+            (scope.region_id() == self.region_id())
+                .then(|| self.pending_spawn_counter_handle())
+                .flatten()
+        });
+        let Some(pending) = pending else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        self.spawn_local_via_lane(scope.region_id(), scope.budget(), &gateway, &pending, f)
+    }
+
+    /// Producer-side machinery for the owner-pinned local spawn lane:
+    /// `!Send` mirror of [`Self::spawn_via_gateway`]. Fails closed with
+    /// `LocalSchedulerUnavailable` off-worker (the thread-local lane is
+    /// only drained by runtime workers), then parks a
+    /// [`LocalSpawnRequest`](crate::runtime::spawn_mailbox::LocalSpawnRequest)
+    /// on the calling worker's lane and returns a pending handle.
+    fn spawn_local_via_lane<F, Fut>(
+        &self,
+        region: RegionId,
+        budget: Budget,
+        gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
+        pending: &Arc<crate::record::region::PendingSpawnCounter>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        use crate::runtime::spawn_mailbox::{AdmittedTask, LocalSpawnFactoryFn, LocalSpawnRequest};
+        use crate::runtime::task_handle::JoinError;
+
+        if crate::runtime::scheduler::three_lane::current_worker_id().is_none() {
+            return Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable);
+        }
+
+        let (result_tx, result_rx) =
+            crate::channel::oneshot::channel::<Result<Fut::Output, JoinError>>();
+        // Take-once semantics across the mutually exclusive completion and
+        // denial paths, as in `spawn_via_gateway`.
+        let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
+        let admitted_slot: Arc<std::sync::OnceLock<AdmittedTask>> =
+            Arc::new(std::sync::OnceLock::new());
+
+        let parent = self.clone();
+        let factory_tx = Arc::clone(&shared_tx);
+        let factory: LocalSpawnFactoryFn = Box::new(move |admission_cx: Cx| {
+            let task_id = admission_cx.task_id();
+            let child: Cx<Caps> =
+                admission_cx.overlay_parent_inheritance::<_, Caps>(&parent, task_id);
+            let child_all = child.retype::<cap::All>();
+            let fut = f(child);
+            Box::pin(async move {
+                match (crate::cx::scope::CatchUnwind { inner: fut }).await {
+                    Ok(value) => {
+                        if let Some(tx) = factory_tx
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ = tx.send(&child_all, Ok(value));
+                        }
+                        crate::types::Outcome::Ok(())
+                    }
+                    Err(payload) => {
+                        let panic_payload = crate::types::outcome::PanicPayload::new(
+                            crate::cx::scope::payload_to_string(&payload),
+                        );
+                        if let Some(tx) = factory_tx
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ = tx
+                                .send(&child_all, Err(JoinError::Panicked(panic_payload.clone())));
+                        }
+                        crate::types::Outcome::Panicked(panic_payload)
+                    }
+                }
+            })
+        });
+
+        let cancel_tx = Arc::clone(&shared_tx);
+        let error_tx = Arc::clone(&shared_tx);
+        let provisional = gateway.mailbox().allocate_task_id();
+        let request = LocalSpawnRequest {
+            task_id: provisional,
+            region,
+            budget,
+            factory,
+            on_unadmitted_cancel: Some(Box::new(move |reason| {
+                if let Some(tx) = cancel_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+                }
+            })),
+            on_admission_error: Some(Box::new(move |error| {
+                if let Some(tx) = error_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let mut reason = crate::types::CancelReason::user("spawn admission failed");
+                    reason.message = Some(error.to_string());
+                    let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+                }
+            })),
+            pending_reservation: Some(pending.reserve()),
+            admitted_slot: Some(Arc::clone(&admitted_slot)),
+        };
+
+        if let Some(trace) = self.trace_buffer() {
+            let now = self.current_checkpoint_time();
+            trace
+                .record_event(|seq| TraceEvent::task_spawn_enqueued(seq, now, provisional, region));
+        }
+        crate::runtime::spawn_mailbox::enqueue_local_spawn(request);
+
+        Ok(crate::runtime::TaskHandle::new_pending(
+            provisional,
+            result_rx,
+            admitted_slot,
+        ))
+    }
+
     /// Shared producer-side machinery for the lock-free spawn paths
     /// ([`Cx::spawn`], [`Cx::spawn_in`]): enqueues a factory-carrying
     /// [`SpawnRequest`](crate::runtime::spawn_mailbox::SpawnRequest) on the

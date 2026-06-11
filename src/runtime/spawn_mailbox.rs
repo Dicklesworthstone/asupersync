@@ -263,6 +263,164 @@ impl Future for LazyFactoryTask {
     }
 }
 
+// === Owner-pinned local spawn lane (br-asupersync-i9y5wb / A2.2a) ===
+//
+// `spawn_local` futures are `!Send`, so they cannot ride the shared
+// mailbox. But a local spawn is by definition issued ON the owner worker
+// thread, so the factory never needs to cross threads: producers push
+// onto a thread-local lane and the same worker drains it at the same
+// dispatch point where it drains the shared mailbox. Admission still goes
+// through `RuntimeState` (same record/region/counter discipline); only
+// storage and scheduling differ (TLS `LocalStoredTask` + the worker's
+// non-stealable local queue).
+
+/// `!Send` mirror of [`SpawnBoxFuture`] for owner-pinned local spawns.
+pub type LocalSpawnBoxFuture = Pin<Box<dyn Future<Output = Outcome<(), ()>>>>;
+
+/// `!Send` mirror of [`SpawnFactoryFn`]: runs at first poll on the owner
+/// worker, receiving the admission-built child context.
+pub type LocalSpawnFactoryFn = Box<dyn FnOnce(crate::cx::Cx) -> LocalSpawnBoxFuture>;
+
+/// `!Send` mirror of [`LazyFactoryTask`]: defers the user factory to the
+/// first poll on the owner worker — never under the state lock.
+pub struct LocalLazyFactoryTask {
+    factory: Option<(LocalSpawnFactoryFn, crate::cx::Cx)>,
+    inner: Option<LocalSpawnBoxFuture>,
+}
+
+impl LocalLazyFactoryTask {
+    /// Pairs a local factory with the admission-built child context.
+    #[must_use]
+    pub fn new(factory: LocalSpawnFactoryFn, cx: crate::cx::Cx) -> Self {
+        Self {
+            factory: Some((factory, cx)),
+            inner: None,
+        }
+    }
+}
+
+impl Future for LocalLazyFactoryTask {
+    type Output = Outcome<(), ()>;
+
+    fn poll(mut self: Pin<&mut Self>, task_cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.inner.is_none() {
+            let Some((factory, cx)) = self.factory.take() else {
+                return Poll::Ready(Outcome::Ok(()));
+            };
+            self.inner = Some(factory(cx));
+        }
+        self.inner
+            .as_mut()
+            .expect("inner future set above")
+            .as_mut()
+            .poll(task_cx)
+    }
+}
+
+/// A local spawn request parked on the owner thread's lane.
+///
+/// Mirrors [`SpawnRequestParts`] for the `!Send` lane: provisional id,
+/// owning region, budget, the local factory, the cancel/error completion
+/// slots, the pending-spawn credit, and the producer-shared admitted slot.
+pub struct LocalSpawnRequest {
+    /// Provisional task id (spawn-mailbox namespace).
+    pub task_id: TaskId,
+    /// Region that will own the task.
+    pub region: RegionId,
+    /// Budget the task starts with.
+    pub budget: Budget,
+    /// The local factory awaiting its admission-built Cx.
+    pub factory: LocalSpawnFactoryFn,
+    /// Completion slot for cancel-before-admission.
+    pub on_unadmitted_cancel: Option<UnadmittedCancelFn>,
+    /// Completion slot for non-cancellation admission failures.
+    pub on_admission_error: Option<AdmissionErrorFn>,
+    /// Pending-spawn credit on the owning region; released only after the
+    /// task is visible in the region's task list (or on denial, last).
+    pub pending_reservation: Option<crate::record::region::PendingSpawnReservation>,
+    /// Producer-shared slot admission fills with the canonical identity.
+    pub admitted_slot: Option<Arc<std::sync::OnceLock<AdmittedTask>>>,
+}
+
+impl LocalSpawnRequest {
+    /// Resolves a request that will never be admitted (region cancelled
+    /// before drain). Factory dropped uninvoked, cancel slot fired at most
+    /// once, pending-spawn credit released last — the same contract as
+    /// [`SpawnRequestParts::resolve_cancelled`].
+    pub fn resolve_cancelled(self, reason: CancelReason) {
+        let Self {
+            factory,
+            on_unadmitted_cancel,
+            pending_reservation,
+            ..
+        } = self;
+        drop(factory);
+        if let Some(slot) = on_unadmitted_cancel {
+            slot(reason);
+        }
+        drop(pending_reservation);
+    }
+
+    /// Resolves a request rejected by admission with `error`. Factory
+    /// dropped uninvoked; the admission-error slot fires, falling back to
+    /// the cancel slot so the caller-visible handle always resolves; the
+    /// pending-spawn credit is released last — the same contract as
+    /// [`SpawnRequestParts::resolve_failed`].
+    pub fn resolve_failed(self, error: SpawnError) {
+        let Self {
+            factory,
+            on_unadmitted_cancel,
+            on_admission_error,
+            pending_reservation,
+            ..
+        } = self;
+        drop(factory);
+        if let Some(slot) = on_admission_error {
+            slot(error);
+        } else if let Some(slot) = on_unadmitted_cancel {
+            let mut reason = CancelReason::user("spawn admission failed");
+            reason.message = Some(error.to_string());
+            slot(reason);
+        }
+        drop(pending_reservation);
+    }
+}
+
+thread_local! {
+    /// Owner-thread lane of pending local spawn requests. Filled by
+    /// `Cx::spawn_local[_in]` (worker threads only — producers fail closed
+    /// off-worker), drained by the same worker in `next_task` alongside
+    /// the shared mailbox.
+    static LOCAL_SPAWN_LANE: std::cell::RefCell<std::collections::VecDeque<LocalSpawnRequest>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+/// Parks a local spawn request on the current thread's lane.
+pub(crate) fn enqueue_local_spawn(request: LocalSpawnRequest) {
+    LOCAL_SPAWN_LANE.with(|lane| lane.borrow_mut().push_back(request));
+}
+
+/// Returns true when the current thread has no parked local spawns.
+pub(crate) fn local_spawn_lane_is_empty() -> bool {
+    LOCAL_SPAWN_LANE.with(|lane| lane.borrow().is_empty())
+}
+
+/// Moves up to `max` parked local requests into `into`, returning the
+/// number moved.
+pub(crate) fn drain_local_spawn_lane(max: usize, into: &mut Vec<LocalSpawnRequest>) -> usize {
+    LOCAL_SPAWN_LANE.with(|lane| {
+        let mut lane = lane.borrow_mut();
+        let take = lane.len().min(max);
+        for _ in 0..take {
+            let Some(request) = lane.pop_front() else {
+                break;
+            };
+            into.push(request);
+        }
+        take
+    })
+}
+
 /// A spawn request travelling through the [`SpawnMailbox`].
 ///
 /// Carries everything admission needs to create the task record under the
@@ -1988,6 +2146,176 @@ mod tests {
         panic!("join did not resolve within the step budget");
     }
 
+    // === br-asupersync-i9y5wb (A2.2a): Cx::spawn_local v2 surface ===
+
+    fn clear_local_spawn_lane_for_test() {
+        let mut dropped = Vec::new();
+        while drain_local_spawn_lane(usize::MAX, &mut dropped) > 0 {
+            dropped.clear();
+        }
+    }
+
+    /// A runtime-wired Cx still fails closed when called off-worker: a
+    /// `!Send` factory cannot be parked anywhere unless an owner worker is
+    /// currently draining that thread-local lane.
+    #[test]
+    fn cx_spawn_local_off_worker_returns_local_scheduler_unavailable() {
+        clear_local_spawn_lane_for_test();
+        let (lab, parent_cx, root) = lab_with_parent_cx();
+        let result = parent_cx.spawn_local(|_child| async {});
+        assert!(matches!(
+            result,
+            Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable)
+        ));
+        assert!(
+            local_spawn_lane_is_empty(),
+            "off-worker call enqueues nothing"
+        );
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            0,
+            "failed off-worker spawn takes no pending credit"
+        );
+    }
+
+    /// Owner-worker local spawn: a `!Send` factory (captures `Rc<Cell<_>>`)
+    /// is admitted under the same region/counter discipline, pinned to the
+    /// owner worker, stored in TLS, queued only on `local_ready`, and joins
+    /// with the produced value.
+    #[test]
+    fn cx_spawn_local_owner_worker_runs_non_send_future() {
+        clear_local_spawn_lane_for_test();
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let local_ready = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _ready_guard =
+            crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
+
+        let cell = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let cell_in_child = std::rc::Rc::clone(&cell);
+        let mut handle = parent_cx
+            .spawn_local(move |_child| async move {
+                cell_in_child.set(11);
+                42usize
+            })
+            .expect("cx.spawn_local on owner worker");
+        assert!(
+            is_spawn_mailbox_id(handle.task_id()),
+            "pre-admission handle reports the provisional id"
+        );
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            1,
+            "local spawn reserves a pending credit before admission"
+        );
+
+        let mut requests = Vec::new();
+        assert_eq!(
+            drain_local_spawn_lane(16, &mut requests),
+            1,
+            "one local request queued"
+        );
+        let request = requests.pop().expect("request present");
+        let admission = lab.state.admit_local_spawn_request(request);
+        let crate::runtime::state::LocalSpawnAdmission::Admitted {
+            task_id, stored, ..
+        } = admission
+        else {
+            panic!("expected local admission");
+        };
+        assert!(
+            !is_spawn_mailbox_id(task_id),
+            "admitted id must be canonical"
+        );
+        let record = lab.state.task(task_id).expect("task record");
+        assert!(record.is_local(), "task record is marked local");
+        assert_eq!(record.pinned_worker(), Some(0), "task pinned to owner");
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            0,
+            "credit released after local admission"
+        );
+
+        crate::runtime::local::store_local_task(task_id, stored);
+        assert!(
+            crate::runtime::scheduler::three_lane::schedule_local_task(task_id),
+            "owner worker has local_ready TLS"
+        );
+        assert_eq!(
+            local_ready.lock().pop_front(),
+            Some(task_id),
+            "task is queued on non-stealable local_ready"
+        );
+
+        let mut local_task = crate::runtime::local::remove_local_task(task_id)
+            .expect("local task stored on owner thread");
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(waker);
+        assert!(matches!(
+            local_task.poll(&mut poll_cx),
+            std::task::Poll::Ready(Outcome::Ok(()))
+        ));
+        let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
+        assert_eq!(result.expect("joined value"), 42);
+        assert_eq!(cell.get(), 11, "non-Send future ran on owner thread");
+    }
+
+    /// Closing-region denial resolves the returned handle as Cancelled and
+    /// drops the `!Send` factory uninvoked.
+    #[test]
+    fn cx_spawn_local_into_closing_region_resolves_cancelled() {
+        clear_local_spawn_lane_for_test();
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let local_ready = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+        let _ready_guard =
+            crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
+        lab.state.region(root).expect("root").begin_close(None);
+
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ran_in_child = std::rc::Rc::clone(&ran);
+        let mut handle = parent_cx
+            .spawn_local(move |_child| async move {
+                ran_in_child.set(true);
+                7usize
+            })
+            .expect("enqueue still succeeds; denial resolves through handle");
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            1,
+            "pending credit held while request is queued"
+        );
+
+        let mut requests = Vec::new();
+        assert_eq!(drain_local_spawn_lane(16, &mut requests), 1);
+        let request = requests.pop().expect("request present");
+        let crate::runtime::state::LocalSpawnAdmission::Denied { request, error } =
+            lab.state.admit_local_spawn_request(request)
+        else {
+            panic!("expected closing-region denial");
+        };
+        assert!(matches!(
+            error,
+            crate::runtime::state::SpawnError::RegionClosed(id) if id == root
+        ));
+        request.resolve_cancelled(crate::types::CancelReason::new(
+            crate::types::CancelKind::ParentCancelled,
+        ));
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            0,
+            "denial releases pending credit"
+        );
+
+        let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
+        assert!(matches!(
+            result,
+            Err(crate::runtime::task_handle::JoinError::Cancelled(_))
+        ));
+        assert!(!ran.get(), "local factory was never invoked");
+        assert!(local_ready.lock().is_empty(), "denied task never scheduled");
+    }
+
     /// Without a pool handle (lab runtime), the closure runs inline inside
     /// the admitted region-owned task and the value flows through the
     /// handle — the deterministic fallback path.
@@ -2146,5 +2474,151 @@ mod tests {
             "join must resolve Cancelled for a denied blocking spawn, got {result:?}"
         );
         assert_eq!(ran.load(Ordering::SeqCst), 0, "closure never ran");
+    }
+
+    // === br-asupersync-i9y5wb (A2.2a): Cx::spawn_local v2 surface ===
+
+    /// Off-worker producers fail closed at spawn time: the thread-local
+    /// lane is only drained by runtime workers, so non-worker threads
+    /// (including the lab and blocking-pool threads) get
+    /// `LocalSchedulerUnavailable` immediately — a parked request can
+    /// never rot on a thread with no drainer.
+    #[test]
+    fn cx_spawn_local_off_worker_fails_local_scheduler_unavailable() {
+        let (_lab, parent_cx, _root) = lab_with_parent_cx();
+        let result = parent_cx.spawn_local(|_child| async move { 5usize });
+        assert!(
+            matches!(
+                result,
+                Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable)
+            ),
+            "off-worker spawn_local must fail closed"
+        );
+    }
+
+    /// Local admission success: the factory defers to first poll, the
+    /// pending credit balances once the task joins the region task list,
+    /// and the stored task completes when polled.
+    #[test]
+    fn local_admission_runs_factory_at_first_poll_and_balances_counter() {
+        use std::task::{Context, Poll, Waker};
+
+        let mut state = crate::runtime::state::RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let pending = state.region(region).expect("region").pending_spawn_handle();
+        let mailbox = SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in_factory = Arc::clone(&ran);
+        let factory: LocalSpawnFactoryFn = Box::new(move |_cx| {
+            Box::pin(async move {
+                ran_in_factory.fetch_add(1, Ordering::SeqCst);
+                Outcome::Ok(())
+            })
+        });
+        let request = LocalSpawnRequest {
+            task_id: provisional,
+            region,
+            budget: Budget::INFINITE,
+            factory,
+            on_unadmitted_cancel: None,
+            on_admission_error: None,
+            pending_reservation: Some(pending.reserve()),
+            admitted_slot: None,
+        };
+        assert_eq!(
+            state.region(region).expect("region").pending_spawn_count(),
+            1,
+            "reservation held while the request is parked"
+        );
+
+        let crate::runtime::state::LocalSpawnAdmission::Admitted {
+            task_id,
+            mut stored,
+            ..
+        } = state.admit_local_spawn_request(request)
+        else {
+            panic!("admission must succeed for an open region");
+        };
+        assert_eq!(
+            state.region(region).expect("region").pending_spawn_count(),
+            0,
+            "credit released once the task is in the region task list"
+        );
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            0,
+            "factory deferred to first poll"
+        );
+
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+        assert!(matches!(
+            stored.poll(&mut poll_cx),
+            Poll::Ready(Outcome::Ok(()))
+        ));
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "factory ran at first poll");
+        assert_eq!(stored.task_id(), Some(task_id));
+    }
+
+    /// Local admission denial for a closing region: factory never runs,
+    /// the cancel slot fires exactly once, and the pending credit is
+    /// released last.
+    #[test]
+    fn local_admission_denied_for_closing_region_resolves_cancelled() {
+        let mut state = crate::runtime::state::RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        state.region(region).expect("region").begin_close(None);
+        let pending = state.region(region).expect("region").pending_spawn_handle();
+        let mailbox = SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in_factory = Arc::clone(&ran);
+        let factory: LocalSpawnFactoryFn = Box::new(move |_cx| {
+            Box::pin(async move {
+                ran_in_factory.fetch_add(1, Ordering::SeqCst);
+                Outcome::Ok(())
+            })
+        });
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_slot = Arc::clone(&cancelled);
+        let request = LocalSpawnRequest {
+            task_id: provisional,
+            region,
+            budget: Budget::INFINITE,
+            factory,
+            on_unadmitted_cancel: Some(Box::new(move |_| {
+                cancelled_slot.fetch_add(1, Ordering::SeqCst);
+            })),
+            on_admission_error: None,
+            pending_reservation: Some(pending.reserve()),
+            admitted_slot: None,
+        };
+
+        let crate::runtime::state::LocalSpawnAdmission::Denied { request, error } =
+            state.admit_local_spawn_request(request)
+        else {
+            panic!("admission must deny for a closing region");
+        };
+        assert!(matches!(
+            error,
+            crate::runtime::state::SpawnError::RegionClosed(_)
+        ));
+        request.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "factory never invoked");
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            1,
+            "cancel slot fired once"
+        );
+        assert_eq!(
+            state.region(region).expect("region").pending_spawn_count(),
+            0,
+            "credit released on denial"
+        );
     }
 }

@@ -4368,7 +4368,13 @@ impl ThreeLaneWorker {
                             .spawn_mailbox
                             .as_ref()
                             .is_some_and(|mailbox| !mailbox.is_empty());
-                        if local_has_runnable || local_ready_has_work || spawn_mailbox_has_work {
+                        let local_spawn_lane_has_work =
+                            !crate::runtime::spawn_mailbox::local_spawn_lane_is_empty();
+                        if local_has_runnable
+                            || local_ready_has_work
+                            || spawn_mailbox_has_work
+                            || local_spawn_lane_has_work
+                        {
                             break;
                         }
                         // Park with timeout based on next timer deadline.
@@ -4687,6 +4693,86 @@ impl ThreeLaneWorker {
         }
     }
 
+    /// Admits owner-pinned local spawn requests parked on this worker's
+    /// thread-local lane (br-asupersync-i9y5wb / A2.2a).
+    ///
+    /// Mirrors [`Self::drain_spawn_admissions`]: admission under one state
+    /// lock acquisition, denial slots resolved after release. Admitted
+    /// tasks are pinned to this worker, stored in the thread-local task
+    /// slot, and scheduled on the non-stealable local queue — they are
+    /// never exposed to stealers.
+    fn drain_local_spawn_admissions(&mut self) {
+        const LOCAL_SPAWN_ADMISSION_BATCH: usize = 16;
+
+        if crate::runtime::spawn_mailbox::local_spawn_lane_is_empty() {
+            return;
+        }
+        let mut requests = Vec::with_capacity(LOCAL_SPAWN_ADMISSION_BATCH);
+        if crate::runtime::spawn_mailbox::drain_local_spawn_lane(
+            LOCAL_SPAWN_ADMISSION_BATCH,
+            &mut requests,
+        ) == 0
+        {
+            return;
+        }
+
+        let mut admitted: Vec<(TaskId, crate::runtime::stored_task::LocalStoredTask)> =
+            Vec::with_capacity(requests.len());
+        let mut denied: SmallVec<
+            [(
+                crate::runtime::spawn_mailbox::LocalSpawnRequest,
+                crate::runtime::state::SpawnError,
+            ); 4],
+        > = SmallVec::new();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for request in requests {
+                match state.admit_local_spawn_request(request) {
+                    crate::runtime::state::LocalSpawnAdmission::Admitted {
+                        task_id,
+                        stored,
+                        ..
+                    } => {
+                        // Admission already pinned the record to this
+                        // worker (`admit_local_spawn_request` requires the
+                        // owner thread); publish the wake state so the
+                        // first schedule is not coalesced away.
+                        if let Some(record) = state.task_mut(task_id) {
+                            record.wake_state.notify();
+                        }
+                        admitted.push((task_id, stored));
+                    }
+                    crate::runtime::state::LocalSpawnAdmission::Denied { request, error } => {
+                        denied.push((request, error));
+                    }
+                }
+            }
+        }
+
+        for (request, error) in denied {
+            match error {
+                crate::runtime::state::SpawnError::RegionClosed(_)
+                | crate::runtime::state::SpawnError::RegionNotFound(_) => {
+                    request.resolve_cancelled(crate::types::CancelReason::new(
+                        crate::types::CancelKind::ParentCancelled,
+                    ));
+                }
+                other => request.resolve_failed(other),
+            }
+        }
+        for (task_id, stored) in admitted {
+            crate::runtime::local::store_local_task(task_id, stored);
+            let scheduled = schedule_local_task(task_id);
+            debug_assert!(
+                scheduled,
+                "worker thread must carry a local ready queue for owner-pinned spawns"
+            );
+        }
+    }
+
     pub fn next_task(&mut self) -> Option<TaskId> {
         // PHASE 0: Process expired timers (fires wakers, which may inject tasks).
         if let Some(timer) = &self.timer_driver {
@@ -4697,6 +4783,10 @@ impl ThreeLaneWorker {
         // (br-asupersync-dx-core-api-v2-u1z5hn.1.3). One atomic emptiness
         // check in direct mode / idle mailbox; bounded batch otherwise.
         self.drain_spawn_admissions();
+        // PHASE 0.6: Admit owner-pinned local spawns parked on this
+        // worker's thread-local lane (br-asupersync-i9y5wb / A2.2a). One
+        // TLS emptiness check when idle.
+        self.drain_local_spawn_admissions();
 
         // Consult the governor for scheduling suggestion (amortised).
         let suggestion = self.governor_suggest();
@@ -12665,6 +12755,70 @@ mod tests {
         assert!(!record.is_local());
         record.mark_local();
         assert!(record.is_local(), "mark_local should set is_local");
+    }
+
+    /// br-asupersync-i9y5wb (A2.2a): the owner worker drains its
+    /// thread-local spawn lane — the admitted task is pinned local,
+    /// stored in the thread-local slot, scheduled on the non-stealable
+    /// local queue, and the pending credit balances.
+    #[test]
+    fn drain_local_spawn_admissions_pins_stores_and_schedules_on_owner() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let (region, pending) = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = guard.create_root_region(Budget::INFINITE);
+            let pending = guard.region(region).expect("region").pending_spawn_handle();
+            (region, pending)
+        };
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let _wid = ScopedWorkerId::new(workers[0].id);
+        let _lr = ScopedLocalReady::new(Arc::clone(&workers[0].local_ready));
+
+        let mailbox = crate::runtime::spawn_mailbox::SpawnMailbox::new();
+        let provisional = mailbox.allocate_task_id();
+        let factory: crate::runtime::spawn_mailbox::LocalSpawnFactoryFn =
+            Box::new(move |_cx| Box::pin(async move { crate::types::Outcome::Ok(()) }));
+        let request = crate::runtime::spawn_mailbox::LocalSpawnRequest {
+            task_id: provisional,
+            region,
+            budget: Budget::INFINITE,
+            factory,
+            on_unadmitted_cancel: None,
+            on_admission_error: None,
+            pending_reservation: Some(pending.reserve()),
+            admitted_slot: None,
+        };
+        crate::runtime::spawn_mailbox::enqueue_local_spawn(request);
+
+        workers[0].drain_local_spawn_admissions();
+
+        assert!(
+            crate::runtime::spawn_mailbox::local_spawn_lane_is_empty(),
+            "lane fully drained"
+        );
+        let scheduled_task = workers[0]
+            .local_ready
+            .lock()
+            .pop_front()
+            .expect("admitted task scheduled on the owner's non-stealable queue");
+        let stored = crate::runtime::local::remove_local_task(scheduled_task)
+            .expect("admitted task stored in the thread-local slot");
+        assert_eq!(stored.task_id(), Some(scheduled_task));
+        {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = guard.task(scheduled_task).expect("task record");
+            assert!(record.is_local(), "record pinned local before scheduling");
+            assert_eq!(
+                guard.region(region).expect("region").pending_spawn_count(),
+                0,
+                "credit balanced"
+            );
+        }
     }
 
     #[test]

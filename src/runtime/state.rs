@@ -35,7 +35,7 @@ use crate::runtime::reactor::Reactor;
 use crate::runtime::resource_monitor::{
     DegradationLevel, DegradationStatsSnapshot, MonitorConfig, RegionPriority, ResourceMonitor,
 };
-use crate::runtime::stored_task::StoredTask;
+use crate::runtime::stored_task::{LocalStoredTask, StoredTask};
 use crate::runtime::task_handle::JoinError;
 use crate::runtime::{BlockingPoolHandle, ObligationTable, RegionTable, TaskTable};
 use crate::time::TimerDriverHandle;
@@ -397,6 +397,36 @@ pub enum SpawnAdmission {
     Denied {
         /// The unresolved request parts (slots + credit intact).
         parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
+        /// Why admission refused.
+        error: SpawnError,
+    },
+}
+
+/// Outcome of [`RuntimeState::admit_local_spawn_request`]
+/// (br-asupersync-i9y5wb / A2.2a).
+///
+/// Mirrors [`SpawnAdmission`] for the owner-pinned local lane; the
+/// admitted arm carries the built [`LocalStoredTask`] because local tasks
+/// are stored thread-locally by the calling worker, not centrally.
+pub enum LocalSpawnAdmission {
+    /// Admitted; the calling worker must store the task in its thread-local
+    /// slot and schedule it on the non-stealable local queue after releasing
+    /// the state lock. Admission has already pinned the task record to the
+    /// owner worker.
+    Admitted {
+        /// Canonical arena task id (replaces the provisional mailbox id).
+        task_id: TaskId,
+        /// Scheduling priority from the request budget.
+        priority: u8,
+        /// The local task, ready for thread-local storage.
+        stored: LocalStoredTask,
+    },
+    /// Denied; the caller must resolve the request after releasing the
+    /// state lock (`resolve_cancelled` for `RegionClosed`/`RegionNotFound`,
+    /// `resolve_failed` otherwise).
+    Denied {
+        /// The unresolved request (slots + credit intact).
+        request: crate::runtime::spawn_mailbox::LocalSpawnRequest,
         /// Why admission refused.
         error: SpawnError,
     },
@@ -2219,20 +2249,31 @@ impl RuntimeState {
     ) -> SpawnAdmission {
         let region = parts.region;
         let budget = parts.budget;
+        let (task_id, cx, now) = match self.admit_spawn_record(region, budget) {
+            Ok(admitted) => admitted,
+            Err(error) => return SpawnAdmission::Denied { parts, error },
+        };
+        self.finish_send_spawn_admission(parts, task_id, &cx, now)
+    }
 
+    /// Payload-agnostic core of mailbox spawn admission, shared by the
+    /// Send mailbox path ([`Self::admit_spawn_request`]) and the
+    /// owner-pinned local lane ([`Self::admit_local_spawn_request`],
+    /// br-asupersync-i9y5wb / A2.2a): region liveness, task-record
+    /// creation, cancel-protocol registration, region quota admission
+    /// (with rollback), and the admission-built capability context.
+    fn admit_spawn_record(
+        &mut self,
+        region: RegionId,
+        budget: Budget,
+    ) -> Result<(TaskId, crate::cx::Cx, Time), SpawnError> {
         // Region liveness first: missing or non-Open regions deny without
         // touching the task table.
         let Some(region_record) = self.regions.get(region.arena_index()) else {
-            return SpawnAdmission::Denied {
-                parts,
-                error: SpawnError::RegionNotFound(region),
-            };
+            return Err(SpawnError::RegionNotFound(region));
         };
         if !region_record.state().can_accept_work() {
-            return SpawnAdmission::Denied {
-                parts,
-                error: SpawnError::RegionClosed(region),
-            };
+            return Err(SpawnError::RegionClosed(region));
         }
 
         let now = self.current_runtime_time();
@@ -2284,7 +2325,7 @@ impl RuntimeState {
                     live,
                 },
             };
-            return SpawnAdmission::Denied { parts, error };
+            return Err(error);
         }
 
         // Capability context, linked exactly as create_task_infrastructure
@@ -2322,6 +2363,20 @@ impl RuntimeState {
             record.set_cx(cx.clone());
         });
 
+        Ok((task_id, cx, now))
+    }
+
+    /// Send-path admission tail: stores the payload centrally under the
+    /// canonical arena id and publishes the admitted identity.
+    fn finish_send_spawn_admission(
+        &mut self,
+        parts: crate::runtime::spawn_mailbox::SpawnRequestParts,
+        task_id: TaskId,
+        cx: &crate::cx::Cx,
+        now: Time,
+    ) -> SpawnAdmission {
+        let region = parts.region;
+        let budget = parts.budget;
         // Store the work under the canonical arena id. Factory payloads are
         // wrapped in a LazyFactoryTask so the user factory runs at first
         // poll on a worker — never here under the state lock
@@ -2365,6 +2420,74 @@ impl RuntimeState {
         SpawnAdmission::Admitted {
             task_id,
             priority: budget.priority,
+        }
+    }
+
+    /// Admits an owner-pinned local spawn request
+    /// (br-asupersync-i9y5wb / A2.2a).
+    ///
+    /// Shares the full admission core with [`Self::admit_spawn_request`]
+    /// (record, cancel-protocol registration, region quota, Cx linkage,
+    /// pending-credit release ordering); only storage differs. The built
+    /// [`LocalStoredTask`] is returned to the calling worker, which must
+    /// store it in its thread-local task slot and schedule it on the
+    /// non-stealable local queue after releasing the state lock. Denials are
+    /// returned for out-of-lock resolution exactly like the Send path.
+    pub fn admit_local_spawn_request(
+        &mut self,
+        request: crate::runtime::spawn_mailbox::LocalSpawnRequest,
+    ) -> LocalSpawnAdmission {
+        let Some(worker_id) = crate::runtime::scheduler::three_lane::current_worker_id() else {
+            return LocalSpawnAdmission::Denied {
+                request,
+                error: SpawnError::LocalSchedulerUnavailable,
+            };
+        };
+        let region = request.region;
+        let budget = request.budget;
+        let (task_id, cx, now) = match self.admit_spawn_record(region, budget) {
+            Ok(admitted) => admitted,
+            Err(error) => return LocalSpawnAdmission::Denied { request, error },
+        };
+        self.update_task(task_id, |record| {
+            record.pin_to_worker(worker_id);
+        });
+
+        let crate::runtime::spawn_mailbox::LocalSpawnRequest {
+            factory,
+            pending_reservation,
+            admitted_slot,
+            ..
+        } = request;
+
+        // The factory runs at first poll on the owner worker — never here
+        // under the state lock (same discipline as the Send path).
+        let stored = LocalStoredTask::new_with_id(
+            crate::runtime::spawn_mailbox::LocalLazyFactoryTask::new(factory, cx.clone()),
+            task_id,
+        );
+        if let Some(slot) = admitted_slot {
+            let _ = slot.set(crate::runtime::spawn_mailbox::AdmittedTask {
+                task_id,
+                cx_inner: std::sync::Arc::downgrade(&cx.inner),
+            });
+        }
+
+        self.record_task_spawn(task_id, region);
+        self.record_task_trace_event(task_id, |seq| {
+            TraceEvent::task_admitted(seq, now, task_id, region)
+        });
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+
+        // The task is already visible in the region's task list
+        // (admission core ran `add_task`), so the pending credit can be
+        // released before the worker finishes thread-local storage.
+        drop(pending_reservation);
+
+        LocalSpawnAdmission::Admitted {
+            task_id,
+            priority: budget.priority,
+            stored,
         }
     }
 
