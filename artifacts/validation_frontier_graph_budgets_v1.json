@@ -1,0 +1,304 @@
+{
+  "contract_version": "validation-frontier-graph-budgets-v1",
+  "bead_id": "asupersync-validation-frontier-v2-b5cjsv.6",
+  "created_date": "2026-06-11",
+  "description": "Cargo graph budget contracts for focused proof lanes. These rows prevent dependency-graph creep from turning narrow validation lanes into broad conformance, fuzz, dev, or Tokio-heavy compiles without an explicit budget update.",
+  "source_of_truth": {
+    "artifact": "artifacts/validation_frontier_graph_budgets_v1.json",
+    "contract_test": "tests/validation_frontier_graph_budgets_contract.rs",
+    "documentation": "docs/validation_frontier_graph_budgets.md",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "validation_frontier_inventory": "artifacts/validation_frontier_inventory_v1.json",
+    "cargo_manifest": "Cargo.toml",
+    "agent_instructions": "AGENTS.md"
+  },
+  "budget_policy": {
+    "policy_id": "validation-frontier-graph-budget-policy-v1",
+    "live_cargo_metadata_policy": "Live cargo tree or cargo metadata checks remain proof-lane commands and must run through RCH_REQUIRE_REMOTE=1 rch exec --. This contract test uses checked fixtures so a unit contract does not accidentally recreate broad graph stalls.",
+    "focused_lane_rule": "A focused lane must list expected graph roots, forbidden packages, allowed heavy edges, an explicit package-count envelope, no-claim boundaries, and at least one checked cargo-tree fixture excerpt.",
+    "forbidden_edge_rule": "Forbidden package names must not appear in fixture cargo-tree excerpts unless the same package appears in allowed_heavy_edges with a scoped rationale.",
+    "conformance_masquerade_rule": "A lane that is not explicitly classified as conformance must forbid asupersync-conformance or mark it as an allowed heavy edge with a conformance-specific no-claim boundary.",
+    "tokio_boundary_rule": "Default and metrics production graph rows must forbid tokio normal edges; fuzz rows may allow tokio only through an explicit fuzz-only OTLP/tonic quarantine rationale."
+  },
+  "classification_enums": {
+    "budget_class": [
+      "dependency_graph",
+      "focused_run",
+      "focused_artifact_contract",
+      "fuzz_quarantine"
+    ],
+    "graph_source": [
+      "cargo_tree_fixture",
+      "cargo_metadata_fixture"
+    ],
+    "tokio_policy": [
+      "forbidden",
+      "allowed_scoped",
+      "not_applicable"
+    ],
+    "conformance_policy": [
+      "forbidden",
+      "allowed_scoped",
+      "not_applicable"
+    ]
+  },
+  "lane_budgets": [
+    {
+      "lane_id": "default-production-tokio-tree",
+      "budget_class": "dependency_graph",
+      "manifest_lane_required": true,
+      "inventory_row_required": true,
+      "command_must_match_manifest": true,
+      "expected_graph_roots": [
+        "Cargo.toml"
+      ],
+      "expected_package": "asupersync",
+      "expected_features": [],
+      "max_package_count": 80,
+      "max_direct_normal_edges": 45,
+      "tokio_policy": "forbidden",
+      "conformance_policy": "forbidden",
+      "forbidden_packages": [
+        "tokio",
+        "tokio-util",
+        "tokio-stream",
+        "tonic",
+        "hyper",
+        "reqwest",
+        "asupersync-conformance"
+      ],
+      "allowed_heavy_edges": [],
+      "no_claim_boundaries": [
+        "workspace-health",
+        "dev-dependency-graph",
+        "fuzz-feature-graph",
+        "conformance-crate",
+        "runtime-behavior",
+        "release-readiness"
+      ],
+      "fixture_graph": {
+        "graph_source": "cargo_tree_fixture",
+        "observed_package_count": 0,
+        "command_excerpt": "cargo tree -e normal -p asupersync -i tokio",
+        "expected_signal": "warning: nothing to print.",
+        "tree_excerpt": [
+          "warning: nothing to print."
+        ]
+      }
+    },
+    {
+      "lane_id": "metrics-production-tokio-tree",
+      "budget_class": "dependency_graph",
+      "manifest_lane_required": true,
+      "inventory_row_required": true,
+      "command_must_match_manifest": true,
+      "expected_graph_roots": [
+        "Cargo.toml"
+      ],
+      "expected_package": "asupersync",
+      "expected_features": [
+        "metrics"
+      ],
+      "max_package_count": 120,
+      "max_direct_normal_edges": 55,
+      "tokio_policy": "forbidden",
+      "conformance_policy": "forbidden",
+      "forbidden_packages": [
+        "tokio",
+        "tokio-util",
+        "tokio-stream",
+        "tonic",
+        "hyper",
+        "reqwest",
+        "asupersync-conformance"
+      ],
+      "allowed_heavy_edges": [
+        {
+          "package": "opentelemetry",
+          "scope": "metrics production API without OTLP protobuf fuzz helpers"
+        },
+        {
+          "package": "opentelemetry_sdk",
+          "scope": "metrics provider normal edge without testing feature runtime"
+        }
+      ],
+      "no_claim_boundaries": [
+        "workspace-health",
+        "dev-dependency-graph",
+        "fuzz-feature-graph",
+        "conformance-crate",
+        "runtime-behavior",
+        "release-readiness"
+      ],
+      "fixture_graph": {
+        "graph_source": "cargo_tree_fixture",
+        "observed_package_count": 0,
+        "command_excerpt": "cargo tree -e normal -p asupersync --features metrics -i tokio",
+        "expected_signal": "warning: nothing to print.",
+        "tree_excerpt": [
+          "warning: nothing to print."
+        ]
+      }
+    },
+    {
+      "lane_id": "channel-mpsc-select-e2e-public-run",
+      "budget_class": "focused_run",
+      "manifest_lane_required": true,
+      "inventory_row_required": true,
+      "command_must_match_manifest": true,
+      "expected_graph_roots": [
+        "Cargo.toml",
+        "src/bin/channel_mpsc_select_e2e.rs",
+        "examples/channel_mpsc_select_e2e.rs"
+      ],
+      "expected_package": "asupersync",
+      "expected_features": [
+        "channel-mpsc-select-e2e"
+      ],
+      "max_package_count": 160,
+      "max_direct_normal_edges": 65,
+      "tokio_policy": "not_applicable",
+      "conformance_policy": "forbidden",
+      "forbidden_packages": [
+        "asupersync-conformance",
+        "criterion",
+        "proptest",
+        "tonic",
+        "tokio"
+      ],
+      "allowed_heavy_edges": [],
+      "no_claim_boundaries": [
+        "broad-lib-test-frontier",
+        "conformance-crate",
+        "examples-benches-fuzz",
+        "performance",
+        "release-readiness",
+        "workspace-health"
+      ],
+      "fixture_graph": {
+        "graph_source": "cargo_tree_fixture",
+        "observed_package_count": 78,
+        "command_excerpt": "cargo run -p asupersync --bin channel_mpsc_select_e2e --features channel-mpsc-select-e2e",
+        "expected_signal": "binary exits 0 after assertion-only public API scenarios",
+        "tree_excerpt": [
+          "asupersync v0.3.4 (/repo)",
+          "├── crossbeam-queue v0.3.x",
+          "├── parking_lot v0.12.x",
+          "├── serde v1.x",
+          "├── serde_json v1.x",
+          "├── smallvec v1.x",
+          "└── thiserror v2.x"
+        ]
+      }
+    },
+    {
+      "lane_id": "fuzz-manifest-smoke",
+      "budget_class": "fuzz_quarantine",
+      "manifest_lane_required": true,
+      "inventory_row_required": true,
+      "command_must_match_manifest": true,
+      "expected_graph_roots": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets"
+      ],
+      "expected_package": "fuzz",
+      "expected_features": [],
+      "max_package_count": 900,
+      "max_direct_normal_edges": 160,
+      "tokio_policy": "allowed_scoped",
+      "conformance_policy": "forbidden",
+      "forbidden_packages": [
+        "asupersync-conformance",
+        "sqlx"
+      ],
+      "allowed_heavy_edges": [
+        {
+          "package": "opentelemetry-proto",
+          "scope": "fuzz-only OTLP wire-format helpers"
+        },
+        {
+          "package": "tonic",
+          "scope": "generated OTLP message support scoped to fuzz"
+        },
+        {
+          "package": "tokio",
+          "scope": "transitive through tonic for fuzz-only generated messages"
+        }
+      ],
+      "no_claim_boundaries": [
+        "production-consumer-proof",
+        "default-production-graph",
+        "metrics-production-graph",
+        "release-readiness",
+        "workspace-health"
+      ],
+      "fixture_graph": {
+        "graph_source": "cargo_tree_fixture",
+        "observed_package_count": 214,
+        "command_excerpt": "cargo check --manifest-path fuzz/Cargo.toml",
+        "expected_signal": "cargo check exits 0 or records the first fuzz target compile blocker",
+        "tree_excerpt": [
+          "asupersync-fuzz v0.0.0 (/repo/fuzz)",
+          "├── asupersync v0.3.4 (/repo)",
+          "├── arbitrary v1.x",
+          "└── opentelemetry-proto v0.31.x",
+          "    └── tonic v0.14.x",
+          "        └── tokio v1.x"
+        ]
+      }
+    },
+    {
+      "lane_id": "proof-lane-manifest-contract",
+      "budget_class": "focused_artifact_contract",
+      "manifest_lane_required": true,
+      "inventory_row_required": true,
+      "command_must_match_manifest": true,
+      "expected_graph_roots": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "Cargo.toml",
+        "AGENTS.md",
+        "README.md"
+      ],
+      "expected_package": "asupersync",
+      "expected_features": [],
+      "max_package_count": 260,
+      "max_direct_normal_edges": 90,
+      "tokio_policy": "not_applicable",
+      "conformance_policy": "forbidden",
+      "forbidden_packages": [
+        "asupersync-conformance",
+        "criterion"
+      ],
+      "allowed_heavy_edges": [
+        {
+          "package": "serde_json",
+          "scope": "artifact verifier parses checked JSON contracts"
+        },
+        {
+          "package": "serde",
+          "scope": "artifact verifier serializes deterministic projections"
+        }
+      ],
+      "no_claim_boundaries": [
+        "lane-command-execution",
+        "broad-workspace-health",
+        "runtime-behavior",
+        "release-readiness"
+      ],
+      "fixture_graph": {
+        "graph_source": "cargo_tree_fixture",
+        "observed_package_count": 94,
+        "command_excerpt": "cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "expected_signal": "proof_lane_manifest_contract tests pass",
+        "tree_excerpt": [
+          "proof_lane_manifest_contract test target",
+          "├── asupersync v0.3.4 (/repo)",
+          "├── serde v1.x",
+          "├── serde_json v1.x",
+          "└── thiserror v2.x"
+        ]
+      }
+    }
+  ]
+}
