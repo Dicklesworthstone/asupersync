@@ -2774,6 +2774,17 @@ struct PgConnectionInner {
     /// replayed after an idle reconnect so notification consumers do not lose
     /// subscriptions across server-side idle timeouts.
     subscribed_channels: BTreeSet<String>,
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: per-connection
+    /// statement-timeout override. The effective per-query timeout is
+    /// `min(remaining Cx budget, this override)`; see
+    /// [`PgConnection::set_statement_timeout_override`].
+    statement_timeout_override: Option<std::time::Duration>,
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: the
+    /// `statement_timeout` (in ms) this client last applied to the server
+    /// session, so unchanged timeouts cost zero extra wire traffic.
+    /// `None` means the session is at its server-side default (we never set
+    /// it, or we restored it with `SET statement_timeout TO DEFAULT`).
+    applied_statement_timeout_ms: Option<u64>,
 }
 
 /// Coordinates needed to send a PG `CancelRequest` on a fresh socket.
@@ -3244,54 +3255,92 @@ impl PgConnection {
     ///   unreachable server cannot stall the cancel path indefinitely.
     /// * Returns no error and never panics — failures are deliberately
     ///   swallowed.
-    fn fire_cancel_request(&self) {
+    /// Sends a PostgreSQL `CancelRequest` frame on a fresh plain-TCP socket,
+    /// awaited to completion
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.2; previously a
+    /// detached fire-and-forget thread under br-asupersync-gvkj1r).
+    ///
+    /// Returns the failure stage plus error so the drain path can log the
+    /// connection-close fallback distinctly. The connect attempt is bounded
+    /// by [`CancelTarget::connect_timeout`] (clamped to 500ms at capture
+    /// time); the frame itself is a single 16-byte write into a fresh socket
+    /// buffer. TLS is intentionally not negotiated: the CancelRequest
+    /// exchange is defined pre-TLS in the protocol and carries only the
+    /// `(process_id, secret_key)` pair issued by BackendKeyData.
+    ///
+    /// This future performs no `Cx` checkpoints, so it runs to completion
+    /// even when the calling task's `Cx` is already cancelled — exactly the
+    /// drain-phase situation it exists for.
+    async fn send_cancel_request(
+        target: CancelTarget,
+        process_id: i32,
+        secret_key: i32,
+    ) -> Result<(), (&'static str, std::io::Error)> {
+        let addr = format!("{}:{}", target.host, target.port);
+        let mut stream = crate::net::TcpStream::connect_timeout(addr, target.connect_timeout)
+            .await
+            .map_err(|err| ("connect", err))?;
+
+        // CancelRequest frame, all big-endian:
+        //   length          = 16  (i32)
+        //   request_code    = 80877102  (i32, magic per protocol)
+        //   process_id      = i32 (from BackendKeyData)
+        //   secret_key      = i32 (from BackendKeyData)
+        let mut frame = [0u8; 16];
+        frame[0..4].copy_from_slice(&16i32.to_be_bytes());
+        frame[4..8].copy_from_slice(&80_877_102i32.to_be_bytes());
+        frame[8..12].copy_from_slice(&process_id.to_be_bytes());
+        frame[12..16].copy_from_slice(&secret_key.to_be_bytes());
+
+        let mut written = 0usize;
+        while written < frame.len() {
+            let n = std::future::poll_fn(|task_cx| {
+                Pin::new(&mut stream).poll_write(task_cx, &frame[written..])
+            })
+            .await
+            .map_err(|err| ("write", err))?;
+            if n == 0 {
+                return Err((
+                    "write",
+                    std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "cancel-request socket accepted 0 bytes",
+                    ),
+                ));
+            }
+            written += n;
+        }
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        Ok(())
+    }
+
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: deliver the
+    /// `CancelRequest` inside the drain phase, returning only once delivery
+    /// completed or the connection-close fallback was taken. Every exit is
+    /// logged distinctly so operators can tell "server told to abort" from
+    /// "only the client socket was torn down".
+    async fn wire_cancel_in_drain(&mut self, cx: &Cx) {
         // No backend identity yet (e.g. cancel during pre-startup
         // exchange) → nothing the server can match this cancel against.
         if self.inner.process_id == 0 && self.inner.secret_key == 0 {
+            cx.trace(
+                "client.wire_cancel proto=postgres outcome=skipped reason=no_backend_key \
+                 fallback=connection_close",
+            );
             return;
         }
-        let host = self.inner.cancel_target.host.clone();
-        let port = self.inner.cancel_target.port;
-        let connect_timeout = self.inner.cancel_target.connect_timeout;
+        let target = self.inner.cancel_target.clone();
         let process_id = self.inner.process_id;
         let secret_key = self.inner.secret_key;
-
-        // Detached. Bounded by connect_timeout + write_timeout. Errors
-        // intentionally swallowed.
-        let _ = std::thread::Builder::new()
-            .name("pg-cancel-request".to_string())
-            .spawn(move || {
-                use std::io::Write as _;
-                use std::net::ToSocketAddrs as _;
-
-                let addr_str = format!("{host}:{port}");
-                let addrs = match addr_str.to_socket_addrs() {
-                    Ok(it) => it,
-                    Err(_) => return,
-                };
-                for addr in addrs {
-                    let mut stream =
-                        match std::net::TcpStream::connect_timeout(&addr, connect_timeout) {
-                            Ok(s) => s,
-                            Err(_) => continue,
-                        };
-                    let _ = stream.set_write_timeout(Some(connect_timeout));
-
-                    // CancelRequest frame, all big-endian:
-                    //   length          = 16  (i32)
-                    //   request_code    = 80877102  (i32, magic per protocol)
-                    //   process_id      = i32 (from BackendKeyData)
-                    //   secret_key      = i32 (from BackendKeyData)
-                    let mut frame = [0u8; 16];
-                    frame[0..4].copy_from_slice(&16i32.to_be_bytes());
-                    frame[4..8].copy_from_slice(&80_877_102i32.to_be_bytes());
-                    frame[8..12].copy_from_slice(&process_id.to_be_bytes());
-                    frame[12..16].copy_from_slice(&secret_key.to_be_bytes());
-                    let _ = stream.write_all(&frame);
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
-                    return;
-                }
-            });
+        match Self::send_cancel_request(target, process_id, secret_key).await {
+            Ok(()) => cx.trace(&format!(
+                "client.wire_cancel proto=postgres outcome=sent process_id={process_id}"
+            )),
+            Err((stage, err)) => cx.trace(&format!(
+                "client.wire_cancel proto=postgres outcome=send_failed stage={stage} \
+                 fallback=connection_close err={err}"
+            )),
+        }
     }
 
     #[inline]
@@ -3524,6 +3573,8 @@ impl PgConnection {
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
+                statement_timeout_override: None,
+                applied_statement_timeout_ms: None,
             },
         };
 
@@ -3555,16 +3606,21 @@ impl PgConnection {
         Outcome::Ok(conn)
     }
 
-    #[inline]
-    fn cancel_in_flight<T>(&mut self, cx: &Cx) -> Outcome<T, PgError> {
-        // Best-effort: tell the server to abort the in-flight query via
-        // PostgreSQL's CancelRequest protocol BEFORE we tear down the
-        // original socket. Sending the cancel after the original close
-        // would still work, but doing it first lets the server's SIGINT
-        // race the close-induced read failure and minimizes the window
-        // in which the server keeps holding locks for a query no one is
-        // listening for. (br-asupersync-gvkj1r)
-        self.fire_cancel_request();
+    async fn cancel_in_flight<T>(&mut self, cx: &Cx) -> Outcome<T, PgError> {
+        // Tell the server to abort the in-flight query via PostgreSQL's
+        // CancelRequest protocol BEFORE we tear down the original socket.
+        // Sending the cancel after the original close would still work, but
+        // doing it first lets the server's SIGINT race the close-induced
+        // read failure and minimizes the window in which the server keeps
+        // holding locks for a query no one is listening for.
+        // (br-asupersync-gvkj1r)
+        //
+        // br-asupersync-server-stack-hardening-eeexl1.1.2: the delivery is
+        // awaited — this drain step resolves only after the CancelRequest
+        // completed (or its connection-close fallback was logged), so a
+        // caller observing `Outcome::Cancelled` knows the server-side abort
+        // signal is no longer merely "scheduled".
+        self.wire_cancel_in_drain(cx).await;
 
         // Once a caller cancels mid-flight we can't safely continue decoding
         // protocol messages for subsequent operations, so close this connection.
@@ -4120,6 +4176,178 @@ impl PgConnection {
         }
     }
 
+    /// Sets the per-connection statement-timeout override
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.2).
+    ///
+    /// The effective timeout forwarded to the server before each query is
+    /// `min(remaining Cx budget, this override)` — meet semantics: the
+    /// override can only tighten what the ambient budget allows, and vice
+    /// versa. `None` (the default) leaves the ambient budget as the only
+    /// source. Delivery is `SET statement_timeout`, applied lazily and only
+    /// when the effective value changed (the budget-derived component is
+    /// bucketed — see `database::wire_statement_timeout_ms` — so
+    /// back-to-back queries under one deadline reuse the session value).
+    /// When no bound applies anymore, the session value is restored with
+    /// `SET statement_timeout TO DEFAULT`.
+    pub fn set_statement_timeout_override(&mut self, timeout: Option<std::time::Duration>) {
+        self.inner.statement_timeout_override = timeout;
+    }
+
+    /// Current per-connection statement-timeout override; see
+    /// [`Self::set_statement_timeout_override`].
+    #[must_use]
+    pub fn statement_timeout_override(&self) -> Option<std::time::Duration> {
+        self.inner.statement_timeout_override
+    }
+
+    /// True for transaction/session-control verbs that must never trigger
+    /// statement-timeout reconciliation
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.2). Two reasons:
+    /// cleanup statements (`ROLLBACK`, `COMMIT`) are drain-critical and must
+    /// not be aborted server-side by an almost-exhausted budget's tightened
+    /// timeout, and control statements are near-instant so a timeout
+    /// backstop buys nothing for an extra round-trip.
+    fn is_session_control_statement(sql: &str) -> bool {
+        let verb = sql
+            .trim_start()
+            .split(|c: char| c.is_whitespace() || c == ';')
+            .next()
+            .unwrap_or("");
+        [
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "ABORT",
+            "END",
+            "START",
+            "SAVEPOINT",
+            "RELEASE",
+            "SET",
+            "RESET",
+            "SHOW",
+            "DEALLOCATE",
+            "DISCARD",
+            "LISTEN",
+            "UNLISTEN",
+            "NOTIFY",
+        ]
+        .iter()
+        .any(|kw| verb.eq_ignore_ascii_case(kw))
+    }
+
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: reconcile the server
+    /// session's `statement_timeout` with `min(remaining Cx budget,
+    /// per-connection override)` before a query is sent.
+    ///
+    /// Zero wire traffic when the effective value is unchanged. The managed
+    /// exchange deliberately bypasses [`Self::execute_unchecked_on_open`]:
+    /// that path fail-closed marks every `SET` completion as
+    /// discard-on-pool-return and invalidates the prepared-statement cache,
+    /// which is correct for *user* session mutations but would make this
+    /// client-managed, always-reconciled GUC unusable with pooling.
+    async fn apply_statement_timeout(&mut self, cx: &Cx) -> Outcome<(), PgError> {
+        let override_timeout = self.inner.statement_timeout_override;
+        let effective_ms = crate::database::wire_statement_timeout_ms(cx, override_timeout);
+        if effective_ms == self.inner.applied_statement_timeout_ms {
+            return Outcome::Ok(());
+        }
+        let remaining_ns = crate::database::remaining_budget(cx)
+            .map_or_else(|| "none".to_string(), |d| d.as_nanos().to_string());
+        let base_ms = override_timeout.map_or_else(
+            || "none".to_string(),
+            |d| crate::database::statement_timeout_millis(d).to_string(),
+        );
+        let sql = match effective_ms {
+            Some(ms) => {
+                cx.trace(&format!(
+                    "client.budget_forwarded proto=postgres base_ms={base_ms} \
+                     remaining_ns={remaining_ns} statement_timeout_ms={ms}"
+                ));
+                format!("SET statement_timeout = {ms}")
+            }
+            None => {
+                cx.trace(&format!(
+                    "client.budget_forwarded proto=postgres base_ms={base_ms} \
+                     remaining_ns={remaining_ns} statement_timeout_ms=default"
+                ));
+                "SET statement_timeout TO DEFAULT".to_string()
+            }
+        };
+        // Session state is uncertain until the exchange completes cleanly.
+        self.inner.applied_statement_timeout_ms = None;
+        match self.run_managed_statement_timeout_set(cx, &sql).await {
+            Outcome::Ok(()) => {
+                self.inner.applied_statement_timeout_ms = effective_ms;
+                Outcome::Ok(())
+            }
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    /// Minimal simple-Query exchange for the client-managed
+    /// `SET statement_timeout` reconciliation. Mirrors the
+    /// [`Self::execute_unchecked_on_open`] response loop minus the
+    /// session-discard and prepared-cache-invalidation reactions (see
+    /// [`Self::apply_statement_timeout`] for why those must not fire here).
+    async fn run_managed_statement_timeout_set(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<(), PgError> {
+        let mut buf = MessageBuffer::new();
+        buf.write_cstring(sql);
+        let msg = match buf.build_message(FrontendMessage::Query as u8) {
+            Ok(m) => m,
+            Err(e) => return Outcome::Err(e),
+        };
+
+        // Same desync protection as the public query paths: stay closed
+        // unless the exchange completes through ReadyForQuery.
+        self.inner.closed = true;
+
+        if let Err(e) = self.write_all(cx, &msg).await {
+            return self.fail_in_flight(e);
+        }
+
+        loop {
+            if cx.checkpoint().is_err() {
+                return self.cancel_in_flight(cx).await;
+            }
+
+            let (msg_type, data) = match self.read_message(cx).await {
+                Ok(m) => m,
+                Err(e) => return self.fail_in_flight(e),
+            };
+
+            match msg_type {
+                b'C' | b'I' => {}
+                b'Z' => {
+                    self.inner.closed = false;
+                    if let Err(e) = self.handle_ready_for_query(&data) {
+                        return self.fail_in_flight(e);
+                    }
+                    return Outcome::Ok(());
+                }
+                b'E' => {
+                    return outcome_from_error(self.parse_error_and_drain(cx, &data).await);
+                }
+                _ => {
+                    match self.handle_async_backend_message(msg_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(e) => return self.fail_in_flight(e),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "managed statement_timeout SET response",
+                        msg_type,
+                    ));
+                }
+            }
+        }
+    }
+
     /// Execute a simple query (DEPRECATED — use [`Self::query_unchecked`] for
     /// trusted-literal SQL or [`Self::query_params`] for parameterized
     /// queries).
@@ -4188,6 +4416,15 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
+        if !Self::is_session_control_statement(sql) {
+            match self.apply_statement_timeout(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => return Outcome::Err(err),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+
         // Send Query message
         let mut buf = MessageBuffer::new();
         buf.write_cstring(sql);
@@ -4214,7 +4451,7 @@ impl PgConnection {
         let mut discard_on_pool_return = false;
         loop {
             if cx.checkpoint().is_err() {
-                return self.cancel_in_flight(cx);
+                return self.cancel_in_flight(cx).await;
             }
 
             let (msg_type, data) = match self.read_message(cx).await {
@@ -4369,6 +4606,15 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
+        if !Self::is_session_control_statement(sql) {
+            match self.apply_statement_timeout(cx).await {
+                Outcome::Ok(()) => {}
+                Outcome::Err(err) => return Outcome::Err(err),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+
         self.execute_unchecked_on_open(cx, sql).await
     }
 
@@ -4411,7 +4657,7 @@ impl PgConnection {
 
         loop {
             if cx.checkpoint().is_err() {
-                return self.cancel_in_flight(cx);
+                return self.cancel_in_flight(cx).await;
             }
 
             let (msg_type, data) = match self.read_message(cx).await {
@@ -4520,7 +4766,7 @@ impl PgConnection {
         let mut command_tag = None::<String>;
         loop {
             if cx.checkpoint().is_err() {
-                return self.cancel_in_flight(cx);
+                return self.cancel_in_flight(cx).await;
             }
 
             let (msg_type, data) = match self.read_message(cx).await {
@@ -4934,6 +5180,13 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
+        match self.apply_statement_timeout(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
         let param_oids: Vec<u32> = params.iter().map(ToSql::type_oid).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
             Ok(p) => p,
@@ -5039,6 +5292,13 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
         match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        match self.apply_statement_timeout(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -5191,7 +5451,7 @@ impl PgConnection {
 
         loop {
             if cx.checkpoint().is_err() {
-                return self.cancel_in_flight(cx);
+                return self.cancel_in_flight(cx).await;
             }
 
             let (msg_type, data) = match self.read_message(cx).await {
@@ -5573,6 +5833,13 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
+        match self.apply_statement_timeout(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
         if let Err(err) = Self::validate_prepared_bind_arity(stmt, params) {
             return Outcome::Err(err);
         }
@@ -5655,6 +5922,13 @@ impl PgConnection {
         let stmt = rebound_stmt.as_ref().unwrap_or(stmt);
 
         match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        match self.apply_statement_timeout(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -5757,7 +6031,7 @@ impl PgConnection {
 
         loop {
             if cx.checkpoint().is_err() {
-                return self.cancel_in_flight(cx);
+                return self.cancel_in_flight(cx).await;
             }
 
             let (msg_type, data) = match self.read_message(cx).await {
@@ -6378,7 +6652,7 @@ impl PgConnection {
 
         loop {
             if cx.checkpoint().is_err() {
-                return self.cancel_in_flight(cx);
+                return self.cancel_in_flight(cx).await;
             }
 
             let (msg_type, data) = match self.read_message(cx).await {
@@ -6466,7 +6740,7 @@ impl PgConnection {
 
         loop {
             if cx.checkpoint().is_err() {
-                return self.cancel_in_flight(cx);
+                return self.cancel_in_flight(cx).await;
             }
 
             let (msg_type, data) = match self.read_message(cx).await {
@@ -6740,7 +7014,7 @@ impl PgCopyIn<'_> {
 
         loop {
             if cx.checkpoint().is_err() {
-                return self.connection.cancel_in_flight(cx);
+                return self.connection.cancel_in_flight(cx).await;
             }
 
             let (msg_type, data) = match self.connection.read_message(cx).await {
@@ -7860,6 +8134,8 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
+                statement_timeout_override: None,
+                applied_statement_timeout_ms: None,
             },
         },
         peer_stream,
@@ -9328,6 +9604,8 @@ mod tests {
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
+                statement_timeout_override: None,
+                applied_statement_timeout_ms: None,
             },
         }
     }
@@ -9361,6 +9639,8 @@ mod tests {
                     consecutive_deallocate_failures: 0,
                     unhealthy: false,
                     subscribed_channels: BTreeSet::new(),
+                    statement_timeout_override: None,
+                    applied_statement_timeout_ms: None,
                 },
             },
             peer_stream,
@@ -13384,6 +13664,307 @@ mod tests {
             !mgr.release_check(&mut conn),
             "pool return must drop connections with prior session statement_timeout state"
         );
+    }
+
+    // ================================================================
+    // br-asupersync-server-stack-hardening-eeexl1.1.2 — budget-derived
+    // statement timeouts + wire-level cancel in the drain phase.
+    // ================================================================
+
+    fn budgeted_traced_cx(remaining: std::time::Duration) -> (Cx, crate::trace::TraceBufferHandle) {
+        let now = crate::time::wall_now();
+        let budget = Budget::INFINITE.tightened_by_timeout(now, remaining);
+        let cx = Cx::for_request_with_budget(budget);
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+        (cx, trace)
+    }
+
+    fn user_trace_messages(trace: &crate::trace::TraceBufferHandle, prefix: &str) -> Vec<String> {
+        trace
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == crate::trace::TraceEventKind::UserTrace)
+            .filter_map(|e| match &e.data {
+                crate::trace::TraceData::Message(msg) if msg.starts_with(prefix) => {
+                    Some(msg.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    /// AC: the effective statement timeout is `min(remaining budget,
+    /// override)`; the tighter override is forwarded exactly, applied once
+    /// (no repeat SET while unchanged), traced, and the managed SET must
+    /// NOT poison pooled reuse the way user-issued SETs do.
+    #[test]
+    fn statement_timeout_forwards_override_under_larger_budget() {
+        init_test("statement_timeout_forwards_override_under_larger_budget");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let (cx, trace) = budgeted_traced_cx(std::time::Duration::from_secs(30));
+        conn.set_statement_timeout_override(Some(std::time::Duration::from_millis(500)));
+
+        let responder = std::thread::spawn(move || {
+            let request = read_until_contains(&mut peer, b"SET statement_timeout = 500");
+            assert!(
+                !contains_subslice(&request, b"INSERT"),
+                "managed SET must be applied before the user statement"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"SET\0"))
+                .expect("write SET complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("write ready");
+
+            let request = read_until_contains(&mut peer, b"INSERT INTO t VALUES (1)");
+            assert!(
+                !contains_subslice(&request, b"statement_timeout"),
+                "unchanged effective timeout must not re-send SET"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"INSERT 0 1\0"))
+                .expect("write insert complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("write ready");
+
+            let request = read_until_contains(&mut peer, b"INSERT INTO t VALUES (2)");
+            assert!(
+                !contains_subslice(&request, b"statement_timeout"),
+                "second statement with unchanged effective timeout must not re-send SET"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"INSERT 0 1\0"))
+                .expect("write insert complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("write ready");
+        });
+
+        match run(conn.execute_unchecked(&cx, "INSERT INTO t VALUES (1)")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 1),
+            other => panic!("expected insert success, got {other:?}"),
+        }
+        match run(conn.execute_unchecked(&cx, "INSERT INTO t VALUES (2)")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 1),
+            other => panic!("expected insert success, got {other:?}"),
+        }
+        responder.join().expect("responder thread");
+
+        assert_eq!(conn.inner.applied_statement_timeout_ms, Some(500));
+        assert!(
+            !conn.inner.needs_discard,
+            "client-managed statement_timeout reconciliation must not poison pooled reuse"
+        );
+
+        let forwarded = user_trace_messages(&trace, "client.budget_forwarded proto=postgres ");
+        assert_eq!(
+            forwarded.len(),
+            1,
+            "exactly one forwarded event expected, got {forwarded:?}"
+        );
+        assert!(forwarded[0].contains("base_ms=500"), "{}", forwarded[0]);
+        assert!(
+            forwarded[0].contains("statement_timeout_ms=500"),
+            "{}",
+            forwarded[0]
+        );
+    }
+
+    /// AC: with no override, the budget-derived component alone becomes the
+    /// wire statement timeout (50ms-bucketed; client checkpoints stay
+    /// exact). The bound is asserted through the traced budget math.
+    #[test]
+    fn statement_timeout_derived_from_budget_alone() {
+        init_test("statement_timeout_derived_from_budget_alone");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let (cx, trace) = budgeted_traced_cx(std::time::Duration::from_secs(30));
+
+        let responder = std::thread::spawn(move || {
+            let request = read_until_contains(&mut peer, b"SET statement_timeout = ");
+            assert!(!contains_subslice(&request, b"INSERT"));
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"SET\0"))
+                .expect("write SET complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("write ready");
+
+            read_until_contains(&mut peer, b"INSERT INTO t VALUES (1)");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"INSERT 0 1\0"))
+                .expect("write insert complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("write ready");
+        });
+
+        match run(conn.execute_unchecked(&cx, "INSERT INTO t VALUES (1)")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 1),
+            other => panic!("expected insert success, got {other:?}"),
+        }
+        responder.join().expect("responder thread");
+
+        let forwarded = user_trace_messages(&trace, "client.budget_forwarded proto=postgres ");
+        assert_eq!(forwarded.len(), 1, "got {forwarded:?}");
+        assert!(forwarded[0].contains("base_ms=none"), "{}", forwarded[0]);
+        let ms: u64 = forwarded[0]
+            .split("statement_timeout_ms=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse().ok())
+            .expect("statement_timeout_ms in trace");
+        assert!(
+            (29_000..=30_000).contains(&ms),
+            "budget-derived timeout should be close to the 30s budget, got {ms}"
+        );
+        assert_eq!(ms % 50, 0, "budget-derived component must be 50ms-bucketed");
+        let applied = conn
+            .inner
+            .applied_statement_timeout_ms
+            .expect("timeout applied");
+        assert_eq!(applied, ms, "trace and session state must agree");
+    }
+
+    /// AC (the showpiece): cancellation observed mid-exchange delivers a
+    /// CancelRequest on a fresh socket — correct 16-byte frame with the
+    /// BackendKeyData identity — and the operation resolves `Cancelled`
+    /// only after delivery completed (the joined listener proves ordering).
+    #[test]
+    fn cancel_in_flight_sends_cancel_request_before_resolving() {
+        init_test("cancel_in_flight_sends_cancel_request_before_resolving");
+        let (mut conn, _peer) = make_test_connection_with_peer();
+        conn.inner.process_id = 42;
+        conn.inner.secret_key = 1337;
+
+        let cancel_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let cancel_addr = cancel_listener.local_addr().expect("local_addr");
+        conn.inner.cancel_target = CancelTarget {
+            host: cancel_addr.ip().to_string(),
+            port: cancel_addr.port(),
+            connect_timeout: std::time::Duration::from_millis(500),
+        };
+
+        let listener_thread = std::thread::spawn(move || {
+            let (mut stream, _) = cancel_listener.accept().expect("cancel connection");
+            let mut frame = [0u8; 16];
+            std::io::Read::read_exact(&mut stream, &mut frame).expect("16-byte cancel frame");
+            frame
+        });
+
+        let cx = cancelled_cx();
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+
+        let outcome: Outcome<(), PgError> = run(conn.cancel_in_flight(&cx));
+        assert_user_cancelled(outcome);
+
+        let frame = listener_thread.join().expect("cancel listener thread");
+        assert_eq!(&frame[0..4], &16i32.to_be_bytes(), "frame length");
+        assert_eq!(&frame[4..8], &80_877_102i32.to_be_bytes(), "request code");
+        assert_eq!(&frame[8..12], &42i32.to_be_bytes(), "process_id");
+        assert_eq!(&frame[12..16], &1337i32.to_be_bytes(), "secret_key");
+        assert!(
+            conn.inner.closed,
+            "drain must close the poisoned connection"
+        );
+
+        let events = user_trace_messages(&trace, "client.wire_cancel proto=postgres ");
+        assert_eq!(events.len(), 1, "got {events:?}");
+        assert!(
+            events[0].contains("outcome=sent process_id=42"),
+            "{}",
+            events[0]
+        );
+    }
+
+    /// AC: when CancelRequest delivery fails (unreachable cancel target),
+    /// the connection-close fallback is taken and logged distinctly, and
+    /// the operation still resolves `Cancelled` afterwards.
+    #[test]
+    fn cancel_in_flight_falls_back_to_close_on_connect_failure() {
+        init_test("cancel_in_flight_falls_back_to_close_on_connect_failure");
+        let (mut conn, _peer) = make_test_connection_with_peer();
+        conn.inner.process_id = 7;
+        conn.inner.secret_key = 8;
+
+        // Bind-then-drop yields a loopback port with no listener: the
+        // cancel connect is refused immediately and deterministically.
+        let dead_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("local_addr").port()
+        };
+        conn.inner.cancel_target = CancelTarget {
+            host: "127.0.0.1".to_string(),
+            port: dead_port,
+            connect_timeout: std::time::Duration::from_millis(500),
+        };
+
+        let cx = cancelled_cx();
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+
+        let outcome: Outcome<(), PgError> = run(conn.cancel_in_flight(&cx));
+        assert_user_cancelled(outcome);
+        assert!(conn.inner.closed);
+
+        let events = user_trace_messages(&trace, "client.wire_cancel proto=postgres ");
+        assert_eq!(events.len(), 1, "got {events:?}");
+        assert!(events[0].contains("outcome=send_failed"), "{}", events[0]);
+        assert!(
+            events[0].contains("fallback=connection_close"),
+            "{}",
+            events[0]
+        );
+    }
+
+    /// Pre-startup cancellation (no BackendKeyData yet) skips the wire
+    /// cancel with its own distinct trace instead of sending a frame the
+    /// server could never match.
+    #[test]
+    fn cancel_in_flight_skips_wire_cancel_without_backend_key() {
+        init_test("cancel_in_flight_skips_wire_cancel_without_backend_key");
+        let (mut conn, _peer) = make_test_connection_with_peer();
+        assert_eq!(conn.inner.process_id, 0);
+        assert_eq!(conn.inner.secret_key, 0);
+
+        let cx = cancelled_cx();
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+
+        let outcome: Outcome<(), PgError> = run(conn.cancel_in_flight(&cx));
+        assert_user_cancelled(outcome);
+
+        let events = user_trace_messages(&trace, "client.wire_cancel proto=postgres ");
+        assert_eq!(events.len(), 1, "got {events:?}");
+        assert!(
+            events[0].contains("outcome=skipped reason=no_backend_key"),
+            "{}",
+            events[0]
+        );
+    }
+
+    /// Transaction-control statements bypass timeout reconciliation: a
+    /// nearly-exhausted budget must never abort ROLLBACK/COMMIT cleanup
+    /// server-side via a tightened statement timeout.
+    #[test]
+    fn session_control_statements_bypass_statement_timeout() {
+        init_test("session_control_statements_bypass_statement_timeout");
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let (cx, trace) = budgeted_traced_cx(std::time::Duration::from_millis(250));
+
+        let responder = std::thread::spawn(move || {
+            let request = read_until_contains(&mut peer, b"ROLLBACK");
+            assert!(
+                !contains_subslice(&request, b"statement_timeout"),
+                "control statements must not trigger timeout reconciliation"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"ROLLBACK\0"))
+                .expect("write rollback complete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).expect("write ready");
+        });
+
+        match run(conn.execute_unchecked(&cx, "ROLLBACK")) {
+            Outcome::Ok(_) => {}
+            other => panic!("expected rollback success, got {other:?}"),
+        }
+        responder.join().expect("responder thread");
+
+        assert!(user_trace_messages(&trace, "client.budget_forwarded proto=postgres ").is_empty());
+        assert_eq!(conn.inner.applied_statement_timeout_ms, None);
     }
 
     #[test]

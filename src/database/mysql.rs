@@ -1654,6 +1654,23 @@ struct MySqlConnectionInner {
     /// without requiring exclusive ownership of `&mut self` at the
     /// observation point.
     query_in_flight: std::sync::atomic::AtomicBool,
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: per-connection
+    /// statement-timeout override. The effective per-query timeout is
+    /// `min(remaining Cx budget, this override)`; see
+    /// [`MySqlConnection::set_statement_timeout_override`].
+    statement_timeout_override: Option<std::time::Duration>,
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: the
+    /// `max_execution_time` (in ms) this client last applied to the server
+    /// session, so unchanged timeouts cost zero extra wire traffic. `None`
+    /// means the session is at its server-side default (we never set it, or
+    /// we restored it with `SET SESSION max_execution_time = DEFAULT`).
+    applied_max_execution_time_ms: Option<u64>,
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: set once the server
+    /// rejected `SET SESSION max_execution_time` with
+    /// ER_UNKNOWN_SYSTEM_VARIABLE (1193, e.g. MariaDB). Timeout forwarding
+    /// is disabled for the rest of the connection's life; client-side
+    /// budget checkpoints remain the enforcement mechanism.
+    max_execution_time_unsupported: bool,
 }
 
 impl Drop for MySqlConnectionInner {
@@ -1875,6 +1892,9 @@ impl MySqlConnection {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             // Stash options so cancel_in_flight_query can reopen a fresh
             // connection to issue KILL QUERY <connection_id>
@@ -1988,6 +2008,205 @@ impl MySqlConnection {
             Outcome::Cancelled(reason) => Err(MySqlError::Cancelled(reason)),
             Outcome::Panicked(_) => Err(MySqlError::Protocol(
                 "cancel_in_flight_query: KILL QUERY panicked during execute".to_string(),
+            )),
+        }
+    }
+
+    /// Sets the per-connection statement-timeout override
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.2).
+    ///
+    /// The effective timeout forwarded to the server before each query is
+    /// `min(remaining Cx budget, this override)` — meet semantics: the
+    /// override can only tighten what the ambient budget allows, and vice
+    /// versa. `None` (the default) leaves the ambient budget as the only
+    /// source. Delivery is `SET SESSION max_execution_time` (milliseconds;
+    /// MySQL ≥ 5.7.8, applies to `SELECT` statements per server semantics),
+    /// applied lazily and only when the effective value changed. Servers
+    /// without the variable (e.g. MariaDB) degrade gracefully: the first
+    /// rejection is traced and timeout forwarding is disabled for the
+    /// connection while client-side budget enforcement continues unchanged.
+    pub fn set_statement_timeout_override(&mut self, timeout: Option<std::time::Duration>) {
+        self.inner.statement_timeout_override = timeout;
+    }
+
+    /// Current per-connection statement-timeout override; see
+    /// [`Self::set_statement_timeout_override`].
+    #[must_use]
+    pub fn statement_timeout_override(&self) -> Option<std::time::Duration> {
+        self.inner.statement_timeout_override
+    }
+
+    /// True for transaction/session-control verbs that must never trigger
+    /// statement-timeout reconciliation or drain-phase `KILL QUERY`
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.2). Cleanup
+    /// statements (`COMMIT`, `ROLLBACK`) are drain-critical and must not be
+    /// aborted by an almost-exhausted budget, and `KILL` itself must be
+    /// exempt so the killer connection's own exchange can never recurse
+    /// into another drain kill.
+    fn is_session_control_statement(sql: &str) -> bool {
+        let verb = sql
+            .trim_start()
+            .split(|c: char| c.is_whitespace() || c == ';')
+            .next()
+            .unwrap_or("");
+        [
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "START",
+            "SAVEPOINT",
+            "RELEASE",
+            "SET",
+            "SHOW",
+            "USE",
+            "KILL",
+        ]
+        .iter()
+        .any(|kw| verb.eq_ignore_ascii_case(kw))
+    }
+
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: reconcile the server
+    /// session's `max_execution_time` with `min(remaining Cx budget,
+    /// per-connection override)` before a query is sent. Zero wire traffic
+    /// when the effective value is unchanged; see
+    /// [`Self::set_statement_timeout_override`] for delivery semantics and
+    /// the graceful-degradation path on servers without the variable.
+    async fn apply_statement_timeout(&mut self, cx: &Cx) -> Outcome<(), MySqlError> {
+        if self.inner.max_execution_time_unsupported {
+            return Outcome::Ok(());
+        }
+        let override_timeout = self.inner.statement_timeout_override;
+        let effective_ms = crate::database::wire_statement_timeout_ms(cx, override_timeout);
+        if effective_ms == self.inner.applied_max_execution_time_ms {
+            return Outcome::Ok(());
+        }
+        let remaining_ns = crate::database::remaining_budget(cx)
+            .map_or_else(|| "none".to_string(), |d| d.as_nanos().to_string());
+        let base_ms = override_timeout.map_or_else(
+            || "none".to_string(),
+            |d| crate::database::statement_timeout_millis(d).to_string(),
+        );
+        let sql = match effective_ms {
+            Some(ms) => {
+                cx.trace(&format!(
+                    "client.budget_forwarded proto=mysql base_ms={base_ms} \
+                     remaining_ns={remaining_ns} max_execution_time_ms={ms}"
+                ));
+                format!("SET SESSION max_execution_time = {ms}")
+            }
+            None => {
+                cx.trace(&format!(
+                    "client.budget_forwarded proto=mysql base_ms={base_ms} \
+                     remaining_ns={remaining_ns} max_execution_time_ms=default"
+                ));
+                "SET SESSION max_execution_time = DEFAULT".to_string()
+            }
+        };
+        // Session state is uncertain until the exchange completes cleanly.
+        self.inner.applied_max_execution_time_ms = None;
+        match self.execute_unchecked_inner_impl(cx, &sql).await {
+            Outcome::Ok(_) => {
+                self.inner.applied_max_execution_time_ms = effective_ms;
+                Outcome::Ok(())
+            }
+            // ER_UNKNOWN_SYSTEM_VARIABLE (1193): the server has no
+            // `max_execution_time` (MariaDB exposes `max_statement_time`
+            // instead). Degrade gracefully — client-side budget checkpoints
+            // remain the enforcement mechanism — and remember the rejection
+            // so steady-state queries pay no repeated failed SETs.
+            Outcome::Err(MySqlError::Server {
+                code: 1193,
+                message,
+                ..
+            }) => {
+                self.inner.max_execution_time_unsupported = true;
+                cx.trace(&format!(
+                    "client.budget_forwarded proto=mysql outcome=unsupported \
+                     err_code=1193 err={message}"
+                ));
+                Outcome::Ok(())
+            }
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: deliver `KILL QUERY`
+    /// inside the drain phase, returning only once delivery completed or the
+    /// connection-close fallback was taken (logged distinctly either way).
+    ///
+    /// Runs under [`commit_section`](crate::combinator::commit_section)'s
+    /// bounded per-poll cancellation masking so the killer connection's own
+    /// checkpoints pass while the calling task's `Cx` is already cancelled
+    /// (including budget-deadline exhaustion — mask depth suppresses both).
+    /// The masked-poll budget keeps the drain step bounded: once exhausted,
+    /// the killer's next checkpoint observes the pending cancel and the
+    /// whole step resolves as a logged failure.
+    async fn wire_cancel_in_drain(&self, cx: &Cx) {
+        /// Bounded drain window: enough polls for a loopback-or-LAN
+        /// connect + auth handshake + one OK exchange, while still
+        /// guaranteeing the drain step terminates.
+        const MASKED_WIRE_CANCEL_POLLS: u32 = 4096;
+
+        let thread_id = self.inner.connection_id;
+        if thread_id == 0 {
+            cx.trace(
+                "client.wire_cancel proto=mysql outcome=skipped reason=no_connection_id \
+                 fallback=connection_close",
+            );
+            return;
+        }
+        let Some(options) = self.options.clone() else {
+            cx.trace(
+                "client.wire_cancel proto=mysql outcome=skipped reason=no_stored_options \
+                 fallback=connection_close",
+            );
+            return;
+        };
+
+        // Clamp the killer's connect attempt (mirrors the PostgreSQL
+        // CancelTarget 500ms cap) so a cancelling caller can't be stalled
+        // by an unreachable host on the cancel path.
+        let cap = std::time::Duration::from_millis(500);
+        let mut kill_options = options;
+        kill_options.connect_timeout = Some(
+            kill_options
+                .connect_timeout
+                .map_or(cap, |timeout| timeout.min(cap)),
+        );
+
+        let kill = async {
+            let mut killer = match Self::connect_with_options(cx, kill_options).await {
+                Outcome::Ok(conn) => conn,
+                Outcome::Err(err) => return Err(("connect", err.to_string())),
+                Outcome::Cancelled(_) => {
+                    return Err(("connect", "masked poll budget exhausted".to_string()));
+                }
+                Outcome::Panicked(_) => return Err(("connect", "panicked".to_string())),
+            };
+            let sql = format!("KILL QUERY {thread_id}");
+            // Box::pin breaks the async-recursion cycle at the type level
+            // (`execute_unchecked_internal` → `wire_cancel_in_drain` →
+            // `execute_unchecked_internal`); the runtime guard against
+            // actual re-entry is the KILL entry in
+            // `is_session_control_statement`.
+            match Box::pin(killer.execute_unchecked_internal(cx, &sql)).await {
+                Outcome::Ok(_) => Ok(()),
+                Outcome::Err(err) => Err(("kill_query", err.to_string())),
+                Outcome::Cancelled(_) => {
+                    Err(("kill_query", "masked poll budget exhausted".to_string()))
+                }
+                Outcome::Panicked(_) => Err(("kill_query", "panicked".to_string())),
+            }
+        };
+        match crate::combinator::commit_section(cx, MASKED_WIRE_CANCEL_POLLS, kill).await {
+            Ok(()) => cx.trace(&format!(
+                "client.wire_cancel proto=mysql outcome=sent thread_id={thread_id}"
+            )),
+            Err((stage, err)) => cx.trace(&format!(
+                "client.wire_cancel proto=mysql outcome=send_failed stage={stage} \
+                 fallback=connection_close err={err}"
             )),
         }
     }
@@ -2653,10 +2872,33 @@ impl MySqlConnection {
         // KILLs the in-flight query. Delegated to an _inner helper so
         // the flag-clear runs on every return path without rewriting
         // the existing method body.
+        let was_closed_at_entry = self.inner.closed;
         self.inner
             .query_in_flight
             .store(true, std::sync::atomic::Ordering::Release);
-        let result = self.query_unchecked_inner_impl(cx, sql).await;
+        let apply_outcome = if Self::is_session_control_statement(sql) {
+            Outcome::Ok(())
+        } else {
+            self.apply_statement_timeout(cx).await
+        };
+        let result = match apply_outcome {
+            Outcome::Ok(()) => self.query_unchecked_inner_impl(cx, sql).await,
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        };
+        // br-asupersync-server-stack-hardening-eeexl1.1.2: cancellation
+        // observed mid-exchange leaves the connection poisoned
+        // (`closed == true`); deliver KILL QUERY in the drain phase and
+        // resolve `Cancelled` only after the wire cancel completed (or its
+        // connection-close fallback was logged).
+        if matches!(result, Outcome::Cancelled(_))
+            && self.inner.closed
+            && !was_closed_at_entry
+            && !Self::is_session_control_statement(sql)
+        {
+            self.wire_cancel_in_drain(cx).await;
+        }
         self.inner
             .query_in_flight
             .store(false, std::sync::atomic::Ordering::Release);
@@ -3449,10 +3691,31 @@ impl MySqlConnection {
         // of the wire exchange. See `query_unchecked` for the
         // rationale. Delegates to `_inner` so the flag-clear runs on
         // every return path.
+        let was_closed_at_entry = self.inner.closed;
         self.inner
             .query_in_flight
             .store(true, std::sync::atomic::Ordering::Release);
-        let result = self.execute_unchecked_inner_impl(cx, sql).await;
+        let apply_outcome = if Self::is_session_control_statement(sql) {
+            Outcome::Ok(())
+        } else {
+            self.apply_statement_timeout(cx).await
+        };
+        let result = match apply_outcome {
+            Outcome::Ok(()) => self.execute_unchecked_inner_impl(cx, sql).await,
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        };
+        // br-asupersync-server-stack-hardening-eeexl1.1.2: see
+        // `query_unchecked_internal` — drain-phase KILL QUERY before the
+        // Cancelled outcome resolves.
+        if matches!(result, Outcome::Cancelled(_))
+            && self.inner.closed
+            && !was_closed_at_entry
+            && !Self::is_session_control_statement(sql)
+        {
+            self.wire_cancel_in_drain(cx).await;
+        }
         self.inner
             .query_in_flight
             .store(false, std::sync::atomic::Ordering::Release);
@@ -3997,6 +4260,13 @@ impl MySqlConnection {
             return outcome_from_error(e);
         }
 
+        match self.apply_statement_timeout(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
         // Build COM_STMT_EXECUTE packet
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
@@ -4104,6 +4374,13 @@ impl MySqlConnection {
 
         if let Err(e) = self.drain_abandoned_transaction().await {
             return outcome_from_error(e);
+        }
+
+        match self.apply_statement_timeout(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // Build COM_STMT_EXECUTE packet (same as query_prepared)
@@ -5535,6 +5812,320 @@ mod tests {
         buf.buf
     }
 
+    // ================================================================
+    // br-asupersync-server-stack-hardening-eeexl1.1.2 — budget-derived
+    // statement timeouts + drain-phase KILL QUERY.
+    // ================================================================
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        tracing::info!(test = %name, "starting mysql test");
+    }
+
+    fn budgeted_traced_cx(remaining: Duration) -> (Cx, crate::trace::TraceBufferHandle) {
+        let now = crate::time::wall_now();
+        let budget = crate::types::Budget::INFINITE.tightened_by_timeout(now, remaining);
+        let cx = Cx::for_request_with_budget(budget);
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+        (cx, trace)
+    }
+
+    fn user_trace_messages(trace: &crate::trace::TraceBufferHandle, prefix: &str) -> Vec<String> {
+        trace
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == crate::trace::TraceEventKind::UserTrace)
+            .filter_map(|e| match &e.data {
+                crate::trace::TraceData::Message(msg) if msg.starts_with(prefix) => {
+                    Some(msg.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn make_server_backed_connection(
+        connection_id: u32,
+    ) -> (MySqlConnection, std::net::TcpListener) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+        let conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
+            },
+            options: None,
+        };
+        (conn, listener)
+    }
+
+    fn read_client_command(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut header = [0u8; 4];
+        std::io::Read::read_exact(stream, &mut header).expect("read command header");
+        let len =
+            usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+        let mut payload = vec![0u8; len];
+        std::io::Read::read_exact(stream, &mut payload).expect("read command payload");
+        payload
+    }
+
+    fn write_response_packet(stream: &mut std::net::TcpStream, sequence: u8, payload: Vec<u8>) {
+        let mut packet = PacketBuffer::new();
+        packet.set_sequence(sequence);
+        packet.buf = payload;
+        let packet = packet.build_packet();
+        std::io::Write::write_all(stream, &packet.bytes).expect("write response packet");
+        std::io::Write::flush(stream).expect("flush response packet");
+    }
+
+    fn command_sql(payload: &[u8]) -> String {
+        assert_eq!(payload[0], command::COM_QUERY, "expected COM_QUERY");
+        String::from_utf8_lossy(&payload[1..]).to_string()
+    }
+
+    /// AC: the effective statement timeout is `min(remaining budget,
+    /// override)` delivered as `SET SESSION max_execution_time`; the
+    /// tighter override is forwarded exactly, applied once (no repeat SET
+    /// while unchanged), and traced.
+    #[test]
+    fn statement_timeout_forwards_override_under_larger_budget() {
+        init_test("mysql_statement_timeout_forwards_override_under_larger_budget");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let (cx, trace) = budgeted_traced_cx(Duration::from_secs(30));
+        conn.set_statement_timeout_override(Some(Duration::from_millis(500)));
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(sql, "SET SESSION max_execution_time = 500");
+            write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
+
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(sql, "INSERT INTO t VALUES (1)");
+            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0));
+
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(
+                sql, "INSERT INTO t VALUES (2)",
+                "unchanged effective timeout must not re-send SET"
+            );
+            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0));
+        });
+
+        match run(conn.query(&cx, "INSERT INTO t VALUES (1)")) {
+            Outcome::Ok(rows) => assert!(rows.is_empty()),
+            other => panic!("expected insert success, got {other:?}"),
+        }
+        match run(conn.query(&cx, "INSERT INTO t VALUES (2)")) {
+            Outcome::Ok(rows) => assert!(rows.is_empty()),
+            other => panic!("expected insert success, got {other:?}"),
+        }
+        server.join().expect("server thread");
+
+        assert_eq!(conn.inner.applied_max_execution_time_ms, Some(500));
+        assert!(!conn.inner.max_execution_time_unsupported);
+
+        let forwarded = user_trace_messages(&trace, "client.budget_forwarded proto=mysql ");
+        assert_eq!(forwarded.len(), 1, "got {forwarded:?}");
+        assert!(forwarded[0].contains("base_ms=500"), "{}", forwarded[0]);
+        assert!(
+            forwarded[0].contains("max_execution_time_ms=500"),
+            "{}",
+            forwarded[0]
+        );
+    }
+
+    /// AC (graceful degradation): a server without `max_execution_time`
+    /// (ER_UNKNOWN_SYSTEM_VARIABLE, e.g. MariaDB) must not fail user
+    /// queries; forwarding is disabled for the connection and traced.
+    #[test]
+    fn statement_timeout_unsupported_server_degrades_gracefully() {
+        init_test("mysql_statement_timeout_unsupported_server_degrades_gracefully");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let (cx, trace) = budgeted_traced_cx(Duration::from_secs(30));
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert!(
+                sql.starts_with("SET SESSION max_execution_time = "),
+                "{sql}"
+            );
+            write_response_packet(
+                &mut stream,
+                1,
+                error_packet_payload(
+                    1193,
+                    "HY000",
+                    "Unknown system variable 'max_execution_time'",
+                ),
+            );
+
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(sql, "INSERT INTO t VALUES (1)");
+            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0));
+
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(
+                sql, "INSERT INTO t VALUES (2)",
+                "unsupported variable must not be retried"
+            );
+            write_response_packet(&mut stream, 1, ok_packet_payload(1, 0));
+        });
+
+        match run(conn.query(&cx, "INSERT INTO t VALUES (1)")) {
+            Outcome::Ok(rows) => assert!(rows.is_empty()),
+            other => panic!("expected insert success despite unsupported variable, got {other:?}"),
+        }
+        match run(conn.query(&cx, "INSERT INTO t VALUES (2)")) {
+            Outcome::Ok(rows) => assert!(rows.is_empty()),
+            other => panic!("expected insert success, got {other:?}"),
+        }
+        server.join().expect("server thread");
+
+        assert!(conn.inner.max_execution_time_unsupported);
+        assert_eq!(conn.inner.applied_max_execution_time_ms, None);
+
+        let unsupported = user_trace_messages(&trace, "client.budget_forwarded proto=mysql ")
+            .into_iter()
+            .filter(|m| m.contains("outcome=unsupported err_code=1193"))
+            .count();
+        assert_eq!(unsupported, 1, "exactly one unsupported-trace expected");
+    }
+
+    /// Drain-phase wire cancel skips distinctly when the connection has no
+    /// stored options (test fixtures) — the gate still resolves and logs.
+    #[test]
+    fn wire_cancel_skips_distinctly_without_stored_options() {
+        init_test("mysql_wire_cancel_skips_distinctly_without_stored_options");
+        let (conn, _listener) = make_server_backed_connection(41);
+        let cx = cancelled_cx();
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+
+        run(conn.wire_cancel_in_drain(&cx));
+
+        let events = user_trace_messages(&trace, "client.wire_cancel proto=mysql ");
+        assert_eq!(events.len(), 1, "got {events:?}");
+        assert!(
+            events[0].contains("outcome=skipped reason=no_stored_options"),
+            "{}",
+            events[0]
+        );
+    }
+
+    /// Drain-phase wire cancel skips distinctly when no connection id was
+    /// captured (cancel before the handshake established identity).
+    #[test]
+    fn wire_cancel_skips_distinctly_without_connection_id() {
+        init_test("mysql_wire_cancel_skips_distinctly_without_connection_id");
+        let (conn, _listener) = make_server_backed_connection(0);
+        let cx = cancelled_cx();
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+
+        run(conn.wire_cancel_in_drain(&cx));
+
+        let events = user_trace_messages(&trace, "client.wire_cancel proto=mysql ");
+        assert_eq!(events.len(), 1, "got {events:?}");
+        assert!(
+            events[0].contains("outcome=skipped reason=no_connection_id"),
+            "{}",
+            events[0]
+        );
+    }
+
+    /// AC ordering: cancellation observed mid-exchange (result set left the
+    /// connection poisoned) runs the drain-phase wire cancel BEFORE the
+    /// query resolves `Cancelled` — proven by the wire_cancel trace being
+    /// present when the query's Outcome is returned.
+    #[test]
+    fn mid_exchange_cancel_runs_drain_wire_cancel_before_resolving() {
+        init_test("mysql_mid_exchange_cancel_runs_drain_wire_cancel_before_resolving");
+        let (mut conn, listener) = make_server_backed_connection(41);
+        let cx = Cx::for_testing();
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+
+        let (columns_sent_tx, columns_sent_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let sql = command_sql(&read_client_command(&mut stream));
+            assert_eq!(sql, "SELECT 1");
+            // Column count + one column definition, then stall before any
+            // row/terminator so the client parks inside the row loop.
+            write_response_packet(&mut stream, 1, vec![0x01]);
+            write_response_packet(&mut stream, 2, column_definition_payload("value"));
+            columns_sent_tx.send(()).expect("signal columns sent");
+            // Hold the socket open until the client has finished draining;
+            // dropping early would surface a read error instead of the
+            // checkpoint-driven cancel.
+            std::thread::sleep(Duration::from_millis(500));
+        });
+
+        let mut fut = Box::pin(conn.query(&cx, "SELECT 1"));
+        // First poll sends COM_QUERY and parks awaiting the response.
+        let first = run(futures_lite::future::poll_once(fut.as_mut()));
+        assert!(first.is_none(), "query must not complete on the first poll");
+
+        columns_sent_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("server sent column packets");
+        // Give the loopback packets time to land in the client socket.
+        std::thread::sleep(Duration::from_millis(50));
+        cx.cancel_fast(CancelKind::User);
+
+        let outcome = run(fut);
+        match outcome {
+            Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+
+        // The drain gate ran (and logged) before the Cancelled outcome
+        // resolved. This fixture has no stored options, so the wire cancel
+        // takes its distinct skip path — the ordering guarantee is what
+        // this test pins down.
+        let events = user_trace_messages(&trace, "client.wire_cancel proto=mysql ");
+        assert_eq!(events.len(), 1, "got {events:?}");
+        assert!(
+            events[0].contains("outcome=skipped reason=no_stored_options"),
+            "{}",
+            events[0]
+        );
+        server.join().expect("server thread");
+    }
+
     fn column_definition_payload(name: &str) -> Vec<u8> {
         column_definition_payload_with_type(name, column_type::MYSQL_TYPE_VAR_STRING)
     }
@@ -5579,6 +6170,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         }
@@ -5605,6 +6199,9 @@ mod tests {
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_statement_epoch: 0,
                     query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                    statement_timeout_override: None,
+                    applied_max_execution_time_ms: None,
+                    max_execution_time_unsupported: false,
                 },
                 options: None,
             },
@@ -5665,6 +6262,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -5709,6 +6309,9 @@ mod tests {
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_statement_epoch: 0,
                     query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                    statement_timeout_override: None,
+                    applied_max_execution_time_ms: None,
+                    max_execution_time_unsupported: false,
                 },
                 options: None,
             };
@@ -6460,6 +7063,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -6544,6 +7150,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7172,6 +7781,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7250,6 +7862,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7403,6 +8018,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7511,6 +8129,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7584,6 +8205,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7678,6 +8302,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7778,6 +8405,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7872,6 +8502,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -7987,6 +8620,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -8175,6 +8811,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -8258,6 +8897,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -8642,6 +9284,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -8896,6 +9541,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };
@@ -8975,6 +9623,9 @@ mod tests {
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                statement_timeout_override: None,
+                applied_max_execution_time_ms: None,
+                max_execution_time_unsupported: false,
             },
             options: None,
         };

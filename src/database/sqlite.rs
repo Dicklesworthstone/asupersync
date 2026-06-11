@@ -65,6 +65,21 @@ fn sqlite_cancelled_reason(cx: &Cx) -> CancelReason {
         .unwrap_or_else(|| CancelReason::user("cancelled"))
 }
 
+/// True when a [`SqliteError`] carries SQLITE_INTERRUPT. Call sites map
+/// rusqlite errors to strings, so this matches the canonical "interrupted"
+/// message text (br-asupersync-server-stack-hardening-eeexl1.1.2). Used to
+/// relabel an interrupt caused by the armed deadline progress handler as
+/// [`SqliteError::StatementTimeout`].
+fn sqlite_error_is_interrupt(err: &SqliteError) -> bool {
+    match err {
+        SqliteError::Sqlite(msg) => {
+            let msg = msg.to_ascii_lowercase();
+            msg.contains("interrupt")
+        }
+        _ => false,
+    }
+}
+
 async fn sqlite_wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> {
     if delay.is_zero() {
         cx.checkpoint().map_err(|_| sqlite_cancelled_reason(cx))?;
@@ -498,6 +513,14 @@ pub enum SqliteError {
     },
     /// WAL checkpoint operation failed.
     WalCheckpointFailed(String),
+    /// Statement aborted by the budget-derived statement timeout
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.2). The deadline
+    /// progress handler interrupted the statement once
+    /// `min(remaining Cx budget, per-connection override)` elapsed.
+    StatementTimeout {
+        /// Effective limit that fired.
+        limit: std::time::Duration,
+    },
 }
 
 impl SqliteError {
@@ -631,6 +654,10 @@ impl fmt::Display for SqliteError {
                 )
             }
             Self::WalCheckpointFailed(msg) => write!(f, "WAL checkpoint failed: {msg}"),
+            Self::StatementTimeout { limit } => write!(
+                f,
+                "statement aborted by budget-derived statement timeout ({limit:?})"
+            ),
         }
     }
 }
@@ -1049,6 +1076,17 @@ pub struct SqliteConnection {
     pool: BlockingPoolHandle,
     /// Mutex-guarded transaction state to prevent concurrency races.
     transaction_state: Arc<Mutex<TransactionState>>,
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: SQLite interrupt
+    /// handle captured at open. Lets the async side abort an in-flight
+    /// blocking statement (`sqlite3_interrupt`) when the `Cx` is cancelled
+    /// while the connection mutex is held by a pool worker — the handle is
+    /// `Send + Sync` and safe to invoke after the connection closed.
+    interrupt: rusqlite::InterruptHandle,
+    /// br-asupersync-server-stack-hardening-eeexl1.1.2: per-connection
+    /// statement-timeout override. The effective per-operation timeout is
+    /// `min(remaining Cx budget, this override)`; see
+    /// [`SqliteConnection::set_statement_timeout_override`].
+    statement_timeout_override: Option<std::time::Duration>,
 }
 
 impl fmt::Debug for SqliteConnection {
@@ -1063,6 +1101,31 @@ impl fmt::Debug for SqliteConnection {
 }
 
 impl SqliteConnection {
+    /// Sets the per-connection statement-timeout override
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.2).
+    ///
+    /// The effective timeout for each operation is `min(remaining Cx
+    /// budget, this override)` — meet semantics: the override can only
+    /// tighten what the ambient budget allows, and vice versa. `None` (the
+    /// default) leaves the ambient budget as the only source. Delivery is a
+    /// deadline-checking SQLite progress handler registered around each
+    /// blocking-pool operation; an aborted statement surfaces as
+    /// [`SqliteError::StatementTimeout`].
+    ///
+    /// Caveat: the progress handler only runs while the SQLite VM is
+    /// executing, so time spent waiting on a locked database (bounded by
+    /// `busy_timeout`) can overshoot the deadline by up to that wait.
+    pub fn set_statement_timeout_override(&mut self, timeout: Option<std::time::Duration>) {
+        self.statement_timeout_override = timeout;
+    }
+
+    /// Current per-connection statement-timeout override; see
+    /// [`Self::set_statement_timeout_override`].
+    #[must_use]
+    pub fn statement_timeout_override(&self) -> Option<std::time::Duration> {
+        self.statement_timeout_override
+    }
+
     async fn run_connection_op<R, F>(
         &self,
         cx: &Cx,
@@ -1073,6 +1136,30 @@ impl SqliteConnection {
         R: Send + 'static,
         F: FnOnce(&rusqlite::Connection) -> Result<R, SqliteError> + Send + 'static,
     {
+        /// SQLite VM instructions between deadline checks in the timeout
+        /// progress handler — small enough for prompt aborts, large enough
+        /// to keep the per-op overhead negligible.
+        const TIMEOUT_PROGRESS_OPS: i32 = 1000;
+        /// Bounded drain window for awaiting the interrupted job's
+        /// completion after a cancelled receive.
+        const MASKED_DRAIN_POLLS: u32 = 1024;
+
+        let timeout =
+            crate::database::effective_statement_timeout(cx, self.statement_timeout_override);
+        if let Some(limit) = timeout {
+            let remaining_ns = crate::database::remaining_budget(cx)
+                .map_or_else(|| "none".to_string(), |d| d.as_nanos().to_string());
+            let base_ms = self.statement_timeout_override.map_or_else(
+                || "none".to_string(),
+                |d| crate::database::statement_timeout_millis(d).to_string(),
+            );
+            cx.trace(&format!(
+                "client.budget_forwarded proto=sqlite base_ms={base_ms} \
+                 remaining_ns={remaining_ns} statement_timeout_ms={}",
+                crate::database::statement_timeout_millis(limit)
+            ));
+        }
+
         let inner = Arc::clone(&self.inner);
         let (tx, mut rx) = crate::channel::oneshot::channel();
         let permit = tx.reserve(cx);
@@ -1081,7 +1168,27 @@ impl SqliteConnection {
             let result = (|| {
                 let guard = inner.lock();
                 let conn = guard.get()?;
+                // br-asupersync-server-stack-hardening-eeexl1.1.2: arm the
+                // budget-derived statement timeout for the duration of this
+                // operation. Wall-clock by necessity — the deadline fires on
+                // a blocking-pool thread that has no virtual-time access.
+                if let Some(limit) = timeout {
+                    let deadline = std::time::Instant::now() + limit;
+                    conn.progress_handler(
+                        TIMEOUT_PROGRESS_OPS,
+                        Some(move || std::time::Instant::now() >= deadline),
+                    );
+                }
                 let result = f(conn);
+                if timeout.is_some() {
+                    conn.progress_handler(0, None::<fn() -> bool>);
+                }
+                let result = match (timeout, result) {
+                    (Some(limit), Err(err)) if sqlite_error_is_interrupt(&err) => {
+                        Err(SqliteError::StatementTimeout { limit })
+                    }
+                    (_, result) => result,
+                };
                 drop(guard);
                 result
             })();
@@ -1097,6 +1204,29 @@ impl SqliteConnection {
             Ok(Err(e)) => Outcome::Err(e),
             Err(crate::channel::oneshot::RecvError::Cancelled) => {
                 handle.cancel();
+                // br-asupersync-server-stack-hardening-eeexl1.1.2: wire-level
+                // cancel in the drain phase. `sqlite3_interrupt` aborts the
+                // in-flight statement promptly; the masked re-receive then
+                // waits for the blocking job to acknowledge before this
+                // operation resolves Cancelled, so the connection mutex is
+                // free and no statement keeps running unobserved. The
+                // masked-poll budget keeps the drain step bounded.
+                self.interrupt.interrupt();
+                cx.trace(&format!(
+                    "client.wire_cancel proto=sqlite outcome=interrupt_sent op={op_name}"
+                ));
+                let drained =
+                    crate::combinator::commit_section(cx, MASKED_DRAIN_POLLS, rx.recv(cx)).await;
+                match drained {
+                    Ok(_) => cx.trace("client.wire_cancel proto=sqlite drain=job_completed"),
+                    Err(crate::channel::oneshot::RecvError::Closed) => {
+                        cx.trace("client.wire_cancel proto=sqlite drain=job_not_started");
+                    }
+                    Err(_) => cx.trace(
+                        "client.wire_cancel proto=sqlite drain=masked_poll_budget_exhausted \
+                         fallback=abandon_job",
+                    ),
+                }
                 Outcome::Cancelled(
                     cx.cancel_reason()
                         .unwrap_or_else(|| CancelReason::user("cancelled")),
@@ -1168,11 +1298,16 @@ impl SqliteConnection {
         });
 
         match rx.recv(cx).await {
-            Ok(Ok(conn)) => Outcome::Ok(Self {
-                inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
-                pool: pool_clone,
-                transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
-            }),
+            Ok(Ok(conn)) => {
+                let interrupt = conn.get_interrupt_handle();
+                Outcome::Ok(Self {
+                    inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
+                    pool: pool_clone,
+                    transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+                    interrupt,
+                    statement_timeout_override: None,
+                })
+            }
             Ok(Err(e)) => Outcome::Err(e),
             Err(crate::channel::oneshot::RecvError::Cancelled) => {
                 handle.cancel();
@@ -1225,11 +1360,16 @@ impl SqliteConnection {
         });
 
         match rx.recv(cx).await {
-            Ok(Ok(conn)) => Outcome::Ok(Self {
-                inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
-                pool: pool_clone,
-                transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
-            }),
+            Ok(Ok(conn)) => {
+                let interrupt = conn.get_interrupt_handle();
+                Outcome::Ok(Self {
+                    inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
+                    pool: pool_clone,
+                    transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+                    interrupt,
+                    statement_timeout_override: None,
+                })
+            }
             Ok(Err(e)) => Outcome::Err(e),
             Err(crate::channel::oneshot::RecvError::Cancelled) => {
                 handle.cancel();
@@ -2614,6 +2754,183 @@ mod tests {
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
         )
+    }
+
+    // ================================================================
+    // br-asupersync-server-stack-hardening-eeexl1.1.2 — budget-derived
+    // statement timeouts (deadline progress handler) + drain-phase
+    // sqlite3_interrupt.
+    // ================================================================
+
+    const INFINITE_QUERY: &str =
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c";
+
+    fn traced_cx_with_budget(budget: Budget) -> (Cx, crate::trace::TraceBufferHandle) {
+        let cx = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            budget,
+        );
+        let trace = crate::trace::TraceBufferHandle::new(64);
+        cx.set_trace_buffer(trace.clone());
+        (cx, trace)
+    }
+
+    fn user_trace_messages(trace: &crate::trace::TraceBufferHandle, prefix: &str) -> Vec<String> {
+        trace
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == crate::trace::TraceEventKind::UserTrace)
+            .filter_map(|e| match &e.data {
+                crate::trace::TraceData::Message(msg) if msg.starts_with(prefix) => {
+                    Some(msg.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// AC: the per-connection override alone bounds statement execution —
+    /// the armed deadline progress handler aborts a runaway query and the
+    /// abort surfaces as the dedicated `StatementTimeout` error.
+    #[test]
+    fn statement_timeout_override_aborts_runaway_query() {
+        init_test_logging();
+        let (cx, trace) = traced_cx_with_budget(Budget::INFINITE);
+
+        block_on(async {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            conn.set_statement_timeout_override(Some(Duration::from_millis(50)));
+
+            match conn.query_unchecked(&cx, INFINITE_QUERY, &[]).await {
+                Outcome::Err(SqliteError::StatementTimeout { limit }) => {
+                    assert_eq!(limit, Duration::from_millis(50));
+                }
+                other => panic!("expected StatementTimeout, got {other:?}"),
+            }
+
+            // The connection survives a statement timeout.
+            match conn.query_unchecked(&cx, "SELECT 1", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
+                other => panic!("connection unusable after statement timeout: {other:?}"),
+            }
+        });
+
+        let forwarded = user_trace_messages(&trace, "client.budget_forwarded proto=sqlite ");
+        assert!(
+            forwarded
+                .iter()
+                .any(|m| m.contains("base_ms=50") && m.contains("statement_timeout_ms=50")),
+            "expected forwarded budget trace, got {forwarded:?}"
+        );
+    }
+
+    /// AC: with no override, the remaining Cx budget alone becomes the
+    /// statement timeout (meet semantics) and aborts a runaway query.
+    #[test]
+    fn budget_deadline_aborts_runaway_query() {
+        init_test_logging();
+        let now = crate::time::wall_now();
+        let (cx, trace) = traced_cx_with_budget(
+            Budget::INFINITE.tightened_by_timeout(now, Duration::from_millis(150)),
+        );
+
+        let timed_out = block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn.query_unchecked(&cx, INFINITE_QUERY, &[]).await {
+                Outcome::Err(SqliteError::StatementTimeout { limit }) => {
+                    assert!(
+                        limit <= Duration::from_millis(150),
+                        "budget-derived limit must not exceed the remaining budget, got {limit:?}"
+                    );
+                    true
+                }
+                // The budget may already be observed as exhausted at a
+                // checkpoint boundary on a slow runner; cancellation is the
+                // budget-enforcement sibling of the wire timeout and no
+                // forwarded-timeout trace is expected in that case.
+                Outcome::Cancelled(_) => false,
+                other => panic!("expected StatementTimeout or Cancelled, got {other:?}"),
+            }
+        });
+
+        if timed_out {
+            let forwarded = user_trace_messages(&trace, "client.budget_forwarded proto=sqlite ");
+            assert!(
+                forwarded.iter().any(|m| m.contains("base_ms=none")),
+                "expected budget-derived forwarded trace, got {forwarded:?}"
+            );
+        }
+    }
+
+    /// AC (the showpiece): cancellation while a blocking statement is in
+    /// flight interrupts it at the wire (`sqlite3_interrupt`), waits for
+    /// the blocking job to acknowledge, and only then resolves Cancelled —
+    /// leaving the connection mutex free and the connection usable.
+    #[test]
+    fn cancel_interrupts_in_flight_statement_and_drains() {
+        init_test_logging();
+        let (cx, trace) = traced_cx_with_budget(Budget::INFINITE);
+
+        let conn = block_on(async {
+            match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            }
+        });
+
+        let mut fut = Box::pin(conn.query_unchecked(&cx, INFINITE_QUERY, &[]));
+        let first = block_on(futures_lite::future::poll_once(fut.as_mut()));
+        assert!(
+            first.is_none(),
+            "runaway query must not complete on first poll"
+        );
+
+        // Let the blocking-pool job actually start executing the statement.
+        std::thread::sleep(Duration::from_millis(100));
+        cx.cancel_fast(crate::types::CancelKind::User);
+
+        let drain_started = std::time::Instant::now();
+        match block_on(fut) {
+            Outcome::Cancelled(reason) => {
+                assert_eq!(reason.kind, crate::types::CancelKind::User);
+            }
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+        let drain_elapsed = drain_started.elapsed();
+        assert!(
+            drain_elapsed < Duration::from_secs(5),
+            "interrupt must end the runaway statement promptly, took {drain_elapsed:?}"
+        );
+
+        let interrupts = user_trace_messages(&trace, "client.wire_cancel proto=sqlite ");
+        assert!(
+            interrupts
+                .iter()
+                .any(|m| m.contains("outcome=interrupt_sent")),
+            "expected interrupt_sent trace, got {interrupts:?}"
+        );
+        assert!(
+            interrupts.iter().any(|m| m.contains("drain=")),
+            "expected drain-resolution trace, got {interrupts:?}"
+        );
+
+        // The drain really released the connection: a fresh Cx can use it
+        // immediately (the blocking job is no longer holding the mutex).
+        let fresh_cx = create_test_cx();
+        block_on(async {
+            match conn.query_unchecked(&fresh_cx, "SELECT 1", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
+                other => panic!("connection unusable after drain: {other:?}"),
+            }
+        });
     }
 
     #[test]
