@@ -6417,7 +6417,7 @@ impl Outputtable for AtpVerifyOutput {
                 error_count,
             } => {
                 let mut lines = vec![
-                    format!("ATP Proof Bundle Verification"),
+                    "ATP Proof Bundle Verification".to_string(),
                     format!("Bundle: {bundle_path}"),
                     format!("Status: {status}"),
                     format!("Transfer ID: {transfer_id}"),
@@ -6441,11 +6441,11 @@ impl Outputtable for AtpVerifyOutput {
                 verification_result,
             } => {
                 let mut lines = vec![
-                    format!("ATP Proof Bundle Verification Report"),
+                    "ATP Proof Bundle Verification Report".to_string(),
                     format!("Bundle: {bundle_path}"),
                     format!("Status: {status}"),
-                    format!(""),
-                    format!("Transfer Summary:"),
+                    String::new(),
+                    "Transfer Summary:".to_string(),
                     format!(
                         "  ID: {}",
                         verification_result.report.transfer_summary.transfer_id
@@ -6466,8 +6466,8 @@ impl Outputtable for AtpVerifyOutput {
                         "  Protocol: {}",
                         verification_result.report.transfer_summary.primary_protocol
                     ),
-                    format!(""),
-                    format!("Content Integrity:"),
+                    String::new(),
+                    "Content Integrity:".to_string(),
                     format!(
                         "  Manifest verified: {}",
                         verification_result
@@ -6494,8 +6494,8 @@ impl Outputtable for AtpVerifyOutput {
                             .content_integrity
                             .verification_stages_total
                     ),
-                    format!(""),
-                    format!("Proof Strength:"),
+                    String::new(),
+                    "Proof Strength:".to_string(),
                     format!(
                         "  Required: {:?}",
                         verification_result.report.proof_strength.required_strength
@@ -6511,7 +6511,7 @@ impl Outputtable for AtpVerifyOutput {
                         "  Requirements met: {}",
                         verification_result.report.proof_strength.requirements_met
                     ),
-                    format!(""),
+                    String::new(),
                 ];
 
                 if !verification_result.warnings.is_empty() {
@@ -6613,12 +6613,12 @@ Journal complete: {journal_complete}",
                 bundle,
             } => {
                 let mut lines = vec![
-                    format!("ATP Proof Bundle"),
+                    "ATP Proof Bundle".to_string(),
                     format!("Bundle: {bundle_path}"),
                     format!("Version: {}", bundle.version.0),
                     format!("Transfer ID: {}", bundle.transfer_id),
-                    format!(""),
-                    format!("Manifest:"),
+                    String::new(),
+                    "Manifest:".to_string(),
                     format!("  Root: {}", bundle.manifest_root),
                     format!("  Objects: {} root(s)", bundle.object_roots.len()),
                     if let Some(ref commit) = bundle.commit_record {
@@ -6626,8 +6626,8 @@ Journal complete: {journal_complete}",
                     } else {
                         "  Commit: none".to_string()
                     },
-                    format!(""),
-                    format!("Content:"),
+                    String::new(),
+                    "Content:".to_string(),
                     format!("  Hash algorithm: {:?}", bundle.chunk_hash_algorithm),
                     format!(
                         "  Chunks: {}/{} received ({:.1}%)",
@@ -6639,8 +6639,8 @@ Journal complete: {journal_complete}",
                         "  Verification stages: {}",
                         bundle.verification_evidence.len()
                     ),
-                    format!(""),
-                    format!("Repair:"),
+                    String::new(),
+                    "Repair:".to_string(),
                 ];
 
                 if let Some(ref raptorq) = bundle.raptorq_metadata {
@@ -6710,10 +6710,10 @@ Journal complete: {journal_complete}",
                 bundle,
             } => {
                 let mut lines = vec![
-                    format!("ATP Proof Bundle"),
+                    "ATP Proof Bundle".to_string(),
                     format!("Bundle: {bundle_path}"),
                     format!("Sections: {}", sections.join(", ")),
-                    format!(""),
+                    String::new(),
                 ];
 
                 for section in sections {
