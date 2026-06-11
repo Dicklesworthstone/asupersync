@@ -18,7 +18,7 @@
 //!      This is the operators "correct: structured cleanup"
 //!      contract.
 //!
-//!   2. **`Scope::spawn(...) + TaskHandle::join`
+//!   2. **`Cx::spawn(...) + TaskHandle::join`
 //!      (lower-level primitive)** — the parent CAN observe
 //!      the outcome via JoinHandle BEFORE the spawned
 //!      task's Drop runs. This is a documented async
@@ -47,7 +47,7 @@
 //!   Drop runs BEFORE the parent observes the outcome**.
 //!   The structured-concurrency contract is preserved.
 //!
-//!   For Scope::spawn + JoinHandle:
+//!   For Cx::spawn + JoinHandle:
 //!     1. The wrapped future calls `result_tx.send(&cx,
 //:        outcome)` BEFORE returning Outcome::Ok(()).
 //!     2. result_tx.send wakes the parent's JoinHandle
@@ -116,7 +116,7 @@
 //! await chain. The structured-cleanup contract is
 //! preserved by Rust's standard local-drop ordering.
 //!
-//! For Scope::spawn + JoinHandle, there IS a documented
+//! For Cx::spawn + JoinHandle, there IS a documented
 //! window. This is intentional — JoinHandle is the
 //: lower-level primitive that doesnt enforce structured
 //! cleanup. Users who need strict ordering use Scope::region.

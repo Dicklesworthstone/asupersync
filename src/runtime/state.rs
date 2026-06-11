@@ -3201,8 +3201,9 @@ impl RuntimeState {
 
     /// Stores a spawned task's future for execution.
     ///
-    /// This is called after `Scope::spawn` to register the `StoredTask` with
-    /// the runtime. The task must already have a `TaskRecord` created via spawn.
+    /// This is called by state-threaded boot paths to register a `StoredTask`
+    /// with the runtime. The task must already have a `TaskRecord` created by
+    /// the scope's stored-task construction path.
     ///
     /// # Arguments
     /// * `task_id` - The ID of the task (from the TaskHandle)
@@ -3210,9 +3211,8 @@ impl RuntimeState {
     ///
     /// # Example
     /// ```ignore
-    /// let (handle, stored) = scope.spawn(&mut state, &cx, |_| async { 42 })?;
-    /// state.store_spawned_task(handle.task_id(), stored);
-    /// // Now the executor can poll the task
+    /// let handle = scope.spawn_registered(&mut state, &cx, |_| async { 42 })?;
+    /// // The executor can now poll the stored task.
     /// ```
     #[inline]
     pub fn store_spawned_task(&mut self, task_id: TaskId, stored: StoredTask) {

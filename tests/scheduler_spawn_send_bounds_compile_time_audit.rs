@@ -11,15 +11,14 @@
 //!
 //!   The asupersync spawn API enforces Send bounds at
 //!   **COMPILE TIME** via `where` clauses. A `!Send` future
-//!   passed to `Scope::spawn` fails to compile — there is
+//!   passed to `Cx::spawn` or `Scope::spawn_registered` fails to compile — there is
 //!   no runtime panic and no runtime check, because there
 //!   doesn't need to be one. The chain:
 //!
-//!   1. **`Scope::spawn` requires Send** (cx/scope.rs:348):
+//!   1. **`Cx::spawn` requires Send** (cx/cx.rs):
 //!      ```ignore
-//!      pub fn spawn<F, Fut, Caps>(...) -> Result<...>
+//!      pub fn spawn<F, Fut>(...) -> Result<...>
 //!      where
-//!          Caps: cap::HasSpawn + Send + Sync + 'static,
 //!          F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
 //!          Fut: Future + Send + 'static,
 //!          Fut::Output: Send + 'static,
@@ -27,17 +26,13 @@
 //!      The factory closure `F`, the future `Fut`, and the
 //!      output type `Fut::Output` ALL require `Send`. The
 //!      compiler rejects any caller that violates these
-//!      bounds. The same bounds are repeated on `spawn_task`
-//!      (cx/scope.rs:493) and `spawn_registered`
-//!      (cx/scope.rs:534) so all three Send-spawn entry
-//!      points share the same compile-time wall.
+//!      bounds. The same bounds are repeated on
+//!      `Scope::spawn_registered` for synchronous boot paths.
 //!
-//!   2. **`Scope::spawn_local` accepts !Send** (cx/scope.rs:
-//!      591):
+//!   2. **`Cx::spawn_local` accepts !Send** (cx/cx.rs):
 //!      ```ignore
-//!      pub fn spawn_local<F, Fut, Caps>(...) -> Result<...>
+//!      pub fn spawn_local<F, Fut>(...) -> Result<...>
 //!      where
-//!          Caps: cap::HasSpawn + Send + Sync + 'static,
 //!          F: FnOnce(Cx<Caps>) -> Fut + 'static,
 //!          Fut: Future + 'static,
 //!          Fut::Output: Send + 'static,
@@ -84,8 +79,8 @@
 //!      the binary even runs.
 //!
 //! Verdict: **SOUND**. Send bounds are enforced at compile
-//! time via `where` clauses on `Scope::spawn` /
-//! `spawn_task` / `spawn_registered`. The compiler rejects
+//! time via `where` clauses on `Cx::spawn` /
+//! `Scope::spawn_registered`. The compiler rejects
 //! a `!Send` future passed to these methods — no runtime
 //! panic is possible because no runtime check is needed.
 //!
@@ -99,7 +94,7 @@
 //!
 //! A regression that:
 //!   - removed the `Send` bound from `Fut: Future + Send +
-//!     'static` on `Scope::spawn` (would compile a !Send
+//!     'static` on `Cx::spawn` (would compile a !Send
 //!     future into a Send-requiring StoredTask, hitting
 //!     a `Box::pin` Send-bound mismatch downstream — but
 //!     potentially with a confusing error far from the
@@ -117,7 +112,7 @@
 //!     anywhere in the spawn path (would be a tautology if
 //!     the type bound is in place — and a footgun if it
 //!     replaced the bound),
-//!   - swapped `Scope::spawn` and `Scope::spawn_local`
+//!   - swapped `Cx::spawn` and `Cx::spawn_local`
 //!     bounds (would let users accidentally spawn !Send
 //!     futures into the global stealable queue),
 //!     would all be caught by the structural pins below or by
@@ -132,14 +127,14 @@ fn read(rel: &str) -> String {
 }
 
 #[test]
-fn scope_spawn_requires_send_on_future_closure_and_output() {
-    // Pin (link 1): Scope::spawn has `where` clauses
+fn cx_spawn_requires_send_on_future_closure_and_output() {
+    // Pin (link 1): Cx::spawn has `where` clauses
     // requiring Send on F (closure), Fut (future), and
     // Fut::Output. All three Send bounds must be present.
-    let source = read("src/cx/scope.rs");
+    let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub fn spawn<F, Fut, Caps>(";
-    let start = source.find(fn_marker).expect("Scope::spawn fn");
+    let fn_marker = "pub fn spawn<F, Fut>(";
+    let start = source.find(fn_marker).expect("Cx::spawn fn");
     // Take the where-clause section: ~30 lines after.
     let window_end = (start + 1500).min(source.len());
     let safe_end = source
@@ -151,7 +146,7 @@ fn scope_spawn_requires_send_on_future_closure_and_output() {
 
     assert!(
         where_section.contains("F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,"),
-        "REGRESSION: Scope::spawn closure bound no longer \
+        "REGRESSION: Cx::spawn closure bound no longer \
          requires `+ Send`. A !Send closure could be passed \
          to spawn — moving captured !Send state between \
          worker threads. Memory unsafety.",
@@ -159,7 +154,7 @@ fn scope_spawn_requires_send_on_future_closure_and_output() {
 
     assert!(
         where_section.contains("Fut: Future + Send + 'static,"),
-        "REGRESSION: Scope::spawn future bound no longer \
+        "REGRESSION: Cx::spawn future bound no longer \
          requires `+ Send`. A !Send future could be moved \
          between workers via work-stealing — undefined \
          behavior. The compile-time guard is the ONLY \
@@ -168,7 +163,7 @@ fn scope_spawn_requires_send_on_future_closure_and_output() {
 
     assert!(
         where_section.contains("Fut::Output: Send + 'static,"),
-        "REGRESSION: Scope::spawn output bound no longer \
+        "REGRESSION: Cx::spawn output bound no longer \
          requires `+ Send`. The parent's JoinHandle may \
          await on a different thread — !Send output would \
          be unsoundly transferred.",
@@ -176,30 +171,17 @@ fn scope_spawn_requires_send_on_future_closure_and_output() {
 }
 
 #[test]
-fn scope_spawn_task_repeats_the_send_bounds() {
-    // Pin (link 1): spawn_task is the documented user-facing
-    // alias of spawn. It must repeat the same Send bounds —
-    // a regression that loosened them on the alias would
-    // create a compile-time bypass.
+fn scope_spawn_task_alias_stays_deleted() {
+    // Pin (link 1): spawn_task was a legacy alias of the removed
+    // state-threaded Scope::spawn API. It must stay deleted so there is no
+    // bypass around the v2 Cx spawn surface.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub fn spawn_task<F, Fut, Caps>(";
-    let start = source.find(fn_marker).expect("spawn_task fn");
-    let window_end = (start + 1500).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let where_section = &source[start..safe_end];
-
     assert!(
-        where_section.contains("F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,")
-            && where_section.contains("Fut: Future + Send + 'static,")
-            && where_section.contains("Fut::Output: Send + 'static,"),
-        "REGRESSION: spawn_task no longer repeats the Send \
-         bounds from spawn. A bypass via spawn_task would \
-         allow !Send futures into global queues.",
+        !source.contains("pub fn spawn_task<F, Fut"),
+        "REGRESSION: legacy Scope::spawn_task alias returned. \
+         Use Cx::spawn/Cx::spawn_in or Scope::spawn_registered \
+         for synchronous boot paths.",
     );
 }
 
@@ -231,13 +213,13 @@ fn scope_spawn_registered_repeats_the_send_bounds() {
 }
 
 #[test]
-fn scope_spawn_local_intentionally_drops_send_on_closure_and_future() {
+fn cx_spawn_local_intentionally_drops_send_on_closure_and_future() {
     // Pin (link 2): spawn_local is the !Send escape hatch.
     // It MUST NOT carry Send on F or Fut. A regression that
     // ADDED Send bounds would defeat the local-spawn API.
-    let source = read("src/cx/scope.rs");
+    let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub fn spawn_local<F, Fut, Caps>(";
+    let fn_marker = "pub fn spawn_local<F, Fut>(";
     let start = source.find(fn_marker).expect("spawn_local fn");
     let window_end = (start + 1500).min(source.len());
     let safe_end = source
@@ -352,7 +334,12 @@ fn no_runtime_send_check_or_panic_on_spawn_path() {
     // patterns — they would be tautologies if the type
     // bound is correct, and footguns if the bound was
     // removed and they were the only line of defense.
-    for rel in &["src/cx/scope.rs", "src/runtime/scheduler/three_lane.rs"] {
+    for rel in &[
+        "src/cx/cx.rs",
+        "src/cx/scope.rs",
+        "src/runtime/spawn_mailbox.rs",
+        "src/runtime/scheduler/three_lane.rs",
+    ] {
         let source = read(rel);
         let suspect = [
             "panic!(\"future is not Send\")",
@@ -377,14 +364,14 @@ fn no_runtime_send_check_or_panic_on_spawn_path() {
 }
 
 #[test]
-fn scope_spawn_blocking_requires_send_on_closure_and_output() {
+fn cx_spawn_blocking_requires_send_on_closure_and_output() {
     // Pin (audit hygiene): spawn_blocking is a separate
     // path that runs the closure on the blocking pool. It
     // must also require Send on the closure (because the
     // closure runs on a different OS thread).
-    let source = read("src/cx/scope.rs");
+    let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub fn spawn_blocking<F, R, Caps>(";
+    let fn_marker = "pub fn spawn_blocking<F, R>(";
     let start = source.find(fn_marker).expect("spawn_blocking fn");
     let window_end = (start + 1500).min(source.len());
     let safe_end = source
@@ -415,7 +402,7 @@ fn scope_spawn_blocking_requires_send_on_closure_and_output() {
 use std::future::Future;
 
 /// Mock signature with the same Send bounds as
-/// `Scope::spawn`. If the bounds were dropped from production,
+/// `Cx::spawn`. If the bounds were dropped from production,
 /// users would see compile errors at the production spawn
 /// site; this mock here serves as a compile-time SHADOW that
 /// fails the test build if the bounds drift.
@@ -429,7 +416,7 @@ where
 }
 
 /// Mock signature with the same NON-Send bounds as
-/// `Scope::spawn_local`. Symmetric — the absence of Send is
+/// `Cx::spawn_local`. Symmetric — the absence of Send is
 /// the contract.
 fn mock_spawn_local_no_send_bound_shadow<F, Fut>(_f: F)
 where

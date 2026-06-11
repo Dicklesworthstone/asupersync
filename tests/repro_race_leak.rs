@@ -70,25 +70,28 @@ fn repro_race_leak() {
         let mut state = RuntimeState::new();
         let cx: Cx = Cx::for_testing();
         let region = state.create_root_region(Budget::INFINITE);
-        let scope = cx.scope();
-        assert_eq!(scope.region_id(), region, "test scope region mismatch");
 
         // Flag to check if the loser task actually ran its cleanup (simulate drain)
         let loser_flag = Flag::new();
 
-        // Spawn a loser task that never finishes but has a drop guard
-        let (loser_handle, mut stored_loser) = scope
-            .spawn(&mut state, &cx, move |_| async move {
+        // Register a loser task that never finishes but has a drop guard.
+        // This repro manually removes and polls the stored futures, so the
+        // lower-level RuntimeState path is the direct surface under test.
+        let (loser_task_id, loser_handle) = state
+            .create_task(region, Budget::INFINITE, async move {
                 // This task runs forever. If it's cancelled, it should be dropped.
                 let fut = DroppableFuture::new(loser_flag);
                 fut.await;
                 "loser"
             })
             .expect("spawn failed");
+        let mut stored_loser = state
+            .remove_stored_future(loser_task_id)
+            .expect("registered loser task should have a stored future");
 
-        // Spawn a winner task that finishes after yielding once
-        let (winner_handle, mut stored_winner) = scope
-            .spawn(&mut state, &cx, |_| async {
+        // Register a winner task that finishes after yielding once.
+        let (winner_task_id, winner_handle) = state
+            .create_task(region, Budget::INFINITE, async {
                 let mut yielded = false;
                 std::future::poll_fn(move |cx| {
                     if yielded {
@@ -102,6 +105,9 @@ fn repro_race_leak() {
                 .await
             })
             .expect("spawn failed");
+        let mut stored_winner = state
+            .remove_stored_future(winner_task_id)
+            .expect("registered winner task should have a stored future");
 
         // Manually drive tasks (since we don't have a real reactor/executor loop in this test setup)
         // We need to poll them.
@@ -115,8 +121,6 @@ fn repro_race_leak() {
         // Poll tasks once to get them started
         assert!(stored_winner.poll(&mut ctx).is_pending()); // Winner yields once
         assert!(stored_loser.poll(&mut ctx).is_pending()); // Loser is pending
-
-        let loser_task_id = loser_handle.task_id();
 
         // Now race the handles using Cx::race
         let mut race_future = Box::pin(cx.race(vec![

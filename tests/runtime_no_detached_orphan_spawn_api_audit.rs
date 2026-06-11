@@ -60,9 +60,9 @@
 //!
 //!   The chain of structural enforcement:
 //!
-//!   1. **`Scope::spawn` requires a Scope** (cx/scope.rs:348):
+//!   1. **State-threaded scope task construction requires a Scope**:
 //!      ```ignore
-//!      pub fn spawn<F, Fut, Caps>(&self, state: &mut RuntimeState, ...) -> ...
+//!      fn create_stored_task<F, Fut, Caps>(&self, state: &mut RuntimeState, ...) -> ...
 //!      ```
 //!      The `&self` is a Scope — which holds a RegionId.
 //!      Every spawn anchors to a region.
@@ -112,7 +112,7 @@
 //!     (would conflate handle-drop semantics with region-
 //!     escape; tokio-style API would conflict with
 //!     structured concurrency),
-//!   - changed Scope::spawn to skip region.add_task on
+//!   - changed scope task construction to skip region.add_task on
 //!     some opt-in flag (silent escape from region tree),
 //!   - removed the all_tasks_done check from
 //!     can_region_finalize (would let regions close with
@@ -225,10 +225,9 @@ fn no_detached_field_on_task_record() {
 }
 
 #[test]
-fn scope_spawn_anchors_task_to_region_via_create_task_record() {
-    // Pin (link 1+2): Scope::spawn (and variants) anchors
-    // the task to the scope's region via
-    // create_task_record + region.add_task.
+fn scope_task_construction_anchors_task_to_region_via_create_task_record() {
+    // Pin (link 1+2): all scope task construction anchors the task to the
+    // scope's region via create_task_record + region.add_task.
     let source = read("src/cx/scope.rs");
 
     assert!(

@@ -21,7 +21,7 @@
 //!
 //! # Soundness Rules for Send Tasks
 //!
-//! The [`spawn`](Scope::spawn) method enforces the following bounds:
+//! The state-threaded boot path enforces the following bounds:
 //!
 //! | Component | Bound | Rationale |
 //! |-----------|-------|-----------|
@@ -54,7 +54,7 @@
 //! let rref = RRef::<ExpensiveData>::new(region_id, index);
 //!
 //! // Pass RRef to task - it's Copy + Send
-//! scope.spawn(state, &cx, move |cx| async move {
+//! scope.spawn_registered(state, &cx, move |cx| async move {
 //!     // Access via region record (requires runtime lookup)
 //!     let data = rref.get_via_region(&region_record)?;
 //!     process(data).await
@@ -72,7 +72,7 @@
 //!
 //! fn try_capture_rc(scope: &Scope, state: &mut RuntimeState, cx: &Cx) {
 //!     let rc = Rc::new(42); // Rc is !Send
-//!     scope.spawn(state, cx, move |_| async move {
+//!     scope.spawn_registered(state, cx, move |_| async move {
 //!         println!("{}", rc); // ERROR: Rc is not Send
 //!     });
 //! }
@@ -84,7 +84,7 @@
 //! fn try_capture_borrow(scope: &Scope, state: &mut RuntimeState, cx: &Cx) {
 //!     let local = 42;
 //!     let reference = &local; // Borrowed, not 'static
-//!     scope.spawn(state, cx, move |_| async move {
+//!     scope.spawn_registered(state, cx, move |_| async move {
 //!         println!("{}", reference); // ERROR: borrowed data not 'static
 //!     });
 //! }
@@ -303,7 +303,7 @@ impl<P: Policy> Scope<'_, P> {
     // Task Spawning
     // =========================================================================
 
-    /// Spawns a new task within this scope's region.
+    /// Builds a task handle and stored future within this scope's region.
     ///
     /// This is the **Task Tier** spawn method for parallel execution. The task
     /// may migrate between worker threads, so all captured data must be thread-safe.
@@ -347,7 +347,7 @@ impl<P: Policy> Scope<'_, P> {
     /// # Example
     ///
     /// ```ignore
-    /// let handle = scope.spawn(&mut state, &cx, |cx| async move {
+    /// let handle = scope.spawn_registered(&mut state, &cx, |cx| async move {
     ///     cx.trace("Child task running");
     ///     compute_value().await
     /// });
@@ -363,7 +363,7 @@ impl<P: Policy> Scope<'_, P> {
     /// let rref = RRef::<Vec<i32>>::new(region_id, index);
     ///
     /// // RRef is Copy + Send, can be captured by multiple tasks
-    /// scope.spawn(&mut state, &cx, move |cx| async move {
+    /// scope.spawn_registered(&mut state, &cx, move |cx| async move {
     ///     // Would access via runtime state in real code
     ///     process_data(rref).await
     /// });
@@ -384,7 +384,7 @@ impl<P: Policy> Scope<'_, P> {
     /// ) {
     ///     let rc = Rc::new(42);
     ///     require_send(&rc);
-    ///     let _ = scope.spawn(state, cx, move |_| async move {
+    ///     let _ = scope.spawn_registered(state, cx, move |_| async move {
     ///         let _ = rc;  // Rc<i32> is not Send
     ///     });
     /// }
@@ -403,12 +403,12 @@ impl<P: Policy> Scope<'_, P> {
     ///     let local = 42;
     ///     let borrow = &local;
     ///     require_static(borrow);
-    ///     let _ = scope.spawn(state, cx, move |_| async move {
+    ///     let _ = scope.spawn_registered(state, cx, move |_| async move {
     ///         let _ = borrow;  // &i32 is not 'static
     ///     });
     /// }
     /// ```
-    pub fn spawn<F, Fut, Caps>(
+    fn create_stored_task<F, Fut, Caps>(
         &self,
         state: &mut RuntimeState,
         cx: &Cx<Caps>,
@@ -577,7 +577,7 @@ impl<P: Policy> Scope<'_, P> {
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
-        let (handle, stored) = self.spawn(state, cx, f)?;
+        let (handle, stored) = self.create_stored_task(state, cx, f)?;
         state.store_spawned_task(handle.task_id(), stored);
         Ok(handle)
     }
@@ -767,7 +767,7 @@ impl<P: Policy> Scope<'_, P> {
                 let reason = CancelReason::fail_fast().with_region(child_region);
                 let _ = state.cancel_request(child_region, &reason, None);
 
-                // Factory panicked after `scope.spawn(...)` returned the
+                // Factory panicked after `create_stored_task(...)` returned the
                 // `(TaskHandle, StoredTask)` pair but before the StoredTask
                 // was scheduled. The matching TaskRecord is orphaned in
                 // `TaskState::Created` — no executor will ever poll it, so
@@ -877,8 +877,8 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// # Example
     /// ```ignore
-    /// let (h1, _) = scope.spawn(...);
-    /// let (h2, _) = scope.spawn(...);
+    /// let h1 = scope.spawn_registered(...);
+    /// let h2 = scope.spawn_registered(...);
     /// let (r1, r2) = scope.join(cx, h1, h2).await;
     /// ```
     pub async fn join<T1, T2>(
@@ -900,8 +900,8 @@ impl<P: Policy> Scope<'_, P> {
     ///
     /// # Example
     /// ```ignore
-    /// let (h1, _) = scope.spawn(...);
-    /// let (h2, _) = scope.spawn(...);
+    /// let h1 = scope.spawn_registered(...);
+    /// let h2 = scope.spawn_registered(...);
     /// match scope.race(cx, h1, h2).await {
     ///     Ok(val) => println!("Winner result: {val}"),
     ///     Err(e) => println!("Race failed: {e}"),
@@ -1557,7 +1557,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         let (handle, _stored) = scope
-            .spawn(&mut state, &cx, |_| async { 42_i32 })
+            .create_stored_task(&mut state, &cx, |_| async { 42_i32 })
             .expect("should spawn async task");
 
         // Task should exist in state
@@ -1635,7 +1635,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         let (mut handle, mut stored) = scope
-            .spawn(&mut state, &cx, |cx| async move { cx.has_timer() })
+            .create_stored_task(&mut state, &cx, |cx| async move { cx.has_timer() })
             .expect("spawn should succeed");
 
         let waker = std::task::Waker::noop().clone();
@@ -1735,7 +1735,9 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
+        let (handle, _stored) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 42_i32 })
+            .unwrap();
 
         // Check region has the task
         let region_record = state.region(region).unwrap();
@@ -1749,9 +1751,15 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle1, _) = scope.spawn(&mut state, &cx, |_| async { 1_i32 }).unwrap();
-        let (handle2, _) = scope.spawn(&mut state, &cx, |_| async { 2_i32 }).unwrap();
-        let (handle3, _) = scope.spawn(&mut state, &cx, |_| async { 3_i32 }).unwrap();
+        let (handle1, _) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 1_i32 })
+            .unwrap();
+        let (handle2, _) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 2_i32 })
+            .unwrap();
+        let (handle3, _) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 3_i32 })
+            .unwrap();
 
         // All task IDs should be different
         assert_ne!(handle1.task_id(), handle2.task_id());
@@ -1777,7 +1785,7 @@ mod tests {
         region_record.begin_close(None);
 
         // Attempt to spawn should fail
-        let result = scope.spawn(&mut state, &cx, |_| async { 42 });
+        let result = scope.create_stored_task(&mut state, &cx, |_| async { 42 });
         assert!(matches!(result, Err(SpawnError::RegionClosed(_))));
     }
 
@@ -1791,9 +1799,10 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Spawn a task
-        let (mut handle, mut stored_task) =
-            scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
-        // The stored task is returned directly, not put in state by scope.spawn
+        let (mut handle, mut stored_task) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 42_i32 })
+            .unwrap();
+        // The stored task is returned directly, not put in state by spawn_registered.
 
         // Create join future
         let mut join_fut = std::pin::pin!(handle.join(&cx));
@@ -1826,7 +1835,7 @@ mod tests {
 
         // Spawn a task that checks for cancellation
         let (mut handle, mut stored_task) = scope
-            .spawn(&mut state, &cx, |cx| async move {
+            .create_stored_task(&mut state, &cx, |cx| async move {
                 // We expect to be cancelled immediately because abort() is called before we run
                 if cx.checkpoint().is_err() {
                     return "cancelled";
@@ -2142,7 +2151,7 @@ mod tests {
         let scope = test_scope_with_capability_budget(region, Budget::INFINITE, capability_budget);
 
         let (handle, _stored) = scope
-            .spawn(&mut state, &cx, |child_cx| async move {
+            .create_stored_task(&mut state, &cx, |child_cx| async move {
                 child_cx.capability_budget()
             })
             .expect("spawn should admit task");
@@ -2174,7 +2183,7 @@ mod tests {
             |child, state| {
                 let child_id = child.region_id();
                 let (handle, mut stored) = child
-                    .spawn(state, &cx, |_| async { 7_i32 })
+                    .create_stored_task(state, &cx, |_| async { 7_i32 })
                     .expect("spawn in child");
 
                 let parent_has = state
@@ -2233,7 +2242,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         let (mut handle, mut stored_task) = scope
-            .spawn(&mut state, &cx, |_| async {
+            .create_stored_task(&mut state, &cx, |_| async {
                 std::panic::panic_any("oops");
             })
             .unwrap();
@@ -2267,8 +2276,12 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 1 }).unwrap();
-        let (h2, mut t2) = scope.spawn(&mut state, &cx, |_| async { 2 }).unwrap();
+        let (h1, mut t1) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 1 })
+            .unwrap();
+        let (h2, mut t2) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 2 })
+            .unwrap();
 
         // Drive tasks to completion
         let waker = std::task::Waker::noop().clone();
@@ -2299,11 +2312,13 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Task 1: completes immediately
-        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 1 }).unwrap();
+        let (h1, mut t1) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 1 })
+            .unwrap();
 
         // Task 2: yields once, checking for cancellation
         let (h2, mut t2) = scope
-            .spawn(&mut state, &cx, |cx| async move {
+            .create_stored_task(&mut state, &cx, |cx| async move {
                 // Yield once to simulate running
                 struct YieldOnce(bool);
                 impl std::future::Future for YieldOnce {
@@ -2388,9 +2403,11 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 1_i32 }).unwrap();
+        let (h1, mut t1) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 1_i32 })
+            .unwrap();
         let (h2, mut t2) = scope
-            .spawn(&mut state, &cx, |_| async {
+            .create_stored_task(&mut state, &cx, |_| async {
                 std::panic::panic_any("loser panic");
             })
             .unwrap();
@@ -2417,12 +2434,12 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         let (h1, mut t1) = scope
-            .spawn(&mut state, &cx, |_| async {
+            .create_stored_task(&mut state, &cx, |_| async {
                 std::panic::panic_any("winner panic");
             })
             .unwrap();
         let (h2, mut t2) = scope
-            .spawn(&mut state, &cx, |_| {
+            .create_stored_task(&mut state, &cx, |_| {
                 let mut first_poll = true;
                 std::future::poll_fn(move |poll_cx| {
                     if first_poll {
@@ -2459,13 +2476,17 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 1_i32 }).unwrap();
+        let (h1, mut t1) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 1_i32 })
+            .unwrap();
         let (h2, mut t2) = scope
-            .spawn(&mut state, &cx, |_| async {
+            .create_stored_task(&mut state, &cx, |_| async {
                 std::panic::panic_any("simultaneous loser panic");
             })
             .unwrap();
-        let (h3, mut t3) = scope.spawn(&mut state, &cx, |_| async { 3_i32 }).unwrap();
+        let (h3, mut t3) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 3_i32 })
+            .unwrap();
 
         let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
@@ -2490,12 +2511,12 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         let (h1, mut t1) = scope
-            .spawn(&mut state, &cx, |_| async {
+            .create_stored_task(&mut state, &cx, |_| async {
                 std::panic::panic_any("winner panic");
             })
             .unwrap();
         let (h2, mut t2) = scope
-            .spawn(&mut state, &cx, |_| {
+            .create_stored_task(&mut state, &cx, |_| {
                 let mut first_poll = true;
                 std::future::poll_fn(move |poll_cx| {
                     if first_poll {
@@ -2553,7 +2574,9 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, _stored) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
+        let (handle, _stored) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 42_i32 })
+            .unwrap();
 
         // Task must exist and be trackable
         let task_record = state
@@ -2585,7 +2608,7 @@ mod tests {
         // This should compile - Send + 'static data
         let send_data = String::from("test");
         let (handle, _stored) = scope
-            .spawn(&mut state, &cx, move |_| async move {
+            .create_stored_task(&mut state, &cx, move |_| async move {
                 send_data.len() // Uses Send + 'static String
             })
             .unwrap();
@@ -2611,7 +2634,9 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (mut handle, mut stored) = scope.spawn(&mut state, &cx, |_| async { 123_i32 }).unwrap();
+        let (mut handle, mut stored) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 123_i32 })
+            .unwrap();
 
         let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
@@ -2658,7 +2683,7 @@ mod tests {
 
                 // Spawn task in child region
                 let (handle, mut stored) = child_scope
-                    .spawn(state, &cx, |_| async { 456_i32 })
+                    .create_stored_task(state, &cx, |_| async { 456_i32 })
                     .expect("spawn in child region must succeed");
 
                 // Verify task ownership invariants
@@ -2862,7 +2887,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         let (mut handle, mut stored) = scope
-            .spawn(&mut state, &cx, |cx| async move {
+            .create_stored_task(&mut state, &cx, |cx| async move {
                 // Check cancellation status and respond accordingly
                 if cx.checkpoint().is_err() {
                     "cancelled"
@@ -2999,7 +3024,8 @@ mod tests {
             .expect("grandchild region missing")
             .task_count();
         let live_tasks_before_failed_spawn = state.live_task_count();
-        let failed_spawn = grandchild_scope.spawn(&mut state, &cx, |_| async { 99_u8 });
+        let failed_spawn =
+            grandchild_scope.create_stored_task(&mut state, &cx, |_| async { 99_u8 });
         let grandchild_tasks_after_failed_spawn = state
             .region(grandchild)
             .expect("grandchild region missing after failed spawn")
@@ -3120,12 +3146,12 @@ mod tests {
 
         // Winner: completes immediately
         let (winner_handle, mut winner_stored) = scope
-            .spawn(&mut state, &cx, |_| async { "winner" })
+            .create_stored_task(&mut state, &cx, |_| async { "winner" })
             .unwrap();
 
         // Loser: would run longer, must be cancelled and drained
         let (loser_handle, mut loser_stored) = scope
-            .spawn(&mut state, &cx, |cx| async move {
+            .create_stored_task(&mut state, &cx, |cx| async move {
                 // Simulate work that can be cancelled
                 struct YieldOnce(bool);
                 impl std::future::Future for YieldOnce {
@@ -3294,7 +3320,7 @@ mod tests {
         region_record.begin_close(None);
 
         // Attempt to spawn should fail
-        let spawn_result = scope.spawn(&mut state, &cx, |_| async { 42 });
+        let spawn_result = scope.create_stored_task(&mut state, &cx, |_| async { 42 });
 
         assert!(
             matches!(spawn_result, Err(SpawnError::RegionClosed(_))),
@@ -3320,9 +3346,15 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Spawn multiple tasks with different results
-        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 100_i32 }).unwrap();
-        let (h2, mut t2) = scope.spawn(&mut state, &cx, |_| async { 200_i32 }).unwrap();
-        let (h3, mut t3) = scope.spawn(&mut state, &cx, |_| async { 300_i32 }).unwrap();
+        let (h1, mut t1) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 100_i32 })
+            .unwrap();
+        let (h2, mut t2) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 200_i32 })
+            .unwrap();
+        let (h3, mut t3) = scope
+            .create_stored_task(&mut state, &cx, |_| async { 300_i32 })
+            .unwrap();
 
         let waker = std::task::Waker::noop().clone();
         let mut poll_cx = Context::from_waker(&waker);
@@ -3374,7 +3406,7 @@ mod tests {
 
         // Spawn a task that panics with a specific message
         let (mut handle, mut stored) = scope
-            .spawn(&mut state, &cx, |_| async {
+            .create_stored_task(&mut state, &cx, |_| async {
                 std::panic::panic_any("test_panic_message");
             })
             .unwrap();
@@ -3404,7 +3436,7 @@ mod tests {
         }
     }
 
-    /// Regression: region_with_budget factory panicking AFTER scope.spawn(...)
+    /// Regression: region_with_budget factory panicking AFTER raw task creation
     /// returned — but BEFORE the StoredTask was scheduled — must not leave an
     /// orphan TaskRecord bound to the child region. Without the panic-catch
     /// rollback in `region_with_budget`, `region.task_count()` stays non-zero
@@ -3432,7 +3464,7 @@ mod tests {
                     // Spawn a task so a TaskRecord exists in Created state,
                     // bound to the child region.
                     let (_handle, _stored) = child
-                        .spawn(state, &cx, |_| async { 42_i32 })
+                        .create_stored_task(state, &cx, |_| async { 42_i32 })
                         .expect("spawn must succeed before the panic");
                     // Immediately panic — StoredTask is dropped unscheduled.
                     std::panic::panic_any("factory panic after spawn");

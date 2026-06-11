@@ -132,14 +132,13 @@ fn factory_panic_reaps_k_orphans_and_preserves_sibling_region() {
             Budget::INFINITE,
             FailFast,
             |child, state| {
-                // Spawn K orphans. Each is bound to the child region
-                // in TaskState::Created. cancel_request inside the
-                // panic-rollback will transition each to
-                // CancelRequested before the orphan filter runs — the
-                // qg5th0 fix is what lets the filter still match.
+                // Spawn K tasks that are bound to the child region and never
+                // polled. cancel_request inside the panic-rollback will
+                // transition each to CancelRequested before the orphan filter
+                // runs — the qg5th0 fix is what lets the filter still match.
                 for _ in 0..ORPHAN_COUNT {
-                    let (_handle, _stored) = child
-                        .spawn(state, &parent_cx, |_| async { 0_u32 })
+                    let _handle = child
+                        .spawn_registered(state, &parent_cx, |_| async { 0_u32 })
                         .expect("orphan spawn must succeed before the panic");
                 }
                 std::panic::panic_any("factory panic after K spawns");

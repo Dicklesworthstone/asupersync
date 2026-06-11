@@ -75,7 +75,7 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
         task_cx: child_cx.clone(),
         yielded: false,
     };
-    // Result delivery uses `send_blocking` for legacy `Scope::spawn` parity
+    // Result delivery uses `send_blocking` for state-threaded scope parity
     // (br-asupersync-qg5th0): a task that observed cancellation must still
     // be able to publish its cancellation-aware payload.
     let wrapped = async move {
@@ -94,7 +94,7 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
         }
     };
     // NOT stored into state — the test drives `stored` directly, same as the
-    // legacy `Scope::spawn` path did.
+    // state-threaded scope path did.
     let mut stored = crate::runtime::StoredTask::new_with_id(wrapped, task_id);
 
     let task_waker = std::task::Waker::noop();

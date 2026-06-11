@@ -1971,7 +1971,7 @@ mod tests {
 
     /// `Cx::spawn_in` applies the SCOPE's planned capability budget to the
     /// admitted child — not the calling cx's — matching the legacy
-    /// `Scope::spawn` contract (br-asupersync-4onmas).
+    /// state-threaded scope contract (br-asupersync-4onmas).
     #[test]
     fn cx_spawn_in_applies_scope_capability_budget() {
         let (mut lab, parent_cx, root) = lab_with_parent_cx();
@@ -2434,8 +2434,8 @@ mod tests {
     }
 
     /// A panic inside the blocking closure resolves the handle as
-    /// `JoinError::Panicked` (panic containment parity with the legacy
-    /// `Scope::spawn_blocking`).
+    /// `JoinError::Panicked` (panic containment parity with the removed
+    /// legacy `Scope::spawn_blocking`).
     #[test]
     fn cx_spawn_blocking_panic_resolves_join_panicked() {
         let (mut lab, parent_cx, _root) = lab_with_parent_cx();

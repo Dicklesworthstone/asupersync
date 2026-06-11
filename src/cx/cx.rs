@@ -3179,7 +3179,7 @@ impl<Caps> Cx<Caps> {
     /// ```ignore
     /// // Using the scope! macro (recommended):
     /// scope!(cx, {
-    ///     let handle = scope.spawn(|cx| async { 42 });
+    ///     let handle = cx.spawn_in(&scope, |cx| async { 42 });
     ///     handle.await
     /// });
     ///
@@ -3351,7 +3351,7 @@ where
     /// capability budget, runtime mask) — the same inheritance set as
     /// `Scope::build_child_task_cx`.
     ///
-    /// # Targeting: `Cx::spawn` vs `Cx::spawn_in` vs `Scope::spawn`
+    /// # Targeting: `Cx::spawn` vs `Cx::spawn_in` vs state-threaded boot
     ///
     /// `Cx::spawn` is *ambient-within-my-region*: the child joins the
     /// calling task's region and is drained/cancelled with it. To target a
@@ -3399,17 +3399,16 @@ where
     /// This is the scope-targeting sibling of [`Cx::spawn`]: the child task
     /// is owned by `scope`'s region (joining its drain/cancel lifecycle and
     /// its close-to-quiescence accounting) and runs under `scope`'s budget
-    /// (`budget_source = "scope"`, matching the legacy `Scope::spawn`),
+    /// (`budget_source = "scope"`, matching the state-threaded boot path),
     /// while capability inheritance and the factory-receives-its-own-`Cx`
     /// discipline come from this context exactly as in [`Cx::spawn`].
     ///
-    /// # Targeting: `Cx::spawn` vs `Cx::spawn_in` vs `Scope::spawn`
+    /// # Targeting: `Cx::spawn` vs `Cx::spawn_in` vs state-threaded boot
     ///
     /// Use `Cx::spawn` to stay in *your own* region, `Cx::spawn_in` to
-    /// target a scope's region through the same lock-free mailbox path, and
-    /// the legacy `Scope::spawn(&mut state, ..)` family only where runtime
-    /// state is already threaded (it is slated for removal in A2.4 /
-    /// br-asupersync-69ftra).
+    /// target a scope's region through the same lock-free mailbox path. Use
+    /// `Scope::spawn_registered(&mut RuntimeState, ..)` only for synchronous
+    /// boot paths that still need inline task-record inspection.
     ///
     /// # Example
     ///
@@ -3517,7 +3516,7 @@ where
     /// without one (e.g. under the lab runtime) the closure runs inline
     /// inside the admitted task — the same deterministic fallback as the
     /// free [`spawn_blocking`](crate::runtime::spawn_blocking::spawn_blocking)
-    /// and the legacy `Scope::spawn_blocking`.
+    /// and the removed legacy `Scope::spawn_blocking`.
     ///
     /// # Cancel safety
     ///
@@ -3592,7 +3591,7 @@ where
     /// Spawns a `!Send` task into **this Cx's own region**, pinned to the
     /// current worker thread (br-asupersync-i9y5wb / A2.2a).
     ///
-    /// The v2 sibling of the legacy `Scope::spawn_local`: no
+    /// The v2 sibling of the removed legacy `Scope::spawn_local`: no
     /// `&mut RuntimeState` at the call site. The factory is parked on the
     /// calling worker's thread-local spawn lane and admitted by that same
     /// worker at its next dispatch point — the factory and its future
@@ -3918,7 +3917,7 @@ where
     /// remote/blocking/evidence/macaroon/pressure handles copy from the
     /// parent; `capability_budget` (the spawn target's planned envelope —
     /// the parent cx's for `Cx::spawn`, the SCOPE's for `Cx::spawn_in`,
-    /// matching legacy `Scope::spawn` which applied the scope's;
+    /// matching the state-threaded scope path, which applied the scope's;
     /// br-asupersync-4onmas) and the parent runtime mask apply.
     /// State-side wiring (drivers, logical clock, trace buffer, loser-drain
     /// history, spawn gateway, region counter) stays as admission built it.

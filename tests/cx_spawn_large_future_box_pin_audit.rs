@@ -1,5 +1,5 @@
 #![allow(unsafe_code)]
-//! Audit + regression test for `Scope::spawn()` handling of
+//! Audit + regression test for spawn-path handling of
 //! large-state-machine futures.
 //!
 //! Operator's question: "when spawning a future whose
@@ -253,12 +253,14 @@ fn spawn_path_constructs_stored_task_via_new_with_id() {
 
 #[test]
 fn spawn_local_path_constructs_local_stored_task_via_new_with_id() {
-    // Pin (link 4): spawn_local follows the same
-    // immediate-box pattern.
-    let source = read("src/cx/scope.rs");
+    // Pin (link 4): local spawn admission follows the same immediate-box
+    // pattern when it converts the owner-thread LocalSpawnRequest into a
+    // LocalStoredTask.
+    let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("let stored = LocalStoredTask::new_with_id(wrapped, task_id);"),
+        source.contains("let stored = LocalStoredTask::new_with_id(")
+            && source.contains("LocalLazyFactoryTask::new(factory, cx.clone())"),
         "REGRESSION: spawn_local path no longer calls \
          LocalStoredTask::new_with_id. Large !Send futures \
          persist on the stack — overflow risk.",

@@ -1,5 +1,5 @@
-//! Audit + regression test for `Scope::spawn_local` vs
-//! `Scope::spawn` distinction.
+//! Audit + regression test for `Cx::spawn_local` vs
+//! `Cx::spawn` distinction.
 //!
 //! Operator's question: "if spawn_local is API-exposed,
 //! must it require !Send futures (correct: thread-pinned)
@@ -35,17 +35,16 @@
 //!      to compile under stable rustc or require a project-
 //!      wide nightly opt-in.
 //!
-//!   3. **Routing enforces the distinction** (cx/scope.rs:
-//!      706-721): spawn_local builds a `LocalStoredTask`
-//!      (NOT `StoredTask`), stores it via
-//!      `crate::runtime::local::store_local_task` (thread-
-//!      local storage), pins the task to the current worker
-//!      via `record.pin_to_worker(worker_id)` (or
-//!      `record.mark_local()`), and schedules via
-//!      `schedule_local_task` which lands on the worker's
-//!      NON-STEALABLE local scheduler. A Send future passed
-//!      into spawn_local follows the same routing — it's
-//!      pinned regardless of its Send-ability.
+//!   3. **Routing enforces the distinction**: `Cx::spawn_local`
+//!      parks a `LocalSpawnRequest` on the owner thread lane,
+//!      `RuntimeState::admit_local_spawn_request` builds a
+//!      `LocalStoredTask` (NOT `StoredTask`) and pins the task
+//!      to the current worker via `record.pin_to_worker(worker_id)`,
+//!      and the worker stores it via
+//!      `crate::runtime::local::store_local_task` before scheduling
+//!      through `schedule_local_task`, the NON-STEALABLE local
+//!      scheduler. A Send future passed into spawn_local follows
+//!      the same routing — it's pinned regardless of its Send-ability.
 //!
 //!   4. **`spawn` requires Send for soundness, not
 //!      preference**: when spawn (not spawn_local) is used,
@@ -139,9 +138,9 @@ fn spawn_local_accepts_both_send_and_non_send_via_no_send_bound() {
     // Pin (link 1+2): spawn_local has NO Send bound on F or
     // Fut. This is what makes it the !Send escape hatch
     // AND lets Send users opt into thread affinity.
-    let source = read("src/cx/scope.rs");
+    let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub fn spawn_local<F, Fut, Caps>(";
+    let fn_marker = "pub fn spawn_local<F, Fut>(";
     let start = source.find(fn_marker).expect("spawn_local fn");
     let window_end = (start + 1500).min(source.len());
     let safe_end = source
@@ -190,9 +189,9 @@ fn spawn_local_output_still_requires_send_for_cross_thread_join() {
     // Pin (link 7): Fut::Output IS Send because the parent's
     // JoinHandle may be awaited from any thread. Asymmetric
     // on F/Fut, symmetric on Output.
-    let source = read("src/cx/scope.rs");
+    let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub fn spawn_local<F, Fut, Caps>(";
+    let fn_marker = "pub fn spawn_local<F, Fut>(";
     let start = source.find(fn_marker).expect("spawn_local fn");
     let window_end = (start + 1500).min(source.len());
     let safe_end = source
@@ -212,20 +211,15 @@ fn spawn_local_output_still_requires_send_for_cross_thread_join() {
 }
 
 #[test]
-fn spawn_local_routes_through_local_stored_task_not_stored_task() {
-    // Pin (link 5): spawn_local builds a LocalStoredTask,
-    // not a StoredTask. The two carry different trait-object
-    // bounds (LocalStoredTask has no Send) — routing
-    // through the wrong type would either silently allow
-    // !Send futures into a Send-requiring storage (UB) or
-    // reject !Send futures at compile time (defeating the
-    // escape hatch).
-    let source = read("src/cx/scope.rs");
+fn spawn_local_routes_through_owner_thread_lane() {
+    // Pin (link 5): Cx::spawn_local parks a LocalSpawnRequest on the
+    // owner-thread lane. RuntimeState/worker tests below pin admission,
+    // storage, and non-stealable scheduling.
+    let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub fn spawn_local<F, Fut, Caps>(";
-    let start = source.find(fn_marker).expect("spawn_local fn");
-    // Take a generous window for the body.
-    let window_end = (start + 8000).min(source.len());
+    let fn_marker = "fn spawn_local_via_lane<F, Fut>(";
+    let start = source.find(fn_marker).expect("spawn_local_via_lane fn");
+    let window_end = (start + 7000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -234,19 +228,19 @@ fn spawn_local_routes_through_local_stored_task_not_stored_task() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("LocalStoredTask::new_with_id(wrapped, task_id)"),
-        "REGRESSION: spawn_local no longer constructs a \
-         LocalStoredTask. Either it routes through StoredTask \
-         (which would reject !Send via its trait-object \
-         bound) or it skips storage entirely (broken).",
+        body.contains("LocalSpawnFactoryFn")
+            && body.contains("LocalSpawnRequest")
+            && body.contains("enqueue_local_spawn(request)"),
+        "REGRESSION: Cx::spawn_local no longer routes through \
+         the owner-thread LocalSpawnRequest lane. A !Send \
+         factory must never cross to the shared Send mailbox.",
     );
 
     assert!(
-        body.contains("crate::runtime::local::store_local_task(task_id, stored);"),
-        "REGRESSION: spawn_local no longer stores via \
-         store_local_task. Without thread-local storage, the \
-         !Send future could be accessed from another thread \
-         — UB pathway.",
+        body.contains("current_worker_id().is_none()")
+            && body.contains("SpawnError::LocalSchedulerUnavailable"),
+        "REGRESSION: Cx::spawn_local no longer fails closed \
+         off-worker. Local spawns must have an owner worker.",
     );
 }
 
@@ -257,11 +251,13 @@ fn spawn_local_pins_task_record_to_current_worker() {
     // that the scheduler's safety guards (try_steal
     // debug_assert) can detect accidental cross-thread
     // migration of !Send futures.
-    let source = read("src/cx/scope.rs");
+    let source = read("src/runtime/state.rs");
 
-    let fn_marker = "pub fn spawn_local<F, Fut, Caps>(";
-    let start = source.find(fn_marker).expect("spawn_local fn");
-    let window_end = (start + 8000).min(source.len());
+    let fn_marker = "pub fn admit_local_spawn_request(";
+    let start = source
+        .find(fn_marker)
+        .expect("admit_local_spawn_request fn");
+    let window_end = (start + 5000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -278,12 +274,9 @@ fn spawn_local_pins_task_record_to_current_worker() {
     );
 
     assert!(
-        body.contains("record.mark_local();"),
-        "REGRESSION: spawn_local no longer falls back to \
-         mark_local() when no current worker is identified. \
-         The fallback is what handles the case where \
-         spawn_local is called outside a worker (e.g., from \
-         a test harness).",
+        body.contains("SpawnError::LocalSchedulerUnavailable"),
+        "REGRESSION: local spawn admission no longer fails \
+         closed when no current worker is identified.",
     );
 }
 
@@ -294,11 +287,13 @@ fn spawn_local_schedules_via_schedule_local_task_non_stealable() {
     // via inject_ready (the stealable global injector).
     // The comment explicitly notes: 'spawn_local tasks MUST
     // NOT be stealable.'
-    let source = read("src/cx/scope.rs");
+    let source = read("src/runtime/scheduler/three_lane.rs");
 
-    let fn_marker = "pub fn spawn_local<F, Fut, Caps>(";
-    let start = source.find(fn_marker).expect("spawn_local fn");
-    let window_end = (start + 8000).min(source.len());
+    let fn_marker = "fn drain_local_spawn_admissions(&mut self)";
+    let start = source
+        .find(fn_marker)
+        .expect("drain_local_spawn_admissions fn");
+    let window_end = (start + 5000).min(source.len());
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
@@ -307,7 +302,8 @@ fn spawn_local_schedules_via_schedule_local_task_non_stealable() {
     let body = &source[start..safe_end];
 
     assert!(
-        body.contains("crate::runtime::scheduler::three_lane::schedule_local_task(task_id);"),
+        body.contains("crate::runtime::local::store_local_task(task_id, stored);")
+            && body.contains("schedule_local_task(task_id)"),
         "REGRESSION: spawn_local no longer schedules via \
          schedule_local_task. Either it uses the stealable \
          path (UB for !Send) or it doesn't schedule at all \
@@ -315,7 +311,7 @@ fn spawn_local_schedules_via_schedule_local_task_non_stealable() {
     );
 
     assert!(
-        body.contains("spawn_local tasks MUST NOT be stealable"),
+        source.contains("never exposed to stealers"),
         "REGRESSION: the explicit invariant comment is gone. \
          The 'must not be stealable' invariant is what \
          documents the routing-level enforcement of the \
@@ -362,10 +358,10 @@ fn spawn_path_signature_remains_send_bounded_for_contrast() {
     // signature must still require Send on F/Fut/Output.
     // This contrasts with spawn_local's no-Send and
     // demonstrates the distinction.
-    let source = read("src/cx/scope.rs");
+    let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub fn spawn<F, Fut, Caps>(";
-    let start = source.find(fn_marker).expect("Scope::spawn fn");
+    let fn_marker = "pub fn spawn<F, Fut>(";
+    let start = source.find(fn_marker).expect("Cx::spawn fn");
     let window_end = (start + 1500).min(source.len());
     let safe_end = source
         .char_indices()
@@ -378,7 +374,7 @@ fn spawn_path_signature_remains_send_bounded_for_contrast() {
         where_section.contains("F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,")
             && where_section.contains("Fut: Future + Send + 'static,")
             && where_section.contains("Fut::Output: Send + 'static,"),
-        "REGRESSION: Scope::spawn no longer requires Send. \
+        "REGRESSION: Cx::spawn no longer requires Send. \
          The asymmetry between spawn and spawn_local is the \
          user-facing API contract — losing it removes the \
          distinction.",
@@ -420,13 +416,13 @@ fn try_steal_debug_assert_guards_against_local_task_theft() {
 
 // ─────────── COMPILE-TIME POSITIVE / NEGATIVE CHECKS ───────
 //
-// Mock signatures with the same Send-asymmetry as Scope::spawn
-// vs Scope::spawn_local. Verify (1) Send futures pass both,
+// Mock signatures with the same Send-asymmetry as Cx::spawn
+// vs Cx::spawn_local. Verify (1) Send futures pass both,
 // (2) !Send futures pass only the no-Send signature.
 
 use std::future::Future;
 
-/// Mirrors Scope::spawn (Send required).
+/// Mirrors Cx::spawn (Send required).
 fn mock_spawn_send_bound<F, Fut>(_f: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -435,7 +431,7 @@ where
 {
 }
 
-/// Mirrors Scope::spawn_local (no Send on F/Fut).
+/// Mirrors Cx::spawn_local (no Send on F/Fut).
 fn mock_spawn_local_no_send_bound<F, Fut>(_f: F)
 where
     F: FnOnce() -> Fut + 'static,

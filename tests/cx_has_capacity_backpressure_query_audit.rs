@@ -317,15 +317,15 @@ fn spawn_error_includes_region_at_capacity_variant_for_typed_backpressure() {
 }
 
 #[test]
-fn spawn_returns_result_for_graceful_backpressure_handling() {
-    // Pin (link 12): Scope::spawn returns Result<...,
-    // SpawnError>. Without Result, apps would have no path
+fn spawn_registered_returns_result_for_graceful_backpressure_handling() {
+    // Pin (link 12): the state-threaded boot spawn path returns
+    // Result<..., SpawnError>. Without Result, apps would have no path
     // to gracefully handle capacity exhaustion.
     let source = read("src/cx/scope.rs");
 
     assert!(
-        source.contains("Result<(TaskHandle<Fut::Output>, StoredTask), SpawnError>"),
-        "REGRESSION: Scope::spawn return type changed from \
+        source.contains("Result<TaskHandle<Fut::Output>, SpawnError>"),
+        "REGRESSION: Scope::spawn_registered return type changed from \
          Result. Apps that expect to handle capacity errors \
          break — and a panicking spawn destroys the \
          graceful-degradation contract.",

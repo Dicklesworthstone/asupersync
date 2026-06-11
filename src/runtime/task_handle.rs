@@ -34,7 +34,8 @@ impl std::error::Error for JoinError {}
 
 /// A handle to a spawned task that can be used to await its result.
 ///
-/// `TaskHandle<T>` is returned by `Scope::spawn()` and related methods.
+/// `TaskHandle<T>` is returned by `Cx::spawn`, `Cx::spawn_in`,
+/// `Scope::spawn_registered`, and related methods.
 /// It provides:
 /// - The task ID for identification and debugging
 /// - A way to await the task's result via `join()`

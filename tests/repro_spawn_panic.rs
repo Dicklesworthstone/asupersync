@@ -63,7 +63,7 @@ fn repro_zombie_task() {
     // Wrapper to allow catch_unwind with mutable borrow
     let res = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut state_ref = state.borrow_mut();
-        let _ = scope.spawn(&mut state_ref, &cx, |_| {
+        let _ = scope.spawn_registered(&mut state_ref, &cx, |_| {
             panic!("factory panic");
             #[allow(unreachable_code)]
             async {
