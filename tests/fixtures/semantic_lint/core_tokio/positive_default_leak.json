@@ -1,0 +1,17 @@
+{
+  "contract_version": "no-tokio-feature-boundary-contract-v1-fixture",
+  "production_guarantees": [
+    {
+      "profile": "default-production",
+      "feature_args": "",
+      "status": "tokio_present_normal_graph",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_core_tokio_default_fixture cargo tree -e normal -p asupersync -i tokio",
+      "expected_path_fragments": [
+        "asupersync",
+        "tokio"
+      ]
+    }
+  ],
+  "quarantined_tokio_carrying_profiles": [],
+  "scoped_audit_profiles": []
+}

@@ -1,0 +1,106 @@
+{
+  "contract_version": "semantic-lint-cleanup-budget-rule-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+  "rule_id": "unbounded-cleanup-budget",
+  "source_of_truth": {
+    "inventory": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "contract": "artifacts/semantic_lint_cleanup_budget_rule_contract_v1.json",
+    "contract_test": "tests/semantic_lint_cleanup_budget_contract.rs",
+    "runner": "scripts/semantic_lint.py",
+    "docs": "docs/semantic_lint_cleanup_budget_rule.md",
+    "positive_fixture": "tests/fixtures/semantic_lint/cleanup_budget/positive_unbounded.rs",
+    "negative_fixture": "tests/fixtures/semantic_lint/cleanup_budget/negative_bounded.rs",
+    "valid_allow_fixture": "tests/fixtures/semantic_lint/cleanup_budget/valid_allow.rs",
+    "invalid_allow_fixture": "tests/fixtures/semantic_lint/cleanup_budget/invalid_allow.rs"
+  },
+  "implementation": {
+    "selected_engine": "ast-grep",
+    "runner_default_engine": "auto",
+    "portable_fallback": "contract-limited deterministic syntax matcher used only when ast-grep is unavailable",
+    "result_schema": "semantic-lint-results-v1",
+    "no_source_rewrites": true,
+    "no_runtime_behavior_change": true,
+    "post_filter": "cleanup/drain/finalize call findings are suppressed when the same line carries an obvious Budget/deadline argument"
+  },
+  "target_paths": [
+    "src/supervision.rs",
+    "src/cancel/",
+    "src/runtime/",
+    "src/database/",
+    "src/http/",
+    "tests/"
+  ],
+  "ast_grep_patterns": [
+    {
+      "pattern_id": "budget-infinite",
+      "pattern": "Budget::INFINITE",
+      "risk": "infinite cleanup budget can hide non-terminating drain or finalizer work"
+    },
+    {
+      "pattern_id": "duration-from-secs-qualified",
+      "pattern": "std::time::Duration::from_secs($SECONDS)",
+      "risk": "ad hoc wall duration should be derived from an explicit Budget"
+    },
+    {
+      "pattern_id": "duration-from-secs-imported",
+      "pattern": "Duration::from_secs($SECONDS)",
+      "risk": "ad hoc wall duration should be derived from an explicit Budget"
+    },
+    {
+      "pattern_id": "cleanup-call-without-budget",
+      "pattern": "cleanup($$$ARGS)",
+      "risk": "cleanup work should carry a bounded budget or owner allowance"
+    },
+    {
+      "pattern_id": "drain-call-without-budget",
+      "pattern": "drain($$$ARGS)",
+      "risk": "drain work should carry a bounded budget or owner allowance"
+    },
+    {
+      "pattern_id": "finalize-call-without-budget",
+      "pattern": "finalize($$$ARGS)",
+      "risk": "finalizer work should carry a bounded budget or owner allowance"
+    }
+  ],
+  "allow_marker": {
+    "format": "asupersync-lint:allow unbounded-cleanup-budget reason=<short reason> owner=<asupersync-bead-id>",
+    "locations": [
+      "same line as finding",
+      "immediately preceding line"
+    ],
+    "requires": [
+      "reason",
+      "owner"
+    ],
+    "owner_must_match": "^asupersync-[A-Za-z0-9_.-]+$",
+    "invalid_marker_does_not_suppress": true
+  },
+  "fixtures": [
+    {
+      "path": "tests/fixtures/semantic_lint/cleanup_budget/positive_unbounded.rs",
+      "expected_verdict": "fail",
+      "expected_findings": 3
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/cleanup_budget/negative_bounded.rs",
+      "expected_verdict": "pass",
+      "expected_findings": 0
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/cleanup_budget/valid_allow.rs",
+      "expected_verdict": "pass",
+      "expected_suppressed": 1
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/cleanup_budget/invalid_allow.rs",
+      "expected_verdict": "fail",
+      "expected_invalid_allow_markers": 1
+    }
+  ],
+  "no_claims": [
+    "does not prove every cleanup path in the repository is bounded",
+    "does not replace the rustc-HIR rules needed for await-while-holding-resource or Outcome severity",
+    "does not rewrite source code",
+    "does not close every rule required by asupersync-idea-wizard-fifth-wave-3gaiun.3.2"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "contract_version": "no-tokio-feature-boundary-contract-v1-fixture",
+  "production_guarantees": [],
+  "quarantined_tokio_carrying_profiles": [
+    {
+      "profile": "fuzz",
+      "feature_args": "--features fuzz",
+      "status": "tokio_carrying_quarantined",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_core_tokio_fuzz_fixture cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "expected_path_fragments": [
+        "opentelemetry-proto",
+        "tonic",
+        "tonic-prost",
+        "tokio"
+      ],
+      "rationale": "The fuzz graph is not production proof; it is quarantined to OTLP wire-format fuzz helpers."
+    }
+  ],
+  "scoped_audit_profiles": []
+}

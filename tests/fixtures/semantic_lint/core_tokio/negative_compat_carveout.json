@@ -1,0 +1,19 @@
+{
+  "contract_version": "no-tokio-feature-boundary-contract-v1-fixture",
+  "production_guarantees": [],
+  "quarantined_tokio_carrying_profiles": [],
+  "scoped_audit_profiles": [
+    {
+      "profile": "workspace-normal-audit",
+      "feature_args": "--workspace",
+      "status": "tokio_carrying_scoped_audit",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_core_tokio_workspace_fixture cargo tree -e normal --workspace -i tokio",
+      "expected_path_fragments": [
+        "asupersync-tokio-compat",
+        "asupersync-conformance",
+        "tokio"
+      ],
+      "rationale": "The workspace graph is not production proof; it audits documented compat and conformance carve-outs."
+    }
+  ]
+}
