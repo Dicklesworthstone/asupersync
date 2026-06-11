@@ -7720,9 +7720,10 @@ fn classify_rejected_doctor_artifact(rejected: &RejectedArtifact) -> Option<Doct
         )
     {
         let evidence_ref = format!("rejected:{}", rejected.artifact_id);
+        let source_id = evidence_ref.clone();
         return Some(analysis_finding(
             "missing_proof_artifact",
-            &evidence_ref,
+            &source_id,
             "high",
             86,
             &["artifact", "proof"],
