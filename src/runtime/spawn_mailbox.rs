@@ -1605,6 +1605,7 @@ mod tests {
         let (ran_a, ids_a) = run_once();
         let (ran_b, ids_b) = run_once();
         assert_eq!(ran_a, 6);
+        assert_eq!(ran_b, 6);
         assert_eq!(ids_a, ids_b, "admitted arena ids replay-identical");
     }
 
