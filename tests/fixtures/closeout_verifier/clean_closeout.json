@@ -35,8 +35,19 @@
     "thread_id": "asupersync-clean"
   },
   "git": {
+    "branch": "main",
+    "dirty_files": [],
     "main_head": "abc1234def",
     "origin_main": "abc1234def",
     "origin_master": "abc1234def"
+  },
+  "proofs": {
+    "artifacts": [
+      {
+        "generated_at": "2026-05-10T08:20:00Z",
+        "max_age_days": 7,
+        "path": "artifacts/proof_notes/clean-closeout.md"
+      }
+    ]
   }
 }

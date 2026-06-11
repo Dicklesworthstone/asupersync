@@ -1,0 +1,44 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Closed and pushed `asupersync-stale-proof` at `2468ace0`. Validation: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_stale_proof cargo test passed. Released reservations.",
+        "from": "GentleCitadel",
+        "id": 1010,
+        "subject": "Closed asupersync-stale-proof",
+        "thread_id": "asupersync-stale-proof"
+      }
+    ],
+    "reservations": []
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-stale-proof",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-stale-proof",
+    "commit": "2468ace0",
+    "mode": "bead-backed",
+    "slice_id": "asupersync-stale-proof",
+    "thread_id": "asupersync-stale-proof"
+  },
+  "git": {
+    "main_head": "2468ace0",
+    "origin_main": "2468ace0",
+    "origin_master": "2468ace0"
+  },
+  "proofs": {
+    "artifacts": [
+      {
+        "generated_at": "2026-04-22T08:20:00Z",
+        "max_age_days": 7,
+        "path": "artifacts/proof_notes/stale-proof.md"
+      }
+    ]
+  }
+}

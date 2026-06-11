@@ -1,7 +1,7 @@
 {
-  "commit": "abc1234def",
+  "commit": "13579bdf",
   "current_date": "2026-05-10",
-  "fixture_path": "tests/fixtures/closeout_verifier/clean_closeout.json",
+  "fixture_path": "tests/fixtures/closeout_verifier/peer_dirty_tree.json",
   "forbidden_actions": {
     "runs_agent_mail_mutation": false,
     "runs_beads_mutation": false,
@@ -11,13 +11,13 @@
   },
   "generated_at": "2026-05-10T08:35:00Z",
   "non_mutating": true,
-  "overall_status": "pass",
+  "overall_status": "fail",
   "rows": [
     {
       "evidence": {
         "command": "git rev-parse origin/main",
-        "expected_commit": "abc1234def",
-        "observed_commit": "abc1234def"
+        "expected_commit": "13579bdf",
+        "observed_commit": "13579bdf"
       },
       "row_id": "main_pushed",
       "status": "pass",
@@ -26,9 +26,9 @@
     {
       "evidence": {
         "command": "git rev-parse origin/main origin/master",
-        "expected_commit": "abc1234def",
-        "origin_main": "abc1234def",
-        "origin_master": "abc1234def"
+        "expected_commit": "13579bdf",
+        "origin_main": "13579bdf",
+        "origin_master": "13579bdf"
       },
       "row_id": "master_synced",
       "status": "pass",
@@ -45,21 +45,21 @@
     },
     {
       "evidence": {
-        "bead_id": "asupersync-clean",
-        "command": "br show asupersync-clean --json",
+        "bead_id": "asupersync-peer-dirt",
+        "command": "br show asupersync-peer-dirt --json",
         "observed_status": "closed"
       },
       "row_id": "bead_closed",
       "status": "pass",
-      "summary": "bead asupersync-clean is closed"
+      "summary": "bead asupersync-peer-dirt is closed"
     },
     {
       "evidence": {
-        "expected_commit": "abc1234def",
+        "expected_commit": "13579bdf",
         "matched_message_ids": [
-          1001
+          1009
         ],
-        "thread_id": "asupersync-clean"
+        "thread_id": "asupersync-peer-dirt"
       },
       "row_id": "closeout_mail",
       "status": "pass",
@@ -87,29 +87,26 @@
       "evidence": {
         "agent": "GentleCitadel",
         "command": "git status --porcelain",
-        "peer_or_unowned_dirty_files": []
+        "peer_or_unowned_dirty_files": [
+          {
+            "owner": "SapphireHill",
+            "path": "src/runtime/spawn_mailbox.rs",
+            "status": "M"
+          }
+        ]
       },
+      "remediation": "wait for peer dirt to land or document ownership before final closeout",
       "row_id": "dirty_tree_ownership",
-      "status": "pass",
-      "summary": "dirty tree contains only closeout-owned files"
-    },
-    {
-      "evidence": {
-        "artifact_count": 1,
-        "default_max_age_days": 7,
-        "stale_artifacts": []
-      },
-      "row_id": "proof_artifacts_fresh",
-      "status": "pass",
-      "summary": "proof artifacts are within their freshness windows"
+      "status": "fail",
+      "summary": "dirty tree contains peer-owned or unowned files"
     }
   ],
   "schema_version": "closeout-verifier-v1",
-  "slice_id": "asupersync-clean",
+  "slice_id": "asupersync-peer-dirt",
   "slice_mode": "bead-backed",
   "summary": {
-    "fail": 0,
-    "pass": 9,
+    "fail": 1,
+    "pass": 7,
     "warn": 0
   }
 }

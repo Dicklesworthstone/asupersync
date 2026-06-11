@@ -36,6 +36,7 @@ RCH_LOCAL_FALLBACK = re.compile(
     re.IGNORECASE,
 )
 COMMAND_SPLIT = re.compile(r"(?:\n|;|&&|\band\b)")
+PROOF_FRESHNESS_MAX_DAYS = 7
 
 
 def utc_now() -> str:
@@ -90,6 +91,7 @@ def live_source(repo_path: Path, timeout: float) -> dict[str, Any]:
         repo_path, ["git", "rev-parse", "origin/master"], timeout
     )
     branch_status, branch = run_text(repo_path, ["git", "branch", "--show-current"], timeout)
+    dirty_status, dirty_stdout = run_text(repo_path, ["git", "status", "--porcelain"], timeout)
     commit = head if head_status == "ok" else ""
     return {
         "closeout": {
@@ -103,10 +105,24 @@ def live_source(repo_path: Path, timeout: float) -> dict[str, Any]:
             "main_head": commit,
             "origin_main": origin_main if main_status == "ok" else "",
             "origin_master": origin_master if master_status == "ok" else "",
+            "dirty_files": dirty_files_from_status(dirty_stdout) if dirty_status == "ok" else [],
         },
         "beads": {"issues": []},
         "agent_mail": {"messages": [], "reservations": []},
     }
+
+
+def dirty_files_from_status(status_output: str) -> list[dict[str, Any]]:
+    dirty: list[dict[str, Any]] = []
+    for line in status_output.splitlines():
+        if not line:
+            continue
+        status = line[:2] if len(line) >= 2 else line
+        path = line[3:] if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.rsplit(" -> ", 1)[1]
+        dirty.append({"path": path, "status": status.strip() or status})
+    return dirty
 
 
 def rows_from(value: Any, *keys: str) -> list[dict[str, Any]]:
@@ -233,6 +249,86 @@ def verify_master_synced(closeout: dict[str, Any], git: dict[str, Any]) -> dict[
             "origin_master": origin_master,
         },
         remediation="run git push origin main:master after pushing main" if status == "fail" else "",
+    )
+
+
+def verify_branch_main(git: dict[str, Any]) -> dict[str, Any] | None:
+    branch = text_field(git, "branch")
+    if not branch:
+        return None
+    status = "pass" if branch == "main" else "fail"
+    return row(
+        "branch_main",
+        status,
+        "current branch is main" if status == "pass" else "current branch is not main",
+        evidence={"command": "git branch --show-current", "observed_branch": branch},
+        remediation="switch back to main before closeout" if status == "fail" else "",
+    )
+
+
+def closeout_owned_paths(closeout: dict[str, Any]) -> set[str]:
+    paths = closeout.get("owned_paths")
+    if not isinstance(paths, list):
+        return set()
+    return {path for path in paths if isinstance(path, str) and path}
+
+
+def dirty_file_path(item: dict[str, Any]) -> str:
+    return text_field(item, "path", "file", "path_pattern")
+
+
+def dirty_file_owner(item: dict[str, Any]) -> str:
+    return text_field(item, "owner", "agent", "agent_name", "holder")
+
+
+def dirty_file_owned_by_closeout_agent(
+    item: dict[str, Any],
+    *,
+    agent: str,
+    owned_paths: set[str],
+) -> bool:
+    if item.get("owned_by_closeout_agent") is True:
+        return True
+    owner = dirty_file_owner(item)
+    if owner and agent and owner == agent:
+        return True
+    path = dirty_file_path(item)
+    return bool(path and path in owned_paths)
+
+
+def verify_dirty_tree_ownership(closeout: dict[str, Any], git: dict[str, Any]) -> dict[str, Any] | None:
+    if "dirty_files" not in git:
+        return None
+    dirty_files = rows_from(git, "dirty_files")
+    agent = text_field(closeout, "agent")
+    owned_paths = closeout_owned_paths(closeout)
+    peer_or_unowned = [
+        item
+        for item in dirty_files
+        if not dirty_file_owned_by_closeout_agent(item, agent=agent, owned_paths=owned_paths)
+    ]
+    status = "pass" if not peer_or_unowned else "fail"
+    return row(
+        "dirty_tree_ownership",
+        status,
+        "dirty tree contains only closeout-owned files"
+        if status == "pass"
+        else "dirty tree contains peer-owned or unowned files",
+        evidence={
+            "command": "git status --porcelain",
+            "agent": agent,
+            "peer_or_unowned_dirty_files": [
+                {
+                    "path": dirty_file_path(item),
+                    "status": text_field(item, "status"),
+                    "owner": dirty_file_owner(item) or None,
+                }
+                for item in peer_or_unowned
+            ],
+        },
+        remediation="wait for peer dirt to land or document ownership before final closeout"
+        if status == "fail"
+        else "",
     )
 
 
@@ -446,6 +542,74 @@ def verify_validation_reported(closeout: dict[str, Any], agent_mail: dict[str, A
     )
 
 
+def proof_artifact_rows(source: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    proofs = source.get("proofs")
+    if isinstance(proofs, dict):
+        rows.extend(rows_from(proofs, "artifacts", "proof_artifacts", "validation_artifacts"))
+    rows.extend(rows_from(source, "proof_artifacts", "validation_artifacts"))
+    return rows
+
+
+def proof_artifact_path(item: dict[str, Any]) -> str:
+    return text_field(item, "path", "artifact_path", "file")
+
+
+def proof_artifact_timestamp(item: dict[str, Any]) -> str:
+    return text_field(item, "generated_at", "created_at", "observed_at", "timestamp")
+
+
+def proof_artifact_max_age_days(item: dict[str, Any]) -> int:
+    value = item.get("max_age_days")
+    if isinstance(value, int) and value >= 0:
+        return value
+    return PROOF_FRESHNESS_MAX_DAYS
+
+
+def verify_proof_artifact_freshness(
+    source: dict[str, Any],
+    generated_at: str,
+) -> dict[str, Any] | None:
+    artifacts = proof_artifact_rows(source)
+    if not artifacts:
+        return None
+    generated = parse_timestamp(generated_at)
+    stale: list[dict[str, Any]] = []
+    for item in artifacts:
+        timestamp = proof_artifact_timestamp(item)
+        artifact_at = parse_timestamp(timestamp)
+        max_age_days = proof_artifact_max_age_days(item)
+        is_stale = (
+            generated is None
+            or artifact_at is None
+            or generated - artifact_at > dt.timedelta(days=max_age_days)
+        )
+        if is_stale:
+            stale.append(
+                {
+                    "path": proof_artifact_path(item),
+                    "generated_at": timestamp or None,
+                    "max_age_days": max_age_days,
+                }
+            )
+    status = "pass" if not stale else "fail"
+    return row(
+        "proof_artifacts_fresh",
+        status,
+        "proof artifacts are within their freshness windows"
+        if status == "pass"
+        else "proof artifacts are stale or missing parseable timestamps",
+        evidence={
+            "artifact_count": len(artifacts),
+            "default_max_age_days": PROOF_FRESHNESS_MAX_DAYS,
+            "stale_artifacts": stale,
+        },
+        remediation="refresh stale proof artifacts before citing them in closeout"
+        if status == "fail"
+        else "",
+    )
+
+
 def summarize_status(rows: list[dict[str, Any]]) -> str:
     if any(item["status"] == "fail" for item in rows):
         return "fail"
@@ -465,10 +629,17 @@ def build_report(source: dict[str, Any], *, generated_at: str, fixture_path: str
     rows = [
         verify_main_pushed(closeout, git),
         verify_master_synced(closeout, git),
+        *[item for item in [verify_branch_main(git)] if item is not None],
         *verify_bead_state(closeout, beads),
         verify_closeout_mail(closeout, agent_mail),
         verify_reservations(closeout, agent_mail, generated_at),
         verify_validation_reported(closeout, agent_mail),
+        *[item for item in [verify_dirty_tree_ownership(closeout, git)] if item is not None],
+        *[
+            item
+            for item in [verify_proof_artifact_freshness(source, generated_at)]
+            if item is not None
+        ],
     ]
     return {
         "schema_version": SCHEMA_VERSION,

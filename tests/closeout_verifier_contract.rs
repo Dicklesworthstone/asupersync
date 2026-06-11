@@ -106,11 +106,13 @@ fn clean_closeout_passes_all_required_rows() {
     assert_eq!(report["current_date"].as_str(), Some("2026-05-10"));
     assert_eq!(report["overall_status"].as_str(), Some("pass"));
     assert_eq!(report["summary"]["fail"].as_u64(), Some(0));
+    assert_eq!(report["summary"]["pass"].as_u64(), Some(9));
     assert_eq!(row(&report, "main_pushed")["status"].as_str(), Some("pass"));
     assert_eq!(
         row(&report, "master_synced")["status"].as_str(),
         Some("pass")
     );
+    assert_eq!(row(&report, "branch_main")["status"].as_str(), Some("pass"));
     assert_eq!(row(&report, "bead_closed")["status"].as_str(), Some("pass"));
     assert_eq!(
         row(&report, "closeout_mail")["status"].as_str(),
@@ -122,6 +124,14 @@ fn clean_closeout_passes_all_required_rows() {
     );
     assert_eq!(
         row(&report, "validation_reported")["status"].as_str(),
+        Some("pass")
+    );
+    assert_eq!(
+        row(&report, "dirty_tree_ownership")["status"].as_str(),
+        Some("pass")
+    );
+    assert_eq!(
+        row(&report, "proof_artifacts_fresh")["status"].as_str(),
         Some("pass")
     );
 }
@@ -212,6 +222,34 @@ fn missing_master_sync_matches_full_output_golden() {
 }
 
 #[test]
+fn peer_dirty_tree_fails_ownership_row() {
+    let report = report("peer_dirty_tree.json");
+    let dirty_tree = row(&report, "dirty_tree_ownership");
+
+    assert_eq!(report["overall_status"].as_str(), Some("fail"));
+    assert_eq!(dirty_tree["status"].as_str(), Some("fail"));
+    assert_eq!(
+        dirty_tree["evidence"]["peer_or_unowned_dirty_files"][0]["path"].as_str(),
+        Some("src/runtime/spawn_mailbox.rs")
+    );
+    assert_eq!(
+        dirty_tree["evidence"]["peer_or_unowned_dirty_files"][0]["owner"].as_str(),
+        Some("SapphireHill")
+    );
+    assert!(
+        dirty_tree["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("peer dirt")
+    );
+}
+
+#[test]
+fn peer_dirty_tree_matches_full_output_golden() {
+    assert_output_matches_full_golden("peer_dirty_tree.json", "peer_dirty_tree_expected.json");
+}
+
+#[test]
 fn bare_cargo_validation_fails_validation_row() {
     let report = report("bare_cargo_validation.json");
     let validation = row(&report, "validation_reported");
@@ -276,6 +314,37 @@ fn missing_remote_required_validation_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "missing_remote_required_validation.json",
         "missing_remote_required_validation_expected.json",
+    );
+}
+
+#[test]
+fn stale_proof_artifact_fails_freshness_row() {
+    let report = report("stale_proof_artifact.json");
+    let proof = row(&report, "proof_artifacts_fresh");
+
+    assert_eq!(report["overall_status"].as_str(), Some("fail"));
+    assert_eq!(proof["status"].as_str(), Some("fail"));
+    assert_eq!(
+        proof["evidence"]["stale_artifacts"][0]["path"].as_str(),
+        Some("artifacts/proof_notes/stale-proof.md")
+    );
+    assert_eq!(
+        proof["evidence"]["stale_artifacts"][0]["max_age_days"].as_u64(),
+        Some(7)
+    );
+    assert!(
+        proof["remediation"]
+            .as_str()
+            .expect("remediation")
+            .contains("refresh stale proof artifacts")
+    );
+}
+
+#[test]
+fn stale_proof_artifact_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "stale_proof_artifact.json",
+        "stale_proof_artifact_expected.json",
     );
 }
 
