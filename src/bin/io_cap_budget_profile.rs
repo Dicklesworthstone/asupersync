@@ -8,12 +8,18 @@
 //! rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo build --profile release-perf --bin io_cap_budget_profile --features test-internals
 //! samply record --save-only -o io_cap_cpu.json -- $CARGO_TARGET_DIR/release-perf/io_cap_budget_profile
 
+#[cfg(feature = "test-internals")]
 use asupersync::io::IoCap;
+#[cfg(feature = "test-internals")]
 use asupersync::io::cap::LabIoCap;
+#[cfg(feature = "test-internals")]
 use std::sync::Arc;
+#[cfg(feature = "test-internals")]
 use std::thread;
+#[cfg(feature = "test-internals")]
 use std::time::Instant;
 
+#[cfg(feature = "test-internals")]
 fn main() {
     println!("IO Capability Budget Accounting Profiling");
 
@@ -99,4 +105,12 @@ fn main() {
     );
 
     println!("✓ Budget accounting correctness verified");
+}
+
+#[cfg(not(feature = "test-internals"))]
+fn main() {
+    println!("This profiling harness requires the test-internals feature.");
+    println!(
+        "Run with: rch exec -- env CARGO_TARGET_DIR=${{CARGO_TARGET_DIR:-/tmp/rch_target_io_cap_budget_profile}} cargo build --profile release-perf --bin io_cap_budget_profile --features test-internals"
+    );
 }

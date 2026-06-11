@@ -230,7 +230,7 @@ impl Future for RegionCloseFuture {
     }
 }
 
-impl<P: Policy> Scope<'_, P> {
+impl<'r, P: Policy> Scope<'r, P> {
     /// Creates a new scope (internal use).
     #[must_use]
     #[allow(dead_code)]
