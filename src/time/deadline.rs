@@ -24,6 +24,7 @@ pub fn with_deadline<'a, P: Policy>(scope: &Scope<'a, P>, deadline: Time) -> Sco
 
     // Create new scope with updated budget
     Scope::new(scope.region_id(), new_budget)
+        .with_pending_spawn_counter(scope.pending_spawn_counter_handle())
 }
 
 /// Updates a scope with a timeout relative to a start time.

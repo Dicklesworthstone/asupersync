@@ -1744,7 +1744,7 @@ mod tests {
         let (mut lab, parent_cx, _root) = lab_with_parent_cx();
         let grandchild_ran = Arc::new(AtomicUsize::new(0));
         let flag = Arc::clone(&grandchild_ran);
-        parent_cx
+        let _child_handle = parent_cx
             .spawn(move |child| async move {
                 let flag_inner = Arc::clone(&flag);
                 child
@@ -1753,8 +1753,7 @@ mod tests {
                     })
                     .expect("grandchild spawn from factory-built cx");
             })
-            .expect("child spawn")
-            .task_id();
+            .expect("child spawn");
         lab.run_until_quiescent();
         assert_eq!(grandchild_ran.load(Ordering::SeqCst), 1);
     }
@@ -1776,11 +1775,7 @@ mod tests {
     /// resolves the handle, and joining yields JoinError::Cancelled.
     #[test]
     fn cx_spawn_into_closing_region_join_resolves_cancelled() {
-        use std::task::{Context, Poll, Wake, Waker};
-        struct NoopWake;
-        impl Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
+        use std::task::{Context, Poll, Waker};
 
         let (mut lab, parent_cx, root) = lab_with_parent_cx();
         // Begin closing the root region BEFORE the spawn is admitted.
@@ -1790,8 +1785,8 @@ mod tests {
             .spawn(|_child| async move { 7usize })
             .expect("enqueue still succeeds; denial resolves via the handle");
 
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut poll_cx = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
         let mut join = handle.join(&parent_cx);
         let mut result = None;
         for _ in 0..200 {
@@ -1811,6 +1806,162 @@ mod tests {
                 Err(crate::runtime::task_handle::JoinError::Cancelled(_))
             ),
             "join must resolve Cancelled for a denied spawn, got {result:?}"
+        );
+    }
+
+    // === br-asupersync-hwjqyo (A2.2): Cx::spawn_in scope-targeting surface ===
+
+    /// `Cx::spawn_in` routes the pending reservation to the scope's region
+    /// counter and the admitted child runs there, without `RuntimeState` at
+    /// the call site.
+    #[test]
+    fn cx_spawn_in_targets_scope_region_counter() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let child_region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let scope: crate::cx::Scope<'static> =
+            crate::cx::Scope::new(child_region, Budget::INFINITE).with_pending_spawn_counter(
+                lab.state
+                    .region(child_region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            );
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in_child = Arc::clone(&ran);
+        let handle = parent_cx
+            .spawn_in(&scope, move |_child| async move {
+                ran_in_child.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("cx.spawn_in");
+        assert!(
+            is_spawn_mailbox_id(handle.task_id()),
+            "pre-admission handle reports the provisional id"
+        );
+        assert_eq!(
+            lab.state
+                .region(child_region)
+                .expect("child")
+                .pending_spawn_count(),
+            1,
+            "reservation lands on the scope's region"
+        );
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            0,
+            "caller's region carries no reservation for a scope-targeted spawn"
+        );
+        lab.run_until_quiescent();
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "child ran");
+        assert_eq!(
+            lab.state
+                .region(child_region)
+                .expect("child")
+                .pending_spawn_count(),
+            0,
+            "credits balanced"
+        );
+    }
+
+    /// A bare same-region scope (no wiring) falls back to the calling
+    /// context's counter, because the counter is per-region.
+    #[test]
+    fn cx_spawn_in_same_region_bare_scope_falls_back() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let scope: crate::cx::Scope<'static> = crate::cx::Scope::new(root, Budget::INFINITE);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in_child = Arc::clone(&ran);
+        parent_cx
+            .spawn_in(&scope, move |_child| async move {
+                ran_in_child.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("same-region fallback uses the cx counter");
+        lab.run_until_quiescent();
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "child ran");
+    }
+
+    /// A counter-less scope for a DIFFERENT region fails closed with
+    /// `RuntimeUnavailable`: the calling context's counter must not be
+    /// borrowed cross-region.
+    #[test]
+    fn cx_spawn_in_foreign_bare_scope_runtime_unavailable() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let child_region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let scope: crate::cx::Scope<'static> =
+            crate::cx::Scope::new(child_region, Budget::INFINITE);
+        let result = parent_cx.spawn_in(&scope, |_child| async move {});
+        assert!(
+            matches!(
+                result,
+                Err(crate::runtime::state::SpawnError::RuntimeUnavailable)
+            ),
+            "cross-region spawn without scope wiring must fail closed"
+        );
+    }
+
+    /// `Cx::scope()` carries the region's pending-spawn counter, so the
+    /// returned scope works with `spawn_in` even when handed to another
+    /// task whose Cx targets a different region.
+    #[test]
+    fn cx_scope_carries_pending_spawn_counter() {
+        let (_lab, parent_cx, _root) = lab_with_parent_cx();
+        assert!(
+            parent_cx.scope().pending_spawn_counter_handle().is_some(),
+            "wired Cx must propagate its region counter into Cx::scope()"
+        );
+    }
+
+    /// `spawn_in` into a closing region: enqueue succeeds, the admission
+    /// denial resolves through the handle as `JoinError::Cancelled`
+    /// (mirrors the `Cx::spawn` closing-region contract).
+    #[test]
+    fn cx_spawn_in_closing_scope_region_resolves_cancelled() {
+        use std::task::{Context, Poll, Waker};
+
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let child_region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let scope: crate::cx::Scope<'static> =
+            crate::cx::Scope::new(child_region, Budget::INFINITE).with_pending_spawn_counter(
+                lab.state
+                    .region(child_region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            );
+        lab.state
+            .region(child_region)
+            .expect("child")
+            .begin_close(None);
+
+        let mut handle = parent_cx
+            .spawn_in(&scope, |_child| async move { 7usize })
+            .expect("enqueue still succeeds; denial resolves via the handle");
+
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+        let mut join = handle.join(&parent_cx);
+        let mut result = None;
+        for _ in 0..200 {
+            match Pin::new(&mut join).poll(&mut poll_cx) {
+                Poll::Ready(r) => {
+                    result = Some(r);
+                    break;
+                }
+                Poll::Pending => lab.step_for_test(),
+            }
+        }
+        drop(join);
+        let result = result.expect("join resolved");
+        assert!(
+            matches!(
+                result,
+                Err(crate::runtime::task_handle::JoinError::Cancelled(_))
+            ),
+            "join must resolve Cancelled for a denied scope-targeted spawn, got {result:?}"
         );
     }
 }

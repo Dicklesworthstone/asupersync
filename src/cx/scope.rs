@@ -129,6 +129,11 @@ pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {
     pub(crate) budget: Budget,
     /// The capability/resource budget for this scope.
     pub(crate) capability_budget: CapabilityBudget,
+    /// Pending-spawn counter for this scope's region, used by the v2
+    /// mailbox spawn path ([`Cx::spawn_in`]) so region close cannot race
+    /// ahead of not-yet-admitted spawns. `None` when the scope was built
+    /// without runtime wiring (br-asupersync-hwjqyo / A2.2).
+    pub(crate) pending_spawns: Option<Arc<crate::record::region::PendingSpawnCounter>>,
     /// Phantom data for the policy type.
     pub(crate) _policy: PhantomData<&'r P>,
 }
@@ -247,8 +252,33 @@ impl<P: Policy> Scope<'_, P> {
             region,
             budget,
             capability_budget,
+            pending_spawns: None,
             _policy: PhantomData,
         }
+    }
+
+    /// Attaches the pending-spawn counter for this scope's region (internal
+    /// use). The counter must belong to the same region as the scope; it is
+    /// cloned from the region record under the state lock at construction
+    /// sites (br-asupersync-hwjqyo / A2.2).
+    #[must_use]
+    #[allow(dead_code)]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
+    pub(crate) fn with_pending_spawn_counter(
+        mut self,
+        counter: Option<Arc<crate::record::region::PendingSpawnCounter>>,
+    ) -> Self {
+        self.pending_spawns = counter;
+        self
+    }
+
+    /// Returns the pending-spawn counter for this scope's region, if the
+    /// scope was built with runtime wiring.
+    #[inline]
+    pub(crate) fn pending_spawn_counter_handle(
+        &self,
+    ) -> Option<Arc<crate::record::region::PendingSpawnCounter>> {
+        self.pending_spawns.clone()
     }
 
     /// Returns the region ID for this scope.
@@ -1040,11 +1070,15 @@ impl<P: Policy> Scope<'_, P> {
             self.capability_budget,
             crate::record::RegionRecord::capability_budget,
         );
+        let child_pending = state
+            .region(child_region)
+            .map(crate::record::RegionRecord::pending_spawn_handle);
         let child_scope = Scope::<P2>::new_with_capability_budget(
             child_region,
             child_budget,
             child_capability_budget,
-        );
+        )
+        .with_pending_spawn_counter(child_pending);
 
         let fut_result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(child_scope, &mut *state)));

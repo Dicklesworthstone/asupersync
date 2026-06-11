@@ -3211,6 +3211,7 @@ impl<Caps> Cx<Caps> {
             budget,
             self.capability_budget(),
         )
+        .with_pending_spawn_counter(self.pending_spawn_counter_handle())
     }
 
     /// Creates a [`Scope`](super::Scope) bound to this context's region with a custom budget.
@@ -3287,6 +3288,7 @@ impl<Caps> Cx<Caps> {
             clamped,
             self.capability_budget(),
         )
+        .with_pending_spawn_counter(self.pending_spawn_counter_handle())
     }
 
     /// Creates a [`Scope`](super::Scope) with explicit scheduler and
@@ -3308,7 +3310,8 @@ impl<Caps> Cx<Caps> {
             scope.region_id(),
             scope.budget(),
             effective,
-        ))
+        )
+        .with_pending_spawn_counter(self.pending_spawn_counter_handle()))
     }
 }
 
@@ -3348,13 +3351,15 @@ where
     /// capability budget, runtime mask) — the same inheritance set as
     /// `Scope::build_child_task_cx`.
     ///
-    /// # Targeting: `Cx::spawn` vs `Scope::spawn`
+    /// # Targeting: `Cx::spawn` vs `Cx::spawn_in` vs `Scope::spawn`
     ///
     /// `Cx::spawn` is *ambient-within-my-region*: the child joins the
-    /// calling task's region and is drained/cancelled with it. When you
-    /// need an explicit structural boundary (a child region that closes to
-    /// quiescence before you proceed), use a `Scope`. If you are unsure
-    /// which you want, you want the `Scope`.
+    /// calling task's region and is drained/cancelled with it. To target a
+    /// specific scope's region through the same lock-free path, use
+    /// [`Cx::spawn_in`]. When you need an explicit structural boundary (a
+    /// child region that closes to quiescence before you proceed), create
+    /// the region via a `Scope`. If you are unsure which you want, you want
+    /// the `Scope`.
     ///
     /// # Errors
     ///
@@ -3372,17 +3377,103 @@ where
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
-        use crate::runtime::spawn_mailbox::{AdmittedTask, SpawnFactoryFn, SpawnRequest};
-        use crate::runtime::task_handle::JoinError;
-
         let Some(gateway) = self.spawn_gateway_handle() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
         let Some(pending) = self.pending_spawn_counter_handle() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
-        let region = self.region_id();
-        let budget = self.budget();
+        Ok(self.spawn_via_gateway(self.region_id(), self.budget(), &gateway, &pending, f))
+    }
+
+    /// Spawns a task into **`scope`'s region** without touching the
+    /// `RuntimeState` lock (br-asupersync-hwjqyo / A2.2).
+    ///
+    /// This is the scope-targeting sibling of [`Cx::spawn`]: the child task
+    /// is owned by `scope`'s region (joining its drain/cancel lifecycle and
+    /// its close-to-quiescence accounting) and runs under `scope`'s budget
+    /// (`budget_source = "scope"`, matching the legacy `Scope::spawn`),
+    /// while capability inheritance and the factory-receives-its-own-`Cx`
+    /// discipline come from this context exactly as in [`Cx::spawn`].
+    ///
+    /// # Targeting: `Cx::spawn` vs `Cx::spawn_in` vs `Scope::spawn`
+    ///
+    /// Use `Cx::spawn` to stay in *your own* region, `Cx::spawn_in` to
+    /// target a scope's region through the same lock-free mailbox path, and
+    /// the legacy `Scope::spawn(&mut state, ..)` family only where runtime
+    /// state is already threaded (it is slated for removal in A2.4 /
+    /// br-asupersync-69ftra).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Inside a running task: `cx` is this task's context and `scope`
+    /// // was produced by runtime-wired scope creation (e.g. `cx.scope()`
+    /// // or a child-region scope), so it carries its region's counter.
+    /// let handle = cx.spawn_in(&scope, |child| async move {
+    ///     child.checkpoint()?;
+    ///     Outcome::ok(42)
+    /// })?;
+    /// let joined = handle.join(&cx).await;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// spawn gateway, or when `scope` carries no pending-spawn counter for
+    /// its region (e.g. a scope built without runtime wiring whose region
+    /// differs from this context's). Admission-time denials (region
+    /// closing, quota) resolve through the returned handle as
+    /// `JoinError::Cancelled`. Never panics.
+    pub fn spawn_in<F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        // The counter is per-region: prefer the scope's own wiring, and
+        // fall back to this context's counter only when the scope targets
+        // this context's region.
+        let pending = scope.pending_spawn_counter_handle().or_else(|| {
+            (scope.region_id() == self.region_id())
+                .then(|| self.pending_spawn_counter_handle())
+                .flatten()
+        });
+        let Some(pending) = pending else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        Ok(self.spawn_via_gateway(scope.region_id(), scope.budget(), &gateway, &pending, f))
+    }
+
+    /// Shared producer-side machinery for the lock-free spawn paths
+    /// ([`Cx::spawn`], [`Cx::spawn_in`]): enqueues a factory-carrying
+    /// [`SpawnRequest`](crate::runtime::spawn_mailbox::SpawnRequest) on the
+    /// gateway with a pending reservation against `pending`, a take-once
+    /// result channel, and cancel/admission-error slots, returning a
+    /// pending [`TaskHandle`](crate::runtime::TaskHandle).
+    fn spawn_via_gateway<F, Fut>(
+        &self,
+        region: RegionId,
+        budget: Budget,
+        gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
+        pending: &Arc<crate::record::region::PendingSpawnCounter>,
+        f: F,
+    ) -> crate::runtime::TaskHandle<Fut::Output>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        use crate::runtime::spawn_mailbox::{AdmittedTask, SpawnFactoryFn, SpawnRequest};
+        use crate::runtime::task_handle::JoinError;
 
         let (result_tx, result_rx) =
             crate::channel::oneshot::channel::<Result<Fut::Output, JoinError>>();
@@ -3461,11 +3552,7 @@ where
 
         gateway.enqueue_and_notify(request);
 
-        Ok(crate::runtime::TaskHandle::new_pending(
-            provisional,
-            result_rx,
-            admitted_slot,
-        ))
+        crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot)
     }
 
     /// Overlays parent-inherited capability state onto an admission-built
