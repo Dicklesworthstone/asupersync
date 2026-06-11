@@ -1763,7 +1763,7 @@ mod tests {
     /// no gateway: spawn errs with RuntimeUnavailable and never panics.
     #[test]
     fn cx_spawn_without_gateway_returns_runtime_unavailable() {
-        let cx = crate::cx::Cx::new(
+        let cx: crate::cx::Cx = crate::cx::Cx::new(
             RegionId::new_for_test(0, 1),
             TaskId::new_for_test(0, 1),
             Budget::new(),
