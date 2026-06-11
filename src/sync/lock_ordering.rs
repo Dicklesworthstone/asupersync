@@ -15,6 +15,9 @@ use std::cell::RefCell;
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+const LOCK_ORDER_VIOLATION_CODE: &str = "ASUP-E205";
+
 /// Lock rank categories following the asupersync hierarchy.
 /// Lower numeric values must be acquired before higher values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -235,11 +238,11 @@ pub fn check_acquire_with_module(lock_name: &str, rank: LockRank, module: LockMo
                             "rank-order",
                         );
                         panic!(
-                            "DEADLOCK PREVENTION: Lock ordering violation!\n\
+                            "[{}] DEADLOCK PREVENTION: Lock ordering violation!\n\
                             Attempted to acquire '{}' (rank {:?}, module {:?}) while holding locks of rank {:?}.\n\
                             Correct order: Config -> Instrumentation -> Regions -> Tasks -> Obligations\n\
                             This violates the asupersync lock hierarchy and could cause deadlocks.",
-                            lock_name, rank, module, highest_held
+                            LOCK_ORDER_VIOLATION_CODE, lock_name, rank, module, highest_held
                         );
                     }
                 }
@@ -321,10 +324,11 @@ fn validate_cross_module_pattern(
                         "cancel-before-obligation",
                     );
                     panic!(
-                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire obligation lock '{}' \
+                        "[{}] CROSS-MODULE DEADLOCK PREVENTION: Lock ordering violation. \
+                        Attempted to acquire obligation lock '{}' \
                         while holding cancel module lock '{}'. This pattern can cause deadlocks \
                         between cancellation and obligation tracking.",
-                        lock_name, lock_info.name
+                        LOCK_ORDER_VIOLATION_CODE, lock_name, lock_info.name
                     );
                 }
             }
@@ -339,10 +343,11 @@ fn validate_cross_module_pattern(
                 if lock_info.module == LockModule::Cx && *held_rank > rank {
                     record_order_violation(lock_name, rank, module, *held_rank, "cx-before-cancel");
                     panic!(
-                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire cancel lock '{}' (rank {:?}) \
+                        "[{}] CROSS-MODULE DEADLOCK PREVENTION: Lock ordering violation. \
+                        Attempted to acquire cancel lock '{}' (rank {:?}) \
                         while holding higher-ranked Cx lock '{}' (rank {:?}). \
                         Capability context operations must complete before cancellation.",
-                        lock_name, rank, lock_info.name, held_rank
+                        LOCK_ORDER_VIOLATION_CODE, lock_name, rank, lock_info.name, held_rank
                     );
                 }
             }
@@ -365,10 +370,11 @@ fn validate_cross_module_pattern(
                         "obligation-before-runtime-task",
                     );
                     panic!(
-                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire task lock '{}' \
+                        "[{}] CROSS-MODULE DEADLOCK PREVENTION: Lock ordering violation. \
+                        Attempted to acquire task lock '{}' \
                         while holding obligation lock '{}'. Task scheduling must be coordinated \
                         with obligation tracking to prevent state inconsistencies.",
-                        lock_name, lock_info.name
+                        LOCK_ORDER_VIOLATION_CODE, lock_name, lock_info.name
                     );
                 }
             }
@@ -586,6 +592,17 @@ impl LockOrderEnforcer {
 mod tests {
     use super::*;
 
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+        match payload.downcast::<String>() {
+            Ok(message) => *message,
+            Err(payload) => match payload.downcast::<&'static str>() {
+                Ok(message) => (*message).to_string(),
+                Err(_) => "<non-string panic payload>".to_string(),
+            },
+        }
+    }
+
     #[test]
     fn test_lock_rank_from_name() {
         assert_eq!(LockRank::from_name("config_cache"), Some(LockRank::Config));
@@ -642,6 +659,26 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn rank_order_violation_panic_starts_with_asup_e205() {
+        clear_held_locks();
+
+        let panic = std::panic::catch_unwind(|| {
+            record_acquire("tasks_test", LockRank::Tasks);
+            check_acquire("config_test", LockRank::Config);
+        })
+        .expect_err("rank-order violation should panic");
+        let message = panic_payload_to_string(panic);
+
+        clear_held_locks();
+
+        assert!(
+            message.starts_with("[ASUP-E205]"),
+            "rank-order panic should start with ASUP-E205 token: {message}"
+        );
+    }
+
+    #[test]
     fn test_module_from_name() {
         assert_eq!(
             LockModule::from_name("runtime_scheduler"),
@@ -690,6 +727,30 @@ mod tests {
             "obligation_tracker",
             LockRank::Obligations,
             LockModule::Obligation,
+        );
+    }
+
+    #[test]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn cross_module_violation_panic_starts_with_asup_e205() {
+        clear_held_locks();
+
+        let panic = std::panic::catch_unwind(|| {
+            record_acquire_with_module("cancel_token", LockRank::Tasks, LockModule::Cancel);
+            check_acquire_with_module(
+                "obligation_tracker",
+                LockRank::Obligations,
+                LockModule::Obligation,
+            );
+        })
+        .expect_err("cross-module violation should panic");
+        let message = panic_payload_to_string(panic);
+
+        clear_held_locks();
+
+        assert!(
+            message.starts_with("[ASUP-E205]"),
+            "cross-module panic should start with ASUP-E205 token: {message}"
         );
     }
 

@@ -374,7 +374,7 @@
       "code": "ASUP-E205",
       "name": "lock-order-violation",
       "area": "channels-sync",
-      "status": "reserved",
+      "status": "live",
       "summary": "A code path acquired runtime locks outside the required order.",
       "probable_causes": [
         "Nested runtime/obligation locks were introduced in the wrong order.",
@@ -385,8 +385,10 @@
         "Snapshot data under one lock and release it before querying another domain."
       ],
       "doc_path": "docs/error_codes/ASUP-E205.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/sync/lock_ordering.rs"
+      ]
     },
     {
       "code": "ASUP-E301",
