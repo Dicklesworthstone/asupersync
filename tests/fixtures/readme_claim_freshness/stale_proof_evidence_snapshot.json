@@ -1,0 +1,19 @@
+{
+  "claim_categories": [
+    {
+      "claim_id": "stale-proof-claim",
+      "category": "stale proof",
+      "status": "green",
+      "proof_evidence_status": "stale-evidence",
+      "notes": "Stale evidence must be rerun before citing this claim.",
+      "doc_claim_markers": {
+        "README.md": [
+          "present readme marker"
+        ],
+        "AGENTS.md": [
+          "present agents marker"
+        ]
+      }
+    }
+  ]
+}

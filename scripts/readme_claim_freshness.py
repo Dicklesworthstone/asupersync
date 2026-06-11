@@ -10,6 +10,34 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "readme-claim-freshness-v1"
+REPORTABLE_PROOF_EVIDENCE_STATUSES = {
+    "approved-cache-hit",
+    "fresh-rch-pass",
+    "rerun-required",
+}
+FAIL_CLOSED_PROOF_EVIDENCE_STATUSES = {
+    "no-win",
+    "stale-evidence",
+    "unsupported",
+}
+NO_CLAIM_TERMS = (
+    "blocked",
+    "blocker",
+    "does not prove",
+    "does not cover",
+    "frontier",
+    "limited to",
+    "maps only",
+    "must not",
+    "no claim",
+    "no-claim",
+    "not a",
+    "not evidence",
+    "not prove",
+    "rerun",
+    "scoped",
+    "yellow",
+)
 
 
 def utc_now() -> str:
@@ -57,6 +85,78 @@ def marker_map(entry: dict[str, Any]) -> dict[str, list[str]]:
     return result
 
 
+def proof_evidence_status(entry: dict[str, Any]) -> str:
+    status = entry.get("proof_evidence_status")
+    if status is None:
+        return "missing"
+    if not isinstance(status, str) or not status:
+        raise ValueError(f"{entry.get('claim_id', '<unknown>')} proof_evidence_status must be a nonempty string")
+    return status
+
+
+def blocked_frontier_is_complete(entry: dict[str, Any]) -> bool:
+    frontier = entry.get("blocked_frontier")
+    if not isinstance(frontier, dict):
+        return False
+    return all(
+        isinstance(frontier.get(key), str) and frontier.get(key, "").strip()
+        for key in ("blocker_id", "reason", "required_followup")
+    )
+
+
+def notes_have_no_claim_boundary(entry: dict[str, Any]) -> bool:
+    notes = entry.get("notes")
+    if not isinstance(notes, str) or not notes.strip():
+        return False
+    normalized = notes.lower()
+    return any(term in normalized for term in NO_CLAIM_TERMS)
+
+
+def requires_no_claim_boundary(claim_status: str, evidence_status: str) -> bool:
+    return claim_status != "green" or evidence_status not in {"fresh-rch-pass"}
+
+
+def proof_evidence_issues(entry: dict[str, Any], claim_status: str) -> list[dict[str, str]]:
+    claim_id = entry.get("claim_id", "<unknown>")
+    evidence_status = proof_evidence_status(entry)
+    issues: list[dict[str, str]] = []
+
+    if evidence_status == "missing":
+        issues.append(
+            {
+                "kind": "missing-proof-evidence-status",
+                "summary": f"{claim_id} has no proof_evidence_status",
+            }
+        )
+    elif evidence_status in FAIL_CLOSED_PROOF_EVIDENCE_STATUSES:
+        issues.append(
+            {
+                "kind": "unciteable-proof-evidence-status",
+                "summary": f"{claim_id} proof evidence status is {evidence_status}",
+            }
+        )
+    elif evidence_status == "blocked":
+        if not blocked_frontier_is_complete(entry):
+            issues.append(
+                {
+                    "kind": "blocked-without-frontier-evidence",
+                    "summary": f"{claim_id} is blocked without blocker_id, reason, and required_followup",
+                }
+            )
+    elif evidence_status not in REPORTABLE_PROOF_EVIDENCE_STATUSES:
+        raise ValueError(f"{claim_id} has unknown proof_evidence_status {evidence_status}")
+
+    if requires_no_claim_boundary(claim_status, evidence_status) and not notes_have_no_claim_boundary(entry):
+        issues.append(
+            {
+                "kind": "missing-no-claim-boundary",
+                "summary": f"{claim_id} needs no-claim or rerun/scoped language in notes",
+            }
+        )
+
+    return issues
+
+
 def build_receipt(
     *,
     snapshot_path: Path,
@@ -90,6 +190,7 @@ def build_receipt(
     missing_total = 0
     required_total = 0
     present_total = 0
+    proof_evidence_issue_total = 0
 
     for entry in claim_entries(snapshot):
         claim_id = entry.get("claim_id")
@@ -101,6 +202,7 @@ def build_receipt(
         status = entry.get("status")
         if not isinstance(status, str) or not status:
             raise ValueError(f"{claim_id} must have a nonempty status")
+        evidence_status = proof_evidence_status(entry)
 
         missing_markers: list[dict[str, str]] = []
         present_markers: list[dict[str, str]] = []
@@ -120,20 +222,33 @@ def build_receipt(
                     missing_total += 1
                     missing_markers.append(marker_row)
 
+        evidence_issues = proof_evidence_issues(entry, status)
+        proof_evidence_issue_total += len(evidence_issues)
         claim_rows.append(
             {
                 "claim_id": claim_id,
                 "category": category,
                 "status": status,
-                "fresh": not missing_markers,
+                "proof_evidence_status": evidence_status,
+                "fresh": not missing_markers and not evidence_issues,
                 "required_marker_count": len(missing_markers) + len(present_markers),
                 "present_marker_count": len(present_markers),
                 "missing_marker_count": len(missing_markers),
                 "missing_doc_markers": missing_markers,
+                "proof_evidence_issue_count": len(evidence_issues),
+                "proof_evidence_issues": evidence_issues,
             }
         )
 
-    verdict = "fresh" if missing_total == 0 else "stale"
+    verdict = "fresh" if missing_total == 0 and proof_evidence_issue_total == 0 else "stale"
+    if missing_total > 0 and proof_evidence_issue_total > 0:
+        decision = "blocked-doc-and-proof-stale"
+    elif missing_total > 0:
+        decision = "blocked-doc-stale"
+    elif proof_evidence_issue_total > 0:
+        decision = "blocked-proof-evidence-stale"
+    else:
+        decision = "passed"
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -144,9 +259,10 @@ def build_receipt(
         "required_marker_count": required_total,
         "present_marker_count": present_total,
         "missing_marker_count": missing_total,
+        "proof_evidence_issue_count": proof_evidence_issue_total,
         "claims": claim_rows,
         "verdict": verdict,
-        "decision": "passed" if verdict == "fresh" else "blocked-doc-stale",
+        "decision": decision,
         "non_mutating": True,
         "forbidden_actions": {
             "runs_cargo": False,

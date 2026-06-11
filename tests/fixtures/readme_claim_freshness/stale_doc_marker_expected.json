@@ -8,6 +8,9 @@
       "missing_doc_markers": [],
       "missing_marker_count": 0,
       "present_marker_count": 2,
+      "proof_evidence_issue_count": 0,
+      "proof_evidence_issues": [],
+      "proof_evidence_status": "rerun-required",
       "required_marker_count": 2,
       "status": "green"
     },
@@ -27,6 +30,9 @@
       ],
       "missing_marker_count": 2,
       "present_marker_count": 0,
+      "proof_evidence_issue_count": 0,
+      "proof_evidence_issues": [],
+      "proof_evidence_status": "rerun-required",
       "required_marker_count": 2,
       "status": "yellow_frontier"
     }
@@ -57,6 +63,7 @@
   "missing_marker_count": 2,
   "non_mutating": true,
   "present_marker_count": 2,
+  "proof_evidence_issue_count": 0,
   "required_marker_count": 4,
   "schema_version": "readme-claim-freshness-v1",
   "snapshot": "/data/projects/asupersync/tests/fixtures/readme_claim_freshness/stale_doc_marker_snapshot.json",
