@@ -1,0 +1,20 @@
+{
+  "contract_version": "semantic-lint-proof-lane-summary-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.4",
+  "lane_id": "semantic-lint-proof-lane-contract",
+  "guarantee_id": "semantic-lint-proof-lane-contract",
+  "summary_status": "canonical-lane-registered",
+  "proof_evidence_status": "rerun-required",
+  "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_proof_lane CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 1 -p asupersync --test semantic_lint_proof_lane_contract --test semantic_lint_rule_inventory_contract --test semantic_lint_diagnostic_codes_contract --test error_code_registry_contract --test semantic_lint_ambient_contract --test semantic_lint_cleanup_budget_contract --test semantic_lint_core_tokio_contract --test semantic_lint_loop_checkpoint_contract --test semantic_lint_ignored_outcome_contract --test semantic_lint_await_holding_contract --test semantic_lint_drop_race_loser_contract -- --nocapture",
+  "event_artifact": "artifacts/semantic_lint_proof_lane_events_v1.ndjson",
+  "rule_count": 7,
+  "aggregate_test_count": 11,
+  "fresh_evidence_requires_exact_command": true,
+  "no_claims": [
+    "not a formal proof of cancel-correctness",
+    "not broad workspace health",
+    "not release readiness",
+    "not live RCH fleet availability",
+    "not fresh RCH evidence until rerun"
+  ]
+}

@@ -495,7 +495,8 @@
     "downstream-consumer-default-tokio-free",
     "downstream-consumer-internal-only-negative",
     "downstream-consumer-proof-contract",
-    "doctor-e2e-proof-lane-contract"
+    "doctor-e2e-proof-lane-contract",
+    "semantic-lint-proof-lane-contract"
   ],
   "lanes": [
     {
@@ -2019,6 +2020,67 @@
           "workspace-health"
         ]
       }
+    },
+    {
+      "lane_id": "semantic-lint-proof-lane-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_proof_lane CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 1 -p asupersync --test semantic_lint_proof_lane_contract --test semantic_lint_rule_inventory_contract --test semantic_lint_diagnostic_codes_contract --test error_code_registry_contract --test semantic_lint_ambient_contract --test semantic_lint_cleanup_budget_contract --test semantic_lint_core_tokio_contract --test semantic_lint_loop_checkpoint_contract --test semantic_lint_ignored_outcome_contract --test semantic_lint_await_holding_contract --test semantic_lint_drop_race_loser_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "semantic-lint-proof-lane-contract"
+      ],
+      "covers": "Verifies the aggregate semantic-lint proof-lane contract, rule inventory, ASUP diagnostic code mapping, per-rule fixture contracts, summary/events metadata artifacts, manifest mapping, and no-claim boundaries.",
+      "explicit_not_covered": "fresh execution evidence until the exact RCH command is rerun, formal cancel-correctness proof, broad workspace health, release-readiness, performance, or complete absence of semantic issues outside the declared rule contract surfaces.",
+      "expected_signal": "semantic_lint_proof_lane_contract and all semantic_lint_* contract tests pass",
+      "source_paths": [
+        "scripts/semantic_lint.py",
+        "artifacts/semantic_lint_proof_lane_contract_v1.json",
+        "artifacts/semantic_lint_proof_lane_summary_v1.json",
+        "artifacts/semantic_lint_proof_lane_events_v1.ndjson",
+        "artifacts/semantic_lint_rule_inventory_v1.json",
+        "artifacts/semantic_lint_ambient_rule_contract_v1.json",
+        "artifacts/semantic_lint_await_holding_rule_contract_v1.json",
+        "artifacts/semantic_lint_cleanup_budget_rule_contract_v1.json",
+        "artifacts/semantic_lint_core_tokio_rule_contract_v1.json",
+        "artifacts/semantic_lint_drop_race_loser_rule_contract_v1.json",
+        "artifacts/semantic_lint_ignored_outcome_rule_contract_v1.json",
+        "artifacts/semantic_lint_loop_checkpoint_rule_contract_v1.json",
+        "tests/semantic_lint_proof_lane_contract.rs",
+        "tests/semantic_lint_rule_inventory_contract.rs",
+        "tests/semantic_lint_diagnostic_codes_contract.rs",
+        "tests/semantic_lint_ambient_contract.rs",
+        "tests/semantic_lint_cleanup_budget_contract.rs",
+        "tests/semantic_lint_core_tokio_contract.rs",
+        "tests/semantic_lint_loop_checkpoint_contract.rs",
+        "tests/semantic_lint_ignored_outcome_contract.rs",
+        "tests/semantic_lint_await_holding_contract.rs",
+        "tests/semantic_lint_drop_race_loser_contract.rs",
+        "docs/semantic_lint_proof_lane.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "semantic lint rule-contract drift",
+        "ASUP diagnostic registry drift",
+        "manifest projection golden drift",
+        "missing Python semantic lint runner dependency"
+      ],
+      "escalation_notes": "This is the focused verifier for semantic-lint L4 proof-lane wiring; rerun the exact manifest command for fresh RCH evidence before citing the lane.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "semantic-lint-proof-lane-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
     }
   ],
   "guarantees": [
@@ -2286,6 +2348,13 @@
       "description": "doctor-e2e-proof-lane-contract is represented by the D4 aggregate doctor proof-lane verifier with explicit no-claim boundaries.",
       "lane_ids": [
         "doctor-e2e-proof-lane-contract"
+      ]
+    },
+    {
+      "guarantee_id": "semantic-lint-proof-lane-contract",
+      "description": "semantic-lint-proof-lane-contract is represented by the L4 aggregate semantic-lint verifier with explicit no-claim boundaries.",
+      "lane_ids": [
+        "semantic-lint-proof-lane-contract"
       ]
     }
   ],

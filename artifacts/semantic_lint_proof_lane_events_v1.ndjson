@@ -1,0 +1,4 @@
+{"schema_version":"semantic-lint-proof-lane-event-v1","sequence":1,"event":"lane_registered","lane_id":"semantic-lint-proof-lane-contract","status":"canonical_manifest_row"}
+{"schema_version":"semantic-lint-proof-lane-event-v1","sequence":2,"event":"summary_declared","artifact":"artifacts/semantic_lint_proof_lane_summary_v1.json","proof_evidence_status":"rerun-required"}
+{"schema_version":"semantic-lint-proof-lane-event-v1","sequence":3,"event":"failure_rehearsal_declared","cases":["positive-fixture-findings","invalid-allow-marker","unsupported-engine","core-tokio-default-leak"]}
+{"schema_version":"semantic-lint-proof-lane-event-v1","sequence":4,"event":"no_claim_boundary_declared","not_covered":["formal-cancel-correctness","broad-workspace-health","release-readiness","live-rch-fleet-availability"]}

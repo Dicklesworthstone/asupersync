@@ -1,0 +1,177 @@
+{
+  "contract_version": "semantic-lint-proof-lane-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.4",
+  "lane_id": "semantic-lint-proof-lane-contract",
+  "guarantee_id": "semantic-lint-proof-lane-contract",
+  "title": "Semantic lint aggregate proof lane",
+  "description": "Aggregate proof-lane contract for the asupersync-specific semantic lint suite. The lane ties the rule inventory, seven per-rule fixture contracts, ASUP diagnostic code registry checks, summary/events metadata, manifest mapping, and no-claim boundaries to one remote-required RCH command.",
+  "source_of_truth": {
+    "contract": "artifacts/semantic_lint_proof_lane_contract_v1.json",
+    "summary": "artifacts/semantic_lint_proof_lane_summary_v1.json",
+    "events": "artifacts/semantic_lint_proof_lane_events_v1.ndjson",
+    "contract_test": "tests/semantic_lint_proof_lane_contract.rs",
+    "docs": "docs/semantic_lint_proof_lane.md",
+    "runner": "scripts/semantic_lint.py",
+    "rule_inventory": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "manifest_projection": "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+    "diagnostic_codes_contract": "tests/semantic_lint_diagnostic_codes_contract.rs",
+    "error_code_registry_contract": "tests/error_code_registry_contract.rs"
+  },
+  "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_proof_lane CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 1 -p asupersync --test semantic_lint_proof_lane_contract --test semantic_lint_rule_inventory_contract --test semantic_lint_diagnostic_codes_contract --test error_code_registry_contract --test semantic_lint_ambient_contract --test semantic_lint_cleanup_budget_contract --test semantic_lint_core_tokio_contract --test semantic_lint_loop_checkpoint_contract --test semantic_lint_ignored_outcome_contract --test semantic_lint_await_holding_contract --test semantic_lint_drop_race_loser_contract -- --nocapture",
+  "proof_outputs": {
+    "summary_artifact": "artifacts/semantic_lint_proof_lane_summary_v1.json",
+    "events_artifact": "artifacts/semantic_lint_proof_lane_events_v1.ndjson",
+    "event_schema": "semantic-lint-proof-lane-event-v1",
+    "proof_evidence_status": "rerun-required",
+    "fresh_evidence_requires_exact_command": true
+  },
+  "aggregate_tests": [
+    "semantic_lint_proof_lane_contract",
+    "semantic_lint_rule_inventory_contract",
+    "semantic_lint_diagnostic_codes_contract",
+    "error_code_registry_contract",
+    "semantic_lint_ambient_contract",
+    "semantic_lint_cleanup_budget_contract",
+    "semantic_lint_core_tokio_contract",
+    "semantic_lint_loop_checkpoint_contract",
+    "semantic_lint_ignored_outcome_contract",
+    "semantic_lint_await_holding_contract",
+    "semantic_lint_drop_race_loser_contract"
+  ],
+  "required_rule_ids": [
+    "ambient-time-or-entropy-in-lab-sensitive-code",
+    "await-while-holding-capability-resource",
+    "core-tokio-feature-leakage",
+    "drop-based-race-loser-handling",
+    "ignored-outcome-severity",
+    "loop-without-cx-checkpoint",
+    "unbounded-cleanup-budget"
+  ],
+  "rule_contracts": [
+    {
+      "rule_id": "ambient-time-or-entropy-in-lab-sensitive-code",
+      "asup_code": "ASUP-E902",
+      "contract": "artifacts/semantic_lint_ambient_rule_contract_v1.json",
+      "contract_test": "tests/semantic_lint_ambient_contract.rs",
+      "docs": "docs/semantic_lint_ambient_rule.md",
+      "fixture_classes": [
+        "positive",
+        "negative",
+        "valid_allow",
+        "invalid_allow"
+      ]
+    },
+    {
+      "rule_id": "await-while-holding-capability-resource",
+      "asup_code": "ASUP-E903",
+      "contract": "artifacts/semantic_lint_await_holding_rule_contract_v1.json",
+      "contract_test": "tests/semantic_lint_await_holding_contract.rs",
+      "docs": "docs/semantic_lint_await_holding_rule.md",
+      "fixture_classes": [
+        "positive",
+        "negative",
+        "valid_allow",
+        "invalid_allow"
+      ]
+    },
+    {
+      "rule_id": "core-tokio-feature-leakage",
+      "asup_code": "ASUP-E908",
+      "contract": "artifacts/semantic_lint_core_tokio_rule_contract_v1.json",
+      "contract_test": "tests/semantic_lint_core_tokio_contract.rs",
+      "docs": "docs/semantic_lint_core_tokio_rule.md",
+      "fixture_classes": [
+        "positive_default_leak",
+        "negative_compat_carveout",
+        "negative_fuzz_quarantine"
+      ]
+    },
+    {
+      "rule_id": "drop-based-race-loser-handling",
+      "asup_code": "ASUP-E906",
+      "contract": "artifacts/semantic_lint_drop_race_loser_rule_contract_v1.json",
+      "contract_test": "tests/semantic_lint_drop_race_loser_contract.rs",
+      "docs": "docs/semantic_lint_drop_race_loser_rule.md",
+      "fixture_classes": [
+        "positive",
+        "negative",
+        "valid_allow",
+        "invalid_allow"
+      ]
+    },
+    {
+      "rule_id": "ignored-outcome-severity",
+      "asup_code": "ASUP-E905",
+      "contract": "artifacts/semantic_lint_ignored_outcome_rule_contract_v1.json",
+      "contract_test": "tests/semantic_lint_ignored_outcome_contract.rs",
+      "docs": "docs/semantic_lint_ignored_outcome_rule.md",
+      "fixture_classes": [
+        "positive",
+        "negative",
+        "valid_allow",
+        "invalid_allow"
+      ]
+    },
+    {
+      "rule_id": "loop-without-cx-checkpoint",
+      "asup_code": "ASUP-E904",
+      "contract": "artifacts/semantic_lint_loop_checkpoint_rule_contract_v1.json",
+      "contract_test": "tests/semantic_lint_loop_checkpoint_contract.rs",
+      "docs": "docs/semantic_lint_loop_checkpoint_rule.md",
+      "fixture_classes": [
+        "positive",
+        "negative",
+        "valid_allow",
+        "invalid_allow"
+      ]
+    },
+    {
+      "rule_id": "unbounded-cleanup-budget",
+      "asup_code": "ASUP-E907",
+      "contract": "artifacts/semantic_lint_cleanup_budget_rule_contract_v1.json",
+      "contract_test": "tests/semantic_lint_cleanup_budget_contract.rs",
+      "docs": "docs/semantic_lint_cleanup_budget_rule.md",
+      "fixture_classes": [
+        "positive",
+        "negative",
+        "valid_allow",
+        "invalid_allow"
+      ]
+    }
+  ],
+  "default_surface_policy": {
+    "intended_default_surface": "The aggregate lane covers the rule target paths and fixture classes declared by each per-rule contract. Full repository scans remain rule-specific and must be cited from the individual lint results, not inferred from this aggregate metadata verifier.",
+    "zero_false_positive_basis": [
+      "negative fixtures pass in each per-rule contract",
+      "valid allow-marker fixtures suppress only with reason and owner metadata",
+      "invalid allow-marker fixtures fail and do not suppress findings",
+      "core Tokio graph carve-outs are checked by explicit negative fixtures"
+    ],
+    "unclassified_suppression_ratcheting": [
+      "allow markers must start with asupersync-lint:allow",
+      "allow markers must name the exact rule id",
+      "allow markers must include reason= and owner=",
+      "owner metadata must match an asupersync bead-style owner"
+    ]
+  },
+  "failure_rehearsal": [
+    "positive fixtures produce fail verdicts with findings",
+    "invalid allow-marker fixtures produce invalid_allow_marker findings",
+    "unsupported engines produce fail-closed diagnostics",
+    "core-tokio positive default graph fixture reports ASUP-E908"
+  ],
+  "docs_markers": [
+    "SEMANTIC-LINT-L4-PROOF-LANE",
+    "SEMANTIC-LINT-L4-SUMMARY-EVENTS",
+    "SEMANTIC-LINT-L4-FAILURE-REHEARSAL",
+    "SEMANTIC-LINT-L4-NO-CLAIMS"
+  ],
+  "no_claims": [
+    "A green semantic-lint proof lane is not a formal proof of cancel-correctness.",
+    "A green semantic-lint proof lane does not certify broad workspace health.",
+    "A green semantic-lint proof lane does not certify release readiness.",
+    "A green semantic-lint proof lane does not prove performance, live RCH fleet availability, or complete absence of semantic issues outside the declared rule contract surfaces.",
+    "Checked summary/events artifacts with rerun-required status are not fresh RCH evidence until the exact manifest command is rerun remotely."
+  ]
+}

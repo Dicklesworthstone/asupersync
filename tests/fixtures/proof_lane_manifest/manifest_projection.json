@@ -425,7 +425,8 @@
     "downstream-consumer-default-tokio-free",
     "downstream-consumer-internal-only-negative",
     "downstream-consumer-proof-contract",
-    "doctor-e2e-proof-lane-contract"
+    "doctor-e2e-proof-lane-contract",
+    "semantic-lint-proof-lane-contract"
   ],
   "lanes": [
     {
@@ -1161,6 +1162,45 @@
         "artifacts/proof_status_snapshot_v1.json",
         "tests/fixtures/proof_lane_manifest/manifest_projection.json"
       ]
+    },
+    {
+      "lane_id": "semantic-lint-proof-lane-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_proof_lane CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 1 -p asupersync --test semantic_lint_proof_lane_contract --test semantic_lint_rule_inventory_contract --test semantic_lint_diagnostic_codes_contract --test error_code_registry_contract --test semantic_lint_ambient_contract --test semantic_lint_cleanup_budget_contract --test semantic_lint_core_tokio_contract --test semantic_lint_loop_checkpoint_contract --test semantic_lint_ignored_outcome_contract --test semantic_lint_await_holding_contract --test semantic_lint_drop_race_loser_contract -- --nocapture",
+      "guarantee_ids": [
+        "semantic-lint-proof-lane-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "semantic_lint_proof_lane_contract and all semantic_lint_* contract tests pass",
+      "source_paths": [
+        "scripts/semantic_lint.py",
+        "artifacts/semantic_lint_proof_lane_contract_v1.json",
+        "artifacts/semantic_lint_proof_lane_summary_v1.json",
+        "artifacts/semantic_lint_proof_lane_events_v1.ndjson",
+        "artifacts/semantic_lint_rule_inventory_v1.json",
+        "artifacts/semantic_lint_ambient_rule_contract_v1.json",
+        "artifacts/semantic_lint_await_holding_rule_contract_v1.json",
+        "artifacts/semantic_lint_cleanup_budget_rule_contract_v1.json",
+        "artifacts/semantic_lint_core_tokio_rule_contract_v1.json",
+        "artifacts/semantic_lint_drop_race_loser_rule_contract_v1.json",
+        "artifacts/semantic_lint_ignored_outcome_rule_contract_v1.json",
+        "artifacts/semantic_lint_loop_checkpoint_rule_contract_v1.json",
+        "tests/semantic_lint_proof_lane_contract.rs",
+        "tests/semantic_lint_rule_inventory_contract.rs",
+        "tests/semantic_lint_diagnostic_codes_contract.rs",
+        "tests/semantic_lint_ambient_contract.rs",
+        "tests/semantic_lint_cleanup_budget_contract.rs",
+        "tests/semantic_lint_core_tokio_contract.rs",
+        "tests/semantic_lint_loop_checkpoint_contract.rs",
+        "tests/semantic_lint_ignored_outcome_contract.rs",
+        "tests/semantic_lint_await_holding_contract.rs",
+        "tests/semantic_lint_drop_race_loser_contract.rs",
+        "docs/semantic_lint_proof_lane.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ]
     }
   ],
   "guarantees": [
@@ -1390,6 +1430,12 @@
       "guarantee_id": "doctor-e2e-proof-lane-contract",
       "lane_ids": [
         "doctor-e2e-proof-lane-contract"
+      ]
+    },
+    {
+      "guarantee_id": "semantic-lint-proof-lane-contract",
+      "lane_ids": [
+        "semantic-lint-proof-lane-contract"
       ]
     }
   ]
