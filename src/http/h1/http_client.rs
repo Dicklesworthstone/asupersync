@@ -65,6 +65,11 @@ pub enum ClientError {
     },
     /// I/O error.
     Io(io::Error),
+    /// The request's effective deadline elapsed before completion
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.3): the meet of the
+    /// remaining ambient budget, the client's configured total request
+    /// timeout, and any per-call override.
+    DeadlineExceeded,
     /// HTTP CONNECT tunnel was rejected by the proxy endpoint.
     ConnectTunnelRefused {
         /// HTTP status code returned by the proxy.
@@ -111,6 +116,7 @@ impl std::fmt::Display for ClientError {
                 write!(f, "connection pool exhausted for {host}:{port}")
             }
             Self::Cancelled => write!(f, "operation cancelled"),
+            Self::DeadlineExceeded => write!(f, "request budget deadline exceeded"),
         }
     }
 }
@@ -127,7 +133,8 @@ impl std::error::Error for ClientError {
             | Self::TlsError(_)
             | Self::InvalidUrl(_)
             | Self::TooManyRedirects { .. }
-            | Self::Cancelled => None,
+            | Self::Cancelled
+            | Self::DeadlineExceeded => None,
         }
     }
 }
@@ -146,6 +153,55 @@ fn check_cx(cx: &Cx) -> Result<(), ClientError> {
         Err(ClientError::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+/// Drives an outbound exchange under the effective total deadline
+/// (br-asupersync-server-stack-hardening-eeexl1.1.3): the **meet** of the
+/// remaining `cx` budget, the client's configured total request timeout,
+/// and any per-call override — the tightest bound wins, so neither config
+/// nor caller can extend past the caller's budget deadline.
+///
+/// Emits a `client.budget_forwarded` trace event when a deadline applies.
+/// With no bound from any source, the future runs unbounded (legacy
+/// behavior). On expiry the future is dropped — `ConnectionGuard` ensures
+/// the in-flight pooled connection is discarded, not reused — and
+/// [`ClientError::DeadlineExceeded`] is returned.
+async fn drive_with_budget_deadline<T>(
+    cx: &Cx,
+    configured: Option<std::time::Duration>,
+    per_call: Option<std::time::Duration>,
+    fut: impl std::future::Future<Output = Result<T, ClientError>>,
+) -> Result<T, ClientError> {
+    // Prefer the caller's timer driver, then the ambient one, so `now`
+    // shares a timeline with the `Sleep` inside `timeout` (which binds the
+    // ambient driver); wall clock is the last resort.
+    let now = cx
+        .timer_driver()
+        .or_else(|| Cx::with_current(|ambient| ambient.timer_driver()).flatten())
+        .map_or_else(crate::time::wall_now, |timer| timer.now());
+    let remaining = cx
+        .budget()
+        .deadline
+        .map(|deadline| std::time::Duration::from_nanos(deadline.duration_since(now)));
+    let effective = [remaining, configured, per_call]
+        .into_iter()
+        .flatten()
+        .min();
+    let Some(effective) = effective else {
+        return fut.await;
+    };
+    if effective.is_zero() {
+        return Err(ClientError::DeadlineExceeded);
+    }
+    cx.trace(&format!(
+        "client.budget_forwarded proto=h1 remaining_ns={} total_timeout_ns={}",
+        remaining.map_or_else(|| "none".to_string(), |r| r.as_nanos().to_string()),
+        effective.as_nanos(),
+    ));
+    match crate::time::timeout(now, effective, std::pin::pin!(fut)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(ClientError::DeadlineExceeded),
     }
 }
 
@@ -509,6 +565,18 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Sets the default total request timeout
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.3).
+    ///
+    /// Meet-composed with the remaining ambient budget and any per-call
+    /// override; the tightest bound wins (see
+    /// [`HttpClientConfig::request_timeout`]).
+    #[must_use]
+    pub fn request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.config.request_timeout = Some(timeout);
+        self
+    }
+
     /// Sets redirect behavior.
     #[must_use]
     pub fn redirect_policy(mut self, policy: RedirectPolicy) -> Self {
@@ -624,6 +692,14 @@ pub struct HttpClientConfig {
     /// Defaults to `None`, which uses the per-codec default (16 MiB).
     /// Set this to a larger value when downloading large files.
     pub max_body_size: Option<usize>,
+    /// Default total request timeout
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.3).
+    ///
+    /// Composed by meet with the remaining ambient budget and any
+    /// per-call override: the tightest bound wins, so neither config nor
+    /// caller can extend past the caller's budget deadline. `None` (the
+    /// default) imposes no client-side total timeout.
+    pub request_timeout: Option<std::time::Duration>,
     /// Time source used for pool bookkeeping.
     time_getter: fn() -> Time,
 }
@@ -637,6 +713,7 @@ impl Default for HttpClientConfig {
             cookie_store: false,
             proxy_url: None,
             max_body_size: None,
+            request_timeout: None,
             time_getter: wall_clock_now,
         }
     }
@@ -783,8 +860,35 @@ impl HttpClient {
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
-        self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0)
-            .await
+        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0);
+        drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
+    }
+
+    /// Send a request with an explicit per-call total timeout
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.3).
+    ///
+    /// The effective deadline is the **meet** of the remaining ambient
+    /// budget, the client's configured [`request_timeout`]
+    /// (`HttpClientConfig::request_timeout`), and `timeout` — the
+    /// tightest bound wins, so a per-call override can never extend past
+    /// the caller's budget deadline. On expiry the in-flight exchange is
+    /// dropped (the pooled connection is discarded, not reused) and
+    /// [`ClientError::DeadlineExceeded`] is returned.
+    ///
+    /// [`request_timeout`]: Self::request_timeout
+    pub async fn request_with_timeout(
+        &self,
+        cx: &Cx,
+        method: Method,
+        url: &str,
+        extra_headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        timeout: std::time::Duration,
+    ) -> Result<Response, ClientError> {
+        check_cx(cx)?;
+        let parsed = ParsedUrl::parse(url)?;
+        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0);
+        drive_with_budget_deadline(cx, self.config.request_timeout, Some(timeout), fut).await
     }
 
     /// Send a request with multipart form-data body.
@@ -812,8 +916,11 @@ impl HttpClient {
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
-        self.execute_with_redirects_streaming(cx, method, parsed, extra_headers, body, 0)
-            .await
+        // The budget deadline bounds the exchange through the response
+        // head; streaming the body afterwards is governed by the budget
+        // through the caller's own checkpoints.
+        let fut = self.execute_with_redirects_streaming(cx, method, parsed, extra_headers, body, 0);
+        drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
     }
 
     /// Send a multipart request and stream the response body.
@@ -4145,5 +4252,158 @@ mod tests {
             request_text.starts_with("GET http://example.com/oversized HTTP/1.1\r\n"),
             "forward-proxy request must use absolute-form and hit the non-streaming proxy path"
         );
+    }
+
+    // --- br-asupersync-server-stack-hardening-eeexl1.1.3: outbound ---
+    // --- total deadline from the remaining Cx budget                ---
+
+    mod budget_deadline {
+        use super::*;
+        use crate::runtime::RuntimeBuilder;
+        use crate::trace::TraceBufferHandle;
+        use crate::trace::event::{TraceData, TraceEventKind};
+        use crate::types::Budget;
+        use std::time::Duration;
+
+        fn runtime_block_on<F: std::future::Future>(fut: F) -> F::Output {
+            RuntimeBuilder::current_thread()
+                .build()
+                .expect("build current-thread runtime")
+                .block_on(fut)
+        }
+
+        fn cx_with_remaining(remaining: Duration) -> Cx {
+            let now = crate::time::wall_now();
+            let budget = Budget::INFINITE.tightened_by_timeout(now, remaining);
+            Cx::for_request_with_budget(budget)
+        }
+
+        async fn never_completes() -> Result<u8, ClientError> {
+            let now = Cx::with_current(|cx| {
+                cx.timer_driver()
+                    .map_or_else(crate::time::wall_now, |timer| timer.now())
+            })
+            .unwrap_or_else(crate::time::wall_now);
+            crate::time::sleep(now, Duration::from_secs(600)).await;
+            Ok(0)
+        }
+
+        #[test]
+        fn no_bounds_runs_unbounded() {
+            let cx = Cx::for_request_with_budget(Budget::INFINITE);
+            let result = runtime_block_on(drive_with_budget_deadline(&cx, None, None, async {
+                Ok(7_u8)
+            }));
+            assert!(matches!(result, Ok(7)));
+        }
+
+        #[test]
+        fn budget_deadline_bounds_the_exchange() {
+            let cx = cx_with_remaining(Duration::from_millis(30));
+            let started = std::time::Instant::now();
+            let result = runtime_block_on(drive_with_budget_deadline(
+                &cx,
+                None,
+                None,
+                never_completes(),
+            ));
+            assert!(
+                matches!(result, Err(ClientError::DeadlineExceeded)),
+                "got {result:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "budget must bound the exchange"
+            );
+        }
+
+        /// Security: a per-call override longer than the remaining budget
+        /// cannot extend the deadline (meet semantics).
+        #[test]
+        fn per_call_override_cannot_extend_budget() {
+            let cx = cx_with_remaining(Duration::from_millis(30));
+            let started = std::time::Instant::now();
+            let result = runtime_block_on(drive_with_budget_deadline(
+                &cx,
+                Some(Duration::from_secs(120)),
+                Some(Duration::from_secs(300)),
+                never_completes(),
+            ));
+            assert!(
+                matches!(result, Err(ClientError::DeadlineExceeded)),
+                "got {result:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "override must not extend past the budget"
+            );
+        }
+
+        #[test]
+        fn per_call_override_tightens_unbounded_budget() {
+            let cx = Cx::for_request_with_budget(Budget::INFINITE);
+            let started = std::time::Instant::now();
+            let result = runtime_block_on(drive_with_budget_deadline(
+                &cx,
+                None,
+                Some(Duration::from_millis(30)),
+                never_completes(),
+            ));
+            assert!(
+                matches!(result, Err(ClientError::DeadlineExceeded)),
+                "got {result:?}"
+            );
+            assert!(started.elapsed() < Duration::from_secs(60));
+        }
+
+        #[test]
+        fn expired_budget_fails_fast() {
+            let cx = cx_with_remaining(Duration::ZERO);
+            let result = runtime_block_on(drive_with_budget_deadline(
+                &cx,
+                None,
+                None,
+                never_completes(),
+            ));
+            assert!(
+                matches!(result, Err(ClientError::DeadlineExceeded)),
+                "got {result:?}"
+            );
+        }
+
+        #[test]
+        fn forwarded_budget_trace_event_emitted() {
+            let cx = cx_with_remaining(Duration::from_secs(30));
+            let trace = TraceBufferHandle::new(64);
+            cx.set_trace_buffer(trace.clone());
+            let result = runtime_block_on(drive_with_budget_deadline(
+                &cx,
+                Some(Duration::from_secs(10)),
+                None,
+                async { Ok(1_u8) },
+            ));
+            assert!(matches!(result, Ok(1)));
+
+            let forwarded: Vec<String> = trace
+                .snapshot()
+                .iter()
+                .filter(|e| e.kind == TraceEventKind::UserTrace)
+                .filter_map(|e| match &e.data {
+                    TraceData::Message(msg)
+                        if msg.starts_with("client.budget_forwarded proto=h1 ") =>
+                    {
+                        Some(msg.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                forwarded.len(),
+                1,
+                "expected one forwarded event, got {forwarded:?}"
+            );
+            assert!(forwarded[0].contains("remaining_ns="));
+            assert!(forwarded[0].contains("total_timeout_ns="));
+        }
     }
 }

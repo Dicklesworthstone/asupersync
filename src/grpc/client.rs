@@ -452,18 +452,62 @@ impl<C: Codec> GrpcClient<C> {
             Some(_) => ExistingTimeoutState::Malformed,
             None => ExistingTimeoutState::Absent,
         };
-        let timeout_value = match existing_state {
-            ExistingTimeoutState::Parseable(v) => Some(v),
+        let (timeout_value, base_source) = match existing_state {
+            ExistingTimeoutState::Parseable(v) => (Some(v), "override"),
             ExistingTimeoutState::Malformed => {
                 // Scrub the malformed entry; fall back to the channel default
                 // (which may also be None, in which case no grpc-timeout is
                 // sent — equivalent to "no deadline").
                 metadata.remove("grpc-timeout");
-                self.channel.config.timeout.map(encode_grpc_timeout)
+                (
+                    self.channel.config.timeout.map(encode_grpc_timeout),
+                    "channel",
+                )
             }
-            ExistingTimeoutState::Absent => self.channel.config.timeout.map(encode_grpc_timeout),
+            ExistingTimeoutState::Absent => (
+                self.channel.config.timeout.map(encode_grpc_timeout),
+                "channel",
+            ),
+        };
+
+        // br-asupersync-server-stack-hardening-eeexl1.1.3: meet the base
+        // timeout (per-request override or channel default) with the
+        // remaining ambient Cx budget, so an outbound call can never
+        // outlive its caller's deadline. Meet semantics: the budget can
+        // only tighten the base; with no base, the remaining budget alone
+        // becomes the wire deadline; with neither, no grpc-timeout is
+        // sent. The original header string is preserved verbatim unless
+        // the budget actually tightens it.
+        let base_source = if timeout_value.is_some() {
+            base_source
+        } else {
+            "none"
+        };
+        let ambient_remaining = ambient_remaining_budget();
+        let timeout_value = match (timeout_value, ambient_remaining) {
+            (Some(base), Some(remaining)) => {
+                let base_duration = super::server::parse_grpc_timeout(&base)
+                    .expect("base grpc-timeout was validated or encoded above");
+                if remaining < base_duration {
+                    Some(encode_grpc_timeout(remaining))
+                } else {
+                    Some(base)
+                }
+            }
+            (None, Some(remaining)) => Some(encode_grpc_timeout(remaining)),
+            (base, None) => base,
         };
         if let Some(timeout_value) = timeout_value {
+            // Forwarded-budget trace event at the client hop: which base
+            // applied (per-request override / channel default / none),
+            // the remaining ambient budget, and the wire value sent.
+            if let Some(cx) = crate::cx::Cx::current() {
+                let remaining = ambient_remaining
+                    .map_or_else(|| "none".to_string(), |r| r.as_nanos().to_string());
+                cx.trace(&format!(
+                    "client.budget_forwarded proto=grpc base={base_source} remaining_ns={remaining} grpc_timeout={timeout_value}",
+                ));
+            }
             let _ = metadata.insert_or_replace("grpc-timeout", timeout_value);
         }
 
@@ -673,7 +717,32 @@ fn enforce_deadline_budget(timeout: Option<Duration>) -> Result<(), Status> {
             "configured timeout is zero duration",
         ));
     }
+    // br-asupersync-server-stack-hardening-eeexl1.1.3: an outbound call
+    // whose caller has already exhausted its budget deadline fails fast
+    // locally instead of sending a doomed request.
+    if ambient_remaining_budget().is_some_and(|remaining| remaining.is_zero()) {
+        return Err(Status::deadline_exceeded(
+            "ambient budget deadline already expired",
+        ));
+    }
     Ok(())
+}
+
+/// Remaining time until the ambient [`Cx`](crate::cx::Cx) budget deadline,
+/// read against the ambient timer driver (exact under lab virtual time)
+/// with a wall-clock fallback (br-asupersync-server-stack-hardening-eeexl1.1.3).
+///
+/// `None` when no ambient context is installed or its budget carries no
+/// deadline; `Some(Duration::ZERO)` when the deadline has already passed.
+fn ambient_remaining_budget() -> Option<Duration> {
+    crate::cx::Cx::with_current(|cx| {
+        let deadline = cx.budget().deadline?;
+        let now = cx
+            .timer_driver()
+            .map_or_else(crate::time::wall_now, |timer| timer.now());
+        Some(Duration::from_nanos(deadline.duration_since(now)))
+    })
+    .flatten()
 }
 
 fn encode_grpc_timeout(timeout: Duration) -> String {
@@ -2370,6 +2439,159 @@ mod tests {
                 }
                 other => panic!("expected transport error for {uri}, got: {other:?}"),
             }
+        }
+    }
+
+    // --- br-asupersync-server-stack-hardening-eeexl1.1.3: outbound ---
+    // --- deadline attach from the remaining ambient Cx budget       ---
+
+    mod budget_forwarding {
+        use super::*;
+        use crate::trace::TraceBufferHandle;
+        use crate::trace::event::{TraceData, TraceEventKind};
+        use crate::types::Budget;
+
+        /// Installs an ambient Cx whose budget deadline is `remaining`
+        /// from now, runs `f`, and returns its result plus the trace
+        /// buffer attached to the ambient context.
+        fn with_ambient_budget<R>(
+            remaining: Duration,
+            f: impl FnOnce() -> R,
+        ) -> (R, TraceBufferHandle) {
+            let now = crate::time::wall_now();
+            let budget = Budget::INFINITE.tightened_by_timeout(now, remaining);
+            let cx = crate::cx::Cx::for_request_with_budget(budget);
+            let trace = TraceBufferHandle::new(64);
+            cx.set_trace_buffer(trace.clone());
+            let _guard = crate::cx::Cx::set_current(Some(cx));
+            (f(), trace)
+        }
+
+        fn outbound_timeout(client: &mut GrpcClient, path: &str) -> Option<Duration> {
+            let response: Response<String> = futures_lite::future::block_on(
+                client.unary(path, Request::new("hello".to_owned())),
+            )
+            .expect("unary");
+            match response.metadata().get("grpc-timeout") {
+                Some(crate::grpc::streaming::MetadataValue::Ascii(value)) => {
+                    crate::grpc::server::parse_grpc_timeout(value)
+                }
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn ambient_budget_caps_channel_default() {
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://loopback:80")
+                    .timeout(Duration::from_secs(30))
+                    .connect(),
+            )
+            .expect("channel");
+            let mut client = GrpcClient::new(channel);
+            let (sent, _trace) = with_ambient_budget(Duration::from_secs(1), || {
+                outbound_timeout(&mut client, "/pkg.Service/Method")
+            });
+            let sent = sent.expect("grpc-timeout must be present");
+            assert!(
+                sent <= Duration::from_secs(1),
+                "budget must cap the channel default, sent {sent:?}"
+            );
+            assert!(
+                sent > Duration::from_millis(500),
+                "cap should reflect the remaining budget, sent {sent:?}"
+            );
+        }
+
+        #[test]
+        fn ambient_budget_alone_becomes_wire_deadline() {
+            let channel =
+                futures_lite::future::block_on(Channel::builder("http://loopback:80").connect())
+                    .expect("channel");
+            let mut client = GrpcClient::new(channel);
+            let (sent, _trace) = with_ambient_budget(Duration::from_millis(500), || {
+                outbound_timeout(&mut client, "/pkg.Service/Method")
+            });
+            let sent = sent.expect("budget-derived grpc-timeout must be sent");
+            assert!(
+                sent <= Duration::from_millis(500),
+                "wire deadline must not exceed the remaining budget, sent {sent:?}"
+            );
+            assert!(sent > Duration::from_millis(250), "sent {sent:?}");
+        }
+
+        #[test]
+        fn tighter_per_request_override_passes_through_verbatim() {
+            let channel =
+                futures_lite::future::block_on(Channel::builder("http://loopback:80").connect())
+                    .expect("channel");
+            let mut client = GrpcClient::new(channel);
+            let ((), _trace) = with_ambient_budget(Duration::from_secs(10), || {
+                let mut request = Request::new("hello".to_owned());
+                request.metadata_mut().insert("grpc-timeout", "100m");
+                let response: Response<String> =
+                    futures_lite::future::block_on(client.unary("/pkg.Service/Method", request))
+                        .expect("unary");
+                match response.metadata().get("grpc-timeout") {
+                    Some(crate::grpc::streaming::MetadataValue::Ascii(value)) => {
+                        assert_eq!(value, "100m", "tighter override must pass through verbatim");
+                    }
+                    other => panic!("expected grpc-timeout, got {other:?}"),
+                }
+            });
+        }
+
+        #[test]
+        fn expired_ambient_budget_fails_fast() {
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://loopback:80")
+                    .timeout(Duration::from_secs(30))
+                    .connect(),
+            )
+            .expect("channel");
+            let mut client = GrpcClient::new(channel);
+            let (result, _trace) = with_ambient_budget(Duration::ZERO, || {
+                futures_lite::future::block_on(client.unary::<String, String>(
+                    "/pkg.Service/Method",
+                    Request::new("hello".to_owned()),
+                ))
+            });
+            let status = result.expect_err("expired budget must fail fast");
+            assert_eq!(status.code(), crate::grpc::Code::DeadlineExceeded);
+        }
+
+        #[test]
+        fn forwarded_budget_trace_event_emitted() {
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://loopback:80")
+                    .timeout(Duration::from_secs(30))
+                    .connect(),
+            )
+            .expect("channel");
+            let mut client = GrpcClient::new(channel);
+            let (_sent, trace) = with_ambient_budget(Duration::from_secs(1), || {
+                outbound_timeout(&mut client, "/pkg.Service/Method")
+            });
+            let forwarded: Vec<String> = trace
+                .snapshot()
+                .iter()
+                .filter(|e| e.kind == TraceEventKind::UserTrace)
+                .filter_map(|e| match &e.data {
+                    TraceData::Message(msg)
+                        if msg.starts_with("client.budget_forwarded proto=grpc ") =>
+                    {
+                        Some(msg.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                forwarded.len(),
+                1,
+                "exactly one forwarded event expected, got {forwarded:?}"
+            );
+            assert!(forwarded[0].contains("base=channel"));
+            assert!(forwarded[0].contains("grpc_timeout="));
         }
     }
 }
