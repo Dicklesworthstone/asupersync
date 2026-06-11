@@ -9,6 +9,7 @@
 
 #![cfg(feature = "sqlite")]
 
+use asupersync::Outcome;
 use asupersync::cx::Cx;
 use asupersync::database::SqliteConnection;
 use std::time::{Duration, Instant};
@@ -50,7 +51,7 @@ async fn sqlite_busy_timeout_behavior_audit() {
 
     // Start exclusive transaction on conn1 (will hold lock)
     conn1
-        .execute(&cx, "BEGIN EXCLUSIVE", &[])
+        .execute_unchecked(&cx, "BEGIN EXCLUSIVE", &[])
         .await
         .expect("begin exclusive transaction");
 
@@ -69,11 +70,11 @@ async fn sqlite_busy_timeout_behavior_audit() {
 
     // Verify the behavior based on elapsed time and result
     match result {
-        Ok(_) => {
+        Outcome::Ok(_) => {
             // This shouldn't happen with exclusive transaction
             panic!("INSERT succeeded despite exclusive lock - unexpected behavior");
         }
-        Err(e) => {
+        Outcome::Err(e) => {
             if e.is_busy() {
                 // Expected: should have waited close to busy_timeout duration (250ms)
                 println!("✅ SQLITE_BUSY error returned after timeout: {}", e);
@@ -94,11 +95,17 @@ async fn sqlite_busy_timeout_behavior_audit() {
                 panic!("Expected SQLITE_BUSY error but got: {}", e);
             }
         }
+        Outcome::Cancelled(reason) => {
+            panic!("Expected SQLITE_BUSY error but operation was cancelled: {reason:?}");
+        }
+        Outcome::Panicked(payload) => {
+            panic!("Expected SQLITE_BUSY error but operation panicked: {payload:?}");
+        }
     }
 
     // Clean up: rollback the exclusive transaction
     conn1
-        .execute(&cx, "ROLLBACK", &[])
+        .execute_unchecked(&cx, "ROLLBACK", &[])
         .await
         .expect("rollback transaction");
 
@@ -145,7 +152,7 @@ async fn sqlite_busy_timeout_classification_audit() {
         .expect("create table");
 
     conn1
-        .execute(&cx, "BEGIN EXCLUSIVE", &[])
+        .execute_unchecked(&cx, "BEGIN EXCLUSIVE", &[])
         .await
         .expect("begin exclusive");
 
@@ -155,7 +162,7 @@ async fn sqlite_busy_timeout_classification_audit() {
         .await;
 
     match result {
-        Err(e) => {
+        Outcome::Err(e) => {
             println!("✓ Got expected error: {}", e);
 
             // Test error classification methods
@@ -173,12 +180,21 @@ async fn sqlite_busy_timeout_classification_audit() {
                 assert_eq!(code, "SQLITE_BUSY");
             }
         }
-        Ok(_) => {
+        Outcome::Ok(_) => {
             panic!("Expected SQLITE_BUSY error but operation succeeded");
+        }
+        Outcome::Cancelled(reason) => {
+            panic!("Expected SQLITE_BUSY error but operation was cancelled: {reason:?}");
+        }
+        Outcome::Panicked(payload) => {
+            panic!("Expected SQLITE_BUSY error but operation panicked: {payload:?}");
         }
     }
 
-    conn1.execute(&cx, "ROLLBACK", &[]).await.expect("rollback");
+    conn1
+        .execute_unchecked(&cx, "ROLLBACK", &[])
+        .await
+        .expect("rollback");
 
     println!("✅ AUDIT PASSED: Error classification infrastructure is sound");
 }

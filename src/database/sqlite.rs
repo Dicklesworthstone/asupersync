@@ -4878,16 +4878,6 @@ mod tests {
                     "Journal mode should be WAL"
                 );
 
-                // Verify WAL files are created
-                assert!(
-                    test_data.get_wal_path().exists(),
-                    "WAL file should be created"
-                );
-                assert!(
-                    test_data.get_shm_path().exists(),
-                    "SHM file should be created"
-                );
-
                 // Verify data integrity after transition
                 JournalModeTestData::verify_test_data(&conn, &cx, 3).await;
 
@@ -4903,6 +4893,18 @@ mod tests {
                     Outcome::Ok(_) => {}
                     other => panic!("Failed to insert WAL data: {other:?}"),
                 };
+
+                // SQLite creates the -wal/-shm files lazily on the first
+                // transaction after entering WAL mode, so these checks must
+                // come after a WAL-mode write (br-asupersync-uvqpga).
+                assert!(
+                    test_data.get_wal_path().exists(),
+                    "WAL file should be created"
+                );
+                assert!(
+                    test_data.get_shm_path().exists(),
+                    "SHM file should be created"
+                );
 
                 JournalModeTestData::verify_test_data(&conn, &cx, 4).await;
 
@@ -5023,8 +5025,11 @@ mod tests {
                     other => panic!("Failed to begin transaction: {other:?}"),
                 };
 
-                // Close connection abruptly without commit (simulating crash)
-                conn.close().unwrap();
+                // Close abruptly without commit (simulating crash). A graceful
+                // close() runs a WAL checkpoint, which correctly fails while a
+                // write transaction is still open — dropping the connection is
+                // the faithful crash simulation (br-asupersync-uvqpga).
+                drop(conn);
 
                 // Reopen in-memory database - all data should be lost
                 let new_conn = match SqliteConnection::open_in_memory(&cx).await {

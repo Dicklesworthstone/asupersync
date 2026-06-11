@@ -3967,14 +3967,19 @@ mod tests {
         recycled.discard();
         let discarded = pool.stats();
 
-        insta::assert_json_snapshot!(
-            "pool_telemetry_snapshot",
-            json!({
-                "initial": db_pool_stats_snapshot(&initial),
-                "checked_out": db_pool_stats_snapshot(&checked_out),
-                "returned": db_pool_stats_snapshot(&returned),
-                "discarded": db_pool_stats_snapshot(&discarded),
-            })
-        );
+        // sort_maps keeps the snapshot stable whether or not some feature
+        // combination unifies serde_json's preserve_order feature into the
+        // test build (br-asupersync-uvqpga).
+        insta::with_settings!({sort_maps => true}, {
+            insta::assert_json_snapshot!(
+                "pool_telemetry_snapshot",
+                json!({
+                    "initial": db_pool_stats_snapshot(&initial),
+                    "checked_out": db_pool_stats_snapshot(&checked_out),
+                    "returned": db_pool_stats_snapshot(&returned),
+                    "discarded": db_pool_stats_snapshot(&discarded),
+                })
+            );
+        });
     }
 }

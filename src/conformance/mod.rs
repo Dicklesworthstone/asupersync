@@ -652,6 +652,14 @@ impl ConformanceTarget for LabRuntimeTarget {
                 }
             }
 
+            // When every task is parked on a virtual-time sleep/timeout the
+            // scheduler is empty and step_for_test cannot make progress; jump
+            // to the next timer deadline the same way run_with_auto_advance
+            // does (br-asupersync-uvqpga). No-op when no timer is pending.
+            if runtime.scheduler.lock().is_empty() {
+                runtime.advance_to_next_timer();
+            }
+
             runtime.step_for_test();
         }
 
