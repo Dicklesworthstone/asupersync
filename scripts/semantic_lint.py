@@ -16,9 +16,31 @@ from typing import Iterable
 AMBIENT_RULE_ID = "ambient-time-or-entropy-in-lab-sensitive-code"
 CLEANUP_BUDGET_RULE_ID = "unbounded-cleanup-budget"
 CORE_TOKIO_RULE_ID = "core-tokio-feature-leakage"
+LOOP_CHECKPOINT_RULE_ID = "loop-without-cx-checkpoint"
 SCHEMA_VERSION = "semantic-lint-results-v1"
 ALLOW_PREFIX = "asupersync-lint:allow"
 OWNER_RE = re.compile(r"^asupersync-[A-Za-z0-9_.-]+$")
+LOOP_CHECKPOINT_ENGINE = "hybrid-rustc-hir-ast-grep"
+LOOP_CHECKPOINT_TARGET_PREFIXES = (
+    "src/runtime/",
+    "src/lab/",
+    "src/transport/",
+    "src/database/",
+    "src/raptorq/",
+    "tests/fixtures/semantic_lint/loop_checkpoint/",
+)
+LOOP_START_RE = re.compile(r"\b(?:loop\s*\{|while\s+true\s*\{)")
+LOOP_CHECKPOINT_TOKENS = (
+    ".checkpoint(",
+    "checkpoint(cx",
+    "cx.checkpoint",
+    ".cancel_requested(",
+    "cancel_requested(",
+    ".is_cancelled(",
+    "is_cancelled(",
+    ".yield_now(",
+    "yield_now(",
+)
 
 
 @dataclass(frozen=True)
@@ -987,6 +1009,148 @@ def build_core_tokio_result(files: list[Path], engine: str, cwd: Path) -> dict[s
     }
 
 
+def is_loop_checkpoint_target_scope(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return any(normalized.startswith(prefix) for prefix in LOOP_CHECKPOINT_TARGET_PREFIXES)
+
+
+def collect_loop_checkpoint_files(
+    paths: Iterable[str],
+    cwd: Path,
+    all_paths: bool,
+) -> list[Path]:
+    files: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = cwd / path
+        if path.is_dir():
+            files.extend(child for child in path.rglob("*.rs") if child.is_file())
+        elif path.is_file() and path.suffix == ".rs":
+            files.append(path)
+
+    unique = sorted({path.resolve() for path in files}, key=lambda item: repo_relative(item, cwd))
+    if all_paths:
+        return unique
+    return [
+        path
+        for path in unique
+        if is_loop_checkpoint_target_scope(repo_relative(path, cwd))
+    ]
+
+
+def loop_block_text(masked_lines: list[str], start_line_index: int, start_column: int) -> str:
+    body: list[str] = []
+    first = masked_lines[start_line_index][start_column:]
+    body.append(first)
+    depth = first.count("{") - first.count("}")
+    index = start_line_index
+    while depth > 0 and index + 1 < len(masked_lines):
+        index += 1
+        line = masked_lines[index]
+        body.append(line)
+        depth += line.count("{") - line.count("}")
+    return "\n".join(body)
+
+
+def loop_has_checkpoint(body: str) -> bool:
+    return any(token in body for token in LOOP_CHECKPOINT_TOKENS)
+
+
+def build_loop_checkpoint_result(files: list[Path], engine: str, cwd: Path) -> dict[str, object]:
+    findings: list[dict[str, object]] = []
+    suppressed: list[dict[str, object]] = []
+    candidate_loops = 0
+
+    for path in files:
+        rel = repo_relative(path, cwd)
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+        masked_lines = [strip_simple_comments_and_strings(line) for line in raw_lines]
+        for line_index, line in enumerate(masked_lines):
+            for match in LOOP_START_RE.finditer(line):
+                body = loop_block_text(masked_lines, line_index, match.start())
+                if ".await" not in body:
+                    continue
+                if loop_has_checkpoint(body):
+                    continue
+
+                candidate_loops += 1
+                marker = allow_marker_for(raw_lines, line_index + 1, LOOP_CHECKPOINT_RULE_ID)
+                base = {
+                    "rule_id": LOOP_CHECKPOINT_RULE_ID,
+                    "path": rel,
+                    "line": line_index + 1,
+                    "column": match.start() + 1,
+                    "matched_text": match.group(0).strip(),
+                    "pattern_id": "async-infinite-loop-without-checkpoint",
+                }
+                if marker and marker["valid"]:
+                    suppressed.append(
+                        {
+                            **base,
+                            "owner": marker["owner"],
+                            "reason": marker["reason"],
+                        }
+                    )
+                    continue
+                if marker and not marker["valid"]:
+                    findings.append(
+                        {
+                            **base,
+                            "kind": "invalid_allow_marker",
+                            "severity": "error",
+                            "diagnostic": "invalid allow marker metadata for loop checkpoint risk",
+                            "allow_marker_errors": marker["errors"],
+                        }
+                    )
+                findings.append(
+                    {
+                        **base,
+                        "kind": "loop_without_cx_checkpoint",
+                        "severity": "warning",
+                        "diagnostic": "async infinite loop is missing an explicit cx checkpoint or cancellation poll",
+                    }
+                )
+
+    findings.sort(
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["column"],
+            item["kind"],
+            item["pattern_id"],
+        )
+    )
+    suppressed.sort(
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["column"],
+            item["pattern_id"],
+        )
+    )
+    scanned = [repo_relative(path, cwd) for path in files]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "rule_id": LOOP_CHECKPOINT_RULE_ID,
+        "engine": engine,
+        "engine_fallback": False,
+        "verdict": "pass" if not findings else "fail",
+        "scanned_files": scanned,
+        "findings": findings,
+        "suppressed": suppressed,
+        "summary": {
+            "files_scanned": len(scanned),
+            "findings": len(findings),
+            "suppressed": len(suppressed),
+            "candidate_loops": candidate_loops,
+            "invalid_allow_markers": sum(
+                1 for finding in findings if finding["kind"] == "invalid_allow_marker"
+            ),
+        },
+    }
+
+
 def unsupported_engine_result(
     files: list[Path],
     cwd: Path,
@@ -1026,13 +1190,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--rule",
         default=AMBIENT_RULE_ID,
-        choices=sorted([*RULES, CORE_TOKIO_RULE_ID]),
+        choices=sorted([*RULES, CORE_TOKIO_RULE_ID, LOOP_CHECKPOINT_RULE_ID]),
         help="semantic lint rule id to run",
     )
     parser.add_argument(
         "--engine",
         default="auto",
-        choices=["auto", "ast-grep", "portable-fallback", "cargo-metadata"],
+        choices=[
+            "auto",
+            "ast-grep",
+            "portable-fallback",
+            "cargo-metadata",
+            LOOP_CHECKPOINT_ENGINE,
+        ],
         help="analysis engine; auto prefers ast-grep and falls back deterministically",
     )
     parser.add_argument(
@@ -1080,11 +1250,37 @@ def main(argv: list[str]) -> int:
             return 0
         return 0 if result["verdict"] == "pass" else 1
 
+    if args.rule == LOOP_CHECKPOINT_RULE_ID:
+        files = collect_loop_checkpoint_files(args.paths, cwd, args.all_paths)
+        engine = LOOP_CHECKPOINT_ENGINE if args.engine == "auto" else args.engine
+        if engine != LOOP_CHECKPOINT_ENGINE:
+            result = unsupported_engine_result(
+                files,
+                cwd,
+                rule_id=LOOP_CHECKPOINT_RULE_ID,
+                engine=engine,
+                diagnostic=(
+                    "loop-without-cx-checkpoint requires the "
+                    "hybrid-rustc-hir-ast-grep engine"
+                ),
+            )
+        else:
+            result = build_loop_checkpoint_result(files, engine, cwd)
+
+        output = json.dumps(result, indent=2, sort_keys=True)
+        if args.json:
+            print(output)
+        else:
+            print(output)
+        if args.exit_zero:
+            return 0
+        return 0 if result["verdict"] == "pass" else 1
+
     rule = RULES[args.rule]
     files = collect_rust_files(args.paths, cwd, args.all_paths, rule)
 
     engine = args.engine
-    if engine == "cargo-metadata":
+    if engine in {"cargo-metadata", LOOP_CHECKPOINT_ENGINE}:
         result = unsupported_engine_result(
             files,
             cwd,
