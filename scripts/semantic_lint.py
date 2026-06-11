@@ -17,10 +17,12 @@ AMBIENT_RULE_ID = "ambient-time-or-entropy-in-lab-sensitive-code"
 CLEANUP_BUDGET_RULE_ID = "unbounded-cleanup-budget"
 CORE_TOKIO_RULE_ID = "core-tokio-feature-leakage"
 LOOP_CHECKPOINT_RULE_ID = "loop-without-cx-checkpoint"
+IGNORED_OUTCOME_RULE_ID = "ignored-outcome-severity"
 SCHEMA_VERSION = "semantic-lint-results-v1"
 ALLOW_PREFIX = "asupersync-lint:allow"
 OWNER_RE = re.compile(r"^asupersync-[A-Za-z0-9_.-]+$")
 LOOP_CHECKPOINT_ENGINE = "hybrid-rustc-hir-ast-grep"
+IGNORED_OUTCOME_ENGINE = "rustc-hir"
 LOOP_CHECKPOINT_TARGET_PREFIXES = (
     "src/runtime/",
     "src/lab/",
@@ -29,7 +31,16 @@ LOOP_CHECKPOINT_TARGET_PREFIXES = (
     "src/raptorq/",
     "tests/fixtures/semantic_lint/loop_checkpoint/",
 )
+IGNORED_OUTCOME_TARGET_PREFIXES = (
+    "src/runtime/",
+    "src/supervision.rs",
+    "src/combinator/",
+    "src/lab/",
+    "src/trace/",
+    "tests/fixtures/semantic_lint/ignored_outcome/",
+)
 LOOP_START_RE = re.compile(r"\b(?:loop\s*\{|while\s+true\s*\{)")
+IGNORED_OUTCOME_RE = re.compile(r"\blet\s+_\s*=\s*[^;]*\bOutcome::")
 LOOP_CHECKPOINT_TOKENS = (
     ".checkpoint(",
     "checkpoint(cx",
@@ -1151,6 +1162,149 @@ def build_loop_checkpoint_result(files: list[Path], engine: str, cwd: Path) -> d
     }
 
 
+def is_ignored_outcome_target_scope(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return any(normalized.startswith(prefix) for prefix in IGNORED_OUTCOME_TARGET_PREFIXES)
+
+
+def collect_ignored_outcome_files(
+    paths: Iterable[str],
+    cwd: Path,
+    all_paths: bool,
+) -> list[Path]:
+    files: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = cwd / path
+        if path.is_dir():
+            files.extend(child for child in path.rglob("*.rs") if child.is_file())
+        elif path.is_file() and path.suffix == ".rs":
+            files.append(path)
+
+    unique = sorted({path.resolve() for path in files}, key=lambda item: repo_relative(item, cwd))
+    if all_paths:
+        return unique
+    return [
+        path
+        for path in unique
+        if is_ignored_outcome_target_scope(repo_relative(path, cwd))
+    ]
+
+
+def ignored_outcome_candidates(masked_line: str) -> list[tuple[int, str, str, str]]:
+    candidates: list[tuple[int, str, str, str]] = []
+    if "Outcome::Cancelled" in masked_line and "Outcome::Ok" in masked_line:
+        column = masked_line.find("Outcome::Cancelled") + 1
+        candidates.append(
+            (
+                column,
+                "cancelled-collapsed-to-ok",
+                "cancelled_collapsed_to_ok",
+                "Outcome::Cancelled is collapsed into Outcome::Ok; preserve the Outcome severity lattice",
+            )
+        )
+    match = IGNORED_OUTCOME_RE.search(masked_line)
+    if match:
+        candidates.append(
+            (
+                match.start() + 1,
+                "ignored-outcome-value",
+                "ignored_outcome_value",
+                "Outcome severity value is ignored; preserve or explicitly handle the Outcome lattice",
+            )
+        )
+    return candidates
+
+
+def build_ignored_outcome_result(files: list[Path], engine: str, cwd: Path) -> dict[str, object]:
+    findings: list[dict[str, object]] = []
+    suppressed: list[dict[str, object]] = []
+    candidate_outcomes = 0
+
+    for path in files:
+        rel = repo_relative(path, cwd)
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+        masked_lines = [strip_simple_comments_and_strings(line) for line in raw_lines]
+        for line_index, masked_line in enumerate(masked_lines):
+            for column, pattern_id, kind, diagnostic in ignored_outcome_candidates(masked_line):
+                candidate_outcomes += 1
+                marker = allow_marker_for(raw_lines, line_index + 1, IGNORED_OUTCOME_RULE_ID)
+                base = {
+                    "rule_id": IGNORED_OUTCOME_RULE_ID,
+                    "path": rel,
+                    "line": line_index + 1,
+                    "column": column,
+                    "matched_text": raw_lines[line_index].strip(),
+                    "pattern_id": pattern_id,
+                }
+                if marker and marker["valid"]:
+                    suppressed.append(
+                        {
+                            **base,
+                            "owner": marker["owner"],
+                            "reason": marker["reason"],
+                        }
+                    )
+                    continue
+                if marker and not marker["valid"]:
+                    findings.append(
+                        {
+                            **base,
+                            "kind": "invalid_allow_marker",
+                            "severity": "error",
+                            "diagnostic": "invalid allow marker metadata for ignored Outcome severity risk",
+                            "allow_marker_errors": marker["errors"],
+                        }
+                    )
+                findings.append(
+                    {
+                        **base,
+                        "kind": kind,
+                        "severity": "warning",
+                        "diagnostic": diagnostic,
+                    }
+                )
+
+    findings.sort(
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["column"],
+            item["kind"],
+            item["pattern_id"],
+        )
+    )
+    suppressed.sort(
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["column"],
+            item["pattern_id"],
+        )
+    )
+    scanned = [repo_relative(path, cwd) for path in files]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "rule_id": IGNORED_OUTCOME_RULE_ID,
+        "engine": engine,
+        "engine_fallback": False,
+        "verdict": "pass" if not findings else "fail",
+        "scanned_files": scanned,
+        "findings": findings,
+        "suppressed": suppressed,
+        "summary": {
+            "files_scanned": len(scanned),
+            "findings": len(findings),
+            "suppressed": len(suppressed),
+            "candidate_outcomes": candidate_outcomes,
+            "invalid_allow_markers": sum(
+                1 for finding in findings if finding["kind"] == "invalid_allow_marker"
+            ),
+        },
+    }
+
+
 def unsupported_engine_result(
     files: list[Path],
     cwd: Path,
@@ -1190,7 +1344,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--rule",
         default=AMBIENT_RULE_ID,
-        choices=sorted([*RULES, CORE_TOKIO_RULE_ID, LOOP_CHECKPOINT_RULE_ID]),
+        choices=sorted(
+            [
+                *RULES,
+                CORE_TOKIO_RULE_ID,
+                LOOP_CHECKPOINT_RULE_ID,
+                IGNORED_OUTCOME_RULE_ID,
+            ]
+        ),
         help="semantic lint rule id to run",
     )
     parser.add_argument(
@@ -1202,6 +1363,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "portable-fallback",
             "cargo-metadata",
             LOOP_CHECKPOINT_ENGINE,
+            IGNORED_OUTCOME_ENGINE,
         ],
         help="analysis engine; auto prefers ast-grep and falls back deterministically",
     )
@@ -1276,11 +1438,34 @@ def main(argv: list[str]) -> int:
             return 0
         return 0 if result["verdict"] == "pass" else 1
 
+    if args.rule == IGNORED_OUTCOME_RULE_ID:
+        files = collect_ignored_outcome_files(args.paths, cwd, args.all_paths)
+        engine = IGNORED_OUTCOME_ENGINE if args.engine == "auto" else args.engine
+        if engine != IGNORED_OUTCOME_ENGINE:
+            result = unsupported_engine_result(
+                files,
+                cwd,
+                rule_id=IGNORED_OUTCOME_RULE_ID,
+                engine=engine,
+                diagnostic="ignored-outcome-severity requires the rustc-hir engine",
+            )
+        else:
+            result = build_ignored_outcome_result(files, engine, cwd)
+
+        output = json.dumps(result, indent=2, sort_keys=True)
+        if args.json:
+            print(output)
+        else:
+            print(output)
+        if args.exit_zero:
+            return 0
+        return 0 if result["verdict"] == "pass" else 1
+
     rule = RULES[args.rule]
     files = collect_rust_files(args.paths, cwd, args.all_paths, rule)
 
     engine = args.engine
-    if engine in {"cargo-metadata", LOOP_CHECKPOINT_ENGINE}:
+    if engine in {"cargo-metadata", LOOP_CHECKPOINT_ENGINE, IGNORED_OUTCOME_ENGINE}:
         result = unsupported_engine_result(
             files,
             cwd,

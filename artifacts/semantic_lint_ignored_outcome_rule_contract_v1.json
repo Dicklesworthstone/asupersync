@@ -1,0 +1,90 @@
+{
+  "contract_version": "semantic-lint-ignored-outcome-rule-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+  "rule_id": "ignored-outcome-severity",
+  "source_of_truth": {
+    "inventory": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "contract": "artifacts/semantic_lint_ignored_outcome_rule_contract_v1.json",
+    "contract_test": "tests/semantic_lint_ignored_outcome_contract.rs",
+    "runner": "scripts/semantic_lint.py",
+    "docs": "docs/semantic_lint_ignored_outcome_rule.md",
+    "positive_cancelled_fixture": "tests/fixtures/semantic_lint/ignored_outcome/positive_cancelled_to_ok.rs",
+    "positive_ignored_fixture": "tests/fixtures/semantic_lint/ignored_outcome/positive_ignored_outcome.rs",
+    "negative_fixture": "tests/fixtures/semantic_lint/ignored_outcome/negative_preserve_severity.rs",
+    "valid_allow_fixture": "tests/fixtures/semantic_lint/ignored_outcome/valid_allow.rs",
+    "invalid_allow_fixture": "tests/fixtures/semantic_lint/ignored_outcome/invalid_allow.rs"
+  },
+  "implementation": {
+    "selected_engine": "rustc-hir",
+    "runner_default_engine": "auto",
+    "result_schema": "semantic-lint-results-v1",
+    "candidate_scanner": true,
+    "requires_future_hir_confirmation": true,
+    "no_source_rewrites": true,
+    "no_runtime_behavior_change": true
+  },
+  "target_paths": [
+    "src/runtime/",
+    "src/supervision.rs",
+    "src/combinator/",
+    "src/lab/",
+    "src/trace/"
+  ],
+  "candidate_policy": {
+    "reports": [
+      "same-line Outcome::Cancelled to Outcome::Ok collapse",
+      "explicit let _ = Outcome::... ignored severity values"
+    ],
+    "accepts": [
+      "severity-preserving Outcome conversions",
+      "allowed fixture-only ignored values with reason and owner"
+    ],
+    "diagnostic_must_name": "Outcome severity lattice"
+  },
+  "allow_marker": {
+    "format": "asupersync-lint:allow ignored-outcome-severity reason=<short reason> owner=<asupersync-bead-id>",
+    "locations": [
+      "same line as finding",
+      "immediately preceding line"
+    ],
+    "requires": [
+      "reason",
+      "owner"
+    ],
+    "owner_must_match": "^asupersync-[A-Za-z0-9_.-]+$",
+    "invalid_marker_does_not_suppress": true
+  },
+  "fixtures": [
+    {
+      "path": "tests/fixtures/semantic_lint/ignored_outcome/positive_cancelled_to_ok.rs",
+      "expected_verdict": "fail",
+      "expected_kind": "cancelled_collapsed_to_ok"
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/ignored_outcome/positive_ignored_outcome.rs",
+      "expected_verdict": "fail",
+      "expected_kind": "ignored_outcome_value"
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/ignored_outcome/negative_preserve_severity.rs",
+      "expected_verdict": "pass",
+      "expected_findings": 0
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/ignored_outcome/valid_allow.rs",
+      "expected_verdict": "pass",
+      "expected_suppressed": 1
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/ignored_outcome/invalid_allow.rs",
+      "expected_verdict": "fail",
+      "expected_invalid_allow_markers": 1
+    }
+  ],
+  "no_claims": [
+    "does not close every rule required by asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+    "does not provide complete rustc-HIR type-aware Outcome tracking",
+    "does not prove every Outcome value in the repository is severity-preserving",
+    "does not rewrite source code"
+  ]
+}
