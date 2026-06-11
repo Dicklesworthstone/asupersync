@@ -3453,6 +3453,90 @@ where
         Ok(self.spawn_via_gateway(scope.region_id(), scope.budget(), &gateway, &pending, f))
     }
 
+    /// Spawns a blocking closure into **this Cx's own region** without
+    /// touching the `RuntimeState` lock (br-asupersync-wwyi9k / A2.2b).
+    ///
+    /// Admission runs through the same producer-side gateway as
+    /// [`Cx::spawn`], so the blocking work is owned by a real region task
+    /// (region close waits for it; pending-spawn accounting applies) and
+    /// the closure receives its own child [`Cx`] carrying this parent's
+    /// inherited capabilities and budget. Execution dispatches to the
+    /// runtime blocking pool when this context carries a pool handle;
+    /// without one (e.g. under the lab runtime) the closure runs inline
+    /// inside the admitted task — the same deterministic fallback as the
+    /// free [`spawn_blocking`](crate::runtime::spawn_blocking::spawn_blocking)
+    /// and the legacy `Scope::spawn_blocking`.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancelling the owning region cancels the *wrapper task*; a closure
+    /// already running on the pool is not preempted (its result is
+    /// discarded), matching the documented `spawn_blocking` semantics.
+    /// A panic inside the closure resolves the handle as
+    /// `JoinError::Panicked` and the task outcome as `Panicked`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// spawn gateway or region counter. Admission-time denials (region
+    /// closing, quota) resolve through the returned handle as
+    /// `JoinError::Cancelled`. Never panics.
+    pub fn spawn_blocking<F, R>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<R>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let pool = self.blocking_pool_handle();
+        self.spawn(move |child| async move {
+            match pool {
+                Some(pool) => {
+                    crate::runtime::spawn_blocking::spawn_blocking_on_pool(pool, move || f(child))
+                        .await
+                }
+                None => f(child),
+            }
+        })
+    }
+
+    /// Spawns a blocking closure into **`scope`'s region** without touching
+    /// the `RuntimeState` lock (br-asupersync-wwyi9k / A2.2b).
+    ///
+    /// The scope-targeting sibling of [`Cx::spawn_blocking`]: region
+    /// ownership, budget, and pending-spawn accounting come from `scope`
+    /// exactly as in [`Cx::spawn_in`]; pool dispatch and the deterministic
+    /// inline fallback match [`Cx::spawn_blocking`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// spawn gateway, or when `scope` carries no pending-spawn counter for
+    /// its region (see [`Cx::spawn_in`]). Admission-time denials resolve
+    /// through the returned handle as `JoinError::Cancelled`. Never panics.
+    pub fn spawn_blocking_in<F, R, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<R>, crate::runtime::state::SpawnError>
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let pool = self.blocking_pool_handle();
+        self.spawn_in(scope, move |child| async move {
+            match pool {
+                Some(pool) => {
+                    crate::runtime::spawn_blocking::spawn_blocking_on_pool(pool, move || f(child))
+                        .await
+                }
+                None => f(child),
+            }
+        })
+    }
+
     /// Shared producer-side machinery for the lock-free spawn paths
     /// ([`Cx::spawn`], [`Cx::spawn_in`]): enqueues a factory-carrying
     /// [`SpawnRequest`](crate::runtime::spawn_mailbox::SpawnRequest) on the

@@ -1964,4 +1964,187 @@ mod tests {
             "join must resolve Cancelled for a denied scope-targeted spawn, got {result:?}"
         );
     }
+
+    // === br-asupersync-wwyi9k (A2.2b): Cx::spawn_blocking v2 surface ===
+
+    /// Drives `join` against the lab until it resolves (or the step budget
+    /// runs out), returning the join result.
+    fn poll_join_with_lab<T: Send + 'static>(
+        lab: &mut LabRuntime,
+        parent_cx: &crate::cx::Cx,
+        handle: &mut crate::runtime::TaskHandle<T>,
+    ) -> Result<T, crate::runtime::task_handle::JoinError> {
+        use std::task::{Context, Poll, Waker};
+
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+        let mut join = handle.join(parent_cx);
+        for _ in 0..200 {
+            match Pin::new(&mut join).poll(&mut poll_cx) {
+                Poll::Ready(r) => return r,
+                Poll::Pending => lab.step_for_test(),
+            }
+        }
+        panic!("join did not resolve within the step budget");
+    }
+
+    /// Without a pool handle (lab runtime), the closure runs inline inside
+    /// the admitted region-owned task and the value flows through the
+    /// handle — the deterministic fallback path.
+    #[test]
+    fn cx_spawn_blocking_inline_fallback_delivers_value() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in_closure = Arc::clone(&ran);
+        let mut handle = parent_cx
+            .spawn_blocking(move |_child| {
+                ran_in_closure.fetch_add(1, Ordering::SeqCst);
+                42usize
+            })
+            .expect("cx.spawn_blocking");
+        let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
+        assert_eq!(result.expect("blocking value"), 42);
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "closure ran exactly once");
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            0,
+            "credits balanced"
+        );
+    }
+
+    /// The blocking closure's child Cx inherits the caller's budget
+    /// (A2.2 acceptance criterion: spawn_blocking budget inheritance).
+    ///
+    /// The deadline must carry over exactly; the poll quota is asserted
+    /// within a small tolerance because the admitted wrapper task's own
+    /// polls are charged against the child budget before the closure
+    /// observes it.
+    #[test]
+    fn cx_spawn_blocking_child_inherits_caller_budget() {
+        const QUOTA: u32 = 1_000;
+        let deadline = Time::from_secs(77);
+        let parent_budget = Budget::new().with_deadline(deadline).with_poll_quota(QUOTA);
+
+        let mut lab = LabRuntime::new(LabConfig::new(21));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let system_cx = lab.state.create_system_cx();
+        let (parent_tid, _handle, parent_cx, _result_tx) = lab
+            .state
+            .create_task_infrastructure::<()>(&system_cx, root, parent_budget, false)
+            .expect("parent task");
+        lab.state.store_spawned_task(
+            parent_tid,
+            StoredTask::new_with_id(async { Outcome::Ok(()) }, parent_tid),
+        );
+        lab.scheduler.lock().schedule(parent_tid, 0);
+
+        let observed: Arc<std::sync::Mutex<Option<Budget>>> = Arc::new(std::sync::Mutex::new(None));
+        let observed_in_closure = Arc::clone(&observed);
+        parent_cx
+            .spawn_blocking(move |child| {
+                *observed_in_closure
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(child.budget());
+            })
+            .expect("cx.spawn_blocking");
+        lab.run_until_quiescent();
+        let observed = observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("closure observed a budget");
+        assert_eq!(
+            observed.deadline,
+            Some(deadline),
+            "child deadline must equal the caller's deadline at spawn time"
+        );
+        assert!(
+            observed.poll_quota <= QUOTA && observed.poll_quota >= QUOTA - 10,
+            "child poll quota must inherit the caller's quota modulo wrapper poll \
+             accounting, got {} (expected within [{}, {QUOTA}])",
+            observed.poll_quota,
+            QUOTA - 10
+        );
+    }
+
+    /// A panic inside the blocking closure resolves the handle as
+    /// `JoinError::Panicked` (panic containment parity with the legacy
+    /// `Scope::spawn_blocking`).
+    #[test]
+    fn cx_spawn_blocking_panic_resolves_join_panicked() {
+        let (mut lab, parent_cx, _root) = lab_with_parent_cx();
+        let mut handle = parent_cx
+            .spawn_blocking(|_child| -> usize { panic!("blocking closure exploded") })
+            .expect("cx.spawn_blocking");
+        let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
+        assert!(
+            matches!(
+                result,
+                Err(crate::runtime::task_handle::JoinError::Panicked(_))
+            ),
+            "join must resolve Panicked, got {result:?}"
+        );
+    }
+
+    /// `spawn_blocking_in` targets the scope's region: reservation and the
+    /// admitted task land on the scope's counter/region.
+    #[test]
+    fn cx_spawn_blocking_in_targets_scope_region() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let child_region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let scope: crate::cx::Scope<'static> =
+            crate::cx::Scope::new(child_region, Budget::INFINITE).with_pending_spawn_counter(
+                lab.state
+                    .region(child_region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            );
+        let mut handle = parent_cx
+            .spawn_blocking_in(&scope, |_child| 7usize)
+            .expect("cx.spawn_blocking_in");
+        assert_eq!(
+            lab.state
+                .region(child_region)
+                .expect("child")
+                .pending_spawn_count(),
+            1,
+            "reservation lands on the scope's region"
+        );
+        let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
+        assert_eq!(result.expect("blocking value"), 7);
+        assert_eq!(
+            lab.state
+                .region(child_region)
+                .expect("child")
+                .pending_spawn_count(),
+            0,
+            "credits balanced"
+        );
+    }
+
+    /// `spawn_blocking` into a closing region resolves the handle as
+    /// `JoinError::Cancelled` without running the closure.
+    #[test]
+    fn cx_spawn_blocking_into_closing_region_resolves_cancelled() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        lab.state.region(root).expect("root").begin_close(None);
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in_closure = Arc::clone(&ran);
+        let mut handle = parent_cx
+            .spawn_blocking(move |_child| {
+                ran_in_closure.fetch_add(1, Ordering::SeqCst);
+                7usize
+            })
+            .expect("enqueue still succeeds; denial resolves via the handle");
+        let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
+        assert!(
+            matches!(
+                result,
+                Err(crate::runtime::task_handle::JoinError::Cancelled(_))
+            ),
+            "join must resolve Cancelled for a denied blocking spawn, got {result:?}"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "closure never ran");
+    }
 }
