@@ -5923,26 +5923,26 @@ mod tests {
             assert_eq!(sql, "SET SESSION max_execution_time = 500");
             write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
 
-            // SELECT statements route through the public wrapper (where the
+            // SELECT @@ statements route through the public wrapper (where the
             // timeout reconciliation lives) and pass the static-SQL security
             // validator; the fake server answers with plain OK packets.
             let sql = command_sql(&read_client_command(&mut stream));
-            assert_eq!(sql, "SELECT 1");
+            assert_eq!(sql, "SELECT @@max_execution_time");
             write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
 
             let sql = command_sql(&read_client_command(&mut stream));
             assert_eq!(
-                sql, "SELECT 2",
+                sql, "SELECT @@session.max_execution_time",
                 "unchanged effective timeout must not re-send SET"
             );
             write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
         });
 
-        match run(conn.query_static_sql(&cx, "SELECT 1")) {
+        match run(conn.query_static_sql(&cx, "SELECT @@max_execution_time")) {
             Outcome::Ok(rows) => assert!(rows.is_empty()),
             other => panic!("expected query success, got {other:?}"),
         }
-        match run(conn.query_static_sql(&cx, "SELECT 2")) {
+        match run(conn.query_static_sql(&cx, "SELECT @@session.max_execution_time")) {
             Outcome::Ok(rows) => assert!(rows.is_empty()),
             other => panic!("expected query success, got {other:?}"),
         }
@@ -5992,19 +5992,22 @@ mod tests {
             );
 
             let sql = command_sql(&read_client_command(&mut stream));
-            assert_eq!(sql, "SELECT 1");
+            assert_eq!(sql, "SELECT @@max_execution_time");
             write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
 
             let sql = command_sql(&read_client_command(&mut stream));
-            assert_eq!(sql, "SELECT 2", "unsupported variable must not be retried");
+            assert_eq!(
+                sql, "SELECT @@session.max_execution_time",
+                "unsupported variable must not be retried"
+            );
             write_response_packet(&mut stream, 1, ok_packet_payload(0, 0));
         });
 
-        match run(conn.query_static_sql(&cx, "SELECT 1")) {
+        match run(conn.query_static_sql(&cx, "SELECT @@max_execution_time")) {
             Outcome::Ok(rows) => assert!(rows.is_empty()),
             other => panic!("expected query success despite unsupported variable, got {other:?}"),
         }
-        match run(conn.query_static_sql(&cx, "SELECT 2")) {
+        match run(conn.query_static_sql(&cx, "SELECT @@session.max_execution_time")) {
             Outcome::Ok(rows) => assert!(rows.is_empty()),
             other => panic!("expected query success, got {other:?}"),
         }
