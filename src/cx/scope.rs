@@ -573,15 +573,19 @@ impl<P: Policy> Scope<'_, P> {
         self.spawn(state, cx, f)
     }
 
-    /// Spawns a task and registers it with the runtime state.
+    /// Spawns a task and registers it synchronously with the runtime state.
     ///
-    /// This is a convenience method that combines `spawn()` with
-    /// `RuntimeState::store_spawned_task()`. It's the primary method
-    /// used by the `spawn!` macro.
+    /// This legacy state-threaded path combines `spawn()` with
+    /// `RuntimeState::store_spawned_task()` and returns a canonical task id
+    /// immediately. Keep it for synchronous boot/test paths that must inspect
+    /// the task record before scheduler admission. Runtime-wired call sites
+    /// that do not require inline start-failure observation should use
+    /// [`Cx::spawn_registered_in`], which registers through the v2 spawn
+    /// gateway without passing `&mut RuntimeState`.
     ///
     /// # Arguments
     ///
-    /// * `state` - The runtime state (for storing the task)
+    /// * `state` - The runtime state (for immediate task storage)
     /// * `cx` - The capability context (for creating child context)
     /// * `f` - A closure that produces the future, receiving the new task's `Cx`
     ///

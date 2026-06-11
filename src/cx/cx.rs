@@ -3453,6 +3453,44 @@ where
         Ok(self.spawn_via_gateway(scope.region_id(), scope.budget(), &gateway, &pending, f))
     }
 
+    /// Spawns a task into **`scope`'s region** and registers it through
+    /// gateway admission.
+    ///
+    /// This is the v2, Cx-side replacement for call sites that used
+    /// `Scope::spawn_registered(&mut RuntimeState, ..)` only to avoid
+    /// hand-calling `RuntimeState::store_spawned_task`. The returned
+    /// handle is pending until mailbox admission runs: before admission,
+    /// [`TaskHandle::task_id`](crate::runtime::TaskHandle::task_id)
+    /// reports a provisional mailbox id; after admission, it reports the
+    /// canonical runtime task id. Registration/storage happens in the
+    /// admission path, not synchronously at the call site.
+    ///
+    /// Use this when a runtime-wired [`Cx`] is available and the caller
+    /// does not need synchronous supervisor-boot failure observation.
+    /// Synchronous boot paths that must observe child start failure inline
+    /// still need the state-threaded path until that protocol is redesigned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// spawn gateway, or when `scope` carries no pending-spawn counter for
+    /// its region (see [`Cx::spawn_in`]). Admission-time denials resolve
+    /// through the returned handle as
+    /// [`JoinError::Cancelled`](crate::runtime::JoinError::Cancelled).
+    pub fn spawn_registered_in<F, Fut, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        self.spawn_in(scope, f)
+    }
+
     /// Spawns a blocking closure into **this Cx's own region** without
     /// touching the `RuntimeState` lock (br-asupersync-wwyi9k / A2.2b).
     ///
@@ -4103,7 +4141,7 @@ mod tests {
     use crate::trace::TraceBufferHandle;
     use crate::types::CapabilityBudgetDimension;
     use crate::util::DetEntropy;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     static CURRENT_CX_DTOR_STATE: AtomicU8 = AtomicU8::new(0);
 
@@ -4130,6 +4168,19 @@ mod tests {
         Cx::for_testing()
     }
 
+    fn lab_with_spawn_cx() -> (crate::lab::LabRuntime, Cx<cap::All>, RegionId) {
+        let mut lab = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(root, TaskId::testing_default(), Budget::INFINITE)
+            .with_spawn_gateway(lab.state.spawn_gateway())
+            .with_pending_spawn_counter(
+                lab.state
+                    .region(root)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            );
+        (lab, cx, root)
+    }
+
     fn test_cx_with_entropy(seed: u64) -> Cx<cap::All> {
         Cx::new_with_observability(
             RegionId::new_for_test(0, 1),
@@ -4139,6 +4190,93 @@ mod tests {
             None,
             Some(Arc::new(DetEntropy::new(seed))),
         )
+    }
+
+    #[test]
+    fn spawn_registered_in_admits_and_registers_through_gateway() {
+        struct YieldOnce(bool);
+
+        impl std::future::Future for YieldOnce {
+            type Output = ();
+
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<()> {
+                if self.0 {
+                    std::task::Poll::Ready(())
+                } else {
+                    self.0 = true;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            }
+        }
+
+        let (mut lab, cx, root) = lab_with_spawn_cx();
+        let child_region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let scope: crate::cx::Scope<'static> =
+            crate::cx::Scope::new(child_region, Budget::INFINITE).with_pending_spawn_counter(
+                lab.state
+                    .region(child_region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            );
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in_child = Arc::clone(&ran);
+        let mut handle = cx
+            .spawn_registered_in(&scope, move |child| async move {
+                assert_eq!(child.region_id(), child_region);
+                ran_in_child.fetch_add(1, Ordering::SeqCst);
+                YieldOnce(false).await;
+                17usize
+            })
+            .expect("spawn_registered_in should enqueue through the gateway");
+
+        assert!(
+            crate::runtime::spawn_mailbox::is_spawn_mailbox_id(handle.task_id()),
+            "pre-admission handle reports the provisional id"
+        );
+        assert_eq!(
+            lab.state
+                .region(child_region)
+                .expect("child region should exist")
+                .pending_spawn_count(),
+            1,
+            "pending reservation lands on the target scope region"
+        );
+
+        lab.step_for_test();
+
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "child task ran");
+        assert!(
+            !crate::runtime::spawn_mailbox::is_spawn_mailbox_id(handle.task_id()),
+            "post-admission handle reports the canonical task id while the task is live"
+        );
+        assert_eq!(
+            lab.state
+                .task(handle.task_id())
+                .expect("admitted task record should exist while pending")
+                .owner,
+            child_region
+        );
+        lab.run_until_quiescent();
+        let joined = futures_lite::future::block_on(handle.join(&cx)).expect("joined child result");
+        assert_eq!(joined, 17);
+    }
+
+    #[test]
+    fn spawn_registered_in_without_runtime_wiring_fails_closed() {
+        let cx = test_cx();
+        let scope = cx.scope();
+        let result = cx.spawn_registered_in(&scope, |_child| async move { 1usize });
+        assert!(matches!(
+            result,
+            Err(crate::runtime::state::SpawnError::RuntimeUnavailable)
+        ));
     }
 
     fn test_cx_with_virtual_time(budget: Budget, now: Time) -> Cx<cap::All> {
