@@ -19,12 +19,14 @@ CORE_TOKIO_RULE_ID = "core-tokio-feature-leakage"
 LOOP_CHECKPOINT_RULE_ID = "loop-without-cx-checkpoint"
 IGNORED_OUTCOME_RULE_ID = "ignored-outcome-severity"
 AWAIT_HOLDING_RULE_ID = "await-while-holding-capability-resource"
+DROP_RACE_LOSER_RULE_ID = "drop-based-race-loser-handling"
 SCHEMA_VERSION = "semantic-lint-results-v1"
 ALLOW_PREFIX = "asupersync-lint:allow"
 OWNER_RE = re.compile(r"^asupersync-[A-Za-z0-9_.-]+$")
 LOOP_CHECKPOINT_ENGINE = "hybrid-rustc-hir-ast-grep"
 IGNORED_OUTCOME_ENGINE = "rustc-hir"
 AWAIT_HOLDING_ENGINE = "rustc-hir"
+DROP_RACE_LOSER_ENGINE = "hybrid-rustc-hir-ast-grep"
 LOOP_CHECKPOINT_TARGET_PREFIXES = (
     "src/runtime/",
     "src/lab/",
@@ -48,6 +50,13 @@ AWAIT_HOLDING_TARGET_PREFIXES = (
     "src/cx/registry.rs",
     "src/database/",
     "tests/fixtures/semantic_lint/await_holding/",
+)
+DROP_RACE_LOSER_TARGET_PREFIXES = (
+    "src/combinator/",
+    "src/cx/scope.rs",
+    "src/channel/",
+    "src/runtime/task_handle.rs",
+    "tests/fixtures/semantic_lint/drop_race_loser/",
 )
 LOOP_START_RE = re.compile(r"\b(?:loop\s*\{|while\s+true\s*\{)")
 IGNORED_OUTCOME_RE = re.compile(r"\blet\s+_\s*=\s*[^;]*\bOutcome::")
@@ -76,6 +85,17 @@ AWAIT_HOLDING_RESOLUTION_METHODS = (
     "abort",
     "release",
     "close",
+)
+DROP_RACE_LOSER_DROP_RE = re.compile(
+    r"\b(?:std::mem::drop|mem::drop|drop)\s*\(\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\)"
+)
+DROP_RACE_LOSER_DEFUSE_RE = re.compile(r"\bdefuse_drop_abort\s*\(")
+DROP_RACE_LOSER_EXPLICIT_RESOLUTION_METHODS = (
+    "abort",
+    "join",
+    "drain",
+    "cancel",
+    "request_cancel",
 )
 LOOP_CHECKPOINT_TOKENS = (
     ".checkpoint(",
@@ -1534,6 +1554,225 @@ def build_await_holding_result(files: list[Path], engine: str, cwd: Path) -> dic
     }
 
 
+def is_drop_race_loser_target_scope(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return any(normalized.startswith(prefix) for prefix in DROP_RACE_LOSER_TARGET_PREFIXES)
+
+
+def collect_drop_race_loser_files(
+    paths: Iterable[str],
+    cwd: Path,
+    all_paths: bool,
+) -> list[Path]:
+    files: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = cwd / path
+        if path.is_dir():
+            files.extend(child for child in path.rglob("*.rs") if child.is_file())
+        elif path.is_file() and path.suffix == ".rs":
+            files.append(path)
+
+    unique = sorted({path.resolve() for path in files}, key=lambda item: repo_relative(item, cwd))
+    if all_paths:
+        return unique
+    return [
+        path
+        for path in unique
+        if is_drop_race_loser_target_scope(repo_relative(path, cwd))
+    ]
+
+
+def loser_name_candidate(name: str) -> bool:
+    normalized = name.lower().lstrip("_")
+    return any(token in normalized for token in ("loser", "losing", "race_loser"))
+
+
+def explicit_loser_resolution_before(
+    masked_lines: list[str],
+    name: str,
+    start_line_index: int,
+    drop_line_index: int,
+) -> bool:
+    escaped_name = re.escape(name)
+    window_start = max(start_line_index, drop_line_index - 12)
+    for line in masked_lines[window_start:drop_line_index]:
+        if any(
+            re.search(rf"\b{escaped_name}\s*\.\s*{method}\s*\(", line) is not None
+            for method in DROP_RACE_LOSER_EXPLICIT_RESOLUTION_METHODS
+        ):
+            return True
+        if "CancelReason::race_loser" in line:
+            return True
+    return False
+
+
+def documented_drop_guard(masked_lines: list[str], name: str, line_index: int) -> bool:
+    normalized = name.lower()
+    if "drain" in normalized and "guard" in normalized:
+        return True
+    window = "\n".join(masked_lines[max(0, line_index - 3) : line_index + 2]).lower()
+    return "drop guard" in window and "drain" in window
+
+
+def nearby_loser_drain_proof(masked_lines: list[str], line_index: int) -> bool:
+    window = "\n".join(masked_lines[max(0, line_index - 3) : line_index + 4]).lower()
+    return "loser_drain_proof" in window or "loser-drain proof" in window
+
+
+def defuse_drop_abort_candidate(masked_lines: list[str], line_index: int) -> bool:
+    masked_line = masked_lines[line_index]
+    if re.search(r"\bfn\s+defuse_drop_abort\b", masked_line):
+        return False
+    window = "\n".join(masked_lines[max(0, line_index - 3) : line_index + 4]).lower()
+    return any(token in window for token in ("loser", "losing", "race_loser"))
+
+
+def add_drop_race_loser_finding(
+    *,
+    findings: list[dict[str, object]],
+    suppressed: list[dict[str, object]],
+    raw_lines: list[str],
+    rel: str,
+    line_index: int,
+    column: int,
+    pattern_id: str,
+    kind: str,
+    diagnostic: str,
+    binding_name: str | None = None,
+) -> None:
+    marker = allow_marker_for(raw_lines, line_index + 1, DROP_RACE_LOSER_RULE_ID)
+    base: dict[str, object] = {
+        "rule_id": DROP_RACE_LOSER_RULE_ID,
+        "path": rel,
+        "line": line_index + 1,
+        "column": column,
+        "matched_text": raw_lines[line_index].strip(),
+        "pattern_id": pattern_id,
+    }
+    if binding_name is not None:
+        base["binding_name"] = binding_name
+    if marker and marker["valid"]:
+        suppressed.append(
+            {
+                **base,
+                "owner": marker["owner"],
+                "reason": marker["reason"],
+            }
+        )
+        return
+    if marker and not marker["valid"]:
+        findings.append(
+            {
+                **base,
+                "kind": "invalid_allow_marker",
+                "severity": "error",
+                "diagnostic": "invalid allow marker metadata for race loser drop risk",
+                "allow_marker_errors": marker["errors"],
+            }
+        )
+    findings.append(
+        {
+            **base,
+            "kind": kind,
+            "severity": "warning",
+            "diagnostic": diagnostic,
+        }
+    )
+
+
+def build_drop_race_loser_result(files: list[Path], engine: str, cwd: Path) -> dict[str, object]:
+    findings: list[dict[str, object]] = []
+    suppressed: list[dict[str, object]] = []
+    candidate_losers = 0
+
+    for path in files:
+        rel = repo_relative(path, cwd)
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+        masked_lines = [strip_simple_comments_and_strings(line) for line in raw_lines]
+        for line_index, masked_line in enumerate(masked_lines):
+            for match in DROP_RACE_LOSER_DROP_RE.finditer(masked_line):
+                name = match.group("name")
+                if not loser_name_candidate(name):
+                    continue
+                if documented_drop_guard(masked_lines, name, line_index):
+                    continue
+                if explicit_loser_resolution_before(masked_lines, name, 0, line_index):
+                    continue
+
+                candidate_losers += 1
+                add_drop_race_loser_finding(
+                    findings=findings,
+                    suppressed=suppressed,
+                    raw_lines=raw_lines,
+                    rel=rel,
+                    line_index=line_index,
+                    column=match.start() + 1,
+                    pattern_id="drop-loser-without-abort-join",
+                    kind="drop_based_race_loser",
+                    diagnostic="race loser is dropped without explicit abort/join loser-drain invariant evidence",
+                    binding_name=name,
+                )
+
+            for match in DROP_RACE_LOSER_DEFUSE_RE.finditer(masked_line):
+                if not defuse_drop_abort_candidate(masked_lines, line_index):
+                    continue
+                if nearby_loser_drain_proof(masked_lines, line_index):
+                    continue
+
+                candidate_losers += 1
+                add_drop_race_loser_finding(
+                    findings=findings,
+                    suppressed=suppressed,
+                    raw_lines=raw_lines,
+                    rel=rel,
+                    line_index=line_index,
+                    column=match.start() + 1,
+                    pattern_id="defuse-drop-abort-without-loser-drain-proof",
+                    kind="defuse_without_loser_drain_proof",
+                    diagnostic="defuse_drop_abort lacks paired loser-drain invariant proof",
+                )
+
+    findings.sort(
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["column"],
+            item["kind"],
+            item["pattern_id"],
+        )
+    )
+    suppressed.sort(
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["column"],
+            item["pattern_id"],
+        )
+    )
+    scanned = [repo_relative(path, cwd) for path in files]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "rule_id": DROP_RACE_LOSER_RULE_ID,
+        "engine": engine,
+        "engine_fallback": False,
+        "verdict": "pass" if not findings else "fail",
+        "scanned_files": scanned,
+        "findings": findings,
+        "suppressed": suppressed,
+        "summary": {
+            "files_scanned": len(scanned),
+            "findings": len(findings),
+            "suppressed": len(suppressed),
+            "candidate_losers": candidate_losers,
+            "invalid_allow_markers": sum(
+                1 for finding in findings if finding["kind"] == "invalid_allow_marker"
+            ),
+        },
+    }
+
+
 def unsupported_engine_result(
     files: list[Path],
     cwd: Path,
@@ -1580,6 +1819,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                 LOOP_CHECKPOINT_RULE_ID,
                 IGNORED_OUTCOME_RULE_ID,
                 AWAIT_HOLDING_RULE_ID,
+                DROP_RACE_LOSER_RULE_ID,
             ]
         ),
         help="semantic lint rule id to run",
@@ -1595,6 +1835,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             LOOP_CHECKPOINT_ENGINE,
             IGNORED_OUTCOME_ENGINE,
             AWAIT_HOLDING_ENGINE,
+            DROP_RACE_LOSER_ENGINE,
         ],
         help="analysis engine; auto prefers ast-grep and falls back deterministically",
     )
@@ -1718,6 +1959,32 @@ def main(argv: list[str]) -> int:
             return 0
         return 0 if result["verdict"] == "pass" else 1
 
+    if args.rule == DROP_RACE_LOSER_RULE_ID:
+        files = collect_drop_race_loser_files(args.paths, cwd, args.all_paths)
+        engine = DROP_RACE_LOSER_ENGINE if args.engine == "auto" else args.engine
+        if engine != DROP_RACE_LOSER_ENGINE:
+            result = unsupported_engine_result(
+                files,
+                cwd,
+                rule_id=DROP_RACE_LOSER_RULE_ID,
+                engine=engine,
+                diagnostic=(
+                    "drop-based-race-loser-handling requires the "
+                    "hybrid-rustc-hir-ast-grep engine"
+                ),
+            )
+        else:
+            result = build_drop_race_loser_result(files, engine, cwd)
+
+        output = json.dumps(result, indent=2, sort_keys=True)
+        if args.json:
+            print(output)
+        else:
+            print(output)
+        if args.exit_zero:
+            return 0
+        return 0 if result["verdict"] == "pass" else 1
+
     rule = RULES[args.rule]
     files = collect_rust_files(args.paths, cwd, args.all_paths, rule)
 
@@ -1727,6 +1994,7 @@ def main(argv: list[str]) -> int:
         LOOP_CHECKPOINT_ENGINE,
         IGNORED_OUTCOME_ENGINE,
         AWAIT_HOLDING_ENGINE,
+        DROP_RACE_LOSER_ENGINE,
     }:
         result = unsupported_engine_result(
             files,
