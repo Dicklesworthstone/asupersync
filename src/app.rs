@@ -815,6 +815,17 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn lab_spawn_cx(runtime: &crate::lab::LabRuntime, region: RegionId, budget: Budget) -> Cx {
+        Cx::new(region, TaskId::testing_default(), budget)
+            .with_spawn_gateway(runtime.state.spawn_gateway())
+            .with_pending_spawn_counter(
+                runtime
+                    .state
+                    .region(region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            )
+    }
+
     fn make_child(name: &str) -> ChildSpec {
         ChildSpec {
             name: name.into(),
@@ -2127,11 +2138,7 @@ mod tests {
             .state
             .create_child_region(root, Budget::INFINITE)
             .expect("example region should allocate");
-        let cx = Cx::new(
-            region,
-            crate::types::TaskId::testing_default(),
-            Budget::INFINITE,
-        );
+        let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
         let scope =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
 
@@ -2154,18 +2161,16 @@ mod tests {
 
         // Spawn a client task that calls GetHistory.
         let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
-            })
+        let mut client_handle = cx
+            .spawn(
+                move |cx| async move { server_ref.call(&cx, ChatCall::GetHistory).await.unwrap() },
+            )
             .unwrap();
-        let client_id = client_handle.task_id();
-        runtime.state.store_spawned_task(client_id, client_stored);
 
-        // Schedule both server and client, run to quiescence.
+        // Schedule the server, run until idle; the client is admitted via the
+        // spawn gateway while the long-lived server remains parked on receive.
         runtime.scheduler.lock().schedule(task_id, 0);
-        runtime.scheduler.lock().schedule(client_id, 0);
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         // Verify the client received the full history.
         let history =
@@ -2189,11 +2194,7 @@ mod tests {
             .state
             .create_child_region(root, Budget::INFINITE)
             .expect("example region should allocate");
-        let cx = Cx::new(
-            region,
-            crate::types::TaskId::testing_default(),
-            Budget::INFINITE,
-        );
+        let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
         let scope =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
 
@@ -2210,17 +2211,14 @@ mod tests {
         handle.try_cast(ChatCast::Post("msg3".into())).unwrap();
 
         let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
-            })
+        let mut client_handle = cx
+            .spawn(
+                move |cx| async move { server_ref.call(&cx, ChatCall::GetHistory).await.unwrap() },
+            )
             .unwrap();
-        let client_id = client_handle.task_id();
-        runtime.state.store_spawned_task(client_id, client_stored);
 
         runtime.scheduler.lock().schedule(task_id, 0);
-        runtime.scheduler.lock().schedule(client_id, 0);
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         let history =
             futures_lite::future::block_on(client_handle.join(&cx)).expect("client join ok");
@@ -2242,11 +2240,7 @@ mod tests {
             .state
             .create_child_region(root, Budget::INFINITE)
             .expect("example region should allocate");
-        let cx = Cx::new(
-            region,
-            crate::types::TaskId::testing_default(),
-            Budget::INFINITE,
-        );
+        let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
         let scope =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
 
@@ -2280,17 +2274,14 @@ mod tests {
             .unwrap();
 
         let server_ref = named_handle.server_ref();
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
-            })
+        let mut client_handle = cx
+            .spawn(
+                move |cx| async move { server_ref.call(&cx, ChatCall::GetHistory).await.unwrap() },
+            )
             .unwrap();
-        let client_id = client_handle.task_id();
-        runtime.state.store_spawned_task(client_id, client_stored);
 
         runtime.scheduler.lock().schedule(task_id, 0);
-        runtime.scheduler.lock().schedule(client_id, 0);
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         let history = futures_lite::future::block_on(client_handle.join(&cx)).expect("join ok");
         assert_eq!(history, vec!["welcome to lobby"]);
@@ -2459,11 +2450,7 @@ mod tests {
             .state
             .create_child_region(root, Budget::INFINITE)
             .expect("example region should allocate");
-        let cx = Cx::new(
-            region,
-            crate::types::TaskId::testing_default(),
-            Budget::INFINITE,
-        );
+        let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
         let scope =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
 
@@ -2481,17 +2468,14 @@ mod tests {
             .unwrap();
 
         let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
-                server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
-            })
+        let mut client_handle = cx
+            .spawn(
+                move |cx| async move { server_ref.call(&cx, ChatCall::GetHistory).await.unwrap() },
+            )
             .unwrap();
-        let client_id = client_handle.task_id();
-        runtime.state.store_spawned_task(client_id, client_stored);
 
         runtime.scheduler.lock().schedule(task_id, 0);
-        runtime.scheduler.lock().schedule(client_id, 0);
-        runtime.run_until_quiescent();
+        runtime.run_until_idle();
 
         let history = futures_lite::future::block_on(client_handle.join(&cx)).expect("join ok");
         assert_eq!(history, vec!["fresh start"], "clear must reset history");

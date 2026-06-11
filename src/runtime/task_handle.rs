@@ -54,8 +54,8 @@ impl std::error::Error for JoinError {}
 /// # Example
 ///
 /// ```ignore
-/// let handle = scope.spawn(&mut state, cx, async { 42 });
-/// let result = handle.join(cx).await?;
+/// let handle = cx.spawn(|cx| async move { 42 })?;
+/// let result = handle.join(&cx).await?;
 /// assert_eq!(result, 42);
 /// ```
 #[derive(Debug)]
@@ -174,8 +174,8 @@ impl<T> TaskHandle<T> {
     /// # Example
     ///
     /// ```ignore
-    /// let mut handle = scope.spawn(&mut state, cx, async { 42 });
-    /// match handle.join(cx).await {
+    /// let mut handle = cx.spawn(|cx| async move { 42 })?;
+    /// match handle.join(&cx).await {
     ///     Ok(value) => println!("Task returned: {value}"),
     ///     Err(JoinError::Cancelled(r)) => println!("Task was cancelled: {r}"),
     ///     Err(JoinError::Panicked(p)) => println!("Task panicked: {p}"),
