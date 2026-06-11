@@ -2526,7 +2526,7 @@ mod tests {
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x6E57_1001));
         let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
         let started = Arc::new(AtomicU8::new(0));
         let checkpoints = Arc::new(Mutex::new(Vec::new()));
@@ -2547,8 +2547,8 @@ mod tests {
 
         let server_ref = handle.server_ref();
         let checkpoints_for_client = Arc::clone(&checkpoints);
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let mut client_handle = cx
+            .spawn(move |cx| async move {
                 let started = server_ref
                     .call(&cx, InitProbeCall::GetStarted)
                     .await
@@ -2562,10 +2562,6 @@ mod tests {
                 started
             })
             .expect("client spawn should succeed");
-        let client_task_id = client_handle.task_id();
-        runtime
-            .state
-            .store_spawned_task(client_task_id, client_stored);
 
         // Schedule server first to ensure initialization completes
         {
@@ -2574,9 +2570,6 @@ mod tests {
         runtime.run_until_idle();
 
         // Then schedule client to ensure call happens after init
-        {
-            runtime.scheduler.lock().schedule(client_task_id, 0);
-        }
         runtime.run_until_idle();
 
         let call_saw_initialized =
@@ -3762,7 +3755,7 @@ mod tests {
             let config = crate::lab::LabConfig::new(seed);
             let mut runtime = crate::lab::LabRuntime::new(config);
             let region = runtime.state.create_root_region(Budget::INFINITE);
-            let cx = Cx::for_testing();
+            let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
             let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
             let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3778,8 +3771,8 @@ mod tests {
 
             let server_ref = handle.server_ref();
 
-            let (client_a, stored_a) = scope
-                .spawn(&mut runtime.state, &cx, move |cx| async move {
+            let _client_a = cx
+                .spawn(move |cx| async move {
                     server_ref
                         .info(
                             &cx,
@@ -3792,12 +3785,10 @@ mod tests {
                         .unwrap();
                 })
                 .unwrap();
-            let task_id_a = client_a.task_id();
-            runtime.state.store_spawned_task(task_id_a, stored_a);
 
             let server_ref_b = handle.server_ref();
-            let (client_b, stored_b) = scope
-                .spawn(&mut runtime.state, &cx, move |cx| async move {
+            let _client_b = cx
+                .spawn(move |cx| async move {
                     server_ref_b
                         .info(
                             &cx,
@@ -3810,16 +3801,8 @@ mod tests {
                         .unwrap();
                 })
                 .unwrap();
-            let task_id_b = client_b.task_id();
-            runtime.state.store_spawned_task(task_id_b, stored_b);
 
             // Let clients enqueue, then let the server drain.
-            {
-                runtime.scheduler.lock().schedule(task_id_a, 0);
-            }
-            {
-                runtime.scheduler.lock().schedule(task_id_b, 0);
-            }
             {
                 runtime.scheduler.lock().schedule(server_task_id, 0);
             }
@@ -4226,7 +4209,7 @@ mod tests {
         let budget = Budget::new().with_poll_quota(100_000).with_priority(10);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
-        let cx = Cx::for_testing();
+        let cx = lab_spawn_cx(&runtime, region, budget);
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
 
         let started_priority = Arc::new(AtomicU8::new(0));
@@ -4243,22 +4226,15 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         let server_ref = handle.server_ref();
-        let (client, stored_client) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let _client = cx
+            .spawn(move |cx| async move {
                 let p = server_ref.call(&cx, CounterCall::Get).await.unwrap();
                 assert_eq!(p, 10);
             })
             .unwrap();
-        let client_task_id = client.task_id();
-        runtime
-            .state
-            .store_spawned_task(client_task_id, stored_client);
 
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        {
-            runtime.scheduler.lock().schedule(client_task_id, 0);
         }
         runtime.run_until_quiescent();
 
@@ -4592,7 +4568,7 @@ mod tests {
             .with_priority(10);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
-        let cx = Cx::for_testing();
+        let cx = lab_spawn_cx(&runtime, region, budget);
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
 
         let loop_quota = Arc::new(AtomicU64::new(0));
@@ -4609,21 +4585,14 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         let server_ref = handle.server_ref();
-        let (client, stored_client) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let _client = cx
+            .spawn(move |cx| async move {
                 let _ = server_ref.call(&cx, CounterCall::Get).await;
             })
             .unwrap();
-        let client_task_id = client.task_id();
-        runtime
-            .state
-            .store_spawned_task(client_task_id, stored_client);
 
         {
             runtime.scheduler.lock().schedule(server_task_id, 0);
-        }
-        {
-            runtime.scheduler.lock().schedule(client_task_id, 0);
         }
         runtime.run_until_quiescent();
 
@@ -5303,7 +5272,7 @@ mod tests {
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
-        let cx = Cx::for_testing();
+        let cx = lab_spawn_cx(&runtime, region, budget);
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
 
         let (handle, stored) = scope
@@ -5318,20 +5287,17 @@ mod tests {
         // client should see a channel close / error.
         let call_result: Arc<Mutex<Option<Result<(), CallError>>>> = Arc::new(Mutex::new(None));
         let call_result_clone = Arc::clone(&call_result);
-        let (ch, cs) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let _ch = cx
+            .spawn(move |cx| async move {
                 let r = server_ref.call(&cx, ()).await;
                 *call_result_clone.lock() = Some(r);
             })
             .unwrap();
-        let client_id = ch.task_id();
-        runtime.state.store_spawned_task(client_id, cs);
 
         // Run everything.
         {
             let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
-            sched.schedule(client_id, 0);
         }
         runtime.run_until_quiescent();
 
@@ -5473,7 +5439,7 @@ mod tests {
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
-        let cx = Cx::for_testing();
+        let cx = lab_spawn_cx(&runtime, region, budget);
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
 
         let aborted = Arc::new(AtomicU8::new(0));
@@ -5491,19 +5457,16 @@ mod tests {
         let call_err: Arc<Mutex<Option<Result<(), CallError>>>> = Arc::new(Mutex::new(None));
         let call_err_clone = Arc::clone(&call_err);
 
-        let (ch, cs) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let _ch = cx
+            .spawn(move |cx| async move {
                 let r = server_ref.call(&cx, ()).await;
                 *call_err_clone.lock() = Some(r);
             })
             .unwrap();
-        let client_id = ch.task_id();
-        runtime.state.store_spawned_task(client_id, cs);
 
         {
             let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
-            sched.schedule(client_id, 0);
         }
         runtime.run_until_quiescent();
 
