@@ -148,8 +148,19 @@ fn cpuid_tsc_frequency_hz(max_basic_leaf: u32) -> Option<u64> {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+// `__cpuid` is `unsafe` on the pinned CI nightly (nightly-2026-02-05) — without the
+// `unsafe` block the crate fails to build with E0133 under `#![deny(unsafe_code)]`.
+// Newer nightlies reclassified `__cpuid` as safe, which makes the same block trip
+// `unused_unsafe`; `allow(unused_unsafe)` keeps the one source compiling warning-free
+// on both toolchains so `clippy -D warnings` stays green regardless of nightly date.
+#[allow(unused_unsafe)]
 fn cpuid(leaf: u32) -> core::arch::x86_64::CpuidResult {
-    core::arch::x86_64::__cpuid(leaf)
+    // SAFETY: __cpuid only issues the CPUID instruction to read a processor
+    // information leaf; it performs no memory access and is sound to call on any
+    // x86_64 CPU. Callers gate the requested leaf behind the max-supported-leaf
+    // check above, mirroring the read_tsc_ordered helper just below.
+    unsafe { core::arch::x86_64::__cpuid(leaf) }
 }
 
 #[cfg(target_arch = "x86_64")]
