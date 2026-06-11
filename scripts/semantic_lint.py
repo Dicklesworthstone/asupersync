@@ -23,6 +23,15 @@ DROP_RACE_LOSER_RULE_ID = "drop-based-race-loser-handling"
 SCHEMA_VERSION = "semantic-lint-results-v1"
 ALLOW_PREFIX = "asupersync-lint:allow"
 OWNER_RE = re.compile(r"^asupersync-[A-Za-z0-9_.-]+$")
+SEMANTIC_LINT_ASUP_CODES = {
+    AMBIENT_RULE_ID: "ASUP-E902",
+    AWAIT_HOLDING_RULE_ID: "ASUP-E903",
+    LOOP_CHECKPOINT_RULE_ID: "ASUP-E904",
+    IGNORED_OUTCOME_RULE_ID: "ASUP-E905",
+    DROP_RACE_LOSER_RULE_ID: "ASUP-E906",
+    CLEANUP_BUDGET_RULE_ID: "ASUP-E907",
+    CORE_TOKIO_RULE_ID: "ASUP-E908",
+}
 LOOP_CHECKPOINT_ENGINE = "hybrid-rustc-hir-ast-grep"
 IGNORED_OUTCOME_ENGINE = "rustc-hir"
 AWAIT_HOLDING_ENGINE = "rustc-hir"
@@ -59,7 +68,10 @@ DROP_RACE_LOSER_TARGET_PREFIXES = (
     "tests/fixtures/semantic_lint/drop_race_loser/",
 )
 LOOP_START_RE = re.compile(r"\b(?:loop\s*\{|while\s+true\s*\{)")
-IGNORED_OUTCOME_RE = re.compile(r"\blet\s+_\s*=\s*[^;]*\bOutcome::")
+CANCELLED_TO_OK_RE = re.compile(
+    r"\bOutcome::Cancelled\b[^;{}]*=>\s*Outcome::Ok\b"
+)
+IGNORED_OUTCOME_RE = re.compile(r"\blet\s+_\s*=\s*Outcome::")
 AWAIT_HOLDING_BINDING_RE = re.compile(
     r"\blet\s+(?:mut\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
     r"(?P<expr>[^;]*(?:\.(?:lock|read|write|reserve|acquire|checkout)\s*\("
@@ -276,6 +288,11 @@ def repo_relative(path: Path, cwd: Path) -> str:
         return path.resolve().relative_to(cwd.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def diagnostic_text(rule_id: str, message: str) -> str:
+    code = SEMANTIC_LINT_ASUP_CODES[rule_id]
+    return f"[{code}] {message}"
 
 
 def is_in_target_scope(path: str, rule: RuleConfig) -> bool:
@@ -669,7 +686,10 @@ def build_result(
                     **base,
                     "kind": "invalid_allow_marker",
                     "severity": "error",
-                    "diagnostic": rule.invalid_allow_marker_diagnostic,
+                    "diagnostic": diagnostic_text(
+                        rule.rule_id,
+                        rule.invalid_allow_marker_diagnostic,
+                    ),
                     "allow_marker_errors": marker["errors"],
                 }
             )
@@ -679,7 +699,7 @@ def build_result(
                 **base,
                 "kind": rule.finding_kind,
                 "severity": rule.severity,
-                "diagnostic": match.pattern.diagnostic,
+                "diagnostic": diagnostic_text(rule.rule_id, match.pattern.diagnostic),
             }
         )
 
@@ -734,7 +754,10 @@ def missing_engine_result(files: list[Path], cwd: Path, rule: RuleConfig) -> dic
                 "rule_id": rule.rule_id,
                 "kind": "missing_engine",
                 "severity": "error",
-                "diagnostic": "ast-grep is required for this semantic lint rule",
+                "diagnostic": diagnostic_text(
+                    rule.rule_id,
+                    "ast-grep is required for this semantic lint rule",
+                ),
             }
         ],
         "suppressed": [],
@@ -797,7 +820,7 @@ def add_core_tokio_finding(
         "path": path,
         "section": section,
         "profile": profile,
-        "diagnostic": diagnostic,
+        "diagnostic": diagnostic_text(CORE_TOKIO_RULE_ID, diagnostic),
     }
     if details is not None:
         finding["details"] = details
@@ -1166,7 +1189,10 @@ def build_loop_checkpoint_result(files: list[Path], engine: str, cwd: Path) -> d
                             **base,
                             "kind": "invalid_allow_marker",
                             "severity": "error",
-                            "diagnostic": "invalid allow marker metadata for loop checkpoint risk",
+                            "diagnostic": diagnostic_text(
+                                LOOP_CHECKPOINT_RULE_ID,
+                                "invalid allow marker metadata for loop checkpoint risk",
+                            ),
                             "allow_marker_errors": marker["errors"],
                         }
                     )
@@ -1175,7 +1201,10 @@ def build_loop_checkpoint_result(files: list[Path], engine: str, cwd: Path) -> d
                         **base,
                         "kind": "loop_without_cx_checkpoint",
                         "severity": "warning",
-                        "diagnostic": "async infinite loop is missing an explicit cx checkpoint or cancellation poll",
+                        "diagnostic": diagnostic_text(
+                            LOOP_CHECKPOINT_RULE_ID,
+                            "async infinite loop is missing an explicit cx checkpoint or cancellation poll",
+                        ),
                     }
                 )
 
@@ -1250,8 +1279,9 @@ def collect_ignored_outcome_files(
 
 def ignored_outcome_candidates(masked_line: str) -> list[tuple[int, str, str, str]]:
     candidates: list[tuple[int, str, str, str]] = []
-    if "Outcome::Cancelled" in masked_line and "Outcome::Ok" in masked_line:
-        column = masked_line.find("Outcome::Cancelled") + 1
+    collapse = CANCELLED_TO_OK_RE.search(masked_line)
+    if collapse:
+        column = collapse.start() + 1
         candidates.append(
             (
                 column,
@@ -1309,7 +1339,10 @@ def build_ignored_outcome_result(files: list[Path], engine: str, cwd: Path) -> d
                             **base,
                             "kind": "invalid_allow_marker",
                             "severity": "error",
-                            "diagnostic": "invalid allow marker metadata for ignored Outcome severity risk",
+                            "diagnostic": diagnostic_text(
+                                IGNORED_OUTCOME_RULE_ID,
+                                "invalid allow marker metadata for ignored Outcome severity risk",
+                            ),
                             "allow_marker_errors": marker["errors"],
                         }
                     )
@@ -1318,7 +1351,7 @@ def build_ignored_outcome_result(files: list[Path], engine: str, cwd: Path) -> d
                         **base,
                         "kind": kind,
                         "severity": "warning",
-                        "diagnostic": diagnostic,
+                        "diagnostic": diagnostic_text(IGNORED_OUTCOME_RULE_ID, diagnostic),
                     }
                 )
 
@@ -1501,7 +1534,10 @@ def build_await_holding_result(files: list[Path], engine: str, cwd: Path) -> dic
                             **base,
                             "kind": "invalid_allow_marker",
                             "severity": "error",
-                            "diagnostic": "invalid allow marker metadata for await-holding resource risk",
+                            "diagnostic": diagnostic_text(
+                                AWAIT_HOLDING_RULE_ID,
+                                "invalid allow marker metadata for await-holding resource risk",
+                            ),
                             "allow_marker_errors": marker["errors"],
                         }
                     )
@@ -1510,7 +1546,7 @@ def build_await_holding_result(files: list[Path], engine: str, cwd: Path) -> dic
                         **base,
                         "kind": kind,
                         "severity": "warning",
-                        "diagnostic": diagnostic,
+                        "diagnostic": diagnostic_text(AWAIT_HOLDING_RULE_ID, diagnostic),
                     }
                 )
                 break
@@ -1668,7 +1704,10 @@ def add_drop_race_loser_finding(
                 **base,
                 "kind": "invalid_allow_marker",
                 "severity": "error",
-                "diagnostic": "invalid allow marker metadata for race loser drop risk",
+                "diagnostic": diagnostic_text(
+                    DROP_RACE_LOSER_RULE_ID,
+                    "invalid allow marker metadata for race loser drop risk",
+                ),
                 "allow_marker_errors": marker["errors"],
             }
         )
@@ -1677,7 +1716,7 @@ def add_drop_race_loser_finding(
             **base,
             "kind": kind,
             "severity": "warning",
-            "diagnostic": diagnostic,
+            "diagnostic": diagnostic_text(DROP_RACE_LOSER_RULE_ID, diagnostic),
         }
     )
 
@@ -1793,7 +1832,7 @@ def unsupported_engine_result(
                 "rule_id": rule_id,
                 "kind": "unsupported_engine",
                 "severity": "error",
-                "diagnostic": diagnostic,
+                "diagnostic": diagnostic_text(rule_id, diagnostic),
             }
         ],
         "suppressed": [],

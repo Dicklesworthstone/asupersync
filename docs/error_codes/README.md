@@ -46,3 +46,10 @@ lands.
 | ASUP-E403 | reserved | lab-replay | [Lab seed nondeterminism](./ASUP-E403.md) |
 | ASUP-E501 | reserved | net-http | [HTTP deadline exhausted](./ASUP-E501.md) |
 | ASUP-E901 | live | config-build | [Config invalid](./ASUP-E901.md) |
+| ASUP-E902 | live | config-build | [Semantic lint ambient determinism](./ASUP-E902.md) |
+| ASUP-E903 | live | config-build | [Semantic lint await holding resource](./ASUP-E903.md) |
+| ASUP-E904 | live | config-build | [Semantic lint loop checkpoint](./ASUP-E904.md) |
+| ASUP-E905 | live | config-build | [Semantic lint outcome severity](./ASUP-E905.md) |
+| ASUP-E906 | live | config-build | [Semantic lint race loser drain](./ASUP-E906.md) |
+| ASUP-E907 | live | config-build | [Semantic lint cleanup budget](./ASUP-E907.md) |
+| ASUP-E908 | live | config-build | [Semantic lint core Tokio boundary](./ASUP-E908.md) |

@@ -15,7 +15,7 @@ trace paths:
 
 The first slice reports two deterministic high-signal candidates:
 
-- `Outcome::Cancelled` collapsed into `Outcome::Ok` on the same line
+- an explicit `Outcome::Cancelled ... => Outcome::Ok` match arm
 - explicit `let _ = Outcome::...` ignored severity values
 
 Example:
@@ -35,4 +35,7 @@ let _ = Outcome::Ok(());
 This is not a complete rustc-HIR implementation. It is a deterministic
 candidate scanner with fixtures, docs, and no source rewrites; future work still
 needs type-aware confirmation for ignored variables whose type is `Outcome` and
-for multi-line severity collapses.
+for multi-line severity collapses. Lines that merely contain both
+`Outcome::Cancelled` and `Outcome::Ok` in a tuple or test vector are outside
+this candidate pattern, as are `let _ = helper(... Outcome::Ok(...))` calls
+where the ignored value is the helper result rather than the `Outcome` literal.

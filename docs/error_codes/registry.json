@@ -1,7 +1,7 @@
 {
   "schema_version": "asupersync-error-code-registry-v1",
   "namespace": "ASUP-Exxx",
-  "updated": "2026-06-10",
+  "updated": "2026-06-11",
   "ranges": [
     {
       "range": "ASUP-E0xx",
@@ -541,6 +541,146 @@
       "since": "0.3.4",
       "source_refs": [
         "src/error.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E902",
+      "name": "semantic-lint-ambient-determinism",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found ambient time or entropy in lab-sensitive code.",
+      "probable_causes": [
+        "Code used host wall-clock, monotonic time, or process entropy inside a replay-sensitive surface.",
+        "A test fixture bypassed virtual time or deterministic seed capabilities."
+      ],
+      "remediation": [
+        "Route time and entropy through Cx or lab-runtime capabilities.",
+        "Use an allow marker only for deliberate diagnostics with an owner bead."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E902.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "scripts/semantic_lint.py"
+      ]
+    },
+    {
+      "code": "ASUP-E903",
+      "name": "semantic-lint-await-holding-resource",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found an await while a lock, permit, lease, or capability token remained live.",
+      "probable_causes": [
+        "A guard or permit binding stayed in scope across an await point.",
+        "Cancellation cleanup can now wait while still holding the resource it must release."
+      ],
+      "remediation": [
+        "Drop, commit, abort, release, or close the resource before awaiting.",
+        "Split the critical section so awaited work happens after resource resolution."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E903.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "scripts/semantic_lint.py"
+      ]
+    },
+    {
+      "code": "ASUP-E904",
+      "name": "semantic-lint-loop-checkpoint",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found an async infinite loop without an explicit cancellation checkpoint.",
+      "probable_causes": [
+        "A loop awaits work repeatedly but never polls cancellation.",
+        "A long-running task can starve region close and drain quiescence."
+      ],
+      "remediation": [
+        "Add a Cx checkpoint, cancellation poll, or bounded progress proof in the loop body.",
+        "Use an allow marker only when another local invariant proves bounded progress."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E904.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "scripts/semantic_lint.py"
+      ]
+    },
+    {
+      "code": "ASUP-E905",
+      "name": "semantic-lint-outcome-severity",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found ignored or collapsed Outcome severity.",
+      "probable_causes": [
+        "Outcome::Cancelled or Outcome::Panicked was mapped to a successful value.",
+        "A task or combinator discarded an Outcome value without preserving severity."
+      ],
+      "remediation": [
+        "Propagate, match, or record the full Outcome lattice explicitly.",
+        "Document any fixture-only discard with an owner bead allow marker."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E905.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "scripts/semantic_lint.py"
+      ]
+    },
+    {
+      "code": "ASUP-E906",
+      "name": "semantic-lint-race-loser-drain",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found a race loser that appears dropped or defused without loser-drain proof.",
+      "probable_causes": [
+        "A loser-named handle was dropped without abort, join, drain, or cancel evidence.",
+        "A defuse_drop_abort path lacks nearby proof that the loser is drained elsewhere."
+      ],
+      "remediation": [
+        "Cancel and join losing branches before returning the race winner.",
+        "Add local loser-drain proof comments only when another path actually drains the loser."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E906.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "scripts/semantic_lint.py"
+      ]
+    },
+    {
+      "code": "ASUP-E907",
+      "name": "semantic-lint-cleanup-budget",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found cleanup, drain, or finalizer code without an explicit bounded budget.",
+      "probable_causes": [
+        "Cleanup used Budget::INFINITE or ad hoc wall-duration constants.",
+        "A drain or finalizer call has no obvious Budget argument or owner boundary."
+      ],
+      "remediation": [
+        "Derive cleanup duration from an explicit Budget or deadline capability.",
+        "Keep finalizers bounded so region close can reach quiescence."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E907.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "scripts/semantic_lint.py"
+      ]
+    },
+    {
+      "code": "ASUP-E908",
+      "name": "semantic-lint-core-tokio-boundary",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found malformed or leaking Tokio feature-boundary evidence.",
+      "probable_causes": [
+        "A production dependency graph is not classified tokio-free.",
+        "A scoped Tokio carve-out lacks quarantine rationale or a valid RCH proof command."
+      ],
+      "remediation": [
+        "Fix the feature graph or move the Tokio edge behind a documented non-production carve-out.",
+        "Update proof-lane commands so production and scoped-audit claims are distinct."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E908.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "scripts/semantic_lint.py"
       ]
     }
   ]

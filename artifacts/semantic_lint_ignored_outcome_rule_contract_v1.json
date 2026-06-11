@@ -32,11 +32,13 @@
   ],
   "candidate_policy": {
     "reports": [
-      "same-line Outcome::Cancelled to Outcome::Ok collapse",
+      "explicit Outcome::Cancelled match arm mapped to Outcome::Ok",
       "explicit let _ = Outcome::... ignored severity values"
     ],
     "accepts": [
       "severity-preserving Outcome conversions",
+      "same-line tuples or test vectors that merely contain both Outcome::Cancelled and Outcome::Ok",
+      "let _ = helper(... Outcome::Ok(...)) where Outcome is an argument rather than the ignored value",
       "allowed fixture-only ignored values with reason and owner"
     ],
     "diagnostic_must_name": "Outcome severity lattice"
