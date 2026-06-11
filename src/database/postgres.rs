@@ -15343,36 +15343,31 @@ mod tests {
             assert!(matches!(stmt3, Outcome::Ok(_)));
             assert_eq!(conn.inner.prepared_cache.len(), 3);
 
-            // Prepare fourth statement - should evict the LRU (first) statement
-            // and trigger DEALLOCATE for the evicted statement
+            // Prepare fourth statement - should evict the LRU (first)
+            // statement and close it server-side.
+            //
+            // br-asupersync-vybwh6: the eviction CLOSE happens strictly AFTER
+            // the fourth Parse exchange completes — prepare() inserts into
+            // the cache only once the new statement exists, then awaits
+            // close_statement_exchange for the LRU victim. The previous
+            // choreography waited for the CLOSE bytes up front, a mutual
+            // wait with the client blocked in read_message on the Parse
+            // response (deterministic >60s hang).
             let responder4 = std::thread::spawn({
                 let mut peer_clone = peer.try_clone().expect("clone peer");
                 move || {
-                    // Expect DEALLOCATE for evicted statement first
-                    let deallocate_msg = read_until_contains(&mut peer_clone, b"__asupersync_s0");
-                    assert!(
-                        deallocate_msg
-                            .windows(b"__asupersync_s0".len())
-                            .any(|w| w == b"__asupersync_s0"),
-                        "should send DEALLOCATE for evicted statement"
-                    );
-
-                    // Send DEALLOCATE response: CloseComplete + ReadyForQuery
-                    let mut dealloc_response = Vec::new();
-                    dealloc_response.extend_from_slice(&[b'3', 0x00, 0x00, 0x00, 0x04]); // CloseComplete
-                    dealloc_response.extend_from_slice(&[b'Z', 0x00, 0x00, 0x00, 0x05, b'I']); // ReadyForQuery
-                    peer_clone
-                        .write_all(&dealloc_response)
-                        .expect("write dealloc response");
-
-                    // Then expect new PARSE for fourth statement
+                    // Serve the Parse exchange for the fourth statement.
                     let _parse_msg = read_until_contains(&mut peer_clone, b"__asupersync_s3");
 
-                    // Send prepare response for fourth statement
                     let mut response = Vec::new();
                     response.extend_from_slice(&[b'1', 0x00, 0x00, 0x00, 0x04]); // ParseComplete
                     response.extend_from_slice(&[b't', 0x00, 0x00, 0x00, 0x06, 0x00, 0x00]); // ParameterDescription (no params)
-                    response.extend_from_slice(&[b'T', 0x00, 0x00, 0x00, 0x21]); // RowDescription
+                    // RowDescription length is 31: 4 (length field) + 2
+                    // (field count) + 25 (("result" + NUL) = 7, table_oid 4,
+                    // attr 2, type_oid 4, typlen 2, typmod 4, format 2). The
+                    // previous 0x21 was copied from the "?column?" responses
+                    // and over-read 2 bytes into the following ReadyForQuery.
+                    response.extend_from_slice(&[b'T', 0x00, 0x00, 0x00, 0x1F]); // RowDescription
                     response.extend_from_slice(&[0x00, 0x01]); // 1 column
                     response.extend_from_slice(b"result\x00"); // column name
                     response.extend_from_slice(&[
@@ -15381,6 +15376,24 @@ mod tests {
                     ]);
                     response.extend_from_slice(&[b'Z', 0x00, 0x00, 0x00, 0x05, b'I']); // ReadyForQuery
                     peer_clone.write_all(&response).expect("write response");
+
+                    // The cache insert now evicts the LRU statement and the
+                    // client closes it: Close('S', "__asupersync_s0") + Sync.
+                    let deallocate_msg = read_until_contains(&mut peer_clone, b"__asupersync_s0");
+                    assert!(
+                        deallocate_msg
+                            .windows(b"__asupersync_s0".len())
+                            .any(|w| w == b"__asupersync_s0"),
+                        "should send CLOSE for evicted statement"
+                    );
+
+                    // CloseComplete + ReadyForQuery
+                    let mut dealloc_response = Vec::new();
+                    dealloc_response.extend_from_slice(&[b'3', 0x00, 0x00, 0x00, 0x04]); // CloseComplete
+                    dealloc_response.extend_from_slice(&[b'Z', 0x00, 0x00, 0x00, 0x05, b'I']); // ReadyForQuery
+                    peer_clone
+                        .write_all(&dealloc_response)
+                        .expect("write dealloc response");
                 }
             });
 
