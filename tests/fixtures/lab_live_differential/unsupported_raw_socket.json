@@ -1,0 +1,55 @@
+{
+  "schema_version": "lab-live-differential-scenario-fixture-v1",
+  "scenario_id": "lab_live_5_1.unsupported.raw_socket",
+  "claim_id": "phase4.raw_socket",
+  "claim_class": "unsupported",
+  "surface_id": "raw_socket",
+  "phase": "Phase 4",
+  "lab_fixture": {
+    "kind": "not_admitted",
+    "path": "docs/lab_live_differential_scope_matrix.md",
+    "entry": "raw_socket_red_line"
+  },
+  "live_adapter": {
+    "kind": "not_bound",
+    "path": "docs/lab_live_virtualized_surface_matrix.md",
+    "entry": "raw_socket_gate"
+  },
+  "admitted_differences": [
+    "none"
+  ],
+  "timing_normalization": {
+    "policy_doc": "docs/lab_live_time_normalization_policy.md",
+    "clock_model": "not_applicable",
+    "wall_clock_fields": "unsupported"
+  },
+  "platform_prerequisites": [
+    "virtualization_boundary_missing",
+    "capture_manifest_missing"
+  ],
+  "expected_logs": [
+    "scenario_id",
+    "surface_id",
+    "unsupported_reason",
+    "eligibility_verdict",
+    "repro_command"
+  ],
+  "failure_bundle": {
+    "bundle_path": "artifacts/lab_live/lab_live_5_1/unsupported_raw_socket/",
+    "summary_record": "summary.json",
+    "events_record": "events.ndjson",
+    "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_5_1 cargo test -p asupersync --test lab_live_differential_contract -- --nocapture",
+    "first_failure_field": "virtualization_boundary"
+  },
+  "readme_or_support_matrix_row": "docs/lab_live_differential_scope_matrix.md#surface-eligibility-matrix",
+  "verification_floor": [
+    "T0 unit_contract",
+    "T4 negative_control"
+  ],
+  "expected_verdict": "unsupported",
+  "no_claims": [
+    "does not claim epoll, kqueue, io_uring, or kernel scheduling parity",
+    "does not claim DNS, TLS, packet loss, or remote peer parity",
+    "does not treat an unsupported platform skip as a pass"
+  ]
+}

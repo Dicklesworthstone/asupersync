@@ -1,0 +1,198 @@
+{
+  "contract_version": "lab-live-differential-scenario-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.5.1",
+  "artifact_path": "artifacts/lab_live_differential_scenario_contract_v1.json",
+  "source_of_truth": {
+    "contract": "artifacts/lab_live_differential_scenario_contract_v1.json",
+    "docs": "docs/lab_live_differential_scenarios.md",
+    "contract_test": "tests/lab_live_differential_contract.rs",
+    "pass_fixture": "tests/fixtures/lab_live_differential/pass_channel_reserve_send.json",
+    "fail_fixture": "tests/fixtures/lab_live_differential/fail_region_close_divergence.json",
+    "unsupported_fixture": "tests/fixtures/lab_live_differential/unsupported_raw_socket.json",
+    "stale_fixture": "tests/fixtures/lab_live_differential/stale_browser_support_row.json"
+  },
+  "inherits": [
+    {
+      "path": "docs/lab_live_differential_scope_matrix.md",
+      "role": "admitted surfaces, rollout phases, and non-goal boundaries"
+    },
+    {
+      "path": "docs/lab_live_normalized_observable_schema.md",
+      "role": "semantic comparison record and provenance-only fields"
+    },
+    {
+      "path": "docs/lab_live_divergence_taxonomy.md",
+      "role": "mismatch, unsupported, and rerun policy classes"
+    },
+    {
+      "path": "docs/lab_live_verification_taxonomy.md",
+      "role": "verification tiers and retained artifact requirements"
+    },
+    {
+      "path": "docs/lab_live_scenario_adapter_contract.md",
+      "role": "shared scenario binding between lab fixtures and live adapters"
+    },
+    {
+      "path": "artifacts/lab_live_differential_v2_scenarios_v1.json",
+      "role": "existing executable pilot scenario and transcript schema"
+    }
+  ],
+  "scenario_schema": {
+    "schema_version": "lab-live-differential-scenario-fixture-v1",
+    "required_fields": [
+      "schema_version",
+      "scenario_id",
+      "claim_id",
+      "claim_class",
+      "surface_id",
+      "phase",
+      "lab_fixture",
+      "live_adapter",
+      "admitted_differences",
+      "timing_normalization",
+      "platform_prerequisites",
+      "expected_logs",
+      "failure_bundle",
+      "readme_or_support_matrix_row",
+      "verification_floor",
+      "expected_verdict",
+      "no_claims"
+    ],
+    "claim_class_values": [
+      "supported_now",
+      "supported_later",
+      "unsupported",
+      "stale_evidence"
+    ],
+    "expected_verdict_values": [
+      "pass",
+      "fail",
+      "unsupported",
+      "stale"
+    ],
+    "required_failure_bundle_fields": [
+      "bundle_path",
+      "summary_record",
+      "events_record",
+      "repro_command",
+      "first_failure_field"
+    ],
+    "required_timing_normalization_fields": [
+      "policy_doc",
+      "clock_model",
+      "wall_clock_fields"
+    ],
+    "required_no_claim_boundary": "Every scenario fixture must carry a nonempty no_claims array. Missing no_claims is a contract failure, not an implied broad proof."
+  },
+  "semantic_claim_map": [
+    {
+      "claim_id": "phase1.channel.reserve_send",
+      "surface_id": "channel.reserve_send",
+      "phase": "Phase 1",
+      "claim_class": "supported_now",
+      "verification_floor": [
+        "T0 unit_contract",
+        "T1 golden_fixture",
+        "T2 dual_run_smoke"
+      ],
+      "supporting_contracts": [
+        "docs/lab_live_differential_scope_matrix.md",
+        "artifacts/lab_live_differential_v2_scenarios_v1.json"
+      ],
+      "no_claims": [
+        "does not prove raw event ordering parity",
+        "does not prove runtime-wide adapter parity"
+      ]
+    },
+    {
+      "claim_id": "phase1.region.close",
+      "surface_id": "region.close",
+      "phase": "Phase 1",
+      "claim_class": "supported_now",
+      "verification_floor": [
+        "T0 unit_contract",
+        "T1 golden_fixture",
+        "T2 dual_run_smoke",
+        "T4 negative_control"
+      ],
+      "supporting_contracts": [
+        "docs/lab_live_divergence_taxonomy.md",
+        "tests/lab_live_differential_v2.rs"
+      ],
+      "no_claims": [
+        "does not prove arbitrary finalizer progress",
+        "does not promote every divergence to a runtime bug"
+      ]
+    },
+    {
+      "claim_id": "phase4.raw_socket",
+      "surface_id": "raw_socket",
+      "phase": "Phase 4",
+      "claim_class": "unsupported",
+      "verification_floor": [
+        "T0 unit_contract",
+        "T4 negative_control"
+      ],
+      "supporting_contracts": [
+        "docs/lab_live_differential_scope_matrix.md",
+        "docs/lab_live_virtualized_surface_matrix.md"
+      ],
+      "no_claims": [
+        "does not claim epoll, kqueue, io_uring, or kernel scheduling parity",
+        "does not claim DNS, TLS, packet loss, or remote peer parity"
+      ]
+    },
+    {
+      "claim_id": "phase3.browser.support_row",
+      "surface_id": "browser_surface",
+      "phase": "Phase 3",
+      "claim_class": "stale_evidence",
+      "verification_floor": [
+        "T0 unit_contract",
+        "T1 golden_fixture"
+      ],
+      "supporting_contracts": [
+        "docs/lab_live_virtualized_surface_matrix.md",
+        "docs/WASM.md",
+        "README.md"
+      ],
+      "no_claims": [
+        "does not promote browser host behavior without fresh fixture evidence",
+        "does not claim service-worker or shared-worker lifetime parity"
+      ]
+    }
+  ],
+  "fixture_matrix": [
+    {
+      "fixture": "tests/fixtures/lab_live_differential/pass_channel_reserve_send.json",
+      "claim_id": "phase1.channel.reserve_send",
+      "expected_verdict": "pass"
+    },
+    {
+      "fixture": "tests/fixtures/lab_live_differential/fail_region_close_divergence.json",
+      "claim_id": "phase1.region.close",
+      "expected_verdict": "fail"
+    },
+    {
+      "fixture": "tests/fixtures/lab_live_differential/unsupported_raw_socket.json",
+      "claim_id": "phase4.raw_socket",
+      "expected_verdict": "unsupported"
+    },
+    {
+      "fixture": "tests/fixtures/lab_live_differential/stale_browser_support_row.json",
+      "claim_id": "phase3.browser.support_row",
+      "expected_verdict": "stale"
+    }
+  ],
+  "validation": {
+    "contract_test": "tests/lab_live_differential_contract.rs",
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_differential_contract -- --nocapture",
+    "no_local_cargo_fallback": true
+  },
+  "no_claims": [
+    "does not replace existing 2a6k9 lab-live contracts",
+    "does not prove broad workspace health",
+    "does not certify raw OS, browser host, or real-network fidelity",
+    "does not run adapter scenarios by itself"
+  ]
+}

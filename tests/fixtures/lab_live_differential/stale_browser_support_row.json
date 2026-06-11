@@ -1,0 +1,58 @@
+{
+  "schema_version": "lab-live-differential-scenario-fixture-v1",
+  "scenario_id": "lab_live_5_1.stale.browser_support_row",
+  "claim_id": "phase3.browser.support_row",
+  "claim_class": "stale_evidence",
+  "surface_id": "browser_surface",
+  "phase": "Phase 3",
+  "lab_fixture": {
+    "kind": "support_matrix_row",
+    "path": "docs/lab_live_virtualized_surface_matrix.md",
+    "entry": "browser_surface"
+  },
+  "live_adapter": {
+    "kind": "browser_runner_required",
+    "path": "tests/fixtures/browser-native-message-stream-consumer",
+    "entry": "check-browser-run"
+  },
+  "admitted_differences": [
+    "host_role_downgrade",
+    "browser_lane_support_class"
+  ],
+  "timing_normalization": {
+    "policy_doc": "docs/lab_live_time_normalization_policy.md",
+    "clock_model": "scenario_clock_required",
+    "wall_clock_fields": "stale_until_fresh_fixture"
+  },
+  "platform_prerequisites": [
+    "host_role_contract",
+    "browser_fixture_evidence",
+    "fresh_support_matrix_row"
+  ],
+  "expected_logs": [
+    "scenario_id",
+    "surface_id",
+    "support_class",
+    "evidence_age",
+    "stale_reason",
+    "repro_command"
+  ],
+  "failure_bundle": {
+    "bundle_path": "artifacts/lab_live/lab_live_5_1/stale_browser_support_row/",
+    "summary_record": "summary.json",
+    "events_record": "events.ndjson",
+    "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_5_1 cargo test -p asupersync --test lab_live_differential_contract -- --nocapture",
+    "first_failure_field": "evidence_freshness"
+  },
+  "readme_or_support_matrix_row": "docs/lab_live_virtualized_surface_matrix.md#browser_surface",
+  "verification_floor": [
+    "T0 unit_contract",
+    "T1 golden_fixture"
+  ],
+  "expected_verdict": "stale",
+  "no_claims": [
+    "does not promote browser host behavior without fresh fixture evidence",
+    "does not claim service-worker or shared-worker lifetime parity",
+    "does not treat stale support evidence as GA readiness"
+  ]
+}

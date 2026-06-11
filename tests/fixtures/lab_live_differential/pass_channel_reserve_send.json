@@ -1,0 +1,56 @@
+{
+  "schema_version": "lab-live-differential-scenario-fixture-v1",
+  "scenario_id": "lab_live_5_1.pass.channel_reserve_send",
+  "claim_id": "phase1.channel.reserve_send",
+  "claim_class": "supported_now",
+  "surface_id": "channel.reserve_send",
+  "phase": "Phase 1",
+  "lab_fixture": {
+    "kind": "LabRuntime",
+    "path": "tests/lab_live_differential_v2.rs",
+    "entry": "semantic_equivalence_pilot"
+  },
+  "live_adapter": {
+    "kind": "run_live_adapter",
+    "path": "tests/lab_live_differential_v2.rs",
+    "entry": "run_equivalence_pilot"
+  },
+  "admitted_differences": [
+    "scheduler_decision_sequence_provenance"
+  ],
+  "timing_normalization": {
+    "policy_doc": "docs/lab_live_time_normalization_policy.md",
+    "clock_model": "semantic_only",
+    "wall_clock_fields": "provenance_only"
+  },
+  "platform_prerequisites": [
+    "current_thread_runtime",
+    "no_external_services"
+  ],
+  "expected_logs": [
+    "scenario_id",
+    "surface_id",
+    "verdict",
+    "seed_lineage_id",
+    "repro_command"
+  ],
+  "failure_bundle": {
+    "bundle_path": "artifacts/lab_live/lab_live_5_1/pass/",
+    "summary_record": "summary.json",
+    "events_record": "events.ndjson",
+    "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_5_1 cargo test -p asupersync --test lab_live_differential_contract -- --nocapture",
+    "first_failure_field": ""
+  },
+  "readme_or_support_matrix_row": "docs/lab_live_differential_scope_matrix.md#normative-scope-matrix",
+  "verification_floor": [
+    "T0 unit_contract",
+    "T1 golden_fixture",
+    "T2 dual_run_smoke"
+  ],
+  "expected_verdict": "pass",
+  "no_claims": [
+    "does not prove raw event ordering parity",
+    "does not prove runtime-wide adapter parity",
+    "does not certify real-network behavior"
+  ]
+}

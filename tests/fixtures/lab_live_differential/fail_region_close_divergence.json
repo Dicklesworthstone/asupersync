@@ -1,0 +1,58 @@
+{
+  "schema_version": "lab-live-differential-scenario-fixture-v1",
+  "scenario_id": "lab_live_5_1.fail.region_close_divergence",
+  "claim_id": "phase1.region.close",
+  "claim_class": "supported_now",
+  "surface_id": "region.close",
+  "phase": "Phase 1",
+  "lab_fixture": {
+    "kind": "LabRuntime",
+    "path": "tests/lab_live_differential_v2.rs",
+    "entry": "region_close_divergence_lab"
+  },
+  "live_adapter": {
+    "kind": "run_live_adapter",
+    "path": "tests/lab_live_differential_v2.rs",
+    "entry": "run_region_divergence_pilot"
+  },
+  "admitted_differences": [
+    "seed_lineage_provenance"
+  ],
+  "timing_normalization": {
+    "policy_doc": "docs/lab_live_time_normalization_policy.md",
+    "clock_model": "semantic_only",
+    "wall_clock_fields": "provenance_only"
+  },
+  "platform_prerequisites": [
+    "current_thread_runtime",
+    "no_external_services"
+  ],
+  "expected_logs": [
+    "scenario_id",
+    "surface_id",
+    "verdict",
+    "live_divergence_point",
+    "first_failure_field",
+    "repro_command"
+  ],
+  "failure_bundle": {
+    "bundle_path": "artifacts/lab_live/lab_live_5_1/fail_region_close/",
+    "summary_record": "summary.json",
+    "events_record": "events.ndjson",
+    "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_5_1 cargo test -p asupersync --test lab_live_differential_contract -- --nocapture",
+    "first_failure_field": "region_close.live_children_joined"
+  },
+  "readme_or_support_matrix_row": "docs/lab_live_differential_scope_matrix.md#region-close-quiescence",
+  "verification_floor": [
+    "T0 unit_contract",
+    "T1 golden_fixture",
+    "T2 dual_run_smoke",
+    "T4 negative_control"
+  ],
+  "expected_verdict": "fail",
+  "no_claims": [
+    "does not prove arbitrary finalizer progress",
+    "does not promote every divergence to a runtime bug",
+    "does not certify broad region lifecycle coverage"
+  ]
+}
