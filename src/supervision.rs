@@ -574,6 +574,13 @@ pub enum NameCollisionPolicy {
 /// This is intentionally synchronous: child start should spawn tasks/actors
 /// and return the *root* `TaskId` for the child. The supervisor runtime can
 /// then track/wait/cancel by task identity.
+///
+/// The state-threaded signature is a deliberate boot-protocol decision
+/// (br-asupersync-c6uw5y): boot must observe start failures inline and
+/// needs the canonical task id immediately, which the asynchronous v2
+/// gateway path cannot provide. Inside the started child, spawn further
+/// work through the v2 surface ([`Cx::spawn`](crate::cx::Cx::spawn) and
+/// friends), not by threading state onward.
 pub trait ChildStart: Send {
     /// Start (or restart) the child inside `scope.region`.
     fn start(
@@ -1569,6 +1576,20 @@ impl CompiledSupervisor {
     /// Restart semantics are specified by [`RestartPolicy`] and computed by
     /// [`CompiledSupervisor::restart_plan_for`]; wiring it into a live restart loop is layered
     /// on top by follow-up beads (bd-1yv7a, bd-35iz1).
+    ///
+    /// # Why this keeps `&mut RuntimeState` (br-asupersync-c6uw5y)
+    ///
+    /// Supervisor boot is deliberately **not** routed through the v2 spawn
+    /// gateway: dependency-ordered boot must observe each child's start
+    /// failure *inline* (to mark dependents unavailable and to roll the
+    /// whole region back deterministically), and the gateway path resolves
+    /// spawn denials asynchronously through handles. Boot is runtime
+    /// infrastructure in the same class as region creation, which also
+    /// threads state. User-facing task spawning inside a running
+    /// supervisor/child should use the v2 surface
+    /// ([`Cx::spawn`](crate::cx::Cx::spawn) /
+    /// [`Cx::spawn_registered_in`](crate::cx::Cx::spawn_registered_in));
+    /// only the boot protocol itself stays state-threaded.
     pub fn spawn(
         mut self,
         state: &mut RuntimeState,
