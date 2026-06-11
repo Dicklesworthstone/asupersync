@@ -35,15 +35,17 @@ use asupersync::atp::{
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
     AdvancedRemediationDelta, AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
-    AgentSwarmStatusSnapshot, DoctorScenarioCoveragePackSmokeReport,
-    DoctorScenarioCoveragePacksContract, DoctorStressSoakContract, DoctorStressSoakSmokeReport,
-    EvidenceTimelineContract, EvidenceTimelineWorkflowTranscript,
-    advanced_diagnostics_report_bundle, agent_swarm_status_contract,
+    AgentSwarmStatusSnapshot, DoctorEvidenceAnalysisReport, DoctorEvidenceBundle,
+    DoctorScenarioCoveragePackSmokeReport, DoctorScenarioCoveragePacksContract,
+    DoctorStressSoakContract, DoctorStressSoakSmokeReport, EvidenceTimelineContract,
+    EvidenceTimelineWorkflowTranscript, advanced_diagnostics_report_bundle,
+    agent_swarm_status_contract, analyze_doctor_evidence_report,
     build_doctor_scenario_coverage_pack_smoke_report, build_doctor_stress_soak_smoke_report,
     doctor_scenario_coverage_packs_contract, doctor_stress_soak_contract,
-    evidence_timeline_contract, run_agent_swarm_status_smoke,
+    evidence_timeline_contract, ingest_doctor_evidence_bundle, run_agent_swarm_status_smoke,
     run_evidence_timeline_keyboard_flow_smoke, validate_advanced_diagnostics_report_extension,
     validate_advanced_diagnostics_report_extension_contract,
+    validate_doctor_evidence_analysis_report, validate_doctor_evidence_bundle,
 };
 use asupersync::cli::{
     AtpDoctorArgs, AtpProofArgs, AtpReplayArgs, AtpVerifyArgs, CliError, ColorChoice, CommonArgs,
@@ -52,9 +54,9 @@ use asupersync::cli::{
     OutputFormat, Outputtable, RemediationRecipeBundle, ScreenEngineContract,
     StructuredLoggingContract, WorkspaceScanReport, analyze_workspace_invariants,
     analyze_workspace_lock_contention, core_diagnostics_report_bundle,
-    core_diagnostics_report_contract, operator_model_contract, parse_color_choice,
-    parse_output_format, remediation_recipe_bundle, scan_workspace, screen_engine_contract,
-    structured_logging_contract, validate_core_diagnostics_report,
+    core_diagnostics_report_contract, core_diagnostics_report_fixtures, operator_model_contract,
+    parse_color_choice, parse_output_format, remediation_recipe_bundle, scan_workspace,
+    screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
     validate_core_diagnostics_report_contract,
 };
 use asupersync::conformance::{
@@ -2859,7 +2861,17 @@ struct DoctorArgs {
 #[derive(Subcommand, Debug)]
 enum DoctorCommand {
     /// Scan workspace topology and capability-flow surfaces
+    Scan(DoctorScanWorkspaceArgs),
+    /// Scan workspace topology and capability-flow surfaces
     ScanWorkspace(DoctorScanWorkspaceArgs),
+    /// Explain a DoctorEvidenceBundle with deterministic analyzer findings
+    Explain(DoctorExplainArgs),
+    /// Emit the remediation recipe catalog used by doctor findings
+    RecipeList(DoctorRecipeListArgs),
+    /// Validate a built-in core diagnostics fixture by id
+    ValidateFixture(DoctorValidateFixtureArgs),
+    /// Emit one checked core diagnostics report fixture
+    Report(DoctorReportArgs),
     /// Analyze runtime invariants over scanner output
     AnalyzeInvariants(DoctorAnalyzeInvariantsArgs),
     /// Analyze lock-order and contention risk over scanner output
@@ -2905,6 +2917,50 @@ struct DoctorScanWorkspaceArgs {
     /// Workspace root to scan
     #[arg(long = "root", default_value = ".")]
     root: PathBuf,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorExplainArgs {
+    /// Path to a DoctorEvidenceBundle JSON payload
+    #[arg(long = "bundle", value_name = "PATH")]
+    bundle: PathBuf,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorRecipeListArgs {
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorValidateFixtureArgs {
+    /// Built-in core diagnostics fixture id to validate
+    #[arg(long = "fixture-id", default_value = "happy_path")]
+    fixture_id: String,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoctorReportArgs {
+    /// Built-in core diagnostics fixture id to emit
+    #[arg(long = "fixture-id", default_value = "happy_path")]
+    fixture_id: String,
+
+    /// Output results as JSON
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -5280,6 +5336,21 @@ fn effective_output_format(command: &Command, default: OutputFormat) -> OutputFo
         Command::Lab(LabArgs {
             command: LabCommand::DifferentialProfileManifest(args),
         }) if args.json => OutputFormat::JsonPretty,
+        Command::Doctor(DoctorArgs {
+            command: DoctorCommand::Scan(args) | DoctorCommand::ScanWorkspace(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Doctor(DoctorArgs {
+            command: DoctorCommand::Explain(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Doctor(DoctorArgs {
+            command: DoctorCommand::RecipeList(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Doctor(DoctorArgs {
+            command: DoctorCommand::ValidateFixture(args),
+        }) if args.json => OutputFormat::JsonPretty,
+        Command::Doctor(DoctorArgs {
+            command: DoctorCommand::Report(args),
+        }) if args.json => OutputFormat::JsonPretty,
         _ => default,
     }
 }
@@ -5532,7 +5603,14 @@ fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
 
 fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
+        DoctorCommand::Scan(scan_args) => doctor_scan_workspace(&scan_args, output),
         DoctorCommand::ScanWorkspace(scan_args) => doctor_scan_workspace(&scan_args, output),
+        DoctorCommand::Explain(explain_args) => doctor_explain(&explain_args, output),
+        DoctorCommand::RecipeList(_recipe_args) => doctor_remediation_contract(output),
+        DoctorCommand::ValidateFixture(validate_args) => {
+            doctor_validate_fixture(&validate_args, output)
+        }
+        DoctorCommand::Report(report_args) => doctor_report(&report_args, output),
         DoctorCommand::AnalyzeInvariants(analyze_args) => {
             doctor_analyze_invariants(&analyze_args, output)
         }
@@ -5565,6 +5643,151 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::TaskConsoleView(view_args) => doctor_task_console_view(&view_args, output),
         DoctorCommand::SwarmStatus => doctor_swarm_status(output),
     }
+}
+
+fn doctor_explain(args: &DoctorExplainArgs, output: &mut Output) -> Result<(), CliError> {
+    let raw = fs::read_to_string(&args.bundle).map_err(|err| {
+        CliError::new(
+            "doctor_evidence_bundle_io_error",
+            "Failed to read DoctorEvidenceBundle",
+        )
+        .detail(err.to_string())
+        .context("bundle", args.bundle.display().to_string())
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+    let bundle: DoctorEvidenceBundle = serde_json::from_str(&raw).map_err(|err| {
+        CliError::new(
+            "doctor_evidence_bundle_parse_error",
+            "Failed to parse DoctorEvidenceBundle JSON",
+        )
+        .detail(err.to_string())
+        .context("bundle", args.bundle.display().to_string())
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+    validate_doctor_evidence_bundle(&bundle).map_err(|err| {
+        CliError::new(
+            "doctor_evidence_bundle_validation_error",
+            "DoctorEvidenceBundle failed validation",
+        )
+        .detail(err)
+        .context("bundle", args.bundle.display().to_string())
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+
+    let ingestion_report = ingest_doctor_evidence_bundle(&bundle);
+    let analysis = analyze_doctor_evidence_report(&ingestion_report);
+    validate_doctor_evidence_analysis_report(&analysis).map_err(|err| {
+        CliError::new(
+            "doctor_evidence_analysis_validation_error",
+            "Doctor evidence analysis failed validation",
+        )
+        .detail(err)
+        .context("bundle", args.bundle.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let payload = DoctorExplainOutput {
+        schema_version: "doctor-cli-explain-v1".to_string(),
+        bundle_path: args.bundle.display().to_string(),
+        bundle_id: bundle.bundle_id,
+        source_profile: bundle.source_profile,
+        accepted_artifact_count: ingestion_report.records.len(),
+        rejected_artifact_count: ingestion_report.rejected.len(),
+        analysis,
+    };
+    output
+        .write(&payload)
+        .map_err(output_write_error("doctor evidence analysis"))?;
+    Ok(())
+}
+
+fn doctor_validate_fixture(
+    args: &DoctorValidateFixtureArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let (fixture_id, report) = selected_core_report_fixture(&args.fixture_id)?;
+    let contract = core_diagnostics_report_contract();
+    validate_core_diagnostics_report(&report, &contract).map_err(|err| {
+        CliError::new(
+            "doctor_fixture_validation_error",
+            "Built-in doctor report fixture failed validation",
+        )
+        .detail(err)
+        .context("fixture_id", fixture_id.clone())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let payload = DoctorFixtureValidationOutput {
+        schema_version: "doctor-cli-fixture-validation-v1".to_string(),
+        fixture_id,
+        report_id: report.report_id,
+        valid: true,
+        validation_status: "passed".to_string(),
+        finding_count: report.findings.len(),
+        evidence_count: report.evidence.len(),
+        command_count: report.commands.len(),
+        rerun_commands: doctor_cli_rerun_commands(),
+    };
+    output
+        .write(&payload)
+        .map_err(output_write_error("doctor fixture validation report"))?;
+    Ok(())
+}
+
+fn doctor_report(args: &DoctorReportArgs, output: &mut Output) -> Result<(), CliError> {
+    let (fixture_id, report) = selected_core_report_fixture(&args.fixture_id)?;
+    let contract = core_diagnostics_report_contract();
+    validate_core_diagnostics_report(&report, &contract).map_err(|err| {
+        CliError::new(
+            "doctor_report_validation_error",
+            "Built-in doctor report failed validation",
+        )
+        .detail(err)
+        .context("fixture_id", fixture_id.clone())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let payload = DoctorCliReportOutput {
+        schema_version: "doctor-cli-report-v1".to_string(),
+        fixture_id,
+        validation_status: "passed".to_string(),
+        rerun_commands: doctor_cli_rerun_commands(),
+        report,
+    };
+    output
+        .write(&payload)
+        .map_err(output_write_error("doctor diagnostics report"))?;
+    Ok(())
+}
+
+fn selected_core_report_fixture(
+    fixture_id: &str,
+) -> Result<(String, CoreDiagnosticsReport), CliError> {
+    let fixtures = core_diagnostics_report_fixtures();
+    fixtures
+        .into_iter()
+        .find(|fixture| fixture.fixture_id == fixture_id)
+        .map(|fixture| (fixture.fixture_id, fixture.report))
+        .ok_or_else(|| {
+            let valid_ids = core_diagnostics_report_fixtures()
+                .into_iter()
+                .map(|fixture| fixture.fixture_id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            CliError::new("doctor_unknown_fixture", "Unknown doctor fixture id")
+                .detail(format!("valid fixture ids: {valid_ids}"))
+                .context("fixture_id", fixture_id.to_string())
+                .exit_code(ExitCode::USER_ERROR)
+        })
+}
+
+fn doctor_cli_rerun_commands() -> Vec<String> {
+    vec![
+        "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features cli --bin asupersync"
+            .to_string(),
+        "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness"
+            .to_string(),
+    ]
 }
 
 fn doctor_scan_workspace(
@@ -6031,6 +6254,112 @@ struct DoctorTaskConsoleViewOutput {
     truncated: bool,
     summary: TaskSummaryWire,
     tasks: Vec<TaskDetailsWire>,
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorExplainOutput {
+    schema_version: String,
+    bundle_path: String,
+    bundle_id: String,
+    source_profile: String,
+    accepted_artifact_count: usize,
+    rejected_artifact_count: usize,
+    analysis: DoctorEvidenceAnalysisReport,
+}
+
+impl Outputtable for DoctorExplainOutput {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!("Schema: {}", self.schema_version),
+            format!("Bundle: {}", self.bundle_id),
+            format!("Source profile: {}", self.source_profile),
+            format!("Accepted artifacts: {}", self.accepted_artifact_count),
+            format!("Rejected artifacts: {}", self.rejected_artifact_count),
+            format!("Findings: {}", self.analysis.finding_count),
+        ];
+        for finding in &self.analysis.findings {
+            lines.push(format!(
+                "- {} [{} confidence={}] {}",
+                finding.finding_id, finding.severity, finding.confidence, finding.likely_cause
+            ));
+            lines.push(format!("  next: {}", finding.next_proof_command));
+            if let Some(recipe) = &finding.remediation_recipe {
+                lines.push(format!(
+                    "  recipe: {} risk={} action={}",
+                    recipe.recipe_id, recipe.risk_class, recipe.operator_action
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorFixtureValidationOutput {
+    schema_version: String,
+    fixture_id: String,
+    report_id: String,
+    valid: bool,
+    validation_status: String,
+    finding_count: usize,
+    evidence_count: usize,
+    command_count: usize,
+    rerun_commands: Vec<String>,
+}
+
+impl Outputtable for DoctorFixtureValidationOutput {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!("Schema: {}", self.schema_version),
+            format!("Fixture: {}", self.fixture_id),
+            format!("Report: {}", self.report_id),
+            format!("Validation: {}", self.validation_status),
+            format!("Findings: {}", self.finding_count),
+            format!("Evidence: {}", self.evidence_count),
+            format!("Commands: {}", self.command_count),
+        ];
+        lines.push("Rerun commands:".to_string());
+        for command in &self.rerun_commands {
+            lines.push(format!("  {command}"));
+        }
+        lines.join("\n")
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorCliReportOutput {
+    schema_version: String,
+    fixture_id: String,
+    validation_status: String,
+    rerun_commands: Vec<String>,
+    report: CoreDiagnosticsReport,
+}
+
+impl Outputtable for DoctorCliReportOutput {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!("Schema: {}", self.schema_version),
+            format!("Fixture: {}", self.fixture_id),
+            format!("Report: {}", self.report.report_id),
+            format!("Validation: {}", self.validation_status),
+            format!("Status: {}", self.report.summary.status),
+            format!("Outcome: {}", self.report.summary.overall_outcome),
+            format!("Findings: {}", self.report.findings.len()),
+            format!("Evidence: {}", self.report.evidence.len()),
+            format!("Commands: {}", self.report.commands.len()),
+        ];
+        for finding in &self.report.findings {
+            lines.push(format!(
+                "- {} [{}] {}",
+                finding.finding_id, finding.severity, finding.title
+            ));
+        }
+        lines.push("Rerun commands:".to_string());
+        for command in &self.rerun_commands {
+            lines.push(format!("  {command}"));
+        }
+        lines.join("\n")
+    }
 }
 
 #[derive(Debug, serde::Serialize, PartialEq, Eq)]
@@ -14401,6 +14730,152 @@ lab:
         else {
             panic!("expected doctor evidence-timeline-smoke command");
         };
+    }
+
+    #[test]
+    fn doctor_canonical_d3_commands_parse() {
+        let scan = Cli::try_parse_from(["asupersync", "doctor", "scan", "--root", ".", "--json"])
+            .expect("parse doctor scan");
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::Scan(scan_args),
+        }) = scan.command
+        else {
+            panic!("expected doctor scan command");
+        };
+        assert_eq!(scan_args.root, PathBuf::from("."));
+        assert!(scan_args.json);
+
+        let explain = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "explain",
+            "--bundle",
+            "artifacts/doctor/bundle.json",
+            "--json",
+        ])
+        .expect("parse doctor explain");
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::Explain(explain_args),
+        }) = explain.command
+        else {
+            panic!("expected doctor explain command");
+        };
+        assert_eq!(
+            explain_args.bundle,
+            PathBuf::from("artifacts/doctor/bundle.json")
+        );
+        assert!(explain_args.json);
+
+        let recipe_list = Cli::try_parse_from(["asupersync", "doctor", "recipe-list", "--json"])
+            .expect("parse doctor recipe-list");
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::RecipeList(recipe_args),
+        }) = recipe_list.command
+        else {
+            panic!("expected doctor recipe-list command");
+        };
+        assert!(recipe_args.json);
+
+        let validate = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "validate-fixture",
+            "--fixture-id",
+            "happy_path",
+            "--json",
+        ])
+        .expect("parse doctor validate-fixture");
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::ValidateFixture(validate_args),
+        }) = validate.command
+        else {
+            panic!("expected doctor validate-fixture command");
+        };
+        assert_eq!(validate_args.fixture_id, "happy_path");
+        assert!(validate_args.json);
+
+        let report = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "report",
+            "--fixture-id",
+            "happy_path",
+            "--json",
+        ])
+        .expect("parse doctor report");
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::Report(report_args),
+        }) = report.command
+        else {
+            panic!("expected doctor report command");
+        };
+        assert_eq!(report_args.fixture_id, "happy_path");
+        assert!(report_args.json);
+    }
+
+    #[test]
+    fn effective_output_format_prefers_doctor_json_subcommands() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "--format",
+            "human",
+            "doctor",
+            "report",
+            "--fixture-id",
+            "happy_path",
+            "--json",
+        ])
+        .expect("parse doctor report json command");
+
+        let format =
+            effective_output_format(&cli.command, cli.common.to_common_args().output_format());
+
+        assert_eq!(format, OutputFormat::JsonPretty);
+    }
+
+    #[test]
+    fn doctor_report_command_emits_checked_json_schema() {
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Json, capture.clone());
+        let args = DoctorReportArgs {
+            fixture_id: "happy_path".to_string(),
+            json: true,
+        };
+
+        doctor_report(&args, &mut output).expect("doctor report command");
+        output.flush().expect("flush report output");
+        let json: serde_json::Value =
+            serde_json::from_str(capture.contents().trim()).expect("parse doctor report json");
+
+        assert_eq!(json["schema_version"], "doctor-cli-report-v1");
+        assert_eq!(json["fixture_id"], "happy_path");
+        assert_eq!(json["validation_status"], "passed");
+        assert_eq!(json["report"]["schema_version"], "doctor-core-report-v1");
+        assert_eq!(json["report"]["summary"]["status"], "healthy");
+        assert!(
+            json["rerun_commands"]
+                .as_array()
+                .expect("rerun commands array")
+                .iter()
+                .any(|command| command
+                    .as_str()
+                    .is_some_and(|value| value.contains("rch exec")))
+        );
+    }
+
+    #[test]
+    fn doctor_validate_fixture_rejects_unknown_fixture_id() {
+        let mut output = Output::with_writer(OutputFormat::Json, Vec::<u8>::new());
+        let args = DoctorValidateFixtureArgs {
+            fixture_id: "missing_fixture".to_string(),
+            json: true,
+        };
+
+        let err = doctor_validate_fixture(&args, &mut output).expect_err("unknown fixture fails");
+
+        assert_eq!(err.error_type, "doctor_unknown_fixture");
+        assert_eq!(err.exit_code, ExitCode::USER_ERROR);
+        assert!(err.detail.contains("happy_path"));
     }
 
     #[test]
