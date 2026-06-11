@@ -49,6 +49,17 @@
         "min_rejected": 1,
         "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness ingestion_mixed_artifacts_baseline"
       }
+    },
+    {
+      "fixture_id": "ingestion_source_adapter_matrix",
+      "description": "Evidence ingestion D1 matrix for runtime inspector, proof, RCH, browser, cargo graph, tracker, and redacted-log sources.",
+      "family": "ingestion",
+      "artifact_profile": "source_adapter_matrix_v1",
+      "expectation": {
+        "min_records": 9,
+        "min_rejected": 1,
+        "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness ingestion_source_adapter_matrix"
+      }
     }
   ]
 }

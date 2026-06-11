@@ -2,12 +2,18 @@
 
 ## Scope
 
-`doctor_asupersync` ingestion normalizes runtime artifacts into deterministic
-`EvidenceRecord` entries with explicit provenance. This contract covers:
+`doctor_asupersync` ingestion normalizes runtime and operator artifacts into
+deterministic `EvidenceRecord` entries with explicit provenance. This contract
+covers:
 
-- accepted artifact kinds (`trace`, `structured_log`, `ubs_findings`, `benchmark`)
+- accepted artifact kinds (`trace`, `structured_log`, `ubs_findings`,
+  `benchmark`, `runtime_inspector`, `proof_status`, `proof_lane_manifest`,
+  `rch_receipt`, `browser_package_readiness`, `cargo_feature_graph`,
+  `tracker_context`, `redacted_log`)
 - deterministic normalization and deduplication behavior
 - rejection semantics for malformed/unsupported artifacts
+- redaction failure semantics for log-like or receipt-like artifacts
+- no-claim boundaries carried by every accepted source adapter
 - structured ingestion events for debugging and replay
 
 ## Schema Version
@@ -63,7 +69,11 @@ The ingestion report is:
       "replay_pointer": "string",
       "provenance": {
         "normalization_rule": "string",
-        "source_digest": "string"
+        "source_digest": "string",
+        "source_kind": "string",
+        "adapter_version": "doctor-evidence-adapter-v1",
+        "no_claim_boundary": "does_not_prove:string",
+        "redaction_policy": "string"
       }
     }
   ],
@@ -103,6 +113,10 @@ Required `EvidenceRecord` fields:
 10. `replay_pointer`
 11. `provenance.normalization_rule`
 12. `provenance.source_digest`
+13. `provenance.source_kind`
+14. `provenance.adapter_version`
+15. `provenance.no_claim_boundary`
+16. `provenance.redaction_policy`
 
 ## Determinism Rules
 
@@ -118,9 +132,45 @@ Required `EvidenceRecord` fields:
 - `structured_log`: parse JSON object, map `correlation_id`, `scenario_id`, `seed`, `outcome_class`, and `summary/message`.
 - `ubs_findings`: each non-empty line becomes one failed evidence record.
 - `benchmark`: each `key=value` line becomes one success evidence record.
+- `runtime_inspector`: parse JSON object as a runtime-inspector snapshot.
+- `proof_status`: parse JSON object as a proof-status snapshot row.
+- `proof_lane_manifest`: parse JSON object as proof-lane manifest metadata.
+- `rch_receipt`: parse JSON object as a terminal or blocker RCH receipt.
+- `browser_package_readiness`: parse JSON object as browser/package readiness evidence.
+- `cargo_feature_graph`: each non-empty line becomes one success evidence record.
+- `tracker_context`: parse JSON object as tracker/bead context.
+- `redacted_log`: parse JSON object after redaction checks pass.
 
 Malformed JSON, invalid benchmark line format, empty findings, and unsupported
 artifact type are rejected with explicit reasons.
+
+## Source Adapter Provenance
+
+Every accepted source type has a deterministic adapter row with:
+
+1. `source_kind`: canonical source family for downstream analyzers.
+2. `adapter_version`: currently `doctor-evidence-adapter-v1`.
+3. `normalization_rule`: stable rule identifier for replay/debugging.
+4. `no_claim_boundary`: a `does_not_prove:*` statement naming what the record
+   does not prove by itself.
+5. `redaction_policy`: stable policy identifier for the adapter.
+
+Examples:
+
+- `rch_receipt` uses `source_kind = "rch_receipt"` and does not prove source
+  code correctness.
+- `proof_status` uses `source_kind = "proof_status_snapshot"` and does not prove
+  that the proof command executed at ingestion time.
+- `cargo_feature_graph` uses line-snippet normalization and does not prove build
+  success.
+
+## Redaction Rules
+
+Ingestion fails closed when content contains common unredacted secret markers,
+including private-key headers, bearer-token headers, `AWS_SECRET_ACCESS_KEY`, or
+the test sentinel `UNREDACTED_SECRET`. A `redacted_log` artifact that mentions a
+token/password/secret without also carrying a redaction marker is also rejected.
+Rejected artifacts retain artifact id, source path, replay pointer, and reason.
 
 ## Structured Event Taxonomy
 
@@ -145,3 +195,5 @@ must remain stable within `doctor-evidence-v1`.
 4. Consumers should retain `provenance.source_digest` for audit and dedupe tracing.
 5. Consumers should treat unknown artifact types as expected rejection paths,
    not runtime panics.
+6. Consumers must carry forward `no_claim_boundary` and must not promote a
+   source record into a stronger proof claim without a later proof lane.

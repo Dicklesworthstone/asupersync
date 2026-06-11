@@ -605,6 +605,23 @@ pub struct RuntimeArtifact {
     pub content: String,
 }
 
+/// Public descriptor for one supported doctor evidence source adapter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceAdapterSpec {
+    /// Caller-facing artifact type accepted by ingestion.
+    pub artifact_type: String,
+    /// Canonical source kind emitted into provenance.
+    pub source_kind: String,
+    /// Deterministic adapter version.
+    pub adapter_version: String,
+    /// Normalization rule used by the adapter.
+    pub normalization_rule: String,
+    /// Explicit boundary for claims this source does not prove by itself.
+    pub no_claim_boundary: String,
+    /// Redaction policy expected for this source.
+    pub redaction_policy: String,
+}
+
 /// Normalized evidence record emitted from one artifact input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvidenceRecord {
@@ -639,6 +656,14 @@ pub struct EvidenceProvenance {
     pub normalization_rule: String,
     /// Stable source digest generated from raw artifact content.
     pub source_digest: String,
+    /// Canonical source kind used by doctor analyzers.
+    pub source_kind: String,
+    /// Adapter version that interpreted this artifact.
+    pub adapter_version: String,
+    /// Explicit no-claim boundary for this evidence source.
+    pub no_claim_boundary: String,
+    /// Redaction policy applied or required for this source.
+    pub redaction_policy: String,
 }
 
 /// One rejected artifact entry with deterministic reason.
@@ -3462,6 +3487,7 @@ const UX_SIGNOFF_MATRIX_VERSION: &str = "doctor-ux-signoff-matrix-v1";
 const UX_BASELINE_MATRIX_VERSION: &str = "doctor-ux-acceptance-matrix-v0";
 const SCREEN_ENGINE_CONTRACT_VERSION: &str = "doctor-screen-engine-v1";
 const EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
+const EVIDENCE_ADAPTER_VERSION: &str = "doctor-evidence-adapter-v1";
 const STRUCTURED_LOGGING_CONTRACT_VERSION: &str = "doctor-logging-v1";
 const REMEDIATION_RECIPE_CONTRACT_VERSION: &str = "doctor-remediation-recipe-v1";
 const EXECUTION_ADAPTER_CONTRACT_VERSION: &str = "doctor-exec-adapter-v1";
@@ -3489,6 +3515,123 @@ const DEFAULT_VISUAL_VIEWPORT_HEIGHT: u16 = 44;
 const MIN_VISUAL_VIEWPORT_WIDTH: u16 = 110;
 const MIN_VISUAL_VIEWPORT_HEIGHT: u16 = 32;
 const MAX_SAMPLE_FILES: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceParserKind {
+    JsonObject,
+    UbsLines,
+    BenchmarkKv,
+    LineSnippets,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EvidenceAdapterDefinition {
+    artifact_type: &'static str,
+    source_kind: &'static str,
+    normalization_rule: &'static str,
+    no_claim_boundary: &'static str,
+    redaction_policy: &'static str,
+    parser: EvidenceParserKind,
+}
+
+const EVIDENCE_ADAPTERS: &[EvidenceAdapterDefinition] = &[
+    EvidenceAdapterDefinition {
+        artifact_type: "trace",
+        source_kind: "runtime_trace",
+        normalization_rule: "trace_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:current-runtime-health",
+        redaction_policy: "trace-redaction-required-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "structured_log",
+        source_kind: "structured_log",
+        normalization_rule: "structured_log_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:complete-raw-log-corpus",
+        redaction_policy: "structured-log-redaction-required-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "ubs_findings",
+        source_kind: "ubs_findings",
+        normalization_rule: "ubs_findings_line_normalization_v1",
+        no_claim_boundary: "does_not_prove:source-fix-correctness",
+        redaction_policy: "ubs-output-path-redaction-v1",
+        parser: EvidenceParserKind::UbsLines,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "benchmark",
+        source_kind: "benchmark_sample",
+        normalization_rule: "benchmark_kv_normalization_v1",
+        no_claim_boundary: "does_not_prove:general-performance-regression",
+        redaction_policy: "benchmark-metadata-redaction-v1",
+        parser: EvidenceParserKind::BenchmarkKv,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "runtime_inspector",
+        source_kind: "runtime_inspector_snapshot",
+        normalization_rule: "runtime_inspector_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:fresh-runtime-health",
+        redaction_policy: "runtime-inspector-redaction-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "proof_status",
+        source_kind: "proof_status_snapshot",
+        normalization_rule: "proof_status_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:proof-command-executed-now",
+        redaction_policy: "proof-status-redaction-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "proof_lane_manifest",
+        source_kind: "proof_lane_manifest_row",
+        normalization_rule: "proof_lane_manifest_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:proof-lane-terminal-outcome",
+        redaction_policy: "proof-lane-manifest-redaction-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "rch_receipt",
+        source_kind: "rch_receipt",
+        normalization_rule: "rch_receipt_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:source-code-correctness",
+        redaction_policy: "rch-receipt-redaction-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "browser_package_readiness",
+        source_kind: "browser_package_readiness",
+        normalization_rule: "browser_package_readiness_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:browser-ga-readiness",
+        redaction_policy: "browser-package-redaction-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "cargo_feature_graph",
+        source_kind: "cargo_feature_graph_snippet",
+        normalization_rule: "cargo_feature_graph_line_normalization_v1",
+        no_claim_boundary: "does_not_prove:cargo-build-success",
+        redaction_policy: "cargo-feature-graph-redaction-v1",
+        parser: EvidenceParserKind::LineSnippets,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "tracker_context",
+        source_kind: "tracker_context",
+        normalization_rule: "tracker_context_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:implementation-state",
+        redaction_policy: "tracker-context-redaction-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+    EvidenceAdapterDefinition {
+        artifact_type: "redacted_log",
+        source_kind: "redacted_log",
+        normalization_rule: "redacted_log_json_normalization_v1",
+        no_claim_boundary: "does_not_prove:complete-raw-log-corpus",
+        redaction_policy: "redacted-log-required-v1",
+        parser: EvidenceParserKind::JsonObject,
+    },
+];
 const SURFACE_MARKERS: [(&str, &[&str]); 12] = [
     (
         "cx",
@@ -6396,6 +6539,28 @@ fn next_elapsed_tick(counter: &mut u64) -> u64 {
     current
 }
 
+/// Returns the deterministic doctor evidence adapters accepted by ingestion.
+#[must_use]
+pub fn supported_evidence_adapter_specs() -> Vec<EvidenceAdapterSpec> {
+    EVIDENCE_ADAPTERS
+        .iter()
+        .map(|adapter| EvidenceAdapterSpec {
+            artifact_type: adapter.artifact_type.to_string(),
+            source_kind: adapter.source_kind.to_string(),
+            adapter_version: EVIDENCE_ADAPTER_VERSION.to_string(),
+            normalization_rule: adapter.normalization_rule.to_string(),
+            no_claim_boundary: adapter.no_claim_boundary.to_string(),
+            redaction_policy: adapter.redaction_policy.to_string(),
+        })
+        .collect()
+}
+
+fn evidence_adapter_for(artifact_type: &str) -> Option<&'static EvidenceAdapterDefinition> {
+    EVIDENCE_ADAPTERS
+        .iter()
+        .find(|adapter| adapter.artifact_type == artifact_type)
+}
+
 fn content_digest(content: &str) -> String {
     let mut weighted_sum: u128 = 0;
     let mut rolling_xor: u8 = 0;
@@ -6409,6 +6574,40 @@ fn content_digest(content: &str) -> String {
         content.len(),
         weighted_sum
     )
+}
+
+fn evidence_provenance(adapter: &EvidenceAdapterDefinition, content: &str) -> EvidenceProvenance {
+    EvidenceProvenance {
+        normalization_rule: adapter.normalization_rule.to_string(),
+        source_digest: content_digest(content),
+        source_kind: adapter.source_kind.to_string(),
+        adapter_version: EVIDENCE_ADAPTER_VERSION.to_string(),
+        no_claim_boundary: adapter.no_claim_boundary.to_string(),
+        redaction_policy: adapter.redaction_policy.to_string(),
+    }
+}
+
+fn redaction_violation(artifact: &RuntimeArtifact) -> Option<String> {
+    let lower = artifact.content.to_ascii_lowercase();
+    let has_secret_marker = lower.contains("unredacted_secret")
+        || lower.contains("begin openssh private key")
+        || lower.contains("begin rsa private key")
+        || lower.contains("authorization: bearer ")
+        || lower.contains("aws_secret_access_key");
+    if has_secret_marker {
+        return Some("artifact contains unredacted secret marker".to_string());
+    }
+
+    if artifact.artifact_type == "redacted_log"
+        && !lower.contains("redacted")
+        && (lower.contains("token") || lower.contains("password") || lower.contains("secret"))
+    {
+        return Some(
+            "redacted_log artifact contains sensitive marker without redaction".to_string(),
+        );
+    }
+
+    None
 }
 
 fn canonical_outcome_class(raw: Option<&str>) -> String {
@@ -6431,7 +6630,7 @@ fn json_value_to_string(value: &serde_json::Value) -> Option<String> {
 fn parse_json_artifact(
     run_id: &str,
     artifact: &RuntimeArtifact,
-    normalization_rule: &str,
+    adapter: &EvidenceAdapterDefinition,
 ) -> Result<Vec<EvidenceRecord>, String> {
     let parsed: serde_json::Value = serde_json::from_str(&artifact.content)
         .map_err(|err| format!("invalid JSON payload: {err}"))?;
@@ -6474,16 +6673,14 @@ fn parse_json_artifact(
         outcome_class,
         summary,
         replay_pointer: artifact.replay_pointer.clone(),
-        provenance: EvidenceProvenance {
-            normalization_rule: normalization_rule.to_string(),
-            source_digest: content_digest(&artifact.content),
-        },
+        provenance: evidence_provenance(adapter, &artifact.content),
     }])
 }
 
 fn parse_ubs_artifact(
     run_id: &str,
     artifact: &RuntimeArtifact,
+    adapter: &EvidenceAdapterDefinition,
 ) -> Result<Vec<EvidenceRecord>, String> {
     let findings = artifact
         .content
@@ -6509,10 +6706,7 @@ fn parse_ubs_artifact(
             outcome_class: "failed".to_string(),
             summary: line.to_string(),
             replay_pointer: artifact.replay_pointer.clone(),
-            provenance: EvidenceProvenance {
-                normalization_rule: "ubs_findings_line_normalization_v1".to_string(),
-                source_digest: content_digest(&artifact.content),
-            },
+            provenance: evidence_provenance(adapter, &artifact.content),
         })
         .collect())
 }
@@ -6520,6 +6714,7 @@ fn parse_ubs_artifact(
 fn parse_benchmark_artifact(
     run_id: &str,
     artifact: &RuntimeArtifact,
+    adapter: &EvidenceAdapterDefinition,
 ) -> Result<Vec<EvidenceRecord>, String> {
     let metrics = artifact
         .content
@@ -6547,10 +6742,44 @@ fn parse_benchmark_artifact(
             outcome_class: "success".to_string(),
             summary: format!("benchmark {metric}={value}"),
             replay_pointer: artifact.replay_pointer.clone(),
-            provenance: EvidenceProvenance {
-                normalization_rule: "benchmark_kv_normalization_v1".to_string(),
-                source_digest: content_digest(&artifact.content),
-            },
+            provenance: evidence_provenance(adapter, &artifact.content),
+        })
+        .collect())
+}
+
+fn parse_line_snippet_artifact(
+    run_id: &str,
+    artifact: &RuntimeArtifact,
+    adapter: &EvidenceAdapterDefinition,
+) -> Result<Vec<EvidenceRecord>, String> {
+    let snippets = artifact
+        .content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if snippets.is_empty() {
+        return Err(format!(
+            "{} artifact contains no snippets",
+            artifact.artifact_type
+        ));
+    }
+
+    Ok(snippets
+        .into_iter()
+        .enumerate()
+        .map(|(idx, line)| EvidenceRecord {
+            evidence_id: format!("{run_id}:{}:{idx:04}", artifact.artifact_id),
+            artifact_id: artifact.artifact_id.clone(),
+            artifact_type: artifact.artifact_type.clone(),
+            source_path: artifact.source_path.clone(),
+            correlation_id: format!("{}-{idx}", artifact.artifact_id),
+            scenario_id: adapter.source_kind.to_string(),
+            seed: "none".to_string(),
+            outcome_class: "success".to_string(),
+            summary: format!("{}: {line}", adapter.source_kind),
+            replay_pointer: artifact.replay_pointer.clone(),
+            provenance: evidence_provenance(adapter, &artifact.content),
         })
         .collect())
 }
@@ -6636,21 +6865,58 @@ pub fn ingest_runtime_artifacts(
             continue;
         }
 
-        let parsed = match artifact.artifact_type.as_str() {
-            "trace" => {
-                parse_json_artifact(&normalized_run_id, &artifact, "trace_json_normalization_v1")
+        let Some(adapter) = evidence_adapter_for(&artifact.artifact_type) else {
+            let reason = format!("unsupported artifact type {}", artifact.artifact_type);
+            rejected.push(RejectedArtifact {
+                artifact_id: artifact.artifact_id.clone(),
+                artifact_type: artifact.artifact_type.clone(),
+                source_path: artifact.source_path.clone(),
+                replay_pointer: artifact.replay_pointer.clone(),
+                reason: reason.clone(),
+            });
+            events.push(IngestionEvent {
+                stage: "reject_artifact".to_string(),
+                level: "warn".to_string(),
+                message: reason,
+                elapsed_ms: next_elapsed_tick(&mut elapsed),
+                artifact_id: Some(artifact.artifact_id),
+                replay_pointer: Some(artifact.replay_pointer),
+            });
+            continue;
+        };
+
+        if let Some(reason) = redaction_violation(&artifact) {
+            rejected.push(RejectedArtifact {
+                artifact_id: artifact.artifact_id.clone(),
+                artifact_type: artifact.artifact_type.clone(),
+                source_path: artifact.source_path.clone(),
+                replay_pointer: artifact.replay_pointer.clone(),
+                reason: reason.clone(),
+            });
+            events.push(IngestionEvent {
+                stage: "reject_artifact".to_string(),
+                level: "warn".to_string(),
+                message: reason,
+                elapsed_ms: next_elapsed_tick(&mut elapsed),
+                artifact_id: Some(artifact.artifact_id),
+                replay_pointer: Some(artifact.replay_pointer),
+            });
+            continue;
+        }
+
+        let parsed = match adapter.parser {
+            EvidenceParserKind::JsonObject => {
+                parse_json_artifact(&normalized_run_id, &artifact, adapter)
             }
-            "structured_log" => parse_json_artifact(
-                &normalized_run_id,
-                &artifact,
-                "structured_log_json_normalization_v1",
-            ),
-            "ubs_findings" => parse_ubs_artifact(&normalized_run_id, &artifact),
-            "benchmark" => parse_benchmark_artifact(&normalized_run_id, &artifact),
-            _ => Err(format!(
-                "unsupported artifact type {}",
-                artifact.artifact_type
-            )),
+            EvidenceParserKind::UbsLines => {
+                parse_ubs_artifact(&normalized_run_id, &artifact, adapter)
+            }
+            EvidenceParserKind::BenchmarkKv => {
+                parse_benchmark_artifact(&normalized_run_id, &artifact, adapter)
+            }
+            EvidenceParserKind::LineSnippets => {
+                parse_line_snippet_artifact(&normalized_run_id, &artifact, adapter)
+            }
         };
 
         match parsed {
@@ -6830,9 +7096,23 @@ pub fn validate_evidence_ingestion_report(report: &EvidenceIngestionReport) -> R
         }
         if record.provenance.normalization_rule.trim().is_empty()
             || record.provenance.source_digest.trim().is_empty()
+            || record.provenance.source_kind.trim().is_empty()
+            || record.provenance.adapter_version.trim().is_empty()
+            || record.provenance.no_claim_boundary.trim().is_empty()
+            || record.provenance.redaction_policy.trim().is_empty()
         {
             return Err(format!(
                 "record {} has empty provenance fields",
+                record.evidence_id
+            ));
+        }
+        if !record
+            .provenance
+            .no_claim_boundary
+            .starts_with("does_not_prove:")
+        {
+            return Err(format!(
+                "record {} provenance no_claim_boundary must start with does_not_prove:",
                 record.evidence_id
             ));
         }
@@ -20155,6 +20435,209 @@ impl RuntimeState {
                     .to_string(),
             },
         ]
+    }
+
+    fn source_adapter_matrix_fixture() -> Vec<RuntimeArtifact> {
+        vec![
+            RuntimeArtifact {
+                artifact_id: "browser-package".to_string(),
+                artifact_type: "browser_package_readiness".to_string(),
+                source_path: "docs/wasm_browser_artifact_integrity_manifest_v1.json".to_string(),
+                replay_pointer: "bash scripts/build_browser_core_artifacts.sh prod".to_string(),
+                content: r#"{
+  "correlation_id": "browser-package",
+  "scenario_id": "browser-ga",
+  "seed": "none",
+  "outcome_class": "success",
+  "summary": "browser package manifest verified"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "cargo-graph".to_string(),
+                artifact_type: "cargo_feature_graph".to_string(),
+                source_path: "target/cargo-tree/default.txt".to_string(),
+                replay_pointer: "rch exec -- cargo tree -e normal -p asupersync".to_string(),
+                content: "asupersync v0.3.4\nserde v1.0.0\n".to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "proof-lane".to_string(),
+                artifact_type: "proof_lane_manifest".to_string(),
+                source_path: "artifacts/proof_lane_manifest_v1.json".to_string(),
+                replay_pointer: "rch exec -- cargo test --test proof_lane_manifest_contract"
+                    .to_string(),
+                content: r#"{
+  "correlation_id": "proof-lane",
+  "scenario_id": "proof-manifest",
+  "seed": "none",
+  "outcome_class": "success",
+  "summary": "manifest row parsed"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "proof-status".to_string(),
+                artifact_type: "proof_status".to_string(),
+                source_path: "artifacts/proof_status_snapshot_v1.json".to_string(),
+                replay_pointer: "rch exec -- cargo test --test proof_status_snapshot_contract"
+                    .to_string(),
+                content: r#"{
+  "correlation_id": "proof-status",
+  "scenario_id": "proof-status",
+  "seed": "none",
+  "outcome_class": "success",
+  "summary": "snapshot row parsed"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "rch-preflight".to_string(),
+                artifact_type: "rch_receipt".to_string(),
+                source_path: "target/rch/topology-preflight.json".to_string(),
+                replay_pointer: "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test ...".to_string(),
+                content: r#"{
+  "correlation_id": "rch-preflight",
+  "scenario_id": "topology-preflight",
+  "seed": "none",
+  "outcome_class": "failed",
+  "summary": "remote topology preflight failed before Cargo"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "redacted-log".to_string(),
+                artifact_type: "redacted_log".to_string(),
+                source_path: "logs/doctor-redacted.json".to_string(),
+                replay_pointer: "asupersync doctor collect-logs --redact".to_string(),
+                content: r#"{
+  "correlation_id": "redacted-log",
+  "scenario_id": "doctor-log",
+  "seed": "none",
+  "outcome_class": "success",
+  "summary": "token=[REDACTED]"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "runtime-inspector".to_string(),
+                artifact_type: "runtime_inspector".to_string(),
+                source_path: "target/runtime-inspector/snapshot.json".to_string(),
+                replay_pointer: "asupersync doctor runtime-inspector --json".to_string(),
+                content: r#"{
+  "correlation_id": "runtime-inspector",
+  "scenario_id": "runtime-health",
+  "seed": "none",
+  "outcome_class": "success",
+  "summary": "runtime inspector snapshot parsed"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "tracker-context".to_string(),
+                artifact_type: "tracker_context".to_string(),
+                source_path: ".beads/issues.jsonl".to_string(),
+                replay_pointer: "br show asupersync-idea-wizard-fifth-wave-3gaiun.1.1 --json"
+                    .to_string(),
+                content: r#"{
+  "correlation_id": "tracker-context",
+  "scenario_id": "doctor-d1",
+  "seed": "none",
+  "outcome_class": "success",
+  "summary": "bead context parsed"
+}"#
+                .to_string(),
+            },
+            RuntimeArtifact {
+                artifact_id: "unredacted-log".to_string(),
+                artifact_type: "redacted_log".to_string(),
+                source_path: "logs/raw.json".to_string(),
+                replay_pointer: "asupersync doctor collect-logs".to_string(),
+                content: r#"{
+  "correlation_id": "raw-log",
+  "scenario_id": "doctor-log",
+  "seed": "none",
+  "outcome_class": "failed",
+  "summary": "UNREDACTED_SECRET token leaked"
+}"#
+                .to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn evidence_adapter_specs_cover_doctor_d1_sources() {
+        let specs = supported_evidence_adapter_specs();
+        let artifact_types = specs
+            .iter()
+            .map(|spec| spec.artifact_type.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "runtime_inspector",
+            "proof_status",
+            "proof_lane_manifest",
+            "rch_receipt",
+            "browser_package_readiness",
+            "cargo_feature_graph",
+            "tracker_context",
+            "redacted_log",
+        ] {
+            assert!(
+                artifact_types.contains(required),
+                "missing doctor evidence adapter {required}"
+            );
+        }
+        for spec in specs {
+            assert_eq!(spec.adapter_version, EVIDENCE_ADAPTER_VERSION);
+            assert!(
+                spec.no_claim_boundary.starts_with("does_not_prove:"),
+                "{} missing no-claim boundary",
+                spec.artifact_type
+            );
+            assert!(
+                spec.redaction_policy.ends_with("-v1"),
+                "{} missing stable redaction policy",
+                spec.artifact_type
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_ingestion_accepts_source_adapter_matrix_and_rejects_raw_secret() {
+        let report = ingest_runtime_artifacts("run-doctor-d1", &source_adapter_matrix_fixture());
+        validate_evidence_ingestion_report(&report).expect("report should validate");
+        assert_eq!(report.records.len(), 9);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(
+            report.rejected[0].reason,
+            "artifact contains unredacted secret marker"
+        );
+
+        let source_kinds = report
+            .records
+            .iter()
+            .map(|record| record.provenance.source_kind.as_str())
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "runtime_inspector_snapshot",
+            "proof_status_snapshot",
+            "proof_lane_manifest_row",
+            "rch_receipt",
+            "browser_package_readiness",
+            "cargo_feature_graph_snippet",
+            "tracker_context",
+            "redacted_log",
+        ] {
+            assert!(
+                source_kinds.contains(required),
+                "missing normalized source kind {required}"
+            );
+        }
+        assert!(report.records.iter().all(|record| {
+            record
+                .provenance
+                .no_claim_boundary
+                .starts_with("does_not_prove:")
+        }));
     }
 
     #[test]

@@ -6,7 +6,8 @@
 use asupersync::cli::doctor::{
     RuntimeArtifact, analyze_workspace_invariants, analyze_workspace_lock_contention,
     emit_lock_contention_structured_events, ingest_runtime_artifacts, scan_workspace,
-    structured_logging_contract, validate_structured_logging_event_stream,
+    structured_logging_contract, validate_evidence_ingestion_report,
+    validate_structured_logging_event_stream,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -175,6 +176,133 @@ fn mixed_artifacts_fixture() -> Vec<RuntimeArtifact> {
     ]
 }
 
+fn source_adapter_matrix_fixture() -> Vec<RuntimeArtifact> {
+    vec![
+        RuntimeArtifact {
+            artifact_id: "browser-package".to_string(),
+            artifact_type: "browser_package_readiness".to_string(),
+            source_path: "docs/wasm_browser_artifact_integrity_manifest_v1.json".to_string(),
+            replay_pointer: "bash scripts/build_browser_core_artifacts.sh prod".to_string(),
+            content: r#"{
+                "correlation_id": "browser-package",
+                "scenario_id": "browser-ga",
+                "seed": "none",
+                "outcome_class": "success",
+                "summary": "browser package manifest verified"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "cargo-graph".to_string(),
+            artifact_type: "cargo_feature_graph".to_string(),
+            source_path: "target/cargo-tree/default.txt".to_string(),
+            replay_pointer: "rch exec -- cargo tree -e normal -p asupersync".to_string(),
+            content: "asupersync v0.3.4\nserde v1.0.0\n".to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "proof-lane".to_string(),
+            artifact_type: "proof_lane_manifest".to_string(),
+            source_path: "artifacts/proof_lane_manifest_v1.json".to_string(),
+            replay_pointer: "rch exec -- cargo test --test proof_lane_manifest_contract"
+                .to_string(),
+            content: r#"{
+                "correlation_id": "proof-lane",
+                "scenario_id": "proof-manifest",
+                "seed": "none",
+                "outcome_class": "success",
+                "summary": "manifest row parsed"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "proof-status".to_string(),
+            artifact_type: "proof_status".to_string(),
+            source_path: "artifacts/proof_status_snapshot_v1.json".to_string(),
+            replay_pointer: "rch exec -- cargo test --test proof_status_snapshot_contract"
+                .to_string(),
+            content: r#"{
+                "correlation_id": "proof-status",
+                "scenario_id": "proof-status",
+                "seed": "none",
+                "outcome_class": "success",
+                "summary": "snapshot row parsed"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "rch-preflight".to_string(),
+            artifact_type: "rch_receipt".to_string(),
+            source_path: "target/rch/topology-preflight.json".to_string(),
+            replay_pointer: "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test ...".to_string(),
+            content: r#"{
+                "correlation_id": "rch-preflight",
+                "scenario_id": "topology-preflight",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "remote topology preflight failed before Cargo"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "redacted-log".to_string(),
+            artifact_type: "redacted_log".to_string(),
+            source_path: "logs/doctor-redacted.json".to_string(),
+            replay_pointer: "asupersync doctor collect-logs --redact".to_string(),
+            content: r#"{
+                "correlation_id": "redacted-log",
+                "scenario_id": "doctor-log",
+                "seed": "none",
+                "outcome_class": "success",
+                "summary": "token=[REDACTED]"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "runtime-inspector".to_string(),
+            artifact_type: "runtime_inspector".to_string(),
+            source_path: "target/runtime-inspector/snapshot.json".to_string(),
+            replay_pointer: "asupersync doctor runtime-inspector --json".to_string(),
+            content: r#"{
+                "correlation_id": "runtime-inspector",
+                "scenario_id": "runtime-health",
+                "seed": "none",
+                "outcome_class": "success",
+                "summary": "runtime inspector snapshot parsed"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "tracker-context".to_string(),
+            artifact_type: "tracker_context".to_string(),
+            source_path: ".beads/issues.jsonl".to_string(),
+            replay_pointer: "br show asupersync-idea-wizard-fifth-wave-3gaiun.1.1 --json"
+                .to_string(),
+            content: r#"{
+                "correlation_id": "tracker-context",
+                "scenario_id": "doctor-d1",
+                "seed": "none",
+                "outcome_class": "success",
+                "summary": "bead context parsed"
+            }"#
+            .to_string(),
+        },
+        RuntimeArtifact {
+            artifact_id: "unredacted-log".to_string(),
+            artifact_type: "redacted_log".to_string(),
+            source_path: "logs/raw.json".to_string(),
+            replay_pointer: "asupersync doctor collect-logs".to_string(),
+            content: r#"{
+                "correlation_id": "raw-log",
+                "scenario_id": "doctor-log",
+                "seed": "none",
+                "outcome_class": "failed",
+                "summary": "UNREDACTED_SECRET token leaked"
+            }"#
+            .to_string(),
+        },
+    ]
+}
+
 #[allow(clippy::too_many_lines)]
 fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
     let run_id = format!("run-{}", fixture.fixture_id);
@@ -306,16 +434,17 @@ fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
                 .artifact_profile
                 .as_deref()
                 .expect("ingestion fixture requires artifact_profile");
-            assert_eq!(
-                profile, "mixed_artifacts_v1",
-                "unsupported artifact profile"
-            );
-            let artifacts = mixed_artifacts_fixture();
+            let artifacts = match profile {
+                "mixed_artifacts_v1" => mixed_artifacts_fixture(),
+                "source_adapter_matrix_v1" => source_adapter_matrix_fixture(),
+                other => panic!("unsupported artifact profile {other}"),
+            };
             let report = ingest_runtime_artifacts(&run_id, &artifacts);
             let report_again = ingest_runtime_artifacts(&run_id, &artifacts);
             if report != report_again {
                 diagnostics.push("ingestion report is non-deterministic".to_string());
             }
+            validate_evidence_ingestion_report(&report).expect("ingestion report validates");
             metrics.insert("record_count".to_string(), report.records.len().to_string());
             metrics.insert(
                 "rejected_count".to_string(),
