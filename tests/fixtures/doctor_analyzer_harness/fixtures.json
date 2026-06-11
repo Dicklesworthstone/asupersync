@@ -52,7 +52,7 @@
     },
     {
       "fixture_id": "ingestion_source_adapter_matrix",
-      "description": "Evidence ingestion D1 matrix for runtime inspector, proof, RCH, browser, cargo graph, tracker, and redacted-log sources.",
+      "description": "DoctorEvidenceBundle D1 matrix for runtime inspector, proof, RCH, browser, cargo graph, tracker, and redacted-log sources.",
       "family": "ingestion",
       "artifact_profile": "source_adapter_matrix_v1",
       "expectation": {

@@ -4,10 +4,11 @@
 #![cfg(feature = "cli")]
 
 use asupersync::cli::doctor::{
-    RuntimeArtifact, analyze_workspace_invariants, analyze_workspace_lock_contention,
-    emit_lock_contention_structured_events, ingest_runtime_artifacts, scan_workspace,
-    structured_logging_contract, validate_evidence_ingestion_report,
-    validate_structured_logging_event_stream,
+    DOCTOR_EVIDENCE_SCHEMA_VERSION, DoctorEvidenceBundle, RuntimeArtifact,
+    analyze_workspace_invariants, analyze_workspace_lock_contention,
+    emit_lock_contention_structured_events, ingest_doctor_evidence_bundle, scan_workspace,
+    structured_logging_contract, validate_doctor_evidence_bundle,
+    validate_evidence_ingestion_report, validate_structured_logging_event_stream,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -303,6 +304,21 @@ fn source_adapter_matrix_fixture() -> Vec<RuntimeArtifact> {
     ]
 }
 
+fn doctor_evidence_bundle(
+    run_id: &str,
+    source_profile: &str,
+    artifacts: Vec<RuntimeArtifact>,
+) -> DoctorEvidenceBundle {
+    DoctorEvidenceBundle {
+        schema_version: DOCTOR_EVIDENCE_SCHEMA_VERSION.to_string(),
+        bundle_id: format!("bundle-{run_id}"),
+        run_id: run_id.to_string(),
+        source_profile: source_profile.to_string(),
+        generated_by: "doctor-analyzer-fixture-harness".to_string(),
+        artifacts,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
     let run_id = format!("run-{}", fixture.fixture_id);
@@ -439,8 +455,10 @@ fn execute_fixture(fixture: &AnalyzerFixture) -> FixtureExecutionLog {
                 "source_adapter_matrix_v1" => source_adapter_matrix_fixture(),
                 other => panic!("unsupported artifact profile {other}"),
             };
-            let report = ingest_runtime_artifacts(&run_id, &artifacts);
-            let report_again = ingest_runtime_artifacts(&run_id, &artifacts);
+            let bundle = doctor_evidence_bundle(&run_id, profile, artifacts);
+            validate_doctor_evidence_bundle(&bundle).expect("doctor evidence bundle validates");
+            let report = ingest_doctor_evidence_bundle(&bundle);
+            let report_again = ingest_doctor_evidence_bundle(&bundle);
             if report != report_again {
                 diagnostics.push("ingestion report is non-deterministic".to_string());
             }
@@ -554,6 +572,15 @@ fn run_all_fixtures(pack: &FixturePack) -> Vec<FixtureExecutionLog> {
     logs
 }
 
+fn run_fixture_by_id(pack: &FixturePack, fixture_id: &str) -> FixtureExecutionLog {
+    let fixture = pack
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.fixture_id == fixture_id)
+        .unwrap_or_else(|| panic!("missing fixture {fixture_id}"));
+    execute_fixture(fixture)
+}
+
 #[test]
 fn fixture_loader_is_deterministic() {
     let first = load_fixture_pack();
@@ -574,6 +601,26 @@ fn analyzer_fixture_harness_e2e_suite_is_deterministic() {
         first_logs.iter().all(|log| log.status == "pass"),
         "fixture harness failures: {}",
         serde_json::to_string_pretty(&first_logs).expect("serialize harness logs")
+    );
+}
+
+#[test]
+fn ingestion_source_adapter_matrix() {
+    let pack = load_fixture_pack();
+    let log = run_fixture_by_id(&pack, "ingestion_source_adapter_matrix");
+    assert_eq!(
+        log.status,
+        "pass",
+        "fixture failed: {}",
+        serde_json::to_string_pretty(&log).expect("serialize fixture log")
+    );
+    assert_eq!(
+        log.metrics.get("record_count").map(String::as_str),
+        Some("9")
+    );
+    assert_eq!(
+        log.metrics.get("rejected_count").map(String::as_str),
+        Some("1")
     );
 }
 

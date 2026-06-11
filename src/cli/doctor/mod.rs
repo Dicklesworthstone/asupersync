@@ -605,6 +605,23 @@ pub struct RuntimeArtifact {
     pub content: String,
 }
 
+/// Versioned input envelope for doctor evidence ingestion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorEvidenceBundle {
+    /// Expected bundle schema version.
+    pub schema_version: String,
+    /// Stable bundle identifier supplied by the collector.
+    pub bundle_id: String,
+    /// Ingestion run identifier propagated to normalized records.
+    pub run_id: String,
+    /// Source profile naming the fixture, collector, or evidence family.
+    pub source_profile: String,
+    /// Collector or agent that generated this bundle.
+    pub generated_by: String,
+    /// Raw runtime/operator artifacts to normalize.
+    pub artifacts: Vec<RuntimeArtifact>,
+}
+
 /// Public descriptor for one supported doctor evidence source adapter.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvidenceAdapterSpec {
@@ -3486,7 +3503,10 @@ const NAVIGATION_TOPOLOGY_VERSION: &str = "doctor-navigation-topology-v1";
 const UX_SIGNOFF_MATRIX_VERSION: &str = "doctor-ux-signoff-matrix-v1";
 const UX_BASELINE_MATRIX_VERSION: &str = "doctor-ux-acceptance-matrix-v0";
 const SCREEN_ENGINE_CONTRACT_VERSION: &str = "doctor-screen-engine-v1";
-const EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
+/// Public schema version for doctor evidence bundles and ingestion reports.
+pub const DOCTOR_EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
+
+const EVIDENCE_SCHEMA_VERSION: &str = DOCTOR_EVIDENCE_SCHEMA_VERSION;
 const EVIDENCE_ADAPTER_VERSION: &str = "doctor-evidence-adapter-v1";
 const STRUCTURED_LOGGING_CONTRACT_VERSION: &str = "doctor-logging-v1";
 const REMEDIATION_RECIPE_CONTRACT_VERSION: &str = "doctor-remediation-recipe-v1";
@@ -6784,6 +6804,101 @@ fn parse_line_snippet_artifact(
         .collect())
 }
 
+fn normalized_evidence_run_id(run_id: &str) -> String {
+    if run_id.trim().is_empty() {
+        "unknown-run".to_string()
+    } else {
+        run_id.to_string()
+    }
+}
+
+fn rejected_doctor_evidence_bundle_report(
+    bundle: &DoctorEvidenceBundle,
+    reason: String,
+) -> EvidenceIngestionReport {
+    EvidenceIngestionReport {
+        schema_version: EVIDENCE_SCHEMA_VERSION.to_string(),
+        run_id: normalized_evidence_run_id(&bundle.run_id),
+        records: Vec::new(),
+        rejected: vec![RejectedArtifact {
+            artifact_id: "doctor_evidence_bundle".to_string(),
+            artifact_type: "doctor_evidence_bundle".to_string(),
+            source_path: "bundle".to_string(),
+            replay_pointer: "validate_doctor_evidence_bundle".to_string(),
+            reason: reason.clone(),
+        }],
+        events: vec![
+            IngestionEvent {
+                stage: "ingest_start".to_string(),
+                level: "info".to_string(),
+                message: "starting artifact ingestion: 0".to_string(),
+                elapsed_ms: 0,
+                artifact_id: None,
+                replay_pointer: None,
+            },
+            IngestionEvent {
+                stage: "reject_bundle".to_string(),
+                level: "warn".to_string(),
+                message: reason,
+                elapsed_ms: 1,
+                artifact_id: Some("doctor_evidence_bundle".to_string()),
+                replay_pointer: Some("validate_doctor_evidence_bundle".to_string()),
+            },
+            IngestionEvent {
+                stage: "ingest_complete".to_string(),
+                level: "info".to_string(),
+                message: "ingestion complete: records=0 rejected=1".to_string(),
+                elapsed_ms: 2,
+                artifact_id: None,
+                replay_pointer: None,
+            },
+        ],
+    }
+}
+
+/// Validates the versioned doctor evidence bundle input envelope.
+///
+/// # Errors
+///
+/// Returns `Err` when the bundle schema version, metadata, or artifact list
+/// violates the ingestion input contract.
+pub fn validate_doctor_evidence_bundle(bundle: &DoctorEvidenceBundle) -> Result<(), String> {
+    if bundle.schema_version != EVIDENCE_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported DoctorEvidenceBundle schema_version {}",
+            bundle.schema_version
+        ));
+    }
+    if bundle.run_id.trim().is_empty() {
+        return Err("DoctorEvidenceBundle run_id must be non-empty".to_string());
+    }
+    if bundle.bundle_id.trim().is_empty() {
+        return Err("DoctorEvidenceBundle bundle_id must be non-empty".to_string());
+    }
+    if bundle.source_profile.trim().is_empty() {
+        return Err("DoctorEvidenceBundle source_profile must be non-empty".to_string());
+    }
+    if bundle.generated_by.trim().is_empty() {
+        return Err("DoctorEvidenceBundle generated_by must be non-empty".to_string());
+    }
+    if bundle.artifacts.is_empty() {
+        return Err("DoctorEvidenceBundle artifacts must be non-empty".to_string());
+    }
+    Ok(())
+}
+
+/// Normalizes a versioned doctor evidence bundle into deterministic records.
+///
+/// Malformed bundles fail closed into a one-row rejection report; malformed
+/// artifacts inside a valid bundle are emitted in `rejected`.
+#[must_use]
+pub fn ingest_doctor_evidence_bundle(bundle: &DoctorEvidenceBundle) -> EvidenceIngestionReport {
+    match validate_doctor_evidence_bundle(bundle) {
+        Ok(()) => ingest_runtime_artifacts(&bundle.run_id, &bundle.artifacts),
+        Err(reason) => rejected_doctor_evidence_bundle_report(bundle, reason),
+    }
+}
+
 /// Ingests raw runtime artifacts and emits a deterministic evidence report.
 ///
 /// # Errors
@@ -6795,11 +6910,7 @@ pub fn ingest_runtime_artifacts(
     run_id: &str,
     artifacts: &[RuntimeArtifact],
 ) -> EvidenceIngestionReport {
-    let normalized_run_id = if run_id.trim().is_empty() {
-        "unknown-run".to_string()
-    } else {
-        run_id.to_string()
-    };
+    let normalized_run_id = normalized_evidence_run_id(run_id);
 
     let mut ordered = artifacts.to_vec();
     ordered.sort_by(|left, right| {
@@ -20564,6 +20675,21 @@ impl RuntimeState {
         ]
     }
 
+    fn doctor_evidence_bundle(
+        run_id: &str,
+        source_profile: &str,
+        artifacts: Vec<RuntimeArtifact>,
+    ) -> DoctorEvidenceBundle {
+        DoctorEvidenceBundle {
+            schema_version: DOCTOR_EVIDENCE_SCHEMA_VERSION.to_string(),
+            bundle_id: format!("bundle-{run_id}"),
+            run_id: run_id.to_string(),
+            source_profile: source_profile.to_string(),
+            generated_by: "doctor-module-fixture".to_string(),
+            artifacts,
+        }
+    }
+
     #[test]
     fn evidence_adapter_specs_cover_doctor_d1_sources() {
         let specs = supported_evidence_adapter_specs();
@@ -20599,6 +20725,111 @@ impl RuntimeState {
                 spec.artifact_type
             );
         }
+    }
+
+    #[test]
+    fn doctor_evidence_bundle_validates_and_ingests_source_adapter_matrix() {
+        let bundle = doctor_evidence_bundle(
+            "run-doctor-d1-bundle",
+            "source_adapter_matrix_v1",
+            source_adapter_matrix_fixture(),
+        );
+        validate_doctor_evidence_bundle(&bundle).expect("bundle should validate");
+
+        let report = ingest_doctor_evidence_bundle(&bundle);
+        validate_evidence_ingestion_report(&report).expect("report should validate");
+        assert_eq!(report.schema_version, DOCTOR_EVIDENCE_SCHEMA_VERSION);
+        assert_eq!(report.run_id, "run-doctor-d1-bundle");
+        assert_eq!(report.records.len(), 9);
+        assert_eq!(report.rejected.len(), 1);
+        assert!(
+            report.records.iter().all(|record| !record
+                .provenance
+                .no_claim_boundary
+                .trim()
+                .is_empty())
+        );
+    }
+
+    #[test]
+    fn doctor_evidence_bundle_rejects_unknown_schema_fail_closed() {
+        let mut bundle = doctor_evidence_bundle(
+            "run-doctor-d1-bad-schema",
+            "mixed_artifacts_v1",
+            mixed_artifacts_fixture(),
+        );
+        bundle.schema_version = "doctor-evidence-v2".to_string();
+
+        let validation_error =
+            validate_doctor_evidence_bundle(&bundle).expect_err("schema must fail");
+        assert!(
+            validation_error.contains("unsupported DoctorEvidenceBundle schema_version"),
+            "{validation_error}"
+        );
+
+        let report = ingest_doctor_evidence_bundle(&bundle);
+        validate_evidence_ingestion_report(&report).expect("fail-closed report validates");
+        assert_eq!(report.records.len(), 0);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(report.rejected[0].artifact_id, "doctor_evidence_bundle");
+        assert!(
+            report.rejected[0]
+                .reason
+                .contains("unsupported DoctorEvidenceBundle schema_version"),
+            "{}",
+            report.rejected[0].reason
+        );
+        assert!(report.events.iter().any(|event| {
+            event.stage == "reject_bundle"
+                && event.artifact_id.as_deref() == Some("doctor_evidence_bundle")
+        }));
+    }
+
+    #[test]
+    fn doctor_evidence_bundle_rejects_empty_artifacts() {
+        let bundle =
+            doctor_evidence_bundle("run-doctor-d1-empty", "empty_artifacts_v1", Vec::new());
+        let validation_error =
+            validate_doctor_evidence_bundle(&bundle).expect_err("empty bundle must fail");
+        assert_eq!(
+            validation_error,
+            "DoctorEvidenceBundle artifacts must be non-empty"
+        );
+
+        let report = ingest_doctor_evidence_bundle(&bundle);
+        validate_evidence_ingestion_report(&report).expect("fail-closed report validates");
+        assert_eq!(report.records.len(), 0);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(
+            report.rejected[0].reason,
+            "DoctorEvidenceBundle artifacts must be non-empty"
+        );
+    }
+
+    #[test]
+    fn doctor_evidence_bundle_rejects_empty_provenance_metadata() {
+        let mut bundle = doctor_evidence_bundle(
+            "run-doctor-d1-metadata",
+            "mixed_artifacts_v1",
+            mixed_artifacts_fixture(),
+        );
+        bundle.bundle_id.clear();
+
+        let validation_error =
+            validate_doctor_evidence_bundle(&bundle).expect_err("empty bundle_id must fail");
+        assert_eq!(
+            validation_error,
+            "DoctorEvidenceBundle bundle_id must be non-empty"
+        );
+
+        let report = ingest_doctor_evidence_bundle(&bundle);
+        validate_evidence_ingestion_report(&report).expect("fail-closed report validates");
+        assert_eq!(report.records.len(), 0);
+        assert_eq!(report.rejected.len(), 1);
+        assert_eq!(
+            report.rejected[0].reason,
+            "DoctorEvidenceBundle bundle_id must be non-empty"
+        );
     }
 
     #[test]

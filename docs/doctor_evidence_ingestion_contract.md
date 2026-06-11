@@ -2,10 +2,11 @@
 
 ## Scope
 
-`doctor_asupersync` ingestion normalizes runtime and operator artifacts into
-deterministic `EvidenceRecord` entries with explicit provenance. This contract
-covers:
+`doctor_asupersync` ingestion accepts a versioned `DoctorEvidenceBundle` and
+normalizes runtime and operator artifacts into deterministic `EvidenceRecord`
+entries with explicit provenance. This contract covers:
 
+- the versioned bundle boundary and fail-closed metadata validation
 - accepted artifact kinds (`trace`, `structured_log`, `ubs_findings`,
   `benchmark`, `runtime_inspector`, `proof_status`, `proof_lane_manifest`,
   `rch_receipt`, `browser_package_readiness`, `cargo_feature_graph`,
@@ -18,18 +19,56 @@ covers:
 
 ## Schema Version
 
-- `schema_version`: `doctor-evidence-v1`
+- bundle `schema_version`: `doctor-evidence-v1`
+- report `schema_version`: `doctor-evidence-v1`
 - Compatibility policy: additive fields are allowed within `v1`; semantic changes
   to required fields or normalization rules require a version bump.
 
 ## Ingestion Input
+
+Evidence ingestion accepts a versioned `DoctorEvidenceBundle`:
+
+```json
+{
+  "schema_version": "doctor-evidence-v1",
+  "bundle_id": "string",
+  "run_id": "string",
+  "source_profile": "string",
+  "generated_by": "string",
+  "artifacts": [
+    {
+      "artifact_id": "string",
+      "artifact_type": "trace|structured_log|ubs_findings|benchmark|runtime_inspector|proof_status|proof_lane_manifest|rch_receipt|browser_package_readiness|cargo_feature_graph|tracker_context|redacted_log",
+      "source_path": "string",
+      "replay_pointer": "string",
+      "content": "string"
+    }
+  ]
+}
+```
+
+Required bundle fields:
+
+1. `schema_version`
+2. `bundle_id`
+3. `run_id`
+4. `source_profile`
+5. `generated_by`
+6. `artifacts`
+
+The bundle schema version must be `doctor-evidence-v1`; `bundle_id`, `run_id`,
+`source_profile`, and `generated_by` must be non-empty; and `artifacts` must
+contain at least one entry. Invalid bundles fail closed through
+`ingest_doctor_evidence_bundle` as a deterministic one-row rejection report with
+no normalized records. Artifact-level malformation is report-local: malformed
+artifacts are emitted in `rejected` while the bundle can still ingest.
 
 Each artifact is represented as:
 
 ```json
 {
   "artifact_id": "string",
-  "artifact_type": "trace|structured_log|ubs_findings|benchmark",
+  "artifact_type": "trace|structured_log|ubs_findings|benchmark|runtime_inspector|proof_status|proof_lane_manifest|rch_receipt|browser_package_readiness|cargo_feature_graph|tracker_context|redacted_log",
   "source_path": "string",
   "replay_pointer": "string",
   "content": "string"
@@ -186,7 +225,7 @@ must remain stable within `doctor-evidence-v1`.
 
 ## Downstream Consumer Assumptions
 
-1. Consumers must fail closed on unknown `schema_version`.
+1. Consumers must fail closed on unknown bundle or report `schema_version`.
 2. Consumers can trust `replay_pointer` to provide deterministic repro context.
 3. Consumers can rely on `outcome_class` normalization to one of:
    - `success`
