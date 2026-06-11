@@ -633,16 +633,18 @@ pub fn derive_request_budget(
     header_cap: Option<Duration>,
 ) -> (Budget, RequestBudgetSource) {
     let mut budget = base;
-    let mut config_applied = false;
-    if let Some(timeout) = server_timeout {
+    let config_applied = if let Some(timeout) = server_timeout {
         budget = budget.tightened_by_timeout(now, timeout);
-        config_applied = true;
-    }
-    let mut header_applied = false;
-    if let (Some(requested), Some(cap)) = (header_timeout, header_cap) {
+        true
+    } else {
+        false
+    };
+    let header_applied = if let (Some(requested), Some(cap)) = (header_timeout, header_cap) {
         budget = budget.tightened_by_timeout(now, requested.min(cap));
-        header_applied = true;
-    }
+        true
+    } else {
+        false
+    };
     let source = match (config_applied, header_applied) {
         (false, false) => RequestBudgetSource::Inherited,
         (true, false) => RequestBudgetSource::ServerConfig,
@@ -734,6 +736,36 @@ impl ServerRequestRegion {
         if let Some(cx) = crate::runtime::Runtime::current_request_cx_with_budget(budget) {
             return Some(cx);
         }
+        // No runtime handle (e.g. serving inside a `LabRuntime` task):
+        // derive from the ambient task context instead. The request cx
+        // gets a fresh `CxInner` (independent cancel state + the tightened
+        // budget) while inheriting the ambient drivers (the lab virtual
+        // timer under `LabRuntime`, so deadlines stay deterministic),
+        // trace buffer, observability/entropy forks, and — critically —
+        // the ambient runtime mask, so this path cannot escalate
+        // capabilities (br-asupersync-ovztin).
+        if let Some(ambient) = Cx::current() {
+            let region = ambient.region_id();
+            let task = ambient.task_id();
+            let mut cx = Cx::new_with_drivers(
+                region,
+                task,
+                budget,
+                Some(ambient.child_observability(region, task)),
+                ambient.io_driver_handle(),
+                ambient.io_cap_handle(),
+                ambient.timer_driver(),
+                Some(ambient.child_entropy(task)),
+            )
+            .with_blocking_pool_handle(ambient.blocking_pool_handle());
+            if let Some(trace) = ambient.trace_buffer() {
+                cx.set_trace_buffer(trace);
+            }
+            cx.runtime_mask = ambient.runtime_mask;
+            return Some(cx);
+        }
+        // Last resort, test builds only: a detached request context so
+        // plain unit tests can exercise the region without any runtime.
         #[cfg(any(test, feature = "test-internals"))]
         {
             Some(Cx::for_request_with_budget(budget))
@@ -807,10 +839,11 @@ impl ServerRequestRegion {
     fn emit_consumed(&self, outcome: &'static str) {
         let now = region_now(&self.cx);
         let elapsed_ns = now.duration_since(self.started_at);
-        let remaining = self.cx.budget().deadline.map_or_else(
-            || "none".to_string(),
-            |d| d.duration_since(now).to_string(),
-        );
+        let remaining = self
+            .cx
+            .budget()
+            .deadline
+            .map_or_else(|| "none".to_string(), |d| d.duration_since(now).to_string());
         self.cx.trace(&format!(
             "server.budget_consumed proto={} outcome={outcome} elapsed_ns={elapsed_ns} deadline_remaining_ns={remaining}",
             self.protocol,
@@ -1972,8 +2005,7 @@ mod tests {
 
         #[test]
         fn derive_inherits_base_when_nothing_configured() {
-            let (budget, source) =
-                derive_request_budget(Budget::INFINITE, NOW, None, None, None);
+            let (budget, source) = derive_request_budget(Budget::INFINITE, NOW, None, None, None);
             assert_eq!(budget.deadline, None);
             assert_eq!(source, RequestBudgetSource::Inherited);
         }
@@ -1994,13 +2026,8 @@ mod tests {
         #[test]
         fn derive_never_loosens_tighter_base() {
             let base = Budget::new().with_timeout(NOW, Duration::from_secs(10));
-            let (budget, _) = derive_request_budget(
-                base,
-                NOW,
-                Some(Duration::from_secs(30)),
-                None,
-                None,
-            );
+            let (budget, _) =
+                derive_request_budget(base, NOW, Some(Duration::from_secs(30)), None, None);
             assert_eq!(
                 budget.deadline,
                 Some(NOW + Duration::from_secs(10)),
@@ -2132,16 +2159,15 @@ mod tests {
         fn hop_handler_sees_request_budget_via_ambient_cx() {
             block_on(async {
                 let budget = Budget::INFINITE.tightened_by_timeout(NOW, Duration::from_secs(30));
-                let region = ServerRequestRegion::mint("test", budget, NOW)
-                    .expect("runtime installed");
+                let region =
+                    ServerRequestRegion::mint("test", budget, NOW).expect("runtime installed");
                 let outcome = region
                     .run_with_protocol_drain(
                         RequestBudgetSource::ServerConfig,
                         None,
                         Duration::from_millis(10),
                         async {
-                            Cx::with_current(|cx| cx.budget().deadline.is_some())
-                                .unwrap_or(false)
+                            Cx::with_current(|cx| cx.budget().deadline.is_some()).unwrap_or(false)
                         },
                     )
                     .await;

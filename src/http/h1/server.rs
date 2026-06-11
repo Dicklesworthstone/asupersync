@@ -2103,10 +2103,20 @@ mod tests {
     #[test]
     fn parse_request_timeout_header_fails_closed() {
         let bad_values = [
-            "", " ", "abc", "-5", "5.5s", "5 s", "1h", "0", "0ms", "0s",
+            "",
+            " ",
+            "abc",
+            "-5",
+            "5.5s",
+            "5 s",
+            "1h",
+            "0",
+            "0ms",
+            "0s",
             "99999999999",   // 11 digits
             "184467440737s", // overflow-adjacent garbage length
-            "5ss", "ms",
+            "5ss",
+            "ms",
         ];
         for value in bad_values {
             let headers = vec![("Request-Timeout".to_string(), value.to_string())];
@@ -2319,8 +2329,7 @@ mod tests {
             move |_req| {
                 let probe = Arc::clone(&probe);
                 async move {
-                    *probe.lock().unwrap() =
-                        Cx::with_current(|cx| cx.trace_buffer()).flatten();
+                    *probe.lock().unwrap() = Cx::with_current(|cx| cx.trace_buffer()).flatten();
                     Response::new(200, "OK", b"ok")
                 }
             },

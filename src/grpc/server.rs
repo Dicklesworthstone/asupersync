@@ -1319,17 +1319,16 @@ impl Server {
             // cancel when the deadline fires. The h2/gRPC hop keeps its
             // existing timeout race and DEADLINE_EXCEEDED mapping.
             let time_now = crate::time::wall_now();
-            let base_budget = Cx::current()
-                .map_or(crate::types::Budget::INFINITE, |ambient| ambient.budget());
+            let base_budget =
+                Cx::current().map_or(crate::types::Budget::INFINITE, |ambient| ambient.budget());
             let source = if request.metadata().get("grpc-timeout").is_some() {
                 crate::web::request_region::RequestBudgetSource::HeaderClamped
             } else {
                 crate::web::request_region::RequestBudgetSource::ServerConfig
             };
             let budget = base_budget.tightened_by_timeout(time_now, remaining_duration);
-            let region = crate::web::request_region::ServerRequestRegion::mint(
-                "h2-grpc", budget, time_now,
-            );
+            let region =
+                crate::web::request_region::ServerRequestRegion::mint("h2-grpc", budget, time_now);
 
             // Race handler vs deadline using the runtime timeout primitive.
             let handler_future = handler(request);
@@ -1355,8 +1354,7 @@ impl Server {
                     }
                 }
                 None => {
-                    match crate::time::timeout(time_now, remaining_duration, handler_future).await
-                    {
+                    match crate::time::timeout(time_now, remaining_duration, handler_future).await {
                         Ok(result) => result,
                         Err(_timeout) => {
                             // Deadline exceeded during handler execution
