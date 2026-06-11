@@ -424,7 +424,8 @@
     "downstream-consumer-channel-public-api",
     "downstream-consumer-default-tokio-free",
     "downstream-consumer-internal-only-negative",
-    "downstream-consumer-proof-contract"
+    "downstream-consumer-proof-contract",
+    "doctor-e2e-proof-lane-contract"
   ],
   "lanes": [
     {
@@ -1139,6 +1140,27 @@
         "artifacts/downstream_consumer_proof_v1.json",
         "tests/downstream_consumer_proof_contract.rs"
       ]
+    },
+    {
+      "lane_id": "doctor-e2e-proof-lane-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_e2e_proof_lane_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test doctor_e2e_proof_lane_contract -- --nocapture",
+      "guarantee_ids": [
+        "doctor-e2e-proof-lane-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "doctor_e2e_proof_lane_contract tests pass",
+      "source_paths": [
+        "scripts/run_doctor_e2e.sh",
+        "scripts/run_all_e2e.sh",
+        "tests/doctor_e2e_proof_lane_contract.rs",
+        "docs/doctor_e2e_harness_contract.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ]
     }
   ],
   "guarantees": [
@@ -1362,6 +1384,12 @@
       "guarantee_id": "downstream-consumer-proof-contract",
       "lane_ids": [
         "downstream-consumer-proof-contract"
+      ]
+    },
+    {
+      "guarantee_id": "doctor-e2e-proof-lane-contract",
+      "lane_ids": [
+        "doctor-e2e-proof-lane-contract"
       ]
     }
   ]

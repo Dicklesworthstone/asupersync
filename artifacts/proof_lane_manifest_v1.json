@@ -494,7 +494,8 @@
     "downstream-consumer-channel-public-api",
     "downstream-consumer-default-tokio-free",
     "downstream-consumer-internal-only-negative",
-    "downstream-consumer-proof-contract"
+    "downstream-consumer-proof-contract",
+    "doctor-e2e-proof-lane-contract"
   ],
   "lanes": [
     {
@@ -1973,6 +1974,48 @@
         "non_citeable_claim_scopes": [
           "fresh-rch-pass",
           "release-readiness",
+        "workspace-health"
+      ]
+    }
+    },
+    {
+      "lane_id": "doctor-e2e-proof-lane-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_e2e_proof_lane_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test doctor_e2e_proof_lane_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "doctor-e2e-proof-lane-contract"
+      ],
+      "covers": "Verifies the aggregate doctor E2E runner, orchestrator registration, docs, manifest/status mapping, local-fallback guard, artifact outputs, and no-claim boundaries.",
+      "explicit_not_covered": "executing the aggregate doctor runner, fresh RCH proof for child stages, release-readiness, broad workspace health, live RCH fleet availability, performance, or source correctness outside the doctor proof lane.",
+      "expected_signal": "doctor_e2e_proof_lane_contract tests pass",
+      "source_paths": [
+        "scripts/run_doctor_e2e.sh",
+        "scripts/run_all_e2e.sh",
+        "tests/doctor_e2e_proof_lane_contract.rs",
+        "docs/doctor_e2e_harness_contract.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "doctor runner artifact schema drift",
+        "manifest/status mapping drift",
+        "orchestrator suite registry drift"
+      ],
+      "escalation_notes": "This is the focused verifier for D4 aggregate doctor proof-lane wiring; run scripts/run_doctor_e2e.sh for fresh aggregate doctor evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "doctor-e2e-proof-lane-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
           "workspace-health"
         ]
       }
@@ -2236,6 +2279,13 @@
       "description": "downstream-consumer-proof-contract is represented by the VF5 artifact verifier lane with explicit no-claim boundaries.",
       "lane_ids": [
         "downstream-consumer-proof-contract"
+      ]
+    },
+    {
+      "guarantee_id": "doctor-e2e-proof-lane-contract",
+      "description": "doctor-e2e-proof-lane-contract is represented by the D4 aggregate doctor proof-lane verifier with explicit no-claim boundaries.",
+      "lane_ids": [
+        "doctor-e2e-proof-lane-contract"
       ]
     }
   ],

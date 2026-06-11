@@ -82,7 +82,8 @@
     "unsafe boundary ledger contract",
     "formal Lean posture",
     "rustdoc/API examples",
-    "downstream consumer proof"
+    "downstream consumer proof",
+    "doctor e2e proof lane"
   ],
   "claim_categories": [
     {
@@ -737,6 +738,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow frontier for the external downstream fixture: run the listed profile lanes for fresh proof. No-claim boundaries: broad-workspace-health, conformance-crate, performance, release-readiness, test-internals-public-api."
+    },
+    {
+      "claim_id": "doctor-e2e-proof-lane",
+      "category": "doctor e2e proof lane",
+      "status": "green",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ],
+        "AGENTS.md": [
+          "Canonical proof-command manifest",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "doctor-e2e-proof-lane-contract"
+      ],
+      "manifest_lane_ids": [
+        "doctor-e2e-proof-lane-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_e2e_proof_lane_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test doctor_e2e_proof_lane_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green maps only the D4 aggregate doctor E2E runner contract, orchestrator registration, docs markers, manifest/status mapping, artifact-output expectations, local-fallback guard, and no-claim boundaries; run scripts/run_doctor_e2e.sh for fresh aggregate evidence. It does not prove broad workspace health, release readiness, live RCH fleet availability, performance, or source correctness outside the doctor proof lane."
     }
   ],
   "proof_reuse_status_rows": [

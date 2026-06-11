@@ -337,6 +337,7 @@ declare -A SUITES=(
     [doctor-scenario-coverage-packs]="test_doctor_scenario_coverage_packs_e2e.sh"
     [doctor-stress-soak]="test_doctor_stress_soak_e2e.sh"
     [doctor-frankensuite-export]="test_doctor_frankensuite_export_e2e.sh"
+    [doctor-e2e-proof-lane]="run_doctor_e2e.sh"
     [phase6]="run_phase6_e2e.sh"
 )
 
@@ -366,6 +367,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [doctor-scenario-coverage-packs]="target/e2e-results/doctor_scenario_coverage_packs"
     [doctor-stress-soak]="target/e2e-results/doctor_stress_soak"
     [doctor-frankensuite-export]="target/e2e-results/doctor_frankensuite_export"
+    [doctor-e2e-proof-lane]="target/e2e-results/doctor_e2e_proof_lane"
     [phase6]="target/phase6-e2e"
 )
 
@@ -395,6 +397,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [doctor-scenario-coverage-packs]="summary.json"
     [doctor-stress-soak]="summary.json"
     [doctor-frankensuite-export]="summary.json"
+    [doctor-e2e-proof-lane]="summary.json"
     [phase6]="summary_*.json"
 )
 
@@ -424,6 +427,7 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [doctor-scenario-coverage-packs]="artifacts_*"
     [doctor-stress-soak]="artifacts_*"
     [doctor-frankensuite-export]="artifacts_*"
+    [doctor-e2e-proof-lane]="artifacts_*"
     [phase6]=""
 )
 
@@ -453,6 +457,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [doctor-scenario-coverage-packs]="E2E-SUITE-DOCTOR-SCENARIO-COVERAGE-PACKS"
     [doctor-stress-soak]="E2E-SUITE-DOCTOR-STRESS-SOAK"
     [doctor-frankensuite-export]="E2E-SUITE-DOCTOR-FRANKENSUITE-EXPORT"
+    [doctor-e2e-proof-lane]="E2E-SUITE-DOCTOR-E2E-PROOF-LANE"
     [phase6]="E2E-SUITE-PHASE6"
 )
 
@@ -474,7 +479,7 @@ SUITE_ORDER=(
     h2-security net-hardening redis
     combinators cancel-attribution scheduler wasm-packaged-bootstrap wasm-packaged-cancellation wasm-cross-framework wasm-incident-forensics wasm-qa-evidence-smoke doctor-workspace-scan
     doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs doctor-stress-soak
-    doctor-frankensuite-export
+    doctor-frankensuite-export doctor-e2e-proof-lane
     phase6
 )
 

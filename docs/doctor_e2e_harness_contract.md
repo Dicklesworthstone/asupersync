@@ -191,3 +191,40 @@ Failure taxonomy assertions for this extension focus on:
 1. approval gating containment (`blocked_pending_approval`)
 2. partial apply failure requiring rollback (`partial_apply_failed`, `rollback_recommended`)
 3. diagnostic completeness (`decision_rationale`, `rollback_instructions`, `recovery_instructions`)
+
+## Aggregate Doctor Proof Lane Extension
+
+Track D4 (`asupersync-idea-wizard-fifth-wave-3gaiun.1.4`) adds the aggregate
+doctor E2E proof lane contract:
+
+- `doctor-e2e-proof-lane-v1`
+- canonical runner: `scripts/run_doctor_e2e.sh`
+- orchestrator suite id: `doctor-e2e-proof-lane`
+- artifact root: `target/e2e-results/doctor_e2e_proof_lane/`
+
+The runner must emit all of the following files under one timestamped
+`artifacts_*` directory:
+
+1. `summary.json`
+2. `events.ndjson`
+3. `operator_report.md`
+
+The lane is intentionally aggregate rather than docs-only. It runs or rehearses:
+
+1. representative workspace fixture scans and malformed-input failure cases via
+   `scripts/test_doctor_workspace_scan_e2e.sh`
+2. report schema checks via `scripts/test_doctor_report_export_e2e.sh`
+3. CLI smoke coverage via `scripts/test_doctor_cli_packaging_e2e.sh`
+4. redaction checks, malformed proof artifacts, and stale-evidence rehearsals via
+   `tests/doctor_analyzer_fixture_harness.rs`
+
+All Cargo work in this lane must be routed through `RCH_REQUIRE_REMOTE=1 rch
+exec -- ...` with an isolated `CARGO_TARGET_DIR`. The runner and child logs must
+fail closed when they contain RCH local fallback markers such as `[RCH] local (`,
+`falling back to local`, `local fallback marker`, or `no-local-fallback
+violation`.
+
+No-claim boundary: doctor diagnoses evidence but does not certify broad
+workspace health. This proof lane does not certify release readiness, live RCH
+fleet availability, performance, broad workspace health, or source correctness
+outside the doctor proof lane.
