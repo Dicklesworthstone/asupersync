@@ -759,6 +759,33 @@
       "notes": "Blocked rows are fail-closed and require exact blocker evidence before any proof claim is made."
     },
     {
+      "row_id": "rch-topology-preflight-blocked",
+      "proof_evidence_status": "blocked",
+      "manifest_lane_id": "rch-topology-preflight-canary",
+      "claim_scope": "rch-topology-preflight-canary",
+      "dirty_frontier_status": "clean",
+      "cache_hit_is_fresh_rch_pass": false,
+      "reason_codes": [
+        "blocked_infrastructure:rch_topology_preflight"
+      ],
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_topology_preflight_canary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_ledger_contract rch_topology_preflight_fixtures_capture_cargo_started_boundary -- --nocapture",
+      "blocked_frontier": {
+        "fixture_id": "VF-RCH-TOPOLOGY-PREFLIGHT-SHELL",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asup_e204_test CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib sync::semaphore::tests::try_acquire_error_display_has_asup_e204 --features test-internals -- --nocapture",
+        "decision": "blocked-external",
+        "error_class": "rch_topology_preflight",
+        "first_failure": {
+          "crate_or_surface": "rch",
+          "target": "topology-preflight",
+          "file": "rch",
+          "line": 0
+        },
+        "summary": "remote topology preflight failed before Cargo started: sh: 18: Syntax error: newline unexpected (expecting \")\")",
+        "supplemental_proof_command": "rch check --json && ssh vmi1149989 'test -d /data/projects && readlink /dp'"
+      },
+      "notes": "This is a blocked-infrastructure receipt for RCH topology preflight before Cargo starts. It is not a source failure, and local or direct-SSH Cargo runs are not valid proof substitutes."
+    },
+    {
       "row_id": "no-safe-proof-reuse-no-win",
       "proof_evidence_status": "no-win",
       "manifest_lane_id": "rustfmt-check",

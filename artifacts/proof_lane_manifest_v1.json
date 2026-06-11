@@ -428,6 +428,7 @@
     "shared-main-commit-guard",
     "durable-rch-final-signoff",
     "rch-stale-progress-receipt",
+    "rch-topology-preflight-canary",
     "unsafe-boundary-ledger-contract",
     "proof-lane-manifest-verifier"
   ],
@@ -1555,6 +1556,51 @@
       }
     },
     {
+      "lane_id": "rch-topology-preflight-canary",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_topology_preflight_canary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_ledger_contract rch_topology_preflight_fixtures_capture_cargo_started_boundary -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "rch-topology-preflight-canary"
+      ],
+      "covers": "The RCH topology-preflight receipt fixtures, Cargo-started boundary classifier, proof-status blocked-infrastructure row, manifest mapping, and no-local-fallback language stay aligned.",
+      "explicit_not_covered": "Does not prove source correctness, does not prove release readiness, does not prove broad workspace health, and does not make direct-SSH or local Cargo fallback valid proof evidence.",
+      "expected_signal": "rch_topology_preflight_fixtures_capture_cargo_started_boundary test passes or emits an exact topology-preflight blocker receipt",
+      "source_paths": [
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/proof_status_snapshot_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "docs/ci_proof_gates_contract.md"
+      ],
+      "common_unrelated_blockers": [
+        "RCH generated topology-preflight shell is rejected by worker /bin/sh before Cargo starts",
+        "remote-required RCH refuses local fallback after a preflight failure",
+        "validation-frontier fixture or proof-status blocker row drift"
+      ],
+      "escalation_notes": "Use this lane before expensive remote-required Cargo proof lanes when RCH may be failing before Cargo starts. A topology-preflight failure is infrastructure-blocked proof evidence, not a source compile or test failure.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rch-topology-preflight-canary"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "source-correctness",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
       "lane_id": "rch-stale-progress-receipt-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1831,6 +1877,13 @@
       "description": "Deterministic stale-progress receipts for remote-required RCH lanes have a canonical verifier command and explicit no-claim boundaries.",
       "lane_ids": [
         "rch-stale-progress-receipt-contract"
+      ]
+    },
+    {
+      "guarantee_id": "rch-topology-preflight-canary",
+      "description": "Deterministic topology-preflight receipts distinguish RCH infrastructure failures before Cargo starts from source compile or test failures.",
+      "lane_ids": [
+        "rch-topology-preflight-canary"
       ]
     },
     {

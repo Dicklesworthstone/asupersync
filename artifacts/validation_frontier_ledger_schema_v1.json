@@ -49,6 +49,11 @@
       "ownership_expectation": "Treat as external environment blocker when RCH_REQUIRE_REMOTE=1 refuses local fallback before the proof lane runs."
     },
     {
+      "error_class": "rch_topology_preflight",
+      "surface": "rch remote topology preflight",
+      "ownership_expectation": "Treat as external infrastructure blocker when RCH admits a worker but fails dependency or topology preflight before Cargo starts; local and direct-SSH Cargo fallback remain invalid proof substitutes."
+    },
+    {
       "error_class": "rustfmt_diff",
       "surface": "rustfmt --check",
       "ownership_expectation": "Treat as local when the diff overlaps the owned reservation scope; otherwise cite the dirty formatter frontier."
@@ -104,6 +109,26 @@
       "name": "rch_result.local_fallback_refused",
       "type": "boolean",
       "description": "Whether RCH_REQUIRE_REMOTE=1 refused to fall back locally."
+    },
+    {
+      "name": "rch_result.rch_version",
+      "type": "string",
+      "description": "RCH CLI version captured for topology-preflight blocker receipts."
+    },
+    {
+      "name": "rch_result.topology_probe_summary",
+      "type": "object",
+      "description": "Read-only summary of worker /data/projects and /dp topology checks when topology preflight fails before Cargo starts."
+    },
+    {
+      "name": "rch_result.cargo_started",
+      "type": "boolean",
+      "description": "Whether the remote-required command passed RCH preflight far enough for Cargo to emit compile, check, run, or finish output."
+    },
+    {
+      "name": "rch_result.stderr_signature",
+      "type": "string",
+      "description": "Stable stderr signature for topology-preflight failures that occur before Cargo emits diagnostics."
     },
     {
       "name": "exit_status",
@@ -417,6 +442,88 @@
         "likely_bead": null,
         "external_to_narrow_fuzz_target_work": true,
         "summary": "RCH_REQUIRE_REMOTE=1: remote worker admission refused; insufficient_slots=3 active_project_exclusion=2; local fallback refused"
+      }
+    },
+    {
+      "fixture_id": "VF-RCH-TOPOLOGY-PREFLIGHT-SHELL",
+      "source_kind": "rch_topology_preflight_output",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asup_e204_test CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib sync::semaphore::tests::try_acquire_error_display_has_asup_e204 --features test-internals -- --nocapture",
+      "timestamp": "2026-06-11T01:12:03Z",
+      "touched_files": [
+        "src/sync/semaphore.rs",
+        "docs/error_codes/registry.json",
+        "docs/error_codes/ASUP-E204.md",
+        "docs/error_codes/README.md"
+      ],
+      "supplemental_proof_command": "rch check --json && ssh vmi1149989 'test -d /data/projects && readlink /dp'",
+      "preflight_receipt": {
+        "schema_version": "rch-topology-preflight-receipt-v1",
+        "command_class": "remote-required-cargo-test",
+        "rch_version": "rch 1.0.41 (commit e2ed51271047)",
+        "daemon_readiness": "not_ready: worker ovh-a disk_critical_without_fresh_telemetry",
+        "selected_worker": "vmi1149989",
+        "topology_probe_summary": {
+          "data_projects": "exists",
+          "dp": "symlink:/data/projects"
+        },
+        "failure_phase": "remote-topology-preflight",
+        "stderr_signature": "sh: 18: Syntax error: newline unexpected (expecting \")\")",
+        "cargo_started": false
+      },
+      "snippet": "Selected worker: vmi1149989 (ssh://root@161.97.65.227:22, load 18.50, free mem 310.8GB)\nStarting remote compilation pipeline...\nPrepared dependency sync manifest for 10 roots\nRemote execution failed: remote topology preflight failed on vmi1149989 (status Some(2)): stdout='' stderr='sh: 18: Syntax error: newline unexpected (expecting \")\")', running locally\n[RCH] local (remote execution failed)\n[RCH] remote required; refusing local fallback (remote execution failed)\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "rch_topology_preflight",
+        "first_failure": {
+          "crate_or_surface": "rch",
+          "target": "topology-preflight",
+          "file": "rch",
+          "line": 0
+        },
+        "likely_owner": "rch topology preflight",
+        "likely_bead": "asupersync-validation-frontier-v2-b5cjsv.8",
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "remote topology preflight failed before Cargo started: sh: 18: Syntax error: newline unexpected (expecting \")\")"
+      }
+    },
+    {
+      "fixture_id": "VF-RCH-TOPOLOGY-CARGO-STARTED",
+      "source_kind": "rch_topology_preflight_output",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_topology_preflight_canary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_ledger_contract rch_topology_preflight_fixtures_capture_cargo_started_boundary -- --nocapture",
+      "timestamp": "2026-06-11T01:16:00Z",
+      "touched_files": [
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs"
+      ],
+      "supplemental_proof_command": "git diff --check -- artifacts/validation_frontier_ledger_schema_v1.json tests/validation_frontier_ledger_contract.rs",
+      "preflight_receipt": {
+        "schema_version": "rch-topology-preflight-receipt-v1",
+        "command_class": "remote-required-cargo-test",
+        "rch_version": "rch 1.0.41 (commit e2ed51271047)",
+        "daemon_readiness": "ready",
+        "selected_worker": "vmi1227854",
+        "topology_probe_summary": {
+          "data_projects": "exists",
+          "dp": "symlink:/data/projects"
+        },
+        "failure_phase": "none",
+        "stderr_signature": "Compiling asupersync",
+        "cargo_started": true
+      },
+      "snippet": "Selected worker: vmi1227854 (ssh://root@worker.example:22, load 1.20, free mem 212.0GB)\nStarting remote compilation pipeline...\nPrepared dependency sync manifest for 10 roots\nCompiling asupersync v0.3.3 (/data/projects/asupersync)\nFinished `test` profile [unoptimized + debuginfo] target(s) in 12.34s\nRunning tests/validation_frontier_ledger_contract.rs\n",
+      "expected_record": {
+        "decision": "pass",
+        "error_class": "none",
+        "first_failure": {
+          "crate_or_surface": "rch",
+          "target": "topology-preflight",
+          "file": "",
+          "line": 0
+        },
+        "likely_owner": "rch topology preflight",
+        "likely_bead": "asupersync-validation-frontier-v2-b5cjsv.8",
+        "external_to_narrow_fuzz_target_work": false,
+        "summary": "remote topology preflight passed and Cargo started on worker vmi1227854; no source proof is implied"
       }
     },
     {

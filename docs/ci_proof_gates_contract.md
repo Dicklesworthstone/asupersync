@@ -183,6 +183,12 @@ Update the dashboard as one atomic proof-status change:
 5. Keep README and AGENTS claim markers present; marker drift is a dashboard
    failure, not a reason to loosen the test.
 
+If remote-required RCH admits a worker but fails topology preflight before Cargo
+starts, record `rch_topology_preflight` / `blocked_infrastructure` evidence.
+That is an infrastructure-blocked proof, not a Rust compile or test failure;
+local Cargo and direct-SSH Cargo runs are not valid substitutes for repository
+proof claims.
+
 The focused proof for dashboard/manifest consistency is:
 
 ```bash

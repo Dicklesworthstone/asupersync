@@ -979,6 +979,7 @@ fn manifest_records_required_lanes_and_doc_sources() {
         "migration-readiness-planner-signoff-contract",
         "unsafe-boundary-ledger-contract",
         "proof-lane-manifest-contract",
+        "rch-topology-preflight-canary",
     ] {
         assert!(lane_ids.contains(required), "missing lane {required}");
     }
@@ -1256,6 +1257,7 @@ fn every_lane_declares_fail_closed_resource_envelope() {
         ),
         ("rustdoc-api", "documentation-frontier-medium"),
         ("proof-lane-manifest-contract", "artifact-contract-medium"),
+        ("rch-topology-preflight-canary", "artifact-contract-medium"),
     ] {
         let lane = lane_by_id(lanes, lane_id);
         assert_eq!(

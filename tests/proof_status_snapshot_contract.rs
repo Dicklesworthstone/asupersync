@@ -906,6 +906,47 @@ fn proof_reuse_status_rows_preserve_cache_hit_and_rerun_distinctions() {
 }
 
 #[test]
+fn rch_topology_preflight_status_row_preserves_blocked_infrastructure_receipt() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let frontier = json(FRONTIER_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let fixtures = frontier_fixture_map(&frontier);
+    let row = array(&snapshot, "proof_reuse_status_rows")
+        .iter()
+        .find(|row| row["row_id"].as_str() == Some("rch-topology-preflight-blocked"))
+        .expect("topology preflight blocked row");
+
+    validate_proof_reuse_status_row(row, &lanes).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(string(row, "proof_evidence_status"), "blocked");
+    assert_eq!(
+        string(row, "manifest_lane_id"),
+        "rch-topology-preflight-canary"
+    );
+    assert_eq!(
+        string_set(row, "reason_codes"),
+        BTreeSet::from(["blocked_infrastructure:rch_topology_preflight".to_string()])
+    );
+    validate_blocked_frontier_record(
+        row.get("blocked_frontier")
+            .expect("topology preflight row must carry exact blocker fixture"),
+        &fixtures,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let notes = string(row, "notes");
+    for required in [
+        "before Cargo starts",
+        "not a source failure",
+        "local or direct-SSH Cargo runs are not valid proof substitutes",
+    ] {
+        assert!(
+            notes.contains(required),
+            "topology preflight row must preserve boundary note {required:?}"
+        );
+    }
+}
+
+#[test]
 fn durable_rch_receipt_status_rows_preserve_manifest_and_claim_boundaries() {
     let snapshot = json(SNAPSHOT_PATH);
     let manifest = json(MANIFEST_PATH);

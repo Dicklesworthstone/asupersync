@@ -358,6 +358,7 @@
     "shared-main-commit-guard",
     "durable-rch-final-signoff",
     "rch-stale-progress-receipt",
+    "rch-topology-preflight-canary",
     "unsafe-boundary-ledger-contract",
     "proof-lane-manifest-verifier"
   ],
@@ -910,6 +911,28 @@
       ]
     },
     {
+      "lane_id": "rch-topology-preflight-canary",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_topology_preflight_canary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_ledger_contract rch_topology_preflight_fixtures_capture_cargo_started_boundary -- --nocapture",
+      "guarantee_ids": [
+        "rch-topology-preflight-canary"
+      ],
+      "feature_flags": [],
+      "expected_signal": "rch_topology_preflight_fixtures_capture_cargo_started_boundary test passes or emits an exact topology-preflight blocker receipt",
+      "source_paths": [
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/proof_status_snapshot_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "docs/ci_proof_gates_contract.md"
+      ]
+    },
+    {
       "lane_id": "rch-stale-progress-receipt-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1115,6 +1138,12 @@
       "guarantee_id": "rch-stale-progress-receipt",
       "lane_ids": [
         "rch-stale-progress-receipt-contract"
+      ]
+    },
+    {
+      "guarantee_id": "rch-topology-preflight-canary",
+      "lane_ids": [
+        "rch-topology-preflight-canary"
       ]
     },
     {

@@ -322,6 +322,123 @@ fn parse_rch_remote_refusal(fixture: &Value) -> ValidationFrontierRecord {
     }
 }
 
+fn parse_rch_topology_preflight(fixture: &Value) -> ValidationFrontierRecord {
+    let command = string_field(fixture, "command");
+    assert!(
+        command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+        "topology preflight canary must be remote-required: {command}"
+    );
+    assert!(
+        command.contains(" CARGO_TARGET_DIR="),
+        "topology preflight canary must isolate Cargo output: {command}"
+    );
+
+    let snippet = string_field(fixture, "snippet");
+    for marker in [
+        "Selected worker:",
+        "Starting remote compilation pipeline",
+        "Prepared dependency sync manifest",
+    ] {
+        assert!(
+            snippet.contains(marker),
+            "topology preflight fixture missing marker {marker:?}: {snippet}"
+        );
+    }
+
+    let receipt = &fixture["preflight_receipt"];
+    assert_eq!(
+        receipt["schema_version"].as_str(),
+        Some("rch-topology-preflight-receipt-v1")
+    );
+    assert_eq!(
+        receipt["command_class"].as_str(),
+        Some("remote-required-cargo-test")
+    );
+    let worker = string_field(receipt, "selected_worker");
+    assert!(
+        snippet.contains(&format!("Selected worker: {worker}")),
+        "topology preflight fixture snippet must include selected worker {worker}"
+    );
+    let topology = receipt["topology_probe_summary"]
+        .as_object()
+        .expect("topology_probe_summary must be an object");
+    for key in ["data_projects", "dp"] {
+        assert!(
+            topology.get(key).and_then(Value::as_str).is_some(),
+            "topology probe summary must include {key}"
+        );
+    }
+    let stderr_signature = string_field(receipt, "stderr_signature");
+    assert!(
+        snippet.contains(&stderr_signature),
+        "topology preflight fixture must preserve stderr or Cargo-start signature"
+    );
+
+    let cargo_started = bool_field(receipt, "cargo_started");
+    let (decision, error_class, file, likely_owner, external, summary) = if cargo_started {
+        assert_eq!(receipt["failure_phase"].as_str(), Some("none"));
+        assert!(
+            ["Compiling ", "Checking ", "Finished ", "Running "]
+                .iter()
+                .any(|marker| snippet.contains(marker)),
+            "cargo_started fixture must include Cargo output: {snippet}"
+        );
+        (
+            "pass",
+            "none",
+            "",
+            "rch topology preflight",
+            false,
+            format!(
+                "remote topology preflight passed and Cargo started on worker {worker}; no source proof is implied"
+            ),
+        )
+    } else {
+        assert_eq!(
+            receipt["failure_phase"].as_str(),
+            Some("remote-topology-preflight")
+        );
+        for marker in [
+            "remote topology preflight failed",
+            "[RCH] remote required; refusing local fallback",
+        ] {
+            assert!(
+                snippet.contains(marker),
+                "topology preflight failure fixture missing marker {marker:?}: {snippet}"
+            );
+        }
+        (
+            "blocked-external",
+            "rch_topology_preflight",
+            "rch",
+            "rch topology preflight",
+            true,
+            format!("remote topology preflight failed before Cargo started: {stderr_signature}"),
+        )
+    };
+
+    ValidationFrontierRecord {
+        command,
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: decision.to_string(),
+        error_class: error_class.to_string(),
+        first_failure: FailureSite {
+            crate_or_surface: "rch".to_string(),
+            target: "topology-preflight".to_string(),
+            file: file.to_string(),
+            line: 0,
+        },
+        likely_owner: likely_owner.to_string(),
+        likely_bead: fixture["expected_record"]["likely_bead"]
+            .as_str()
+            .map(str::to_string),
+        external_to_narrow_fuzz_target_work: external,
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary,
+    }
+}
+
 fn parse_rustfmt_diff(fixture: &Value) -> ValidationFrontierRecord {
     let snippet = string_field(fixture, "snippet");
     let diff_line = snippet
@@ -395,6 +512,7 @@ fn parse_fixture(fixture: &Value) -> ValidationFrontierRecord {
         "peer_dirty_index" => parse_peer_dirty_index(fixture),
         "rustc_json_output" => parse_rustc_json_output(fixture),
         "rch_remote_required_refusal" => parse_rch_remote_refusal(fixture),
+        "rch_topology_preflight_output" => parse_rch_topology_preflight(fixture),
         "rustfmt_diff" => parse_rustfmt_diff(fixture),
         "truncated_rustc_output" => parse_code_snippet(
             fixture,
@@ -512,6 +630,7 @@ fn error_classes_cover_required_blocker_families() {
         "file_reservation_conflict",
         "peer_dirty_index_conflict",
         "rch_admission_refusal",
+        "rch_topology_preflight",
         "rustfmt_diff",
         "truncated_rustc_output",
     ] {
@@ -586,6 +705,7 @@ fn fixtures_cover_required_parser_inputs() {
         "rustc_output",
         "rustc_json_output",
         "rch_remote_required_refusal",
+        "rch_topology_preflight_output",
         "rustfmt_diff",
         "clippy_output",
         "truncated_rustc_output",
@@ -649,6 +769,60 @@ fn recurring_all_target_blockers_are_current_and_external() {
             "{fixture_id} should preserve the narrow fuzz-target proof lane"
         );
     }
+}
+
+#[test]
+fn rch_topology_preflight_fixtures_capture_cargo_started_boundary() {
+    let artifact = artifact();
+    let topology_fixtures = fixtures(&artifact)
+        .iter()
+        .filter(|fixture| string_field(fixture, "source_kind") == "rch_topology_preflight_output")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        topology_fixtures.len(),
+        2,
+        "topology preflight fixtures must cover failure and Cargo-started paths"
+    );
+
+    let failure = topology_fixtures
+        .iter()
+        .find(|fixture| string_field(fixture, "fixture_id") == "VF-RCH-TOPOLOGY-PREFLIGHT-SHELL")
+        .expect("missing shell preflight failure fixture");
+    let failure_receipt = &failure["preflight_receipt"];
+    assert!(
+        !bool_field(failure_receipt, "cargo_started"),
+        "shell preflight failure must not be classified as Cargo output"
+    );
+    assert_eq!(
+        string_field(failure_receipt, "stderr_signature"),
+        "sh: 18: Syntax error: newline unexpected (expecting \")\")"
+    );
+    let failure_record = expected_record(failure);
+    assert_eq!(failure_record.decision, "blocked-external");
+    assert_eq!(failure_record.error_class, "rch_topology_preflight");
+    assert_eq!(failure_record.first_failure.target, "topology-preflight");
+    assert!(
+        failure_record.external_to_narrow_fuzz_target_work,
+        "pre-Cargo RCH topology failure is external to the source slice"
+    );
+
+    let cargo_started = topology_fixtures
+        .iter()
+        .find(|fixture| string_field(fixture, "fixture_id") == "VF-RCH-TOPOLOGY-CARGO-STARTED")
+        .expect("missing Cargo-started topology fixture");
+    assert!(
+        bool_field(&cargo_started["preflight_receipt"], "cargo_started"),
+        "Cargo-started fixture must mark the canary boundary explicitly"
+    );
+    let started_record = expected_record(cargo_started);
+    assert_eq!(started_record.decision, "pass");
+    assert_eq!(started_record.error_class, "none");
+    assert!(
+        started_record
+            .summary
+            .contains("no source proof is implied"),
+        "Cargo-started canary pass must not become a source proof claim"
+    );
 }
 
 #[test]
