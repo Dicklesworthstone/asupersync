@@ -41,8 +41,7 @@ async fn sqlite_busy_timeout_behavior_audit() {
             "CREATE TABLE test_table (id INTEGER PRIMARY KEY, value TEXT)",
         )
         .await
-        .expect("create table")
-        .unwrap();
+        .expect("create table");
 
     println!("✓ Database and test table created");
 
@@ -53,8 +52,7 @@ async fn sqlite_busy_timeout_behavior_audit() {
     conn1
         .execute(&cx, "BEGIN EXCLUSIVE", &[])
         .await
-        .expect("begin exclusive transaction")
-        .unwrap();
+        .expect("begin exclusive transaction");
 
     println!("✓ Exclusive transaction started on conn1");
 
@@ -102,8 +100,7 @@ async fn sqlite_busy_timeout_behavior_audit() {
     conn1
         .execute(&cx, "ROLLBACK", &[])
         .await
-        .expect("rollback transaction")
-        .unwrap();
+        .expect("rollback transaction");
 
     println!("✅ AUDIT PASSED: SQLite busy_timeout provides automatic retry");
 
@@ -145,14 +142,12 @@ async fn sqlite_busy_timeout_classification_audit() {
     conn1
         .execute_batch(&cx, "CREATE TABLE test (id INTEGER)")
         .await
-        .expect("create table")
-        .unwrap();
+        .expect("create table");
 
     conn1
         .execute(&cx, "BEGIN EXCLUSIVE", &[])
         .await
-        .expect("begin exclusive")
-        .unwrap();
+        .expect("begin exclusive");
 
     // Attempt operation that should fail with SQLITE_BUSY
     let result = conn2
@@ -183,11 +178,7 @@ async fn sqlite_busy_timeout_classification_audit() {
         }
     }
 
-    conn1
-        .execute(&cx, "ROLLBACK", &[])
-        .await
-        .expect("rollback")
-        .unwrap();
+    conn1.execute(&cx, "ROLLBACK", &[]).await.expect("rollback");
 
     println!("✅ AUDIT PASSED: Error classification infrastructure is sound");
 }
