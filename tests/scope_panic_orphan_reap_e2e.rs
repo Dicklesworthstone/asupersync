@@ -84,16 +84,15 @@ fn factory_panic_reaps_k_orphans_and_preserves_sibling_region() {
     let sibling_region = state
         .create_child_region(parent_region, Budget::INFINITE)
         .expect("sibling region creation must succeed");
-    let sibling_cx = make_test_cx(sibling_region);
-    let sibling_scope = sibling_cx.scope();
     for _ in 0..SIBLING_COUNT {
-        let (_handle, _stored) = sibling_scope
-            .spawn(&mut state, &sibling_cx, |_| async { 7_u8 })
+        let (_task_id, _handle) = state
+            .create_task(sibling_region, Budget::INFINITE, async { 7_u8 })
             .expect("sibling spawn must succeed");
-        // _handle and _stored are dropped here — the spawned task is
-        // registered (TaskState::Created) but never polled, exactly
-        // mirroring the orphan condition this test exists to verify
-        // does NOT escape into the sibling region's task accounting.
+        // _handle is dropped here — create_task registers the record and
+        // stores the future synchronously, but nothing schedules or polls
+        // it (TaskState::Created), exactly mirroring the orphan condition
+        // this test exists to verify does NOT escape into the sibling
+        // region's task accounting.
     }
     let sibling_count_before = sibling_region_task_count(&state, sibling_region);
     log(

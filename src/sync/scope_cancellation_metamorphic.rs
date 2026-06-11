@@ -2,10 +2,9 @@
 
 #![cfg(test)]
 
-use crate::cx::{Cx, Scope};
+use crate::cx::Cx;
 use crate::runtime::RuntimeState;
 use crate::runtime::task_handle::JoinError;
-use crate::types::policy::FailFast;
 use crate::types::{Budget, CancelReason, Outcome};
 use std::future::Future;
 use std::pin::Pin;
@@ -67,14 +66,36 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
     let mut state = RuntimeState::new();
     let cx = Cx::for_testing();
     let region = state.create_root_region(Budget::INFINITE);
-    let scope: Scope<'static, FailFast> = Scope::new(region, Budget::INFINITE);
 
-    let (mut handle, mut stored) = scope
-        .spawn(&mut state, &cx, |task_cx| YieldOnceThenCheckpoint {
-            task_cx,
-            yielded: false,
-        })
-        .expect("scope spawn should succeed");
+    let system_cx = state.create_system_cx();
+    let (task_id, mut handle, child_cx, result_tx) = state
+        .create_task_infrastructure::<Outcome<(), ()>>(&system_cx, region, Budget::INFINITE, false)
+        .expect("task infrastructure creation should succeed");
+    let fut = YieldOnceThenCheckpoint {
+        task_cx: child_cx.clone(),
+        yielded: false,
+    };
+    // Result delivery uses `send_blocking` for legacy `Scope::spawn` parity
+    // (br-asupersync-qg5th0): a task that observed cancellation must still
+    // be able to publish its cancellation-aware payload.
+    let wrapped = async move {
+        match (crate::cx::scope::CatchUnwind { inner: fut }).await {
+            Ok(v) => {
+                let _ = result_tx.send_blocking(Ok(v));
+                Outcome::Ok(())
+            }
+            Err(payload) => {
+                let panic_payload = crate::types::outcome::PanicPayload::new(
+                    crate::cx::scope::payload_to_string(&payload),
+                );
+                let _ = result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                Outcome::Panicked(panic_payload)
+            }
+        }
+    };
+    // NOT stored into state — the test drives `stored` directly, same as the
+    // legacy `Scope::spawn` path did.
+    let mut stored = crate::runtime::StoredTask::new_with_id(wrapped, task_id);
 
     let task_waker = std::task::Waker::noop();
     let mut task_cx = Context::from_waker(task_waker);
@@ -100,7 +121,7 @@ fn drive_spawned_task(timing: CancelTiming) -> Outcome<(), ()> {
     };
     assert!(
         matches!(terminal, Outcome::Ok(())),
-        "Scope::spawn wrapper should complete after delivering the task result: {terminal:?}"
+        "spawn wrapper should complete after delivering the task result: {terminal:?}"
     );
 
     let join_waker = std::task::Waker::noop();

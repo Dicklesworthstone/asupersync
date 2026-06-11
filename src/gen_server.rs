@@ -2796,18 +2796,47 @@ mod tests {
         let client_cx_cell: Arc<Mutex<Option<Cx>>> = Arc::new(Mutex::new(None));
         let client_cx_cell_for_task = Arc::clone(&client_cx_cell);
 
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let system_cx = runtime.state.create_system_cx();
+        let (client_task_id, mut client_handle, child_cx, result_tx) = runtime
+            .state
+            .create_task_infrastructure::<Result<u64, CallError>>(
+                &system_cx,
+                region,
+                Budget::INFINITE,
+                false,
+            )
+            .expect("should spawn client task for cancellation test");
+        let client_fut = {
+            let cx = child_cx.clone();
+            async move {
                 {
                     *client_cx_cell_for_task.lock() = Some(cx.clone());
                 }
                 server_ref.call(&cx, CounterCall::Get).await
-            })
-            .expect("should spawn client task for cancellation test");
-        let client_task_id = client_handle.task_id();
-        runtime
-            .state
-            .store_spawned_task(client_task_id, client_stored);
+            }
+        };
+        let wrapped = {
+            async move {
+                match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
+                    Ok(value) => {
+                        let _ = result_tx.send_blocking(Ok(value));
+                        Outcome::Ok(())
+                    }
+                    Err(payload) => {
+                        let panic_payload = crate::types::outcome::PanicPayload::new(
+                            crate::cx::scope::payload_to_string(&payload),
+                        );
+                        let _ = result_tx
+                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        Outcome::Panicked(panic_payload)
+                    }
+                }
+            }
+        };
+        runtime.state.store_spawned_task(
+            client_task_id,
+            crate::runtime::StoredTask::new_with_id(wrapped, client_task_id),
+        );
 
         // Poll the client once: it should enqueue the call and then block waiting for reply.
         {
@@ -2931,18 +2960,47 @@ mod tests {
         let client_cx_cell: Arc<Mutex<Option<Cx>>> = Arc::new(Mutex::new(None));
         let client_cx_cell_for_task = Arc::clone(&client_cx_cell);
 
-        let (mut client_handle, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let system_cx = runtime.state.create_system_cx();
+        let (client_task_id, mut client_handle, child_cx, result_tx) = runtime
+            .state
+            .create_task_infrastructure::<Result<(), CastError>>(
+                &system_cx,
+                region,
+                Budget::INFINITE,
+                false,
+            )
+            .expect("should spawn client task for cast cancellation test");
+        let client_fut = {
+            let cx = child_cx.clone();
+            async move {
                 {
                     *client_cx_cell_for_task.lock() = Some(cx.clone());
                 }
                 server_ref.cast(&cx, CounterCast::Reset).await
-            })
-            .expect("should spawn client task for cast cancellation test");
-        let client_task_id = client_handle.task_id();
-        runtime
-            .state
-            .store_spawned_task(client_task_id, client_stored);
+            }
+        };
+        let wrapped = {
+            async move {
+                match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
+                    Ok(value) => {
+                        let _ = result_tx.send_blocking(Ok(value));
+                        Outcome::Ok(())
+                    }
+                    Err(payload) => {
+                        let panic_payload = crate::types::outcome::PanicPayload::new(
+                            crate::cx::scope::payload_to_string(&payload),
+                        );
+                        let _ = result_tx
+                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        Outcome::Panicked(panic_payload)
+                    }
+                }
+            }
+        };
+        runtime.state.store_spawned_task(
+            client_task_id,
+            crate::runtime::StoredTask::new_with_id(wrapped, client_task_id),
+        );
 
         // Poll the client once: it should block waiting for mailbox capacity.
         {
@@ -4905,26 +4963,77 @@ mod tests {
         // Client 1: sends a call that the server will process.
         let result_1: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let result_1_clone = Arc::clone(&result_1);
-        let (c1_handle, c1_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let system_cx = runtime.state.create_system_cx();
+        let (c1_id, _c1_handle, c1_child_cx, c1_result_tx) = runtime
+            .state
+            .create_task_infrastructure::<()>(&system_cx, region, budget, false)
+            .unwrap();
+        let c1_fut = {
+            let cx = c1_child_cx.clone();
+            async move {
                 let r = server_ref_1.call(&cx, CounterCall::Add(10)).await;
                 *result_1_clone.lock() = Some(r);
-            })
-            .unwrap();
-        let c1_id = c1_handle.task_id();
-        runtime.state.store_spawned_task(c1_id, c1_stored);
+            }
+        };
+        let c1_wrapped = {
+            async move {
+                match (crate::cx::scope::CatchUnwind { inner: c1_fut }).await {
+                    Ok(value) => {
+                        let _ = c1_result_tx.send_blocking(Ok(value));
+                        Outcome::Ok(())
+                    }
+                    Err(payload) => {
+                        let panic_payload = crate::types::outcome::PanicPayload::new(
+                            crate::cx::scope::payload_to_string(&payload),
+                        );
+                        let _ = c1_result_tx
+                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        Outcome::Panicked(panic_payload)
+                    }
+                }
+            }
+        };
+        runtime.state.store_spawned_task(
+            c1_id,
+            crate::runtime::StoredTask::new_with_id(c1_wrapped, c1_id),
+        );
 
         // Client 2: sends a call that will queue behind client 1.
         let result_2: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let result_2_clone = Arc::clone(&result_2);
-        let (c2_handle, c2_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let (c2_id, _c2_handle, c2_child_cx, c2_result_tx) = runtime
+            .state
+            .create_task_infrastructure::<()>(&system_cx, region, budget, false)
+            .unwrap();
+        let c2_fut = {
+            let cx = c2_child_cx.clone();
+            async move {
                 let r = server_ref_2.call(&cx, CounterCall::Add(20)).await;
                 *result_2_clone.lock() = Some(r);
-            })
-            .unwrap();
-        let c2_id = c2_handle.task_id();
-        runtime.state.store_spawned_task(c2_id, c2_stored);
+            }
+        };
+        let c2_wrapped = {
+            async move {
+                match (crate::cx::scope::CatchUnwind { inner: c2_fut }).await {
+                    Ok(value) => {
+                        let _ = c2_result_tx.send_blocking(Ok(value));
+                        Outcome::Ok(())
+                    }
+                    Err(payload) => {
+                        let panic_payload = crate::types::outcome::PanicPayload::new(
+                            crate::cx::scope::payload_to_string(&payload),
+                        );
+                        let _ = c2_result_tx
+                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        Outcome::Panicked(panic_payload)
+                    }
+                }
+            }
+        };
+        runtime.state.store_spawned_task(
+            c2_id,
+            crate::runtime::StoredTask::new_with_id(c2_wrapped, c2_id),
+        );
 
         // Schedule server + clients, let them make progress.
         {
@@ -5019,14 +5128,40 @@ mod tests {
         let call_result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let call_result_clone = Arc::clone(&call_result);
         let server_ref_for_call = handle.server_ref();
-        let (client, client_stored) = scope
-            .spawn(&mut runtime.state, &cx, move |cx| async move {
+        let system_cx = runtime.state.create_system_cx();
+        let (client_id, _client, child_cx, result_tx) = runtime
+            .state
+            .create_task_infrastructure::<()>(&system_cx, region, budget, false)
+            .unwrap();
+        let client_fut = {
+            let cx = child_cx.clone();
+            async move {
                 let r = server_ref_for_call.call(&cx, CounterCall::Add(42)).await;
                 *call_result_clone.lock() = Some(r);
-            })
-            .unwrap();
-        let client_id = client.task_id();
-        runtime.state.store_spawned_task(client_id, client_stored);
+            }
+        };
+        let wrapped = {
+            async move {
+                match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
+                    Ok(value) => {
+                        let _ = result_tx.send_blocking(Ok(value));
+                        Outcome::Ok(())
+                    }
+                    Err(payload) => {
+                        let panic_payload = crate::types::outcome::PanicPayload::new(
+                            crate::cx::scope::payload_to_string(&payload),
+                        );
+                        let _ = result_tx
+                            .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                        Outcome::Panicked(panic_payload)
+                    }
+                }
+            }
+        };
+        runtime.state.store_spawned_task(
+            client_id,
+            crate::runtime::StoredTask::new_with_id(wrapped, client_id),
+        );
 
         // Schedule both and let them process.
         {
@@ -5097,15 +5232,40 @@ mod tests {
             for i in 1..=3u64 {
                 let server_ref = handle.server_ref();
                 let results_clone = Arc::clone(&results);
-                let (ch, cs) = scope
-                    .spawn(&mut runtime.state, &cx, move |cx| async move {
+                let system_cx = runtime.state.create_system_cx();
+                let (cid, _ch, child_cx, result_tx) = runtime
+                    .state
+                    .create_task_infrastructure::<()>(&system_cx, region, budget, false)
+                    .unwrap();
+                let client_fut = {
+                    let cx = child_cx.clone();
+                    async move {
                         if let Ok(val) = server_ref.call(&cx, CounterCall::Add(i * 10)).await {
                             results_clone.lock().push(val);
                         }
-                    })
-                    .unwrap();
-                let cid = ch.task_id();
-                runtime.state.store_spawned_task(cid, cs);
+                    }
+                };
+                let wrapped = {
+                    async move {
+                        match (crate::cx::scope::CatchUnwind { inner: client_fut }).await {
+                            Ok(value) => {
+                                let _ = result_tx.send_blocking(Ok(value));
+                                Outcome::Ok(())
+                            }
+                            Err(payload) => {
+                                let panic_payload = crate::types::outcome::PanicPayload::new(
+                                    crate::cx::scope::payload_to_string(&payload),
+                                );
+                                let _ = result_tx
+                                    .send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
+                                Outcome::Panicked(panic_payload)
+                            }
+                        }
+                    }
+                };
+                runtime
+                    .state
+                    .store_spawned_task(cid, crate::runtime::StoredTask::new_with_id(wrapped, cid));
                 client_ids.push(cid);
             }
 
