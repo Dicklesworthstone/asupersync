@@ -637,6 +637,63 @@ impl Default for SpawnMailbox {
     }
 }
 
+/// Producer-facing spawn gateway (br-asupersync-hwjqyo / A2.2).
+///
+/// Bundles everything a lock-free producer needs: the runtime's spawn
+/// mailbox, a wake notifier (closing the parked-fleet lost-wakeup race),
+/// and a clock for enqueue timestamps. Stored in `RuntimeState` and cloned
+/// into every `Cx` at construction so `Cx::spawn` works without the state
+/// lock.
+pub struct SpawnGateway {
+    mailbox: Arc<SpawnMailbox>,
+    notify: Arc<dyn Fn() + Send + Sync>,
+    clock: Option<crate::time::TimerDriverHandle>,
+}
+
+impl SpawnGateway {
+    /// Creates a gateway. `notify` wakes the consumer side after enqueue
+    /// (a worker coordinator in production; a no-op in the lab, whose step
+    /// loop drains synchronously).
+    #[must_use]
+    pub fn new(
+        mailbox: Arc<SpawnMailbox>,
+        notify: Arc<dyn Fn() + Send + Sync>,
+        clock: Option<crate::time::TimerDriverHandle>,
+    ) -> Self {
+        Self {
+            mailbox,
+            notify,
+            clock,
+        }
+    }
+
+    /// The underlying mailbox (for id allocation and tests).
+    #[must_use]
+    pub fn mailbox(&self) -> &Arc<SpawnMailbox> {
+        &self.mailbox
+    }
+
+    /// Enqueues a request stamped with the gateway clock and wakes the
+    /// consumer.
+    pub fn enqueue_and_notify(&self, request: SpawnRequest) {
+        let now = self
+            .clock
+            .as_ref()
+            .map_or(Time::ZERO, crate::time::TimerDriverHandle::now);
+        self.mailbox.enqueue(request, now);
+        (self.notify)();
+    }
+}
+
+impl fmt::Debug for SpawnGateway {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpawnGateway")
+            .field("mailbox", &self.mailbox)
+            .field("has_clock", &self.clock.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for SpawnMailbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SpawnMailbox")
@@ -1628,5 +1685,132 @@ mod tests {
         req.resolve_cancelled(CancelReason::new(CancelKind::ParentCancelled));
         assert_eq!(ran.load(Ordering::SeqCst), 0, "factory never invoked");
         assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+    }
+
+    // === br-asupersync-hwjqyo (A2.2): Cx::spawn public surface ===
+
+    /// Builds a lab + a live parent task Cx (gateway/counter attached at
+    /// Cx construction) and returns both plus the parent task id.
+    fn lab_with_parent_cx() -> (LabRuntime, crate::cx::Cx, RegionId) {
+        let mut lab = LabRuntime::new(LabConfig::new(21));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let system_cx = lab.state.create_system_cx();
+        let (parent_tid, _handle, parent_cx, _result_tx) = lab
+            .state
+            .create_task_infrastructure::<()>(&system_cx, root, Budget::new(), false)
+            .expect("parent task");
+        lab.state.store_spawned_task(
+            parent_tid,
+            StoredTask::new_with_id(async { Outcome::Ok(()) }, parent_tid),
+        );
+        lab.scheduler.lock().schedule(parent_tid, 0);
+        (lab, parent_cx, root)
+    }
+
+    /// Cx::spawn end to end under the lab: no RuntimeState at the call
+    /// site, factory child runs, handle exposes the canonical arena id.
+    #[test]
+    fn cx_spawn_runs_child_without_runtime_state() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_in_child = Arc::clone(&counter);
+        let handle = parent_cx
+            .spawn(move |_child| async move {
+                counter_in_child.fetch_add(1, Ordering::SeqCst);
+                42usize
+            })
+            .expect("cx.spawn");
+        assert!(
+            is_spawn_mailbox_id(handle.task_id()),
+            "pre-admission handle reports the provisional id"
+        );
+        lab.run_until_quiescent();
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "child ran");
+        assert!(
+            !is_spawn_mailbox_id(handle.task_id()),
+            "post-admission handle reports the arena id"
+        );
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            0,
+            "credits balanced"
+        );
+    }
+
+    /// Deep child: the factory-built child Cx carries the gateway and its
+    /// region counter, so it can spawn a grandchild the same way.
+    #[test]
+    fn cx_spawn_from_factory_child_spawns_grandchild() {
+        let (mut lab, parent_cx, _root) = lab_with_parent_cx();
+        let grandchild_ran = Arc::new(AtomicUsize::new(0));
+        let flag = Arc::clone(&grandchild_ran);
+        parent_cx
+            .spawn(move |child| async move {
+                let flag_inner = Arc::clone(&flag);
+                child
+                    .spawn(move |_grandchild| async move {
+                        flag_inner.fetch_add(1, Ordering::SeqCst);
+                    })
+                    .expect("grandchild spawn from factory-built cx");
+            })
+            .expect("child spawn")
+            .task_id();
+        lab.run_until_quiescent();
+        assert_eq!(grandchild_ran.load(Ordering::SeqCst), 1);
+    }
+
+    /// A Cx built without runtime wiring (test-internals constructor) has
+    /// no gateway: spawn errs with RuntimeUnavailable and never panics.
+    #[test]
+    fn cx_spawn_without_gateway_returns_runtime_unavailable() {
+        let cx = crate::cx::Cx::new(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 1),
+            Budget::new(),
+        );
+        let result = cx.spawn(|_child| async {});
+        assert!(matches!(result, Err(SpawnError::RuntimeUnavailable)));
+    }
+
+    /// Spawn into a closing region: admission denies, the cancel slot
+    /// resolves the handle, and joining yields JoinError::Cancelled.
+    #[test]
+    fn cx_spawn_into_closing_region_join_resolves_cancelled() {
+        use std::task::{Context, Poll, Wake, Waker};
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        // Begin closing the root region BEFORE the spawn is admitted.
+        lab.state.region(root).expect("root").begin_close(None);
+
+        let mut handle = parent_cx
+            .spawn(|_child| async move { 7usize })
+            .expect("enqueue still succeeds; denial resolves via the handle");
+
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut poll_cx = Context::from_waker(&waker);
+        let mut join = handle.join(&parent_cx);
+        let mut result = None;
+        for _ in 0..200 {
+            match Pin::new(&mut join).poll(&mut poll_cx) {
+                Poll::Ready(r) => {
+                    result = Some(r);
+                    break;
+                }
+                Poll::Pending => lab.step_for_test(),
+            }
+        }
+        drop(join);
+        let result = result.expect("join resolved");
+        assert!(
+            matches!(
+                result,
+                Err(crate::runtime::task_handle::JoinError::Cancelled(_))
+            ),
+            "join must resolve Cancelled for a denied spawn, got {result:?}"
+        );
     }
 }

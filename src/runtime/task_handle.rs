@@ -66,6 +66,12 @@ pub struct TaskHandle<T> {
     receiver: oneshot::Receiver<Result<T, JoinError>>,
     /// Weak reference to the task's context state for cancellation.
     inner: Weak<RwLock<CxInner>>,
+    /// Late-bound identity for mailbox spawns (br-asupersync-hwjqyo /
+    /// A2.2): admission fills this with the canonical arena id and a live
+    /// Cx weak handle. `task_id`/`inner` above hold the provisional values
+    /// until then.
+    admitted:
+        Option<std::sync::Arc<std::sync::OnceLock<crate::runtime::spawn_mailbox::AdmittedTask>>>,
     /// Whether this handle already consumed a terminal join result.
     terminal_consumed: bool,
 }
@@ -83,14 +89,55 @@ impl<T> TaskHandle<T> {
             task_id,
             receiver,
             inner,
+            admitted: None,
             terminal_consumed: false,
         }
     }
 
+    /// Creates a handle for a mailbox spawn whose canonical identity is
+    /// filled in by admission (br-asupersync-hwjqyo / A2.2). Until the
+    /// slot is set, `task_id()` reports the provisional mailbox id and
+    /// abort is a no-op (cancel-before-admission resolves through the
+    /// request's cancel slot instead).
+    #[inline]
+    #[doc(hidden)]
+    pub fn new_pending(
+        provisional_task_id: TaskId,
+        receiver: oneshot::Receiver<Result<T, JoinError>>,
+        admitted: std::sync::Arc<std::sync::OnceLock<crate::runtime::spawn_mailbox::AdmittedTask>>,
+    ) -> Self {
+        Self {
+            task_id: provisional_task_id,
+            receiver,
+            inner: Weak::new(),
+            admitted: Some(admitted),
+            terminal_consumed: false,
+        }
+    }
+
+    /// Resolves the live `CxInner` weak handle: the admission-filled one
+    /// for mailbox spawns, the construction-time one otherwise.
+    fn live_inner(&self) -> Option<std::sync::Arc<RwLock<CxInner>>> {
+        if let Some(slot) = &self.admitted {
+            if let Some(admitted) = slot.get() {
+                return admitted.cx_inner.upgrade();
+            }
+        }
+        self.inner.upgrade()
+    }
+
     /// Returns the task ID of the spawned task.
+    ///
+    /// For mailbox spawns this is the canonical arena id once admission
+    /// has run, and the provisional mailbox id before that.
     #[inline]
     #[must_use]
     pub fn task_id(&self) -> TaskId {
+        if let Some(slot) = &self.admitted {
+            if let Some(admitted) = slot.get() {
+                return admitted.task_id;
+            }
+        }
         self.task_id
     }
 
@@ -137,7 +184,11 @@ impl<T> TaskHandle<T> {
     #[inline]
     #[must_use]
     pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> JoinFuture<'a, T> {
-        let cx_inner = self.inner.clone();
+        // Resolve the live linkage at join time: mailbox spawns start with a
+        // dangling weak that admission supersedes via the admitted slot.
+        let cx_inner = self
+            .live_inner()
+            .map_or_else(Weak::new, |arc| std::sync::Arc::downgrade(&arc));
         let receiver = &mut self.receiver;
         let terminal_state = &mut self.terminal_consumed;
         JoinFuture {
@@ -220,7 +271,7 @@ impl<T> TaskHandle<T> {
     /// [`CancelReason::strengthen`], preserving deterministic attribution.
     #[inline]
     pub fn abort_with_reason(&self, reason: CancelReason) {
-        if let Some(inner) = self.inner.upgrade() {
+        if let Some(inner) = self.live_inner() {
             let cancel_waker = {
                 let mut lock = inner.write();
                 lock.cancel_requested = true;

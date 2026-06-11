@@ -2589,6 +2589,15 @@ impl ThreeLaneScheduler {
         self.coordinator.wake_one();
     }
 
+    /// Returns a detachable notifier equivalent to
+    /// [`Self::notify_spawn_enqueued`], for storage inside the producer-side
+    /// spawn gateway (br-asupersync-hwjqyo / A2.2).
+    #[must_use]
+    pub fn spawn_enqueued_notifier(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let coordinator = Arc::clone(&self.coordinator);
+        Arc::new(move || coordinator.wake_one())
+    }
+
     pub fn take_workers(&mut self) -> Vec<ThreeLaneWorker> {
         if let Some(worker) = self.workers.first_mut() {
             worker.preemption_metrics.governor_throttled_spawns = worker

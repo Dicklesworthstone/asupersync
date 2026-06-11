@@ -771,6 +771,9 @@ pub struct RuntimeState {
     observability: Option<RuntimeObservability>,
     /// Blocking pool handle for offloading synchronous work.
     blocking_pool: Option<BlockingPoolHandle>,
+    /// Producer-side spawn gateway, cloned into every Cx at build time
+    /// (br-asupersync-hwjqyo / A2.2).
+    spawn_gateway: Option<std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
     /// Response policy when obligation leaks are detected.
     obligation_leak_response: ObligationLeakResponse,
     /// Optional escalation policy for obligation leaks.
@@ -954,6 +957,7 @@ impl RuntimeState {
             spawn_authorization_key: None,
             observability: None,
             blocking_pool: None,
+            spawn_gateway: None,
             // br-asupersync-qp2tfx: internal constructors Panic on obligation
             // leak so the lab/test paths surface bugs the same way the
             // user-facing default (Fail, set in br-gi61n1) does.
@@ -1182,6 +1186,25 @@ impl RuntimeState {
         self.timer_driver
             .as_ref()
             .map_or(self.now, TimerDriverHandle::now)
+    }
+
+    /// Returns the producer-side spawn gateway, if installed
+    /// (br-asupersync-hwjqyo / A2.2).
+    #[inline]
+    #[must_use]
+    pub fn spawn_gateway(
+        &self,
+    ) -> Option<std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>> {
+        self.spawn_gateway.clone()
+    }
+
+    /// Installs the producer-side spawn gateway. Cloned into every `Cx`
+    /// built after this point so `Cx::spawn` works without the state lock.
+    pub fn set_spawn_gateway(
+        &mut self,
+        gateway: std::sync::Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
+    ) {
+        self.spawn_gateway = Some(gateway);
     }
 
     /// Returns a cloned handle to the blocking pool, if present.
@@ -2060,7 +2083,13 @@ impl RuntimeState {
             Some(entropy),
         )
         .with_blocking_pool_handle(self.blocking_pool_handle())
-        .with_logical_clock(logical_clock);
+        .with_logical_clock(logical_clock)
+        .with_spawn_gateway(self.spawn_gateway.clone())
+        .with_pending_spawn_counter(
+            self.regions
+                .get(region.arena_index())
+                .map(crate::record::RegionRecord::pending_spawn_handle),
+        );
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
@@ -2279,7 +2308,13 @@ impl RuntimeState {
             Some(entropy),
         )
         .with_blocking_pool_handle(self.blocking_pool_handle())
-        .with_logical_clock(logical_clock);
+        .with_logical_clock(logical_clock)
+        .with_spawn_gateway(self.spawn_gateway.clone())
+        .with_pending_spawn_counter(
+            self.regions
+                .get(region.arena_index())
+                .map(crate::record::RegionRecord::pending_spawn_handle),
+        );
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         self.update_task(task_id, |record| {

@@ -153,6 +153,12 @@ struct CxHandles {
     pressure: Option<Arc<SystemPressure>>,
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
     macaroon: Option<Arc<MacaroonToken>>,
+    /// Producer-side spawn gateway (br-asupersync-hwjqyo / A2.2): lets
+    /// `Cx::spawn` enqueue without the RuntimeState lock.
+    spawn_gateway: Option<Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
+    /// Pending-spawn counter for THIS Cx's region (cloned under the state
+    /// lock at Cx build time; credits gate region close per A1.2).
+    pending_spawns: Option<Arc<crate::record::region::PendingSpawnCounter>>,
     #[cfg(feature = "messaging-fabric")]
     fabric_capabilities: Arc<FabricCapabilityRegistry>,
 }
@@ -607,6 +613,8 @@ impl<Caps> Cx<Caps> {
                 pressure: None,
                 evidence_sink: None,
                 macaroon: None,
+                spawn_gateway: None,
+                pending_spawns: None,
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
             }),
@@ -707,6 +715,8 @@ impl<Caps> Cx<Caps> {
                 pressure: None,
                 evidence_sink: None,
                 macaroon: None,
+                spawn_gateway: None,
+                pending_spawns: None,
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
             }),
@@ -971,6 +981,42 @@ impl<Caps> Cx<Caps> {
     pub(crate) fn with_macaroon_handle(mut self, handle: Option<Arc<MacaroonToken>>) -> Self {
         Arc::make_mut(&mut self.handles).macaroon = handle;
         self
+    }
+
+    /// Attaches the producer-side spawn gateway
+    /// (br-asupersync-hwjqyo / A2.2).
+    #[must_use]
+    pub(crate) fn with_spawn_gateway(
+        mut self,
+        gateway: Option<Arc<crate::runtime::spawn_mailbox::SpawnGateway>>,
+    ) -> Self {
+        Arc::make_mut(&mut self.handles).spawn_gateway = gateway;
+        self
+    }
+
+    /// Attaches this Cx's region pending-spawn counter
+    /// (br-asupersync-hwjqyo / A2.2).
+    #[must_use]
+    pub(crate) fn with_pending_spawn_counter(
+        mut self,
+        counter: Option<Arc<crate::record::region::PendingSpawnCounter>>,
+    ) -> Self {
+        Arc::make_mut(&mut self.handles).pending_spawns = counter;
+        self
+    }
+
+    #[inline]
+    pub(crate) fn spawn_gateway_handle(
+        &self,
+    ) -> Option<Arc<crate::runtime::spawn_mailbox::SpawnGateway>> {
+        self.handles.spawn_gateway.clone()
+    }
+
+    #[inline]
+    pub(crate) fn pending_spawn_counter_handle(
+        &self,
+    ) -> Option<Arc<crate::record::region::PendingSpawnCounter>> {
+        self.handles.pending_spawns.clone()
     }
 
     /// Returns a reference to the attached Macaroon token, if any.
@@ -3285,6 +3331,179 @@ impl Cx<cap::None> {
         );
         cx.runtime_mask = cap::CapMask::none();
         cx
+    }
+}
+
+impl<Caps> Cx<Caps>
+where
+    Caps: cap::HasSpawn + Send + Sync + 'static,
+{
+    /// Spawns a task into **this Cx's own region** without touching the
+    /// `RuntimeState` lock (br-asupersync-hwjqyo / A2.2).
+    ///
+    /// The factory receives its own child [`Cx`] — built by mailbox
+    /// admission with the canonical task identity, then overlaid with this
+    /// parent's inherited capabilities (observability fork, entropy fork,
+    /// io-cap/registry/remote/blocking/evidence/macaroon/pressure handles,
+    /// capability budget, runtime mask) — the same inheritance set as
+    /// `Scope::build_child_task_cx`.
+    ///
+    /// # Targeting: `Cx::spawn` vs `Scope::spawn`
+    ///
+    /// `Cx::spawn` is *ambient-within-my-region*: the child joins the
+    /// calling task's region and is drained/cancelled with it. When you
+    /// need an explicit structural boundary (a child region that closes to
+    /// quiescence before you proceed), use a `Scope`. If you are unsure
+    /// which you want, you want the `Scope`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] when this Cx carries no
+    /// spawn gateway or region counter (e.g. built by a harness without
+    /// runtime wiring). Admission-time denials (region closing, quota)
+    /// resolve through the returned handle as `JoinError::Cancelled`.
+    /// Never panics.
+    pub fn spawn<F, Fut>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        use crate::runtime::spawn_mailbox::{AdmittedTask, SpawnFactoryFn, SpawnRequest};
+        use crate::runtime::task_handle::JoinError;
+
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let Some(pending) = self.pending_spawn_counter_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let region = self.region_id();
+        let budget = self.budget();
+
+        let (result_tx, result_rx) =
+            crate::channel::oneshot::channel::<Result<Fut::Output, JoinError>>();
+        // The sender is claimed by exactly one of: task completion (inside
+        // the factory-built future) or a denial slot. `Mutex<Option<..>>`
+        // gives take-once semantics across those mutually exclusive paths.
+        let shared_tx = Arc::new(std::sync::Mutex::new(Some(result_tx)));
+        let admitted_slot: Arc<std::sync::OnceLock<AdmittedTask>> =
+            Arc::new(std::sync::OnceLock::new());
+
+        // Parent snapshot for capability inheritance (cheap Arc clones).
+        let parent = self.clone();
+        let factory_tx = Arc::clone(&shared_tx);
+        let factory: SpawnFactoryFn = Box::new(move |admission_cx: Cx| {
+            let task_id = admission_cx.task_id();
+            let child: Cx<Caps> =
+                admission_cx.overlay_parent_inheritance::<_, Caps>(&parent, task_id);
+            let child_all = child.retype::<cap::All>();
+            let fut = f(child);
+            Box::pin(async move {
+                match (crate::cx::scope::CatchUnwind { inner: fut }).await {
+                    Ok(value) => {
+                        if let Some(tx) = factory_tx
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ = tx.send(&child_all, Ok(value));
+                        }
+                        crate::types::Outcome::Ok(())
+                    }
+                    Err(payload) => {
+                        let panic_payload = crate::types::outcome::PanicPayload::new(
+                            crate::cx::scope::payload_to_string(&payload),
+                        );
+                        if let Some(tx) = factory_tx
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take()
+                        {
+                            let _ = tx
+                                .send(&child_all, Err(JoinError::Panicked(panic_payload.clone())));
+                        }
+                        crate::types::Outcome::Panicked(panic_payload)
+                    }
+                }
+            })
+        });
+
+        let cancel_tx = Arc::clone(&shared_tx);
+        let error_tx = Arc::clone(&shared_tx);
+        let provisional = gateway.mailbox().allocate_task_id();
+        let request = SpawnRequest::new_with_factory(provisional, region, budget, factory)
+            .with_admitted_slot(Arc::clone(&admitted_slot))
+            .with_pending_reservation(pending.reserve())
+            .with_unadmitted_cancel(Box::new(move |reason| {
+                if let Some(tx) = cancel_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+                }
+            }))
+            .with_admission_error_slot(Box::new(move |error| {
+                if let Some(tx) = error_tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let mut reason = crate::types::CancelReason::user("spawn admission failed");
+                    reason.message = Some(error.to_string());
+                    let _ = tx.send_blocking(Err(JoinError::Cancelled(reason)));
+                }
+            }));
+
+        gateway.enqueue_and_notify(request);
+
+        Ok(crate::runtime::TaskHandle::new_pending(
+            provisional,
+            result_rx,
+            admitted_slot,
+        ))
+    }
+
+    /// Overlays parent-inherited capability state onto an admission-built
+    /// child context, mirroring `Scope::build_child_task_cx` exactly:
+    /// observability and entropy fork from the parent; io-cap/registry/
+    /// remote/blocking/evidence/macaroon/pressure handles copy from the
+    /// parent; the parent capability budget and runtime mask apply.
+    /// State-side wiring (drivers, logical clock, trace buffer, loser-drain
+    /// history, spawn gateway, region counter) stays as admission built it.
+    /// The shared `CxInner` is untouched, so cancellation and budget flow
+    /// through the record linkage admission already established.
+    pub(crate) fn overlay_parent_inheritance<PCaps, Out>(
+        mut self,
+        parent: &Cx<PCaps>,
+        task_id: TaskId,
+    ) -> Cx<Out> {
+        let region = self.region_id();
+        *self.observability.write() = parent.child_observability(region, task_id);
+        {
+            let handles = Arc::make_mut(&mut self.handles);
+            handles.entropy = parent.child_entropy(task_id);
+            handles.io_cap = parent.io_cap_handle();
+            handles.registry = parent.registry_handle();
+            handles.remote_cap = parent.remote_cap_handle();
+            handles.blocking_pool = parent.blocking_pool_handle();
+            handles.evidence_sink = parent.evidence_sink_handle();
+            handles.macaroon = parent.macaroon_handle();
+            if let Some(pressure) = parent.pressure_handle() {
+                handles.pressure = Some(pressure);
+            }
+        }
+        let _ = self.apply_child_capability_budget(
+            parent.capability_budget(),
+            crate::types::CapabilityBudgetRequirements::NONE,
+        );
+        let mut typed = self.retype::<Out>();
+        typed.runtime_mask = parent.runtime_mask;
+        typed
     }
 }
 

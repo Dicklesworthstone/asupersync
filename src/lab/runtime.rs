@@ -758,6 +758,17 @@ impl LabRuntime {
         state.set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(
             virtual_clock.clone(),
         ));
+        // Producer-side spawn gateway (br-asupersync-hwjqyo / A2.2): the
+        // lab drains this mailbox synchronously at the top of each step, so
+        // the notifier is a no-op.
+        let spawn_mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::with_trace(
+            state.trace_handle(),
+        ));
+        state.set_spawn_gateway(Arc::new(crate::runtime::spawn_mailbox::SpawnGateway::new(
+            Arc::clone(&spawn_mailbox),
+            Arc::new(|| {}),
+            state.timer_driver_handle(),
+        )));
         state.set_entropy_source(Arc::new(DetEntropy::new(config.entropy_seed)));
         state.trace = TraceBufferHandle::new(config.trace_capacity);
 
@@ -776,7 +787,7 @@ impl LabRuntime {
         Self {
             state,
             lab_reactor,
-            spawn_mailbox: Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::new()),
+            spawn_mailbox,
             seen_io_tokens: DetHashSet::default(),
             scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
             config,

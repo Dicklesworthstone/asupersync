@@ -3929,23 +3929,34 @@ impl RuntimeInner {
                 .set_worker_cohort_map(&mapping.worker_to_cohort)
                 .expect("validated worker cohort map should apply to scheduler");
         }
-        let (spawn_mailbox, root_pending_spawns, spawn_clock) =
+        // The spawn mailbox + producer gateway always exist so the
+        // Cx::spawn surface works in every mode (workers' drain costs one
+        // atomic emptiness check when idle); SpawnAdmissionMode only
+        // selects RuntimeHandle::spawn routing (br-asupersync-hwjqyo / A2.2).
+        let (mailbox, root_pending_spawns, spawn_clock) = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::with_trace(
+                guard.trace_handle(),
+            ));
+            let pending = guard
+                .region(root_region)
+                .map(crate::record::RegionRecord::pending_spawn_handle);
+            let clock = guard.timer_driver_handle();
+            scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+            guard.set_spawn_gateway(Arc::new(crate::runtime::spawn_mailbox::SpawnGateway::new(
+                Arc::clone(&mailbox),
+                scheduler.spawn_enqueued_notifier(),
+                clock.clone(),
+            )));
+            (mailbox, pending, clock)
+        };
+        let spawn_mailbox =
             if config.spawn_admission == crate::runtime::config::SpawnAdmissionMode::Mailbox {
-                let guard = state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::with_trace(
-                    guard.trace_handle(),
-                ));
-                let pending = guard
-                    .region(root_region)
-                    .map(crate::record::RegionRecord::pending_spawn_handle);
-                let clock = guard.timer_driver_handle();
-                drop(guard);
-                scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
-                (Some(mailbox), pending, clock)
+                Some(mailbox)
             } else {
-                (None, None, None)
+                None
             };
         let workers = scheduler.take_workers();
 

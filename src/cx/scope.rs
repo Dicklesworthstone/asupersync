@@ -1661,6 +1661,13 @@ impl<P: Policy> Scope<'_, P> {
         // Set state handles with minimal additional Arc clones
         child_cx.set_trace_buffer(state.trace_handle());
         child_cx.set_loser_drain_history_handle(state.loser_drain_history_handle());
+        child_cx = child_cx
+            .with_spawn_gateway(state.spawn_gateway())
+            .with_pending_spawn_counter(
+                state
+                    .region(self.region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            );
         let child_cx_full = child_cx.retype::<cap::All>();
 
         (child_cx, child_cx_full)
