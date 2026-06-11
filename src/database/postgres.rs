@@ -1169,7 +1169,7 @@ pub struct PgRowStream<'a> {
     pending_row_count: u64,
 }
 
-impl<'a> PgRowStream<'a> {
+impl PgRowStream<'_> {
     /// Get the next row from the stream.
     ///
     /// Returns `Ok(Some(row))` for the next row, `Ok(None)` when the stream
@@ -1225,7 +1225,6 @@ impl<'a> PgRowStream<'a> {
                 }
                 b'C' => {
                     // CommandComplete - continue to ReadyForQuery
-                    continue;
                 }
                 b'Z' => {
                     // ReadyForQuery - stream complete
@@ -1245,7 +1244,6 @@ impl<'a> PgRowStream<'a> {
                 }
                 _ => {
                     // Ignore other message types (notices, etc.)
-                    continue;
                 }
             }
         }
@@ -1788,8 +1786,10 @@ fn scram_constant_time_eq_expected_len(expected: &[u8], actual: &[u8]) -> bool {
 
     let mut diff = u8::from(expected.len() != actual.len());
 
-    // Use direct indexing instead of enumerate to avoid potential iterator overhead
-    // that could introduce timing variations
+    // Constant-time byte comparison: every expected byte is visited
+    // regardless of earlier mismatches, and missing actual bytes compare
+    // against 0 rather than short-circuiting.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..expected.len() {
         let actual_byte = actual.get(i).copied().unwrap_or(0);
         diff |= expected[i] ^ actual_byte;
@@ -3227,7 +3227,10 @@ impl PgConnection {
         self.inner.closed = true;
     }
 
-    /// Send a PostgreSQL `CancelRequest` on a fresh TCP connection.
+    /// Sends a PostgreSQL `CancelRequest` frame on a fresh plain-TCP socket,
+    /// awaited to completion
+    /// (br-asupersync-server-stack-hardening-eeexl1.1.2; previously a
+    /// detached fire-and-forget thread under br-asupersync-gvkj1r).
     ///
     /// Per the PG protocol (PG docs §53.2.7), cancellation of an in-flight
     /// query is signalled by opening a *separate* TCP connection to the
@@ -3239,26 +3242,6 @@ impl PgConnection {
     /// closing the original TCP socket leaves the server unaware — it may
     /// continue executing the query (holding locks, burning CPU) until it
     /// notices the closed socket on its next write attempt.
-    ///
-    /// Implementation properties (br-asupersync-gvkj1r):
-    ///
-    /// * Spawned on a detached `std::thread`, NOT through asupersync's
-    ///   structured-concurrency machinery, because the caller's `Cx` is
-    ///   already cancelled — we can't `.await` against it. Best-effort
-    ///   signaling: a thread-spawn failure or a downed network would
-    ///   simply mean the server learns of the cancel slightly later.
-    /// * Sends raw 16 bytes over plain TCP. Per spec, `CancelRequest`
-    ///   does NOT use TLS or any handshake — the secret key is the only
-    ///   authentication and the protocol is fixed-frame.
-    /// * Both the connect and write phases are bounded by
-    ///   `cancel_target.connect_timeout` (≤ 500ms) so a hostile or
-    ///   unreachable server cannot stall the cancel path indefinitely.
-    /// * Returns no error and never panics — failures are deliberately
-    ///   swallowed.
-    /// Sends a PostgreSQL `CancelRequest` frame on a fresh plain-TCP socket,
-    /// awaited to completion
-    /// (br-asupersync-server-stack-hardening-eeexl1.1.2; previously a
-    /// detached fire-and-forget thread under br-asupersync-gvkj1r).
     ///
     /// Returns the failure stage plus error so the drain path can log the
     /// connection-close fallback distinctly. The connect attempt is bounded
@@ -7510,7 +7493,7 @@ fn civil_from_unix_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
     let month_prime = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
     let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
+    let year = year + i64::from(month <= 2);
     (year as i32, month as u32, day as u32)
 }
 

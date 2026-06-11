@@ -322,6 +322,9 @@ mod pg {
             PgConnection::connect(cx, &self.url).await
         }
 
+        // async is required by the AsyncConnectionManager trait signature
+        // even though this optimistic implementation never awaits.
+        #[allow(clippy::unused_async)]
         async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
             // Cheap optimistic validity: rely on protocol-level errors at the
             // next real query rather than spending a round-trip on Sync ping.
@@ -465,7 +468,7 @@ mod pg {
         // conservative lower bound that proves backoff actually engaged
         // rather than spinning.
         match result {
-            Err(DbPoolError::Connect(_)) | Err(DbPoolError::Timeout) => {
+            Err(DbPoolError::Connect(_) | DbPoolError::Timeout) => {
                 assert!(
                     elapsed >= Duration::from_millis(160),
                     "expected ≥160ms cumulative backoff, observed {elapsed:?}"
@@ -624,7 +627,7 @@ mod mysql {
         );
 
         match result {
-            Err(DbPoolError::Connect(_)) | Err(DbPoolError::Timeout) => {
+            Err(DbPoolError::Connect(_) | DbPoolError::Timeout) => {
                 assert!(
                     elapsed >= Duration::from_millis(160),
                     "expected ≥160ms cumulative backoff, observed {elapsed:?}"

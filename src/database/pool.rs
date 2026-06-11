@@ -897,6 +897,11 @@ impl<M: ConnectionManager> DbPool<M> {
                                     found: current_client.clone(),
                                 });
                             }
+                            // Not collapsed into the arm guard:
+                            // clear_authentication_state mutates the
+                            // connection, and side effects in match guards
+                            // obscure when the reset actually runs.
+                            #[allow(clippy::collapsible_match)]
                             (Some(current_client), None) if current_client != &client_id_owned => {
                                 // Connection has unexpected authentication state - try to clear it
                                 if !self.manager.clear_authentication_state(&mut valid_conn) {
@@ -1098,7 +1103,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 if min_delay_ms > 0 && time_since_last_retry < min_delay_ms * 1_000_000 {
                     Some(
                         Duration::from_millis(min_delay_ms)
-                            - Duration::from_nanos(time_since_last_retry),
+                            .saturating_sub(Duration::from_nanos(time_since_last_retry)),
                     )
                 } else {
                     None
@@ -2091,6 +2096,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                     found: current_client.clone(),
                                 });
                             }
+                            // Not collapsed into the arm guard:
+                            // clear_authentication_state mutates the
+                            // connection, and side effects in match guards
+                            // obscure when the reset actually runs.
+                            #[allow(clippy::collapsible_match)]
                             (Some(current_client), None) if current_client != &client_id_owned => {
                                 // Connection has unexpected authentication state - try to clear it
                                 if !self.manager.clear_authentication_state(&mut valid_conn) {
