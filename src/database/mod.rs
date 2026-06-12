@@ -94,7 +94,7 @@ pub(crate) fn remaining_budget(cx: &crate::cx::Cx) -> Option<std::time::Duration
 /// Meet semantics (br-asupersync-server-stack-hardening-eeexl1.1.2): the
 /// budget can only tighten the override and vice versa. Returns `None` when
 /// neither bound exists, in which case no timeout is forwarded to the server.
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+#[cfg(feature = "sqlite")]
 pub(crate) fn effective_statement_timeout(
     cx: &crate::cx::Cx,
     override_timeout: Option<std::time::Duration>,

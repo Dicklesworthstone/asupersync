@@ -15397,6 +15397,13 @@ mod tests {
                 }
             });
 
+            // No more server-side clones are needed after responder4 starts.
+            // Dropping the outer handle makes responder failure fail closed:
+            // if the responder times out or panics, the client-side
+            // read_message sees EOF instead of blocking forever on an idle
+            // peer handle left open by the test harness.
+            drop(peer);
+
             let stmt4 = conn.prepare(&cx, "SELECT 'result'").await;
             responder4.join().expect("responder4");
             assert!(matches!(stmt4, Outcome::Ok(_)));
