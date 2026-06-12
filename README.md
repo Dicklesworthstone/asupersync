@@ -1628,6 +1628,14 @@ See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,
 architecture diagrams, crate map, the current Rust-authored browser contract,
 and known limitations.
 
+The checked Browser Edition readiness matrix is
+[`artifacts/browser_edition_readiness_matrix_v1.json`](./artifacts/browser_edition_readiness_matrix_v1.json),
+with the human review table in
+[`docs/browser_edition_readiness_matrix.md`](./docs/browser_edition_readiness_matrix.md).
+It binds Direct-runtime supported, Package ABI boundary, Preview public lane,
+Broker/coordinator-only, Bridge-only, and Impossible / unsupported rows to
+their fixture evidence, including vanilla/Vite and Webpack consumer lanes.
+
 ---
 
 ## Limitations

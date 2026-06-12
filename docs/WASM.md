@@ -146,6 +146,13 @@ lanes and avoid blending them together:
 For the command-first version of this workflow, see
 `docs/wasm_quickstart_migration.md`.
 
+The release-review Browser Edition readiness matrix lives in
+`artifacts/browser_edition_readiness_matrix_v1.json`, with the human review
+table in `docs/browser_edition_readiness_matrix.md`. It records Direct-runtime
+supported, Package ABI boundary, Preview public lane, Broker/coordinator-only,
+Bridge-only, and Impossible / unsupported rows, including vanilla/Vite and
+Webpack consumer fixtures, without widening the support classes below.
+
 ## Authoritative Support Matrix (live tree)
 
 This section is the canonical browser-feasibility classification for the

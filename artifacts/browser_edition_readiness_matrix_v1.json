@@ -1,0 +1,884 @@
+{
+  "contract_version": "browser-edition-readiness-matrix-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.4.1",
+  "reviewed_date": "2026-06-11",
+  "status": "browser_edition_support_classes_bound_to_fixtures_and_no_claims",
+  "canonical_docs": [
+    "README.md",
+    "docs/WASM.md",
+    "docs/integration.md",
+    "docs/browser_edition_readiness_matrix.md",
+    "docs/wasm_release_channel_strategy.md"
+  ],
+  "canonical_tests": [
+    "tests/browser_edition_readiness_matrix_contract.rs",
+    "tests/wasm_browser_support_boundary_contract.rs",
+    "tests/wasm_browser_feasibility_matrix.rs",
+    "tests/wasm_js_exports_coverage_contract.rs",
+    "tests/wasm_rust_browser_example_contract.rs"
+  ],
+  "freshness_policy": {
+    "schema_version": "browser-edition-readiness-freshness-v1",
+    "as_of_date_for_contract": "2026-06-11",
+    "max_row_age_days": 45,
+    "stale_verdict": "stale_readiness_row",
+    "required_refresh_fields": [
+      "support_class",
+      "evidence_lanes",
+      "required_fixture",
+      "rollback_status",
+      "promotion_criteria",
+      "demotion_criteria",
+      "no_claims"
+    ],
+    "operator_action": "Refresh the row, rerun the named evidence lane, and keep the previous support claim no higher than its rollback status until fresh evidence lands."
+  },
+  "support_classes": [
+    {
+      "class_id": "direct_runtime_supported",
+      "docs_label": "Direct-runtime supported",
+      "meaning": "A shipped Browser Edition runtime boundary may construct runtime and scope handles directly when the documented browser prerequisites hold.",
+      "promotion_rule": "May remain stable only when package guards, fixture evidence, and browser docs are fresh in the same review window.",
+      "demotion_rule": "Demote to preview or unsupported when runtime construction, package diagnostics, or fixture evidence drift.",
+      "no_claims": [
+        "does not imply native host parity",
+        "does not imply service-worker or shared-worker direct runtime support"
+      ]
+    },
+    {
+      "class_id": "package_abi_boundary",
+      "docs_label": "Package ABI boundary",
+      "meaning": "A repository-maintained wasm/package boundary that feeds the JS/TS Browser Edition packages without becoming an end-user Rust browser SDK by itself.",
+      "promotion_rule": "May feed GA packages when ABI metadata, package files, and compatibility tests stay green.",
+      "demotion_rule": "Demote package release readiness when ABI metadata, package exports, or browser-core fixture checks drift.",
+      "no_claims": [
+        "does not claim a stable external Rust RuntimeBuilder API",
+        "does not make browser-core the ergonomic public SDK"
+      ]
+    },
+    {
+      "class_id": "preview_public_lane",
+      "docs_label": "Preview public lane",
+      "meaning": "A public but narrower Rust-authored browser path with truthful fail-closed diagnostics and fixture-backed evidence.",
+      "promotion_rule": "Cannot promote to stable until builder diagnostics, ABI policy, fixture logs, and docs are promoted together.",
+      "demotion_rule": "Downgrade to internal fixture guidance if the preview builder, docs, or rust-browser-consumer evidence regresses.",
+      "no_claims": [
+        "does not claim parity with the shipped JS/TS packages",
+        "does not claim full native-thread runtime semantics on wasm32"
+      ]
+    },
+    {
+      "class_id": "broker_coordinator_only",
+      "docs_label": "Broker/coordinator-only",
+      "meaning": "The host may coordinate bounded broker or coordinator work, but direct Browser Edition runtime ownership remains fail-closed.",
+      "promotion_rule": "May remain canary or preview only while direct runtime denial is the public truth and broker/coordinator fixtures are fresh.",
+      "demotion_rule": "Remove bounded helper claims if lifecycle, durable handoff, attach, or downgrade evidence regresses.",
+      "no_claims": [
+        "does not promote service-worker or shared-worker direct runtime",
+        "does not claim persistent host lifetime parity"
+      ]
+    },
+    {
+      "class_id": "bridge_only",
+      "docs_label": "Bridge-only",
+      "meaning": "The boundary must cross through serialized data, adapter state, or another explicit bridge instead of constructing Browser Edition runtimes directly.",
+      "promotion_rule": "May stay bridge-only when diagnostics and adapter docs prevent direct runtime creation at server or edge boundaries.",
+      "demotion_rule": "Block release if bridge docs or adapter guards imply partial direct-runtime parity.",
+      "no_claims": [
+        "does not tunnel live Browser Edition handles across server or edge boundaries",
+        "does not claim direct runtime execution outside browser-owned code"
+      ]
+    },
+    {
+      "class_id": "impossible_unsupported",
+      "docs_label": "Impossible / unsupported",
+      "meaning": "The browser security model or shipped package contract rules out direct Browser Edition support.",
+      "promotion_rule": "No promotion is allowed without a new explicit design, docs, and proof lane.",
+      "demotion_rule": "Keep fail-closed diagnostics and native-runtime or bridge guidance in place.",
+      "no_claims": [
+        "does not claim raw TCP, filesystem, process, signal, or native DB parity",
+        "does not hide unsupported browser surfaces behind compatibility shims"
+      ]
+    }
+  ],
+  "required_surface_ids": [
+    "browser_core_package_boundary",
+    "browser_package_main_thread",
+    "react_client_adapter",
+    "next_client_adapter",
+    "next_server_edge_bridge",
+    "vite_vanilla_consumer",
+    "webpack_consumer",
+    "dedicated_worker_runtime",
+    "service_worker_broker",
+    "shared_worker_coordinator",
+    "rust_runtime_builder_browser_preview",
+    "abi_package_artifacts",
+    "unsupported_native_only_surfaces"
+  ],
+  "rows": [
+    {
+      "surface_id": "browser_core_package_boundary",
+      "display_name": "@asupersync/browser-core package boundary",
+      "support_class": "package_abi_boundary",
+      "direct_runtime_allowed": false,
+      "canonical_package": "@asupersync/browser-core",
+      "evidence_lanes": [
+        {
+          "lane_id": "browser_core_crate_artifact_layout",
+          "kind": "cargo_test",
+          "path": "asupersync-browser-core/tests/artifact_layout.rs"
+        },
+        {
+          "lane_id": "browser_core_package_metadata",
+          "kind": "package_artifact",
+          "path": "packages/browser-core/package.json"
+        },
+        {
+          "lane_id": "wasm_packaged_abi_compatibility_matrix",
+          "kind": "contract_test",
+          "path": "tests/wasm_packaged_abi_compatibility_matrix.rs"
+        }
+      ],
+      "required_fixture": {
+        "kind": "package_artifact",
+        "path": "packages/browser-core/abi-metadata.json",
+        "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_core_package cargo test -p asupersync --test wasm_packaged_abi_compatibility_matrix -- --nocapture"
+      },
+      "rollback_status": {
+        "state": "block_package_ga",
+        "action": "Hold Browser Edition package promotion and keep browser-core described as repository ABI infrastructure until metadata and package export evidence is fresh."
+      },
+      "promotion_criteria": [
+        "ABI metadata, package.json exports, TypeScript declarations, and wasm artifacts match the checked package contracts.",
+        "Docs keep browser-core scoped as the low-level JS/WASM boundary, not an end-user Rust runtime SDK."
+      ],
+      "demotion_criteria": [
+        "ABI fingerprint, package files, or package contract tests drift.",
+        "Docs present browser-core as a direct runtime consumer API."
+      ],
+      "no_claims": [
+        "not a stable external Rust Browser Edition runtime API",
+        "not a replacement for @asupersync/browser"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "asupersync-browser-core",
+          "JS ABI/package boundary"
+        ],
+        "docs/WASM.md": [
+          "@asupersync/browser-core",
+          "Low-level wasm-bindgen bindings"
+        ],
+        "docs/integration.md": [
+          "asupersync-browser-core",
+          "canonical owner"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "browser_package_main_thread",
+      "display_name": "@asupersync/browser main-thread runtime",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "canonical_package": "@asupersync/browser",
+      "evidence_lanes": [
+        {
+          "lane_id": "wasm_browser_support_boundary",
+          "kind": "contract_test",
+          "path": "tests/wasm_browser_support_boundary_contract.rs"
+        },
+        {
+          "lane_id": "wasm_js_exports_coverage",
+          "kind": "contract_test",
+          "path": "tests/wasm_js_exports_coverage_contract.rs"
+        },
+        {
+          "lane_id": "browser_package_source",
+          "kind": "source_guard",
+          "path": "packages/browser/src/index.ts"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/vite-vanilla-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "demote_to_preview_or_unsupported",
+        "action": "Remove stable main-thread runtime language and require browser package diagnostics plus fixture evidence before promotion."
+      },
+      "promotion_criteria": [
+        "Main-thread package diagnostics report supportClass=direct_runtime_supported and reason=supported.",
+        "The vanilla/Vite fixture and JS export contract stay green in the same review window."
+      ],
+      "demotion_criteria": [
+        "Main-thread detection, WebAssembly prerequisite checks, or fixture bundle/run evidence fails.",
+        "Docs imply support outside a browser window/document boundary."
+      ],
+      "no_claims": [
+        "does not claim Node, SSR, service-worker, or shared-worker direct runtime",
+        "does not claim native filesystem/process/socket parity"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "JS/TS consumers (GA)",
+          "@asupersync/browser"
+        ],
+        "docs/WASM.md": [
+          "@asupersync/browser",
+          "primary supported path"
+        ],
+        "docs/integration.md": [
+          "Browser main thread",
+          "Direct-runtime supported"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "react_client_adapter",
+      "display_name": "@asupersync/react client adapter",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "canonical_package": "@asupersync/react",
+      "evidence_lanes": [
+        {
+          "lane_id": "wasm_js_adapter_lifecycle",
+          "kind": "contract_test",
+          "path": "tests/wasm_js_adapter_lifecycle_contract.rs"
+        },
+        {
+          "lane_id": "react_package_source",
+          "kind": "source_guard",
+          "path": "packages/react/src/index.ts"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/react-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_react_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/react_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "demote_client_adapter",
+        "action": "Keep React usage bridge-only or documentation-only until the client fixture and adapter lifecycle contract are fresh."
+      },
+      "promotion_criteria": [
+        "React package guards admit only client-rendered browser trees.",
+        "The React consumer fixture and adapter lifecycle contract remain green."
+      ],
+      "demotion_criteria": [
+        "SSR imports, provider lifecycle, or client-boundary diagnostics drift.",
+        "Docs imply React SSR direct runtime support."
+      ],
+      "no_claims": [
+        "does not support React SSR direct runtime",
+        "does not move runtime creation outside a client-rendered browser tree"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "@asupersync/react"
+        ],
+        "docs/WASM.md": [
+          "@asupersync/react",
+          "React hooks and provider"
+        ],
+        "docs/integration.md": [
+          "React client-rendered tree in a browser",
+          "React SSR / Node render path"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "next_client_adapter",
+      "display_name": "@asupersync/next client adapter",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "canonical_package": "@asupersync/next",
+      "evidence_lanes": [
+        {
+          "lane_id": "wasm_next_adapter_lifecycle",
+          "kind": "contract_test",
+          "path": "tests/wasm_next_adapter_lifecycle_contract.rs"
+        },
+        {
+          "lane_id": "next_package_source",
+          "kind": "source_guard",
+          "path": "packages/next/src/index.ts"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/next-turbopack-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/next_turbopack_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "demote_client_adapter",
+        "action": "Keep Next guidance bridge-only outside client components until the client fixture and adapter lifecycle contract are fresh."
+      },
+      "promotion_criteria": [
+        "Next client diagnostics admit browser client components only.",
+        "The Next fixture validates client bootstrap without widening server or edge boundaries."
+      ],
+      "demotion_criteria": [
+        "Client bootstrap, hydration, package guard, or fixture evidence fails.",
+        "Docs imply direct runtime in Next server or edge code."
+      ],
+      "no_claims": [
+        "does not support direct runtime in Next server components, route handlers, or edge runtimes",
+        "does not move live runtime handles across serialization boundaries"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "@asupersync/next"
+        ],
+        "docs/WASM.md": [
+          "@asupersync/next",
+          "Next.js App Router bootstrap adapter"
+        ],
+        "docs/integration.md": [
+          "Next.js client component",
+          "Next.js server component / route handler"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "next_server_edge_bridge",
+      "display_name": "Next server and edge bridge boundaries",
+      "support_class": "bridge_only",
+      "direct_runtime_allowed": false,
+      "canonical_package": "@asupersync/next",
+      "evidence_lanes": [
+        {
+          "lane_id": "wasm_next_adapter_lifecycle",
+          "kind": "contract_test",
+          "path": "tests/wasm_next_adapter_lifecycle_contract.rs"
+        },
+        {
+          "lane_id": "next_server_edge_routes",
+          "kind": "consumer_fixture",
+          "path": "tests/fixtures/next-turbopack-consumer/app/api/server-bridge/route.js"
+        },
+        {
+          "lane_id": "next_edge_bridge_route",
+          "kind": "consumer_fixture",
+          "path": "tests/fixtures/next-turbopack-consumer/app/api/edge-bridge/route.js"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/next-turbopack-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/next_turbopack_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "keep_bridge_only",
+        "action": "Block any server or edge direct-runtime release note and keep serialized bridge guidance as the supported path."
+      },
+      "promotion_criteria": [
+        "Bridge adapters return stable unsupported-runtime diagnostics for server and edge targets.",
+        "Docs keep direct runtime construction inside client components or browser-only modules."
+      ],
+      "demotion_criteria": [
+        "Server or edge helpers import direct runtime entrypoints.",
+        "Docs describe server or edge as partial direct-runtime support."
+      ],
+      "no_claims": [
+        "no direct Browser Edition runtime execution in Next server code",
+        "no direct Browser Edition runtime execution in Next edge code"
+      ],
+      "docs_markers": {
+        "docs/WASM.md": [
+          "lane.next.server.bridge",
+          "lane.next.edge.bridge"
+        ],
+        "docs/integration.md": [
+          "Next.js server component / route handler",
+          "Next.js edge runtime"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "vite_vanilla_consumer",
+      "display_name": "vanilla/Vite Browser Edition consumer",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "canonical_package": "@asupersync/browser",
+      "evidence_lanes": [
+        {
+          "lane_id": "vite_vanilla_fixture",
+          "kind": "consumer_fixture",
+          "path": "tests/fixtures/vite-vanilla-consumer/"
+        },
+        {
+          "lane_id": "browser_onboarding_checks",
+          "kind": "script",
+          "path": "scripts/run_browser_onboarding_checks.py"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/vite-vanilla-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "block_vanilla_ga_fixture",
+        "action": "Keep package GA claims from citing vanilla/Vite until bundle and browser-run evidence is fresh."
+      },
+      "promotion_criteria": [
+        "Vite fixture builds, bundles, and runs through the browser harness.",
+        "Onboarding receipts keep the vanilla scenario current."
+      ],
+      "demotion_criteria": [
+        "Vite bundle, package resolution, or browser-run evidence fails.",
+        "Onboarding docs cite stale vanilla artifacts."
+      ],
+      "no_claims": [
+        "does not prove every bundler",
+        "does not prove unsupported host contexts"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "vanilla/Vite"
+        ],
+        "docs/WASM.md": [
+          "vanilla/Vite"
+        ],
+        "docs/integration.md": [
+          "vanilla/Vite"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "webpack_consumer",
+      "display_name": "Webpack Browser Edition consumer",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "canonical_package": "@asupersync/browser",
+      "evidence_lanes": [
+        {
+          "lane_id": "webpack_fixture",
+          "kind": "consumer_fixture",
+          "path": "tests/fixtures/webpack-consumer/"
+        },
+        {
+          "lane_id": "webpack_validator",
+          "kind": "script",
+          "path": "scripts/validate_webpack_consumer.sh"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/webpack-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_webpack_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/webpack_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "block_webpack_ga_fixture",
+        "action": "Do not cite Webpack compatibility for GA signoff until the fixture and bundle checks are fresh."
+      },
+      "promotion_criteria": [
+        "Webpack fixture package resolution and bundle checks pass.",
+        "Package exports remain compatible with the Webpack fixture."
+      ],
+      "demotion_criteria": [
+        "Webpack package resolution or bundle checks fail.",
+        "Docs cite Webpack as fresh without a current fixture lane."
+      ],
+      "no_claims": [
+        "does not prove every Webpack plugin or loader combination",
+        "does not prove server-side Webpack direct runtime"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "Webpack"
+        ],
+        "docs/WASM.md": [
+          "Webpack"
+        ],
+        "docs/integration.md": [
+          "Webpack"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "dedicated_worker_runtime",
+      "display_name": "Dedicated worker direct-runtime lane",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "canonical_package": "@asupersync/browser",
+      "evidence_lanes": [
+        {
+          "lane_id": "dedicated_worker_fixture",
+          "kind": "consumer_fixture",
+          "path": "tests/fixtures/dedicated-worker-consumer/"
+        },
+        {
+          "lane_id": "wasm_browser_feasibility_matrix",
+          "kind": "contract_test",
+          "path": "tests/wasm_browser_feasibility_matrix.rs"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/dedicated-worker-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "demote_worker_to_canary",
+        "action": "Keep browser main-thread runtime as the stable fallback and demote worker support until worker-specific evidence is fresh."
+      },
+      "promotion_criteria": [
+        "DedicatedWorkerGlobalScope diagnostics admit direct runtime only inside a dedicated worker.",
+        "Worker fixture summary and browser-run evidence are fresh."
+      ],
+      "demotion_criteria": [
+        "Worker fixture, worker package diagnostics, or worker evidence artifacts fail.",
+        "Docs imply automatic upgrade from main thread to worker or service/shared-worker support."
+      ],
+      "no_claims": [
+        "does not imply automatic worker offload",
+        "does not imply service-worker or shared-worker direct runtime"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "dedicated worker support"
+        ],
+        "docs/WASM.md": [
+          "DedicatedWorkerGlobalScope",
+          "lane.browser.dedicated_worker.direct_runtime"
+        ],
+        "docs/integration.md": [
+          "Browser dedicated worker",
+          "Direct-runtime supported"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "service_worker_broker",
+      "display_name": "Service-worker bounded broker",
+      "support_class": "broker_coordinator_only",
+      "direct_runtime_allowed": false,
+      "canonical_package": "@asupersync/browser",
+      "evidence_lanes": [
+        {
+          "lane_id": "service_worker_broker_contract",
+          "kind": "contract_test",
+          "path": "tests/wasm_service_worker_broker_contract.rs"
+        },
+        {
+          "lane_id": "service_worker_broker_fixture",
+          "kind": "consumer_fixture",
+          "path": "tests/fixtures/service-worker-broker-consumer/"
+        },
+        {
+          "lane_id": "service_worker_broker_docs",
+          "kind": "docs_contract",
+          "path": "docs/wasm_service_worker_broker_contract.md"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/service-worker-broker-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_service_worker_broker_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/service_worker_broker_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "demote_to_preview_only",
+        "action": "Keep service_worker_not_yet_shipped and service_worker_direct_runtime_not_shipped as the public truth; require main-thread or dedicated-worker fallback guidance."
+      },
+      "promotion_criteria": [
+        "Broker registration, durable handoff, and downgrade diagnostics remain covered by the service-worker fixture.",
+        "Direct runtime denial remains explicit in package and Rust diagnostics."
+      ],
+      "demotion_criteria": [
+        "Broker lifecycle, durable handoff, summary/browser-run artifacts, or docs drift.",
+        "Any docs or package diagnostics imply service-worker direct runtime support."
+      ],
+      "no_claims": [
+        "no service-worker direct runtime",
+        "no service-worker lifetime or persistence parity beyond the bounded broker contract"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "Service worker direct runtime",
+          "Broker/coordinator-only"
+        ],
+        "docs/WASM.md": [
+          "service_worker_direct_runtime_not_shipped",
+          "BrowserServiceWorkerBrokerStore"
+        ],
+        "docs/integration.md": [
+          "Browser service worker",
+          "Broker/coordinator-only"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "shared_worker_coordinator",
+      "display_name": "Shared-worker bounded coordinator",
+      "support_class": "broker_coordinator_only",
+      "direct_runtime_allowed": false,
+      "canonical_package": "@asupersync/browser",
+      "evidence_lanes": [
+        {
+          "lane_id": "shared_worker_lifecycle_contract",
+          "kind": "contract_test",
+          "path": "tests/wasm_shared_worker_tenancy_lifecycle_contract.rs"
+        },
+        {
+          "lane_id": "shared_worker_fixture",
+          "kind": "consumer_fixture",
+          "path": "tests/fixtures/shared-worker-consumer/"
+        },
+        {
+          "lane_id": "shared_worker_docs",
+          "kind": "docs_contract",
+          "path": "docs/wasm_shared_worker_tenancy_lifecycle_contract.md"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/shared-worker-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/shared_worker_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "demote_to_preview_only",
+        "action": "Keep shared_worker_direct_runtime_not_shipped as the public truth; require main-thread or dedicated-worker fallback guidance."
+      },
+      "promotion_criteria": [
+        "Coordinator attach, version handshake, detach cleanup, and fallback evidence remain fresh.",
+        "Direct runtime denial remains explicit in package and Rust diagnostics."
+      ],
+      "demotion_criteria": [
+        "Coordinator lifecycle, summary/browser-run artifacts, or docs drift.",
+        "Any docs or package diagnostics imply shared-worker direct runtime support."
+      ],
+      "no_claims": [
+        "no shared-worker direct runtime",
+        "no shared-worker host ownership or lifetime parity"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "Shared worker direct runtime",
+          "Broker/coordinator-only"
+        ],
+        "docs/WASM.md": [
+          "shared_worker_direct_runtime_not_shipped",
+          "createBrowserSharedWorkerCoordinatorSelection()"
+        ],
+        "docs/integration.md": [
+          "Browser shared worker",
+          "Broker/coordinator-only"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "rust_runtime_builder_browser_preview",
+      "display_name": "Rust RuntimeBuilder::browser() preview lane",
+      "support_class": "preview_public_lane",
+      "direct_runtime_allowed": true,
+      "canonical_package": "asupersync",
+      "evidence_lanes": [
+        {
+          "lane_id": "rust_browser_consumer_fixture",
+          "kind": "consumer_fixture",
+          "path": "tests/fixtures/rust-browser-consumer/"
+        },
+        {
+          "lane_id": "wasm_rust_browser_example_contract",
+          "kind": "contract_test",
+          "path": "tests/wasm_rust_browser_example_contract.rs"
+        },
+        {
+          "lane_id": "runtime_builder_source",
+          "kind": "source_guard",
+          "path": "src/runtime/builder.rs"
+        }
+      ],
+      "required_fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/rust-browser-consumer/",
+        "validation_command": "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh",
+        "summary_artifact_pattern": "target/e2e-results/rust_browser_consumer/<timestamp>/summary.json"
+      },
+      "rollback_status": {
+        "state": "downgrade_to_internal_fixture_guidance",
+        "action": "Remove preview-public language if RuntimeBuilder::browser diagnostics, docs, or rust-browser-consumer evidence regresses."
+      },
+      "promotion_criteria": [
+        "RuntimeBuilder::browser() keeps truthful lane negotiation and fail-closed diagnostics.",
+        "Rust browser consumer fixture and docs remain fresh."
+      ],
+      "demotion_criteria": [
+        "Preview builder path widens beyond fixture evidence.",
+        "Docs imply stable parity with JS/TS Browser Edition packages."
+      ],
+      "no_claims": [
+        "not stable external Rust Browser Edition API parity",
+        "not full native-thread runtime parity on wasm32"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "RuntimeBuilder::browser()",
+          "preview browser-runtime bootstrap path"
+        ],
+        "docs/WASM.md": [
+          "RuntimeBuilder::browser()",
+          "Preview public lane"
+        ],
+        "docs/integration.md": [
+          "Construct Browser Edition runtimes directly from external Rust consumer code",
+          "Preview public lane"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "abi_package_artifacts",
+      "display_name": "Browser ABI and package artifacts",
+      "support_class": "package_abi_boundary",
+      "direct_runtime_allowed": false,
+      "canonical_package": "@asupersync/browser-core",
+      "evidence_lanes": [
+        {
+          "lane_id": "browser_core_abi_metadata",
+          "kind": "package_artifact",
+          "path": "packages/browser-core/abi-metadata.json"
+        },
+        {
+          "lane_id": "browser_core_wasm_artifact",
+          "kind": "package_artifact",
+          "path": "packages/browser-core/asupersync_bg.wasm"
+        },
+        {
+          "lane_id": "wasm_bundle_size_budget_contract",
+          "kind": "contract_test",
+          "path": "tests/wasm_bundle_size_budget_contract.rs"
+        }
+      ],
+      "required_fixture": {
+        "kind": "package_artifact",
+        "path": "packages/browser-core/asupersync_bg.wasm",
+        "validation_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_abi_artifacts cargo test -p asupersync --test wasm_bundle_size_budget_contract -- --nocapture"
+      },
+      "rollback_status": {
+        "state": "block_package_integrity_signoff",
+        "action": "Block package-level GA signoff until ABI metadata, wasm artifact, and bundle budget evidence are refreshed."
+      },
+      "promotion_criteria": [
+        "ABI metadata, generated JS glue, wasm artifact, declarations, and package files stay internally consistent.",
+        "Bundle budget and artifact layout contracts remain green."
+      ],
+      "demotion_criteria": [
+        "ABI metadata, wasm artifact, package file, or bundle budget drifts.",
+        "Docs cite ABI/package artifacts as fresh without a current contract lane."
+      ],
+      "no_claims": [
+        "does not prove every npm publishing or provenance gate",
+        "does not prove stable Rust consumer runtime parity"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "JS ABI/package boundary"
+        ],
+        "docs/WASM.md": [
+          "ABI versioning",
+          "abiFingerprint()"
+        ],
+        "docs/integration.md": [
+          "Maintain the Rust-side ABI/package boundary"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    },
+    {
+      "surface_id": "unsupported_native_only_surfaces",
+      "display_name": "Unsupported native-only Browser Edition surfaces",
+      "support_class": "impossible_unsupported",
+      "direct_runtime_allowed": false,
+      "canonical_package": "native asupersync or explicit bridge only",
+      "evidence_lanes": [
+        {
+          "lane_id": "wasm_native_feature_gates",
+          "kind": "source_guard",
+          "path": "src/lib.rs"
+        },
+        {
+          "lane_id": "wasm_browser_feasibility_matrix",
+          "kind": "contract_test",
+          "path": "tests/wasm_browser_feasibility_matrix.rs"
+        },
+        {
+          "lane_id": "wasm_support_boundary_contract",
+          "kind": "contract_test",
+          "path": "tests/wasm_browser_support_boundary_contract.rs"
+        }
+      ],
+      "required_fixture": {
+        "fixture_not_required_reason": "Unsupported native-only surfaces are guarded by cfg gates, source contracts, and docs; there is no browser-run fixture that should attempt direct raw TCP, filesystem, process, signal, or native DB access."
+      },
+      "rollback_status": {
+        "state": "keep_fail_closed",
+        "action": "Keep native-only guidance behind native asupersync or explicit bridge code, and reject Browser Edition parity claims."
+      },
+      "promotion_criteria": [
+        "No promotion is allowed without a separate design, docs, source gate, and proof lane."
+      ],
+      "demotion_criteria": [
+        "Any docs, package, or adapter code implies raw TCP/UDP, filesystem, process/signal, or native DB direct browser support."
+      ],
+      "no_claims": [
+        "no raw TCP or UDP in Browser Edition",
+        "no filesystem, process, signal, sqlite, postgres, mysql, kafka, or native TLS direct browser support"
+      ],
+      "docs_markers": {
+        "README.md": [
+          "Raw TCP/UDP, filesystem, process/signal"
+        ],
+        "docs/WASM.md": [
+          "Native-only features",
+          "compile-time rejected on `wasm32`"
+        ],
+        "docs/integration.md": [
+          "Impossible / unsupported",
+          "raw TCP/UDP"
+        ]
+      },
+      "last_reviewed_date": "2026-06-11",
+      "review_window_days": 45
+    }
+  ],
+  "validation_commands": [
+    "jq empty artifacts/browser_edition_readiness_matrix_v1.json",
+    "rustfmt --edition 2024 --check tests/browser_edition_readiness_matrix_contract.rs",
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_readiness_matrix CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test browser_edition_readiness_matrix_contract -- --nocapture"
+  ]
+}

@@ -556,6 +556,12 @@ capability belong to right now?"
 | Bridge-only | Direct Browser Edition runtime execution is not allowed at that boundary; use serialization or an adapter seam instead | React SSR, Next server components, Next route handlers, Next edge runtime | move runtime creation back into a browser-owned boundary and cross the server/edge hop with serializable data only | matrix below, `docs/wasm_troubleshooting_compendium.md` |
 | Impossible / unsupported | The browser security model or shipped package contract rules out direct Browser Edition runtime support | Node-only direct runtime, raw TCP/UDP, filesystem, process/signal, native DB clients | switch to native `asupersync` or an explicit bridge; do not add fake parity shims | `docs/WASM.md` |
 
+The checked Browser Edition readiness matrix is
+`artifacts/browser_edition_readiness_matrix_v1.json`, with the human review
+table in `docs/browser_edition_readiness_matrix.md`. It extends the quick
+reference above with Package ABI boundary, vanilla/Vite, Webpack, fixture,
+rollback, freshness, and no-claim rows for release review.
+
 ### Browser-Native Messaging And Stream Helper Contract
 
 The promoted browser-native support class is
