@@ -35,9 +35,46 @@ use asupersync::proc_macros::{scope, spawn, join, join_all, race};
 | `join!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Awaits branches sequentially today |
 | `join_all!` | Supported and re-exported by `asupersync` | Unavailable | Awaits branches sequentially today |
 | `race!` | Supported and re-exported by `asupersync` | Contract-enforcement `compile_error!` fallback | Expands to `Cx::race*`; losers are dropped, not drained |
+| `#[lab_test]` | Supported and re-exported by `asupersync` | Unavailable | Runs deterministic lab tests under one seed or a seed matrix and fails with seed/rerun details |
 
 `session_protocol!` and `#[conformance]` exist in `asupersync-macros`, but they
 are not part of the root `asupersync` macro contract.
+
+`#[lab_test]` wraps deterministic lab tests in a fixed seed or seed matrix,
+initializes test logging, drives the lab to quiescence, and fails with the exact
+seed plus a rerun command when the body, oracle report, or invariant report
+fails.
+
+```rust
+use asupersync::{lab::LabRuntime, lab_test};
+
+#[lab_test(seeds = 0..16)]
+fn invariant_matrix(lab: &mut LabRuntime) {
+    assert!(lab.config().seed < 16);
+}
+```
+
+Async root-task form receives a `&Cx` and is run through
+`lab::run_async_under_lab_with_config`:
+
+```rust
+use asupersync::{cx::Cx, lab_test};
+
+#[lab_test(seeds = 7..9, chaos)]
+async fn cancel_path(cx: &Cx) {
+    cx.checkpoint().expect("checkpoint");
+}
+```
+
+Initial porting evidence for `asupersync-lab-dx-v2-n2v2fi.1`: six
+representative `src/lab/runtime.rs` tests now use
+`#[asupersync::lab_test(seeds = 42..43)]`:
+`empty_runtime_is_quiescent`, `advance_time`, `advance_to_next_timer_empty`,
+`clock_pause_resume`, `inject_clock_skew`, and
+`auto_advance_quiescent_termination`. Their repeated raw setup/completion
+boilerplate moved from 18 lines (`init_test`, `LabRuntime::{with_seed,new}`,
+and `test_complete!`) to 6 attribute lines, a 67% reduction for that setup
+block.
 
 ## Quick Start (Runnable)
 

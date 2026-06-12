@@ -34,10 +34,10 @@ use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::det_hash::{DetHashMap, DetHashSet};
 use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
-use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
+use std::{fmt, future::Future};
 
 /// Summary of a trace certificate built from the current trace buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2563,6 +2563,95 @@ impl LabRuntime {
     }
 }
 
+/// Run an async task under a fresh [`LabRuntime`] with the given seed.
+///
+/// This is the runtime half of the `#[lab_test]` macro. It creates a root
+/// region, spawns one task under a current [`crate::cx::Cx`], drives the lab to
+/// quiescence, and returns the task output together with the structured
+/// [`LabRunReport`].
+///
+/// # Panics
+///
+/// Panics if the task cannot be spawned, does not finish after the lab run, is
+/// cancelled, or panics. Test harness callers should treat those panics as
+/// deterministic failures; the returned report is for successful task
+/// completion plus oracle/invariant inspection.
+///
+/// # Examples
+///
+/// ```rust
+/// use asupersync::lab::run_async_under_lab;
+///
+/// let (value, report) = run_async_under_lab(7, |cx| async move {
+///     assert_eq!(
+///         cx.region_id(),
+///         asupersync::cx::Cx::current().expect("current Cx").region_id()
+///     );
+///     42_u8
+/// });
+///
+/// assert_eq!(value, 42);
+/// assert!(report.quiescent);
+/// assert!(report.oracle_report.all_passed());
+/// assert!(report.invariant_violations.is_empty());
+/// ```
+#[must_use]
+pub fn run_async_under_lab<F, Fut, T>(seed: u64, task: F) -> (T, LabRunReport)
+where
+    F: FnOnce(crate::cx::Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    run_async_under_lab_with_config(LabConfig::new(seed), task)
+}
+
+/// Run an async task under a fresh [`LabRuntime`] using an explicit config.
+///
+/// This variant lets test macros and harnesses enable deterministic chaos or
+/// tune step limits while preserving the same root-task execution contract as
+/// [`run_async_under_lab`].
+///
+/// # Panics
+///
+/// Panics under the same conditions as [`run_async_under_lab`].
+#[must_use]
+pub fn run_async_under_lab_with_config<F, Fut, T>(config: LabConfig, task: F) -> (T, LabRunReport)
+where
+    F: FnOnce(crate::cx::Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let seed = config.seed;
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime
+        .state
+        .create_root_region(crate::types::Budget::INFINITE);
+    let (task_id, mut handle) = runtime
+        .state
+        .create_task(root, crate::types::Budget::INFINITE, async move {
+            let cx = crate::cx::Cx::current()
+                .unwrap_or_else(|| panic!("lab task started without current Cx for seed {seed}"));
+            task(cx).await
+        })
+        .unwrap_or_else(|error| panic!("failed to spawn lab task for seed {seed}: {error}"));
+    runtime
+        .scheduler
+        .lock()
+        .schedule(task_id, crate::types::Budget::INFINITE.priority);
+
+    let report = runtime.run_until_quiescent_with_report();
+    let output = handle
+        .try_join()
+        .unwrap_or_else(|error| panic!("lab task failed for seed {seed}: {error}"))
+        .unwrap_or_else(|| {
+            panic!(
+                "lab task did not finish for seed {seed}: quiescent={}, steps_total={}",
+                report.quiescent, report.steps_total
+            )
+        });
+    (output, report)
+}
+
 const DEFAULT_LAB_CANCEL_STREAK_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
@@ -3092,19 +3181,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_runtime_is_quiescent() {
-        init_test("empty_runtime_is_quiescent");
-        let runtime = LabRuntime::with_seed(42);
+    #[asupersync::lab_test(seeds = 42..43)]
+    fn empty_runtime_is_quiescent(runtime: &mut LabRuntime) {
         let quiescent = runtime.is_quiescent();
         crate::assert_with_log!(quiescent, "quiescent", true, quiescent);
-        crate::test_complete!("empty_runtime_is_quiescent");
     }
 
-    #[test]
-    fn advance_time() {
-        init_test("advance_time");
-        let mut runtime = LabRuntime::with_seed(42);
+    #[asupersync::lab_test(seeds = 42..43)]
+    fn advance_time(runtime: &mut LabRuntime) {
         let now = runtime.now();
         crate::assert_with_log!(now == Time::ZERO, "now", Time::ZERO, now);
 
@@ -3116,7 +3200,6 @@ mod tests {
             Time::from_millis(1),
             now
         );
-        crate::test_complete!("advance_time");
     }
 
     #[test]
@@ -5142,11 +5225,8 @@ mod tests {
     // Virtual Time Control Tests (bd-1hu19.3)
     // =========================================================================
 
-    #[test]
-    fn advance_to_next_timer_empty() {
-        init_test("advance_to_next_timer_empty");
-        let mut runtime = LabRuntime::with_seed(42);
-
+    #[asupersync::lab_test(seeds = 42..43)]
+    fn advance_to_next_timer_empty(runtime: &mut LabRuntime) {
         let wakeups = runtime.advance_to_next_timer();
         crate::assert_with_log!(wakeups == 0, "no timers → 0 wakeups", 0, wakeups);
 
@@ -5157,7 +5237,6 @@ mod tests {
             true,
             deadline.is_none()
         );
-        crate::test_complete!("advance_to_next_timer_empty");
     }
 
     #[test]
@@ -5433,11 +5512,8 @@ mod tests {
         crate::test_complete!("virtual_time_24_hour_instant_test");
     }
 
-    #[test]
-    fn clock_pause_resume() {
-        init_test("clock_pause_resume");
-        let runtime = LabRuntime::with_seed(42);
-
+    #[asupersync::lab_test(seeds = 42..43)]
+    fn clock_pause_resume(runtime: &mut LabRuntime) {
         let not_paused = !runtime.is_clock_paused();
         crate::assert_with_log!(not_paused, "not paused initially", true, not_paused);
 
@@ -5448,14 +5524,10 @@ mod tests {
         runtime.resume_clock();
         let resumed = !runtime.is_clock_paused();
         crate::assert_with_log!(resumed, "resumed", true, resumed);
-        crate::test_complete!("clock_pause_resume");
     }
 
-    #[test]
-    fn inject_clock_skew() {
-        init_test("inject_clock_skew");
-        let mut runtime = LabRuntime::with_seed(42);
-
+    #[asupersync::lab_test(seeds = 42..43)]
+    fn inject_clock_skew(runtime: &mut LabRuntime) {
         runtime.advance_time(1_000_000_000); // 1 second
         let before = runtime.now();
 
@@ -5477,7 +5549,6 @@ mod tests {
             Time::from_secs(6),
             after
         );
-        crate::test_complete!("inject_clock_skew");
     }
 
     #[test]
@@ -5688,10 +5759,8 @@ mod tests {
     // AutoAdvanceTermination tests (bead 56c785)
     // =========================================================================
 
-    #[test]
-    fn auto_advance_quiescent_termination() {
-        init_test("auto_advance_quiescent_termination");
-        let mut lab = LabRuntime::new(LabConfig::new(42));
+    #[asupersync::lab_test(seeds = 42..43)]
+    fn auto_advance_quiescent_termination(lab: &mut LabRuntime) {
         // No tasks enqueued → immediately quiescent
         let report = lab.run_with_auto_advance();
         assert_eq!(
@@ -5699,7 +5768,6 @@ mod tests {
             AutoAdvanceTermination::Quiescent,
             "empty runtime should terminate as quiescent"
         );
-        crate::test_complete!("auto_advance_quiescent_termination");
     }
 
     #[test]

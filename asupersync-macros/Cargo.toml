@@ -18,6 +18,7 @@ quote = "1.0"
 proc-macro2 = "1.0"
 
 [dev-dependencies]
+asupersync = { version = "0.3.4", path = "..", default-features = false, features = ["test-internals"] }
 trybuild = "1.0"
 
 [lints.rust]

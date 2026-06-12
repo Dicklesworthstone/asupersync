@@ -14,7 +14,7 @@ the workstation and the RCH fleet.
 | --- | --- | --- |
 | Pure function, parser, state transition, error mapping | Inline unit test | `src/*` module `#[cfg(test)]` |
 | Cancellation, task ownership, obligation, virtual time | Lab integration test | `src/lab/*`, `src/test_utils.rs` |
-| Same invariant across seed/config matrix | Lab test macro recipe | `asupersync-lab-dx-v2-n2v2fi.1` until `#[lab_test]` lands |
+| Same invariant across seed/config matrix | `#[asupersync::lab_test(seeds = A..B)]` | Fixed seeds, deterministic lab runtime, seed in failure output |
 | Schedule sensitivity, DPOR, seed search, replay equivalence | Exploration test | `src/lab/explorer.rs`, `src/lab/replay.rs` |
 | User-visible workflow across modules | Scenario YAML or e2e script | `examples/scenarios/*.yaml`, `scripts/run_all_e2e.sh` |
 
@@ -140,23 +140,26 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target
 
 ## Recipe 3: Lab Test Matrix
 
-The planned `#[lab_test]` attribute is tracked by
-`asupersync-lab-dx-v2-n2v2fi.1`. Until it lands, spell out the matrix as ordinary
-tests with fixed seeds and shared helper functions.
+Use `#[asupersync::lab_test]` for deterministic lab tests that fit one of the
+two blessed signatures. The macro initializes logging, creates the lab runtime
+for each seed, drives the lab to quiescence, and reports the failing seed plus a
+rerun command.
 
 ```rust
-#[test]
-fn scenario_id_seed_matrix() {
-    for seed in [1_u64, 2, 13, 55] {
-        let mut lab = asupersync::lab::LabRuntime::new(asupersync::lab::LabConfig::new(seed));
-        let report = run_scenario(&mut lab);
-        assert!(report.passed(), "seed={seed} report={report:?}");
-    }
+use asupersync::{lab::LabRuntime, lab_test};
+
+#[lab_test(seeds = 1..5)]
+fn scenario_id_seed_matrix(lab: &mut LabRuntime) {
+    let report = run_scenario(lab);
+    assert!(report.passed(), "seed={} report={report:?}", lab.config().seed);
 }
 ```
 
-Backed by compiling code: seed and replay tests in `src/lab/scenario_runner.rs`
-and deterministic corpus tests in `src/lab/fuzz.rs`.
+Backed by compiling code: `asupersync-macros/tests/lab_test.rs` covers raw
+`&mut LabRuntime`, async `&Cx`, seed matrices, chaos, and seed failure output.
+`src/lab/runtime.rs` includes representative in-crate ports for empty runtime,
+virtual time, timer-empty, clock pause/resume, clock skew, and auto-advance
+quiescence.
 
 Run:
 
@@ -165,8 +168,11 @@ TEST_FILTER=seed_matrix
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_agents_seed_matrix" cargo test --lib --features test-internals "$TEST_FILTER" -- --nocapture
 ```
 
-When the attribute lands, migrate the helper body behind the macro rather than
-changing the scenario meaning.
+For new deterministic lab tests, prefer `#[asupersync::lab_test]` over copying
+the setup block. Use `fn case(lab: &mut LabRuntime)` for raw state-level tests
+and `async fn case(cx: &Cx)` for root-task tests that should be driven to
+quiescence with oracle checks. Spell out a manual seed loop only when the test
+needs non-contiguous seeds or custom per-seed setup.
 
 ## Recipe 4: Exploration And Replay
 

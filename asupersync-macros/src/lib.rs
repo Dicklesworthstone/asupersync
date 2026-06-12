@@ -42,6 +42,7 @@
 
 mod instrument;
 mod join;
+mod lab_test;
 mod race;
 mod scope;
 mod session;
@@ -283,6 +284,26 @@ pub fn conformance(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(_) => item,
         Err(message) => util::compile_error(&message).into(),
     }
+}
+
+/// Runs a deterministic lab-runtime test with optional seed matrices.
+///
+/// Supported function shapes:
+///
+/// ```ignore
+/// #[lab_test]
+/// fn raw_lab(lab: &mut asupersync::lab::LabRuntime) {
+///     // create tasks, advance virtual time, inspect lab state
+/// }
+///
+/// #[lab_test(seeds = 0..16, chaos)]
+/// async fn async_body(cx: &asupersync::cx::Cx) {
+///     // run under a root lab task with automatic quiescence/oracle checks
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn lab_test(attr: TokenStream, item: TokenStream) -> TokenStream {
+    lab_test::lab_test_impl(attr, item)
 }
 
 /// Generates typestate-encoded session types from a protocol DSL.
