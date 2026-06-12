@@ -1957,6 +1957,220 @@ mod tests {
         crate::test_complete!("timer_driver_handle_with_browser_clock");
     }
 
+    /// br-asupersync-rr849p: a near timer must keep firing (and must keep
+    /// being reported by `next_deadline`) while a far timer is pending.
+    ///
+    /// The default-built runtime currently has no I/O reactor, so every
+    /// `TcpStream` read re-polls through a ~1ms fallback timer
+    /// (`fallback_rewake`). Registering a coexisting long timer (e.g. the 4s
+    /// `Sleep` inside a `timeout()` wrapper) must not strand or shadow the
+    /// near fallback timers — if it does, every reactor-less read stalls
+    /// until the far deadline, which is exactly the rr849p symptom.
+    #[test]
+    fn near_timer_fires_while_far_timer_pending() {
+        init_test("near_timer_fires_while_far_timer_pending");
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(1)));
+        let driver = TimerDriver::with_clock(Arc::clone(&clock));
+
+        // Far timer: 4 seconds out (mirrors the rr849p timeout() Sleep).
+        let far_flag = Arc::new(AtomicBool::new(false));
+        let _far = driver.register(
+            Time::from_nanos(clock.now().as_nanos() + 4_000_000_000),
+            waker_that_sets(Arc::clone(&far_flag)),
+        );
+
+        // Simulated fallback-rewake loop: register now+1ms, advance 1ms,
+        // process. 1000 steps = 1 virtual second, crossing several level-0
+        // wheel revolutions so cascade/skip paths are exercised.
+        for step in 0..1_000u64 {
+            let woken = Arc::new(AtomicBool::new(false));
+            let deadline = Time::from_nanos(clock.now().as_nanos() + 1_000_000);
+            let _near = driver.register(deadline, waker_that_sets(Arc::clone(&woken)));
+
+            let reported = driver.next_deadline();
+            let near_reported = reported == Some(deadline);
+            crate::assert_with_log!(
+                near_reported,
+                &format!("next_deadline reports the near timer at step {step}"),
+                Some(deadline),
+                reported
+            );
+
+            clock.advance(1_000_000);
+            driver.process_timers();
+            let fired = woken.load(Ordering::SeqCst);
+            crate::assert_with_log!(
+                fired,
+                &format!("near timer fires at step {step} while the far timer is pending"),
+                true,
+                fired
+            );
+        }
+
+        let far_fired_early = far_flag.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            !far_fired_early,
+            "far timer has not fired after 1 virtual second",
+            false,
+            far_fired_early
+        );
+
+        clock.advance(3_100_000_000);
+        driver.process_timers();
+        let far_fired = far_flag.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            far_fired,
+            "far timer fires once its deadline passes",
+            true,
+            far_fired
+        );
+        crate::test_complete!("near_timer_fires_while_far_timer_pending");
+    }
+
+    /// br-asupersync-rr849p: same invariant with deliberately tick-UNALIGNED
+    /// virtual times and the production registration order (first fallback
+    /// re-poll timer registered BEFORE the far timeout Sleep). The wall clock
+    /// registers near timers at arbitrary sub-millisecond offsets, so this
+    /// exercises truncation paths (mid-tick `now`, deadlines crossing tick
+    /// boundaries, partial advances) the aligned variant cannot reach.
+    #[test]
+    fn near_timer_fires_while_far_timer_pending_unaligned() {
+        init_test("near_timer_fires_while_far_timer_pending_unaligned");
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000_000_123)));
+        let driver = TimerDriver::with_clock(Arc::clone(&clock));
+
+        // Production order: near fallback timer first, far Sleep second.
+        let first_near = Arc::new(AtomicBool::new(false));
+        let _n0 = driver.register(
+            Time::from_nanos(clock.now().as_nanos() + 1_000_000),
+            waker_that_sets(Arc::clone(&first_near)),
+        );
+        let far_flag = Arc::new(AtomicBool::new(false));
+        let _far = driver.register(
+            Time::from_nanos(clock.now().as_nanos() + 4_000_000_000),
+            waker_that_sets(Arc::clone(&far_flag)),
+        );
+
+        clock.advance(1_500_000);
+        driver.process_timers();
+        let first_fired = first_near.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            first_fired,
+            "first near timer fires with the far timer registered after it",
+            true,
+            first_fired
+        );
+
+        // Unaligned chain: two uneven sub-steps per iteration so the wheel
+        // sees mid-tick `now` values on both register and process.
+        for step in 0..2_000u64 {
+            let woken = Arc::new(AtomicBool::new(false));
+            let deadline = Time::from_nanos(clock.now().as_nanos() + 1_000_000);
+            let _near = driver.register(deadline, waker_that_sets(Arc::clone(&woken)));
+
+            clock.advance(641_337);
+            driver.process_timers();
+            clock.advance(400_000);
+            driver.process_timers();
+
+            let fired = woken.load(Ordering::SeqCst);
+            crate::assert_with_log!(
+                fired,
+                &format!("unaligned near timer fires at step {step} with far timer pending"),
+                true,
+                fired
+            );
+        }
+
+        let far_fired_early = far_flag.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            !far_fired_early,
+            "far timer has not fired after ~2.1 virtual seconds",
+            false,
+            far_fired_early
+        );
+        clock.advance(2_100_000_000);
+        driver.process_timers();
+        let far_fired = far_flag.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            far_fired,
+            "far timer fires once its deadline passes",
+            true,
+            far_fired
+        );
+        crate::test_complete!("near_timer_fires_while_far_timer_pending_unaligned");
+    }
+
+    /// br-asupersync-rr849p: wall-clock + concurrent-processor variant.
+    /// Production drives the shared wheel from several worker threads plus
+    /// the block_on thread; this runs background processors against the
+    /// foreground fallback re-poll chain with a far timer pending. The bug
+    /// presents as a multi-second stall, so the generous 500ms per-step
+    /// budget cleanly separates it from scheduler jitter on loaded hosts.
+    #[test]
+    fn near_timer_fires_while_far_timer_pending_wall_clock_concurrent() {
+        init_test("near_timer_fires_while_far_timer_pending_wall_clock_concurrent");
+        let driver = TimerDriverHandle::with_wall_clock();
+
+        let far_flag = Arc::new(AtomicBool::new(false));
+        let _far = driver.register(
+            Time::from_nanos(driver.now().as_nanos() + 60_000_000_000),
+            waker_that_sets(Arc::clone(&far_flag)),
+        );
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let processors: Vec<_> = (0..2)
+            .map(|_| {
+                let driver = driver.clone();
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        let _ = driver.process_timers();
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                })
+            })
+            .collect();
+
+        for step in 0..200u64 {
+            let woken = Arc::new(AtomicBool::new(false));
+            let deadline = Time::from_nanos(driver.now().as_nanos() + 1_000_000);
+            let _near = driver.register(deadline, waker_that_sets(Arc::clone(&woken)));
+
+            let start = std::time::Instant::now();
+            let mut fired = false;
+            while start.elapsed() < Duration::from_millis(500) {
+                let _ = driver.process_timers();
+                if woken.load(Ordering::SeqCst) {
+                    fired = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_micros(300));
+            }
+            crate::assert_with_log!(
+                fired,
+                &format!(
+                    "wall-clock near timer fires within 500ms at step {step} with far timer pending"
+                ),
+                true,
+                fired
+            );
+        }
+
+        stop.store(true, Ordering::Release);
+        for processor in processors {
+            processor.join().expect("processor thread");
+        }
+        let far_fired_early = far_flag.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            !far_fired_early,
+            "60s far timer has not fired during the chain",
+            false,
+            far_fired_early
+        );
+        crate::test_complete!("near_timer_fires_while_far_timer_pending_wall_clock_concurrent");
+    }
+
     // =========================================================================
     // Helper Functions
     // =========================================================================

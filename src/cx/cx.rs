@@ -728,6 +728,7 @@ impl<Caps> Cx<Caps> {
     /// Returns a cloned handle to the I/O driver, if present.
     #[inline]
     #[must_use]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn io_driver_handle(&self) -> Option<IoDriverHandle> {
         self.handles.io_driver.clone()
     }

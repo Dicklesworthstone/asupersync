@@ -1,21 +1,23 @@
-//! Localization repro for br-asupersync-rr849p: does a request-region-wrapped
-//! PgConnection fail to read responses that are already available on the wire?
+//! Regression guards for br-asupersync-rr849p: `timeout()`-wrapped socket
+//! reads must complete when data arrives instead of stalling to the timeout
+//! deadline.
 //!
-//! Two phases against scripted PostgreSQL backends, both under the real
-//! asupersync runtime:
-//!   - CONTROL: `query_unchecked(&task_cx, "SELECT 1")` directly (no request
-//!     region). The server answers immediately. Proves the runtime + the
-//!     query method + reactor-driven reads work under `task_cx`.
-//!   - REGION: the same query inside `ServerRequestRegion::run_with_protocol_drain`
-//!     with a finite budget. The server answers BOTH the budget-derived
-//!     `SET statement_timeout` and the `SELECT`. If region-wrapped reads work,
-//!     the handler returns rows in milliseconds; if it parks on the
-//!     SET-response read even though the response is already buffered, the
-//!     budget deadline fires (~budget) and the handler resolves Cancelled.
+//! Two tests, both under the real asupersync runtime:
+//!   - `rr849p_minimal_tcp_timeout_read_diag`: PG-free minimal guard — a raw
+//!     `TcpStream` read with and without a bare `timeout()` wrapper, plus an
+//!     io/timer monitor timeline for diagnosability.
+//!   - `localize_request_cx_read_after_write`: the canonical PostgreSQL
+//!     reproduction — a `timeout()`-wrapped `query_unchecked` (CONTROL) and a
+//!     request-region-wrapped query with an INFINITE budget (REGION) against
+//!     scripted PG backends.
 //!
-//! A CONTROL=Ok + REGION=Cancelled split localizes the defect to the request
-//! cx / AmbientCxScope read path inside run_with_protocol_drain, rather than a
-//! general runtime+PG read problem.
+//! Historical root cause (fixed in src/runtime/scheduler/three_lane.rs):
+//! default-built runtimes have no I/O reactor (br-asupersync-1ajbtl), so
+//! reads re-poll through ~1ms `fallback_rewake` wheel timers. Workers only
+//! pump the timer wheel in `next_task()`; a worker stuck in the inner backoff
+//! loop never fired due wheel timers, and the block_on thread could park all
+//! the way to the far `timeout()` Sleep deadline — stranding the due re-poll
+//! timer and stalling the read for the full timeout.
 
 #![cfg(all(feature = "postgres", feature = "test-internals"))]
 
@@ -33,13 +35,13 @@ use asupersync::web::request_region::{
     ServerHopOutcome, ServerRequestRegion, derive_request_budget,
 };
 
-const REGION_BUDGET: Duration = Duration::from_secs(4);
 const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(12);
 
 fn backend_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + 4 + body.len());
     out.push(msg_type);
-    out.extend_from_slice(&((body.len() as i32) + 4).to_be_bytes());
+    let body_len = i32::try_from(body.len()).expect("backend message body fits i32");
+    out.extend_from_slice(&(body_len + 4).to_be_bytes());
     out.extend_from_slice(body);
     out
 }
@@ -186,14 +188,222 @@ fn region_server(listener: &TcpListener) {
     let _ = conn.read(&mut probe);
 }
 
-// IGNORED: this is the runnable canonical reproduction for br-asupersync-rr849p
-// (a `timeout()`-wrapped reactor-driven socket read stalls until the deadline
-// instead of completing when data arrives). It is expected to FAIL on the
-// canonical phase until rr849p is fixed; un-ignore it once the timer+reactor
-// interaction is corrected so it becomes the regression guard. Run with
-// `cargo test -p asupersync --test rr849p_request_cx_read_localization
-//  --features postgres,test-internals -- --ignored --nocapture`.
-#[ignore = "reproduces br-asupersync-rr849p (timeout-wrapped reactor read stalls); un-ignore when fixed"]
+/// Minimal PG-free regression guard for br-asupersync-rr849p: a bare
+/// `timeout()` wrapped around a `TcpStream` read must complete when data
+/// arrives, not stall to the timeout deadline. Phase A (control) performs the
+/// identical read WITHOUT the timeout wrapper; phase B wraps it in
+/// `timeout(4s)`.
+///
+/// Root cause this guards against: default-built runtimes have no I/O
+/// reactor (br-asupersync-1ajbtl), so reads re-poll through ~1ms
+/// `fallback_rewake` wheel timers. Workers only pump the timer wheel in
+/// `next_task()`; before the rr849p fix, a worker in the inner backoff loop
+/// never processed due wheel timers, and the block_on thread could park all
+/// the way to the far `timeout()` Sleep deadline — stranding the due 1ms
+/// re-poll timer (`timer_next_ms=Some(0)` frozen) and stalling the read for
+/// the full timeout.
+///
+/// The `[RR849P-DIAG ...]` monitor timeline prints io stats (when a reactor
+/// exists) and the timer wheel's next-deadline/pending view to keep the
+/// failure mode diagnosable if it regresses.
+#[test]
+fn rr849p_minimal_tcp_timeout_read_diag() {
+    use asupersync::io::{AsyncRead, ReadBuf};
+    use asupersync::net::TcpStream as AsupTcpStream;
+    use std::pin::Pin;
+    use std::sync::mpsc;
+    use std::task::Poll;
+
+    const SERVER_WRITE_DELAY: Duration = Duration::from_millis(500);
+    const READ_TIMEOUT: Duration = Duration::from_secs(4);
+
+    fn spawn_server(listener: TcpListener, tag: &'static str) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().expect("accept");
+            std::thread::sleep(SERVER_WRITE_DELAY);
+            conn.write_all(b"RR849P!!").expect("write payload");
+            conn.flush().expect("flush payload");
+            eprintln!("[RR849P-DIAG server {tag}] payload written");
+            // Hold the socket open so the client read window is bounded only
+            // by the client, never by EOF. The healthy read completes within
+            // milliseconds of the write; 2s comfortably outlives it without
+            // dragging the test out.
+            std::thread::sleep(Duration::from_secs(2));
+        })
+    }
+
+    async fn read_some(stream: &mut AsupTcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut read_buf = ReadBuf::new(buf);
+        std::future::poll_fn(|task_cx| {
+            match Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
+    }
+
+    let control_listener = TcpListener::bind("127.0.0.1:0").expect("bind control");
+    let control_addr = control_listener.local_addr().expect("control addr");
+    let timeout_listener = TcpListener::bind("127.0.0.1:0").expect("bind timeout");
+    let timeout_addr = timeout_listener.local_addr().expect("timeout addr");
+    let control_thread = spawn_server(control_listener, "control");
+    let timeout_thread = spawn_server(timeout_listener, "timeout");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+
+    // Monitor thread: samples io + timer driver state on a 50ms cadence for
+    // the whole test, printing only on change so the timeline stays readable.
+    // The io handle is optional because default-built runtimes currently have
+    // no reactor (br-asupersync-1ajbtl); the timer view is the critical one.
+    #[allow(clippy::type_complexity)]
+    let (handle_tx, handle_rx) = mpsc::channel::<(
+        Option<asupersync::runtime::IoDriverHandle>,
+        Option<asupersync::time::TimerDriverHandle>,
+    )>();
+    let monitor_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let monitor_done_flag = std::sync::Arc::clone(&monitor_done);
+    let monitor = std::thread::spawn(move || {
+        let Ok((io, timer)) = handle_rx.recv() else {
+            return;
+        };
+        let start = std::time::Instant::now();
+        let mut last = String::new();
+        while start.elapsed() < Duration::from_secs(12)
+            && !monitor_done_flag.load(std::sync::atomic::Ordering::Acquire)
+        {
+            let io_part = io.as_ref().map_or_else(
+                || "io=none".to_string(),
+                |io| {
+                    let s = io.stats();
+                    format!(
+                        "polls={} events={} wakers={} unknown={} regs={} deregs={} waker_count={}",
+                        s.polls,
+                        s.events_received,
+                        s.wakers_dispatched,
+                        s.unknown_tokens,
+                        s.registrations,
+                        s.deregistrations,
+                        io.waker_count(),
+                    )
+                },
+            );
+            let timer_part = timer.as_ref().map_or_else(
+                || "timer=none".to_string(),
+                |t| {
+                    let next_ms = t
+                        .next_deadline()
+                        .map(|d| d.as_nanos().saturating_sub(t.now().as_nanos()) / 1_000_000);
+                    format!(
+                        "timer_next_ms={next_ms:?} timer_pending={}",
+                        t.pending_count()
+                    )
+                },
+            );
+            let line = format!("{io_part} {timer_part}");
+            if line != last {
+                eprintln!(
+                    "[RR849P-DIAG monitor +{:>5}ms] {line}",
+                    start.elapsed().as_millis()
+                );
+                last = line;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+
+    let join_handle = runtime.handle().spawn(async move {
+        let task_cx = Cx::current().expect("runtime task context");
+        eprintln!(
+            "[RR849P-DIAG task] task cx io_driver={} timer_driver={}",
+            task_cx.io_driver_handle().is_some(),
+            task_cx.timer_driver().is_some()
+        );
+
+        // Phase A: identical read, no timeout wrapper.
+        let mut control_stream = AsupTcpStream::connect(control_addr)
+            .await
+            .expect("connect control");
+        eprintln!("[RR849P-DIAG task] phase A (no timeout) read starting");
+        let phase_a_start = std::time::Instant::now();
+        let mut buf_a = [0u8; 8];
+        let control_n = read_some(&mut control_stream, &mut buf_a)
+            .await
+            .expect("control read");
+        let control_ms = phase_a_start.elapsed().as_millis();
+        eprintln!("[RR849P-DIAG task] phase A read done n={control_n} in {control_ms}ms");
+
+        // Phase B: same read wrapped in a bare timeout().
+        let mut timeout_stream = AsupTcpStream::connect(timeout_addr)
+            .await
+            .expect("connect timeout");
+        eprintln!("[RR849P-DIAG task] phase B (timeout-wrapped) read starting");
+        let phase_b_start = std::time::Instant::now();
+        let mut buf_b = [0u8; 8];
+        let timeout_result = asupersync::time::timeout(
+            task_cx.now(),
+            READ_TIMEOUT,
+            read_some(&mut timeout_stream, &mut buf_b),
+        )
+        .await;
+        let timeout_ms = phase_b_start.elapsed().as_millis();
+        eprintln!(
+            "[RR849P-DIAG task] phase B read done result={timeout_result:?} in {timeout_ms}ms"
+        );
+
+        (control_n, control_ms, timeout_result, timeout_ms)
+    });
+
+    let (control_n, control_ms, timeout_result, timeout_ms) = runtime.block_on(async move {
+        let ambient_cx = Cx::current().expect("block_on ambient cx");
+        eprintln!(
+            "[RR849P-DIAG main] ambient cx io_driver={} timer_driver={}",
+            ambient_cx.io_driver_handle().is_some(),
+            ambient_cx.timer_driver().is_some()
+        );
+        let _ = handle_tx.send((ambient_cx.io_driver_handle(), ambient_cx.timer_driver()));
+        join_handle.await
+    });
+
+    control_thread.join().expect("control server thread");
+    timeout_thread.join().expect("timeout server thread");
+    monitor_done.store(true, std::sync::atomic::Ordering::Release);
+    monitor.join().expect("monitor thread");
+
+    assert_eq!(control_n, 8, "phase A control read returns the payload");
+    assert!(
+        control_ms < 2_000,
+        "phase A control read should complete near the 500ms server delay, took {control_ms}ms"
+    );
+    match timeout_result {
+        Ok(Ok(n)) => {
+            assert_eq!(n, 8, "phase B timeout-wrapped read returns the payload");
+            assert!(
+                timeout_ms < 2_000,
+                "phase B timeout-wrapped read should complete near the 500ms server delay, \
+                 took {timeout_ms}ms (rr849p stall)"
+            );
+        }
+        Ok(Err(err)) => panic!("phase B timeout-wrapped read io error: {err:?}"),
+        Err(elapsed) => panic!(
+            "RR849P DIAG: timeout-wrapped reactor read stalled to the deadline \
+             ({timeout_ms}ms): {elapsed:?}"
+        ),
+    }
+}
+
+// Canonical reproduction for br-asupersync-rr849p, now serving as the
+// regression guard: a `timeout()`-wrapped PostgreSQL read must complete when
+// the server answers (CONTROL phase), and a request-region-wrapped query with
+// an INFINITE budget must round-trip (REGION phase). Before the fix the
+// CONTROL phase stalled to the full timeout deadline because workers in the
+// inner backoff loop never pumped due wheel timers while the block_on thread
+// parked to the far Sleep deadline (see the scheduler backoff break in
+// src/runtime/scheduler/three_lane.rs and the diag companion test above).
 #[test]
 fn localize_request_cx_read_after_write() {
     let control_listener = TcpListener::bind("127.0.0.1:0").expect("bind control");

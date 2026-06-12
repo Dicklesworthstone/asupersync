@@ -4410,6 +4410,21 @@ impl ThreeLaneWorker {
                                         nanos,
                                     );
                                     self.parker.park_timeout(Duration::from_nanos(nanos));
+                                    // br-asupersync-rr849p: this park was sized
+                                    // by the nearest timer/EDF deadline, so on
+                                    // wake that deadline is (close to) due.
+                                    // Expired wheel timers only fire inside
+                                    // `next_task()` (PHASE 0 `process_timers`);
+                                    // the inner backoff loop re-checks queues
+                                    // but never pumps the wheel, so looping
+                                    // here strands due wheel timers (e.g. the
+                                    // ~1ms fallback-rewake re-poll chain behind
+                                    // every reactor-less read) until another
+                                    // thread happens to pump it. Break to the
+                                    // outer loop so this worker fires the
+                                    // now-due deadline itself.
+                                    self.reset_empty_backoff();
+                                    break;
                                 }
                                 BackoffTimeoutDecision::DeadlineDue => {
                                     // `next_task()` already failed to dispatch
@@ -4426,6 +4441,25 @@ impl ThreeLaneWorker {
                                     self.parker.park_timeout(Duration::from_nanos(
                                         STALE_DUE_DEADLINE_PARK_NANOS,
                                     ));
+                                    // br-asupersync-rr849p: the due signal may
+                                    // be an unprocessed WHEEL timer rather than
+                                    // a stale timed-lane entry. Only
+                                    // `next_task()` can fire wheel timers, so
+                                    // break out when the wheel itself is due;
+                                    // genuine timed-lane flicker (wheel not
+                                    // due) keeps the bounded inner-loop
+                                    // behavior.
+                                    let wheel_due = self
+                                        .timer_driver
+                                        .as_ref()
+                                        .and_then(TimerDriverHandle::next_deadline)
+                                        .is_some_and(|deadline| {
+                                            deadline <= self.current_scheduler_time()
+                                        });
+                                    if wheel_due {
+                                        self.reset_empty_backoff();
+                                        break;
+                                    }
                                 }
                             }
                         } else {
