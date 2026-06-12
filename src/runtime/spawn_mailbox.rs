@@ -1895,6 +1895,57 @@ mod tests {
         );
     }
 
+    /// The shared `Cx::spawn` / `Cx::spawn_in` gateway path must emit the
+    /// same enqueue trace event as the direct mailbox and local-spawn paths.
+    #[test]
+    fn cx_spawn_gateway_paths_emit_task_spawn_enqueued_trace_events() {
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let trace = lab.state.trace_handle();
+
+        let root_handle = parent_cx
+            .spawn(|_child| async move { 11usize })
+            .expect("cx.spawn");
+        let root_provisional = root_handle.task_id();
+
+        let child_region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("child region");
+        let scope: crate::cx::Scope<'static> =
+            crate::cx::Scope::new(child_region, Budget::INFINITE).with_pending_spawn_counter(
+                lab.state
+                    .region(child_region)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            );
+        let scoped_handle = parent_cx
+            .spawn_in(&scope, |_child| async move { 22usize })
+            .expect("cx.spawn_in");
+        let scoped_provisional = scoped_handle.task_id();
+
+        let events = trace.snapshot();
+        for (expected_task, expected_region) in
+            [(root_provisional, root), (scoped_provisional, child_region)]
+        {
+            let matches = events
+                .iter()
+                .filter(|event| {
+                    event.kind == TraceEventKind::TaskSpawnEnqueued
+                        && matches!(
+                            &event.data,
+                            TraceData::Task { task, region }
+                                if *task == expected_task && *region == expected_region
+                        )
+                })
+                .count();
+            assert_eq!(
+                matches, 1,
+                "gateway enqueue for {expected_task:?} in {expected_region:?} must be traced exactly once"
+            );
+        }
+
+        lab.run_until_quiescent();
+    }
+
     /// Deep child: the factory-built child Cx carries the gateway and its
     /// region counter, so it can spawn a grandchild the same way.
     #[test]

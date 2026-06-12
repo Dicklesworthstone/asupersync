@@ -748,6 +748,7 @@ impl LabRuntime {
             |chaos| Arc::new(LabReactor::with_chaos(chaos.clone())),
         );
         let mut state = RuntimeState::with_reactor(lab_reactor.clone());
+        state.trace = TraceBufferHandle::new(config.trace_capacity);
         state.set_logical_clock_mode(crate::trace::distributed::LogicalClockMode::Lamport);
         state.set_obligation_leak_response(if config.panic_on_obligation_leak {
             ObligationLeakResponse::Panic
@@ -770,7 +771,6 @@ impl LabRuntime {
             state.timer_driver_handle(),
         )));
         state.set_entropy_source(Arc::new(DetEntropy::new(config.entropy_seed)));
-        state.trace = TraceBufferHandle::new(config.trace_capacity);
 
         // Initialize replay recorder if configured
         let mut replay_recorder = if let Some(ref rec_config) = config.replay_recording {
