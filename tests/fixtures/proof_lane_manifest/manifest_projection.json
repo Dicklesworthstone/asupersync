@@ -397,6 +397,7 @@
     "feature-gated-native-surfaces",
     "fuzz-manifest-smoke",
     "lib-test-frontier",
+    "db-feature-lib-test-frontier",
     "channel-mpsc-select-e2e-public-run",
     "all-target-compile-frontier",
     "clippy-frontier",
@@ -578,6 +579,28 @@
       "expected_signal": "lib tests pass or the first failing compile/test frontier is recorded",
       "source_paths": [
         "src/lib.rs",
+        "Cargo.toml"
+      ]
+    },
+    {
+      "lane_id": "db-feature-lib-tests",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_db_feature_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features postgres,mysql,sqlite,test-internals database:: -- --test-threads=2",
+      "guarantee_ids": [
+        "db-feature-lib-test-frontier"
+      ],
+      "feature_flags": [
+        "postgres",
+        "mysql",
+        "sqlite",
+        "test-internals"
+      ],
+      "expected_signal": "database:: filtered lib tests pass under postgres,mysql,sqlite,test-internals or the first failing compile/test frontier is recorded",
+      "source_paths": [
+        "src/database",
+        "src/conformance/mod.rs",
         "Cargo.toml"
       ]
     },
@@ -1256,6 +1279,12 @@
       "guarantee_id": "lib-test-frontier",
       "lane_ids": [
         "lib-tests"
+      ]
+    },
+    {
+      "guarantee_id": "db-feature-lib-test-frontier",
+      "lane_ids": [
+        "db-feature-lib-tests"
       ]
     },
     {
