@@ -62,10 +62,11 @@ use asupersync::runtime::{RuntimeBuilder, SpawnError};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread().build()?;
-    runtime.block_on(async {
-        let cx = Cx::current().expect("block_on installs a runtime Cx");
+    let result = runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task Cx");
         main_task(&cx).await
-    })?;
+    }));
+    result?;
     Ok(())
 }
 

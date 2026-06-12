@@ -1,22 +1,15 @@
-//! Fan out tasks through the v2 spawn surface and join them — no
-//! `&mut RuntimeState` anywhere (br-asupersync-69ftra, parent AC4).
+use asupersync::{cx::Cx, runtime::RuntimeBuilder};
 
-use asupersync::cx::Cx;
-use asupersync::runtime::RuntimeBuilder;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = RuntimeBuilder::current_thread().build()?;
-    let total: u32 = runtime.block_on(async {
-        let cx = Cx::current().expect("block_on installs an ambient Cx");
-        let handles: Vec<_> = (0..8)
-            .map(|i| cx.spawn(move |_cx| async move { i }).expect("spawn"))
-            .collect();
+fn main() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let total = runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task Cx");
         let mut sum = 0;
-        for mut handle in handles {
+        for i in 0..10 {
+            let mut handle = cx.spawn(move |_cx| async move { i }).expect("spawn");
             sum += handle.join(&cx).await.expect("join");
         }
         sum
-    });
-    assert_eq!(total, 28);
-    Ok(())
+    }));
+    assert_eq!(total, 45);
 }
