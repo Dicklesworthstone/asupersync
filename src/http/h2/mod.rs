@@ -17,6 +17,7 @@ pub mod frame;
 #[cfg(test)]
 pub mod frame_golden_tests;
 pub mod hpack;
+pub mod listener;
 pub mod settings;
 pub mod stream;
 

@@ -2263,6 +2263,10 @@ fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
     match response.version {
         Version::Http11 => !header_has_token(&response.headers, "connection", "close"),
         Version::Http10 => header_has_token(&response.headers, "connection", "keep-alive"),
+        // Unreachable for this h1 client (responses are parsed from h1 wire
+        // text), but HTTP/2 connections are persistent by default and carry
+        // no Connection header semantics (RFC 9113 §8.2.2).
+        Version::Http2 => true,
     }
 }
 

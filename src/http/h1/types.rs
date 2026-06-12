@@ -94,10 +94,18 @@ pub enum Version {
     Http10,
     /// HTTP/1.1
     Http11,
+    /// HTTP/2 (br-asupersync-eprpk6): requests/responses carried over an
+    /// HTTP/2 connection share these `Request`/`Response` types so one
+    /// handler can serve both listener stacks.
+    Http2,
 }
 
 impl Version {
     /// Parse a version from its ASCII representation (e.g. `HTTP/1.1`).
+    ///
+    /// Intentionally does **not** accept `HTTP/2.0`: HTTP/2 has no textual
+    /// request-line version (RFC 9113 §3 — connections start with a binary
+    /// preface), so an h1 request line claiming HTTP/2.0 stays rejected.
     #[must_use]
     pub fn from_bytes(src: &[u8]) -> Option<Self> {
         match src {
@@ -113,6 +121,7 @@ impl Version {
         match self {
             Self::Http10 => "HTTP/1.0",
             Self::Http11 => "HTTP/1.1",
+            Self::Http2 => "HTTP/2.0",
         }
     }
 }
