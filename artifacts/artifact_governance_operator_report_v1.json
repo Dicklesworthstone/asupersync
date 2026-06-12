@@ -1,0 +1,319 @@
+{
+  "schema_version": "artifact-governance-operator-report-v1",
+  "report_id": "artifact_governance_operator_report_v1",
+  "bead_id": "asupersync-artifact-governance-awdiwy.4",
+  "created_date": "2026-06-12",
+  "purpose": "Provide a deterministic operator-facing summary of artifact-governance ledger, scanner, and seed-backfill rows by citation action without claiming full-corpus coverage or fresh proof.",
+  "source_of_truth": {
+    "operator_report": "artifacts/artifact_governance_operator_report_v1.json",
+    "markdown_report": "docs/proof/artifact_governance_operator_report.md",
+    "contract_test": "tests/artifact_governance_operator_report_contract.rs",
+    "ledger": "artifacts/artifact_governance_ledger_v1.json",
+    "scanner": "artifacts/artifact_governance_scanner_v1.json",
+    "seed_backfill": "artifacts/artifact_governance_seed_backfill_v1.json"
+  },
+  "report_policy": {
+    "corpus_coverage": "representative_operator_summary_not_full_corpus",
+    "full_corpus_claim": false,
+    "stable_sort_order": "action_id_then_item_id_bytewise",
+    "non_destructive_policy": "This report only routes citation and follow-up decisions. It does not delete, move, rewrite, clean, branch, worktree, or authorize local Cargo fallback.",
+    "missing_tests_policy": "Rows with no checked_by_tests are reported as a gap unless their ledger citeability class is excluded and the path is an explicit generated or remote cache pattern."
+  },
+  "action_catalog": {
+    "ambiguous_ownership": {
+      "meaning": "Credible owner signals disagree and a future explicit override is needed before selecting an owner.",
+      "next_action_rule": "Keep both owner signals visible; do not select a winner in the operator report."
+    },
+    "blocked": {
+      "meaning": "Blocked-frontier rows can route follow-up but cannot be cited as green proof.",
+      "next_action_rule": "Rerun or repair the lane named by the row before making proof claims."
+    },
+    "citeable": {
+      "meaning": "Proof-bearing rows may be cited narrowly when their focused contract passes on current main.",
+      "next_action_rule": "Attach the row's freshness policy and no-claim boundaries to every citation."
+    },
+    "excluded": {
+      "meaning": "Generated or ephemeral path families are outside durable artifact governance for this report.",
+      "next_action_rule": "Use only to explain exclusion; never use as cleanup authorization."
+    },
+    "missing_tests": {
+      "meaning": "Rows or scanner findings that lack a focused test surface need metadata or test follow-up.",
+      "next_action_rule": "Add a focused contract or preserve the explicit exclusion reason."
+    },
+    "operator_context": {
+      "meaning": "Operator-report rows provide routing context and are not proof substitutes.",
+      "next_action_rule": "Use for triage only, with no broad correctness or performance claim."
+    },
+    "owner_missing": {
+      "meaning": "Scanner orphan rows have references but no sufficient governance ledger row.",
+      "next_action_rule": "Add a ledger row or explicit non-citeable exclusion before citation."
+    },
+    "stale_superseded": {
+      "meaning": "Historical rows have a successor and must not be cited as current evidence.",
+      "next_action_rule": "Cite the successor for current evidence and retain the stale artifact for lineage."
+    }
+  },
+  "report_buckets": [
+    {
+      "action_id": "ambiguous_ownership",
+      "summary": "Keep conflicting owner signals explicit.",
+      "items": [
+        {
+          "item_id": "rch-stale-progress-receipt-contract",
+          "artifact_path": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+          "ledger_row": "rch-stale-progress-receipt-contract",
+          "scanner_category": "ambiguous",
+          "seed_row": "rch-stale-progress-receipt-contract",
+          "owner_beads": [
+            "asupersync-validation-frontier-v2-b5cjsv.4",
+            "asupersync-artifact-governance-awdiwy.1"
+          ],
+          "selected_owner": null,
+          "next_action": "Preserve both owner signals until a future ledger override resolves ownership and a fresh remote proof passes.",
+          "no_claim_boundaries": [
+            "does_not_select_a_winner",
+            "does_not_prove_source_correctness",
+            "does_not_prove_fresh_rch_pass"
+          ]
+        }
+      ]
+    },
+    {
+      "action_id": "blocked",
+      "summary": "Route blocker-class proof surfaces without turning them green.",
+      "items": [
+        {
+          "item_id": "proof-lane-manifest-canonical",
+          "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+          "ledger_row": "proof-lane-manifest-canonical",
+          "scanner_category": "exact_ownership",
+          "seed_row": "proof-lane-manifest-canonical",
+          "owner_beads": [
+            "asupersync-artifact-governance-awdiwy.1",
+            "asupersync-aj7lx3.1"
+          ],
+          "selected_owner": null,
+          "next_action": "Cite only for manifest structure and lane inventory; rerun individual lanes for proof.",
+          "no_claim_boundaries": [
+            "does_not_prove_any_manifest_lane",
+            "does_not_prove_workspace_health",
+            "does_not_authorize_local_cargo_fallback"
+          ]
+        },
+        {
+          "item_id": "runtime-pressure-control-evidence-contract",
+          "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+          "ledger_row": "runtime-pressure-control-evidence-contract",
+          "scanner_category": null,
+          "seed_row": "runtime-pressure-control-evidence-contract",
+          "owner_beads": [
+            "asupersync-bwcdfl.4"
+          ],
+          "selected_owner": "asupersync-bwcdfl.4",
+          "next_action": "Route as runtime-pressure contract evidence only; do not cite as production enforcement or throughput proof.",
+          "no_claim_boundaries": [
+            "does_not_prove_adaptive_controls_are_production_enabled",
+            "does_not_prove_real_host_throughput",
+            "does_not_prove_deadlock_absence"
+          ]
+        },
+        {
+          "item_id": "validation-frontier-inventory",
+          "artifact_path": "artifacts/validation_frontier_inventory_v1.json",
+          "ledger_row": "validation-frontier-inventory",
+          "scanner_category": null,
+          "seed_row": "validation-frontier-inventory",
+          "owner_beads": [
+            "asupersync-validation-frontier-v2-b5cjsv.1"
+          ],
+          "selected_owner": "asupersync-validation-frontier-v2-b5cjsv.1",
+          "next_action": "Use as frontier routing context until each lane has fresh remote-required proof receipts.",
+          "no_claim_boundaries": [
+            "does_not_prove_all_manifest_lanes_passed",
+            "does_not_prove_production_dependency_graph_health",
+            "does_not_prove_live_rch_fleet_availability"
+          ]
+        }
+      ]
+    },
+    {
+      "action_id": "citeable",
+      "summary": "Cite narrowly and carry freshness plus no-claim text.",
+      "items": [
+        {
+          "item_id": "artifact-governance-seed-backfill",
+          "artifact_path": "artifacts/artifact_governance_seed_backfill_v1.json",
+          "ledger_row": "artifact-governance-seed-backfill",
+          "scanner_category": null,
+          "seed_row": null,
+          "owner_beads": [
+            "asupersync-artifact-governance-awdiwy.7"
+          ],
+          "selected_owner": "asupersync-artifact-governance-awdiwy.7",
+          "next_action": "Cite only for the representative seed backfill and preserve the ambiguous-owner boundary.",
+          "no_claim_boundaries": [
+            "does_not_prove_full_corpus_coverage",
+            "does_not_select_ambiguous_owners",
+            "does_not_authorize_deletion",
+            "does_not_prove_fresh_rch_pass"
+          ]
+        },
+        {
+          "item_id": "browser-wasm-artifact-integrity-manifest",
+          "artifact_path": "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+          "ledger_row": "browser-wasm-artifact-integrity-manifest",
+          "scanner_category": null,
+          "seed_row": "browser-wasm-artifact-integrity-manifest",
+          "owner_beads": [
+            "asupersync-3qv04.7.2"
+          ],
+          "selected_owner": "asupersync-3qv04.7.2",
+          "next_action": "Cite only for listed browser and wasm package artifact hashes when package integrity inputs match current main.",
+          "no_claim_boundaries": [
+            "does_not_execute_npm_publish",
+            "does_not_prove_full_workspace_health",
+            "does_not_prove_runtime_performance_or_scheduler_correctness"
+          ]
+        }
+      ]
+    },
+    {
+      "action_id": "excluded",
+      "summary": "Explain exclusions without cleanup authority.",
+      "items": [
+        {
+          "item_id": "remote-build-target-cache-roots",
+          "artifact_path": "${TMPDIR:-/tmp}/rch_target_*",
+          "ledger_row": "remote-build-target-cache-roots",
+          "scanner_category": "excluded",
+          "seed_row": "remote-build-target-cache-roots",
+          "owner_beads": [
+            "asupersync-artifact-governance-awdiwy.1"
+          ],
+          "selected_owner": "asupersync-artifact-governance-awdiwy.1",
+          "next_action": "Explain why remote build cache roots are not durable artifacts; keep future durable receipts visible.",
+          "no_claim_boundaries": [
+            "does_not_authorize_deletion",
+            "does_not_hide_future_durable_receipts",
+            "does_not_prove_artifact_absence"
+          ]
+        }
+      ]
+    },
+    {
+      "action_id": "missing_tests",
+      "summary": "Name test metadata gaps separately from proof failures.",
+      "items": [
+        {
+          "item_id": "remote-build-target-cache-roots",
+          "artifact_path": "${TMPDIR:-/tmp}/rch_target_*",
+          "ledger_row": "remote-build-target-cache-roots",
+          "scanner_category": "excluded",
+          "seed_row": "remote-build-target-cache-roots",
+          "owner_beads": [
+            "asupersync-artifact-governance-awdiwy.1"
+          ],
+          "selected_owner": "asupersync-artifact-governance-awdiwy.1",
+          "test_gap_status": "allowed_empty_for_excluded_generated_pattern",
+          "next_action": "No focused proof test is required for this excluded cache pattern; preserve the exclusion row.",
+          "no_claim_boundaries": [
+            "does_not_authorize_deletion",
+            "does_not_hide_future_durable_receipts",
+            "does_not_prove_artifact_absence"
+          ]
+        }
+      ]
+    },
+    {
+      "action_id": "operator_context",
+      "summary": "Use operator reports as routing aids only.",
+      "items": [
+        {
+          "item_id": "fifth-wave-live-swarm-telemetry-heatmap",
+          "artifact_path": "artifacts/fifth_wave_live_swarm_telemetry_heatmap_v1.json",
+          "ledger_row": "fifth-wave-live-swarm-telemetry-heatmap",
+          "scanner_category": null,
+          "seed_row": "fifth-wave-live-swarm-telemetry-heatmap",
+          "owner_beads": [
+            "asupersync-live-swarm-telemetry-heatmap-wt9b4r"
+          ],
+          "selected_owner": "asupersync-live-swarm-telemetry-heatmap-wt9b4r",
+          "next_action": "Use for operator routing and telemetry context only.",
+          "no_claim_boundaries": [
+            "does_not_prove_broad_observability_correctness",
+            "does_not_prove_performance_improvement",
+            "does_not_create_branches_or_worktrees"
+          ]
+        }
+      ]
+    },
+    {
+      "action_id": "owner_missing",
+      "summary": "Add metadata before citation.",
+      "items": [
+        {
+          "item_id": "raptorq-track-e-gf256-p95p99",
+          "artifact_path": "artifacts/raptorq_track_e_gf256_p95p99_v1.json",
+          "ledger_row": null,
+          "scanner_category": "orphan",
+          "seed_row": null,
+          "owner_beads": [
+            "asupersync-36m6p"
+          ],
+          "selected_owner": null,
+          "next_action": "Add a governance ledger row or explicit non-citeable exclusion before using this RaptorQ artifact as citation evidence.",
+          "no_claim_boundaries": [
+            "does_not_authorize_deletion",
+            "does_not_prove_artifact_unused",
+            "does_not_prove_owner_absence"
+          ]
+        }
+      ]
+    },
+    {
+      "action_id": "stale_superseded",
+      "summary": "Retain lineage and cite the successor for current evidence.",
+      "items": [
+        {
+          "item_id": "raptorq-gf256-multiscenario-refresh-v3",
+          "artifact_path": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+          "ledger_row": "raptorq-gf256-multiscenario-refresh-v3",
+          "scanner_category": "stale",
+          "seed_row": null,
+          "owner_beads": [
+            "asupersync-36m6p"
+          ],
+          "selected_owner": "asupersync-36m6p",
+          "superseded_by": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+          "next_action": "Use the successor artifact for current mixed-signal RaptorQ context; retain this row for lineage only.",
+          "no_claim_boundaries": [
+            "does_not_prove_current_result",
+            "does_not_override_successor_artifact",
+            "does_not_authorize_deletion"
+          ]
+        }
+      ]
+    }
+  ],
+  "operator_summary": {
+    "bucket_count": 8,
+    "item_count": 11,
+    "citeable_item_count": 2,
+    "blocked_item_count": 3,
+    "ambiguous_item_count": 1,
+    "owner_missing_item_count": 1,
+    "stale_or_superseded_item_count": 1,
+    "excluded_item_count": 1,
+    "missing_tests_item_count": 1,
+    "operator_context_item_count": 1,
+    "first_blocker": "validation-frontier-inventory",
+    "golden_summary": "citeable=2 blocked=3 ambiguous=1 owner_missing=1 stale_superseded=1 excluded=1 missing_tests=1 operator_context=1"
+  },
+  "no_claim_boundaries": [
+    "does_not_prove_full_corpus_coverage",
+    "does_not_authorize_deletion",
+    "does_not_prove_fresh_rch_pass",
+    "does_not_close_artifact_beads",
+    "does_not_prove_release_readiness"
+  ]
+}

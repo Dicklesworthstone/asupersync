@@ -437,6 +437,25 @@ fn specific_seed_rows_preserve_fail_closed_citation_boundaries() {
         string_set(seed_backfill, "no_claim_boundaries").contains("does_not_authorize_deletion")
     );
 
+    let operator_report = rows["artifact-governance-operator-report"];
+    assert_eq!(string(operator_report, "path_status"), "tracked");
+    assert_eq!(
+        string(operator_report, "owning_bead"),
+        "asupersync-artifact-governance-awdiwy.4"
+    );
+    assert_eq!(
+        string(operator_report, "artifact_family"),
+        "artifact_governance"
+    );
+    assert_eq!(
+        string(operator_report, "citeability_class"),
+        "operator-report"
+    );
+    assert!(
+        string_set(operator_report, "no_claim_boundaries")
+            .contains("does_not_close_artifact_beads")
+    );
+
     let rch = rows["rch-stale-progress-receipt-contract"];
     assert_eq!(string(rch, "path_status"), "tracked");
     assert!(string_set(rch, "no_claim_boundaries").contains("does_not_prove_source_correctness"));

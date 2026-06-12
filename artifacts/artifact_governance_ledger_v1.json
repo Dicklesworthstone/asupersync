@@ -273,6 +273,35 @@
       ]
     },
     {
+      "artifact_id": "artifact-governance-operator-report",
+      "path": "artifacts/artifact_governance_operator_report_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.4",
+      "producing_lane": "artifact-governance-operator-report-contract",
+      "domain": "artifact governance",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/artifact_governance_operator_report_contract.rs"
+      ],
+      "citeability_class": "operator-report",
+      "freshness_policy": "cite_only_for_artifact_governance_operator_routing_when_operator_report_contract_passes_on_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass",
+        "does_not_close_artifact_beads",
+        "does_not_prove_release_readiness"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Machine-checked operator report that groups representative artifact-governance rows by citeable, advisory, blocked, stale/superseded, owner-missing, ambiguous, excluded, missing-tests, and operator-context actions.",
+      "source_references": [
+        "artifacts/artifact_governance_operator_report_v1.json",
+        "docs/proof/artifact_governance_operator_report.md",
+        "tests/artifact_governance_operator_report_contract.rs"
+      ]
+    },
+    {
       "artifact_id": "proof-lane-manifest-canonical",
       "path": "artifacts/proof_lane_manifest_v1.json",
       "path_status": "tracked",
