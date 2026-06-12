@@ -42,6 +42,36 @@ fn scanner() -> Value {
         .unwrap_or_else(|error| panic!("parse {SCANNER_PATH}: {error}"))
 }
 
+fn repo_json(path: &str) -> Result<Value, String> {
+    serde_json::from_str(&read_repo_file(path)).map_err(|error| format!("parse {path}: {error}"))
+}
+
+fn json_contains_string(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text == needle,
+        Value::Array(entries) => entries
+            .iter()
+            .any(|entry| json_contains_string(entry, needle)),
+        Value::Object(fields) => fields
+            .values()
+            .any(|entry| json_contains_string(entry, needle)),
+        _ => false,
+    }
+}
+
+fn ledger_path_by_row_id() -> Result<BTreeMap<String, String>, String> {
+    let ledger = repo_json(LEDGER_PATH)?;
+    let mut rows = BTreeMap::new();
+    for row in array(&ledger, "rows")? {
+        let row_id = string(row, "artifact_id")?.to_owned();
+        let path = string(row, "path")?.to_owned();
+        if rows.insert(row_id.clone(), path).is_some() {
+            return Err(format!("duplicate ledger row {row_id}"));
+        }
+    }
+    Ok(rows)
+}
+
 fn array<'a>(value: &'a Value, key: &str) -> Result<&'a [Value], String> {
     value
         .get(key)
@@ -105,7 +135,7 @@ fn assert_repo_file_exists(path: &str) -> Result<(), String> {
     }
 }
 
-fn validate_source_match(source: &Value) -> Result<String, String> {
+fn validate_source_match(source: &Value) -> Result<(String, String), String> {
     let kind = string(source, "kind")?;
     let path = string(source, "path")?;
     let needle = string(source, "match")?;
@@ -114,7 +144,7 @@ fn validate_source_match(source: &Value) -> Result<String, String> {
     if !haystack.contains(needle) {
         return Err(format!("{path} does not contain scanner match {needle}"));
     }
-    Ok(kind.to_owned())
+    Ok((kind.to_owned(), path.to_owned()))
 }
 
 fn validate_scanner(scan: &Value) -> Result<(), String> {
@@ -197,6 +227,7 @@ fn validate_scanner(scan: &Value) -> Result<(), String> {
     }
 
     let rows = array(scan, "rows")?;
+    let ledger_paths = ledger_path_by_row_id()?;
     let mut last_sort_key = String::new();
     let mut paths = BTreeSet::new();
     let mut category_counts: BTreeMap<String, u64> = BTreeMap::new();
@@ -243,11 +274,61 @@ fn validate_scanner(scan: &Value) -> Result<(), String> {
             ));
         }
         for source in array(&ownership_value, "confidence_sources")? {
-            let kind = validate_source_match(source)?;
+            let (kind, source_path) = validate_source_match(source)?;
             if !confidence_catalog.contains_key(&kind) {
                 return Err(format!("{path}: unknown confidence source kind {kind}"));
             }
+            match kind.as_str() {
+                "exact_bead_id_field" => {
+                    let source_json = repo_json(&source_path)?;
+                    let source_bead = string(&source_json, "bead_id")?;
+                    if !bead_ids.contains(source_bead) {
+                        return Err(format!(
+                            "{path}: exact bead_id {source_bead} not listed in ownership"
+                        ));
+                    }
+                }
+                "domain_specific_owner_field" => {
+                    let source_json = repo_json(&source_path)?;
+                    let source_bead = string(&source_json, "track_bead_id")?;
+                    if !bead_ids.contains(source_bead) {
+                        return Err(format!(
+                            "{path}: track_bead_id {source_bead} not listed in ownership"
+                        ));
+                    }
+                }
+                "proof_manifest_source_path" => {
+                    let manifest = repo_json(&source_path)?;
+                    if !json_contains_string(&manifest, path) {
+                        return Err(format!(
+                            "{path}: proof manifest source does not contain artifact path"
+                        ));
+                    }
+                }
+                "manual_ledger_override" => {
+                    if array(row, "ledger_rows")?.is_empty() {
+                        return Err(format!(
+                            "{path}: manual ledger override requires ledger_rows"
+                        ));
+                    }
+                }
+                _ => {}
+            }
             confidence_seen.insert(kind);
+        }
+
+        for ledger_row in array(row, "ledger_rows")? {
+            let ledger_row = ledger_row
+                .as_str()
+                .ok_or_else(|| format!("{path}: ledger_rows entries must be strings"))?;
+            let ledger_path = ledger_paths
+                .get(ledger_row)
+                .ok_or_else(|| format!("{path}: unknown ledger row {ledger_row}"))?;
+            if ledger_path != path {
+                return Err(format!(
+                    "{path}: ledger row {ledger_row} points to {ledger_path}"
+                ));
+            }
         }
 
         for test_path in array(row, "checked_by_tests")? {
