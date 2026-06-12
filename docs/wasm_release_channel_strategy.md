@@ -108,6 +108,7 @@ Required package-release artifacts:
 - `artifacts/npm/package_release_validation.json`
 - `artifacts/npm/package_pack_dry_run_summary.json`
 - `artifacts/npm/publish_outcome.json`
+- `artifacts/browser_package_integrity_gate_v1.json`
 
 The Gate 6 package-validation command bundle must also prove that the candidate
 ran the full Browser Edition package gate, not a symbolic placeholder. The
@@ -116,6 +117,38 @@ or direct command provenance showing both `bash scripts/validate_package_build.s
 and `bash scripts/validate_npm_pack_smoke.sh` for the same candidate window.
 A lone generic `validate` label without both underlying validators is
 insufficient for promotion.
+
+The Browser GA B2 package-integrity aggregate gate
+(`asupersync-idea-wizard-fifth-wave-3gaiun.4.2`) is also release blocking for
+package GA. It is intentionally an aggregate over the existing package metadata,
+ABI, integrity-manifest, SBOM/provenance, bundle-budget, rollback, and readiness
+contracts rather than a replacement for them.
+
+Required aggregate evidence:
+
+- `artifacts/browser_package_integrity_gate_v1.json`
+- `tests/browser_package_integrity_gate_contract.rs`
+- `tests/fixtures/browser_package_integrity_gate/failure_rehearsals.json`
+
+The focused aggregate proof command is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_package_integrity_gate cargo test -p asupersync --test browser_package_integrity_gate_contract -- --nocapture
+```
+
+The aggregate gate must fail closed with `block_package_ga` for at least these
+rehearsed package-integrity failures:
+
+- `tampered_wasm_digest`
+- `abi_metadata_mismatch`
+- `oversized_bundle_ceiling`
+- `missing_types_declaration`
+- `missing_rollback_evidence`
+
+Passing this aggregate gate does not execute npm publish, does not replace
+cross-framework browser E2E evidence, does not prove broad workspace health, and
+does not promote any browser-facing surface above the support ceiling in
+`artifacts/browser_edition_readiness_matrix_v1.json`.
 
 Required consumer-build and smoke artifacts:
 
@@ -223,7 +256,12 @@ Automatic `NO_GO` triggers for optional lanes:
    command provenance tying the candidate to both
    `bash scripts/validate_package_build.sh` and
    `bash scripts/validate_npm_pack_smoke.sh`,
-5. onboarding and QA smoke artifacts exist for the same decision window.
+5. `artifacts/browser_package_integrity_gate_v1.json` and
+   `tests/browser_package_integrity_gate_contract.rs` pass for the same
+   candidate window, including fail-closed rehearsal coverage for
+   `tampered_wasm_digest`, `abi_metadata_mismatch`, and
+   `oversized_bundle_ceiling`,
+6. onboarding and QA smoke artifacts exist for the same decision window.
 
 `canary -> stable` promotion requires:
 
@@ -236,7 +274,10 @@ Automatic `NO_GO` triggers for optional lanes:
    reproducible for the current candidate, and the package-validation provenance
    must still show both `bash scripts/validate_package_build.sh` and
    `bash scripts/validate_npm_pack_smoke.sh`,
-6. consumer-build onboarding summaries and QA smoke bundle/summary artifacts
+6. `artifacts/browser_package_integrity_gate_v1.json` remains green for the
+   current candidate and every aggregate automatic blocker resolves to
+   `block_package_ga` rather than advisory-only status,
+7. consumer-build onboarding summaries and QA smoke bundle/summary artifacts
    are reproducible for the current candidate.
 
 No vNext surface may be promoted above the ceiling declared in
@@ -260,9 +301,12 @@ Demotion is mandatory when one of these triggers occurs post-publish:
    match the candidate being promoted, or do not prove both
    `bash scripts/validate_package_build.sh` and
    `bash scripts/validate_npm_pack_smoke.sh`,
-6. consumer-build onboarding or QA smoke artifacts are missing, stale, or not
+6. the B2 aggregate gate artifact, contract, fixture, or any linked package
+   integrity input is missing, stale, or returns anything other than
+   `block_package_ga` for rehearsed package-integrity blockers,
+7. consumer-build onboarding or QA smoke artifacts are missing, stale, or not
    reproducible for the candidate being promoted.
-7. any vNext surface is described above its documented ceiling
+8. any vNext surface is described above its documented ceiling
    (`preview_only`, `guarded canary-only`, `nightly-only`, `bridge-only`, or
    `impossible`) or loses the artifact bundle listed in the vNext promotion
    table.
@@ -286,13 +330,18 @@ Demotion actions:
    captures `corepack pnpm run validate` or both
    `bash scripts/validate_package_build.sh` and
    `bash scripts/validate_npm_pack_smoke.sh`.
-7. Confirm onboarding summaries plus QA smoke bundle/summary artifacts for the
+7. Confirm the B2 aggregate package-integrity gate artifact and contract pass
+   for the candidate window:
+   `artifacts/browser_package_integrity_gate_v1.json`,
+   `tests/browser_package_integrity_gate_contract.rs`, and
+   `tests/fixtures/browser_package_integrity_gate/failure_rehearsals.json`.
+8. Confirm onboarding summaries plus QA smoke bundle/summary artifacts for the
    same candidate are present and non-empty.
-8. For any optional lane, attach the latest decision tuple
+9. For any optional lane, attach the latest decision tuple
    (`support_class`, `reason_code`, `fallback_lane_id`, lane-health fields,
    and `repro_command`) plus the optional-lane evidence bundle before
    widening exposure.
-9. Publish promotion decision with command + artifact pointers.
+10. Publish promotion decision with command + artifact pointers.
 
 ## Traceability and Audit Fields
 
@@ -333,6 +382,7 @@ Policy wiring expectations:
    - package validation artifact: `artifacts/npm/package_release_validation.json`
    - pack dry-run evidence artifact: `artifacts/npm/package_pack_dry_run_summary.json`
    - publish outcome artifact: `artifacts/npm/publish_outcome.json`
+   - aggregate package integrity gate artifact: `artifacts/browser_package_integrity_gate_v1.json`
    - rollback outcome artifact (when rollback mode is used): `artifacts/npm/rollback_outcome.json`
 4. Missing package manifests are a hard release-blocking failure. Missing package manifests or missing built package outputs are hard release-blocking failures. The exact required package set from
    `.github/wasm_typescript_package_policy.json` must be discovered, built via

@@ -1,0 +1,235 @@
+{
+  "schema_version": "browser-package-integrity-gate-v1",
+  "gate_id": "browser_package_integrity_gate",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.4.2",
+  "decision_window": {
+    "candidate_window_required": true,
+    "channel_scope": "browser-edition-ga",
+    "promotion_effect": "block_package_ga_on_any_required_gate_failure",
+    "rollback_effect": "demote_channel_and_keep_last_known_good_dist_tag"
+  },
+  "package_set": [
+    {
+      "name": "@asupersync/browser-core",
+      "manifest": "packages/browser-core/package.json",
+      "manifest_version": "0.3.4",
+      "kind": "wasm-runtime-boundary",
+      "required_committed_files": [
+        "packages/browser-core/package.json",
+        "packages/browser-core/index.js",
+        "packages/browser-core/index.d.ts",
+        "packages/browser-core/asupersync.js",
+        "packages/browser-core/asupersync.d.ts",
+        "packages/browser-core/types.d.ts",
+        "packages/browser-core/asupersync_bg.wasm",
+        "packages/browser-core/asupersync_bg.wasm.d.ts",
+        "packages/browser-core/abi-metadata.json",
+        "packages/browser-core/debug-metadata.json"
+      ]
+    },
+    {
+      "name": "@asupersync/browser",
+      "manifest": "packages/browser/package.json",
+      "manifest_version": "0.3.4",
+      "kind": "browser-sdk",
+      "required_committed_files": [
+        "packages/browser/package.json",
+        "packages/browser/src/index.ts",
+        "packages/browser/src/tracing.ts",
+        "packages/browser/tsconfig.json"
+      ]
+    },
+    {
+      "name": "@asupersync/react",
+      "manifest": "packages/react/package.json",
+      "manifest_version": "0.3.4",
+      "kind": "react-adapter",
+      "required_committed_files": [
+        "packages/react/package.json",
+        "packages/react/src/index.ts",
+        "packages/react/tsconfig.json"
+      ]
+    },
+    {
+      "name": "@asupersync/next",
+      "manifest": "packages/next/package.json",
+      "manifest_version": "0.3.4",
+      "kind": "next-adapter",
+      "required_committed_files": [
+        "packages/next/package.json",
+        "packages/next/src/index.ts",
+        "packages/next/tsconfig.json"
+      ]
+    }
+  ],
+  "artifact_inputs": {
+    "integrity_manifest": "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+    "sbom": "docs/wasm_browser_sbom_v1.json",
+    "provenance": "docs/wasm_browser_provenance_attestation_v1.json",
+    "bundle_budget": "artifacts/wasm_bundle_size_budget_v1.json",
+    "readiness_matrix": "artifacts/browser_edition_readiness_matrix_v1.json",
+    "release_channel_strategy": "docs/wasm_release_channel_strategy.md",
+    "rollback_playbook": "docs/wasm_release_rollback_incident_playbook.md"
+  },
+  "linked_contracts": [
+    {
+      "id": "package_metadata_exports",
+      "contract_test": "tests/wasm_npm_pack_smoke_contract.rs",
+      "blocks_on_failure": true,
+      "source_paths": [
+        "package.json",
+        "pnpm-workspace.yaml",
+        "tsconfig.base.json",
+        "packages/browser-core/package.json",
+        "packages/browser/package.json",
+        "packages/react/package.json",
+        "packages/next/package.json"
+      ],
+      "claim": "package manifests, export maps, types declarations, files lists, dependency edges, and pack assumptions remain coherent"
+    },
+    {
+      "id": "package_build_topology",
+      "contract_test": "tests/wasm_package_build_contract.rs",
+      "blocks_on_failure": true,
+      "source_paths": [
+        "scripts/validate_package_build.sh",
+        "scripts/validate_npm_pack_smoke.sh",
+        "packages/browser/src/index.ts",
+        "packages/browser/src/tracing.ts",
+        "packages/react/src/index.ts",
+        "packages/next/src/index.ts"
+      ],
+      "claim": "workspace scripts and TypeScript package topology still point at the package build validators"
+    },
+    {
+      "id": "artifact_integrity_sbom_provenance",
+      "contract_test": "tests/wasm_supply_chain_controls.rs",
+      "blocks_on_failure": true,
+      "source_paths": [
+        "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+        "docs/wasm_browser_sbom_v1.json",
+        "docs/wasm_browser_provenance_attestation_v1.json",
+        "packages/browser-core/asupersync_bg.wasm",
+        "packages/browser-core/abi-metadata.json"
+      ],
+      "claim": "committed Browser Edition artifacts match the integrity manifest, SBOM, and provenance attestations"
+    },
+    {
+      "id": "abi_metadata_and_downgrade_matrix",
+      "contract_test": "tests/wasm_packaged_abi_compatibility_matrix.rs",
+      "blocks_on_failure": true,
+      "source_paths": [
+        "packages/browser-core/abi-metadata.json",
+        "asupersync-browser-core/tests/artifact_layout.rs",
+        "asupersync-browser-core/tests/abi_exports.rs",
+        "docs/wasm_abi_compatibility_policy.md",
+        "scripts/validate_package_build.sh"
+      ],
+      "claim": "ABI metadata, export coverage, and documented packaged upgrade/downgrade decisions stay aligned"
+    },
+    {
+      "id": "bundle_budget",
+      "contract_test": "tests/wasm_bundle_size_budget_contract.rs",
+      "blocks_on_failure": true,
+      "source_paths": [
+        "artifacts/wasm_bundle_size_budget_v1.json",
+        "docs/wasm_bundle_size_budget.md"
+      ],
+      "claim": "release profile bundle ceilings and warning thresholds remain defined for every Browser Edition package"
+    },
+    {
+      "id": "rollback_and_release_channel_policy",
+      "contract_test": "tests/wasm_release_rollback_incident_playbook.rs",
+      "blocks_on_failure": true,
+      "source_paths": [
+        "docs/wasm_release_channel_strategy.md",
+        "docs/wasm_release_rollback_incident_playbook.md"
+      ],
+      "claim": "package integrity failures map to deterministic demotion, rollback, and incident response requirements"
+    },
+    {
+      "id": "browser_surface_readiness_alignment",
+      "contract_test": "tests/browser_edition_readiness_matrix_contract.rs",
+      "blocks_on_failure": true,
+      "source_paths": [
+        "artifacts/browser_edition_readiness_matrix_v1.json",
+        "docs/browser_edition_readiness_matrix.md",
+        "docs/WASM.md"
+      ],
+      "claim": "package GA does not promote browser surfaces above their readiness ceilings"
+    }
+  ],
+  "failure_rehearsal_fixture": "tests/fixtures/browser_package_integrity_gate/failure_rehearsals.json",
+  "validation_commands": [
+    {
+      "id": "browser-package-integrity-gate-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_package_integrity_gate cargo test -p asupersync --test browser_package_integrity_gate_contract -- --nocapture",
+      "resource_envelope": "remote-required",
+      "proves": "aggregate B2 artifact, linked paths, fail-closed rehearsals, package manifest versions, and release-channel doc wiring"
+    },
+    {
+      "id": "browser-package-workspace-validate",
+      "command": "corepack pnpm run validate",
+      "resource_envelope": "package-tooling",
+      "proves": "the same candidate ran scripts/validate_package_build.sh and scripts/validate_npm_pack_smoke.sh through the root package validate entrypoint"
+    },
+    {
+      "id": "browser-package-supply-chain-contracts",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_package_integrity_inputs cargo test -p asupersync --test wasm_supply_chain_controls --test wasm_bundle_size_budget_contract --test wasm_npm_pack_smoke_contract --test wasm_package_build_contract --test wasm_packaged_abi_compatibility_matrix -- --nocapture",
+      "resource_envelope": "remote-required",
+      "proves": "the linked package, ABI, supply-chain, and bundle-budget contract lanes pass for the candidate window"
+    }
+  ],
+  "deterministic_report": {
+    "path": "artifacts/browser_package_integrity_gate_v1.json",
+    "stable_order": [
+      "schema_version",
+      "gate_id",
+      "bead_id",
+      "decision_window",
+      "package_set",
+      "artifact_inputs",
+      "linked_contracts",
+      "failure_rehearsal_fixture",
+      "validation_commands",
+      "deterministic_report",
+      "automatic_blockers",
+      "no_claim_boundaries"
+    ],
+    "report_status_field": "promotion_effect"
+  },
+  "automatic_blockers": [
+    {
+      "id": "tampered_wasm_digest",
+      "reason_code": "integrity_manifest_digest_mismatch",
+      "expected_action": "block_package_ga"
+    },
+    {
+      "id": "abi_metadata_mismatch",
+      "reason_code": "abi_metadata_fingerprint_or_version_mismatch",
+      "expected_action": "block_package_ga"
+    },
+    {
+      "id": "oversized_bundle_ceiling",
+      "reason_code": "bundle_budget_ceiling_exceeded",
+      "expected_action": "block_package_ga"
+    },
+    {
+      "id": "missing_types_declaration",
+      "reason_code": "package_types_export_missing",
+      "expected_action": "block_package_ga"
+    },
+    {
+      "id": "missing_rollback_evidence",
+      "reason_code": "release_channel_rollback_artifact_missing",
+      "expected_action": "block_package_ga"
+    }
+  ],
+  "no_claim_boundaries": [
+    "does_not_execute_npm_publish",
+    "does_not_prove_full_workspace_health",
+    "does_not_replace_cross_framework_e2e_or_browser_smoke_artifacts",
+    "does_not_prove_runtime_performance_or_scheduler_correctness",
+    "does_not_override_surface_ceiling_readiness_matrix"
+  ]
+}
