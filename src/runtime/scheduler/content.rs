@@ -11,7 +11,7 @@
 //! content scheduling decisions (ATP transfers, replication, etc.).
 
 use crate::types::Time;
-use crate::util::det_hash::{DetHashMap, DetHashSet};
+use crate::util::det_hash::DetHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BinaryHeap;
 use std::fmt;
@@ -222,7 +222,11 @@ struct ScheduledContent {
 
 impl PartialEq for ScheduledContent {
     fn eq(&self, other: &Self) -> bool {
-        self.item.id == other.item.id
+        // Must stay consistent with `Ord::cmp` (`a == b` iff `cmp == Equal`):
+        // the heap can legitimately hold two entries with the same content ID
+        // (a tombstone plus a re-scheduled incarnation), so identity cannot be
+        // keyed on the ID alone.
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 
@@ -304,8 +308,10 @@ pub struct ScheduleEvidence {
 pub struct ContentScheduler {
     /// Scheduled content items ordered by priority
     queue: BinaryHeap<ScheduledContent>,
-    /// Set of scheduled content IDs for deduplication
-    scheduled: DetHashSet<ContentId>,
+    /// Live queue entries: content ID -> generation of the entry that is
+    /// currently scheduled. Heap entries whose generation does not match are
+    /// tombstones (unscheduled or superseded by a re-schedule of the same ID).
+    scheduled: DetHashMap<ContentId, u64>,
     /// Next generation number for FIFO ordering
     next_generation: u64,
     /// Next decision ID for evidence logging
@@ -330,7 +336,7 @@ impl ContentScheduler {
     pub fn new() -> Self {
         Self {
             queue: BinaryHeap::new(),
-            scheduled: DetHashSet::default(),
+            scheduled: DetHashMap::default(),
             next_generation: 0,
             next_decision_id: 1,
             evidence_log: Vec::new(),
@@ -348,12 +354,13 @@ impl ContentScheduler {
     ///
     /// Returns `true` if the item was newly scheduled, `false` if it was already queued.
     pub fn schedule(&mut self, item: ContentItem) -> bool {
-        if !self.scheduled.insert(item.id) {
+        if self.scheduled.contains_key(&item.id) {
             return false; // Already scheduled
         }
 
         let generation = self.next_generation;
         self.next_generation += 1;
+        self.scheduled.insert(item.id, generation);
 
         let scheduled_content = ScheduledContent { item, generation };
 
@@ -365,13 +372,15 @@ impl ContentScheduler {
     ///
     /// Returns `true` if the item was found and removed.
     pub fn unschedule(&mut self, content_id: ContentId) -> bool {
-        if !self.scheduled.remove(&content_id) {
+        if self.scheduled.remove(&content_id).is_none() {
             return false; // Not scheduled
         }
 
         // Note: We leave the item in the heap as a tombstone.
         // It will be filtered out when it reaches the top of the queue.
-        // This is more efficient than rebuilding the heap.
+        // This is more efficient than rebuilding the heap. If the same ID is
+        // re-scheduled later, the generation recorded in `scheduled`
+        // distinguishes the live entry from this stale one.
         true
     }
 
@@ -391,10 +400,12 @@ impl ContentScheduler {
         }
 
         let scheduled = self.queue.pop()?;
-        if !self.scheduled.remove(&scheduled.item.id) {
-            // Tombstone entry - item was unscheduled
+        if self.scheduled.get(&scheduled.item.id) != Some(&scheduled.generation) {
+            // Tombstone entry: the item was unscheduled, or this entry was
+            // superseded by a re-schedule of the same ID (different generation).
             return self.next_content(now);
         }
+        self.scheduled.remove(&scheduled.item.id);
 
         // Update stream fairness tracking
         if let Some(stream_id) = scheduled.item.stream_id {
@@ -480,7 +491,7 @@ impl ContentScheduler {
 
     fn prune_tombstones(&mut self) {
         while let Some(scheduled) = self.queue.peek() {
-            if self.scheduled.contains(&scheduled.item.id) {
+            if self.scheduled.get(&scheduled.item.id) == Some(&scheduled.generation) {
                 break; // Valid entry at top
             }
             self.queue.pop(); // Remove tombstone
@@ -598,6 +609,52 @@ mod tests {
         assert!(!scheduler.schedule(item.clone())); // Duplicate should return false
 
         assert_eq!(scheduler.pending_count(), 1);
+    }
+
+    #[test]
+    fn content_scheduler_reschedule_after_unschedule_delivers_new_item() {
+        let mut scheduler = ContentScheduler::new();
+
+        // Old incarnation sorts strictly higher (Control beats Data), so the
+        // stale heap entry would be popped first if liveness were keyed on the
+        // content ID alone instead of (ID, generation).
+        let old = test_content(1, PriorityClass::Control, 100, 1.0, 10.0);
+        scheduler.schedule(old);
+        assert!(scheduler.unschedule(ContentId::new(1)));
+
+        let new = test_content(1, PriorityClass::Data, 200, 2.0, 4.0);
+        assert!(scheduler.schedule(new.clone()));
+        assert_eq!(scheduler.pending_count(), 1);
+
+        let (item, _) = scheduler.next_content(Time::ZERO).unwrap();
+        assert_eq!(item.id, new.id);
+        assert_eq!(item.priority_class, PriorityClass::Data);
+        assert_eq!(item.size_bytes, 200);
+        assert!(!scheduler.has_pending_content());
+        assert!(scheduler.next_content(Time::ZERO).is_none());
+    }
+
+    #[test]
+    fn scheduled_content_eq_is_consistent_with_ord() {
+        // Same ID, different generation: previously `eq` returned true while
+        // `cmp` returned non-equal, violating the Ord contract.
+        let a = ScheduledContent {
+            item: test_content(1, PriorityClass::Data, 100, 1.0, 2.0),
+            generation: 0,
+        };
+        let b = ScheduledContent {
+            item: test_content(1, PriorityClass::Data, 100, 1.0, 2.0),
+            generation: 1,
+        };
+        assert_ne!(a, b);
+        assert_ne!(a.cmp(&b), std::cmp::Ordering::Equal);
+
+        let c = ScheduledContent {
+            item: test_content(1, PriorityClass::Data, 100, 1.0, 2.0),
+            generation: 0,
+        };
+        assert_eq!(a, c);
+        assert_eq!(a.cmp(&c), std::cmp::Ordering::Equal);
     }
 
     #[test]

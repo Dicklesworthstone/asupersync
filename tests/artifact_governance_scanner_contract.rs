@@ -305,12 +305,10 @@ fn validate_scanner(scan: &Value) -> Result<(), String> {
                         ));
                     }
                 }
-                "manual_ledger_override" => {
-                    if array(row, "ledger_rows")?.is_empty() {
-                        return Err(format!(
-                            "{path}: manual ledger override requires ledger_rows"
-                        ));
-                    }
+                "manual_ledger_override" if array(row, "ledger_rows")?.is_empty() => {
+                    return Err(format!(
+                        "{path}: manual ledger override requires ledger_rows"
+                    ));
                 }
                 _ => {}
             }

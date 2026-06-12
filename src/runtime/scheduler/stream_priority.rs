@@ -175,9 +175,17 @@ impl StreamPriorityScheduler {
             };
             self.available_streams.push(available);
 
-            // Limit the size of available streams queue
-            while self.available_streams.len() > self.max_concurrent_streams / 2 {
-                self.available_streams.pop();
+            // Limit the size of the available-stream pool. `pop()` would
+            // evict the MOST preferred candidates (the heap is a max-heap
+            // ordered by reuse preference), so trim from the bottom instead:
+            // keep the most preferred entries and drop the least preferred.
+            let keep = self.max_concurrent_streams / 2;
+            if self.available_streams.len() > keep {
+                let mut entries = std::mem::take(&mut self.available_streams).into_sorted_vec();
+                // `into_sorted_vec` is ascending; the least preferred come first.
+                let drop_count = entries.len() - keep;
+                entries.drain(..drop_count);
+                self.available_streams = BinaryHeap::from(entries);
             }
         }
     }
@@ -238,13 +246,25 @@ impl StreamPriorityScheduler {
             return stream_id;
         }
 
-        // Try to reuse an available stream with compatible priority
+        // Try to reuse an available stream with compatible priority. Popped
+        // candidates from other priority lanes are pushed back afterwards —
+        // they must stay in the pool for future allocations. Entries whose
+        // stream went active again are stale and are dropped.
+        let mut other_lanes: Vec<AvailableStream> = Vec::new();
+        let mut reused = None;
         while let Some(available) = self.available_streams.pop() {
-            if available.last_priority == priority
-                && !self.active_streams.contains_key(&available.stream_id)
-            {
-                return available.stream_id;
+            if self.active_streams.contains_key(&available.stream_id) {
+                continue; // stale entry: the stream is active again
             }
+            if available.last_priority == priority {
+                reused = Some(available.stream_id);
+                break;
+            }
+            other_lanes.push(available);
+        }
+        self.available_streams.extend(other_lanes);
+        if let Some(stream_id) = reused {
+            return stream_id;
         }
 
         // Allocate new stream if under limit
@@ -443,6 +463,70 @@ mod tests {
         let (content, assignment, _evidence) = result.unwrap();
         assert_eq!(content.id.value(), 1);
         assert_eq!(assignment.priority, StreamPriority::Normal);
+    }
+
+    #[test]
+    fn reuse_scan_retains_other_priority_lanes() {
+        let mut scheduler = StreamPriorityScheduler::new(10);
+
+        // Allocate one stream per lane, then release both.
+        let critical =
+            scheduler.assign_stream(&test_content(1, PriorityClass::Control, 10), Time::ZERO);
+        let normal = scheduler.assign_stream(
+            &test_content(2, PriorityClass::Data, 10),
+            Time::from_nanos(1),
+        );
+        scheduler.release_stream(critical.stream_id, Time::from_nanos(10));
+        scheduler.release_stream(normal.stream_id, Time::from_nanos(20));
+
+        // A Normal allocation scans past the Critical candidate; the Critical
+        // entry must survive the scan instead of being silently dropped.
+        let normal2 = scheduler.assign_stream(
+            &test_content(3, PriorityClass::Data, 10),
+            Time::from_nanos(30),
+        );
+        assert_eq!(normal2.stream_id, normal.stream_id);
+
+        let critical2 = scheduler.assign_stream(
+            &test_content(4, PriorityClass::Control, 10),
+            Time::from_nanos(40),
+        );
+        assert_eq!(
+            critical2.stream_id, critical.stream_id,
+            "non-matching candidates must stay in the available pool"
+        );
+    }
+
+    #[test]
+    fn pool_trim_keeps_most_preferred_candidates() {
+        // keep = max_concurrent_streams / 2 = 2.
+        let mut scheduler = StreamPriorityScheduler::new(4);
+
+        let critical =
+            scheduler.assign_stream(&test_content(1, PriorityClass::Control, 10), Time::ZERO);
+        let normal = scheduler.assign_stream(
+            &test_content(2, PriorityClass::Data, 10),
+            Time::from_nanos(1),
+        );
+        let background = scheduler.assign_stream(
+            &test_content(3, PriorityClass::Telemetry, 10),
+            Time::from_nanos(2),
+        );
+
+        scheduler.release_stream(critical.stream_id, Time::from_nanos(10));
+        scheduler.release_stream(normal.stream_id, Time::from_nanos(20));
+        // Third release exceeds the pool limit and must evict the LEAST
+        // preferred candidate (Background), not the most preferred (Critical).
+        scheduler.release_stream(background.stream_id, Time::from_nanos(30));
+
+        let critical2 = scheduler.assign_stream(
+            &test_content(4, PriorityClass::Control, 10),
+            Time::from_nanos(40),
+        );
+        assert_eq!(
+            critical2.stream_id, critical.stream_id,
+            "pool trim must keep the most preferred reuse candidates"
+        );
     }
 
     #[test]

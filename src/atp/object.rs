@@ -540,15 +540,34 @@ impl Object {
         Ok(())
     }
 
+    /// Append a variable-length field to a canonical encoding with a u64
+    /// big-endian length prefix.
+    ///
+    /// Every variable-length field in the canonical bytes MUST be
+    /// length-prefixed: bare concatenation lets adjacent fields trade bytes
+    /// (e.g. `name="a", target="xy"` followed by `name="b"` encodes to the
+    /// same bytes as `name="a", target="x"` followed by `name="yb"`), which
+    /// would let two different structures collide on the same manifest ID.
+    fn push_canonical_field(bytes: &mut Vec<u8>, field: &[u8]) {
+        bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(field);
+    }
+
     /// Get canonical bytes representation for children (for manifest computation).
     fn canonical_children_bytes(children: &[ObjectEdge]) -> Vec<u8> {
         let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(children.len() as u64).to_be_bytes());
         for edge in children {
-            bytes.extend_from_slice(edge.name.as_bytes());
+            Self::push_canonical_field(&mut bytes, edge.name.as_bytes());
+            // Fixed 32-byte hash: no length prefix needed.
             bytes.extend_from_slice(edge.child_id.hash_bytes());
             bytes.push(u8::from(edge.is_symlink));
-            if let Some(target) = &edge.symlink_target {
-                bytes.extend_from_slice(target.as_os_str().as_encoded_bytes());
+            match &edge.symlink_target {
+                Some(target) => {
+                    bytes.push(1);
+                    Self::push_canonical_field(&mut bytes, target.as_os_str().as_encoded_bytes());
+                }
+                None => bytes.push(0),
             }
         }
         bytes
@@ -557,11 +576,12 @@ impl Object {
     /// Get canonical bytes representation for application metadata.
     fn canonical_app_metadata_bytes(metadata: &ApplicationMetadata) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(metadata.extension_type.as_bytes());
+        Self::push_canonical_field(&mut bytes, metadata.extension_type.as_bytes());
         bytes.extend_from_slice(&metadata.schema_version.to_be_bytes());
+        bytes.extend_from_slice(&(metadata.metadata.len() as u64).to_be_bytes());
         for (key, value) in &metadata.metadata {
-            bytes.extend_from_slice(key.as_bytes());
-            bytes.extend_from_slice(value);
+            Self::push_canonical_field(&mut bytes, key.as_bytes());
+            Self::push_canonical_field(&mut bytes, value);
         }
         bytes
     }
@@ -1186,5 +1206,51 @@ mod tests {
         assert!(graph.objects_with_parents.contains(&file1_id));
         assert!(graph.objects_with_parents.contains(&file2_id));
         assert!(!graph.objects_with_parents.contains(&file3_id));
+    }
+
+    #[test]
+    fn canonical_children_bytes_resist_field_boundary_collisions() {
+        // Without length prefixes, the symlink target of one edge could trade
+        // bytes with the following edge's name ("xy" + "b" vs "x" + "yb") and
+        // produce identical canonical bytes for structurally different
+        // directories. Compare the encodings directly so edge sort order
+        // cannot mask the collision.
+        let child_a = ObjectId::content(ContentId::from_bytes(b"child-a"));
+        let child_b = ObjectId::content(ContentId::from_bytes(b"child-b"));
+
+        let edges1 = vec![
+            ObjectEdge::symlink(child_a.clone(), "a".to_string(), PathBuf::from("xy")),
+            ObjectEdge::new(child_b.clone(), "b".to_string()),
+        ];
+        let edges2 = vec![
+            ObjectEdge::symlink(child_a, "a".to_string(), PathBuf::from("x")),
+            ObjectEdge::new(child_b, "yb".to_string()),
+        ];
+
+        assert_ne!(
+            Object::canonical_children_bytes(&edges1),
+            Object::canonical_children_bytes(&edges2),
+            "different child structures must not collide on canonical bytes"
+        );
+    }
+
+    #[test]
+    fn canonical_app_metadata_bytes_resist_field_boundary_collisions() {
+        // Key/value bytes must not be able to migrate across field boundaries.
+        let obj1 = Object::application_defined(
+            "ext".to_string(),
+            1,
+            BTreeMap::from([("ab".to_string(), b"c".to_vec())]),
+        );
+        let obj2 = Object::application_defined(
+            "ext".to_string(),
+            1,
+            BTreeMap::from([("a".to_string(), b"bc".to_vec())]),
+        );
+
+        assert_ne!(
+            obj1.id, obj2.id,
+            "different application metadata must not collide on manifest ID"
+        );
     }
 }

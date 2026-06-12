@@ -1287,7 +1287,16 @@ impl Manifest {
                         "chunk boundaries must be in ascending order".to_string(),
                     ));
                 }
-                prev_offset = chunk.byte_offset + chunk.size_bytes;
+                // checked_add: a crafted byte_offset/size_bytes pair must not
+                // wrap and re-arm the ascending-order check above.
+                prev_offset = chunk
+                    .byte_offset
+                    .checked_add(chunk.size_bytes)
+                    .ok_or_else(|| {
+                        ManifestError::InvalidFormat(
+                            "chunk boundary byte_offset + size_bytes overflows u64".to_string(),
+                        )
+                    })?;
             }
 
             // Validate RaptorQ symbols
@@ -2147,16 +2156,21 @@ impl Manifest {
         let mut symbols = Vec::new();
         for i in 0..num_symbols {
             let symbol_hash = if let Some(ref content) = object.content {
-                let symbol_start = (u64::from(i) * symbol_size_u64) as usize;
-                let symbol_end = std::cmp::min(symbol_start + symbol_size as usize, content.len());
-                if symbol_end <= content.len() {
+                // Symbol count derives from declared size_bytes, which may
+                // exceed the actual content length; guard the start offset so
+                // a mismatch cannot produce an inverted slice range.
+                let symbol_start_u64 = u64::from(i) * symbol_size_u64;
+                if symbol_start_u64 < content.len() as u64 {
+                    let symbol_start = symbol_start_u64 as usize;
+                    let symbol_end =
+                        std::cmp::min(symbol_start + symbol_size as usize, content.len());
                     let symbol_data = &content[symbol_start..symbol_end];
                     let mut hasher = Sha256::new();
                     hasher.update(symbol_data);
                     let result = hasher.finalize();
                     result.into()
                 } else {
-                    *content_hash // Fallback if symbol exceeds content
+                    *content_hash // Fallback if symbol lies beyond the content
                 }
             } else {
                 *content_hash // Fallback if no content available
@@ -2896,6 +2910,35 @@ mod tests {
 
         let result = manifest.validate();
         assert!(matches!(result, Err(ManifestError::RootObjectMissing(id)) if id == missing_id));
+    }
+
+    #[test]
+    fn manifest_validation_rejects_overflowing_chunk_boundary() {
+        let mut graph = ObjectGraph::new();
+        let file = Object::file(b"test".to_vec());
+        let file_id = file.id.clone();
+        graph.add_root(file).unwrap();
+
+        let policy = MetadataPolicy::default();
+        let mut manifest = Manifest::from_graph(&graph, policy).unwrap();
+
+        // byte_offset + size_bytes wraps u64; the wrap must be rejected
+        // instead of silently re-arming the ascending-order check.
+        let obj = manifest.objects.get_mut(&file_id).unwrap();
+        obj.chunk_boundaries = vec![ChunkBoundary {
+            index: 0,
+            byte_offset: u64::MAX - 1,
+            size_bytes: 2,
+            content_hash: [0u8; 32],
+            strategy: ChunkStrategy::FixedSize,
+            metadata: None,
+        }];
+
+        let result = manifest.validate();
+        assert!(
+            matches!(result, Err(ManifestError::InvalidFormat(ref msg)) if msg.contains("overflows")),
+            "overflowing chunk boundary must be rejected, got {result:?}"
+        );
     }
 
     #[test]
