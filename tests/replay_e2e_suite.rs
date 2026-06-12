@@ -880,6 +880,12 @@ fn browser_replay_report_artifact_e2e() {
     assert_eq!(report.divergence_index, Some(divergence.index));
     assert!(report.minimization_prefix_len.is_some());
     assert!(report.minimization_reduction_pct.is_some());
+    let divergence_context = report
+        .divergence_context
+        .as_ref()
+        .expect("structured divergence context");
+    assert!(divergence_context.contains("Replay Divergence Report"));
+    assert!(divergence_context.contains("DIVERGENCE"));
     assert_eq!(report.rerun_commands, rerun_commands);
     assert_eq!(
         report.artifact_pointer,

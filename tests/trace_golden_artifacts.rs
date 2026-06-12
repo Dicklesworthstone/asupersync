@@ -114,6 +114,7 @@ fn fixture_divergence_report() -> DivergenceReport {
             task_id: Some(7),
             region_id: Some(42),
         }],
+        context_after_actual: Vec::new(),
         affected: AffectedEntities {
             tasks: vec![7, 8],
             regions: vec![42],

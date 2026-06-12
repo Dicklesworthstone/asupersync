@@ -97,8 +97,8 @@ pub use delta_debug::{
 };
 pub use divergence::{
     AffectedEntities, DiagnosticConfig, DivergenceCategory, DivergenceReport, EventSummary,
-    MinimizationConfig, MinimizationResult, diagnose_divergence, minimal_divergent_prefix,
-    minimize_divergent_prefix,
+    MinimizationConfig, MinimizationResult, diagnose_divergence, diagnose_replay_trace_divergence,
+    minimal_divergent_prefix, minimize_divergent_prefix, replay_traces_foata_equivalent,
 };
 pub use dpor::{
     BacktrackPoint, DetectedRace, HappensBeforeGraph, Race, RaceAnalysis, RaceDetector, RaceKind,

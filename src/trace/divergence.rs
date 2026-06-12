@@ -199,6 +199,13 @@ pub struct DivergenceReport {
     /// Context window: expected events immediately after the divergence.
     pub context_after: Vec<EventSummary>,
 
+    /// Context window: actual events immediately after the divergence.
+    ///
+    /// This is populated by full-trace diagnostics, where the recorded trace
+    /// and actual replay trace are both available.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context_after_actual: Vec<EventSummary>,
+
     /// Entities affected by the divergence.
     pub affected: AffectedEntities,
 
@@ -275,6 +282,13 @@ impl DivergenceReport {
             }
         }
 
+        if !self.context_after_actual.is_empty() {
+            out.push_str("--- Context (actual after) ---\n");
+            for ev in &self.context_after_actual {
+                let _ = writeln!(out, "  [{}] {} {}", ev.index, ev.event_type, ev.details);
+            }
+        }
+
         out
     }
 }
@@ -331,30 +345,118 @@ pub fn diagnose_divergence(
         idx + 1
     };
 
-    // Progress
-    let replay_progress_pct = if trace_len == 0 {
-        0.0
-    } else {
-        let idx_f = f64::from(idx.min(u32::MAX as usize) as u32);
-        let len_f = f64::from(trace_len.min(u32::MAX as usize) as u32);
-        (idx_f / len_f) * 100.0
-    };
-
     DivergenceReport {
         category,
         divergence_index: idx,
         trace_length: trace_len,
-        replay_progress_pct,
+        replay_progress_pct: replay_progress_pct(idx, trace_len),
         expected,
         actual,
         explanation,
         suggestion,
         context_before,
         context_after,
+        context_after_actual: Vec::new(),
         affected,
         minimal_prefix_len,
         seed: trace.metadata.seed,
     }
+}
+
+/// Compare complete replay traces after conservative Foata canonicalization.
+///
+/// Returns `true` when the only differences are reorderings of independent
+/// replay events. Global effects such as RNG, virtual time, checkpoints, and
+/// batch wakeups are treated as dependent on everything.
+#[must_use]
+pub fn replay_traces_foata_equivalent(expected: &ReplayTrace, actual: &ReplayTrace) -> bool {
+    let expected_canonical = canonicalize_replay_events(&expected.events);
+    let actual_canonical = canonicalize_replay_events(&actual.events);
+
+    expected_canonical == actual_canonical
+}
+
+/// Produce a structured divergence report from two complete replay traces.
+///
+/// The traces are first canonicalized using a conservative Foata normal form so
+/// independent scheduling reorderings do not produce false divergence reports.
+/// Returns `None` when the traces are equivalent after canonicalization.
+#[must_use]
+#[allow(clippy::similar_names)]
+pub fn diagnose_replay_trace_divergence(
+    expected: &ReplayTrace,
+    actual: &ReplayTrace,
+    config: &DiagnosticConfig,
+) -> Option<DivergenceReport> {
+    let expected_events = canonicalize_replay_events(&expected.events);
+    let actual_events = canonicalize_replay_events(&actual.events);
+    let idx = first_replay_mismatch(&expected_events, &actual_events)?;
+
+    let expected_at = expected_events.get(idx);
+    let actual_at = actual_events.get(idx);
+    let category = match (expected_at, actual_at) {
+        (Some(expected_event), Some(actual_event)) => {
+            classify_divergence(Some(expected_event), actual_event)
+        }
+        _ => DivergenceCategory::LengthMismatch,
+    };
+
+    let expected_summary = expected_at.map_or_else(
+        || trace_exhausted_summary(idx, "expected"),
+        |event| EventSummary::from_event(idx, event),
+    );
+    let actual_summary = actual_at.map_or_else(
+        || trace_exhausted_summary(idx, "actual"),
+        |event| EventSummary::from_event(idx, event),
+    );
+
+    let affected = match (expected_at, actual_at) {
+        (Some(expected_event), Some(actual_event)) => {
+            extract_affected_entities(Some(expected_event), actual_event)
+        }
+        (Some(expected_event), None) => {
+            extract_affected_entities(Some(expected_event), expected_event)
+        }
+        (None, Some(actual_event)) => extract_affected_entities(None, actual_event),
+        (None, None) => AffectedEntities::default(),
+    };
+
+    let explanation = match (expected_at, actual_at) {
+        (Some(expected_event), Some(actual_event)) => {
+            build_explanation(category, Some(expected_event), actual_event)
+        }
+        (Some(_), None) => "After Foata canonicalization, the actual replay trace ended before the expected canonical event. Replay stopped early relative to the recording.".to_string(),
+        (None, Some(_)) => "After Foata canonicalization, the expected replay trace ended before the actual canonical event. Execution produced extra runtime activity beyond the recorded trace boundary.".to_string(),
+        (None, None) => "After Foata canonicalization, both traces ended at the divergence boundary.".to_string(),
+    };
+    let suggestion = if actual_at.is_some() {
+        build_suggestion(category, &affected)
+    } else {
+        "Compare the expected trace boundary with replay termination. Check for premature cancellation, early region close, or a missing wakeup before the trace ended.".to_string()
+    };
+
+    let minimal_prefix_len = if config.max_prefix_len > 0 {
+        (idx + 1).min(config.max_prefix_len)
+    } else {
+        idx + 1
+    };
+
+    Some(DivergenceReport {
+        category,
+        divergence_index: idx,
+        trace_length: expected_events.len(),
+        replay_progress_pct: replay_progress_pct(idx, expected_events.len()),
+        expected: expected_summary,
+        actual: actual_summary,
+        explanation,
+        suggestion,
+        context_before: build_context_before(&expected_events, idx, config.context_before),
+        context_after: build_context_after(&expected_events, idx, config.context_after),
+        context_after_actual: build_context_after(&actual_events, idx, config.context_after),
+        affected,
+        minimal_prefix_len,
+        seed: expected.metadata.seed,
+    })
 }
 
 /// Extract the minimal divergent prefix: the shortest sub-trace that still
@@ -514,6 +616,206 @@ fn slice_trace(source: &ReplayTrace, len: usize) -> ReplayTrace {
         metadata: source.metadata.clone(),
         events: source.events[..len].to_vec(),
         cursor: 0,
+    }
+}
+
+fn replay_progress_pct(idx: usize, trace_len: usize) -> f64 {
+    if trace_len == 0 {
+        return 0.0;
+    }
+
+    let idx_f = f64::from(idx.min(u32::MAX as usize) as u32);
+    let len_f = f64::from(trace_len.min(u32::MAX as usize) as u32);
+    (idx_f / len_f) * 100.0
+}
+
+fn first_replay_mismatch(expected: &[ReplayEvent], actual: &[ReplayEvent]) -> Option<usize> {
+    let shared_len = expected.len().min(actual.len());
+    (0..shared_len)
+        .find(|&idx| expected[idx] != actual[idx])
+        .or_else(|| (expected.len() != actual.len()).then_some(shared_len))
+}
+
+fn trace_exhausted_summary(index: usize, side: &str) -> EventSummary {
+    EventSummary {
+        index,
+        event_type: "TraceExhausted".to_string(),
+        details: format!("{side} trace ended before this canonical event"),
+        task_id: None,
+        region_id: None,
+    }
+}
+
+fn canonicalize_replay_events(events: &[ReplayEvent]) -> Vec<ReplayEvent> {
+    let mut layered = Vec::with_capacity(events.len());
+
+    for (source_index, event) in events.iter().enumerate() {
+        let layer = layered
+            .iter()
+            .filter(|(_, previous, _)| replay_events_dependent(previous, event))
+            .map(|(previous_layer, _, _)| *previous_layer + 1)
+            .max()
+            .unwrap_or(0);
+
+        layered.push((layer, event.clone(), source_index));
+    }
+
+    layered.sort_by(
+        |(left_layer, left_event, left_index), (right_layer, right_event, right_index)| {
+            left_layer
+                .cmp(right_layer)
+                .then_with(|| {
+                    replay_event_sort_key(left_event).cmp(&replay_event_sort_key(right_event))
+                })
+                .then_with(|| left_index.cmp(right_index))
+        },
+    );
+
+    layered.into_iter().map(|(_, event, _)| event).collect()
+}
+
+fn replay_events_dependent(left: &ReplayEvent, right: &ReplayEvent) -> bool {
+    let (left_global, left_resources) = replay_event_resources(left);
+    let (right_global, right_resources) = replay_event_resources(right);
+
+    left_global
+        || right_global
+        || left_resources
+            .iter()
+            .any(|resource| right_resources.contains(resource))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReplayResource {
+    Task(u64),
+    Region(u64),
+    Timer(u64),
+    Io(u64),
+}
+
+#[allow(clippy::too_many_lines)]
+fn replay_event_resources(event: &ReplayEvent) -> (bool, Vec<ReplayResource>) {
+    match event {
+        ReplayEvent::TaskScheduled { task, .. }
+        | ReplayEvent::TaskYielded { task }
+        | ReplayEvent::TaskCompleted { task, .. }
+        | ReplayEvent::WakerWake { task } => (false, vec![ReplayResource::Task(task.0)]),
+        ReplayEvent::TaskSpawned { task, region, .. } => (
+            false,
+            vec![
+                ReplayResource::Task(task.0),
+                ReplayResource::Region(region.0),
+            ],
+        ),
+        ReplayEvent::TimerCreated { timer_id, .. }
+        | ReplayEvent::TimerFired { timer_id }
+        | ReplayEvent::TimerCancelled { timer_id } => {
+            (false, vec![ReplayResource::Timer(*timer_id)])
+        }
+        ReplayEvent::IoReady { token, .. }
+        | ReplayEvent::IoResult { token, .. }
+        | ReplayEvent::IoError { token, .. } => (false, vec![ReplayResource::Io(*token)]),
+        ReplayEvent::ChaosInjection {
+            task: Some(task), ..
+        } => (false, vec![ReplayResource::Task(task.0)]),
+        ReplayEvent::RegionCreated { region, parent, .. } => {
+            let mut resources = vec![ReplayResource::Region(region.0)];
+            if let Some(parent) = parent {
+                resources.push(ReplayResource::Region(parent.0));
+            }
+            (false, resources)
+        }
+        ReplayEvent::RegionClosed { region, .. } | ReplayEvent::RegionCancelled { region, .. } => {
+            (false, vec![ReplayResource::Region(region.0)])
+        }
+        ReplayEvent::TimeAdvanced { .. }
+        | ReplayEvent::RngSeed { .. }
+        | ReplayEvent::RngValue { .. }
+        | ReplayEvent::ChaosInjection { task: None, .. }
+        | ReplayEvent::WakerBatchWake { .. }
+        | ReplayEvent::Checkpoint { .. } => (true, Vec::new()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReplayEventSortKey {
+    TaskScheduled(u64, u64),
+    TaskYielded(u64),
+    TaskCompleted(u64, u8),
+    TaskSpawned(u64, u64, u64),
+    TimeAdvanced(u64, u64),
+    TimerCreated(u64, u64),
+    TimerFired(u64),
+    TimerCancelled(u64),
+    IoReady(u64, u8),
+    IoResult(u64, i64),
+    IoError(u64, u8),
+    RngSeed(u64),
+    RngValue(u64),
+    ChaosInjection(u8, Option<u64>, u64),
+    RegionCreated(u64, Option<u64>, u64),
+    RegionClosed(u64, u8),
+    RegionCancelled(u64, u8),
+    WakerWake(u64),
+    WakerBatchWake(u32),
+    Checkpoint(u64, u64, u32, u32),
+}
+
+#[allow(clippy::too_many_lines)]
+fn replay_event_sort_key(event: &ReplayEvent) -> ReplayEventSortKey {
+    match event {
+        ReplayEvent::TaskScheduled { task, at_tick } => {
+            ReplayEventSortKey::TaskScheduled(task.0, *at_tick)
+        }
+        ReplayEvent::TaskYielded { task } => ReplayEventSortKey::TaskYielded(task.0),
+        ReplayEvent::TaskCompleted { task, outcome } => {
+            ReplayEventSortKey::TaskCompleted(task.0, *outcome)
+        }
+        ReplayEvent::TaskSpawned {
+            task,
+            region,
+            at_tick,
+        } => ReplayEventSortKey::TaskSpawned(task.0, region.0, *at_tick),
+        ReplayEvent::TimeAdvanced {
+            from_nanos,
+            to_nanos,
+        } => ReplayEventSortKey::TimeAdvanced(*from_nanos, *to_nanos),
+        ReplayEvent::TimerCreated {
+            timer_id,
+            deadline_nanos,
+        } => ReplayEventSortKey::TimerCreated(*timer_id, *deadline_nanos),
+        ReplayEvent::TimerFired { timer_id } => ReplayEventSortKey::TimerFired(*timer_id),
+        ReplayEvent::TimerCancelled { timer_id } => ReplayEventSortKey::TimerCancelled(*timer_id),
+        ReplayEvent::IoReady { token, readiness } => {
+            ReplayEventSortKey::IoReady(*token, *readiness)
+        }
+        ReplayEvent::IoResult { token, bytes } => ReplayEventSortKey::IoResult(*token, *bytes),
+        ReplayEvent::IoError { token, kind } => ReplayEventSortKey::IoError(*token, *kind),
+        ReplayEvent::RngSeed { seed } => ReplayEventSortKey::RngSeed(*seed),
+        ReplayEvent::RngValue { value } => ReplayEventSortKey::RngValue(*value),
+        ReplayEvent::ChaosInjection { kind, task, data } => {
+            ReplayEventSortKey::ChaosInjection(*kind, task.map(|task| task.0), *data)
+        }
+        ReplayEvent::RegionCreated {
+            region,
+            parent,
+            at_tick,
+        } => ReplayEventSortKey::RegionCreated(region.0, parent.map(|parent| parent.0), *at_tick),
+        ReplayEvent::RegionClosed { region, outcome } => {
+            ReplayEventSortKey::RegionClosed(region.0, *outcome)
+        }
+        ReplayEvent::RegionCancelled {
+            region,
+            cancel_kind,
+        } => ReplayEventSortKey::RegionCancelled(region.0, *cancel_kind),
+        ReplayEvent::WakerWake { task } => ReplayEventSortKey::WakerWake(task.0),
+        ReplayEvent::WakerBatchWake { count } => ReplayEventSortKey::WakerBatchWake(*count),
+        ReplayEvent::Checkpoint {
+            sequence,
+            time_nanos,
+            active_tasks,
+            active_regions,
+        } => ReplayEventSortKey::Checkpoint(*sequence, *time_nanos, *active_tasks, *active_regions),
     }
 }
 
@@ -1331,6 +1633,90 @@ mod tests {
         );
         assert!(report.explanation.contains("trace is exhausted"));
         assert_eq!(report.actual.event_type, "RngSeed");
+    }
+
+    #[test]
+    fn replay_trace_diagnostics_suppress_foata_equivalent_reordering() {
+        let expected = make_trace(
+            0xFEED,
+            vec![
+                ReplayEvent::TaskScheduled {
+                    task: CompactTaskId(1),
+                    at_tick: 0,
+                },
+                ReplayEvent::TaskScheduled {
+                    task: CompactTaskId(2),
+                    at_tick: 0,
+                },
+            ],
+        );
+        let actual = make_trace(
+            0xFEED,
+            vec![
+                ReplayEvent::TaskScheduled {
+                    task: CompactTaskId(2),
+                    at_tick: 0,
+                },
+                ReplayEvent::TaskScheduled {
+                    task: CompactTaskId(1),
+                    at_tick: 0,
+                },
+            ],
+        );
+
+        assert!(replay_traces_foata_equivalent(&expected, &actual));
+        assert!(
+            diagnose_replay_trace_divergence(&expected, &actual, &DiagnosticConfig::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn replay_trace_diagnostics_report_actual_after_context() {
+        let expected = make_trace(
+            0xABCD,
+            vec![
+                ReplayEvent::RngValue { value: 10 },
+                ReplayEvent::RngValue { value: 11 },
+                ReplayEvent::RngValue { value: 12 },
+                ReplayEvent::RngValue { value: 13 },
+            ],
+        );
+        let actual = make_trace(
+            0xABCD,
+            vec![
+                ReplayEvent::RngValue { value: 10 },
+                ReplayEvent::RngValue { value: 99 },
+                ReplayEvent::RngValue { value: 100 },
+                ReplayEvent::RngValue { value: 101 },
+            ],
+        );
+        let config = DiagnosticConfig {
+            context_before: 1,
+            context_after: 2,
+            ..DiagnosticConfig::default()
+        };
+
+        let report = diagnose_replay_trace_divergence(&expected, &actual, &config)
+            .expect("rng drift should produce divergence");
+
+        assert_eq!(report.category, DivergenceCategory::RngMismatch);
+        assert_eq!(report.divergence_index, 1);
+        assert_eq!(report.context_after.len(), 2);
+        assert_eq!(report.context_after_actual.len(), 2);
+        assert!(report.context_after[0].details.contains("000000000000000c"));
+        assert!(
+            report.context_after_actual[0]
+                .details
+                .contains("0000000000000064")
+        );
+        assert!(report.to_text().contains("--- Context (actual after) ---"));
+        assert!(
+            report
+                .to_json()
+                .expect("serialize")
+                .contains("context_after_actual")
+        );
     }
 
     // -------------------------------------------------------------------------

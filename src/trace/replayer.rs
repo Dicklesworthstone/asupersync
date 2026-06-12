@@ -424,9 +424,13 @@ impl TraceReplayer {
             let prefix =
                 crate::trace::divergence::minimal_divergent_prefix(&self.trace, divergence.index);
             let reduction_pct = minimization_reduction_pct(self.trace.len(), prefix.len());
+            let diagnostic = self.diagnose_divergence(
+                divergence,
+                &crate::trace::divergence::DiagnosticConfig::default(),
+            );
             (
                 Some(divergence.index),
-                Some(divergence.context.clone()),
+                Some(diagnostic.to_text()),
                 Some(prefix.len()),
                 Some(reduction_pct),
             )
@@ -446,6 +450,22 @@ impl TraceReplayer {
             artifact_pointer: artifact_pointer.map(Into::into),
             rerun_commands,
         }
+    }
+
+    /// Builds a structured diagnostic report for a replay divergence.
+    ///
+    /// The replayer only observes one actual event at the failure boundary, so
+    /// this uses the single-divergence diagnostic path. Call
+    /// [`crate::trace::divergence::diagnose_replay_trace_divergence`] when a
+    /// complete actual replay trace is available and actual after-context is
+    /// needed.
+    #[must_use]
+    pub fn diagnose_divergence(
+        &self,
+        divergence: &DivergenceError,
+        config: &crate::trace::divergence::DiagnosticConfig,
+    ) -> crate::trace::divergence::DivergenceReport {
+        crate::trace::divergence::diagnose_divergence(&self.trace, divergence, config)
     }
 }
 
