@@ -117,7 +117,8 @@ fn row_is_stale(row: &JsonValue, as_of: &str, default_window_days: u64) -> bool 
         .and_then(JsonValue::as_u64)
         .unwrap_or(default_window_days);
     let age_days = parse_date_days(as_of) - parse_date_days(reviewed);
-    age_days < 0 || age_days > window_days as i64
+    let window_days = i64::try_from(window_days).unwrap_or(i64::MAX);
+    age_days < 0 || age_days > window_days
 }
 
 #[test]
