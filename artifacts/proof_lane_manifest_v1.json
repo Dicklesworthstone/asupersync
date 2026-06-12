@@ -498,6 +498,7 @@
     "downstream-consumer-proof-contract",
     "lab-live-support-claim-report-contract",
     "browser-ga-final-signoff",
+    "validation-frontier-final-signoff",
     "doctor-e2e-proof-lane-contract",
     "semantic-lint-proof-lane-contract",
     "artifact-governance-final-signoff"
@@ -2127,6 +2128,60 @@
       }
     },
     {
+      "lane_id": "validation-frontier-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "validation-frontier-final-signoff"
+      ],
+      "covers": "Verifies the validation-frontier final signoff artifact, operator runbook, channel MPSC/select fixture split, inventory/stale-receipt/downstream/graph-budget child deliverables, e2e runner command list, proof manifest/status rows, README/AGENTS markers, deterministic Markdown summary, and no-claim boundaries.",
+      "explicit_not_covered": "fresh execution evidence until the exact RCH command is rerun, broad workspace health, release readiness, runtime correctness, performance improvement, no regression, source correctness outside cited surfaces, live RCH fleet availability, local Cargo fallback, tracker closure, or file deletion.",
+      "expected_signal": "validation_frontier_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/validation_frontier_signoff_v1.json",
+        "docs/proof/validation_frontier_runbook.md",
+        "scripts/run_validation_frontier_signoff_e2e.sh",
+        "tests/validation_frontier_signoff_contract.rs",
+        "artifacts/validation_frontier_inventory_v1.json",
+        "artifacts/validation_frontier_graph_budgets_v1.json",
+        "artifacts/rch_stale_progress_receipt_contract_v1.json",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "validation-frontier inventory drift",
+        "stale-progress receipt fixture drift",
+        "downstream-consumer proof artifact drift",
+        "graph-budget fixture drift",
+        "manifest projection golden drift",
+        "proof-status marker drift",
+        "RCH stale progress while refreshing child lanes"
+      ],
+      "escalation_notes": "Use this lane only for the VF7 validation-frontier final signoff packet and operator procedure. It cannot be cited as release readiness, broad workspace health, runtime correctness, performance proof, no-regression proof, source correctness outside cited surfaces, live RCH fleet availability, local Cargo fallback approval, tracker closure, or permission to delete files.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "validation-frontier-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "performance",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
       "lane_id": "doctor-e2e-proof-lane-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -2558,6 +2613,13 @@
       "description": "Browser Edition GA final signoff packet, B1-B3 aggregation, package hashes, rollback drill, docs markers, manifest/status mapping, and scoped no-claim boundaries have a canonical verifier command.",
       "lane_ids": [
         "browser-ga-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "validation-frontier-final-signoff",
+      "description": "Validation-frontier final signoff artifact, operator runbook, child deliverable mapping, channel fixture split, e2e runner commands, manifest/status rows, deterministic Markdown summary, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "validation-frontier-final-signoff"
       ]
     },
     {

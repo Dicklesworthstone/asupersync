@@ -85,6 +85,7 @@
     "downstream consumer proof",
     "lab-live support-claim report",
     "browser GA final signoff",
+    "validation frontier final signoff",
     "doctor e2e proof lane",
     "artifact governance final signoff"
   ],
@@ -822,6 +823,35 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped Browser GA signoff: cite it only as the scoped JS/TS package GA evidence packet tying B1 readiness, B2 package integrity, B3 consumer compatibility, package hashes, rollback drill, docs markers, and proof manifest/status rows together. It does not execute npm publish, prove broad workspace health, prove full release readiness outside Browser Edition JS/TS package GA, promote Rust browser API to stable, promote service-worker direct runtime, or promote shared-worker direct runtime."
+    },
+    {
+      "claim_id": "validation-frontier-final-signoff",
+      "category": "validation frontier final signoff",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/validation_frontier_signoff_v1.json",
+          "docs/proof/validation_frontier_runbook.md",
+          "validation-frontier-final-signoff"
+        ],
+        "AGENTS.md": [
+          "artifacts/validation_frontier_signoff_v1.json",
+          "docs/proof/validation_frontier_runbook.md",
+          "validation-frontier-final-signoff"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "validation-frontier-final-signoff"
+      ],
+      "manifest_lane_ids": [
+        "validation-frontier-final-signoff"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_signoff_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped validation-frontier signoff: cite it only as the VF7 operator packet tying inventory, stale-progress receipts, downstream-consumer proof, graph budgets, the channel MPSC/select fixture split, proof manifest/status rows, e2e runner commands, deterministic Markdown summary, and no-claim boundaries together. It does not prove broad workspace health, release readiness, runtime correctness, performance improvement, no regression, source correctness outside cited surfaces, live RCH fleet availability, local Cargo fallback approval, tracker closure, or permission to delete files."
     },
     {
       "claim_id": "artifact-governance-final-signoff",

@@ -1,0 +1,216 @@
+{
+  "schema_version": "validation-frontier-signoff-v1",
+  "bead_id": "asupersync-validation-frontier-v2-b5cjsv.7",
+  "parent_bead": "asupersync-validation-frontier-v2-b5cjsv",
+  "parent_close_policy": "parent_remains_open_until_inventory_stale_receipt_downstream_graph_budget_and_signoff_lanes_have_fresh_remote_required_evidence_or_explicit_blocked_followups",
+  "source_of_truth": {
+    "signoff_artifact": "artifacts/validation_frontier_signoff_v1.json",
+    "operator_runbook": "docs/proof/validation_frontier_runbook.md",
+    "e2e_runner": "scripts/run_validation_frontier_signoff_e2e.sh",
+    "contract_test": "tests/validation_frontier_signoff_contract.rs",
+    "validation_frontier_inventory": "artifacts/validation_frontier_inventory_v1.json",
+    "validation_frontier_inventory_doc": "docs/proof/validation_frontier_inventory.md",
+    "validation_frontier_graph_budgets": "artifacts/validation_frontier_graph_budgets_v1.json",
+    "validation_frontier_graph_budgets_doc": "docs/validation_frontier_graph_budgets.md",
+    "rch_stale_progress_receipt": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+    "downstream_consumer_proof": "artifacts/downstream_consumer_proof_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md"
+  },
+  "signoff_lane": {
+    "lane_id": "validation-frontier-final-signoff",
+    "guarantee_id": "validation-frontier-final-signoff",
+    "proof_status_claim_id": "validation-frontier-final-signoff",
+    "proof_command_id": "validation-frontier-final-signoff-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_signoff_contract -- --nocapture"
+  },
+  "freshness_policy": {
+    "policy_id": "validation-frontier-final-signoff-freshness-v1",
+    "reviewed_as_of": "2026-06-12",
+    "freshness_window_seconds": 86400,
+    "required_before_parent_close": "fresh-rch-pass",
+    "current_required_status": "rerun-required",
+    "required_remote_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- env ",
+    "reject_evidence_statuses": [
+      "approved-cache-hit",
+      "stale-evidence",
+      "blocked",
+      "no-win",
+      "unsupported"
+    ],
+    "reject_transcript_markers": [
+      "[RCH] local",
+      "Executing command locally",
+      "local fallback accepted",
+      "falling back to local execution"
+    ],
+    "reject_zero_tests": true,
+    "artifact_hash_algorithm": "sha256"
+  },
+  "source_deliverable_rows": [
+    {
+      "row_id": "validation-frontier-inventory",
+      "owner_bead": "asupersync-validation-frontier-v2-b5cjsv.1",
+      "proof_command_id": "validation-frontier-inventory-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_inventory CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_inventory_contract -- --nocapture",
+      "current_evidence_status": "rerun-required",
+      "artifact_paths": [
+        "artifacts/validation_frontier_inventory_v1.json",
+        "docs/proof/validation_frontier_inventory.md",
+        "tests/validation_frontier_inventory_contract.rs"
+      ],
+      "claim_boundary": "Inventory row coverage, graph-tail classification, observed channel fixture rows, docs markers, and no-claim boundaries only."
+    },
+    {
+      "row_id": "rch-stale-progress-receipts",
+      "owner_bead": "asupersync-validation-frontier-v2-b5cjsv.4",
+      "manifest_lane_id": "rch-stale-progress-receipt-contract",
+      "proof_status_claim_id": "rch-stale-progress-receipts",
+      "proof_command_id": "rch-stale-progress-receipt-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture",
+      "current_evidence_status": "rerun-required",
+      "artifact_paths": [
+        "artifacts/rch_stale_progress_receipt_contract_v1.json",
+        "docs/rch_stale_progress_receipt.md",
+        "scripts/rch_stale_progress_receipt.py",
+        "tests/rch_stale_progress_receipt_contract.rs"
+      ],
+      "claim_boundary": "Deterministic stale-progress receipt schema, parser fixtures, operator policy, and no-claim boundaries only."
+    },
+    {
+      "row_id": "downstream-consumer-proof",
+      "owner_bead": "asupersync-validation-frontier-v2-b5cjsv.5",
+      "manifest_lane_id": "downstream-consumer-proof-contract",
+      "proof_status_claim_id": "downstream-consumer-public-api-proof",
+      "proof_command_id": "downstream-consumer-proof-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture",
+      "current_evidence_status": "rerun-required",
+      "artifact_paths": [
+        "artifacts/downstream_consumer_proof_v1.json",
+        "tests/downstream_consumer_proof_contract.rs",
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs"
+      ],
+      "claim_boundary": "External downstream fixture metadata, manifest mappings, negative fixture, and public API no-claim boundaries only."
+    },
+    {
+      "row_id": "validation-frontier-graph-budgets",
+      "owner_bead": "asupersync-validation-frontier-v2-b5cjsv.6",
+      "proof_command_id": "validation-frontier-graph-budgets-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_graph_budgets CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_graph_budgets_contract -- --nocapture",
+      "current_evidence_status": "rerun-required",
+      "artifact_paths": [
+        "artifacts/validation_frontier_graph_budgets_v1.json",
+        "docs/validation_frontier_graph_budgets.md",
+        "tests/validation_frontier_graph_budgets_contract.rs"
+      ],
+      "claim_boundary": "Focused lane graph-budget fixtures, forbidden-edge policy, scoped allowances, and no-claim boundaries only."
+    }
+  ],
+  "channel_mpsc_select_regression_fixture": {
+    "fixture_id": "channel-mpsc-select-e2e-frontier-split",
+    "inventory_artifact": "artifacts/validation_frontier_inventory_v1.json",
+    "public_execution_lane": "channel-mpsc-select-e2e-public-run",
+    "compile_only_lane": "channel-mpsc-select-e2e-lib-check",
+    "stale_or_blocked_lanes": [
+      "channel-mpsc-select-e2e-lib-tests-check",
+      "channel-mpsc-select-e2e-filtered-run",
+      "mpsc-recv-many-wake-cascade-exact-run"
+    ],
+    "expected_decision": "public-run-green-but-cfg-test-frontier-rerun-required",
+    "claim_boundary": "The public execution lane may be cited only for the public channel profile; stale cfg(test) or exact-filter lanes remain validation-frontier evidence until rerun through RCH."
+  },
+  "e2e_runner": {
+    "script_path": "scripts/run_validation_frontier_signoff_e2e.sh",
+    "required_commands": [
+      "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_inventory CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_inventory_contract -- --nocapture",
+      "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture",
+      "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture",
+      "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_graph_budgets CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_graph_budgets_contract -- --nocapture",
+      "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_signoff_contract -- --nocapture"
+    ]
+  },
+  "evaluation_rules": {
+    "accepted_verdict": "pass",
+    "current_expected_verdict": "rerun_required_before_parent_close",
+    "allow_parent_close_when": [
+      "every source deliverable row has current_evidence_status=fresh-rch-pass or an explicit blocked follow-up",
+      "every proof command starts with the remote-required RCH prefix",
+      "every Cargo proof command includes CARGO_TARGET_DIR",
+      "the channel MPSC/select public execution lane is not widened into cfg(test) proof",
+      "no transcript contains a local fallback marker",
+      "no focused artifact contract is cited as release readiness or broad workspace health"
+    ],
+    "block_parent_close_when": [
+      "any source deliverable row is rerun-required without a fresh RCH receipt",
+      "any stale-progress receipt is cited as source failure",
+      "any compile-only lane is cited as test execution",
+      "any exact-filter Cargo lane reports zero tests",
+      "any broad release, performance, workspace-health, or RCH-fleet claim appears"
+    ]
+  },
+  "failure_fixtures": [
+    {
+      "fixture_id": "missing-inventory-row",
+      "mutated_row_id": "validation-frontier-inventory",
+      "mutation": "remove inventory deliverable row",
+      "expected_verdict": "fail_closed",
+      "expected_first_failing_row": "validation-frontier-inventory",
+      "expected_reason": "inventory deliverable required"
+    },
+    {
+      "fixture_id": "local-fallback-evidence",
+      "mutated_row_id": "rch-stale-progress-receipts",
+      "mutation": "inject transcript marker [RCH] local",
+      "expected_verdict": "fail_closed",
+      "expected_first_failing_row": "rch-stale-progress-receipts",
+      "expected_reason": "local fallback evidence rejected"
+    },
+    {
+      "fixture_id": "compile-only-overclaim",
+      "mutated_row_id": "channel-mpsc-select-e2e-lib-check",
+      "mutation": "cite compile-only lane as test execution",
+      "expected_verdict": "fail_closed",
+      "expected_first_failing_row": "channel-mpsc-select-e2e-lib-check",
+      "expected_reason": "compile-only evidence cannot prove test execution"
+    },
+    {
+      "fixture_id": "broad-release-overclaim",
+      "mutated_row_id": "validation-frontier-final-signoff",
+      "mutation": "replace no-claim boundary with release-readiness claim",
+      "expected_verdict": "fail_closed",
+      "expected_first_failing_row": "validation-frontier-final-signoff",
+      "expected_reason": "focused signoff cannot prove release readiness"
+    }
+  ],
+  "current_operator_report": {
+    "report_id": "validation-frontier-final-signoff-current",
+    "final_verdict": "rerun_required_before_parent_close",
+    "parent_close_allowed": false,
+    "first_failing_row": "validation-frontier-inventory",
+    "required_log_fields": [
+      "owner_bead",
+      "proof_command_id",
+      "artifact_sha256",
+      "freshness_window_seconds",
+      "first_failing_row",
+      "final_verdict",
+      "claim_boundary"
+    ],
+    "summary": "The validation-frontier signoff packet maps inventory, stale-progress receipts, downstream-consumer proof, graph budgets, manifest/status rows, and the channel MPSC/select fixture into one operator procedure. Parent close remains blocked until the exact remote-required lanes are rerun with fresh evidence or explicit blocked follow-ups. This packet is not release readiness, broad workspace health, performance evidence, source-correctness evidence outside cited surfaces, or live RCH fleet proof."
+  },
+  "markdown_summary_golden": "# Validation Frontier final signoff\n\nfinal_verdict=rerun_required_before_parent_close\nparent_close_allowed=false\nfirst_failing_row=validation-frontier-inventory\nfreshness_window_seconds=86400\n\n- owner_bead=asupersync-validation-frontier-v2-b5cjsv.1 proof_command_id=validation-frontier-inventory-contract evidence_status=rerun-required\n- owner_bead=asupersync-validation-frontier-v2-b5cjsv.4 proof_command_id=rch-stale-progress-receipt-contract evidence_status=rerun-required\n- owner_bead=asupersync-validation-frontier-v2-b5cjsv.5 proof_command_id=downstream-consumer-proof-contract evidence_status=rerun-required\n- owner_bead=asupersync-validation-frontier-v2-b5cjsv.6 proof_command_id=validation-frontier-graph-budgets-contract evidence_status=rerun-required\n",
+  "non_claims": [
+    "does not prove broad workspace health",
+    "does not prove release readiness",
+    "does not prove source correctness outside cited surfaces",
+    "does not prove performance improvement",
+    "does not prove no regression",
+    "does not prove live RCH fleet availability",
+    "does not authorize local Cargo fallback",
+    "does not authorize deleting files",
+    "does not close the parent validation-frontier epic"
+  ]
+}

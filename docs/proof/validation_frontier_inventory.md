@@ -39,6 +39,16 @@ diagnostic for the channel code.
 | `channel-mpsc-select-e2e-lib-tests-check` | observed | focused cfg(test) compile attempt | `unknown_needs_vf2` | stale build `29880940465487999` |
 | `channel-mpsc-select-e2e-filtered-run` | observed | focused filtered test execution | `unknown_needs_vf2` | stale build `29880940465487994` |
 | `mpsc-recv-many-wake-cascade-exact-run` | observed | focused exact lib-test execution | `unknown_needs_vf2` | stale build `29880940465487998` |
+| `validation-frontier-final-signoff` | manifest | artifact contract | `unknown_needs_vf2` | mapped, not rerun in VF1 |
+
+## Manifest Drift Repair
+
+VF7 extends this inventory to cover later manifest lanes that were added after
+the original VF1 pass, including downstream-consumer proof lanes, stale-receipt
+lanes, unsafe-boundary ledger, Browser GA, semantic-lint, doctor E2E,
+artifact-governance, and `validation-frontier-final-signoff`. These rows are
+classification rows only. They do not convert mapped manifest coverage into
+fresh RCH proof.
 
 ## VF2 Handoff
 

@@ -428,6 +428,7 @@
     "downstream-consumer-proof-contract",
     "lab-live-support-claim-report-contract",
     "browser-ga-final-signoff",
+    "validation-frontier-final-signoff",
     "doctor-e2e-proof-lane-contract",
     "semantic-lint-proof-lane-contract",
     "artifact-governance-final-signoff"
@@ -1220,6 +1221,32 @@
       ]
     },
     {
+      "lane_id": "validation-frontier-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_signoff_contract -- --nocapture",
+      "guarantee_ids": [
+        "validation-frontier-final-signoff"
+      ],
+      "feature_flags": [],
+      "expected_signal": "validation_frontier_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/validation_frontier_signoff_v1.json",
+        "docs/proof/validation_frontier_runbook.md",
+        "scripts/run_validation_frontier_signoff_e2e.sh",
+        "tests/validation_frontier_signoff_contract.rs",
+        "artifacts/validation_frontier_inventory_v1.json",
+        "artifacts/validation_frontier_graph_budgets_v1.json",
+        "artifacts/rch_stale_progress_receipt_contract_v1.json",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ]
+    },
+    {
       "lane_id": "doctor-e2e-proof-lane-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1544,6 +1571,12 @@
       "guarantee_id": "browser-ga-final-signoff",
       "lane_ids": [
         "browser-ga-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "validation-frontier-final-signoff",
+      "lane_ids": [
+        "validation-frontier-final-signoff"
       ]
     },
     {
