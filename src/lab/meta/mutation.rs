@@ -1,7 +1,7 @@
 //! Built-in meta-mutations for testing the oracle suite.
 
 use crate::actor::ActorId;
-use crate::lab::oracle::{CapabilityKind, OracleViolation, RRefId};
+use crate::lab::oracle::{CapabilityKind, OracleViolation, RRefId, registry};
 use crate::record::ObligationKind;
 use crate::supervision::{EscalationPolicy, RestartPolicy};
 use crate::types::{Budget, CancelReason, TaskId};
@@ -10,105 +10,68 @@ use crate::util::ArenaIndex;
 use super::runner::MetaHarness;
 
 /// Invariant name for the task leak oracle.
-pub const INVARIANT_TASK_LEAK: &str = "task_leak";
+pub const INVARIANT_TASK_LEAK: &str = registry::INVARIANT_TASK_LEAK;
 /// Invariant name for the obligation leak oracle.
-pub const INVARIANT_OBLIGATION_LEAK: &str = "obligation_leak";
+pub const INVARIANT_OBLIGATION_LEAK: &str = registry::INVARIANT_OBLIGATION_LEAK;
 /// Invariant name for the quiescence oracle.
-pub const INVARIANT_QUIESCENCE: &str = "quiescence";
+pub const INVARIANT_QUIESCENCE: &str = registry::INVARIANT_QUIESCENCE;
 /// Invariant name for the loser drain oracle.
-pub const INVARIANT_LOSER_DRAIN: &str = "loser_drain";
+pub const INVARIANT_LOSER_DRAIN: &str = registry::INVARIANT_LOSER_DRAIN;
 /// Invariant name for the finalizer oracle.
-pub const INVARIANT_FINALIZER: &str = "finalizer";
+pub const INVARIANT_FINALIZER: &str = registry::INVARIANT_FINALIZER;
 /// Invariant name for the region tree oracle.
-pub const INVARIANT_REGION_TREE: &str = "region_tree";
+pub const INVARIANT_REGION_TREE: &str = registry::INVARIANT_REGION_TREE;
 /// Invariant name for the ambient authority oracle.
-pub const INVARIANT_AMBIENT_AUTHORITY: &str = "ambient_authority";
+pub const INVARIANT_AMBIENT_AUTHORITY: &str = registry::INVARIANT_AMBIENT_AUTHORITY;
 /// Invariant name for the deadline monotonicity oracle.
-pub const INVARIANT_DEADLINE_MONOTONE: &str = "deadline_monotone";
+pub const INVARIANT_DEADLINE_MONOTONE: &str = registry::INVARIANT_DEADLINE_MONOTONE;
 /// Invariant name for the cancellation protocol oracle.
-pub const INVARIANT_CANCELLATION_PROTOCOL: &str = "cancellation_protocol";
+pub const INVARIANT_CANCELLATION_PROTOCOL: &str = registry::INVARIANT_CANCELLATION_PROTOCOL;
 /// Invariant name for the cancel-correctness oracle.
-pub const INVARIANT_CANCEL_CORRECTNESS: &str = "cancel_correctness";
+pub const INVARIANT_CANCEL_CORRECTNESS: &str = registry::INVARIANT_CANCEL_CORRECTNESS;
 /// Invariant name for the cancel debt accumulation oracle.
-pub const INVARIANT_CANCEL_DEBT: &str = "cancel_debt";
+pub const INVARIANT_CANCEL_DEBT: &str = registry::INVARIANT_CANCEL_DEBT;
 /// Invariant name for the cancel signal ordering oracle.
-pub const INVARIANT_CANCEL_ORDERING: &str = "cancel_signal_ordering";
+pub const INVARIANT_CANCEL_ORDERING: &str = registry::INVARIANT_CANCEL_ORDERING;
 /// Invariant name for the runtime epoch consistency oracle.
-pub const INVARIANT_RUNTIME_EPOCH: &str = "runtime_epoch";
+pub const INVARIANT_RUNTIME_EPOCH: &str = registry::INVARIANT_RUNTIME_EPOCH;
 /// Invariant name for the channel atomicity oracle.
-pub const INVARIANT_CHANNEL_ATOMICITY: &str = "channel_atomicity";
+pub const INVARIANT_CHANNEL_ATOMICITY: &str = registry::INVARIANT_CHANNEL_ATOMICITY;
 /// Invariant name for the waker deduplication oracle.
-pub const INVARIANT_WAKER_DEDUP: &str = "waker_dedup";
+pub const INVARIANT_WAKER_DEDUP: &str = registry::INVARIANT_WAKER_DEDUP;
 /// Invariant name for the actor leak oracle.
-pub const INVARIANT_ACTOR_LEAK: &str = "actor_leak";
+pub const INVARIANT_ACTOR_LEAK: &str = registry::INVARIANT_ACTOR_LEAK;
 /// Invariant name for the supervision oracle.
-pub const INVARIANT_SUPERVISION: &str = "supervision";
+pub const INVARIANT_SUPERVISION: &str = registry::INVARIANT_SUPERVISION;
 /// Invariant name for the mailbox oracle.
-pub const INVARIANT_MAILBOX: &str = "mailbox";
+pub const INVARIANT_MAILBOX: &str = registry::INVARIANT_MAILBOX;
 /// Invariant name for the RRef access oracle.
-pub const INVARIANT_RREF_ACCESS: &str = "rref_access";
+pub const INVARIANT_RREF_ACCESS: &str = registry::INVARIANT_RREF_ACCESS;
 /// Invariant name for the reply linearity oracle (Spork).
-pub const INVARIANT_REPLY_LINEARITY: &str = "reply_linearity";
+pub const INVARIANT_REPLY_LINEARITY: &str = registry::INVARIANT_REPLY_LINEARITY;
 /// Invariant name for the registry lease linearity oracle (Spork).
-pub const INVARIANT_REGISTRY_LEASE: &str = "registry_lease";
+pub const INVARIANT_REGISTRY_LEASE: &str = registry::INVARIANT_REGISTRY_LEASE;
 /// Invariant name for the deterministic DOWN ordering oracle (Spork).
-pub const INVARIANT_DOWN_ORDER: &str = "down_order";
+pub const INVARIANT_DOWN_ORDER: &str = registry::INVARIANT_DOWN_ORDER;
 /// Invariant name for the supervisor quiescence oracle (Spork).
-pub const INVARIANT_SUPERVISOR_QUIESCENCE: &str = "supervisor_quiescence";
+pub const INVARIANT_SUPERVISOR_QUIESCENCE: &str = registry::INVARIANT_SUPERVISOR_QUIESCENCE;
 /// Invariant name for the priority inversion oracle.
-pub const INVARIANT_PRIORITY_INVERSION: &str = "priority_inversion";
+pub const INVARIANT_PRIORITY_INVERSION: &str = registry::INVARIANT_PRIORITY_INVERSION;
 /// Invariant name for the FABRIC publish oracle.
 #[cfg(feature = "messaging-fabric")]
-pub const INVARIANT_FABRIC_PUBLISH: &str = "fabric_publish";
+pub const INVARIANT_FABRIC_PUBLISH: &str = registry::INVARIANT_FABRIC_PUBLISH;
 /// Invariant name for the FABRIC reply oracle.
 #[cfg(feature = "messaging-fabric")]
-pub const INVARIANT_FABRIC_REPLY: &str = "fabric_reply";
+pub const INVARIANT_FABRIC_REPLY: &str = registry::INVARIANT_FABRIC_REPLY;
 /// Invariant name for the FABRIC quiescence oracle.
 #[cfg(feature = "messaging-fabric")]
-pub const INVARIANT_FABRIC_QUIESCENCE: &str = "fabric_quiescence";
+pub const INVARIANT_FABRIC_QUIESCENCE: &str = registry::INVARIANT_FABRIC_QUIESCENCE;
 /// Invariant name for the FABRIC redelivery oracle.
 #[cfg(feature = "messaging-fabric")]
-pub const INVARIANT_FABRIC_REDELIVERY: &str = "fabric_redelivery";
+pub const INVARIANT_FABRIC_REDELIVERY: &str = registry::INVARIANT_FABRIC_REDELIVERY;
 
 /// Ordered list of all oracle invariants covered by the meta runner.
-pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
-    INVARIANT_TASK_LEAK,
-    INVARIANT_QUIESCENCE,
-    INVARIANT_CANCELLATION_PROTOCOL,
-    INVARIANT_LOSER_DRAIN,
-    INVARIANT_OBLIGATION_LEAK,
-    INVARIANT_AMBIENT_AUTHORITY,
-    INVARIANT_FINALIZER,
-    INVARIANT_REGION_TREE,
-    "region_leak",
-    INVARIANT_DEADLINE_MONOTONE,
-    INVARIANT_CANCEL_CORRECTNESS,
-    INVARIANT_CANCEL_DEBT,
-    INVARIANT_CANCEL_ORDERING,
-    INVARIANT_RUNTIME_EPOCH,
-    INVARIANT_CHANNEL_ATOMICITY,
-    INVARIANT_WAKER_DEDUP,
-    INVARIANT_ACTOR_LEAK,
-    INVARIANT_SUPERVISION,
-    INVARIANT_MAILBOX,
-    INVARIANT_RREF_ACCESS,
-    INVARIANT_REPLY_LINEARITY,
-    INVARIANT_REGISTRY_LEASE,
-    INVARIANT_DOWN_ORDER,
-    INVARIANT_SUPERVISOR_QUIESCENCE,
-    // Note: INVARIANT_PRIORITY_INVERSION exists as an OracleViolation variant
-    // but the PriorityInversionOracle is not yet wired into OracleSuite::report,
-    // so it isn't counted in the oracle_report tests. Leave it out here until
-    // the oracle is integrated.
-    #[cfg(feature = "messaging-fabric")]
-    INVARIANT_FABRIC_PUBLISH,
-    #[cfg(feature = "messaging-fabric")]
-    INVARIANT_FABRIC_REPLY,
-    #[cfg(feature = "messaging-fabric")]
-    INVARIANT_FABRIC_QUIESCENCE,
-    #[cfg(feature = "messaging-fabric")]
-    INVARIANT_FABRIC_REDELIVERY,
-];
+pub const ALL_ORACLE_INVARIANTS: &[&str] = registry::ALL_REPORTED_ORACLE_NAMES;
 
 /// Built-in mutations used to validate oracle detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

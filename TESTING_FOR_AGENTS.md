@@ -22,6 +22,23 @@ If a bead changes production behavior, add the narrowest unit or lab proof first
 Only then run broader gates. If a proof lane is already active or
 progress-stale, coordinate by Agent Mail before starting another RCH job.
 
+## Oracle Registry
+
+Use `asupersync::lab::OracleRegistry` to discover lab invariant checkers instead
+of guessing from `src/lab/oracle/`. `OracleRegistry::list_all()` returns
+descriptors with the stable name, invariant statement, description, required
+features/config, diagnostic code family, and whether the oracle is emitted by
+`OracleSuite::report`. Scenario YAML names and `LabConfig::with_oracles(&[...])`
+are validated through the same registry; `oracles: ["all"]` still means every
+suite-reported oracle.
+
+Common selections:
+
+- `task_leak`, `obligation_leak`, `quiescence`: ownership and close invariants
+- `cancellation_protocol`, `cancel_correctness`, `cancel_debt`: cancellation lanes
+- `loser_drain`, `finalizer`, `region_tree`, `deadline_monotone`: structured concurrency checks
+- `channel_atomicity`, `waker_dedup`: channel and wakeup correctness
+
 ## Required Metadata
 
 Every new deterministic test or script should expose these in the test name,

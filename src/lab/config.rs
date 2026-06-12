@@ -113,6 +113,7 @@
 //! ```
 
 use crate::lab::chaos::ChaosConfig;
+use crate::lab::oracle::{ORACLE_ALL, OracleRegistry, OracleRegistryError};
 use crate::trace::RecorderConfig;
 use crate::util::DetRng;
 
@@ -170,6 +171,11 @@ pub struct LabConfig {
     ///
     /// When false, violations are logged as warnings instead of panicking.
     pub panic_on_cancellation_violation: bool,
+    /// Oracle names selected for report filtering and scenario-style lab runs.
+    ///
+    /// Empty means [`ORACLE_ALL`], preserving the historical "check every
+    /// suite-reported oracle" default.
+    pub oracle_selection: Vec<String>,
 }
 
 impl LabConfig {
@@ -190,6 +196,7 @@ impl LabConfig {
             auto_advance_time: false,
             enable_cancellation_oracle: true,
             panic_on_cancellation_violation: true,
+            oracle_selection: Vec::new(),
         }
     }
 
@@ -390,6 +397,26 @@ impl LabConfig {
         self.enable_cancellation_oracle
     }
 
+    /// Selects reportable lab oracles by registry name.
+    ///
+    /// Passing an empty slice or [`ORACLE_ALL`] selects every
+    /// `OracleSuite::report` entry. Unknown names fail closed and return the
+    /// registry error with a valid-name list and suggestion.
+    pub fn with_oracles(mut self, names: &[&str]) -> Result<Self, OracleRegistryError> {
+        let selected = OracleRegistry::select_reported_strs(names)?;
+        if names.is_empty() || names.contains(&ORACLE_ALL) {
+            self.oracle_selection.clear();
+        } else {
+            self.oracle_selection = selected.into_iter().map(str::to_owned).collect();
+        }
+        Ok(self)
+    }
+
+    /// Resolves the configured oracle selection to reportable registry names.
+    pub fn selected_oracles(&self) -> Result<Vec<&'static str>, OracleRegistryError> {
+        OracleRegistry::select_reported(&self.oracle_selection)
+    }
+
     /// Creates a deterministic RNG from this configuration.
     #[must_use]
     pub fn rng(&self) -> DetRng {
@@ -451,6 +478,35 @@ mod tests {
             config.panic_on_futurelock
         );
         crate::test_complete!("default_config");
+    }
+
+    #[test]
+    fn oracle_selection_validates_names() {
+        init_test("oracle_selection_validates_names");
+        let config = LabConfig::new(42)
+            .with_oracles(&["task_leak", "obligation_leak"])
+            .expect("known oracle names should validate");
+        assert_eq!(
+            config.selected_oracles().expect("selection resolves"),
+            vec!["task_leak", "obligation_leak"]
+        );
+
+        let all_config = LabConfig::new(42)
+            .with_oracles(&[ORACLE_ALL])
+            .expect("all selection validates");
+        assert_eq!(
+            all_config
+                .selected_oracles()
+                .expect("all selection resolves")
+                .len(),
+            OracleRegistry::reported_names().len()
+        );
+
+        let err = LabConfig::new(42)
+            .with_oracles(&["task_lek"])
+            .expect_err("unknown oracle should reject");
+        assert!(err.to_string().contains("task_leak"));
+        crate::test_complete!("oracle_selection_validates_names");
     }
 
     #[test]

@@ -54,6 +54,7 @@ pub mod priority_inversion;
 pub mod quiescence;
 pub mod region_leak;
 pub mod region_tree;
+pub mod registry;
 pub mod rref_access;
 pub mod runtime_epoch;
 pub mod spork;
@@ -114,6 +115,10 @@ pub use region_leak::{
     ViolationContext, ViolationType,
 };
 pub use region_tree::{RegionTreeEntry, RegionTreeOracle, RegionTreeViolation};
+pub use registry::{
+    ALL_REPORTED_ORACLE_NAMES, ORACLE_ALL, ORACLE_DESCRIPTORS, OracleDescriptor, OracleRegistry,
+    OracleRegistryError,
+};
 pub use rref_access::{RRefAccessOracle, RRefAccessViolation, RRefAccessViolationKind, RRefId};
 pub use runtime_epoch::{
     ConsistencyLevel, RuntimeEpochConfig, RuntimeEpochOracle, RuntimeEpochStatistics,

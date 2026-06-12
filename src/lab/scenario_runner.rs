@@ -23,8 +23,7 @@
 
 use super::config::LabConfig;
 use super::dual_run::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord};
-use super::meta::mutation::ALL_ORACLE_INVARIANTS;
-use super::oracle::OracleReport;
+use super::oracle::{OracleRegistry, OracleRegistryError, OracleReport};
 use super::runtime::{LabRunReport, LabRuntime};
 use super::scenario::{FaultAction, FaultEvent, Scenario, ValidationError};
 use crate::trace::replay::ReplayTrace;
@@ -79,7 +78,30 @@ impl std::fmt::Display for ScenarioRunnerError {
                 }
                 Ok(())
             }
-            Self::UnknownOracle(name) => write!(f, "unknown oracle: {name}"),
+            Self::UnknownOracle(name) => {
+                let detail = match OracleRegistry::validate_reported_selection(
+                    std::slice::from_ref(name),
+                ) {
+                    Err(OracleRegistryError::UnknownOracle { .. }) => {
+                        let suggestion = OracleRegistry::suggestion_for(name)
+                            .map_or_else(String::new, |suggestion| {
+                                format!("; did you mean `{suggestion}`")
+                            });
+                        format!(
+                            "unknown oracle: {name}{suggestion}; valid names: {}",
+                            OracleRegistry::reported_names().join(", ")
+                        )
+                    }
+                    Err(OracleRegistryError::NotReportable { .. }) => format!(
+                        "oracle `{name}` is registered but is not emitted by OracleSuite::report yet; valid scenario names: {}",
+                        OracleRegistry::reported_names().join(", ")
+                    ),
+                    Err(OracleRegistryError::NotInstantiable { .. }) | Ok(()) => {
+                        format!("unknown oracle: {name}")
+                    }
+                };
+                f.write_str(&detail)
+            }
             Self::ReplayDivergence {
                 seed,
                 first,
@@ -426,11 +448,11 @@ pub struct FilteredOracleReport {
 
 impl FilteredOracleReport {
     fn from_full(full_report: OracleReport, oracle_names: &[String]) -> Self {
-        let check_all = oracle_names.iter().any(|n| n == "all");
+        let check_all = OracleRegistry::is_all_selection(oracle_names);
         let oracle_filter = (!check_all).then(|| {
-            oracle_names
-                .iter()
-                .map(String::as_str)
+            OracleRegistry::select_reported(oracle_names)
+                .expect("scenario oracle names are validated before filtering")
+                .into_iter()
                 .collect::<HashSet<_>>()
         });
 
@@ -655,15 +677,8 @@ impl ScenarioRunner {
 
     /// Validate oracle names in a scenario against the known oracle registry.
     fn validate_oracle_names(scenario: &Scenario) -> Result<(), ScenarioRunnerError> {
-        for name in &scenario.oracles {
-            if name == "all" {
-                continue;
-            }
-            if !ALL_ORACLE_INVARIANTS.contains(&name.as_str()) {
-                return Err(ScenarioRunnerError::UnknownOracle(name.clone()));
-            }
-        }
-        Ok(())
+        OracleRegistry::validate_reported_selection(&scenario.oracles)
+            .map_err(|err| ScenarioRunnerError::UnknownOracle(err.name().to_owned()))
     }
 
     /// Create a `LabConfig` from a scenario, always enabling replay recording.
@@ -1445,7 +1460,7 @@ mod tests {
         // "all" should check every oracle
         assert_eq!(
             result.oracle_report.checked.len(),
-            ALL_ORACLE_INVARIANTS.len()
+            OracleRegistry::reported_names().len()
         );
         crate::test_complete!("oracle_all_checks_everything");
     }
@@ -1589,6 +1604,7 @@ mod tests {
         init_test("error_display_unknown_oracle");
         let err = ScenarioRunnerError::UnknownOracle("bad_oracle".into());
         assert!(err.to_string().contains("bad_oracle"));
+        assert!(err.to_string().contains("valid names:"));
         crate::test_complete!("error_display_unknown_oracle");
     }
 
