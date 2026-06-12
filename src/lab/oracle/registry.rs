@@ -3,6 +3,36 @@
 //! The registry is the agent-facing index of built-in lab oracles. It keeps
 //! names, descriptions, applicability metadata, and scenario-selection
 //! validation in one place so scenario YAML, docs, and tests do not drift.
+//!
+//! # Examples
+//!
+//! List reportable oracle names:
+//!
+//! ```
+//! use asupersync::lab::OracleRegistry;
+//!
+//! let names = OracleRegistry::reported_names();
+//! assert!(names.contains(&"task_leak"));
+//! assert!(names.contains(&"quiescence"));
+//! ```
+//!
+//! Find oracles by invariant text:
+//!
+//! ```
+//! use asupersync::lab::OracleRegistry;
+//!
+//! let matches = OracleRegistry::find_by_invariant("region close");
+//! assert!(matches.iter().any(|descriptor| descriptor.name == "quiescence"));
+//! ```
+//!
+//! Instantiate an object-safe oracle by name:
+//!
+//! ```
+//! use asupersync::lab::OracleRegistry;
+//!
+//! let oracle = OracleRegistry::instantiate("quiescence").unwrap();
+//! assert_eq!(oracle.invariant_name(), "quiescence");
+//! ```
 
 use super::Oracle;
 use super::quiescence::QuiescenceOracle;
@@ -857,5 +887,19 @@ mod tests {
         };
         assert!(matches!(err, OracleRegistryError::NotInstantiable { .. }));
         crate::test_complete!("registry_finds_quiescence_by_invariant_text_and_instantiates_it");
+    }
+
+    #[test]
+    fn testing_for_agents_lists_reported_registry_names() {
+        init_test("testing_for_agents_lists_reported_registry_names");
+        let docs = include_str!("../../../TESTING_FOR_AGENTS.md");
+        assert!(docs.contains("asupersync::lab::OracleRegistry"));
+        for name in OracleRegistry::reported_names() {
+            assert!(
+                docs.contains(&format!("`{name}`")),
+                "TESTING_FOR_AGENTS.md must list `{name}`"
+            );
+        }
+        crate::test_complete!("testing_for_agents_lists_reported_registry_names");
     }
 }

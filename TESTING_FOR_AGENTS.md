@@ -39,6 +39,17 @@ Common selections:
 - `loser_drain`, `finalizer`, `region_tree`, `deadline_monotone`: structured concurrency checks
 - `channel_atomicity`, `waker_dedup`: channel and wakeup correctness
 
+Reportable registry names:
+
+- `task_leak`, `quiescence`, `cancellation_protocol`, `loser_drain`
+- `obligation_leak`, `ambient_authority`, `finalizer`, `region_tree`
+- `region_leak`, `deadline_monotone`, `cancel_correctness`, `cancel_debt`
+- `cancel_signal_ordering`, `runtime_epoch`, `channel_atomicity`, `waker_dedup`
+- `actor_leak`, `supervision`, `mailbox`, `rref_access`
+- `reply_linearity`, `registry_lease`, `down_order`, `supervisor_quiescence`
+- `fabric_publish`, `fabric_reply`, `fabric_quiescence`, `fabric_redelivery` when
+  `messaging-fabric` is enabled
+
 ## Required Metadata
 
 Every new deterministic test or script should expose these in the test name,
