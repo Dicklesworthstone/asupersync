@@ -164,7 +164,7 @@
     {
       "artifact_id": "proof-lane-manifest-canonical",
       "path": "artifacts/proof_lane_manifest_v1.json",
-      "path_status": "missing_expected_artifact",
+      "path_status": "tracked",
       "owning_bead": "asupersync-artifact-governance-awdiwy.1",
       "producing_lane": "proof-lane-manifest-contract",
       "domain": "proof manifest",
@@ -173,7 +173,7 @@
         "tests/proof_lane_manifest_contract.rs"
       ],
       "citeability_class": "blocked-frontier",
-      "freshness_policy": "not_citeable_until_path_exists_and_contract_passes_on_current_main",
+      "freshness_policy": "cite_only_for_manifest_structure_and_lane_inventory_when_proof_lane_manifest_contract_passes_on_current_main",
       "superseded_by": null,
       "no_claim_boundaries": [
         "does_not_prove_any_manifest_lane",
@@ -181,7 +181,7 @@
         "does_not_authorize_local_cargo_fallback"
       ],
       "exclusion_reason": null,
-      "evidence_scope": "Names the canonical proof-lane manifest gap currently referenced by docs/tests; this is blocker evidence, not proof-lane evidence.",
+      "evidence_scope": "Names the canonical proof-lane manifest and its contract; cite only for manifest structure and lane inventory, not as evidence that any lane passed.",
       "source_references": [
         "AGENTS.md",
         "tests/proof_lane_manifest_contract.rs"
@@ -217,7 +217,7 @@
     {
       "artifact_id": "rch-stale-progress-receipt-contract",
       "path": "artifacts/rch_stale_progress_receipt_contract_v1.json",
-      "path_status": "missing_expected_artifact",
+      "path_status": "tracked",
       "owning_bead": "asupersync-artifact-governance-awdiwy.1",
       "producing_lane": "rch-stale-progress-receipt-contract",
       "domain": "rch stale progress",
@@ -226,7 +226,7 @@
         "tests/rch_stale_progress_receipt_contract.rs"
       ],
       "citeability_class": "blocked-frontier",
-      "freshness_policy": "not_citeable_until_contract_fixture_exists_and_focused_rch_lane_passes_remotely",
+      "freshness_policy": "cite_only_as_stale_progress_schema_when_focused_rch_contract_lane_passes_remotely",
       "superseded_by": null,
       "no_claim_boundaries": [
         "does_not_prove_source_correctness",
@@ -234,7 +234,7 @@
         "does_not_authorize_local_cargo_fallback"
       ],
       "exclusion_reason": null,
-      "evidence_scope": "Documents the expected stale-progress receipt surface while the current-tree contract fixture is absent.",
+      "evidence_scope": "Documents the stale-progress receipt schema and fixtures; cite only as blocker-class receipt shape, not as source-correctness proof.",
       "source_references": [
         "docs/rch_stale_progress_receipt.md",
         "tests/rch_stale_progress_receipt_contract.rs"
@@ -243,7 +243,7 @@
     {
       "artifact_id": "runtime-pressure-control-evidence-contract",
       "path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
-      "path_status": "missing_expected_artifact",
+      "path_status": "tracked",
       "owning_bead": "asupersync-bwcdfl.4",
       "producing_lane": "runtime-pressure-control-evidence-contract",
       "domain": "runtime pressure",
@@ -252,7 +252,7 @@
         "tests/runtime_pressure_control_evidence_contract.rs"
       ],
       "citeability_class": "blocked-frontier",
-      "freshness_policy": "not_citeable_until_contract_fixture_exists_and_remote_required_contract_lane_passes",
+      "freshness_policy": "cite_only_as_runtime_pressure_contract_when_remote_required_contract_lane_passes",
       "superseded_by": null,
       "no_claim_boundaries": [
         "does_not_prove_adaptive_controls_are_production_enabled",
@@ -260,7 +260,7 @@
         "does_not_prove_deadlock_absence"
       ],
       "exclusion_reason": null,
-      "evidence_scope": "Tracks the runtime-pressure evidence contract gap and preserves its no-local-fallback boundary.",
+      "evidence_scope": "Tracks the runtime-pressure evidence contract and preserves its no-local-fallback boundary; not a performance or production-enablement claim.",
       "source_references": [
         "docs/runtime_pressure_triage_runbook.md",
         "tests/runtime_pressure_control_evidence_contract.rs"

@@ -365,10 +365,7 @@ fn specific_seed_rows_preserve_fail_closed_citation_boundaries() {
     let rows = rows_by_id(&ledger);
 
     let proof_manifest = rows["proof-lane-manifest-canonical"];
-    assert_eq!(
-        string(proof_manifest, "path_status"),
-        "missing_expected_artifact"
-    );
+    assert_eq!(string(proof_manifest, "path_status"), "tracked");
     assert_eq!(
         string(proof_manifest, "citeability_class"),
         "blocked-frontier"
@@ -379,10 +376,11 @@ fn specific_seed_rows_preserve_fail_closed_citation_boundaries() {
     );
 
     let rch = rows["rch-stale-progress-receipt-contract"];
-    assert_eq!(string(rch, "path_status"), "missing_expected_artifact");
+    assert_eq!(string(rch, "path_status"), "tracked");
     assert!(string_set(rch, "no_claim_boundaries").contains("does_not_prove_source_correctness"));
 
     let runtime = rows["runtime-pressure-control-evidence-contract"];
+    assert_eq!(string(runtime, "path_status"), "tracked");
     assert!(
         string_set(runtime, "no_claim_boundaries")
             .contains("does_not_prove_adaptive_controls_are_production_enabled")
