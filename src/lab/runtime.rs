@@ -21,7 +21,8 @@ use crate::runtime::scheduler::{DispatchLane, ScheduleCertificate};
 use crate::time::VirtualClock;
 use crate::trace::TraceBufferHandle;
 use crate::trace::crashpack::{
-    CrashPack, CrashPackConfig, FailureInfo, FailureOutcome, ReplayCommand, artifact_filename,
+    CrashPack, CrashPackConfig, CrashPackWriteError, CrashPackWriter, FailureInfo, FailureOutcome,
+    FileCrashPackWriter, ReplayCommand, artifact_filename,
 };
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
@@ -34,10 +35,14 @@ use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::det_hash::{DetHashMap, DetHashSet};
 use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use std::{fmt, future::Future};
+
+const AUTO_ARTIFACTS_ENV: &str = "ASUPERSYNC_AUTO_ARTIFACTS";
+const TEST_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_TEST_ARTIFACTS_DIR";
 
 /// Summary of a trace certificate built from the current trace buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +161,12 @@ pub struct LabRunReport {
 }
 
 impl LabRunReport {
+    /// Returns true when the report satisfies the `#[lab_test]` success contract.
+    #[must_use]
+    pub fn lab_test_passed(&self) -> bool {
+        self.quiescent && self.oracle_report.all_passed() && self.invariant_violations.is_empty()
+    }
+
     /// Convert to JSON for artifact storage.
     #[must_use]
     pub fn to_json(&self) -> serde_json::Value {
@@ -213,6 +224,59 @@ impl LabRunReport {
             return None;
         }
         Some(exporter.export_behavior(module_name))
+    }
+}
+
+/// Crashpack artifact written by the lab auto-forensics path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabAutoCrashpack {
+    /// Filesystem path of the written crashpack.
+    pub path: String,
+    /// One-command replay recipe embedded in the crashpack.
+    pub replay: ReplayCommand,
+}
+
+/// Error returned when lab auto-forensics cannot write a crashpack.
+#[derive(Debug)]
+pub enum LabAutoCrashpackError {
+    /// Creating the deterministic artifact directory failed.
+    CreateDir {
+        /// Directory that could not be created.
+        path: PathBuf,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
+    /// Serializing or writing the crashpack failed.
+    Write(CrashPackWriteError),
+}
+
+impl fmt::Display for LabAutoCrashpackError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CreateDir { path, source } => {
+                write!(
+                    f,
+                    "failed to create lab crashpack directory {}: {source}",
+                    path.display()
+                )
+            }
+            Self::Write(source) => write!(f, "{source}"),
+        }
+    }
+}
+
+impl std::error::Error for LabAutoCrashpackError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::CreateDir { source, .. } => Some(source),
+            Self::Write(source) => Some(source),
+        }
+    }
+}
+
+impl From<CrashPackWriteError> for LabAutoCrashpackError {
+    fn from(source: CrashPackWriteError) -> Self {
+        Self::Write(source)
     }
 }
 
@@ -1291,9 +1355,88 @@ impl LabRuntime {
     /// Returns `None` for passing reports.
     #[must_use]
     pub fn build_crashpack_for_report(&self, run: &LabRunReport) -> Option<CrashPack> {
+        self.build_crashpack_for_report_with_outcome(run, None, None)
+    }
+
+    /// Write a deterministic crashpack for a failing lab-test report.
+    ///
+    /// Returns `Ok(None)` when the report is passing, when auto-artifacts are
+    /// disabled with `ASUPERSYNC_AUTO_ARTIFACTS=0`, or when no crashpack can be
+    /// built for the report.
+    pub fn write_auto_crashpack_for_report(
+        &self,
+        test_name: &str,
+        run: &LabRunReport,
+    ) -> Result<Option<LabAutoCrashpack>, LabAutoCrashpackError> {
+        self.write_auto_crashpack(test_name, run, None, None)
+    }
+
+    /// Write a deterministic crashpack for a panic observed by a lab test body.
+    ///
+    /// This is used when a test panics before oracle assertions are evaluated.
+    pub fn write_auto_crashpack_for_panic(
+        &self,
+        test_name: &str,
+        run: &LabRunReport,
+        panic_message: &str,
+    ) -> Result<Option<LabAutoCrashpack>, LabAutoCrashpackError> {
+        self.write_auto_crashpack(
+            test_name,
+            run,
+            Some(FailureOutcome::Panicked {
+                message: panic_message.to_string(),
+            }),
+            Some(format!("panic:{panic_message}")),
+        )
+    }
+
+    fn write_auto_crashpack(
+        &self,
+        test_name: &str,
+        run: &LabRunReport,
+        forced_outcome: Option<FailureOutcome>,
+        extra_violation: Option<String>,
+    ) -> Result<Option<LabAutoCrashpack>, LabAutoCrashpackError> {
+        if !auto_artifacts_enabled() {
+            return Ok(None);
+        }
+
+        let Some(mut pack) =
+            self.build_crashpack_for_report_with_outcome(run, forced_outcome, extra_violation)
+        else {
+            return Ok(None);
+        };
+
+        let dir = auto_crashpack_dir(test_name, &pack);
+        std::fs::create_dir_all(&dir).map_err(|source| LabAutoCrashpackError::CreateDir {
+            path: dir.clone(),
+            source,
+        })?;
+
+        let path = dir.join(artifact_filename(&pack));
+        let path = path.to_string_lossy().into_owned();
+        let replay = pack.replay_command(Some(&path));
+        pack.replay = Some(replay.clone());
+
+        let writer = FileCrashPackWriter::new(dir);
+        let artifact = writer.write(&pack)?;
+
+        Ok(Some(LabAutoCrashpack {
+            path: artifact.path().to_string(),
+            replay,
+        }))
+    }
+
+    fn build_crashpack_for_report_with_outcome(
+        &self,
+        run: &LabRunReport,
+        forced_outcome: Option<FailureOutcome>,
+        extra_violation: Option<String>,
+    ) -> Option<CrashPack> {
         let has_failure = !run.oracle_report.all_passed()
             || !run.invariant_violations.is_empty()
-            || run.refinement_firewall_rule_id.is_some();
+            || run.refinement_firewall_rule_id.is_some()
+            || forced_outcome.is_some();
         if !has_failure {
             return None;
         }
@@ -1346,6 +1489,9 @@ impl LabRuntime {
                 "refinement_firewall:minimal_counterexample_prefix_len={prefix_len}"
             ));
         }
+        if let Some(extra_violation) = extra_violation {
+            oracle_violations.push(extra_violation);
+        }
         oracle_violations.sort();
         oracle_violations.dedup();
 
@@ -1354,9 +1500,10 @@ impl LabRuntime {
             .failure(FailureInfo {
                 task,
                 region,
-                outcome: FailureOutcome::Err,
+                outcome: forced_outcome.unwrap_or(FailureOutcome::Err),
                 virtual_time: Time::from_nanos(run.now_nanos),
             })
+            .created_at(run.now_nanos)
             .oracle_violations(oracle_violations)
             .replay(ReplayCommand::from_config(&crash_config, None));
 
@@ -2650,6 +2797,155 @@ where
             )
         });
     (output, report)
+}
+
+/// Run an async `#[lab_test]` body under a fresh [`LabRuntime`].
+///
+/// This helper uses the same root-task model as [`run_async_under_lab_with_config`],
+/// and adds lab-test failure handling: task failures, missing completion, oracle
+/// failures, invariant violations, and non-quiescence all write an auto-crashpack
+/// before panicking.
+///
+/// # Panics
+///
+/// Panics when the async body fails, does not finish, or when the final
+/// [`LabRunReport`] violates the lab-test success contract.
+#[must_use]
+pub fn run_async_lab_test_with_config<F, Fut, T>(
+    config: LabConfig,
+    test_name: &str,
+    task: F,
+) -> (T, LabRunReport)
+where
+    F: FnOnce(crate::cx::Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let seed = config.seed;
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime
+        .state
+        .create_root_region(crate::types::Budget::INFINITE);
+    let (task_id, mut handle) = runtime
+        .state
+        .create_task(root, crate::types::Budget::INFINITE, async move {
+            let cx = crate::cx::Cx::current()
+                .unwrap_or_else(|| panic!("lab task started without current Cx for seed {seed}"));
+            task(cx).await
+        })
+        .unwrap_or_else(|error| panic!("failed to spawn lab task for seed {seed}: {error}"));
+    runtime
+        .scheduler
+        .lock()
+        .schedule(task_id, crate::types::Budget::INFINITE.priority);
+
+    let report = runtime.run_until_quiescent_with_report();
+    let output = match handle.try_join() {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            let cause = format!(
+                "lab task did not finish for seed {seed}: quiescent={}, steps_total={}",
+                report.quiescent, report.steps_total
+            );
+            let artifact = runtime.write_auto_crashpack_for_panic(test_name, &report, &cause);
+            panic!(
+                "{}",
+                lab_auto_failure_message(test_name, seed, &cause, artifact)
+            );
+        }
+        Err(error) => {
+            let cause = format!("lab task failed for seed {seed}: {error}");
+            let artifact = runtime.write_auto_crashpack_for_panic(test_name, &report, &cause);
+            panic!(
+                "{}",
+                lab_auto_failure_message(test_name, seed, &cause, artifact)
+            );
+        }
+    };
+
+    if !report.lab_test_passed() {
+        let cause = lab_report_failure_summary(&report);
+        let artifact = runtime.write_auto_crashpack_for_report(test_name, &report);
+        panic!(
+            "{}",
+            lab_auto_failure_message(test_name, seed, &cause, artifact)
+        );
+    }
+
+    (output, report)
+}
+
+fn lab_auto_failure_message(
+    test_name: &str,
+    seed: u64,
+    cause: &str,
+    artifact: Result<Option<LabAutoCrashpack>, LabAutoCrashpackError>,
+) -> String {
+    let mut message = format!(
+        "lab_test failed for {test_name} seed {seed}; rerun: \
+         ASUPERSYNC_LAB_TEST_SEED={seed} cargo test {test_name} -- --nocapture; \
+         cause: {cause}"
+    );
+    match artifact {
+        Ok(Some(artifact)) => {
+            message.push_str(&format!(
+                "\ncrashpack: {}\nreplay: {}",
+                artifact.path, artifact.replay.command_line
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            message.push_str(&format!("\ncrashpack_error: {error}"));
+        }
+    }
+    message
+}
+
+fn lab_report_failure_summary(report: &LabRunReport) -> String {
+    format!(
+        "quiescent={}; oracle_passed={}; invariant_violations={:?}; trace_fingerprint={}",
+        report.quiescent,
+        report.oracle_report.all_passed(),
+        report.invariant_violations,
+        report.trace_fingerprint
+    )
+}
+
+fn auto_artifacts_enabled() -> bool {
+    std::env::var(AUTO_ARTIFACTS_ENV).map_or(true, |value| value != "0")
+}
+
+fn auto_crashpack_dir(test_name: &str, pack: &CrashPack) -> PathBuf {
+    let root = std::env::var_os(TEST_ARTIFACTS_DIR_ENV).map_or_else(
+        || PathBuf::from("target").join("test-artifacts"),
+        PathBuf::from,
+    );
+    root.join(sanitize_test_artifact_segment(test_name))
+        .join(format!(
+            "seed-{:016x}-trace-{:016x}",
+            pack.seed(),
+            pack.fingerprint()
+        ))
+}
+
+fn sanitize_test_artifact_segment(test_name: &str) -> String {
+    let mut sanitized = String::with_capacity(test_name.len());
+    let mut last_was_separator = false;
+    for ch in test_name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            sanitized.push(ch);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            sanitized.push('_');
+            last_was_separator = true;
+        }
+    }
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "lab-test".to_string()
+    } else {
+        sanitized.to_string()
+    }
 }
 
 const DEFAULT_LAB_CANCEL_STREAK_LIMIT: usize = 16;

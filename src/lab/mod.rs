@@ -194,9 +194,10 @@ pub use replay::{
     normalize_for_replay_with_config, summarize_spork_reports, traces_equivalent,
 };
 pub use runtime::{
-    AutoAdvanceTermination, HarnessAttachmentKind, HarnessAttachmentRef, LabConfigSummary,
-    LabRunReport, LabRuntime, LabTraceCertificateSummary, SporkHarnessReport, VirtualTimeReport,
-    run_async_under_lab, run_async_under_lab_with_config,
+    AutoAdvanceTermination, HarnessAttachmentKind, HarnessAttachmentRef, LabAutoCrashpack,
+    LabAutoCrashpackError, LabConfigSummary, LabRunReport, LabRuntime, LabTraceCertificateSummary,
+    SporkHarnessReport, VirtualTimeReport, run_async_lab_test_with_config, run_async_under_lab,
+    run_async_under_lab_with_config,
 };
 pub use scenario::{
     CancellationSection, CancellationStrategy, ChaosSection, FaultAction, FaultEvent, IncludeRef,

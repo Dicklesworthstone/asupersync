@@ -156,7 +156,8 @@ fn scenario_id_seed_matrix(lab: &mut LabRuntime) {
 ```
 
 Backed by compiling code: `asupersync-macros/tests/lab_test.rs` covers raw
-`&mut LabRuntime`, async `&Cx`, seed matrices, chaos, and seed failure output.
+`&mut LabRuntime`, async `&Cx`, seed matrices, chaos, seed failure output, and
+automatic crashpack capture on failure.
 `src/lab/runtime.rs` includes representative in-crate ports for empty runtime,
 virtual time, timer-empty, clock pause/resume, clock skew, and auto-advance
 quiescence.
@@ -173,6 +174,12 @@ the setup block. Use `fn case(lab: &mut LabRuntime)` for raw state-level tests
 and `async fn case(cx: &Cx)` for root-task tests that should be driven to
 quiescence with oracle checks. Spell out a manual seed loop only when the test
 needs non-contiguous seeds or custom per-seed setup.
+
+Failing `#[lab_test]` cases write deterministic crashpacks by default under
+`ASUPERSYNC_TEST_ARTIFACTS_DIR` or `target/test-artifacts/<test>/<seed+trace>/`.
+Set `ASUPERSYNC_AUTO_ARTIFACTS=0` only for tests that intentionally assert
+stderr text and do not need forensic bundles. The panic tail includes both the
+crashpack path and replay command.
 
 ## Recipe 4: Exploration And Replay
 

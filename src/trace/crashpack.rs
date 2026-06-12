@@ -512,6 +512,7 @@ impl CrashPack {
             failure: None,
             fingerprint: 0,
             event_count: 0,
+            created_at: None,
             canonical_prefix: Vec::new(),
             divergent_prefix: Vec::new(),
             evidence: Vec::new(),
@@ -569,6 +570,7 @@ pub struct CrashPackBuilder {
     failure: Option<FailureInfo>,
     fingerprint: u64,
     event_count: u64,
+    created_at: Option<u64>,
     canonical_prefix: Vec<Vec<TraceEventKey>>,
     divergent_prefix: Vec<ReplayEvent>,
     evidence: Vec<EvidenceEntrySnapshot>,
@@ -613,6 +615,16 @@ impl CrashPackBuilder {
     #[must_use]
     pub fn event_count(mut self, count: u64) -> Self {
         self.event_count = count;
+        self
+    }
+
+    /// Set an explicit `created_at` timestamp for deterministic artifacts.
+    ///
+    /// Lab-driven crash packs should pass virtual time here so serialized
+    /// artifacts are byte-stable across re-runs of the same seed.
+    #[must_use]
+    pub fn created_at(mut self, created_at: u64) -> Self {
+        self.created_at = Some(created_at);
         self
     }
 
@@ -752,7 +764,16 @@ impl CrashPackBuilder {
             });
         }
 
-        let mut manifest = CrashPackManifest::new(self.config, self.fingerprint, self.event_count);
+        let mut manifest = if let Some(created_at) = self.created_at {
+            CrashPackManifest::new_with_created_at(
+                self.config,
+                self.fingerprint,
+                self.event_count,
+                created_at,
+            )
+        } else {
+            CrashPackManifest::new(self.config, self.fingerprint, self.event_count)
+        };
         manifest.attachments = attachments;
 
         Ok(CrashPack {

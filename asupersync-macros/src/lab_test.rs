@@ -107,36 +107,8 @@ fn expand_lab_test(args: LabTestArgs, mut item: ItemFn) -> Result<proc_macro2::T
     let end = LitInt::new(&args.seed_end.to_string(), Span::call_site());
     let chaos = args.chaos;
     let test_name_text = test_name.to_string();
-    let runner = match signature {
-        LabSignature::Runtime { arg } => quote! {
-            let __asupersync_report = {
-                let mut #arg = ::asupersync::lab::LabRuntime::new(
-                    __asupersync_lab_config(__asupersync_seed, __asupersync_chaos)
-                );
-                #inner_name(&mut #arg);
-                #arg.run_until_quiescent_with_report()
-            };
-            __asupersync_assert_lab_report(
-                &__asupersync_report,
-                __asupersync_seed,
-                __asupersync_test_name,
-            );
-        },
-        LabSignature::AsyncCx { arg } => quote! {
-            let (_, __asupersync_report) =
-                ::asupersync::lab::run_async_under_lab_with_config(
-                    __asupersync_lab_config(__asupersync_seed, __asupersync_chaos),
-                    |#arg| async move {
-                        #inner_name(&#arg).await
-                    },
-                );
-            __asupersync_assert_lab_report(
-                &__asupersync_report,
-                __asupersync_seed,
-                __asupersync_test_name,
-            );
-        },
-    };
+    let runner = lab_runner_tokens(signature, &inner_name);
+    let support_fns = lab_support_tokens();
 
     Ok(quote! {
         #(#wrapper_attrs)*
@@ -159,21 +131,7 @@ fn expand_lab_test(args: LabTestArgs, mut item: ItemFn) -> Result<proc_macro2::T
                     "lab_test seed start"
                 );
 
-                let __asupersync_result = std::panic::catch_unwind(
-                    std::panic::AssertUnwindSafe(|| {
-                        #runner
-                    })
-                );
-                if let Err(__asupersync_payload) = __asupersync_result {
-                    panic!(
-                        "{}",
-                        __asupersync_lab_failure_message(
-                            __asupersync_test_name,
-                            __asupersync_seed,
-                            __asupersync_payload.as_ref(),
-                        )
-                    );
-                }
+                #runner
             }
 
             ::asupersync::tracing_compat::info!(
@@ -186,62 +144,151 @@ fn expand_lab_test(args: LabTestArgs, mut item: ItemFn) -> Result<proc_macro2::T
                 "lab_test matrix completed"
             );
 
-            fn __asupersync_lab_config(
-                seed: u64,
-                chaos: bool,
-            ) -> ::asupersync::lab::LabConfig {
-                let config = ::asupersync::lab::LabConfig::new(seed);
-                if chaos {
-                    config.with_light_chaos()
-                } else {
-                    config
-                }
-            }
-
-            fn __asupersync_assert_lab_report(
-                report: &::asupersync::lab::LabRunReport,
-                seed: u64,
-                test_name: &str,
-            ) {
-                if report.quiescent
-                    && report.oracle_report.all_passed()
-                    && report.invariant_violations.is_empty()
-                {
-                    return;
-                }
-
-                panic!(
-                    "lab_test failed for {test_name} seed {seed}; rerun: \
-                     ASUPERSYNC_LAB_TEST_SEED={seed} cargo test {test_name} -- --nocapture; \
-                     quiescent={}; oracle_passed={}; invariant_violations={:?}; \
-                     trace_fingerprint={}",
-                    report.quiescent,
-                    report.oracle_report.all_passed(),
-                    report.invariant_violations,
-                    report.trace_fingerprint
-                );
-            }
-
-            fn __asupersync_lab_failure_message(
-                test_name: &str,
-                seed: u64,
-                payload: &(dyn std::any::Any + Send),
-            ) -> String {
-                let cause = payload
-                    .downcast_ref::<&str>()
-                    .map(|text| (*text).to_string())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "non-string panic payload".to_string());
-                format!(
-                    "lab_test failed for {test_name} seed {seed}; rerun: \
-                     ASUPERSYNC_LAB_TEST_SEED={seed} cargo test {test_name} -- --nocapture; \
-                     cause: {cause}"
-                )
-            }
+            #support_fns
         }
 
         #item
     })
+}
+
+fn lab_runner_tokens(signature: LabSignature, inner_name: &Ident) -> proc_macro2::TokenStream {
+    match signature {
+        LabSignature::Runtime { arg } => quote! {
+            let mut #arg = ::asupersync::lab::LabRuntime::new(
+                __asupersync_lab_config(__asupersync_seed, __asupersync_chaos)
+            );
+            let __asupersync_body_result = std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| {
+                    #inner_name(&mut #arg);
+                })
+            );
+            if let Err(__asupersync_payload) = __asupersync_body_result {
+                let __asupersync_report = #arg.report();
+                let __asupersync_cause =
+                    __asupersync_panic_cause(__asupersync_payload.as_ref());
+                let __asupersync_artifact = #arg.write_auto_crashpack_for_panic(
+                    __asupersync_test_name,
+                    &__asupersync_report,
+                    &__asupersync_cause,
+                );
+                panic!(
+                    "{}",
+                    __asupersync_lab_failure_message(
+                        __asupersync_test_name,
+                        __asupersync_seed,
+                        &__asupersync_cause,
+                        __asupersync_artifact,
+                    )
+                );
+            }
+
+            let __asupersync_report = #arg.run_until_quiescent_with_report();
+            __asupersync_assert_lab_report(
+                &#arg,
+                &__asupersync_report,
+                __asupersync_seed,
+                __asupersync_test_name,
+            );
+        },
+        LabSignature::AsyncCx { arg } => quote! {
+            let (_, __asupersync_report) =
+                ::asupersync::lab::run_async_lab_test_with_config(
+                    __asupersync_lab_config(__asupersync_seed, __asupersync_chaos),
+                    __asupersync_test_name,
+                    |#arg| async move {
+                        #inner_name(&#arg).await
+                    },
+            );
+            let _ = __asupersync_report;
+        },
+    }
+}
+
+fn lab_support_tokens() -> proc_macro2::TokenStream {
+    quote! {
+        fn __asupersync_lab_config(
+            seed: u64,
+            chaos: bool,
+        ) -> ::asupersync::lab::LabConfig {
+            let config = ::asupersync::lab::LabConfig::new(seed);
+            if chaos {
+                config.with_light_chaos()
+            } else {
+                config
+            }
+        }
+
+        fn __asupersync_assert_lab_report(
+            lab: &::asupersync::lab::LabRuntime,
+            report: &::asupersync::lab::LabRunReport,
+            seed: u64,
+            test_name: &str,
+        ) {
+            if report.lab_test_passed() {
+                return;
+            }
+
+            let __asupersync_cause = format!(
+                "quiescent={}; oracle_passed={}; invariant_violations={:?}; \
+                 trace_fingerprint={}",
+                report.quiescent,
+                report.oracle_report.all_passed(),
+                report.invariant_violations,
+                report.trace_fingerprint
+            );
+            let __asupersync_artifact =
+                lab.write_auto_crashpack_for_report(test_name, report);
+            panic!(
+                "{}",
+                __asupersync_lab_failure_message(
+                    test_name,
+                    seed,
+                    &__asupersync_cause,
+                    __asupersync_artifact,
+                )
+            );
+        }
+
+        fn __asupersync_panic_cause(
+            payload: &(dyn std::any::Any + Send),
+        ) -> String {
+            payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_string())
+        }
+
+        fn __asupersync_lab_failure_message(
+            test_name: &str,
+            seed: u64,
+            cause: &str,
+            artifact: Result<
+                Option<::asupersync::lab::LabAutoCrashpack>,
+                ::asupersync::lab::LabAutoCrashpackError,
+            >,
+        ) -> String {
+            let mut message = format!(
+                "lab_test failed for {test_name} seed {seed}; rerun: \
+                 ASUPERSYNC_LAB_TEST_SEED={seed} cargo test {test_name} -- --nocapture; \
+                 cause: {cause}"
+            );
+            match artifact {
+                Ok(Some(artifact)) => {
+                    message.push_str(&format!(
+                        "\ncrashpack: {}\nreplay: {}",
+                        artifact.path,
+                        artifact.replay.command_line,
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    message.push_str(&format!("\ncrashpack_error: {error}"));
+                }
+            }
+            message
+        }
+    }
 }
 
 fn wrapper_attrs(attrs: &[Attribute]) -> Vec<Attribute> {
