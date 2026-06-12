@@ -1,0 +1,415 @@
+{
+  "contract_version": "lock-order-inventory-v1",
+  "bead_id": "asupersync-lock-order-deadlock-proof-dw03gl.1",
+  "description": "Checked inventory of lock-order-relevant runtime surfaces before lock-order behavior changes.",
+  "source_of_truth": {
+    "artifact": "artifacts/lock_order_inventory_v1.json",
+    "contract_test": "tests/lock_order_inventory_contract.rs",
+    "contended_mutex": "src/sync/contended_mutex.rs",
+    "lock_ordering": "src/sync/lock_ordering.rs",
+    "sharded_state": "src/runtime/sharded_state.rs",
+    "trace_buffer": "src/trace/buffer.rs",
+    "evidence_sink": "src/evidence_sink.rs",
+    "contention_inventory": "docs/runtime_state_contention_inventory.md"
+  },
+  "no_claim_boundaries": [
+    {
+      "boundary_id": "not_broad_scheduler_performance_proof",
+      "description": "This inventory does not prove scheduler throughput, latency, or contention improvement."
+    },
+    {
+      "boundary_id": "not_global_third_party_deadlock_proof",
+      "description": "This inventory does not prove all parking_lot or std mutexes in the workspace are globally deadlock-free."
+    },
+    {
+      "boundary_id": "not_replacement_for_sharded_state_conformance",
+      "description": "This inventory does not replace sharded-state conformance, lab replay, or runtime behavior tests."
+    }
+  ],
+  "rank_map": [
+    {
+      "order_symbol": "E",
+      "rank_name": "Config",
+      "numeric_rank": 10,
+      "from_name_samples": [
+        "config_cache"
+      ],
+      "source_file": "src/sync/lock_ordering.rs"
+    },
+    {
+      "order_symbol": "D",
+      "rank_name": "Instrumentation",
+      "numeric_rank": 20,
+      "from_name_samples": [
+        "metrics_collector",
+        "instrumentation_buffer",
+        "trace_buffer"
+      ],
+      "source_file": "src/sync/lock_ordering.rs"
+    },
+    {
+      "order_symbol": "B",
+      "rank_name": "Regions",
+      "numeric_rank": 30,
+      "from_name_samples": [
+        "regions_table"
+      ],
+      "source_file": "src/sync/lock_ordering.rs"
+    },
+    {
+      "order_symbol": "A",
+      "rank_name": "Tasks",
+      "numeric_rank": 40,
+      "from_name_samples": [
+        "tasks_queue",
+        "scheduler_queue"
+      ],
+      "source_file": "src/sync/lock_ordering.rs"
+    },
+    {
+      "order_symbol": "C",
+      "rank_name": "Obligations",
+      "numeric_rank": 50,
+      "from_name_samples": [
+        "obligations_ledger"
+      ],
+      "source_file": "src/sync/lock_ordering.rs"
+    }
+  ],
+  "module_classifier_samples": [
+    {
+      "sample": "runtime_state",
+      "module": "Runtime"
+    },
+    {
+      "sample": "sync_mutex",
+      "module": "Sync"
+    },
+    {
+      "sample": "cx_scope",
+      "module": "Cx"
+    },
+    {
+      "sample": "cancel_protocol",
+      "module": "Cancel"
+    },
+    {
+      "sample": "obligation_tracker",
+      "module": "Obligation"
+    },
+    {
+      "sample": "channel_mpsc",
+      "module": "Channel"
+    },
+    {
+      "sample": "io_tcp",
+      "module": "Io"
+    },
+    {
+      "sample": "tasks",
+      "module": "Other"
+    },
+    {
+      "sample": "regions",
+      "module": "Io"
+    }
+  ],
+  "lock_sites": [
+    {
+      "lock_name": "regions",
+      "category": "sharded_state_shard",
+      "rank_name": "Regions",
+      "order_symbol": "B",
+      "module_classifier_result": "Io",
+      "semantic_module": "Runtime",
+      "source_file": "src/runtime/sharded_state.rs",
+      "source_marker": "regions: ContendedMutex::new(\"regions\", RegionTable::new())",
+      "lock_kind": "ContendedMutex<RegionTable>",
+      "automatic_enforcement": true,
+      "enforcement_path": "ContendedMutex::new -> LockRank::from_name -> lock()/try_lock check_acquire/record_acquire",
+      "held_across_callbacks_or_trace_emission": true,
+      "callback_trace_notes": "ShardGuard multi-shard operations may emit trace after shard mutation; the trace mutex is outside LockShard enforcement and must not re-enter shard mutation."
+    },
+    {
+      "lock_name": "tasks",
+      "category": "sharded_state_shard",
+      "rank_name": "Tasks",
+      "order_symbol": "A",
+      "module_classifier_result": "Other",
+      "semantic_module": "Runtime",
+      "source_file": "src/runtime/sharded_state.rs",
+      "source_marker": "tasks: ContendedMutex::new(\"tasks\", TaskTable::new())",
+      "lock_kind": "ContendedMutex<TaskTable>",
+      "automatic_enforcement": true,
+      "enforcement_path": "ContendedMutex::new -> LockRank::from_name -> lock()/try_lock check_acquire/record_acquire",
+      "held_across_callbacks_or_trace_emission": true,
+      "callback_trace_notes": "Task completion and spawn paths can emit trace while protected state is being updated; trace emission is a documented D-shard gap, not a broad callback allowance."
+    },
+    {
+      "lock_name": "obligations",
+      "category": "sharded_state_shard",
+      "rank_name": "Obligations",
+      "order_symbol": "C",
+      "module_classifier_result": "Obligation",
+      "semantic_module": "Runtime",
+      "source_file": "src/runtime/sharded_state.rs",
+      "source_marker": "obligations: ContendedMutex::new(\"obligations\", ObligationTable::new())",
+      "lock_kind": "ContendedMutex<ObligationTable>",
+      "automatic_enforcement": true,
+      "enforcement_path": "ContendedMutex::new -> LockRank::from_name -> lock()/try_lock check_acquire/record_acquire",
+      "held_across_callbacks_or_trace_emission": true,
+      "callback_trace_notes": "Obligation resolution paths may trigger trace emission after C-shard updates; D remains convention-checked rather than LockShard-checked."
+    },
+    {
+      "lock_name": "runtime_state",
+      "category": "legacy_unified_runtime_state",
+      "rank_name": null,
+      "order_symbol": null,
+      "module_classifier_result": "Runtime",
+      "semantic_module": "Runtime",
+      "source_file": "src/runtime/builder.rs",
+      "source_marker": "ContendedMutex::new(\"runtime_state\",",
+      "lock_kind": "ContendedMutex<RuntimeState>",
+      "automatic_enforcement": false,
+      "unknown_rank_justification": "The legacy unified RuntimeState lock spans regions, tasks, obligations, trace, metrics, and config, so a single rank would be misleading.",
+      "queued_followup": "L2 must decide whether to keep the unified lock outside rank enforcement, wrap it as a legacy global lock, or remove it when ShardedState becomes the runtime backing.",
+      "held_across_callbacks_or_trace_emission": true,
+      "callback_trace_notes": "Unified RuntimeState methods can emit trace from inside state methods; this row records the gap and does not claim third-party deadlock proof."
+    },
+    {
+      "lock_name": "task_table",
+      "category": "high_value_test_surface",
+      "rank_name": "Tasks",
+      "order_symbol": "A",
+      "module_classifier_result": "Other",
+      "semantic_module": "Runtime",
+      "source_file": "src/runtime/scheduler/local_queue.rs",
+      "source_marker": "ContendedMutex::new(\"task_table\", tasks)",
+      "lock_kind": "ContendedMutex<TaskTable>",
+      "automatic_enforcement": true,
+      "enforcement_path": "ContendedMutex::new -> LockRank::from_name -> lock()/try_lock check_acquire/record_acquire",
+      "held_across_callbacks_or_trace_emission": false,
+      "callback_trace_notes": "LocalQueue test helper lock for task-table exercises; not a production shard replacement."
+    },
+    {
+      "lock_name": "metamorphic.runtime_state",
+      "category": "high_value_test_surface",
+      "rank_name": null,
+      "order_symbol": null,
+      "module_classifier_result": "Runtime",
+      "semantic_module": "Runtime",
+      "source_file": "src/runtime/scheduler/metamorphic_tests.rs",
+      "source_marker": "ContendedMutex::new(\"metamorphic.runtime_state\",",
+      "lock_kind": "ContendedMutex<RuntimeState>",
+      "automatic_enforcement": false,
+      "unknown_rank_justification": "Scheduler metamorphic tests intentionally exercise the legacy unified state shape; it crosses B/A/C and cannot be ranked as one shard.",
+      "queued_followup": "Fold into the L2 legacy RuntimeState policy alongside runtime_state before fail-closed unknown-lock enforcement.",
+      "held_across_callbacks_or_trace_emission": true,
+      "callback_trace_notes": "Test-only helper can exercise state paths that emit trace."
+    },
+    {
+      "lock_name": "ws_fairness.runtime_state",
+      "category": "high_value_test_surface",
+      "rank_name": null,
+      "order_symbol": null,
+      "module_classifier_result": "Runtime",
+      "semantic_module": "Runtime",
+      "source_file": "src/runtime/scheduler/work_stealing_fairness_metamorphic.rs",
+      "source_marker": "ContendedMutex::new(\n        \"ws_fairness.runtime_state\",",
+      "lock_kind": "ContendedMutex<RuntimeState>",
+      "automatic_enforcement": false,
+      "unknown_rank_justification": "Work-stealing fairness tests use the legacy unified state lock, which spans multiple conceptual ranks.",
+      "queued_followup": "L2 legacy RuntimeState policy should cover this test helper or rename it when the scheduler accepts ShardedState.",
+      "held_across_callbacks_or_trace_emission": true,
+      "callback_trace_notes": "Test-only scheduler path can exercise trace-emitting runtime state behavior."
+    },
+    {
+      "lock_name": "atp_transfer_registry",
+      "category": "non_runtime_contended_mutex",
+      "rank_name": null,
+      "order_symbol": null,
+      "module_classifier_result": "Other",
+      "semantic_module": "ATP",
+      "source_file": "src/atp/sdk.rs",
+      "source_marker": "ContendedMutex::new(\"atp_transfer_registry\", HashMap::new())",
+      "lock_kind": "ContendedMutex<HashMap<TransferId, TransferRegistryEntry>>",
+      "automatic_enforcement": false,
+      "unknown_rank_justification": "ATP registry locks are outside the runtime B/A/C shard order and do not currently declare a separate ATP rank hierarchy.",
+      "queued_followup": "If ATP operations acquire runtime shard locks while holding this registry, L2 should add an explicit ATP lock-rank policy or rename/wrap the lock.",
+      "held_across_callbacks_or_trace_emission": false,
+      "callback_trace_notes": "Registry mutation is local to ATP transfer bookkeeping in the inspected constructor path."
+    },
+    {
+      "lock_name": "epoch_gc.last_advance",
+      "category": "non_runtime_contended_mutex",
+      "rank_name": null,
+      "order_symbol": null,
+      "module_classifier_result": "Other",
+      "semantic_module": "Runtime",
+      "source_file": "src/runtime/epoch_gc.rs",
+      "source_marker": "ContendedMutex::new(\"epoch_gc.last_advance\", Instant::now())",
+      "lock_kind": "ContendedMutex<Instant>",
+      "automatic_enforcement": false,
+      "unknown_rank_justification": "The epoch GC timestamp lock is a single-field rate limiter, not a runtime shard lock.",
+      "queued_followup": "L2 should either keep it outside the shard hierarchy with an explicit allow row or rename/wrap it if it is ever held across runtime shard acquisition.",
+      "held_across_callbacks_or_trace_emission": false,
+      "callback_trace_notes": "The inspected try_advance path updates Instant state only."
+    }
+  ],
+  "shard_guard_constructors": [
+    {
+      "constructor": "tasks_only",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "tasks"
+      ],
+      "rank_order": [
+        "A"
+      ],
+      "automatic_enforcement": true
+    },
+    {
+      "constructor": "regions_only",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "regions"
+      ],
+      "rank_order": [
+        "B"
+      ],
+      "automatic_enforcement": true
+    },
+    {
+      "constructor": "obligations_only",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "obligations"
+      ],
+      "rank_order": [
+        "C"
+      ],
+      "automatic_enforcement": true
+    },
+    {
+      "constructor": "for_spawn",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "regions",
+        "tasks"
+      ],
+      "rank_order": [
+        "B",
+        "A"
+      ],
+      "automatic_enforcement": true
+    },
+    {
+      "constructor": "for_obligation",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "regions",
+        "obligations"
+      ],
+      "rank_order": [
+        "B",
+        "C"
+      ],
+      "automatic_enforcement": true
+    },
+    {
+      "constructor": "for_task_completed",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "regions",
+        "tasks",
+        "obligations"
+      ],
+      "rank_order": [
+        "B",
+        "A",
+        "C"
+      ],
+      "automatic_enforcement": true
+    },
+    {
+      "constructor": "for_cancel",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "regions",
+        "tasks",
+        "obligations"
+      ],
+      "rank_order": [
+        "B",
+        "A",
+        "C"
+      ],
+      "automatic_enforcement": true
+    },
+    {
+      "constructor": "for_obligation_resolve",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "regions",
+        "tasks",
+        "obligations"
+      ],
+      "rank_order": [
+        "B",
+        "A",
+        "C"
+      ],
+      "automatic_enforcement": true
+    },
+    {
+      "constructor": "all",
+      "source_file": "src/runtime/sharded_state.rs",
+      "acquires": [
+        "regions",
+        "tasks",
+        "obligations"
+      ],
+      "rank_order": [
+        "B",
+        "A",
+        "C"
+      ],
+      "automatic_enforcement": true
+    }
+  ],
+  "hidden_mutex_surfaces": [
+    {
+      "surface_id": "trace_buffer_handle",
+      "rank_name": "Instrumentation",
+      "source_file": "src/trace/buffer.rs",
+      "source_marker": "buffer: Mutex<TraceBuffer>",
+      "lock_kind": "parking_lot::Mutex<TraceBuffer>",
+      "automatic_enforcement": false,
+      "held_across_callbacks_or_trace_emission": true,
+      "gap": "TraceBufferHandle::record_event runs the event builder while holding the trace buffer mutex; builders must stay lightweight and must not re-enter the same trace handle or shard mutation."
+    },
+    {
+      "surface_id": "jsonl_evidence_sink",
+      "rank_name": "Instrumentation",
+      "source_file": "src/evidence_sink.rs",
+      "source_marker": "inner: Mutex<JsonlExporter>",
+      "lock_kind": "parking_lot::Mutex<JsonlExporter>",
+      "automatic_enforcement": false,
+      "held_across_callbacks_or_trace_emission": false,
+      "gap": "Evidence append and flush are serialized behind an instrumentation mutex but are outside ContendedMutex rank enforcement."
+    },
+    {
+      "surface_id": "collector_evidence_sink",
+      "rank_name": "Instrumentation",
+      "source_file": "src/evidence_sink.rs",
+      "source_marker": "entries: Mutex<Vec<EvidenceLedger>>",
+      "lock_kind": "parking_lot::Mutex<Vec<EvidenceLedger>>",
+      "automatic_enforcement": false,
+      "held_across_callbacks_or_trace_emission": false,
+      "gap": "The test collector is a hidden instrumentation mutex and should not be treated as a runtime shard lock."
+    }
+  ],
+  "proof_commands": [
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_order_inventory_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test lock_order_inventory_contract -- --nocapture"
+  ]
+}

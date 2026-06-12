@@ -545,9 +545,30 @@ When reviewing sharding PRs, verify:
 - [ ] **Obligation orphan scan**: task_completed holds A+C simultaneously
 - [ ] **No shard leak**: Shard locks not exposed to task code (only through Cx/scope)
 - [ ] **Config immutability**: Shard E has no lock; all fields are read-only after init
-- [ ] **Instrumentation lock-free**: Shard D trace/metrics accessed without any shard lock
+- [ ] **Instrumentation isolation**: Shard D trace/metrics do not add a
+      `ShardGuard` lock, and any internal instrumentation mutex must not
+      re-enter shard mutation while held
 - [ ] **Test coverage**: New tests for each affected cross-shard operation
 - [ ] **Benchmark comparison**: Pre/post contention numbers from bd-3urgh baseline
+
+## Checked Lock-Order Inventory (asupersync-lock-order-deadlock-proof-dw03gl.1)
+
+`artifacts/lock_order_inventory_v1.json` is the machine-checked L1 inventory for
+the lock-order/deadlock proof track. It lists the current rank map, the
+`ShardedState` shard locks, `ShardGuard` constructors, selected high-value
+`ContendedMutex::new` test surfaces, legacy unknown-rank locks, and hidden
+instrumentation mutexes behind trace/evidence handles.
+
+The artifact is checked by `tests/lock_order_inventory_contract.rs`. The focused
+remote proof lane is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_order_inventory_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test lock_order_inventory_contract -- --nocapture
+```
+
+No-claim boundaries: this inventory is not a broad scheduler performance proof,
+not a global third-party deadlock proof for every `parking_lot`/`std` mutex, and
+not a replacement for sharded-state conformance or lab replay.
 
 ## NUMA Ready-Queue Sharding Evaluation (asupersync-c8thc8.7)
 
