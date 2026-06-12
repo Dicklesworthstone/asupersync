@@ -2241,10 +2241,17 @@ impl NatsClient {
             )));
         }
 
-        // Check if we have the full payload + trailing CRLF
+        // Check if we have the full payload + trailing CRLF. Use checked
+        // arithmetic like the HMSG parser: `max_read_buffer` is
+        // caller-configurable, so these sums must not be able to wrap.
+        // (`header_end` indexes into `buf`, so `+ 2` cannot overflow.)
         let payload_start = header_end + 2;
-        let payload_end = payload_start + payload_len;
-        let total_len = payload_end + 2; // +2 for trailing CRLF
+        let payload_end = payload_start
+            .checked_add(payload_len)
+            .ok_or_else(|| NatsError::Protocol("MSG payload bounds overflow".to_string()))?;
+        let total_len = payload_end
+            .checked_add(2) // +2 for trailing CRLF
+            .ok_or_else(|| NatsError::Protocol("MSG payload bounds overflow".to_string()))?;
 
         if buf.len() < total_len {
             return Ok(None); // Need more data

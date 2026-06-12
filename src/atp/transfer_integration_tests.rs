@@ -212,12 +212,19 @@ mod tests {
             let mut manifest_hash = [0u8; 32];
             let mut policy_hash = [0u8; 32];
 
-            // Fill with deterministic but varied data based on entropy
+            // Fill with deterministic data that depends on EVERY bit of
+            // `entropy`. The previous `(entropy ...) % 256` formula kept only
+            // the low byte, so entropies differing in the high bits derived
+            // identical transfer IDs; `entropy * 2` also overflowed u64 in
+            // debug builds for large entropy values.
+            let bytes = entropy.to_be_bytes();
             for i in 0..32 {
-                peer_id[i] = ((entropy + i as u64) % 256) as u8;
-                nonce[i] = ((entropy * 2 + i as u64) % 256) as u8;
-                manifest_hash[i] = ((entropy * 3 + i as u64) % 256) as u8;
-                policy_hash[i] = ((entropy * 4 + i as u64) % 256) as u8;
+                let byte = bytes[i % 8];
+                let offset = i as u8;
+                peer_id[i] = byte.wrapping_add(offset);
+                nonce[i] = byte.wrapping_mul(2).wrapping_add(offset);
+                manifest_hash[i] = byte.wrapping_mul(3).wrapping_add(offset);
+                policy_hash[i] = byte.wrapping_mul(5).wrapping_add(offset);
             }
 
             TransferId::derive(peer_id, nonce, manifest_hash, policy_hash)

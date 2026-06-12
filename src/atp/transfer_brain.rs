@@ -442,11 +442,15 @@ impl TransferBrain {
             .ok_or_else(|| Error::new(ErrorKind::Internal))?;
 
         if success {
-            self.completed_chunks.insert(chunk_id.clone());
+            let newly_completed = self.completed_chunks.insert(chunk_id.clone());
             info!("Completed chunk {} successfully", chunk_id.as_string());
 
-            // Update metrics based on completion
-            self.update_metrics_on_completion(&chunk, &actual_resources);
+            // Update metrics only the first time a chunk completes;
+            // re-completions must not skew running averages or double-add
+            // resume value.
+            if newly_completed {
+                self.update_metrics_on_completion(&chunk, &actual_resources);
+            }
         } else {
             warn!("Chunk {} failed, rescheduling", chunk_id.as_string());
             // Store size before moving chunk
@@ -765,12 +769,17 @@ impl TransferBrain {
         chunk: &ScheduledChunk,
         actual_resources: &ResourceUsage,
     ) {
-        // Update CPU per GiB metric
+        // Update CPU-per-GiB as an exact running average over per-chunk
+        // samples. The sample must be normalized by the chunk's size (the
+        // field is CPU usage PER GIB, not per chunk), and the prior sample
+        // count is len() - 1 because `complete_chunk` inserts this chunk
+        // into `completed_chunks` before calling here.
         let gib = (chunk.size_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
         if gib > 0.0 {
-            let current_cpu_gib = self.metrics.cpu_per_gib * (self.completed_chunks.len() as f64);
-            self.metrics.cpu_per_gib = (current_cpu_gib + actual_resources.cpu)
-                / ((self.completed_chunks.len() + 1) as f64);
+            let sample = actual_resources.cpu / gib;
+            let prior = (self.completed_chunks.len().saturating_sub(1)) as f64;
+            self.metrics.cpu_per_gib =
+                self.metrics.cpu_per_gib.mul_add(prior, sample) / (prior + 1.0);
         }
 
         // Update early usability metrics
@@ -971,6 +980,54 @@ mod tests {
         assert_eq!(state.in_flight_count, 0);
         assert_eq!(state.completed_count, 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_per_gib_running_average_is_exact() -> Result<()> {
+        const GIB: usize = 1024 * 1024 * 1024;
+        let config = TransferBrainConfig::default();
+        let mut brain = TransferBrain::new(config);
+        let budget = Budget::unlimited();
+
+        let resources = |cpu: f64| ResourceUsage {
+            cpu,
+            disk_io: 0.05,
+            network: 0.1,
+            memory: 1024.0,
+            duration: Duration::from_millis(100),
+        };
+
+        // Two 1-GiB chunks with cpu samples 1.0 and 2.0: the running average
+        // must be exactly 1.5 (previously the formula double-weighted the old
+        // average and divided by N+2, and never normalized by chunk size).
+        for (offset, cpu) in [(0u64, 1.0f64), (GIB as u64, 2.0f64)] {
+            let object_id = test_object_id("avg-obj");
+            let chunk = ScheduledChunk {
+                chunk_id: ChunkId::new(object_id.clone(), offset, GIB),
+                object_id,
+                priority: TransferPriority::Standard,
+                size_bytes: GIB,
+                cpu_cost: 0.1,
+                disk_cost: 0.1,
+                network_cost: 0.1,
+                deadline: None,
+                early_usability_value: 0.0,
+                decode_usefulness: 0.5,
+                resume_value: 0,
+                trace_id: test_trace_id(99),
+            };
+            let chunk_id = chunk.chunk_id.clone();
+            brain.schedule_chunk(chunk)?;
+            let _selected = brain.next_chunk(&budget, test_trace_id(99))?.unwrap();
+            brain.complete_chunk(&chunk_id, true, resources(cpu))?;
+        }
+
+        let average = brain.metrics().cpu_per_gib;
+        assert!(
+            (average - 1.5).abs() < 1e-9,
+            "running average must be exact, got {average}"
+        );
         Ok(())
     }
 

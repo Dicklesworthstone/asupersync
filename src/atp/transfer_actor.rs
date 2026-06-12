@@ -90,6 +90,14 @@ impl SessionId {
     }
 }
 
+/// Pressure levels above which the actor auto-pauses active sessions.
+const AUTO_PAUSE_CPU_UTILIZATION: f64 = 0.95;
+const AUTO_PAUSE_DISK_PRESSURE: f64 = 0.9;
+/// Recovery levels (a hysteresis band below the pause thresholds) at which
+/// auto-paused sessions are resumed.
+const AUTO_RESUME_CPU_UTILIZATION: f64 = 0.85;
+const AUTO_RESUME_DISK_PRESSURE: f64 = 0.8;
+
 /// State of a transfer session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionState {
@@ -136,6 +144,10 @@ pub struct TransferSession {
     pub error: Option<Error>,
     /// Session trace ID
     pub trace_id: TraceId,
+    /// Whether the session was paused automatically by the pressure monitor
+    /// (as opposed to an explicit `PauseSession` request). Only auto-paused
+    /// sessions are auto-resumed when pressure recovers.
+    pub auto_paused: bool,
 }
 
 impl TransferSession {
@@ -161,6 +173,7 @@ impl TransferSession {
             chunks_completed: 0,
             error: None,
             trace_id,
+            auto_paused: false,
         }
     }
 
@@ -559,11 +572,26 @@ impl TransferActor {
             }
         }
 
-        // Pause sessions if pressure is too high
-        if pressure.cpu_utilization > 0.95 || pressure.disk_pressure > 0.9 {
+        // Pause sessions if pressure is too high; resume auto-paused
+        // sessions once pressure recovers (hysteresis band below the pause
+        // thresholds so transient flapping does not toggle sessions).
+        // Explicitly paused sessions are never auto-resumed.
+        if pressure.cpu_utilization > AUTO_PAUSE_CPU_UTILIZATION
+            || pressure.disk_pressure > AUTO_PAUSE_DISK_PRESSURE
+        {
             for session in self.sessions.values_mut() {
                 if session.state == SessionState::Active {
+                    session.auto_paused = true;
                     session.transition_to(SessionState::Paused);
+                }
+            }
+        } else if pressure.cpu_utilization <= AUTO_RESUME_CPU_UTILIZATION
+            && pressure.disk_pressure <= AUTO_RESUME_DISK_PRESSURE
+        {
+            for session in self.sessions.values_mut() {
+                if session.state == SessionState::Paused && session.auto_paused {
+                    session.auto_paused = false;
+                    session.transition_to(SessionState::Active);
                 }
             }
         }
@@ -575,6 +603,9 @@ impl TransferActor {
             .get_mut(&session_id)
             .ok_or_else(|| Error::new(ErrorKind::ObjectMismatch))?;
 
+        // An explicit pause is sticky: clear the pressure-pause marker so the
+        // pressure monitor does not auto-resume this session.
+        session.auto_paused = false;
         if session.state == SessionState::Active {
             session.transition_to(SessionState::Paused);
             info!("Paused session {}", session_id.as_string());
@@ -590,6 +621,7 @@ impl TransferActor {
             .ok_or_else(|| Error::new(ErrorKind::ObjectMismatch))?;
 
         if session.state == SessionState::Paused {
+            session.auto_paused = false;
             session.transition_to(SessionState::Active);
             info!("Resumed session {}", session_id.as_string());
         }
@@ -1068,6 +1100,79 @@ fn read_network_snapshot() -> Option<NetworkSnapshot> {
 mod tests {
     use super::*;
     use crate::atp::object::ContentId;
+    use std::future::Future;
+
+    /// Drive a future that completes without yielding (the actor's message
+    /// handlers contain no await points).
+    fn poll_ready<F: Future>(fut: F) -> F::Output {
+        let mut fut = std::pin::pin!(fut);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("future was not immediately ready"),
+        }
+    }
+
+    fn insert_active_session(actor: &mut TransferActor, counter: u64) -> SessionId {
+        let object_id = ObjectId::content(ContentId::from_bytes(b"pressure-object"));
+        let session_id = SessionId::new(object_id.clone(), counter);
+        let mut session = TransferSession::new(
+            session_id.clone(),
+            object_id,
+            RegionId::new_for_test(1, 0),
+            TaskId::new_for_test(2, 0),
+            TransferBrainConfig::default(),
+            TraceId::from_raw(3),
+        );
+        session.transition_to(SessionState::Active);
+        actor.sessions.insert(session_id.clone(), session);
+        session_id
+    }
+
+    #[test]
+    fn pressure_auto_pause_then_auto_resume() {
+        let (mut actor, _handle) = TransferActor::new(TransferActorConfig::default());
+        let session_id = insert_active_session(&mut actor, 1);
+
+        let high = SystemPressure {
+            cpu_utilization: 0.99,
+            ..SystemPressure::default()
+        };
+        poll_ready(actor.update_pressure(high));
+        assert_eq!(actor.sessions[&session_id].state, SessionState::Paused);
+        assert!(actor.sessions[&session_id].auto_paused);
+
+        // Recovery below the hysteresis band must resume the session;
+        // previously a pressure-pause was permanent (no auto-resume path).
+        let low = SystemPressure {
+            cpu_utilization: 0.1,
+            ..SystemPressure::default()
+        };
+        poll_ready(actor.update_pressure(low));
+        assert_eq!(actor.sessions[&session_id].state, SessionState::Active);
+        assert!(!actor.sessions[&session_id].auto_paused);
+    }
+
+    #[test]
+    fn explicit_pause_survives_pressure_recovery() {
+        let (mut actor, _handle) = TransferActor::new(TransferActorConfig::default());
+        let session_id = insert_active_session(&mut actor, 2);
+
+        poll_ready(actor.pause_session(session_id.clone())).expect("pause session");
+        assert_eq!(actor.sessions[&session_id].state, SessionState::Paused);
+
+        let low = SystemPressure {
+            cpu_utilization: 0.1,
+            ..SystemPressure::default()
+        };
+        poll_ready(actor.update_pressure(low));
+        assert_eq!(
+            actor.sessions[&session_id].state,
+            SessionState::Paused,
+            "explicitly paused sessions must not auto-resume"
+        );
+    }
 
     #[test]
     fn test_transfer_actor_creation() {
