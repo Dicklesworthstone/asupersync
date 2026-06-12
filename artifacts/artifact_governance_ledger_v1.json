@@ -245,6 +245,34 @@
       ]
     },
     {
+      "artifact_id": "artifact-governance-seed-backfill",
+      "path": "artifacts/artifact_governance_seed_backfill_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.7",
+      "producing_lane": "artifact-governance-seed-backfill-contract",
+      "domain": "artifact governance",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/artifact_governance_seed_backfill_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_artifact_governance_seed_backfill_when_seed_backfill_contract_passes_on_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_select_ambiguous_owners",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Machine-checked representative seed backfill across high-value artifact families with ownership-confidence routing and explicit ambiguous-owner preservation.",
+      "source_references": [
+        "artifacts/artifact_governance_seed_backfill_v1.json",
+        "docs/proof/artifact_governance_seed_backfill.md",
+        "tests/artifact_governance_seed_backfill_contract.rs"
+      ]
+    },
+    {
       "artifact_id": "proof-lane-manifest-canonical",
       "path": "artifacts/proof_lane_manifest_v1.json",
       "path_status": "tracked",
