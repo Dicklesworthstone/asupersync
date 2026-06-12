@@ -13,15 +13,48 @@
 //! drain via the D2.3 two-stage GOAWAY primitives on
 //! [`crate::http::h2::connection::Connection`].
 
+use crate::channel::mpsc;
+use crate::codec::Framed;
+use crate::cx::Cx;
 use crate::http::h1::types::{Method, Request, Response, Version};
-use crate::http::h2::error::H2Error;
+use crate::http::h2::connection::{CLIENT_PREFACE, Connection, FrameCodec, ReceivedFrame};
+use crate::http::h2::error::{ErrorCode, H2Error};
+use crate::http::h2::frame::Frame;
 use crate::http::h2::hpack::Header;
-use std::net::SocketAddr;
+use crate::http::h2::settings::Settings;
+use crate::io::AsyncReadExt as _;
+use crate::net::tcp::listener::TcpListener;
+use crate::net::tcp::stream::TcpStream;
+use crate::runtime::{JoinHandle, RuntimeHandle};
+use crate::server::connection::ConnectionManager;
+use crate::server::shutdown::{
+    DrainStep, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal, ShutdownStats,
+};
+use crate::stream::Stream;
+use crate::tracing_compat::error;
+use crate::types::Time;
+use std::collections::HashMap;
+use std::future::Future;
+use std::io;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
+use std::time::Duration;
+
+/// Tick interval for the listener's drain supervision loop and for the
+/// stage-1 → stage-2 GOAWAY spacing inside the connection driver (one
+/// round-trip-ish window for racing in-flight stream creation, RFC 9113
+/// §6.8).
+const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
+
+/// Capacity of the per-connection handler-response funnel.
+const RESPONSE_FUNNEL_CAPACITY: usize = 64;
 
 /// Connection-specific h1 headers that MUST NOT be carried into HTTP/2
 /// messages (RFC 9113 §8.2.2). `te` is handled separately: it is permitted
 /// with the single value `trailers`.
-#[allow(dead_code)] // consumed by the connection driver in increment 2 (br-asupersync-eprpk6)
 const CONNECTION_SPECIFIC_HEADERS: &[&str] = &[
     "connection",
     "keep-alive",
@@ -46,7 +79,6 @@ const CONNECTION_SPECIFIC_HEADERS: &[&str] = &[
 /// Returns a protocol-level [`H2Error`] when required pseudo-headers are
 /// missing, the method token is invalid, or an unknown request pseudo-header
 /// appears.
-#[allow(dead_code)] // consumed by the connection driver in increment 2 (br-asupersync-eprpk6)
 pub(crate) fn request_from_h2_headers(
     headers: Vec<Header>,
     body: Vec<u8>,
@@ -108,7 +140,6 @@ pub(crate) fn request_from_h2_headers(
 /// field names are lowercase on the wire), and strips connection-specific
 /// h1 headers that MUST NOT appear in h2 messages (RFC 9113 §8.2.2),
 /// including any `te` value other than `trailers`.
-#[allow(dead_code)] // consumed by the connection driver in increment 2 (br-asupersync-eprpk6)
 pub(crate) fn h2_headers_from_response(response: &Response) -> Vec<Header> {
     let mut out = Vec::with_capacity(response.headers.len() + 1);
     out.push(Header::new(":status", response.status.to_string()));
@@ -123,6 +154,755 @@ pub(crate) fn h2_headers_from_response(response: &Response) -> Vec<Header> {
         out.push(Header::new(lowered, value.clone()));
     }
     out
+}
+
+/// RAII in-flight request counter guard (mirrors the HTTP/1.1 server's
+/// guard): acquired when a complete request is dispatched to its handler,
+/// released after the response frames are queued on the connection.
+struct InFlightRequestGuard {
+    counter: Option<Arc<AtomicUsize>>,
+}
+
+impl InFlightRequestGuard {
+    fn acquire(counter: Option<&Arc<AtomicUsize>>) -> Self {
+        if let Some(counter) = counter {
+            counter.fetch_add(1, Ordering::AcqRel);
+        }
+        Self {
+            counter: counter.cloned(),
+        }
+    }
+}
+
+impl Drop for InFlightRequestGuard {
+    fn drop(&mut self) {
+        if let Some(counter) = &self.counter {
+            counter.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Race `fut` against the shutdown signal reaching `ForceClosing`
+/// (HTTP/1.1 server parity): `None` means force-close fired and the future
+/// was dropped without completing.
+async fn race_force_close<F: Future>(signal: &ShutdownSignal, fut: F) -> Option<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    let mut force_close_fut = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    std::future::poll_fn(|cx| {
+        if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+            return Poll::Ready(None);
+        }
+        if force_close_fut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        fut.as_mut().poll(cx).map(Some)
+    })
+    .await
+}
+
+/// A handler response travelling back to the connection driver, carrying
+/// the in-flight guard so accounting is released only after the response
+/// frames are queued.
+type FunnelItem = (u32, Response, InFlightRequestGuard);
+
+/// One wake-up of the connection driver's event select.
+enum DriverEvent {
+    /// An incoming frame (or EOF when `None`).
+    Frame(Option<Result<Frame, H2Error>>),
+    /// A handler finished and its response is ready to encode.
+    Response(FunnelItem),
+    /// The shutdown signal entered `Draining`: begin the stage-1 GOAWAY.
+    DrainRequested,
+    /// One drain tick elapsed with the stage-1 warning outstanding:
+    /// advertise the definitive stage-2 GOAWAY.
+    FinalizeTick,
+    /// The shutdown signal entered `ForceClosing`: drop the transport.
+    ForceClose,
+}
+
+/// Flush every frame the connection has queued onto the transport.
+///
+/// Flow-control-blocked DATA stays queued inside the connection (its
+/// `next_frame` re-queues it) and is retried after the next processed
+/// frame (e.g. a WINDOW_UPDATE) pumps again.
+async fn pump_writes(
+    conn: &mut Connection,
+    framed: &mut Framed<TcpStream, FrameCodec>,
+) -> io::Result<()> {
+    while let Some(frame) = conn.next_frame() {
+        framed.send(frame).map_err(io::Error::other)?;
+    }
+    std::future::poll_fn(|cx| framed.poll_flush(cx)).await
+}
+
+/// Wait for the next driver event: incoming frame, completed handler
+/// response, or a shutdown-phase transition.
+async fn next_driver_event(
+    framed: &mut Framed<TcpStream, FrameCodec>,
+    resp_rx: &mut mpsc::Receiver<FunnelItem>,
+    task_cx: &Cx,
+    signal: &ShutdownSignal,
+    watch_drain: bool,
+    finalize_tick_armed: bool,
+) -> DriverEvent {
+    if watch_drain && signal.is_shutting_down() {
+        return DriverEvent::DrainRequested;
+    }
+    let mut recv_fut = std::pin::pin!(resp_rx.recv(task_cx));
+    let mut force_fut = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    let mut drain_fut = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::Draining));
+    let mut tick_fut = std::pin::pin!(async {
+        let now = Cx::current()
+            .and_then(|cx| cx.timer_driver())
+            .map_or_else(crate::time::wall_now, |timer| timer.now());
+        crate::time::sleep(now, DRAIN_SUPERVISION_TICK).await;
+    });
+    std::future::poll_fn(move |cx| {
+        if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+            || force_fut.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(DriverEvent::ForceClose);
+        }
+        if watch_drain && drain_fut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(DriverEvent::DrainRequested);
+        }
+        if finalize_tick_armed && tick_fut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(DriverEvent::FinalizeTick);
+        }
+        // Cancel-correct channels make dropping a partially-polled recv
+        // safe: no item is consumed unless the future completes.
+        if let Poll::Ready(Ok(item)) = recv_fut.as_mut().poll(cx) {
+            return Poll::Ready(DriverEvent::Response(item));
+        }
+        match Pin::new(&mut *framed).poll_next(cx) {
+            Poll::Ready(item) => Poll::Ready(DriverEvent::Frame(item)),
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
+}
+
+/// Dispatch one complete request to the handler on its own task.
+///
+/// The spawned task races the handler against force-close (h1 parity) and
+/// funnels the response back to the driver together with the in-flight
+/// guard. Mapping failures reset the stream rather than killing the
+/// connection.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_h2_request<F, Fut>(
+    conn: &mut Connection,
+    stream_id: u32,
+    headers: Vec<Header>,
+    body: Vec<u8>,
+    peer_addr: Option<SocketAddr>,
+    handler: &Arc<F>,
+    resp_tx: &mpsc::Sender<FunnelItem>,
+    shutdown_signal: &ShutdownSignal,
+    in_flight_requests: &Arc<AtomicUsize>,
+    runtime: &RuntimeHandle,
+) where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    let request = match request_from_h2_headers(headers, body, peer_addr) {
+        Ok(request) => request,
+        Err(_) => {
+            conn.reset_stream(stream_id, ErrorCode::ProtocolError);
+            return;
+        }
+    };
+    let guard = InFlightRequestGuard::acquire(Some(in_flight_requests));
+    let handler = Arc::clone(handler);
+    let resp_tx = resp_tx.clone();
+    let signal = shutdown_signal.clone();
+    let spawned = runtime.try_spawn(async move {
+        let Some(cx) = Cx::current() else {
+            drop(guard);
+            return;
+        };
+        let Some(response) = race_force_close(&signal, handler(request)).await else {
+            drop(guard);
+            return;
+        };
+        if let Ok(permit) = resp_tx.reserve(&cx).await {
+            permit.send((stream_id, response, guard));
+        }
+    });
+    if spawned.is_err() {
+        conn.reset_stream(stream_id, ErrorCode::InternalError);
+    }
+}
+
+/// Serve one accepted HTTP/2 connection until close, drain completion, or
+/// force-close (br-asupersync-eprpk6 increment 2).
+///
+/// Protocol shape: strip the 24-byte client preface (the sans-I/O
+/// [`Connection`] does not consume it), queue the server SETTINGS, then run
+/// an event loop multiplexing incoming frames, completed handler responses,
+/// and shutdown transitions. Draining uses the D2.3 two-stage GOAWAY: a
+/// stage-1 warning immediately, the definitive stage-2 boundary one drain
+/// tick later, transport close at
+/// [`Connection::graceful_shutdown_complete`].
+#[allow(clippy::too_many_lines)]
+async fn serve_h2_connection<F, Fut>(
+    mut stream: TcpStream,
+    peer_addr: Option<SocketAddr>,
+    handler: Arc<F>,
+    settings: Settings,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+    runtime: RuntimeHandle,
+) -> io::Result<()>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    let task_cx = Cx::current()
+        .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
+
+    let mut preface = [0u8; CLIENT_PREFACE.len()];
+    stream.read_exact(&mut preface).await?;
+    if preface != *CLIENT_PREFACE {
+        return Err(io::Error::other("invalid HTTP/2 client preface"));
+    }
+
+    let mut conn = Connection::server(settings);
+    conn.queue_initial_settings();
+    let mut framed = Framed::new(stream, FrameCodec::new());
+
+    let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
+    // Per-stream request assembly: headers arrive first, DATA accumulates
+    // until END_STREAM completes the request.
+    let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)> = HashMap::new();
+
+    loop {
+        pump_writes(&mut conn, &mut framed).await?;
+
+        if conn.graceful_shutdown_complete()
+            || (conn.goaway_received()
+                && conn.active_stream_count() == 0
+                && pending_requests.is_empty())
+        {
+            std::future::poll_fn(|cx| framed.poll_close(cx)).await?;
+            return Ok(());
+        }
+
+        let watch_drain = !conn.goaway_sent();
+        let finalize_tick_armed = conn.graceful_shutdown_pending();
+        let event = next_driver_event(
+            &mut framed,
+            &mut resp_rx,
+            &task_cx,
+            &shutdown_signal,
+            watch_drain,
+            finalize_tick_armed,
+        )
+        .await;
+
+        match event {
+            DriverEvent::ForceClose => {
+                // Escalation: drop the transport; spawned handler hops are
+                // raced against ForceClosing and request-region teardown is
+                // the cancellation backstop (h1 parity).
+                return Ok(());
+            }
+            DriverEvent::DrainRequested => {
+                conn.begin_graceful_shutdown(crate::bytes::Bytes::from_static(b"server draining"));
+            }
+            DriverEvent::FinalizeTick => {
+                conn.finalize_graceful_shutdown(crate::bytes::Bytes::new());
+            }
+            DriverEvent::Frame(None) => {
+                // Peer closed the transport.
+                return Ok(());
+            }
+            DriverEvent::Frame(Some(Err(decode_error))) => {
+                conn.goaway(decode_error.code, crate::bytes::Bytes::new());
+                pump_writes(&mut conn, &mut framed).await?;
+                let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                return Err(io::Error::other(decode_error));
+            }
+            DriverEvent::Frame(Some(Ok(frame))) => match conn.process_frame(frame) {
+                Err(protocol_error) => {
+                    conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
+                    pump_writes(&mut conn, &mut framed).await?;
+                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    return Err(io::Error::other(protocol_error));
+                }
+                Ok(Some(ReceivedFrame::Headers {
+                    stream_id,
+                    headers,
+                    end_stream,
+                })) => {
+                    if end_stream {
+                        dispatch_h2_request(
+                            &mut conn,
+                            stream_id,
+                            headers,
+                            Vec::new(),
+                            peer_addr,
+                            &handler,
+                            &resp_tx,
+                            &shutdown_signal,
+                            &in_flight_requests,
+                            &runtime,
+                        );
+                    } else {
+                        pending_requests.insert(stream_id, (headers, Vec::new()));
+                    }
+                }
+                Ok(Some(ReceivedFrame::Data {
+                    stream_id,
+                    data,
+                    end_stream,
+                })) => {
+                    if let Some((_, body)) = pending_requests.get_mut(&stream_id) {
+                        body.extend_from_slice(&data);
+                        if end_stream {
+                            let (headers, body) = pending_requests
+                                .remove(&stream_id)
+                                .expect("pending request present");
+                            dispatch_h2_request(
+                                &mut conn,
+                                stream_id,
+                                headers,
+                                body,
+                                peer_addr,
+                                &handler,
+                                &resp_tx,
+                                &shutdown_signal,
+                                &in_flight_requests,
+                                &runtime,
+                            );
+                        }
+                    }
+                }
+                Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
+                    pending_requests.remove(&stream_id);
+                }
+                Ok(_) => {}
+            },
+            DriverEvent::Response((stream_id, response, guard)) => {
+                let header_block = h2_headers_from_response(&response);
+                let end_stream = response.body.is_empty();
+                if conn
+                    .send_headers(stream_id, header_block, end_stream)
+                    .is_ok()
+                    && !end_stream
+                {
+                    let _ =
+                        conn.send_data(stream_id, crate::bytes::Bytes::from(response.body), true);
+                }
+                drop(guard);
+            }
+        }
+    }
+}
+
+/// Configuration for the HTTP/2 listener (br-asupersync-eprpk6).
+#[derive(Debug, Clone)]
+pub struct Http2ListenerConfig {
+    /// HTTP/2 connection settings advertised by the server.
+    pub settings: Settings,
+    /// Maximum concurrent connections. `None` means unlimited.
+    pub max_connections: Option<usize>,
+    /// Soft drain budget: when it elapses with requests in flight, the
+    /// drain supervisor escalates stragglers through force-close.
+    pub drain_timeout: Duration,
+    /// Hard drain deadline (clamped up to at least `drain_timeout`).
+    pub hard_drain_timeout: Duration,
+    /// Keep the listening socket bound (not accepting) until drain
+    /// completes (h1 parity, D2.4 AC5 semantics).
+    pub lb_compat_keep_socket: bool,
+    /// Time source for shutdown bookkeeping and drain supervision.
+    pub time_getter: fn() -> Time,
+}
+
+fn default_h2_listener_time_getter() -> Time {
+    Cx::current()
+        .and_then(|current| current.timer_driver())
+        .map_or_else(crate::time::wall_now, |driver| driver.now())
+}
+
+impl Default for Http2ListenerConfig {
+    fn default() -> Self {
+        Self {
+            settings: Settings::server(),
+            max_connections: Some(10_000),
+            drain_timeout: Duration::from_secs(30),
+            hard_drain_timeout: Duration::from_secs(60),
+            lb_compat_keep_socket: false,
+            time_getter: default_h2_listener_time_getter,
+        }
+    }
+}
+
+impl Http2ListenerConfig {
+    /// Set the advertised HTTP/2 settings.
+    #[must_use]
+    pub fn settings(mut self, settings: Settings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Set the maximum number of concurrent connections.
+    #[must_use]
+    pub fn max_connections(mut self, max: Option<usize>) -> Self {
+        self.max_connections = max;
+        self
+    }
+
+    /// Set the soft drain budget for graceful shutdown.
+    #[must_use]
+    pub fn drain_timeout(mut self, timeout: Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
+    }
+
+    /// Set the hard drain deadline budget for graceful shutdown.
+    #[must_use]
+    pub fn hard_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.hard_drain_timeout = timeout;
+        self
+    }
+
+    /// Keep the listening socket bound (not accepting) until drain
+    /// completes.
+    #[must_use]
+    pub fn lb_compat_keep_socket(mut self, keep: bool) -> Self {
+        self.lb_compat_keep_socket = keep;
+        self
+    }
+
+    /// Set the time source for listener bookkeeping.
+    #[must_use]
+    pub fn time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.time_getter = time_getter;
+        self
+    }
+}
+
+fn h2_shutdown_signal_for_time_getter(time_getter: fn() -> Time) -> ShutdownSignal {
+    if std::ptr::fn_addr_eq(time_getter, default_h2_listener_time_getter as fn() -> Time) {
+        ShutdownSignal::new()
+    } else {
+        ShutdownSignal::with_time_getter(time_getter)
+    }
+}
+
+/// HTTP/2 server listener: accepts connections and serves each through the
+/// frame-pump driver with request-aware graceful drain
+/// (br-asupersync-eprpk6 increment 3; mirrors [`Http1Listener`] semantics).
+///
+/// [`Http1Listener`]: crate::http::h1::listener::Http1Listener
+pub struct Http2Listener<F> {
+    tcp_listener: TcpListener,
+    handler: Arc<F>,
+    config: Http2ListenerConfig,
+    shutdown_signal: ShutdownSignal,
+    connection_manager: ConnectionManager,
+    in_flight_requests: Arc<AtomicUsize>,
+}
+
+impl<F, Fut> Http2Listener<F>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    /// Bind to the given address with default configuration.
+    pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A, handler: F) -> io::Result<Self> {
+        Self::bind_with_config(addr, handler, Http2ListenerConfig::default()).await
+    }
+
+    /// Bind with custom configuration.
+    pub async fn bind_with_config<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        handler: F,
+        config: Http2ListenerConfig,
+    ) -> io::Result<Self> {
+        let tcp_listener = TcpListener::bind(addr).await?;
+        Ok(Self::from_parts(tcp_listener, handler, config))
+    }
+
+    /// Create from an existing [`TcpListener`] with custom configuration.
+    #[must_use]
+    pub fn from_listener(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http2ListenerConfig,
+    ) -> Self {
+        Self::from_parts(tcp_listener, handler, config)
+    }
+
+    fn from_parts(tcp_listener: TcpListener, handler: F, config: Http2ListenerConfig) -> Self {
+        let shutdown_signal = h2_shutdown_signal_for_time_getter(config.time_getter);
+        let connection_manager = ConnectionManager::with_time_getter(
+            config.max_connections,
+            shutdown_signal.clone(),
+            config.time_getter,
+        );
+        Self {
+            tcp_listener,
+            handler: Arc::new(handler),
+            config,
+            shutdown_signal,
+            connection_manager,
+            in_flight_requests: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Returns a clone of the shutdown signal for external phase observation.
+    #[must_use]
+    pub fn shutdown_signal(&self) -> ShutdownSignal {
+        self.shutdown_signal.clone()
+    }
+
+    /// Begins graceful shutdown using the listener's configured drain timeout.
+    #[must_use]
+    pub fn begin_drain(&self) -> bool {
+        self.connection_manager
+            .begin_drain(self.config.drain_timeout)
+    }
+
+    /// Returns a reference to the connection manager.
+    #[must_use]
+    pub fn connection_manager(&self) -> &ConnectionManager {
+        &self.connection_manager
+    }
+
+    /// Returns the listener-wide in-flight request counter.
+    #[must_use]
+    pub fn in_flight_requests(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.in_flight_requests)
+    }
+
+    /// Returns the local address this listener is bound to.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.tcp_listener.local_addr()
+    }
+
+    /// Run the accept loop until shutdown, then drain with request-aware
+    /// supervision and return the shutdown statistics (including the
+    /// graceful-drain report).
+    #[allow(clippy::too_many_lines)]
+    pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
+        let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+        let mut shutdown_rx = self.shutdown_signal.subscribe();
+
+        enum AcceptOrShutdown {
+            Accept(io::Result<(TcpStream, SocketAddr)>),
+            Shutdown,
+        }
+
+        loop {
+            if self.shutdown_signal.is_shutting_down() {
+                break;
+            }
+
+            let result = {
+                let accept_fut = self.tcp_listener.accept();
+                let shutdown_fut = shutdown_rx.wait();
+                let mut accept_fut = core::pin::pin!(accept_fut);
+                let mut shutdown_fut = core::pin::pin!(shutdown_fut);
+                std::future::poll_fn(|cx| {
+                    if self.shutdown_signal.is_shutting_down() {
+                        return Poll::Ready(AcceptOrShutdown::Shutdown);
+                    }
+                    if shutdown_fut.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(AcceptOrShutdown::Shutdown);
+                    }
+                    if let Poll::Ready(r) = accept_fut.as_mut().poll(cx) {
+                        return Poll::Ready(AcceptOrShutdown::Accept(r));
+                    }
+                    Poll::Pending
+                })
+                .await
+            };
+
+            let (stream, addr) = match result {
+                AcceptOrShutdown::Shutdown => break,
+                AcceptOrShutdown::Accept(Ok(conn)) => conn,
+                AcceptOrShutdown::Accept(Err(ref e))
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue;
+                }
+                AcceptOrShutdown::Accept(Err(e)) => return Err(e),
+            };
+
+            let Some(guard) = self.connection_manager.register(addr) else {
+                drop(stream);
+                continue;
+            };
+
+            let handler = Arc::clone(&self.handler);
+            let settings = self.config.settings.clone();
+            let shutdown_signal = self.shutdown_signal.clone();
+            let in_flight_requests = Arc::clone(&self.in_flight_requests);
+            let runtime_for_conn = runtime.clone();
+            let spawn_result = runtime.try_spawn(async move {
+                let peer_addr = Some(addr);
+                if let Err(err) = serve_h2_connection(
+                    stream,
+                    peer_addr,
+                    handler,
+                    settings,
+                    shutdown_signal,
+                    in_flight_requests,
+                    runtime_for_conn,
+                )
+                .await
+                {
+                    // Bind unconditionally: tracing_compat::error! compiles
+                    // to nothing without the tracing feature.
+                    let _ = &err;
+                    error!(error = %err, "h2 connection task failed");
+                }
+                drop(guard);
+            });
+            match spawn_result {
+                Ok(handle) => tasks.push(handle),
+                Err(err) => {
+                    return Err(io::Error::other(format!(
+                        "failed to spawn h2 connection task: {err}"
+                    )));
+                }
+            }
+        }
+
+        // Drain phase: socket lifetime is explicit (h1 D2.4 AC5 parity).
+        let parked_socket = self
+            .config
+            .lb_compat_keep_socket
+            .then_some(self.tcp_listener);
+
+        if self.shutdown_signal.phase() == ShutdownPhase::Running {
+            let _ = self
+                .connection_manager
+                .begin_drain(self.config.drain_timeout);
+        }
+
+        // Request-aware drain supervision, CONCURRENT with the connection
+        // manager's own drain so connection-level accounting is untouched
+        // (sequential composition breaks force_closed accounting — see the
+        // h1 listener, D2.2b).
+        let supervise = async {
+            let drain_start = (self.config.time_getter)();
+            let mut supervisor = GracefulDrainSupervisor::new(
+                self.in_flight_requests.load(Ordering::Acquire),
+                drain_start,
+                self.config.drain_timeout,
+                self.config.hard_drain_timeout,
+            );
+            let mut hard_deadline_hit = false;
+            loop {
+                let now = (self.config.time_getter)();
+                match supervisor.observe(self.in_flight_requests.load(Ordering::Acquire), now) {
+                    DrainStep::Continue => {
+                        let sleep_now = Cx::current()
+                            .and_then(|cx| cx.timer_driver())
+                            .map_or_else(crate::time::wall_now, |timer| timer.now());
+                        crate::time::sleep(sleep_now, DRAIN_SUPERVISION_TICK).await;
+                    }
+                    DrainStep::Escalate => {
+                        let _ = self.shutdown_signal.begin_force_close();
+                    }
+                    DrainStep::Quiescent => break,
+                    DrainStep::HardDeadline => {
+                        hard_deadline_hit = true;
+                        let _ = self.shutdown_signal.begin_force_close();
+                        break;
+                    }
+                }
+            }
+            supervisor.finish((self.config.time_getter)(), hard_deadline_hit)
+        };
+        let drain = self.connection_manager.drain_with_stats();
+
+        let mut supervise = core::pin::pin!(supervise);
+        let mut drain = core::pin::pin!(drain);
+        let mut report_slot = None;
+        let mut stats_slot = None;
+        std::future::poll_fn(|cx| {
+            if report_slot.is_none()
+                && let Poll::Ready(report) = supervise.as_mut().poll(cx)
+            {
+                report_slot = Some(report);
+            }
+            if stats_slot.is_none()
+                && let Poll::Ready(stats) = drain.as_mut().poll(cx)
+            {
+                stats_slot = Some(stats);
+            }
+            if report_slot.is_some() && stats_slot.is_some() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        let mut stats = stats_slot.take().expect("drain stats present after join");
+        stats.drain_report = report_slot.take();
+
+        let is_force_closing = self.shutdown_signal.phase() == ShutdownPhase::ForceClosing;
+
+        for task in tasks {
+            if let Err(payload) = (CatchUnwind { inner: task }).await {
+                // Bind unconditionally: tracing_compat::error! compiles to
+                // nothing without the tracing feature.
+                let _ = &payload;
+                error!(
+                    message = %crate::cx::scope::payload_to_string(&payload),
+                    "h2 connection task panicked"
+                );
+            }
+        }
+
+        if self.connection_manager.is_empty() {
+            self.shutdown_signal.mark_stopped();
+            if is_force_closing {
+                let drain_report = stats.drain_report.take();
+                stats = self
+                    .shutdown_signal
+                    .collect_stats(stats.drained, stats.force_closed);
+                stats.drain_report = drain_report;
+            }
+        }
+
+        drop(parked_socket);
+        Ok(stats)
+    }
+}
+
+/// Panic isolation for connection-task joins (HTTP/1.1 listener parity):
+/// a panicked or force-cancelled task must not take down the listener's
+/// drain/stats path.
+#[pin_project::pin_project]
+struct CatchUnwind<F> {
+    #[pin]
+    inner: F,
+}
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            this.inner.as_mut().poll(cx)
+        }));
+        match result {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
+    }
 }
 
 #[cfg(test)]

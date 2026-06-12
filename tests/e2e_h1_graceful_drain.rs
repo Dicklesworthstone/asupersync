@@ -220,8 +220,13 @@ fn drain_escalates_stragglers() {
             asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5)).await;
         }
 
+        // The manager gets a LONG backstop deadline so the request-aware
+        // supervisor (config drain_timeout = 200ms) is deterministically the
+        // escalation driver; with equal deadlines the manager's own timeout
+        // can force-close first and the report records no escalation (the
+        // race surfaced in the h2 twin of this test).
         assert!(
-            manager.begin_drain(Duration::from_millis(200)),
+            manager.begin_drain(Duration::from_secs(5)),
             "begin_drain transitions Running -> Draining"
         );
 
