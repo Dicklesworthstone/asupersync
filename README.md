@@ -689,6 +689,20 @@ impl Cx {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Unsafe Boundaries
+
+The workspace denies unsafe code by default. Required exceptions are tracked in
+`artifacts/unsafe_boundary_ledger_v1.json`, with reviewer guidance in
+`docs/unsafe_boundary_ledger.md`. The ledger is the canonical unsafe-boundary
+inventory for auditors: each row names the source path, category,
+category-specific evidence, safety invariant, and explicit no-claim boundary.
+
+The focused `unsafe-boundary-ledger-contract` lane checks that the ledger still
+matches live unsafe source locators and that proof manifest/status wiring stays
+aligned. Passing that lane does not prove unsafe correctness, execute every
+platform-specific FFI path, or replace category evidence; it only proves the
+inventory and review-policy metadata are coherent.
+
 ### Scheduler Priority Lanes
 
 | Lane | Purpose | Priority |

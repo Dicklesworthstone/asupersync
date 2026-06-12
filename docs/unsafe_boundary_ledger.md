@@ -42,6 +42,14 @@ Each `sites[]` row must include:
 - `explicit_no_claims`: Boundaries that must not be inferred from this row.
 - `operation_locators`: The unsafe/allow sites found in the path.
 
+The top-level `category_evidence` object is the machine-readable review policy
+for category-specific evidence. Every key in `categories` must have a matching
+`category_evidence` entry with nonempty `required_evidence`,
+`review_workflow`, and `explicit_no_claims` lists. Each site row cross-references
+that policy through its `category`; reviewers should treat the row-level
+`expected_evidence` as the local pointer and the category entry as the concrete
+evidence checklist.
+
 UNSAFE-2 may split broad file rows into narrower item rows when enforcement
 needs per-block precision. If it does, it must keep stable identifiers or record
 the migration in the child bead closeout.
@@ -84,6 +92,15 @@ New unsafe code is acceptable only when all of these are true:
 5. The proof lane or test evidence does not overclaim. Test-only, fuzz,
    conformance, compat, and platform-specific rows must say what they do not
    prove.
+
+breakage rehearsal for unsafe review changes:
+
+1. Add a temporary unledgered unsafe site in a local throwaway edit.
+2. Run the focused contract command with `RCH_REQUIRE_REMOTE=1 rch exec`.
+3. Confirm the failure reports the path, line, site kind, nearby context, and
+   suggested site-id skeleton.
+4. Remove the temporary edit before committing. Never commit the rehearsal
+   breakage.
 
 ## Follow-Up Contract
 

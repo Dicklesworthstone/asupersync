@@ -96,6 +96,13 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn object<'a>(value: &'a Value, key: &str) -> &'a serde_json::Map<String, Value> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .unwrap_or_else(|| panic!("{key} must be an object"))
+}
+
 fn rust_source_paths() -> Vec<String> {
     let mut paths = Vec::new();
     collect_rust_source_paths(&repo_path(""), &mut paths);
@@ -629,6 +636,43 @@ fn validate_summary(ledger: &Value, locators: &BTreeSet<Locator>) {
     }
 }
 
+fn validate_category_evidence_policy(ledger: &Value) {
+    let categories = object(ledger, "categories");
+    let category_evidence = object(ledger, "category_evidence");
+    let category_keys = categories.keys().cloned().collect::<BTreeSet<_>>();
+    let evidence_keys = category_evidence.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        category_keys, evidence_keys,
+        "category_evidence keys must exactly match categories keys"
+    );
+
+    for (category, evidence) in category_evidence {
+        for key in ["required_evidence", "review_workflow", "explicit_no_claims"] {
+            let values = array(evidence, key);
+            assert!(!values.is_empty(), "{category}: {key} must be nonempty");
+            for value in values {
+                assert!(
+                    value.as_str().is_some_and(|text| !text.trim().is_empty()),
+                    "{category}: {key} entries must be nonempty strings"
+                );
+            }
+        }
+    }
+
+    for site in array(ledger, "sites") {
+        let site_id = string(site, "site_id");
+        let category = string(site, "category");
+        assert!(
+            category_evidence.contains_key(category),
+            "{site_id}: category {category} must have category_evidence"
+        );
+        assert!(
+            string(site, "expected_evidence").contains("Category-specific evidence"),
+            "{site_id}: expected_evidence must point reviewers at the category policy"
+        );
+    }
+}
+
 fn lane_by_id<'a>(manifest: &'a Value, lane_id: &str) -> &'a Value {
     array(manifest, "lanes")
         .iter()
@@ -652,6 +696,7 @@ fn unsafe_boundary_ledger_matches_source_locators() {
     let (ledger_locators, owner_by_locator) = ledger_locators(&ledger, &source_paths);
 
     validate_summary(&ledger, &ledger_locators);
+    validate_category_evidence_policy(&ledger);
     let diagnostics = compare_locators(
         &scanned,
         &ledger_locators,
@@ -766,4 +811,39 @@ fn manifest_and_status_rows_wire_the_contract_lane() {
         Some(PROOF_COMMAND)
     );
     assert!(string(claim, "notes").contains("does not prove unsafe correctness"));
+}
+
+#[test]
+fn docs_publish_unsafe_review_workflow_policy() {
+    let docs = read_repo_file("docs/unsafe_boundary_ledger.md");
+    let readme = read_repo_file("README.md");
+    let agents = read_repo_file("AGENTS.md");
+
+    for required in [
+        "category_evidence",
+        "category-specific evidence",
+        "breakage rehearsal",
+        "RCH_REQUIRE_REMOTE=1 rch exec",
+    ] {
+        assert!(
+            docs.contains(required),
+            "unsafe ledger docs must mention {required}"
+        );
+    }
+
+    for required in [
+        "artifacts/unsafe_boundary_ledger_v1.json",
+        "docs/unsafe_boundary_ledger.md",
+        "category-specific evidence",
+        "unsafe-boundary-ledger-contract",
+    ] {
+        assert!(
+            readme.contains(required),
+            "README unsafe policy must mention {required}"
+        );
+        assert!(
+            agents.contains(required),
+            "AGENTS unsafe policy must mention {required}"
+        );
+    }
 }

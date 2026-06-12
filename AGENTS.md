@@ -109,6 +109,17 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Configuration:** Cargo.toml workspace with members pattern
 - **Unsafe code:** Denied by default (`#![deny(unsafe_code)]`) — specific modules **or functions** that require unsafe (e.g., epoll reactor FFI, the env-var setter calls in `runtime/builder.rs`, GF(256) SIMD kernels in `raptorq/gf256.rs`) can use `#[allow(unsafe_code)]` at file scope (`#![...]`) or at item scope (`#[...]` on the enclosing fn / impl). Per-function allow is preferred when the unsafe surface is narrow — it keeps the override visible at the actual unsafe block instead of hiding it behind a top-of-file pragma. (br-asupersync-f9i00q)
 
+Every unsafe exception must also be represented in
+`artifacts/unsafe_boundary_ledger_v1.json` and explained in
+`docs/unsafe_boundary_ledger.md`. New unsafe review must update the row,
+category-specific evidence, explicit no-claim boundary, and the narrowest
+practical `#[allow(unsafe_code)]` scope before citing the
+`unsafe-boundary-ledger-contract` lane. The focused verifier is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_unsafe_boundary_ledger_contract" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test unsafe_boundary_ledger_contract -- --nocapture
+```
+
 ### Async Runtime: THIS IS IT (NO TOKIO)
 
 **The asupersync runtime crate has no transitive dependency on tokio.** Inside `src/`, `tokio`, `hyper`, `reqwest`, `axum`, `tower` (tokio adapter only — the `tower` feature flag exists for trait compat), `async-std`, and `smol` are forbidden, as are any crates that transitively depend on tokio.

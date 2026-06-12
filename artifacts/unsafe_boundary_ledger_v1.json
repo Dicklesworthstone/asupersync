@@ -45,6 +45,289 @@
     "atp-platform-boundary": "ATP platform capability or journal probe boundary.",
     "other": "Unclassified boundary requiring follow-up before enforcement closes."
   },
+  "category_evidence": {
+    "reactor-ffi": {
+      "required_evidence": [
+        "RCH cargo check or test lane for the target-gated reactor module.",
+        "Focused reactor tests for registration, rearm, stale-token, and close/drop behavior.",
+        "Explicit host coverage notes for platform-specific paths that were not executed."
+      ],
+      "review_workflow": [
+        "Prefer item-scope #[allow(unsafe_code)] for narrow FFI calls; file-scope allows must name contained operations.",
+        "Verify raw descriptors or handles cannot be double-closed, reused after deregistration, or observed through stale tokens."
+      ],
+      "explicit_no_claims": [
+        "Passing the ledger contract does not execute platform FFI.",
+        "Linux proof does not prove macOS or Windows reactor behavior."
+      ]
+    },
+    "filesystem-ffi": {
+      "required_evidence": [
+        "Focused filesystem or descriptor tests for ownership, drop, and error-path cleanup.",
+        "Assertions that stale, duplicated, or invalid handles are rejected or cleaned up deterministically."
+      ],
+      "review_workflow": [
+        "Trace every unsafe descriptor conversion to a single owner.",
+        "Confirm cleanup paths are cancel-safe and do not rely on ambient process state."
+      ],
+      "explicit_no_claims": [
+        "Filesystem FFI evidence does not prove reactor readiness semantics.",
+        "Host-specific descriptor tests do not cover every platform."
+      ]
+    },
+    "process-signal-ffi": {
+      "required_evidence": [
+        "Process lifecycle tests that tolerate exit races and verify cleanup.",
+        "Platform notes for PID, process group, wait, signal, or Windows event behavior."
+      ],
+      "review_workflow": [
+        "Verify signal or process operations are bounded to owned children or documented probes.",
+        "Document any unavoidable global process-state assumptions."
+      ],
+      "explicit_no_claims": [
+        "Process-signal evidence does not prove general scheduler cancellation.",
+        "Unix signal proof does not prove Windows event behavior."
+      ]
+    },
+    "env-var-mutation": {
+      "required_evidence": [
+        "Serialized setup/restore proof or test isolation evidence.",
+        "A no-production-safety claim for process-global environment mutation."
+      ],
+      "review_workflow": [
+        "Keep environment mutation helpers scoped to tests or explicit configuration setup.",
+        "Verify every mutation path restores or removes prior state deterministically."
+      ],
+      "explicit_no_claims": [
+        "Environment mutation evidence is not production runtime safety proof.",
+        "Passing env-var tests does not prove concurrent process-global mutation is safe."
+      ]
+    },
+    "platform-resource-metrics": {
+      "required_evidence": [
+        "Focused parser or probe tests for OS resource, load, handle-count, or socket-table APIs.",
+        "Bounds checks for kernel-returned sizes and partial records."
+      ],
+      "review_workflow": [
+        "Treat kernel metrics as untrusted inputs.",
+        "Verify malformed or truncated platform data degrades without panics."
+      ],
+      "explicit_no_claims": [
+        "Metrics evidence does not prove admission or scheduling correctness.",
+        "One host's resource API proof does not cover every OS version."
+      ]
+    },
+    "simd-kernel": {
+      "required_evidence": [
+        "Scalar parity tests for every SIMD path.",
+        "Feature-gate proof for target-specific instruction use.",
+        "Architecture-specific RCH evidence or an explicit no-host boundary."
+      ],
+      "review_workflow": [
+        "Confirm unsafe intrinsics never run without the required target feature.",
+        "Compare SIMD output against the scalar implementation for representative and boundary inputs."
+      ],
+      "explicit_no_claims": [
+        "Scalar parity does not prove all CPU microarchitectures.",
+        "Feature-gated SIMD proof does not cover disabled-feature fallback unless separately tested."
+      ]
+    },
+    "sync-internal-cell": {
+      "required_evidence": [
+        "Loom, lab, or deterministic concurrency tests for aliasing, drop, and wake protocol invariants.",
+        "A documented Send/Sync or interior-mutability safety invariant."
+      ],
+      "review_workflow": [
+        "Review aliasing, lifetime, and drop ordering before performance claims.",
+        "Tie every manual Send/Sync assertion to the owning synchronization protocol."
+      ],
+      "explicit_no_claims": [
+        "A local contract test does not prove every scheduler interleaving.",
+        "Manual Send/Sync evidence does not transfer to unrelated types."
+      ]
+    },
+    "secret-memory-security": {
+      "required_evidence": [
+        "Tests that prove the unsafe exists for security semantics such as zeroization or constant-time handling.",
+        "Reference-validity checks for any raw pointer or uninitialized-memory handling."
+      ],
+      "review_workflow": [
+        "Keep the security property and memory-safety invariant separate in review.",
+        "Verify unsafe code does not expose invalid references while enforcing the security behavior."
+      ],
+      "explicit_no_claims": [
+        "Secret-memory tests do not prove broad cryptographic security.",
+        "Zeroization evidence does not prove scheduler or I/O safety."
+      ]
+    },
+    "database-test-or-ffi-boundary": {
+      "required_evidence": [
+        "Test-only confinement proof or focused database FFI/protocol tests.",
+        "Sanitization or rejection assertions for intentionally invalid data."
+      ],
+      "review_workflow": [
+        "Confirm the unsafe boundary cannot leak into default production database paths without a new row.",
+        "Document whether the row is a test fixture, protocol audit, or runtime FFI boundary."
+      ],
+      "explicit_no_claims": [
+        "Database test unsafe does not prove production database driver safety.",
+        "Invalid-data construction evidence is not a correctness proof for the full protocol."
+      ]
+    },
+    "network-ffi": {
+      "required_evidence": [
+        "Socket ownership and nonblocking setup tests.",
+        "Cancellation or drop-path checks for raw streams and socket handles."
+      ],
+      "review_workflow": [
+        "Verify socket state transitions are explicit and cancel-safe.",
+        "Keep raw handle ownership local to the smallest boundary that needs it."
+      ],
+      "explicit_no_claims": [
+        "Network FFI tests do not prove HTTP, TLS, or transport-layer semantics.",
+        "One address-family proof does not cover every socket family."
+      ]
+    },
+    "browser-boundary": {
+      "required_evidence": [
+        "Wasm or browser-boundary tests, or a documented host limitation.",
+        "Explicit distinction between Rust browser preview surfaces and JS/TS Browser Edition GA claims."
+      ],
+      "review_workflow": [
+        "Check that browser unsafe rows remain inside wasm/browser interop boundaries.",
+        "Do not cite browser-boundary rows as native runtime proof."
+      ],
+      "explicit_no_claims": [
+        "Browser-boundary evidence does not prove native reactor behavior.",
+        "Preview Rust browser surfaces are not GA support claims."
+      ]
+    },
+    "compat-boundary": {
+      "required_evidence": [
+        "Opt-in compatibility crate tests for the adapter surface.",
+        "A no-core-runtime-production-claim boundary for tokio/hyper-shaped wrappers."
+      ],
+      "review_workflow": [
+        "Keep compat unsafe outside the core runtime default feature graph.",
+        "Verify adapter unsafe does not weaken the no-Tokio production guarantee."
+      ],
+      "explicit_no_claims": [
+        "Compat evidence does not prove core runtime production safety.",
+        "Compat crate dependencies are not default asupersync runtime dependencies."
+      ]
+    },
+    "conformance-boundary": {
+      "required_evidence": [
+        "Conformance-only test or vendor-comparison evidence.",
+        "A no-production-proof claim for helper unsafe used by the conformance harness."
+      ],
+      "review_workflow": [
+        "Keep vendor comparison helpers scoped away from runtime API guarantees.",
+        "Document any process-global or platform-specific mutation used by conformance tests."
+      ],
+      "explicit_no_claims": [
+        "Conformance harness unsafe does not prove default production runtime safety.",
+        "Vendor comparison evidence does not prove asupersync implementation correctness by itself."
+      ]
+    },
+    "fuzz-target": {
+      "required_evidence": [
+        "Fuzz harness build or smoke evidence.",
+        "Proof that harness-only unsafe remains outside production runtime proof."
+      ],
+      "review_workflow": [
+        "Keep raw wakers, pinning helpers, and allocator hooks confined to fuzz targets.",
+        "Do not reuse fuzz-only unsafe helpers in production modules without a new category row."
+      ],
+      "explicit_no_claims": [
+        "Fuzz harness evidence is not a release-readiness claim.",
+        "A fuzz smoke run does not prove absence of undefined behavior."
+      ]
+    },
+    "test-or-lab-harness": {
+      "required_evidence": [
+        "Focused unit or lab tests for the fixture that uses unsafe.",
+        "A no-production-API claim for raw-waker or deterministic fixture helpers."
+      ],
+      "review_workflow": [
+        "Keep test-only unsafe out of exported runtime API paths.",
+        "Verify fixture unsafe cannot mask task, obligation, or region leaks."
+      ],
+      "explicit_no_claims": [
+        "Test harness unsafe does not prove production runtime safety.",
+        "Raw-waker fixture evidence does not prove executor waker correctness globally."
+      ]
+    },
+    "channel-test-boundary": {
+      "required_evidence": [
+        "Single-owner and drop-invariant tests for channel fixtures.",
+        "Cancellation-path assertions for any extracted channel state."
+      ],
+      "review_workflow": [
+        "Confirm the unsafe exists only to inspect or drive test fixtures.",
+        "Verify the fixture cannot create duplicate ownership of channel state."
+      ],
+      "explicit_no_claims": [
+        "Channel fixture evidence does not prove all channel implementations.",
+        "Test extraction proof is not production API proof."
+      ]
+    },
+    "stream-test-boundary": {
+      "required_evidence": [
+        "Pin and ownership assertions in the stream fixture test.",
+        "A no-production-API claim for any test-only state access."
+      ],
+      "review_workflow": [
+        "Verify pinned stream state is not moved after being exposed to unsafe test code.",
+        "Keep fixture-only access out of public stream APIs."
+      ],
+      "explicit_no_claims": [
+        "Stream fixture evidence does not prove every stream combinator.",
+        "Pin fixture proof does not cover unrelated unsafe pinning."
+      ]
+    },
+    "observability-test-boundary": {
+      "required_evidence": [
+        "Sanitization or rejection tests for intentionally invalid telemetry/resource data.",
+        "A no-production-metrics-safety claim for invalid-data construction."
+      ],
+      "review_workflow": [
+        "Keep invalid telemetry construction inside tests or fixtures.",
+        "Verify observability code degrades without panics on malformed input."
+      ],
+      "explicit_no_claims": [
+        "Observability fixture evidence does not prove metrics backend correctness.",
+        "Invalid-data tests do not prove production resource accounting."
+      ]
+    },
+    "atp-platform-boundary": {
+      "required_evidence": [
+        "ATP platform capability or journal probe tests under RCH, or explicit no-host coverage.",
+        "Clear feature/platform gate notes for each host-specific operation."
+      ],
+      "review_workflow": [
+        "Verify ATP unsafe remains behind platform capability checks.",
+        "Record host coverage separately from protocol-level ATP claims."
+      ],
+      "explicit_no_claims": [
+        "ATP platform evidence does not prove the full transfer protocol.",
+        "One host proof does not cover every ATP platform boundary."
+      ]
+    },
+    "other": {
+      "required_evidence": [
+        "Reclassify the row before claiming closure.",
+        "Open a follow-up blocker if the category cannot be identified."
+      ],
+      "review_workflow": [
+        "Do not accept new rows in this category for completed unsafe-review work.",
+        "Treat any remaining row as a fail-closed review blocker."
+      ],
+      "explicit_no_claims": [
+        "No safety, production, platform, or release claim may cite an other-category row."
+      ]
+    }
+  },
   "summary": {
     "boundary_rows": 92,
     "operation_count": 821,
