@@ -34,7 +34,832 @@ use crate::supervision::{
     SupervisorCompileError, SupervisorHandle, SupervisorSpawnError,
 };
 use crate::types::{Budget, CancelKind, CancelReason, RegionId, TaskId};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::task::{Context, Poll, Waker};
+
+/// Schema discriminator for the declarative AppSpec v1 contract.
+pub const APPSPEC_V1_SCHEMA_VERSION: &str = "asupersync.appspec.v1";
+
+// ---------------------------------------------------------------------------
+// Declarative AppSpec v1
+// ---------------------------------------------------------------------------
+
+/// Versioned, serde-friendly application topology contract.
+///
+/// This is the fail-closed data model used by generated manifests and external
+/// tooling. It intentionally sits beside the builder-style [`AppSpec`]; runtime
+/// compilation from this declarative shape belongs to the follow-on compiler
+/// layer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSpecV1 {
+    /// Schema discriminator. Must equal [`APPSPEC_V1_SCHEMA_VERSION`].
+    pub schema_version: String,
+    /// Stable application name used in traces and supervision diagnostics.
+    pub name: String,
+    /// Service topology for routes, actors, and background jobs.
+    pub services: Vec<AppServiceSpecV1>,
+    /// Named resources that routes, actors, jobs, and sinks may require.
+    pub resources: Vec<AppResourceSpecV1>,
+    /// Named budget presets referenced by services and work units.
+    pub budgets: Vec<AppBudgetSpecV1>,
+    /// Named SLO policy hooks referenced by routes and jobs.
+    pub slo_hooks: Vec<AppSloHookSpecV1>,
+    /// Explicit supervision topology over declared services.
+    pub supervision: AppSupervisionSpecV1,
+    /// Observability sinks and the capabilities they require.
+    pub observability: Vec<AppObservabilitySinkSpecV1>,
+    /// Compatibility policy for this v1 manifest.
+    pub compatibility: AppCompatibilityPolicyV1,
+}
+
+impl AppSpecV1 {
+    /// Validate cross-field invariants that serde alone cannot express.
+    pub fn validate(&self) -> Result<(), AppSpecV1ValidationError> {
+        if self.schema_version != APPSPEC_V1_SCHEMA_VERSION {
+            return Err(AppSpecV1ValidationError::UnsupportedSchemaVersion {
+                found: self.schema_version.clone(),
+            });
+        }
+
+        validate_nonempty("app.name", &self.name)?;
+
+        let budget_names = unique_names(
+            "budgets",
+            self.budgets.iter().map(|budget| budget.name.as_str()),
+        )?;
+        for budget in &self.budgets {
+            budget.validate()?;
+        }
+
+        let resource_names = unique_names(
+            "resources",
+            self.resources.iter().map(|resource| resource.name.as_str()),
+        )?;
+
+        let slo_hook_names = unique_names(
+            "slo_hooks",
+            self.slo_hooks.iter().map(|hook| hook.name.as_str()),
+        )?;
+        for hook in &self.slo_hooks {
+            hook.validate(&budget_names)?;
+        }
+
+        let service_names = unique_names(
+            "services",
+            self.services.iter().map(|service| service.name.as_str()),
+        )?;
+
+        let group_names = unique_names(
+            "supervision.groups",
+            self.supervision
+                .groups
+                .iter()
+                .map(|group| group.name.as_str()),
+        )?;
+        if !group_names.contains(self.supervision.root_group.as_str()) {
+            return Err(AppSpecV1ValidationError::UnknownReference {
+                field: "supervision.root_group",
+                name: self.supervision.root_group.clone(),
+            });
+        }
+
+        for service in &self.services {
+            service.validate(
+                &budget_names,
+                &resource_names,
+                &slo_hook_names,
+                &group_names,
+            )?;
+        }
+
+        for group in &self.supervision.groups {
+            group.validate(&service_names)?;
+        }
+
+        unique_names(
+            "observability",
+            self.observability.iter().map(|sink| sink.name.as_str()),
+        )?;
+        for sink in &self.observability {
+            sink.required_capabilities
+                .validate(&format!("observability.{}", sink.name), &resource_names)?;
+        }
+
+        if !self.compatibility.fail_closed_unknown_fields {
+            return Err(AppSpecV1ValidationError::CompatibilityPolicy {
+                reason: "v1 manifests must fail closed on unknown fields",
+            });
+        }
+        if !self.compatibility.fail_closed_unknown_capabilities {
+            return Err(AppSpecV1ValidationError::CompatibilityPolicy {
+                reason: "v1 manifests must fail closed on unknown capabilities",
+            });
+        }
+        if !self.compatibility.future_schema_requires_new_version {
+            return Err(AppSpecV1ValidationError::CompatibilityPolicy {
+                reason: "v1 manifests must use a new schema version for future widening",
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Declarative service with all entry points and required app resources.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppServiceSpecV1 {
+    /// Stable service name.
+    pub name: String,
+    /// HTTP-style request routes owned by this service.
+    pub routes: Vec<AppRouteSpecV1>,
+    /// Long-lived actors owned by this service.
+    pub actors: Vec<AppActorSpecV1>,
+    /// Background jobs owned by this service.
+    pub background_jobs: Vec<AppBackgroundJobSpecV1>,
+    /// Resource names used by the service as a whole.
+    pub resources: Vec<String>,
+    /// Optional named budget for the service root.
+    pub budget: Option<String>,
+    /// Optional supervision group this service expects to belong to.
+    pub supervision_group: Option<String>,
+}
+
+impl AppServiceSpecV1 {
+    fn validate(
+        &self,
+        budget_names: &BTreeSet<&str>,
+        resource_names: &BTreeSet<&str>,
+        slo_hook_names: &BTreeSet<&str>,
+        group_names: &BTreeSet<&str>,
+    ) -> Result<(), AppSpecV1ValidationError> {
+        validate_nonempty("service.name", &self.name)?;
+        validate_optional_reference("service.budget", self.budget.as_deref(), budget_names)?;
+        validate_optional_reference(
+            "service.supervision_group",
+            self.supervision_group.as_deref(),
+            group_names,
+        )?;
+        for resource in &self.resources {
+            validate_reference("service.resources", resource, resource_names)?;
+        }
+
+        unique_names(
+            "service.routes",
+            self.routes.iter().map(|route| route.name.as_str()),
+        )?;
+        for route in &self.routes {
+            route.validate(&self.name, budget_names, resource_names, slo_hook_names)?;
+        }
+
+        unique_names(
+            "service.actors",
+            self.actors.iter().map(|actor| actor.name.as_str()),
+        )?;
+        for actor in &self.actors {
+            actor.validate(&self.name, budget_names, resource_names)?;
+        }
+
+        unique_names(
+            "service.background_jobs",
+            self.background_jobs.iter().map(|job| job.name.as_str()),
+        )?;
+        for job in &self.background_jobs {
+            job.validate(&self.name, budget_names, resource_names, slo_hook_names)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Request route declaration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppRouteSpecV1 {
+    /// Stable route name, unique within the service.
+    pub name: String,
+    /// HTTP method shape for the route.
+    pub method: AppRouteMethodV1,
+    /// Absolute route path, for example `/health`.
+    pub path: String,
+    /// Handler symbol or adapter entry point.
+    pub handler: String,
+    /// Required `Cx` capabilities, feature flags, and resource names.
+    pub required_capabilities: AppRequiredCapabilitiesV1,
+    /// Optional named budget for this route.
+    pub budget: Option<String>,
+    /// Optional named SLO policy hook.
+    pub slo_hook: Option<String>,
+}
+
+impl AppRouteSpecV1 {
+    fn validate(
+        &self,
+        service: &str,
+        budget_names: &BTreeSet<&str>,
+        resource_names: &BTreeSet<&str>,
+        slo_hook_names: &BTreeSet<&str>,
+    ) -> Result<(), AppSpecV1ValidationError> {
+        validate_nonempty("route.name", &self.name)?;
+        validate_nonempty("route.handler", &self.handler)?;
+        if !self.path.starts_with('/') {
+            return Err(AppSpecV1ValidationError::InvalidRoutePath {
+                service: service.to_string(),
+                route: self.name.clone(),
+                path: self.path.clone(),
+            });
+        }
+        validate_optional_reference("route.budget", self.budget.as_deref(), budget_names)?;
+        validate_optional_reference("route.slo_hook", self.slo_hook.as_deref(), slo_hook_names)?;
+        self.required_capabilities.validate(
+            &format!("service.{service}.route.{}", self.name),
+            resource_names,
+        )
+    }
+}
+
+/// Route method surface recognized by AppSpec v1.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AppRouteMethodV1 {
+    /// HTTP GET.
+    Get,
+    /// HTTP POST.
+    Post,
+    /// HTTP PUT.
+    Put,
+    /// HTTP PATCH.
+    Patch,
+    /// HTTP DELETE.
+    Delete,
+    /// HTTP HEAD.
+    Head,
+    /// HTTP OPTIONS.
+    Options,
+}
+
+/// Long-lived actor declaration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppActorSpecV1 {
+    /// Stable actor name, unique within the service.
+    pub name: String,
+    /// Actor entry point symbol.
+    pub entrypoint: String,
+    /// Optional bounded mailbox capacity.
+    pub mailbox_capacity: Option<u32>,
+    /// Required `Cx` capabilities, feature flags, and resource names.
+    pub required_capabilities: AppRequiredCapabilitiesV1,
+    /// Optional named budget for the actor.
+    pub budget: Option<String>,
+}
+
+impl AppActorSpecV1 {
+    fn validate(
+        &self,
+        service: &str,
+        budget_names: &BTreeSet<&str>,
+        resource_names: &BTreeSet<&str>,
+    ) -> Result<(), AppSpecV1ValidationError> {
+        validate_nonempty("actor.name", &self.name)?;
+        validate_nonempty("actor.entrypoint", &self.entrypoint)?;
+        validate_optional_reference("actor.budget", self.budget.as_deref(), budget_names)?;
+        self.required_capabilities.validate(
+            &format!("service.{service}.actor.{}", self.name),
+            resource_names,
+        )
+    }
+}
+
+/// Background job declaration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppBackgroundJobSpecV1 {
+    /// Stable job name, unique within the service.
+    pub name: String,
+    /// Job entry point symbol.
+    pub entrypoint: String,
+    /// Trigger policy.
+    pub trigger: AppJobTriggerV1,
+    /// Required `Cx` capabilities, feature flags, and resource names.
+    pub required_capabilities: AppRequiredCapabilitiesV1,
+    /// Optional named budget for the job.
+    pub budget: Option<String>,
+    /// Optional named SLO policy hook.
+    pub slo_hook: Option<String>,
+}
+
+impl AppBackgroundJobSpecV1 {
+    fn validate(
+        &self,
+        service: &str,
+        budget_names: &BTreeSet<&str>,
+        resource_names: &BTreeSet<&str>,
+        slo_hook_names: &BTreeSet<&str>,
+    ) -> Result<(), AppSpecV1ValidationError> {
+        validate_nonempty("background_job.name", &self.name)?;
+        validate_nonempty("background_job.entrypoint", &self.entrypoint)?;
+        validate_optional_reference(
+            "background_job.budget",
+            self.budget.as_deref(),
+            budget_names,
+        )?;
+        validate_optional_reference(
+            "background_job.slo_hook",
+            self.slo_hook.as_deref(),
+            slo_hook_names,
+        )?;
+        self.required_capabilities.validate(
+            &format!("service.{service}.background_job.{}", self.name),
+            resource_names,
+        )
+    }
+}
+
+/// Supported background-job trigger contracts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AppJobTriggerV1 {
+    /// The job is started once during service startup.
+    Startup,
+    /// The job is driven by an interval in milliseconds.
+    Interval {
+        /// Interval duration in milliseconds.
+        every_ms: u64,
+    },
+    /// The job is externally signalled by a declared resource or actor.
+    Signal {
+        /// Signal source name.
+        source: String,
+    },
+}
+
+/// Resource declaration referenced by capability requirements.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppResourceSpecV1 {
+    /// Stable resource name.
+    pub name: String,
+    /// Resource kind.
+    pub kind: AppResourceKindV1,
+    /// Capability that gates access to the resource.
+    pub capability: AppCxCapabilityV1,
+    /// Optional feature flag required to enable this resource.
+    pub feature_flag: Option<AppFeatureFlagV1>,
+}
+
+/// Resource families recognized by AppSpec v1.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppResourceKindV1 {
+    /// CPU-bound work budget.
+    Cpu,
+    /// Memory budget or pool.
+    Memory,
+    /// Timer or virtual-clock access.
+    Timer,
+    /// File-system access.
+    FileSystem,
+    /// Network socket access.
+    Socket,
+    /// Database connection or pool.
+    Database,
+    /// Message bus or broker surface.
+    MessageBus,
+    /// Remote node or cluster boundary.
+    RemoteNode,
+    /// Browser host bridge boundary.
+    BrowserHost,
+}
+
+/// Named budget preset.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppBudgetSpecV1 {
+    /// Stable budget name.
+    pub name: String,
+    /// Optional maximum poll quota.
+    pub poll_quota: Option<u64>,
+    /// Optional deadline in milliseconds.
+    pub deadline_ms: Option<u64>,
+    /// Optional I/O byte budget.
+    pub io_bytes: Option<u64>,
+    /// Optional memory budget.
+    pub memory_bytes: Option<u64>,
+}
+
+impl AppBudgetSpecV1 {
+    fn validate(&self) -> Result<(), AppSpecV1ValidationError> {
+        validate_nonempty("budget.name", &self.name)?;
+        if self.poll_quota.is_none()
+            && self.deadline_ms.is_none()
+            && self.io_bytes.is_none()
+            && self.memory_bytes.is_none()
+        {
+            return Err(AppSpecV1ValidationError::EmptyBudget {
+                name: self.name.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// SLO policy hook declaration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSloHookSpecV1 {
+    /// Stable hook name.
+    pub name: String,
+    /// Hook kind.
+    pub kind: AppSloHookKindV1,
+    /// Target selector interpreted by the later compiler layer.
+    pub target: String,
+    /// Optional named budget associated with this policy hook.
+    pub budget: Option<String>,
+}
+
+impl AppSloHookSpecV1 {
+    fn validate(&self, budget_names: &BTreeSet<&str>) -> Result<(), AppSpecV1ValidationError> {
+        validate_nonempty("slo_hook.name", &self.name)?;
+        validate_nonempty("slo_hook.target", &self.target)?;
+        validate_optional_reference("slo_hook.budget", self.budget.as_deref(), budget_names)
+    }
+}
+
+/// SLO hook families recognized by AppSpec v1.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppSloHookKindV1 {
+    /// Latency threshold hook.
+    Latency,
+    /// Error-rate threshold hook.
+    ErrorRate,
+    /// Throughput threshold hook.
+    Throughput,
+    /// Saturation threshold hook.
+    Saturation,
+}
+
+/// Explicit supervision topology over services.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSupervisionSpecV1 {
+    /// Name of the root supervision group.
+    pub root_group: String,
+    /// Supervision groups in deterministic declaration order.
+    pub groups: Vec<AppSupervisionGroupSpecV1>,
+}
+
+/// Supervision group declaration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSupervisionGroupSpecV1 {
+    /// Stable group name.
+    pub name: String,
+    /// Services supervised by this group.
+    pub services: Vec<String>,
+    /// Restart policy for children in this group.
+    pub restart_policy: AppRestartPolicyV1,
+}
+
+impl AppSupervisionGroupSpecV1 {
+    fn validate(&self, service_names: &BTreeSet<&str>) -> Result<(), AppSpecV1ValidationError> {
+        validate_nonempty("supervision.group.name", &self.name)?;
+        if self.services.is_empty() {
+            return Err(AppSpecV1ValidationError::EmptySupervisionGroup {
+                name: self.name.clone(),
+            });
+        }
+        for service in &self.services {
+            validate_reference("supervision.group.services", service, service_names)?;
+        }
+        Ok(())
+    }
+}
+
+/// Restart policy names available in AppSpec v1.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppRestartPolicyV1 {
+    /// Stop the group after child failure.
+    Stop,
+    /// Restart one failed child.
+    OneForOne,
+    /// Restart all children in the group.
+    OneForAll,
+}
+
+/// Observability sink declaration.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppObservabilitySinkSpecV1 {
+    /// Stable sink name.
+    pub name: String,
+    /// Sink kind.
+    pub kind: AppObservabilitySinkKindV1,
+    /// Required `Cx` capabilities, feature flags, and resources for the sink.
+    pub required_capabilities: AppRequiredCapabilitiesV1,
+}
+
+/// Observability sink families recognized by AppSpec v1.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppObservabilitySinkKindV1 {
+    /// Structured trace sink.
+    Trace,
+    /// Metrics sink.
+    Metrics,
+    /// Evidence ledger sink.
+    Evidence,
+}
+
+/// Required authority declaration for one route, actor, job, or sink.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppRequiredCapabilitiesV1 {
+    /// Explicit `Cx` capability families required by the entry point.
+    pub cx_capabilities: Vec<AppCxCapabilityV1>,
+    /// Cargo feature flags required by the entry point.
+    pub feature_flags: Vec<AppFeatureFlagV1>,
+    /// Named resources required by the entry point.
+    pub resources: Vec<String>,
+}
+
+impl AppRequiredCapabilitiesV1 {
+    fn validate(
+        &self,
+        owner: &str,
+        resource_names: &BTreeSet<&str>,
+    ) -> Result<(), AppSpecV1ValidationError> {
+        if self.cx_capabilities.is_empty() {
+            return Err(AppSpecV1ValidationError::AmbientAuthority {
+                owner: owner.to_string(),
+            });
+        }
+
+        let contains_pure = self.cx_capabilities.contains(&AppCxCapabilityV1::Pure);
+        if contains_pure
+            && (self.cx_capabilities.len() > 1
+                || !self.feature_flags.is_empty()
+                || !self.resources.is_empty())
+        {
+            return Err(AppSpecV1ValidationError::PureAuthorityHasEffects {
+                owner: owner.to_string(),
+            });
+        }
+
+        for resource in &self.resources {
+            validate_reference("required_capabilities.resources", resource, resource_names)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Capability families that may be required from `Cx`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppCxCapabilityV1 {
+    /// Explicitly declares a pure entry point with no effects.
+    Pure,
+    /// Structured task spawning.
+    Spawn,
+    /// Time or timer driver access.
+    Time,
+    /// I/O driver access.
+    Io,
+    /// Network access.
+    Net,
+    /// Trace emission.
+    Trace,
+    /// Entropy capability.
+    Entropy,
+    /// Name registry access.
+    Registry,
+    /// Remote execution or cluster capability.
+    Remote,
+    /// Blocking pool access.
+    Blocking,
+    /// Database client capability.
+    Database,
+    /// Messaging or FABRIC capability.
+    Messaging,
+    /// TLS capability.
+    Tls,
+    /// QUIC/HTTP3 capability.
+    Quic,
+    /// Browser host bridge capability.
+    BrowserHost,
+}
+
+/// Cargo feature flags recognized by AppSpec v1.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppFeatureFlagV1 {
+    /// `native-runtime`.
+    NativeRuntime,
+    /// `wasm-runtime`.
+    WasmRuntime,
+    /// `browser-io`.
+    BrowserIo,
+    /// `browser-trace`.
+    BrowserTrace,
+    /// `deterministic-mode`.
+    DeterministicMode,
+    /// `messaging-fabric`.
+    MessagingFabric,
+    /// `metrics`.
+    Metrics,
+    /// `tracing-integration`.
+    TracingIntegration,
+    /// `sqlite`.
+    Sqlite,
+    /// `postgres`.
+    Postgres,
+    /// `mysql`.
+    Mysql,
+    /// `tls`.
+    Tls,
+    /// `tls-native-roots`.
+    TlsNativeRoots,
+    /// `tls-webpki-roots`.
+    TlsWebpkiRoots,
+    /// `quic`.
+    Quic,
+    /// `http3`.
+    Http3,
+    /// `kafka`.
+    Kafka,
+    /// `io-uring`.
+    IoUring,
+    /// `tokio-compat`.
+    TokioCompat,
+}
+
+/// Compatibility policy embedded in each v1 manifest.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppCompatibilityPolicyV1 {
+    /// Unknown top-level or nested fields must be rejected.
+    pub fail_closed_unknown_fields: bool,
+    /// Unknown capability or feature strings must be rejected by serde.
+    pub fail_closed_unknown_capabilities: bool,
+    /// Future schema widening must use a new schema discriminator.
+    pub future_schema_requires_new_version: bool,
+}
+
+/// Validation failure for [`AppSpecV1`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppSpecV1ValidationError {
+    /// The manifest used an unsupported schema discriminator.
+    UnsupportedSchemaVersion {
+        /// Actual schema string.
+        found: String,
+    },
+    /// A required name-like field was empty.
+    EmptyName {
+        /// Field path that failed validation.
+        field: &'static str,
+    },
+    /// A collection had a duplicate name.
+    DuplicateName {
+        /// Collection that must have unique names.
+        collection: &'static str,
+        /// Duplicate name.
+        name: String,
+    },
+    /// A reference pointed at an undeclared budget, resource, SLO hook, or group.
+    UnknownReference {
+        /// Field path that contained the reference.
+        field: &'static str,
+        /// Missing referenced name.
+        name: String,
+    },
+    /// A route path was not absolute.
+    InvalidRoutePath {
+        /// Owning service name.
+        service: String,
+        /// Route name.
+        route: String,
+        /// Invalid path value.
+        path: String,
+    },
+    /// An entry point did not declare any explicit authority.
+    AmbientAuthority {
+        /// Entry point or sink that hid its authority requirements.
+        owner: String,
+    },
+    /// A `pure` declaration was combined with effectful authority.
+    PureAuthorityHasEffects {
+        /// Entry point or sink with the invalid declaration.
+        owner: String,
+    },
+    /// A budget declared no limiting dimension.
+    EmptyBudget {
+        /// Budget name.
+        name: String,
+    },
+    /// A supervision group declared no services.
+    EmptySupervisionGroup {
+        /// Group name.
+        name: String,
+    },
+    /// The embedded compatibility policy is weaker than v1 allows.
+    CompatibilityPolicy {
+        /// Human-readable reason.
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Display for AppSpecV1ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedSchemaVersion { found } => {
+                write!(f, "unsupported AppSpec schema version {found:?}")
+            }
+            Self::EmptyName { field } => write!(f, "{field} must be nonempty"),
+            Self::DuplicateName { collection, name } => {
+                write!(f, "{collection} contains duplicate name {name:?}")
+            }
+            Self::UnknownReference { field, name } => {
+                write!(f, "{field} references undeclared name {name:?}")
+            }
+            Self::InvalidRoutePath {
+                service,
+                route,
+                path,
+            } => write!(
+                f,
+                "route {service}.{route} path {path:?} must start with '/'"
+            ),
+            Self::AmbientAuthority { owner } => {
+                write!(f, "{owner} must declare at least one Cx capability")
+            }
+            Self::PureAuthorityHasEffects { owner } => {
+                write!(f, "{owner} declares pure plus effectful authority")
+            }
+            Self::EmptyBudget { name } => write!(f, "budget {name:?} has no limits"),
+            Self::EmptySupervisionGroup { name } => {
+                write!(f, "supervision group {name:?} has no services")
+            }
+            Self::CompatibilityPolicy { reason } => write!(f, "{reason}"),
+        }
+    }
+}
+
+impl std::error::Error for AppSpecV1ValidationError {}
+
+fn validate_nonempty(field: &'static str, value: &str) -> Result<(), AppSpecV1ValidationError> {
+    if value.trim().is_empty() {
+        return Err(AppSpecV1ValidationError::EmptyName { field });
+    }
+    Ok(())
+}
+
+fn unique_names<'a>(
+    collection: &'static str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeSet<&'a str>, AppSpecV1ValidationError> {
+    let mut seen = BTreeSet::new();
+    for name in names {
+        validate_nonempty(collection, name)?;
+        if !seen.insert(name) {
+            return Err(AppSpecV1ValidationError::DuplicateName {
+                collection,
+                name: name.to_string(),
+            });
+        }
+    }
+    Ok(seen)
+}
+
+fn validate_reference(
+    field: &'static str,
+    name: &str,
+    known_names: &BTreeSet<&str>,
+) -> Result<(), AppSpecV1ValidationError> {
+    validate_nonempty(field, name)?;
+    if !known_names.contains(name) {
+        return Err(AppSpecV1ValidationError::UnknownReference {
+            field,
+            name: name.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_optional_reference(
+    field: &'static str,
+    name: Option<&str>,
+    known_names: &BTreeSet<&str>,
+) -> Result<(), AppSpecV1ValidationError> {
+    if let Some(name) = name {
+        validate_reference(field, name, known_names)?;
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // CompiledApp
@@ -808,6 +1633,7 @@ mod tests {
     use crate::runtime::state::RuntimeState;
     use crate::supervision::{ChildSpec, NameRegistrationPolicy, SupervisionStrategy};
     use crate::types::Budget;
+    use serde_json::{Value, json};
     use std::sync::Arc;
 
     fn init_test(name: &str) {
@@ -863,6 +1689,293 @@ mod tests {
     }
 
     // --- Unit tests ---
+
+    fn appspec_v1_sample_json() -> Value {
+        json!({
+            "schema_version": APPSPEC_V1_SCHEMA_VERSION,
+            "name": "payments",
+            "services": [
+                {
+                    "name": "api",
+                    "routes": [
+                        {
+                            "name": "readiness",
+                            "method": "GET",
+                            "path": "/ready",
+                            "handler": "crate::payments::ready",
+                            "required_capabilities": {
+                                "cx_capabilities": ["net", "trace"],
+                                "feature_flags": ["native-runtime", "tracing-integration"],
+                                "resources": ["public_socket"]
+                            },
+                            "budget": "request",
+                            "slo_hook": "latency_50ms"
+                        }
+                    ],
+                    "actors": [
+                        {
+                            "name": "cache_warmer",
+                            "entrypoint": "crate::payments::cache_warmer",
+                            "mailbox_capacity": 64,
+                            "required_capabilities": {
+                                "cx_capabilities": ["spawn", "time"],
+                                "feature_flags": ["native-runtime"],
+                                "resources": []
+                            },
+                            "budget": "background"
+                        }
+                    ],
+                    "background_jobs": [
+                        {
+                            "name": "sweeper",
+                            "entrypoint": "crate::payments::sweep",
+                            "trigger": { "interval": { "every_ms": 1000 } },
+                            "required_capabilities": {
+                                "cx_capabilities": ["time", "trace"],
+                                "feature_flags": [],
+                                "resources": ["timer"]
+                            },
+                            "budget": "background",
+                            "slo_hook": "latency_50ms"
+                        }
+                    ],
+                    "resources": ["public_socket", "timer"],
+                    "budget": "service",
+                    "supervision_group": "root"
+                }
+            ],
+            "resources": [
+                {
+                    "name": "public_socket",
+                    "kind": "socket",
+                    "capability": "net",
+                    "feature_flag": "native-runtime"
+                },
+                {
+                    "name": "timer",
+                    "kind": "timer",
+                    "capability": "time",
+                    "feature_flag": null
+                }
+            ],
+            "budgets": [
+                {
+                    "name": "service",
+                    "poll_quota": 100000,
+                    "deadline_ms": null,
+                    "io_bytes": null,
+                    "memory_bytes": null
+                },
+                {
+                    "name": "request",
+                    "poll_quota": 10000,
+                    "deadline_ms": 50,
+                    "io_bytes": 65536,
+                    "memory_bytes": null
+                },
+                {
+                    "name": "background",
+                    "poll_quota": 25000,
+                    "deadline_ms": 1000,
+                    "io_bytes": null,
+                    "memory_bytes": null
+                }
+            ],
+            "slo_hooks": [
+                {
+                    "name": "latency_50ms",
+                    "kind": "latency",
+                    "target": "api.readiness",
+                    "budget": "request"
+                }
+            ],
+            "supervision": {
+                "root_group": "root",
+                "groups": [
+                    {
+                        "name": "root",
+                        "services": ["api"],
+                        "restart_policy": "one_for_one"
+                    }
+                ]
+            },
+            "observability": [
+                {
+                    "name": "trace",
+                    "kind": "trace",
+                    "required_capabilities": {
+                        "cx_capabilities": ["trace"],
+                        "feature_flags": ["tracing-integration"],
+                        "resources": []
+                    }
+                }
+            ],
+            "compatibility": {
+                "fail_closed_unknown_fields": true,
+                "fail_closed_unknown_capabilities": true,
+                "future_schema_requires_new_version": true
+            }
+        })
+    }
+
+    fn appspec_v1_sample() -> AppSpecV1 {
+        serde_json::from_value(appspec_v1_sample_json()).expect("sample AppSpec v1 parses")
+    }
+
+    #[test]
+    fn appspec_v1_roundtrip_preserves_capability_contract() {
+        init_test("appspec_v1_roundtrip_preserves_capability_contract");
+        let spec = appspec_v1_sample();
+        spec.validate().expect("sample AppSpec v1 validates");
+
+        assert_eq!(spec.schema_version, APPSPEC_V1_SCHEMA_VERSION);
+        let route = &spec.services[0].routes[0];
+        assert_eq!(route.method, AppRouteMethodV1::Get);
+        assert_eq!(
+            route.required_capabilities.cx_capabilities,
+            vec![AppCxCapabilityV1::Net, AppCxCapabilityV1::Trace]
+        );
+        assert_eq!(
+            route.required_capabilities.feature_flags,
+            vec![
+                AppFeatureFlagV1::NativeRuntime,
+                AppFeatureFlagV1::TracingIntegration
+            ]
+        );
+
+        let roundtrip =
+            serde_json::to_value(&spec).expect("serialize sample AppSpec v1 back to JSON");
+        assert_eq!(
+            roundtrip["schema_version"],
+            json!(APPSPEC_V1_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            roundtrip["services"][0]["routes"][0]["required_capabilities"]["cx_capabilities"],
+            json!(["net", "trace"])
+        );
+        crate::test_complete!("appspec_v1_roundtrip_preserves_capability_contract");
+    }
+
+    #[test]
+    fn appspec_v1_rejects_missing_route_capabilities_field() {
+        init_test("appspec_v1_rejects_missing_route_capabilities_field");
+        let mut value = appspec_v1_sample_json();
+        value["services"][0]["routes"][0]
+            .as_object_mut()
+            .expect("route object")
+            .remove("required_capabilities");
+
+        let err = serde_json::from_value::<AppSpecV1>(value).expect_err("missing field rejects");
+        assert!(
+            err.to_string().contains("required_capabilities"),
+            "unexpected serde error: {err}"
+        );
+        crate::test_complete!("appspec_v1_rejects_missing_route_capabilities_field");
+    }
+
+    #[test]
+    fn appspec_v1_rejects_unknown_capability_string() {
+        init_test("appspec_v1_rejects_unknown_capability_string");
+        let mut value = appspec_v1_sample_json();
+        value["services"][0]["routes"][0]["required_capabilities"]["cx_capabilities"][0] =
+            json!("ambient_global");
+
+        let err =
+            serde_json::from_value::<AppSpecV1>(value).expect_err("unknown capability rejects");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected serde error: {err}"
+        );
+        crate::test_complete!("appspec_v1_rejects_unknown_capability_string");
+    }
+
+    #[test]
+    fn appspec_v1_validate_rejects_ambient_route_authority() {
+        init_test("appspec_v1_validate_rejects_ambient_route_authority");
+        let mut spec = appspec_v1_sample();
+        spec.services[0].routes[0].required_capabilities = AppRequiredCapabilitiesV1 {
+            cx_capabilities: Vec::new(),
+            feature_flags: Vec::new(),
+            resources: Vec::new(),
+        };
+
+        let err = spec.validate().expect_err("ambient route rejects");
+        assert!(
+            matches!(
+                err,
+                AppSpecV1ValidationError::AmbientAuthority { ref owner }
+                    if owner == "service.api.route.readiness"
+            ),
+            "unexpected validation error: {err:?}"
+        );
+        crate::test_complete!("appspec_v1_validate_rejects_ambient_route_authority");
+    }
+
+    #[test]
+    fn appspec_v1_validate_rejects_duplicate_services() {
+        init_test("appspec_v1_validate_rejects_duplicate_services");
+        let mut spec = appspec_v1_sample();
+        spec.services.push(spec.services[0].clone());
+
+        let err = spec.validate().expect_err("duplicate service rejects");
+        assert!(
+            matches!(
+                err,
+                AppSpecV1ValidationError::DuplicateName {
+                    collection: "services",
+                    ref name
+                } if name == "api"
+            ),
+            "unexpected validation error: {err:?}"
+        );
+        crate::test_complete!("appspec_v1_validate_rejects_duplicate_services");
+    }
+
+    #[test]
+    fn appspec_v1_schema_artifact_matches_runtime_contract() {
+        init_test("appspec_v1_schema_artifact_matches_runtime_contract");
+        let schema: Value =
+            serde_json::from_str(include_str!("../artifacts/appspec_v1_schema.json"))
+                .expect("schema artifact parses");
+        assert_eq!(schema["schema_version"], json!(APPSPEC_V1_SCHEMA_VERSION));
+        assert_eq!(
+            schema["properties"]["schema_version"]["const"],
+            json!(APPSPEC_V1_SCHEMA_VERSION)
+        );
+
+        let required = schema["required"]
+            .as_array()
+            .expect("schema required is array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        for field in [
+            "schema_version",
+            "services",
+            "resources",
+            "budgets",
+            "slo_hooks",
+            "supervision",
+            "observability",
+            "compatibility",
+        ] {
+            assert!(required.contains(field), "schema should require {field}");
+        }
+
+        let capability_enum = schema["$defs"]["cx_capability"]["enum"]
+            .as_array()
+            .expect("capability enum exists")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<BTreeSet<_>>();
+        for capability in ["pure", "spawn", "time", "net", "trace", "database"] {
+            assert!(
+                capability_enum.contains(capability),
+                "schema should include capability {capability}"
+            );
+        }
+        crate::test_complete!("appspec_v1_schema_artifact_matches_runtime_contract");
+    }
 
     #[test]
     fn app_spec_new_creates_named_spec() {
