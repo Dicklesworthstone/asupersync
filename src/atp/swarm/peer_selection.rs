@@ -322,8 +322,13 @@ impl PeerSelector {
 
         for (peer_id, peer) in available_peers {
             if peer.available_pieces.contains(piece_id) {
-                let active_count =
-                    active_loads.get(peer_id).copied().unwrap_or(0) + peer.pending_requests.len();
+                // `active_loads` is recomputed by the caller from
+                // `active_requests` on every assignment iteration, and
+                // `peer.pending_requests` is updated in lockstep for the same
+                // requests — summing both double-counted every in-flight
+                // request, halving effective peer capacity and stalling any
+                // transfer with more than `2 * peer_count` needed pieces.
+                let active_count = active_loads.get(peer_id).copied().unwrap_or(0);
 
                 if active_count < peer.capabilities.max_concurrent_uploads {
                     let score = self.calculate_peer_score(peer);
@@ -538,6 +543,46 @@ mod tests {
     fn test_peer_selector_creation() {
         let selector = PeerSelector::new();
         assert_eq!(selector.quality_history.len(), 0);
+    }
+
+    #[test]
+    fn test_select_peer_capacity_counts_load_once() {
+        // Regression: capacity must be judged by `active_loads` alone.
+        // `pending_requests` tracks the same in-flight requests as
+        // `active_loads`; summing both double-counted and (with default
+        // max_concurrent_uploads=4) excluded any peer at 2 real requests,
+        // stalling transfers larger than 2 * peer_count pieces.
+        let selector = PeerSelector::new();
+        let piece = PieceId::new(7);
+
+        let mut peer = create_test_peer("peer1", 0.9, 1_000_000.0);
+        peer.available_pieces.insert(piece);
+        // 3 in-flight requests, mirrored into pending_requests (the old
+        // double-count source). Real load is 3 < max(4) → still selectable.
+        peer.pending_requests.insert(PieceId::new(1));
+        peer.pending_requests.insert(PieceId::new(2));
+        peer.pending_requests.insert(PieceId::new(3));
+
+        let mut peers = HashMap::new();
+        peers.insert(peer.peer_id.clone(), peer.clone());
+        let mut loads = HashMap::new();
+        loads.insert(peer.peer_id.clone(), 3usize);
+
+        assert!(
+            selector
+                .select_peer_for_piece(&piece, &peers, &loads)
+                .is_ok(),
+            "peer at 3 real requests (max 4) must remain selectable"
+        );
+
+        // At the real capacity limit it must be excluded.
+        loads.insert(peer.peer_id.clone(), 4usize);
+        assert!(
+            selector
+                .select_peer_for_piece(&piece, &peers, &loads)
+                .is_err(),
+            "peer at the concurrency limit must be excluded"
+        );
     }
 
     #[test]

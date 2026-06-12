@@ -403,6 +403,14 @@ pub enum VerificationError {
         /// Object kind.
         kind: ObjectKind,
     },
+    /// Object kind must not carry child edges (e.g. a content-addressed
+    /// file object whose identity commits to content only).
+    UnexpectedObjectChildren {
+        /// Object id being verified.
+        object_id: ObjectId,
+        /// Object kind.
+        kind: ObjectKind,
+    },
     /// Object kind is not yet accepted by this verifier surface.
     UnsupportedObjectKind {
         /// Object kind.
@@ -513,6 +521,7 @@ impl VerificationError {
             | Self::ObjectSizeMismatch { .. }
             | Self::MissingObjectContent { .. }
             | Self::UnexpectedObjectContent { .. }
+            | Self::UnexpectedObjectChildren { .. }
             | Self::UnsupportedObjectKind { .. } => VerificationStage::ObjectContent,
             Self::InvalidGraph { .. } | Self::MerkleRootMismatch { .. } => {
                 VerificationStage::GraphMerkle
@@ -556,6 +565,9 @@ impl VerificationError {
             Self::MissingObjectContent { .. } => "object content missing".to_string(),
             Self::UnexpectedObjectContent { kind, .. } => {
                 format!("object kind {kind} carried unexpected content")
+            }
+            Self::UnexpectedObjectChildren { kind, .. } => {
+                format!("object kind {kind} carried unexpected children")
             }
             Self::UnsupportedObjectKind { kind } => {
                 format!("object kind {kind} is not accepted by this verifier")
@@ -962,6 +974,19 @@ impl AtpVerifier {
         &self,
         object: &Object,
     ) -> Result<VerificationEvidence, VerificationError> {
+        // A file object's identity is content-addressed
+        // (`ContentId::from_bytes(content)`) and commits to content only —
+        // never to `children`. Reject smuggled edges fail-closed, symmetric
+        // with `verify_directory_object` rejecting stray inline content, so
+        // a standalone `verify_object` cannot attest a "verified" object
+        // that carries attacker-controlled, uncommitted edges to other ids.
+        if !object.children.is_empty() {
+            return Err(VerificationError::UnexpectedObjectChildren {
+                object_id: object.id.clone(),
+                kind: object.metadata.kind,
+            });
+        }
+
         let content =
             object
                 .content
@@ -1118,6 +1143,29 @@ mod tests {
 
         assert_eq!(err.stage(), VerificationStage::ObjectContent);
         assert_eq!(err.redacted_reason(), "object identity mismatch");
+    }
+
+    #[test]
+    fn object_verifier_rejects_file_with_smuggled_children() {
+        // A file object's id commits to content only; children outside that
+        // commitment must be rejected fail-closed (symmetric with directory
+        // objects rejecting stray inline content), so `verify_object` can
+        // never attest a "verified" file that carries unverified edges.
+        let verifier = AtpVerifier::default();
+        let mut object = Object::file(b"payload".to_vec());
+        object
+            .children
+            .push(ObjectEdge::new(object.id.clone(), "smuggled".to_string()));
+
+        let err = verifier
+            .verify_object(&object)
+            .expect_err("file with children must not verify");
+
+        assert_eq!(err.stage(), VerificationStage::ObjectContent);
+        assert_eq!(
+            err.redacted_reason(),
+            "object kind file carried unexpected children"
+        );
     }
 
     #[test]

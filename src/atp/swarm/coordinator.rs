@@ -354,9 +354,22 @@ impl SwarmCoordinator {
 
         for piece_id in selected_pieces {
             let active_loads = self.active_loads_for_transfer(transfer_id)?;
-            let peer_id =
-                self.peer_selector
-                    .select_peer_for_piece(&piece_id, &self.peers, &active_loads)?;
+            let peer_id = match self.peer_selector.select_peer_for_piece(
+                &piece_id,
+                &self.peers,
+                &active_loads,
+            ) {
+                Ok(peer_id) => peer_id,
+                // No peer can currently take this piece (none holds it, or
+                // every holder is saturated). Skip it and keep the
+                // assignments already accumulated this round rather than
+                // discarding them via `?` while their tracker/peer side
+                // effects persist — that left phantom `Requested` pieces that
+                // only cleared through the multi-minute timeout ladder. A
+                // later piece may still have an available peer, so continue.
+                Err(SwarmError::NoPeersAvailable { .. }) => continue,
+                Err(err) => return Err(err),
+            };
 
             let priority = {
                 let transfer =
@@ -431,6 +444,16 @@ impl SwarmCoordinator {
         peer_id: &PeerId,
         verification_status: String,
     ) -> SwarmResult<()> {
+        // Validate the piece against the tracker BEFORE mutating any transfer
+        // aggregate state. `mark_piece_completed` rejects pieces that are not
+        // in a legal in-flight state (including out-of-range ids, which have no
+        // tracker entry); doing it first means a rejected piece cannot inflate
+        // `completed_pieces` / drive `remaining_pieces` to zero and report a
+        // bogus "complete" transfer, which is exactly the tamper-resistance
+        // this path exists to provide.
+        self.piece_tracker
+            .mark_piece_completed(transfer_id, piece_id)?;
+
         let (
             download_time,
             piece_size,
@@ -474,9 +497,8 @@ impl SwarmCoordinator {
             )
         };
 
-        // Update piece tracker
-        self.piece_tracker
-            .mark_piece_completed(transfer_id, piece_id)?;
+        // Piece tracker already validated + transitioned above, before any
+        // transfer-aggregate mutation.
         self.quality_metrics
             .record_verification_success(transfer_id);
         self.quality_metrics

@@ -489,8 +489,12 @@ impl MultiSourceRepairScheduler {
         let symbol_rarity = self.calculate_peer_symbol_rarity(peer_info);
         let decode_usefulness = self.calculate_peer_decode_usefulness(peer_info);
         let trust = peer_info.trust_score;
-        let relay_cost = 1.0 - (peer_info.relay_cost_per_byte * 1000.0).min(1.0); // Invert and normalize
-        let churn_stability = 1.0 - peer_info.churn_probability;
+        // `relay_cost` / `churn_probability` weights are negative ("higher is
+        // worse"), so they must multiply the raw *bad* metric, not an inverted
+        // goodness value. Inverting first and then applying a negative weight
+        // double-negated, penalizing cheap/stable peers the most.
+        let relay_cost = (peer_info.relay_cost_per_byte * 1000.0).min(1.0); // Normalize to [0,1]
+        let churn = peer_info.churn_probability;
 
         weights.path_quality * path_quality
             + weights.upload_budget * upload_budget
@@ -498,7 +502,7 @@ impl MultiSourceRepairScheduler {
             + weights.decode_usefulness * decode_usefulness
             + weights.trust * trust
             + weights.relay_cost * relay_cost
-            + weights.churn_probability * churn_stability
+            + weights.churn_probability * churn
     }
 
     /// Calculate symbol rarity for a peer's available symbols
@@ -630,7 +634,12 @@ impl MultiSourceRepairScheduler {
 
     // Additional helper methods...
     fn calculate_symbols_needed(&self) -> usize {
-        (self.k_prime as usize).saturating_sub(self.received_symbols.len())
+        // Need is measured against decode RANK (linearly-independent symbols),
+        // not the raw received count: a linearly-dependent symbol raises the
+        // received count without advancing rank, so counting received symbols
+        // would report "0 needed" while `can_decode()` is still false —
+        // stalling the transfer forever.
+        (self.k_prime as usize).saturating_sub(self.decode_matrix.decode_rank)
     }
 
     fn calculate_symbol_decode_usefulness(&self, symbol_index: u32) -> f64 {
@@ -974,6 +983,73 @@ mod tests {
         assert!(
             high_score > low_score,
             "High quality peer should have better score"
+        );
+    }
+
+    #[test]
+    fn test_relay_cost_and_churn_penalize_worse_peers() {
+        // Regression: relay_cost / churn weights are negative, so a cheaper,
+        // more stable peer must score HIGHER than an expensive, churny one.
+        // The previous code inverted the metrics before applying the negative
+        // weight (double negation), penalizing the better peer.
+        let scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            10,
+        );
+
+        let mut cheap_stable =
+            create_test_peer_info(&scheduler, create_test_peer_id(9001), vec![1]);
+        cheap_stable.relay_cost_per_byte = 0.0;
+        cheap_stable.churn_probability = 0.0;
+
+        let mut expensive_churny =
+            create_test_peer_info(&scheduler, create_test_peer_id(9002), vec![1]);
+        expensive_churny.relay_cost_per_byte = 0.001; // caps at normalized 1.0
+        expensive_churny.churn_probability = 1.0;
+
+        let cheap_score = scheduler.calculate_individual_peer_score(&cheap_stable);
+        let expensive_score = scheduler.calculate_individual_peer_score(&expensive_churny);
+
+        assert!(
+            cheap_score > expensive_score,
+            "cheap/stable peer ({cheap_score}) must outscore expensive/churny ({expensive_score})"
+        );
+    }
+
+    #[test]
+    fn test_symbols_needed_tracks_decode_rank_not_received_count() {
+        // Regression: a linearly-dependent symbol raises the received count
+        // without advancing decode rank; need must be measured against rank,
+        // otherwise the scheduler reports 0 needed while decode is impossible.
+        let mut scheduler = MultiSourceRepairScheduler::new(
+            RepairSchedulerConfig::default(),
+            crate::atp::object::ObjectId::content(crate::atp::object::ContentId::new([1u8; 32])),
+            "test-group".to_string(),
+            3,
+        );
+
+        // Two independent source symbols → decode rank 2 (k_prime is 3).
+        scheduler.decode_matrix.add_symbol(0, &[1u8; 32]).unwrap();
+        scheduler.decode_matrix.add_symbol(1, &[2u8; 32]).unwrap();
+        assert_eq!(scheduler.decode_matrix.decode_rank, 2);
+
+        // A third symbol is received and counted, but it was linearly
+        // dependent (no rank gain). The scheduler's received set therefore
+        // holds 3 entries while decode rank is still 2 and decode is
+        // impossible.
+        scheduler.received_symbols.insert(0);
+        scheduler.received_symbols.insert(1);
+        scheduler.received_symbols.insert(2);
+
+        assert!(!scheduler.decode_matrix.can_decode());
+        // Old (buggy) formula: k_prime(3) - received_count(3) = 0 → stall.
+        // New formula: k_prime(3) - decode_rank(2) = 1 → keep requesting.
+        assert_eq!(
+            scheduler.calculate_symbols_needed(),
+            1,
+            "need must follow decode rank, not received count"
         );
     }
 
