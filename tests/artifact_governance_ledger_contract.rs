@@ -43,6 +43,7 @@ const REQUIRED_FAMILIES: &[&str] = &[
     "runtime_pressure",
     "swarm_agent",
     "browser_wasm",
+    "artifact_governance",
     "raptorq",
     "generated_fixture",
     "excluded",
@@ -374,6 +375,15 @@ fn specific_seed_rows_preserve_fail_closed_citation_boundaries() {
         string_set(proof_manifest, "no_claim_boundaries")
             .contains("does_not_authorize_local_cargo_fallback")
     );
+
+    let scanner = rows["artifact-governance-scanner"];
+    assert_eq!(string(scanner, "path_status"), "tracked");
+    assert_eq!(string(scanner, "artifact_family"), "artifact_governance");
+    assert_eq!(
+        string(scanner, "owning_bead"),
+        "asupersync-artifact-governance-awdiwy.2"
+    );
+    assert!(string_set(scanner, "no_claim_boundaries").contains("does_not_authorize_deletion"));
 
     let rch = rows["rch-stale-progress-receipt-contract"];
     assert_eq!(string(rch, "path_status"), "tracked");

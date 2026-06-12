@@ -1,0 +1,547 @@
+{
+  "schema_version": "artifact-governance-scanner-v1",
+  "scanner_id": "artifact_governance_scanner_v1",
+  "bead_id": "asupersync-artifact-governance-awdiwy.2",
+  "created_date": "2026-06-12",
+  "purpose": "Representative deterministic scan result that links durable artifact paths to owner signals, tests, docs references, proof manifest rows, proof status rows, ledger overrides, and citation categories without claiming full-corpus coverage.",
+  "source_of_truth": {
+    "scanner_artifact": "artifacts/artifact_governance_scanner_v1.json",
+    "operator_report": "docs/proof/artifact_governance_scanner.md",
+    "contract_test": "tests/artifact_governance_scanner_contract.rs",
+    "ledger": "artifacts/artifact_governance_ledger_v1.json",
+    "agent_instructions": "AGENTS.md"
+  },
+  "coverage_policy": {
+    "corpus_coverage": "representative_contract_scan_not_full_corpus",
+    "full_corpus_claim": false,
+    "non_destructive": true,
+    "stable_sort_order": "artifact_path_then_category_bytewise",
+    "parser_policy": "Structured artifact inputs are parsed as JSON. Markdown and Rust references are collected as literal repository-relative path references and checked deterministically by the contract. The scanner does not rewrite, move, or delete artifacts."
+  },
+  "confidence_catalog": {
+    "exact_bead_id_field": {
+      "rank": 1,
+      "meaning": "The artifact JSON exposes a top-level bead_id field that names the owner.",
+      "false_positive_boundary": "Does not prove the artifact is current or citeable without its contract lane."
+    },
+    "domain_specific_owner_field": {
+      "rank": 2,
+      "meaning": "The artifact JSON exposes a domain-specific owner field such as track_bead_id that needs scanner-specific interpretation.",
+      "false_positive_boundary": "Does not override the governance ledger or prove closure-grade evidence."
+    },
+    "proof_manifest_source_path": {
+      "rank": 3,
+      "meaning": "The proof manifest lists the artifact path in a lane's source_paths or supporting metadata.",
+      "false_positive_boundary": "Does not prove that the lane passed."
+    },
+    "proof_status_lane_mapping": {
+      "rank": 4,
+      "meaning": "The proof status snapshot maps a claim to a lane or command that cites the artifact path.",
+      "false_positive_boundary": "Does not prove fresh proof evidence; rerun-required and blocked rows stay non-green evidence."
+    },
+    "readme_agents_reference": {
+      "rank": 5,
+      "meaning": "README.md or AGENTS.md names the artifact path or its canonical proof surface.",
+      "false_positive_boundary": "Documentation references are citation cues, not owner proof."
+    },
+    "test_constant_path": {
+      "rank": 6,
+      "meaning": "A checked test contains the artifact path as a constant or include_str source.",
+      "false_positive_boundary": "Does not prove the artifact is exhaustive or semantically fresh."
+    },
+    "manual_ledger_override": {
+      "rank": 7,
+      "meaning": "The artifact governance ledger supplies an explicit owner, exclusion, or supersession row.",
+      "false_positive_boundary": "Manual overrides must stay visible and do not authorize deletion."
+    }
+  },
+  "category_catalog": {
+    "exact_ownership": {
+      "meaning": "The scanner found a direct owner signal with no conflicting owner signal in the representative corpus.",
+      "scanner_rule": "At least one confidence source has kind exact_bead_id_field or manual_ledger_override and all owner beads agree.",
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_prove_fresh_rch_pass",
+        "does_not_prove_workspace_health"
+      ]
+    },
+    "inferred_ownership": {
+      "meaning": "The scanner found a plausible owner through domain-specific fields, tests, docs, or proof metadata, but not a canonical bead_id-only owner.",
+      "scanner_rule": "Confidence sources include domain_specific_owner_field, proof_manifest_source_path, proof_status_lane_mapping, readme_agents_reference, or test_constant_path without a conflict.",
+      "no_claim_boundaries": [
+        "does_not_override_manual_ledger",
+        "does_not_prove_acceptance_criteria",
+        "does_not_close_owner_bead"
+      ]
+    },
+    "orphan": {
+      "meaning": "The artifact exists and is referenced, but the scanner did not find a governance ledger row or proof-lane owner sufficient for citation.",
+      "scanner_rule": "Artifact path exists, reference sites exist, and ledger_rows plus proof_manifest_rows plus proof_status_rows are empty.",
+      "no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_prove_artifact_unused",
+        "does_not_prove_owner_absence"
+      ]
+    },
+    "ambiguous": {
+      "meaning": "The scanner found conflicting owner signals that require an explicit ledger override or follow-up.",
+      "scanner_rule": "Two or more owner bead signals disagree, or an artifact owner field conflicts with the ledger row.",
+      "no_claim_boundaries": [
+        "does_not_select_a_winner",
+        "does_not_close_followup",
+        "does_not_prove_current_artifact_health"
+      ]
+    },
+    "stale": {
+      "meaning": "The artifact is retained for lineage but must not be cited as current because a successor path exists.",
+      "scanner_rule": "superseded_by is set and points to an existing successor artifact.",
+      "no_claim_boundaries": [
+        "does_not_prove_current_result",
+        "does_not_override_successor_artifact",
+        "does_not_authorize_deletion"
+      ]
+    },
+    "excluded": {
+      "meaning": "The path or path family is intentionally outside durable artifact governance for this scanner version.",
+      "scanner_rule": "exclusion_reason is set and the path is a generated or ephemeral pattern.",
+      "no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_hide_future_durable_artifacts",
+        "does_not_prove_artifact_absence"
+      ]
+    }
+  },
+  "scanner_inputs": [
+    {
+      "path": "artifacts/artifact_governance_ledger_v1.json",
+      "parser": "json",
+      "role": "manual_overrides"
+    },
+    {
+      "path": "artifacts/proof_lane_manifest_v1.json",
+      "parser": "json",
+      "role": "proof_manifest_source_paths"
+    },
+    {
+      "path": "artifacts/proof_status_snapshot_v1.json",
+      "parser": "json",
+      "role": "proof_status_claim_mappings"
+    },
+    {
+      "path": "README.md",
+      "parser": "markdown_reference_scan",
+      "role": "readme_reference_sites"
+    },
+    {
+      "path": "AGENTS.md",
+      "parser": "markdown_reference_scan",
+      "role": "agent_instruction_reference_sites"
+    },
+    {
+      "path": "tests",
+      "parser": "rust_literal_reference_scan",
+      "role": "test_constant_reference_sites"
+    }
+  ],
+  "rows": [
+    {
+      "artifact_path": "${TMPDIR:-/tmp}/rch_target_*",
+      "category": "excluded",
+      "ownership": {
+        "bead_ids": [
+          "asupersync-artifact-governance-awdiwy.1"
+        ],
+        "confidence_level": "manual_ledger_override",
+        "confidence_sources": [
+          {
+            "kind": "manual_ledger_override",
+            "path": "artifacts/artifact_governance_ledger_v1.json",
+            "match": "remote-build-target-cache-roots"
+          },
+          {
+            "kind": "readme_agents_reference",
+            "path": "AGENTS.md",
+            "match": "${TMPDIR:-/tmp}/rch_target_check_all_targets"
+          }
+        ]
+      },
+      "ledger_rows": [
+        "remote-build-target-cache-roots"
+      ],
+      "checked_by_tests": [
+        "tests/artifact_governance_ledger_contract.rs"
+      ],
+      "docs_references": [
+        "AGENTS.md"
+      ],
+      "proof_manifest_rows": [],
+      "proof_status_rows": [],
+      "superseded_by": null,
+      "stale_reason": null,
+      "exclusion_reason": "RCH target directories are ephemeral execution output; durable governance tracks committed receipts, manifests, ledgers, and reports instead.",
+      "no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_hide_future_durable_artifacts",
+        "does_not_prove_artifact_absence"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/artifact_governance_ledger_v1.json",
+      "category": "exact_ownership",
+      "ownership": {
+        "bead_ids": [
+          "asupersync-artifact-governance-awdiwy.1"
+        ],
+        "confidence_level": "exact_bead_id_field",
+        "confidence_sources": [
+          {
+            "kind": "exact_bead_id_field",
+            "path": "artifacts/artifact_governance_ledger_v1.json",
+            "match": "\"bead_id\": \"asupersync-artifact-governance-awdiwy.1\""
+          },
+          {
+            "kind": "test_constant_path",
+            "path": "tests/artifact_governance_ledger_contract.rs",
+            "match": "artifacts/artifact_governance_ledger_v1.json"
+          }
+        ]
+      },
+      "ledger_rows": [],
+      "checked_by_tests": [
+        "tests/artifact_governance_ledger_contract.rs"
+      ],
+      "docs_references": [],
+      "proof_manifest_rows": [],
+      "proof_status_rows": [],
+      "superseded_by": null,
+      "stale_reason": null,
+      "exclusion_reason": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_prove_fresh_rch_pass",
+        "does_not_authorize_local_cargo_fallback"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/artifact_governance_scanner_v1.json",
+      "category": "exact_ownership",
+      "ownership": {
+        "bead_ids": [
+          "asupersync-artifact-governance-awdiwy.2"
+        ],
+        "confidence_level": "exact_bead_id_field",
+        "confidence_sources": [
+          {
+            "kind": "exact_bead_id_field",
+            "path": "artifacts/artifact_governance_scanner_v1.json",
+            "match": "\"bead_id\": \"asupersync-artifact-governance-awdiwy.2\""
+          },
+          {
+            "kind": "manual_ledger_override",
+            "path": "artifacts/artifact_governance_ledger_v1.json",
+            "match": "artifact-governance-scanner"
+          },
+          {
+            "kind": "test_constant_path",
+            "path": "tests/artifact_governance_scanner_contract.rs",
+            "match": "artifacts/artifact_governance_scanner_v1.json"
+          }
+        ]
+      },
+      "ledger_rows": [
+        "artifact-governance-scanner"
+      ],
+      "checked_by_tests": [
+        "tests/artifact_governance_scanner_contract.rs"
+      ],
+      "docs_references": [
+        "docs/proof/artifact_governance_scanner.md"
+      ],
+      "proof_manifest_rows": [],
+      "proof_status_rows": [],
+      "superseded_by": null,
+      "stale_reason": null,
+      "exclusion_reason": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_prove_fresh_rch_pass",
+        "does_not_prove_workspace_health"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+      "category": "exact_ownership",
+      "ownership": {
+        "bead_ids": [
+          "asupersync-aj7lx3.1"
+        ],
+        "confidence_level": "exact_bead_id_field",
+        "confidence_sources": [
+          {
+            "kind": "exact_bead_id_field",
+            "path": "artifacts/proof_lane_manifest_v1.json",
+            "match": "\"bead_id\": \"asupersync-aj7lx3.1\""
+          },
+          {
+            "kind": "readme_agents_reference",
+            "path": "README.md",
+            "match": "artifacts/proof_lane_manifest_v1.json"
+          },
+          {
+            "kind": "readme_agents_reference",
+            "path": "AGENTS.md",
+            "match": "artifacts/proof_lane_manifest_v1.json"
+          },
+          {
+            "kind": "proof_status_lane_mapping",
+            "path": "artifacts/proof_status_snapshot_v1.json",
+            "match": "\"proof_lane_manifest\": \"artifacts/proof_lane_manifest_v1.json\""
+          }
+        ]
+      },
+      "ledger_rows": [
+        "proof-lane-manifest-canonical"
+      ],
+      "checked_by_tests": [
+        "tests/proof_lane_manifest_contract.rs",
+        "tests/proof_status_snapshot_contract.rs"
+      ],
+      "docs_references": [
+        "README.md",
+        "AGENTS.md"
+      ],
+      "proof_manifest_rows": [
+        "source_of_truth.manifest"
+      ],
+      "proof_status_rows": [
+        "source_of_truth.proof_lane_manifest"
+      ],
+      "superseded_by": null,
+      "stale_reason": null,
+      "exclusion_reason": null,
+      "no_claim_boundaries": [
+        "does_not_prove_any_manifest_lane",
+        "does_not_prove_workspace_health",
+        "does_not_authorize_local_cargo_fallback"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/raptorq_track_e_gf256_bench_v1.json",
+      "category": "inferred_ownership",
+      "ownership": {
+        "bead_ids": [
+          "asupersync-36m6p"
+        ],
+        "confidence_level": "domain_specific_owner_field",
+        "confidence_sources": [
+          {
+            "kind": "domain_specific_owner_field",
+            "path": "artifacts/raptorq_track_e_gf256_bench_v1.json",
+            "match": "\"track_bead_id\": \"asupersync-36m6p\""
+          },
+          {
+            "kind": "test_constant_path",
+            "path": "tests/raptorq_perf_invariants.rs",
+            "match": "artifacts/raptorq_track_e_gf256_bench_v1.json"
+          }
+        ]
+      },
+      "ledger_rows": [],
+      "checked_by_tests": [
+        "tests/raptorq_perf_invariants.rs"
+      ],
+      "docs_references": [
+        "docs/raptorq_optimization_decision_records.md"
+      ],
+      "proof_manifest_rows": [],
+      "proof_status_rows": [],
+      "superseded_by": null,
+      "stale_reason": null,
+      "exclusion_reason": null,
+      "no_claim_boundaries": [
+        "does_not_override_manual_ledger",
+        "does_not_prove_track_e_closure",
+        "does_not_prove_no_regression"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+      "category": "stale",
+      "ownership": {
+        "bead_ids": [
+          "asupersync-36m6p"
+        ],
+        "confidence_level": "manual_ledger_override",
+        "confidence_sources": [
+          {
+            "kind": "manual_ledger_override",
+            "path": "artifacts/artifact_governance_ledger_v1.json",
+            "match": "raptorq-gf256-multiscenario-refresh-v3"
+          },
+          {
+            "kind": "domain_specific_owner_field",
+            "path": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+            "match": "\"track_bead_id\": \"asupersync-36m6p\""
+          }
+        ]
+      },
+      "ledger_rows": [
+        "raptorq-gf256-multiscenario-refresh-v3"
+      ],
+      "checked_by_tests": [
+        "tests/manual_raptorq_stability_check.rs"
+      ],
+      "docs_references": [
+        "docs/raptorq_optimization_decision_records.md"
+      ],
+      "proof_manifest_rows": [],
+      "proof_status_rows": [],
+      "superseded_by": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+      "stale_reason": "The governance ledger marks this v3 packet as superseded by the v4 mixed-signal successor.",
+      "exclusion_reason": null,
+      "no_claim_boundaries": [
+        "does_not_prove_current_result",
+        "does_not_override_successor_artifact",
+        "does_not_authorize_deletion"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/raptorq_track_e_gf256_p95p99_v1.json",
+      "category": "orphan",
+      "ownership": {
+        "bead_ids": [
+          "asupersync-36m6p"
+        ],
+        "confidence_level": "domain_specific_owner_field",
+        "confidence_sources": [
+          {
+            "kind": "domain_specific_owner_field",
+            "path": "artifacts/raptorq_track_e_gf256_p95p99_v1.json",
+            "match": "\"track_bead_id\": \"asupersync-36m6p\""
+          },
+          {
+            "kind": "test_constant_path",
+            "path": "tests/raptorq_perf_invariants.rs",
+            "match": "artifacts/raptorq_track_e_gf256_p95p99_v1.json"
+          }
+        ]
+      },
+      "ledger_rows": [],
+      "checked_by_tests": [
+        "tests/raptorq_perf_invariants.rs"
+      ],
+      "docs_references": [
+        "docs/raptorq_optimization_decision_records.md"
+      ],
+      "proof_manifest_rows": [],
+      "proof_status_rows": [],
+      "superseded_by": null,
+      "stale_reason": null,
+      "exclusion_reason": null,
+      "no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_prove_artifact_unused",
+        "does_not_prove_owner_absence"
+      ]
+    },
+    {
+      "artifact_path": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+      "category": "ambiguous",
+      "ownership": {
+        "bead_ids": [
+          "asupersync-validation-frontier-v2-b5cjsv.4",
+          "asupersync-artifact-governance-awdiwy.1"
+        ],
+        "confidence_level": "manual_ledger_override",
+        "confidence_sources": [
+          {
+            "kind": "exact_bead_id_field",
+            "path": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+            "match": "\"bead_id\": \"asupersync-validation-frontier-v2-b5cjsv.4\""
+          },
+          {
+            "kind": "manual_ledger_override",
+            "path": "artifacts/artifact_governance_ledger_v1.json",
+            "match": "rch-stale-progress-receipt-contract"
+          },
+          {
+            "kind": "proof_manifest_source_path",
+            "path": "artifacts/proof_lane_manifest_v1.json",
+            "match": "\"lane_id\": \"rch-stale-progress-receipt-contract\""
+          },
+          {
+            "kind": "proof_status_lane_mapping",
+            "path": "artifacts/proof_status_snapshot_v1.json",
+            "match": "\"claim_id\": \"rch-stale-progress-receipts\""
+          }
+        ]
+      },
+      "ledger_rows": [
+        "rch-stale-progress-receipt-contract"
+      ],
+      "checked_by_tests": [
+        "tests/rch_stale_progress_receipt_contract.rs"
+      ],
+      "docs_references": [
+        "docs/rch_stale_progress_receipt.md"
+      ],
+      "proof_manifest_rows": [
+        "rch-stale-progress-receipt-contract"
+      ],
+      "proof_status_rows": [
+        "rch-stale-progress-receipts"
+      ],
+      "superseded_by": null,
+      "stale_reason": null,
+      "exclusion_reason": null,
+      "no_claim_boundaries": [
+        "does_not_select_a_winner",
+        "does_not_prove_source_correctness",
+        "does_not_prove_fresh_rch_pass"
+      ]
+    }
+  ],
+  "negative_fixtures": [
+    {
+      "fixture_id": "malformed_json",
+      "input_kind": "scanner_json",
+      "must_fail_with": "malformed-json"
+    },
+    {
+      "fixture_id": "missing_owner_field",
+      "input_kind": "row",
+      "must_fail_with": "ownership"
+    },
+    {
+      "fixture_id": "duplicate_artifact_path",
+      "input_kind": "rows",
+      "must_fail_with": "duplicate artifact_path"
+    },
+    {
+      "fixture_id": "self_supersession",
+      "input_kind": "rows",
+      "must_fail_with": "supersession"
+    }
+  ],
+  "summary": {
+    "row_count": 8,
+    "category_counts": {
+      "exact_ownership": 3,
+      "inferred_ownership": 1,
+      "orphan": 1,
+      "ambiguous": 1,
+      "stale": 1,
+      "excluded": 1
+    },
+    "confidence_source_kinds_covered": [
+      "exact_bead_id_field",
+      "domain_specific_owner_field",
+      "proof_manifest_source_path",
+      "proof_status_lane_mapping",
+      "readme_agents_reference",
+      "test_constant_path",
+      "manual_ledger_override"
+    ],
+    "operator_report": "docs/proof/artifact_governance_scanner.md"
+  }
+}

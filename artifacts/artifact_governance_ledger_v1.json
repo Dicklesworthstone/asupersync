@@ -156,11 +156,39 @@
     "runtime_pressure",
     "swarm_agent",
     "browser_wasm",
+    "artifact_governance",
     "raptorq",
     "generated_fixture",
     "excluded"
   ],
   "rows": [
+    {
+      "artifact_id": "artifact-governance-scanner",
+      "path": "artifacts/artifact_governance_scanner_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.2",
+      "producing_lane": "artifact-governance-scanner-contract",
+      "domain": "artifact governance",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/artifact_governance_scanner_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_representative_scanner_rows_when_artifact_governance_scanner_contract_passes_on_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_prove_fresh_rch_pass",
+        "does_not_authorize_deletion"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Representative scanner inventory and operator report for artifact governance ownership, reference, ambiguity, stale, orphan, and exclusion routing.",
+      "source_references": [
+        "artifacts/artifact_governance_scanner_v1.json",
+        "docs/proof/artifact_governance_scanner.md",
+        "tests/artifact_governance_scanner_contract.rs"
+      ]
+    },
     {
       "artifact_id": "proof-lane-manifest-canonical",
       "path": "artifacts/proof_lane_manifest_v1.json",
