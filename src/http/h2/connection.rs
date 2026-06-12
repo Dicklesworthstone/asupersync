@@ -34,6 +34,13 @@ const DEFAULT_RST_STREAM_RATE_LIMIT: u32 = 100;
 /// Default window duration for RST_STREAM rate limiting (in milliseconds).
 const DEFAULT_RST_STREAM_RATE_WINDOW_MS: u128 = 30_000;
 
+/// Last-stream-id advertised by the stage-1 graceful-shutdown GOAWAY.
+///
+/// RFC 9113 §6.8: a graceful shutdown starts with a GOAWAY carrying the
+/// maximum stream identifier (2^31 - 1) and NO_ERROR, which warns the peer
+/// that shutdown is imminent without refusing any in-flight stream.
+const GRACEFUL_SHUTDOWN_LAST_STREAM_ID: u32 = 0x7fff_ffff;
+
 /// Configurable RST_STREAM rate limit for CVE-2023-44487 protection.
 ///
 /// **Security warning**: Increasing these limits or disabling rate limiting
@@ -261,6 +268,9 @@ pub struct Connection {
     goaway_received: bool,
     /// GOAWAY sent.
     goaway_sent: bool,
+    /// A stage-1 graceful-shutdown GOAWAY (last_stream_id = 2^31 - 1) was
+    /// sent and the definitive stage-2 GOAWAY has not been sent yet.
+    graceful_shutdown_pending: bool,
     /// Pending operations to process.
     pending_ops: VecDeque<PendingOp>,
     /// Clock source used by timeout and rate-limit bookkeeping.
@@ -312,6 +322,7 @@ impl Connection {
             sent_goaway_last_stream_id: None,
             goaway_received: false,
             goaway_sent: false,
+            graceful_shutdown_pending: false,
             pending_ops: VecDeque::new(),
             time_getter,
             continuation_stream_id: None,
@@ -352,6 +363,7 @@ impl Connection {
             sent_goaway_last_stream_id: None,
             goaway_received: false,
             goaway_sent: false,
+            graceful_shutdown_pending: false,
             pending_ops: VecDeque::new(),
             time_getter,
             continuation_stream_id: None,
@@ -425,6 +437,55 @@ impl Connection {
     #[must_use]
     pub fn goaway_received(&self) -> bool {
         self.goaway_received
+    }
+
+    /// Check if a GOAWAY has been sent (immediate or graceful, either stage).
+    #[must_use]
+    pub fn goaway_sent(&self) -> bool {
+        self.goaway_sent
+    }
+
+    /// Check if a stage-1 graceful-shutdown warning has been sent but the
+    /// definitive stage-2 GOAWAY has not yet been sent.
+    ///
+    /// While pending, peer-initiated streams are still accepted; drain
+    /// supervisors must call [`Connection::finalize_graceful_shutdown`]
+    /// before treating the connection as refusing new work.
+    #[must_use]
+    pub fn graceful_shutdown_pending(&self) -> bool {
+        self.graceful_shutdown_pending
+    }
+
+    /// Last-stream-id advertised by the GOAWAY we sent, if any.
+    ///
+    /// During a pending graceful shutdown this is 2^31 - 1 (the stage-1
+    /// warning value); after [`Connection::finalize_graceful_shutdown`] or
+    /// [`Connection::goaway`] it is the definitive refusal boundary.
+    #[must_use]
+    pub fn sent_goaway_last_stream_id(&self) -> Option<u32> {
+        self.sent_goaway_last_stream_id
+    }
+
+    /// Number of streams that currently count as active (RFC 9113 §5.1.2:
+    /// open, half-closed, or reserved).
+    ///
+    /// This is the in-flight figure a graceful-drain supervisor (for
+    /// example `server::shutdown::GracefulDrainSupervisor`) observes while
+    /// draining an HTTP/2 connection.
+    #[must_use]
+    pub fn active_stream_count(&self) -> usize {
+        self.streams.active_count()
+    }
+
+    /// Check whether graceful shutdown has fully drained this connection.
+    ///
+    /// True once a definitive GOAWAY has been sent (immediate
+    /// [`Connection::goaway`] or stage-2
+    /// [`Connection::finalize_graceful_shutdown`]) and no active streams
+    /// remain. The transport can then be closed without stranding work.
+    #[must_use]
+    pub fn graceful_shutdown_complete(&self) -> bool {
+        self.goaway_sent && !self.graceful_shutdown_pending && self.streams.active_count() == 0
     }
 
     /// Check if we're expecting CONTINUATION frames.
@@ -560,7 +621,14 @@ impl Connection {
         });
     }
 
-    /// Send GOAWAY and start graceful shutdown.
+    /// Send GOAWAY and start an immediate shutdown.
+    ///
+    /// The advertised last-stream-id is frozen at the highest stream
+    /// processed so far; peer streams above it are refused from this point
+    /// on. For the RFC 9113 §6.8 two-stage graceful variant that keeps
+    /// accepting racing in-flight streams first, use
+    /// [`Connection::begin_graceful_shutdown`] /
+    /// [`Connection::finalize_graceful_shutdown`].
     pub fn goaway(&mut self, error_code: ErrorCode, debug_data: Bytes) {
         if !self.goaway_sent {
             self.goaway_sent = true;
@@ -573,6 +641,70 @@ impl Connection {
                 debug_data,
             });
         }
+    }
+
+    /// Begin an RFC 9113 §6.8 graceful shutdown (stage 1 of 2).
+    ///
+    /// Queues a GOAWAY with last-stream-id 2^31 - 1 and NO_ERROR: the peer
+    /// learns shutdown is imminent and should stop creating streams, but no
+    /// in-flight or racing stream is refused yet. The local side stops
+    /// opening new streams immediately ([`Connection::open_stream`] fails
+    /// once a GOAWAY is sent).
+    ///
+    /// After allowing in-flight stream creation to settle (at least one
+    /// round trip; a drain supervisor tick works), call
+    /// [`Connection::finalize_graceful_shutdown`] to advertise the
+    /// definitive boundary. A connection that is already idle
+    /// ([`Connection::active_stream_count`] == 0) can be finalized
+    /// immediately — that is the drain-start fast path for idle keep-alive
+    /// connections.
+    ///
+    /// No-op if a GOAWAY (graceful or immediate) was already sent.
+    pub fn begin_graceful_shutdown(&mut self, debug_data: Bytes) {
+        if self.goaway_sent {
+            return;
+        }
+        self.goaway_sent = true;
+        self.graceful_shutdown_pending = true;
+        self.state = ConnectionState::Closing;
+        self.sent_goaway_last_stream_id = Some(GRACEFUL_SHUTDOWN_LAST_STREAM_ID);
+        self.pending_ops.push_back(PendingOp::GoAway {
+            last_stream_id: GRACEFUL_SHUTDOWN_LAST_STREAM_ID,
+            error_code: ErrorCode::NoError,
+            debug_data,
+        });
+    }
+
+    /// Finalize an RFC 9113 §6.8 graceful shutdown (stage 2 of 2).
+    ///
+    /// Queues a GOAWAY with NO_ERROR and the highest stream identifier
+    /// actually processed, ratcheting the advertised boundary down from the
+    /// stage-1 value (RFC 9113 §6.8 forbids raising it). Peer streams above
+    /// the boundary are refused with `RST_STREAM(REFUSED_STREAM)` from this
+    /// point on; once the remaining active streams complete,
+    /// [`Connection::graceful_shutdown_complete`] reports true.
+    ///
+    /// Calling this without [`Connection::begin_graceful_shutdown`] behaves
+    /// like an immediate `goaway(ErrorCode::NoError, ..)`. No-op if a
+    /// definitive GOAWAY was already sent.
+    pub fn finalize_graceful_shutdown(&mut self, debug_data: Bytes) {
+        if self.goaway_sent && !self.graceful_shutdown_pending {
+            // A definitive boundary is already on the wire; never widen or
+            // re-advertise it.
+            return;
+        }
+        let last_stream_id = self
+            .sent_goaway_last_stream_id
+            .map_or(self.last_stream_id, |prev| self.last_stream_id.min(prev));
+        self.goaway_sent = true;
+        self.graceful_shutdown_pending = false;
+        self.state = ConnectionState::Closing;
+        self.sent_goaway_last_stream_id = Some(last_stream_id);
+        self.pending_ops.push_back(PendingOp::GoAway {
+            last_stream_id,
+            error_code: ErrorCode::NoError,
+            debug_data,
+        });
     }
 
     /// Process an incoming frame.
@@ -811,6 +943,12 @@ impl Connection {
                     stream_id: frame.stream_id,
                     error_code: ErrorCode::RefusedStream,
                 });
+                // Close the local record too: a refused stream is one we
+                // will take no action on, and leaving it active would block
+                // graceful-drain quiescence (active_stream_count) forever.
+                if let Some(stream) = self.streams.get_mut(frame.stream_id) {
+                    stream.reset(ErrorCode::RefusedStream);
+                }
                 result?; // bubble up compression errors
                 Ok(None)
             } else {
@@ -873,6 +1011,12 @@ impl Connection {
                     stream_id: frame.stream_id,
                     error_code: ErrorCode::RefusedStream,
                 });
+                // Mirror process_headers: close the local record so a
+                // refused stream cannot pin active_stream_count above zero
+                // during graceful drain.
+                if let Some(stream) = self.streams.get_mut(frame.stream_id) {
+                    stream.reset(ErrorCode::RefusedStream);
+                }
                 result?; // bubble up compression errors
                 Ok(None)
             } else {
@@ -3485,6 +3629,275 @@ mod tests {
         // Streams 3 and 5 should be reset
         assert_eq!(conn.stream(3).unwrap().state(), StreamState::Closed);
         assert_eq!(conn.stream(5).unwrap().state(), StreamState::Closed);
+    }
+
+    // =========================================================================
+    // Two-stage graceful shutdown / drain tests
+    // (br-asupersync-server-stack-hardening-eeexl1.2 D2.3)
+    // =========================================================================
+
+    #[test]
+    fn begin_graceful_shutdown_warns_without_refusing_racing_streams() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // One request is already in flight when drain starts.
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/in-flight"),
+            false,
+            true,
+        )))
+        .unwrap();
+
+        conn.begin_graceful_shutdown(Bytes::from_static(b"draining"));
+        assert!(conn.goaway_sent());
+        assert!(conn.graceful_shutdown_pending());
+        assert_eq!(conn.state(), ConnectionState::Closing);
+        assert_eq!(
+            conn.sent_goaway_last_stream_id(),
+            Some(0x7fff_ffff),
+            "stage-1 GOAWAY must advertise the maximum stream id"
+        );
+
+        match conn.next_frame().expect("stage-1 GOAWAY queued") {
+            Frame::GoAway(g) => {
+                assert_eq!(g.last_stream_id, 0x7fff_ffff);
+                assert_eq!(g.error_code, ErrorCode::NoError);
+                assert_eq!(&g.debug_data[..], b"draining");
+            }
+            other => panic!("expected GoAway, got {other:?}"),
+        }
+
+        // A stream racing with the stage-1 warning must still be accepted.
+        let received = conn
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                3,
+                test_request_headers("/racing"),
+                false,
+                true,
+            )))
+            .unwrap();
+        assert!(
+            matches!(received, Some(ReceivedFrame::Headers { stream_id: 3, .. })),
+            "racing stream must be processed during the stage-1 window"
+        );
+        assert_eq!(conn.active_stream_count(), 2);
+        assert!(!conn.graceful_shutdown_complete());
+        assert!(!conn.has_pending_frames(), "no RST for the racing stream");
+    }
+
+    #[test]
+    fn finalize_graceful_shutdown_ratchets_boundary_and_refuses_late_streams() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/one"),
+            false,
+            true,
+        )))
+        .unwrap();
+        conn.begin_graceful_shutdown(Bytes::new());
+        let _ = conn.next_frame(); // stage-1 GOAWAY
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            3,
+            test_request_headers("/racing"),
+            false,
+            true,
+        )))
+        .unwrap();
+
+        conn.finalize_graceful_shutdown(Bytes::new());
+        assert!(!conn.graceful_shutdown_pending());
+        assert_eq!(conn.sent_goaway_last_stream_id(), Some(3));
+        match conn.next_frame().expect("stage-2 GOAWAY queued") {
+            Frame::GoAway(g) => {
+                assert_eq!(
+                    g.last_stream_id, 3,
+                    "stage-2 GOAWAY must ratchet down to the true boundary"
+                );
+                assert_eq!(g.error_code, ErrorCode::NoError);
+            }
+            other => panic!("expected GoAway, got {other:?}"),
+        }
+
+        // A stream above the definitive boundary is refused...
+        let received = conn
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                5,
+                test_request_headers("/late"),
+                true,
+                true,
+            )))
+            .unwrap();
+        assert!(received.is_none(), "refused stream must not surface");
+        match conn.next_frame().expect("RST_STREAM queued") {
+            Frame::RstStream(r) => {
+                assert_eq!(r.stream_id, 5);
+                assert_eq!(r.error_code, ErrorCode::RefusedStream);
+            }
+            other => panic!("expected RstStream, got {other:?}"),
+        }
+        // ...and its local record is closed so drain can quiesce.
+        assert_eq!(conn.stream(5).unwrap().state(), StreamState::Closed);
+        assert_eq!(conn.active_stream_count(), 2);
+    }
+
+    #[test]
+    fn graceful_shutdown_completes_when_in_flight_streams_finish() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Request fully received; response not yet sent (half-closed remote).
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/slow"),
+            true,
+            true,
+        )))
+        .unwrap();
+
+        conn.begin_graceful_shutdown(Bytes::new());
+        let _ = conn.next_frame();
+        conn.finalize_graceful_shutdown(Bytes::new());
+        let _ = conn.next_frame();
+        assert_eq!(conn.active_stream_count(), 1);
+        assert!(!conn.graceful_shutdown_complete());
+
+        // Server finishes the response: stream closes, drain completes.
+        conn.send_headers(1, vec![Header::new(":status", "200")], true)
+            .unwrap();
+        assert_eq!(conn.active_stream_count(), 0);
+        assert!(conn.graceful_shutdown_complete());
+    }
+
+    #[test]
+    fn idle_connection_graceful_shutdown_completes_immediately() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        conn.begin_graceful_shutdown(Bytes::new());
+        assert!(
+            !conn.graceful_shutdown_complete(),
+            "stage-1 alone is not definitive even when idle"
+        );
+        conn.finalize_graceful_shutdown(Bytes::new());
+        assert!(conn.graceful_shutdown_complete());
+
+        match conn.next_frame().expect("stage-1 GOAWAY") {
+            Frame::GoAway(g) => assert_eq!(g.last_stream_id, 0x7fff_ffff),
+            other => panic!("expected GoAway, got {other:?}"),
+        }
+        match conn.next_frame().expect("stage-2 GOAWAY") {
+            Frame::GoAway(g) => assert_eq!(g.last_stream_id, 0),
+            other => panic!("expected GoAway, got {other:?}"),
+        }
+        assert!(!conn.has_pending_frames());
+    }
+
+    #[test]
+    fn finalize_without_begin_acts_like_immediate_noerror_goaway() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/only"),
+            true,
+            true,
+        )))
+        .unwrap();
+
+        conn.finalize_graceful_shutdown(Bytes::new());
+        assert!(conn.goaway_sent());
+        assert!(!conn.graceful_shutdown_pending());
+        match conn.next_frame().expect("definitive GOAWAY") {
+            Frame::GoAway(g) => {
+                assert_eq!(g.last_stream_id, 1);
+                assert_eq!(g.error_code, ErrorCode::NoError);
+            }
+            other => panic!("expected GoAway, got {other:?}"),
+        }
+
+        // Repeated finalize must not re-advertise the boundary.
+        conn.finalize_graceful_shutdown(Bytes::new());
+        assert!(!conn.has_pending_frames());
+    }
+
+    #[test]
+    fn graceful_shutdown_after_immediate_goaway_is_noop() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/pre"),
+            false,
+            true,
+        )))
+        .unwrap();
+        conn.goaway(ErrorCode::NoError, Bytes::new());
+        assert_eq!(conn.sent_goaway_last_stream_id(), Some(1));
+        let _ = conn.next_frame(); // definitive GOAWAY
+
+        conn.begin_graceful_shutdown(Bytes::new());
+        conn.finalize_graceful_shutdown(Bytes::new());
+        assert!(!conn.graceful_shutdown_pending());
+        assert_eq!(
+            conn.sent_goaway_last_stream_id(),
+            Some(1),
+            "boundary must never widen after a definitive GOAWAY"
+        );
+        assert!(
+            !conn.has_pending_frames(),
+            "no extra GOAWAY after an immediate goaway"
+        );
+    }
+
+    #[test]
+    fn refused_continuation_stream_is_closed_locally() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/one"),
+            false,
+            true,
+        )))
+        .unwrap();
+        conn.begin_graceful_shutdown(Bytes::new());
+        conn.finalize_graceful_shutdown(Bytes::new());
+        let _ = conn.next_frame();
+        let _ = conn.next_frame();
+
+        // A late stream split across HEADERS + CONTINUATION is refused and
+        // its local record closed, exercising the continuation refusal path.
+        let block = test_request_headers("/late-split");
+        let first = block.slice(..1);
+        let rest = block.slice(1..);
+        conn.process_frame(Frame::Headers(HeadersFrame::new(3, first, true, false)))
+            .unwrap();
+        let received = conn
+            .process_frame(Frame::Continuation(ContinuationFrame {
+                stream_id: 3,
+                header_block: rest,
+                end_headers: true,
+            }))
+            .unwrap();
+        assert!(received.is_none(), "refused stream must not surface");
+
+        match conn.next_frame().expect("RST_STREAM queued") {
+            Frame::RstStream(r) => {
+                assert_eq!(r.stream_id, 3);
+                assert_eq!(r.error_code, ErrorCode::RefusedStream);
+            }
+            other => panic!("expected RstStream, got {other:?}"),
+        }
+        assert_eq!(conn.stream(3).unwrap().state(), StreamState::Closed);
+        assert_eq!(conn.active_stream_count(), 1);
     }
 
     #[test]
