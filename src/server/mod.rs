@@ -54,5 +54,6 @@ pub mod shutdown;
 
 pub use connection::{ConnectionGuard, ConnectionId, ConnectionInfo, ConnectionManager};
 pub use shutdown::{
-    GracefulDrainReport, GracefulDrainTracker, ShutdownPhase, ShutdownSignal, ShutdownStats,
+    DrainStep, GracefulDrainReport, GracefulDrainSupervisor, GracefulDrainTracker, ShutdownPhase,
+    ShutdownSignal, ShutdownStats,
 };

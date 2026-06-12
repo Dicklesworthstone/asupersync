@@ -295,6 +295,140 @@ fn usize_to_potential(count: usize) -> f64 {
     count_as_f64.min(MAX_EXACT_F64)
 }
 
+/// The action a graceful-drain driver should take after one in-flight-count
+/// observation.
+///
+/// This is the decision output of [`GracefulDrainSupervisor::observe`]. The
+/// driver (the HTTP accept/shutdown supervisor, wired in a later slice) maps
+/// each variant to a concrete action; the supervisor itself performs no I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainStep {
+    /// Requests are still draining within the soft budget; keep waiting.
+    Continue,
+    /// The soft drain budget elapsed with requests still in flight: the driver
+    /// should escalate the stragglers through the cancellation protocol. Emitted
+    /// at most once (the transition into the escalation window).
+    Escalate,
+    /// All in-flight requests completed; the drain reached quiescence and the
+    /// driver should finish and emit the report.
+    Quiescent,
+    /// The hard deadline elapsed with requests still in flight: the driver
+    /// should force-close the stragglers and emit the report.
+    HardDeadline,
+}
+
+/// Decision state machine for a request-aware graceful drain.
+///
+/// Wraps a [`GracefulDrainTracker`] (which carries the progress certificate)
+/// and adds the soft-budget / hard-deadline sequencing the operator-facing
+/// drain needs: feed it the current in-flight request count once per tick via
+/// [`observe`](Self::observe) and it returns the [`DrainStep`] the driver
+/// should act on. It is deliberately synchronous and I/O-free so the drain
+/// policy can be unit-tested deterministically; the async driving loop, the
+/// in-flight counter, and the actual straggler cancellation are wired by the
+/// HTTP-layer integration slice.
+///
+/// Two budgets, both measured from drain start:
+/// * `drain_budget` — soft: in-flight requests are allowed to finish on their
+///   own until it elapses, after which the driver escalates ([`DrainStep::Escalate`]).
+/// * `hard_budget` — hard: after it elapses the driver force-closes any
+///   stragglers ([`DrainStep::HardDeadline`]). Must be `>= drain_budget`.
+#[derive(Debug)]
+pub struct GracefulDrainSupervisor {
+    tracker: GracefulDrainTracker,
+    drain_deadline: Time,
+    hard_deadline: Time,
+    escalated: bool,
+}
+
+impl GracefulDrainSupervisor {
+    /// Begin supervising a drain that starts at `now` with
+    /// `initial_in_flight` requests.
+    ///
+    /// `drain_budget` is the soft window; `hard_budget` is the hard window.
+    /// `hard_budget` is clamped up to at least `drain_budget` so the hard
+    /// deadline can never precede the soft one.
+    #[must_use]
+    pub fn new(
+        initial_in_flight: usize,
+        now: Time,
+        drain_budget: Duration,
+        hard_budget: Duration,
+    ) -> Self {
+        let effective_hard = hard_budget.max(drain_budget);
+        let to_nanos = |d: Duration| -> u64 { d.as_nanos().min(u128::from(u64::MAX)) as u64 };
+        Self {
+            tracker: GracefulDrainTracker::new(initial_in_flight, now),
+            drain_deadline: now.saturating_add_nanos(to_nanos(drain_budget)),
+            hard_deadline: now.saturating_add_nanos(to_nanos(effective_hard)),
+            escalated: false,
+        }
+    }
+
+    /// Record the current in-flight request count at logical time `now` and
+    /// return the action the driver should take.
+    ///
+    /// Quiescence (zero in-flight) wins over every deadline; the hard deadline
+    /// wins over the soft escalation window. [`DrainStep::Escalate`] is emitted
+    /// at most once — on the first observation at or after the soft deadline
+    /// while requests remain — so the driver escalates exactly once.
+    pub fn observe(&mut self, remaining_in_flight: usize, now: Time) -> DrainStep {
+        self.tracker.observe(remaining_in_flight);
+        if remaining_in_flight == 0 {
+            return DrainStep::Quiescent;
+        }
+        if now >= self.hard_deadline {
+            return DrainStep::HardDeadline;
+        }
+        if now >= self.drain_deadline && !self.escalated {
+            self.escalated = true;
+            return DrainStep::Escalate;
+        }
+        DrainStep::Continue
+    }
+
+    /// The current drain-phase classification from the progress certificate.
+    #[must_use]
+    pub fn phase(&self) -> DrainPhase {
+        self.tracker.phase()
+    }
+
+    /// The most recently observed in-flight request count.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.tracker.remaining()
+    }
+
+    /// The soft drain deadline (escalation point).
+    #[must_use]
+    pub fn drain_deadline(&self) -> Time {
+        self.drain_deadline
+    }
+
+    /// The hard drain deadline (force-close point).
+    #[must_use]
+    pub fn hard_deadline(&self) -> Time {
+        self.hard_deadline
+    }
+
+    /// Whether the soft budget has elapsed and escalation has been signalled.
+    #[must_use]
+    pub fn escalated(&self) -> bool {
+        self.escalated
+    }
+
+    /// Produce the final report at logical time `now`.
+    ///
+    /// `hard_deadline_hit` should reflect whether the drain ended on the hard
+    /// deadline (the driver typically passes `true` when it last saw
+    /// [`DrainStep::HardDeadline`]). Any still-in-flight requests are reported
+    /// as stranded.
+    #[must_use]
+    pub fn finish(&self, now: Time, hard_deadline_hit: bool) -> GracefulDrainReport {
+        self.tracker.finish(now, hard_deadline_hit)
+    }
+}
+
 /// Internal state shared between the signal and its subscribers.
 struct SignalState {
     phase: AtomicU8,
@@ -1716,5 +1850,98 @@ Drain duration:     42ms
         assert_eq!(report.drain_duration, Duration::ZERO);
         assert!(report.reached_quiescence);
         crate::test_complete!("drain_tracker_backward_clock_is_zero_duration");
+    }
+
+    // ------------------------------------------------------------------
+    // Drain supervisor decision state machine (D2.2a)
+    // ------------------------------------------------------------------
+
+    /// A drain that empties before the soft budget reports Continue then
+    /// Quiescent, never escalating.
+    #[test]
+    fn drain_supervisor_clean_drain_never_escalates() {
+        init_test("drain_supervisor_clean_drain_never_escalates");
+        let mut sup = GracefulDrainSupervisor::new(
+            10,
+            t(0),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+        );
+        assert_eq!(sup.observe(6, t(1_000_000_000)), DrainStep::Continue);
+        assert_eq!(sup.observe(2, t(2_000_000_000)), DrainStep::Continue);
+        assert_eq!(sup.observe(0, t(3_000_000_000)), DrainStep::Quiescent);
+        assert!(!sup.escalated());
+        let report = sup.finish(t(3_000_000_000), false);
+        assert!(report.reached_quiescence);
+        assert_eq!(report.requests_stranded, 0);
+        crate::test_complete!("drain_supervisor_clean_drain_never_escalates");
+    }
+
+    /// Crossing the soft budget with requests still in flight escalates
+    /// exactly once, then keeps reporting Continue until the hard deadline.
+    #[test]
+    fn drain_supervisor_escalates_once_at_soft_budget() {
+        init_test("drain_supervisor_escalates_once_at_soft_budget");
+        let mut sup =
+            GracefulDrainSupervisor::new(5, t(0), Duration::from_secs(10), Duration::from_secs(30));
+        // Before the soft deadline: keep waiting.
+        assert_eq!(sup.observe(5, t(5_000_000_000)), DrainStep::Continue);
+        // First observation at/after the soft deadline escalates.
+        assert_eq!(sup.observe(4, t(10_000_000_000)), DrainStep::Escalate);
+        assert!(sup.escalated());
+        // Subsequent observations in the escalation window do not re-escalate.
+        assert_eq!(sup.observe(3, t(12_000_000_000)), DrainStep::Continue);
+        assert_eq!(sup.observe(2, t(20_000_000_000)), DrainStep::Continue);
+        crate::test_complete!("drain_supervisor_escalates_once_at_soft_budget");
+    }
+
+    /// Reaching the hard deadline with requests still in flight reports
+    /// HardDeadline; the report records the stranded requests.
+    #[test]
+    fn drain_supervisor_hard_deadline_strands_remaining() {
+        init_test("drain_supervisor_hard_deadline_strands_remaining");
+        let mut sup =
+            GracefulDrainSupervisor::new(8, t(0), Duration::from_secs(10), Duration::from_secs(20));
+        assert_eq!(sup.observe(6, t(10_000_000_000)), DrainStep::Escalate);
+        assert_eq!(sup.observe(4, t(20_000_000_000)), DrainStep::HardDeadline);
+        let report = sup.finish(t(20_000_000_000), true);
+        assert!(report.hard_deadline_hit);
+        assert_eq!(report.requests_stranded, 4);
+        assert_eq!(report.requests_completed, 4);
+        assert!(!report.reached_quiescence);
+        crate::test_complete!("drain_supervisor_hard_deadline_strands_remaining");
+    }
+
+    /// Quiescence wins over a simultaneously-elapsed hard deadline: a tick
+    /// that observes zero in-flight reports Quiescent even past the deadline.
+    #[test]
+    fn drain_supervisor_quiescence_beats_hard_deadline() {
+        init_test("drain_supervisor_quiescence_beats_hard_deadline");
+        let mut sup =
+            GracefulDrainSupervisor::new(3, t(0), Duration::from_secs(10), Duration::from_secs(20));
+        // Past the hard deadline, but the count hit zero this tick.
+        assert_eq!(sup.observe(0, t(25_000_000_000)), DrainStep::Quiescent);
+        let report = sup.finish(t(25_000_000_000), false);
+        assert!(report.reached_quiescence);
+        assert_eq!(report.requests_stranded, 0);
+        crate::test_complete!("drain_supervisor_quiescence_beats_hard_deadline");
+    }
+
+    /// `hard_budget` is clamped up to at least `drain_budget` so the hard
+    /// deadline can never precede the soft escalation point.
+    #[test]
+    fn drain_supervisor_clamps_hard_budget_below_soft() {
+        init_test("drain_supervisor_clamps_hard_budget_below_soft");
+        let sup = GracefulDrainSupervisor::new(
+            1,
+            t(0),
+            Duration::from_secs(30),
+            Duration::from_secs(5), // smaller than the soft budget
+        );
+        assert!(
+            sup.hard_deadline() >= sup.drain_deadline(),
+            "hard deadline must not precede the soft deadline"
+        );
+        crate::test_complete!("drain_supervisor_clamps_hard_budget_below_soft");
     }
 }
