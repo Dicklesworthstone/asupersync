@@ -166,17 +166,18 @@ pub use numa::{
 };
 pub use oracle::{
     ActorLeakOracle, ActorLeakViolation, BayesFactor, DetectionModel, DeterminismOracle,
-    DeterminismViolation, DownOrderOracle, DownOrderViolation, EProcess, EProcessConfig,
-    EProcessMonitor, EValue, EvidenceEntry, EvidenceLedger, EvidenceLine, EvidenceStrength,
-    EvidenceSummary, FinalizerId, FinalizerOracle, FinalizerViolation, LogLikelihoodContributions,
-    LoserDrainOracle, LoserDrainViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
-    MonitorResult, ORACLE_ALL, ORACLE_DESCRIPTORS, ObligationLeakOracle, ObligationLeakViolation,
-    Oracle, OracleDescriptor, OracleEntryReport, OracleRegistry, OracleRegistryError, OracleReport,
-    OracleStats, OracleSuite, OracleViolation, QuiescenceOracle, QuiescenceViolation,
-    RegistryLeaseOracle, RegistryLeaseViolation, ReplyLinearityOracle, ReplyLinearityViolation,
-    SupervisionOracle, SupervisionViolation, SupervisionViolationKind, SupervisorQuiescenceOracle,
-    SupervisorQuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
-    assert_deterministic, assert_deterministic_multi,
+    DeterminismSourceHint, DeterminismViolation, DownOrderOracle, DownOrderViolation, EProcess,
+    EProcessConfig, EProcessMonitor, EValue, EvidenceEntry, EvidenceLedger, EvidenceLine,
+    EvidenceStrength, EvidenceSummary, FinalizerId, FinalizerOracle, FinalizerViolation,
+    LogLikelihoodContributions, LoserDrainOracle, LoserDrainViolation, MailboxOracle,
+    MailboxViolation, MailboxViolationKind, MonitorResult, ORACLE_ALL, ORACLE_DESCRIPTORS,
+    ObligationLeakOracle, ObligationLeakViolation, Oracle, OracleDescriptor, OracleEntryReport,
+    OracleRegistry, OracleRegistryError, OracleReport, OracleStats, OracleSuite, OracleViolation,
+    QuiescenceOracle, QuiescenceViolation, RegistryLeaseOracle, RegistryLeaseViolation,
+    ReplyLinearityOracle, ReplyLinearityViolation, SupervisionOracle, SupervisionViolation,
+    SupervisionViolationKind, SupervisorQuiescenceOracle, SupervisorQuiescenceViolation,
+    TaskLeakOracle, TaskLeakViolation, TraceEventSummary, assert_deterministic,
+    assert_deterministic_for_seeds, assert_deterministic_multi,
 };
 #[cfg(feature = "messaging-fabric")]
 pub use oracle::{

@@ -1,7 +1,7 @@
 {
   "schema_version": "asupersync-error-code-registry-v1",
   "namespace": "ASUP-Exxx",
-  "updated": "2026-06-11",
+  "updated": "2026-06-12",
   "ranges": [
     {
       "range": "ASUP-E0xx",
@@ -491,7 +491,7 @@
       "code": "ASUP-E403",
       "name": "lab-seed-nondeterminism",
       "area": "lab-replay",
-      "status": "reserved",
+      "status": "live",
       "summary": "Two runs with the same lab seed produced different outcomes.",
       "probable_causes": [
         "A data structure iteration order is nondeterministic.",
@@ -502,8 +502,10 @@
         "Route time and entropy through Cx capabilities."
       ],
       "doc_path": "docs/error_codes/ASUP-E403.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/lab/oracle/determinism.rs"
+      ]
     },
     {
       "code": "ASUP-E501",

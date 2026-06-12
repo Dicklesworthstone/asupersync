@@ -40,21 +40,146 @@ pub struct DeterminismViolation {
     pub actual: Option<TraceEventSummary>,
     /// Context: events before divergence from the first trace.
     pub context_before: Vec<TraceEventSummary>,
+    /// Expected events immediately after the divergence point.
+    pub context_after_expected: Vec<TraceEventSummary>,
+    /// Actual events immediately after the divergence point.
+    pub context_after_actual: Vec<TraceEventSummary>,
+    /// Best-effort source hint for the nondeterminism checklist.
+    pub source_hint: DeterminismSourceHint,
     /// Length of the first trace.
     pub trace1_len: usize,
     /// Length of the second trace.
     pub trace2_len: usize,
 }
 
+/// Best-effort source hint for a same-seed determinism failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeterminismSourceHint {
+    /// A virtual-time or timer event diverged.
+    AmbientClock,
+    /// A deterministic RNG event diverged.
+    AmbientEntropy,
+    /// A scheduling, wakeup, I/O, or chaos event changed ordering.
+    SchedulerOrdering,
+    /// User trace payloads differ; inspect the code that emitted them.
+    UserTrace,
+    /// One run ended before the other.
+    TraceLength,
+    /// The event shape is not specific enough for a narrower hint.
+    Unknown,
+}
+
+impl DeterminismSourceHint {
+    /// Stable diagnostic code for same-seed lab nondeterminism.
+    pub const ERROR_CODE: &'static str = "ASUP-E403";
+
+    /// Checklist token agents can search for in docs and closeout notes.
+    #[must_use]
+    pub const fn checklist_item(self) -> &'static str {
+        match self {
+            Self::AmbientClock => "determinism.checklist.ambient-clock",
+            Self::AmbientEntropy => "determinism.checklist.ambient-entropy",
+            Self::SchedulerOrdering => "determinism.checklist.scheduler-ordering",
+            Self::UserTrace => "determinism.checklist.user-trace",
+            Self::TraceLength => "determinism.checklist.trace-length",
+            Self::Unknown => "determinism.checklist.inspect-first-divergence",
+        }
+    }
+
+    /// Human-readable explanation for the hint.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::AmbientClock => {
+                "virtual time or timer behavior changed; check wall-clock reads and deadlines"
+            }
+            Self::AmbientEntropy => {
+                "deterministic RNG behavior changed; check ambient entropy and extra RNG calls"
+            }
+            Self::SchedulerOrdering => {
+                "scheduler-visible ordering changed; check readiness, wakeups, I/O, and chaos paths"
+            }
+            Self::UserTrace => {
+                "user trace payloads changed; inspect the code that emitted the trace event"
+            }
+            Self::TraceLength => "one trace ended early; check leaked or extra runtime activity",
+            Self::Unknown => "inspect the first divergent event and surrounding context",
+        }
+    }
+
+    fn for_divergence(
+        expected: Option<&TraceEventSummary>,
+        actual: Option<&TraceEventSummary>,
+    ) -> Self {
+        let Some(expected) = expected else {
+            return Self::TraceLength;
+        };
+        let Some(actual) = actual else {
+            return Self::TraceLength;
+        };
+
+        match (expected.kind, actual.kind) {
+            (
+                TraceEventKind::TimeAdvance
+                | TraceEventKind::TimerScheduled
+                | TraceEventKind::TimerFired
+                | TraceEventKind::TimerCancelled,
+                _,
+            )
+            | (
+                _,
+                TraceEventKind::TimeAdvance
+                | TraceEventKind::TimerScheduled
+                | TraceEventKind::TimerFired
+                | TraceEventKind::TimerCancelled,
+            ) => Self::AmbientClock,
+
+            (TraceEventKind::RngSeed | TraceEventKind::RngValue, _)
+            | (_, TraceEventKind::RngSeed | TraceEventKind::RngValue) => Self::AmbientEntropy,
+
+            (
+                TraceEventKind::Schedule
+                | TraceEventKind::Wake
+                | TraceEventKind::IoRequested
+                | TraceEventKind::IoReady
+                | TraceEventKind::IoResult
+                | TraceEventKind::IoError
+                | TraceEventKind::ChaosInjection,
+                _,
+            )
+            | (
+                _,
+                TraceEventKind::Schedule
+                | TraceEventKind::Wake
+                | TraceEventKind::IoRequested
+                | TraceEventKind::IoReady
+                | TraceEventKind::IoResult
+                | TraceEventKind::IoError
+                | TraceEventKind::ChaosInjection,
+            ) => Self::SchedulerOrdering,
+
+            (TraceEventKind::UserTrace, TraceEventKind::UserTrace) => Self::UserTrace,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 impl fmt::Display for DeterminismViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "Determinism violation at index {}",
+            "[{}] Determinism violation at index {}",
+            DeterminismSourceHint::ERROR_CODE,
             self.divergence_index
         )?;
         writeln!(f, "  First trace length:  {}", self.trace1_len)?;
         writeln!(f, "  Second trace length: {}", self.trace2_len)?;
+        writeln!(
+            f,
+            "  Likely source: {} ({})",
+            self.source_hint.checklist_item(),
+            self.source_hint.description()
+        )?;
 
         if let Some(ref expected) = self.expected {
             writeln!(f, "  Expected: {expected}")?;
@@ -78,6 +203,30 @@ impl fmt::Display for DeterminismViolation {
                 let idx = self
                     .divergence_index
                     .saturating_sub(self.context_before.len() - i);
+                writeln!(f, "    [{idx:04}] {event}")?;
+            }
+        }
+
+        if !self.context_after_expected.is_empty() {
+            writeln!(
+                f,
+                "\n  Expected context after divergence (next {} events):",
+                self.context_after_expected.len()
+            )?;
+            for (i, event) in self.context_after_expected.iter().enumerate() {
+                let idx = self.divergence_index + 1 + i;
+                writeln!(f, "    [{idx:04}] {event}")?;
+            }
+        }
+
+        if !self.context_after_actual.is_empty() {
+            writeln!(
+                f,
+                "\n  Actual context after divergence (next {} events):",
+                self.context_after_actual.len()
+            )?;
+            for (i, event) in self.context_after_actual.iter().enumerate() {
+                let idx = self.divergence_index + 1 + i;
                 writeln!(f, "    [{idx:04}] {event}")?;
             }
         }
@@ -378,12 +527,23 @@ impl DeterminismOracle {
                     // Divergence found
                     let context_start = i.saturating_sub(self.context_window);
                     let context_before = trace1[context_start..i].to_vec();
+                    let after_start1 = i.saturating_add(1).min(trace1.len());
+                    let after_start2 = i.saturating_add(1).min(trace2.len());
+                    let context_end1 = after_start1
+                        .saturating_add(self.context_window)
+                        .min(trace1.len());
+                    let context_end2 = after_start2
+                        .saturating_add(self.context_window)
+                        .min(trace2.len());
 
                     return Err(Box::new(DeterminismViolation {
                         divergence_index: i,
                         expected: e1.cloned(),
                         actual: e2.cloned(),
                         context_before,
+                        context_after_expected: trace1[after_start1..context_end1].to_vec(),
+                        context_after_actual: trace2[after_start2..context_end2].to_vec(),
+                        source_hint: DeterminismSourceHint::for_divergence(e1, e2),
                         trace1_len: trace1.len(),
                         trace2_len: trace2.len(),
                     }));
@@ -468,6 +628,37 @@ where
             );
         }
     }
+}
+
+/// Verifies determinism across a set of fixed seeds.
+///
+/// Each seed is run twice with [`LabConfig::new(seed)`]. The helper panics on
+/// the first divergent seed and includes the seed plus the first-divergence
+/// report in the panic text.
+///
+/// # Panics
+///
+/// Panics when `seeds` is empty or any seed produces divergent traces.
+pub fn assert_deterministic_for_seeds<I, F>(seeds: I, program: F)
+where
+    I: IntoIterator<Item = u64>,
+    F: Fn(&mut LabRuntime),
+{
+    let oracle = DeterminismOracle::new();
+    let mut saw_seed = false;
+
+    for seed in seeds {
+        saw_seed = true;
+        let config = LabConfig::new(seed);
+        if let Err(violation) = oracle.verify(config, &program) {
+            panic!(
+                "Determinism check failed for seed {seed}:\n{violation}\n\n\
+                 This indicates same-seed nondeterminism in the runtime or program.",
+            );
+        }
+    }
+
+    assert!(saw_seed, "Need at least one seed to verify determinism");
 }
 
 #[cfg(test)]
@@ -763,6 +954,9 @@ mod tests {
             expected: None,
             actual: None,
             context_before: vec![],
+            context_after_expected: vec![],
+            context_after_actual: vec![],
+            source_hint: DeterminismSourceHint::TraceLength,
             trace1_len: 10,
             trace2_len: 8,
         };
@@ -783,11 +977,15 @@ mod tests {
             expected: None,
             actual: None,
             context_before: vec![],
+            context_after_expected: vec![],
+            context_after_actual: vec![],
+            source_hint: DeterminismSourceHint::TraceLength,
             trace1_len: 0,
             trace2_len: 0,
         };
         let display = format!("{v}");
-        assert!(display.contains("Determinism violation at index 0"));
+        assert!(display.contains("[ASUP-E403] Determinism violation at index 0"));
+        assert!(display.contains("determinism.checklist.trace-length"));
         assert!(display.contains("<end of trace>"));
         crate::test_complete!("determinism_violation_display_both_none");
     }
@@ -815,6 +1013,19 @@ mod tests {
                 kind: TraceEventKind::UserTrace,
                 data_summary: "msg=context".into(),
             }],
+            context_after_expected: vec![TraceEventSummary {
+                seq: 4,
+                time_nanos: 400,
+                kind: TraceEventKind::UserTrace,
+                data_summary: "msg=expected-next".into(),
+            }],
+            context_after_actual: vec![TraceEventSummary {
+                seq: 4,
+                time_nanos: 400,
+                kind: TraceEventKind::UserTrace,
+                data_summary: "msg=actual-next".into(),
+            }],
+            source_hint: DeterminismSourceHint::UserTrace,
             trace1_len: 5,
             trace2_len: 5,
         };
@@ -823,6 +1034,9 @@ mod tests {
         assert!(display.contains("Expected:"));
         assert!(display.contains("Actual:"));
         assert!(display.contains("Context"));
+        assert!(display.contains("Expected context after divergence"));
+        assert!(display.contains("Actual context after divergence"));
+        assert!(display.contains("determinism.checklist.user-trace"));
         crate::test_complete!("determinism_violation_display_with_events");
     }
 
@@ -834,6 +1048,9 @@ mod tests {
             expected: None,
             actual: None,
             context_before: vec![],
+            context_after_expected: vec![],
+            context_after_actual: vec![],
+            source_hint: DeterminismSourceHint::Unknown,
             trace1_len: 0,
             trace2_len: 0,
         };

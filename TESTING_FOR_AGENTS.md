@@ -50,6 +50,28 @@ Reportable registry names:
 - `fabric_publish`, `fabric_reply`, `fabric_quiescence`, `fabric_redelivery` when
   `messaging-fabric` is enabled
 
+## Determinism Assertions
+
+Use `asupersync::lab::assert_deterministic_for_seeds` when the claim is "same
+seed, same execution" across a fixed seed matrix. The helper runs each seed
+twice with `LabConfig::new(seed)` and panics with `[ASUP-E403]` on the first
+divergence. The rendered violation includes the first divergent event, context
+before the fork, expected/actual context after the fork, and a searchable
+checklist hint.
+
+Checklist hints:
+
+- `determinism.checklist.ambient-clock`: wall-clock reads, timer drift, or
+  changed virtual-time deadlines
+- `determinism.checklist.ambient-entropy`: ambient randomness or shifted
+  deterministic RNG call order
+- `determinism.checklist.scheduler-ordering`: readiness, wakeup, I/O, or chaos
+  ordering changed
+- `determinism.checklist.user-trace`: user trace payloads diverged
+- `determinism.checklist.trace-length`: one run leaked or added runtime activity
+- `determinism.checklist.inspect-first-divergence`: inspect the first divergent
+  event when no narrower heuristic applies
+
 ## Required Metadata
 
 Every new deterministic test or script should expose these in the test name,

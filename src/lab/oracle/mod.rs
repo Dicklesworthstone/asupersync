@@ -88,8 +88,8 @@ pub use channel_atomicity::{
 };
 pub use deadline_monotone::{DeadlineMonotoneOracle, DeadlineMonotoneViolation};
 pub use determinism::{
-    DeterminismOracle, DeterminismViolation, TraceEventSummary, assert_deterministic,
-    assert_deterministic_multi,
+    DeterminismOracle, DeterminismSourceHint, DeterminismViolation, TraceEventSummary,
+    assert_deterministic, assert_deterministic_for_seeds, assert_deterministic_multi,
 };
 pub use eprocess::{EProcess, EProcessConfig, EProcessMonitor, EValue, MonitorResult};
 pub use evidence::{

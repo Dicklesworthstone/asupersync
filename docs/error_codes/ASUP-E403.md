@@ -3,7 +3,8 @@
 ## Symptom
 
 `[ASUP-E403]` means two lab runs with the same seed produced different
-outcomes.
+outcomes. The diagnostic includes the first divergent trace event, context on
+both sides of the fork, and a `determinism.checklist.*` hint.
 
 ## Probable Causes
 
@@ -14,6 +15,8 @@ outcomes.
 
 - Replace unordered iteration with stable ordering in trace-visible paths.
 - Route time and entropy through `Cx` capabilities.
+- Use the checklist hint to inspect the most likely ambient clock, entropy,
+  scheduler-ordering, user-trace, or trace-length source first.
 
 ## Example
 
