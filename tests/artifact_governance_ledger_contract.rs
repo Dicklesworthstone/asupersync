@@ -385,6 +385,21 @@ fn specific_seed_rows_preserve_fail_closed_citation_boundaries() {
     );
     assert!(string_set(scanner, "no_claim_boundaries").contains("does_not_authorize_deletion"));
 
+    let citation_policy = rows["artifact-governance-citation-policy"];
+    assert_eq!(string(citation_policy, "path_status"), "tracked");
+    assert_eq!(
+        string(citation_policy, "owning_bead"),
+        "asupersync-artifact-governance-awdiwy.3"
+    );
+    assert_eq!(
+        string(citation_policy, "artifact_family"),
+        "artifact_governance"
+    );
+    assert!(
+        string_set(citation_policy, "no_claim_boundaries")
+            .contains("does_not_authorize_overclaims")
+    );
+
     let rch = rows["rch-stale-progress-receipt-contract"];
     assert_eq!(string(rch, "path_status"), "tracked");
     assert!(string_set(rch, "no_claim_boundaries").contains("does_not_prove_source_correctness"));

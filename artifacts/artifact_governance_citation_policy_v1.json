@@ -1,0 +1,302 @@
+{
+  "schema_version": "artifact-governance-citation-policy-v1",
+  "policy_id": "artifact_governance_citation_policy_v1",
+  "bead_id": "asupersync-artifact-governance-awdiwy.3",
+  "created_date": "2026-06-12",
+  "purpose": "Define checked citation contexts for representative artifact-governance ledger rows so agents cannot cite artifacts beyond their citeability class, evidence scope, freshness policy, or no-claim boundaries.",
+  "source_of_truth": {
+    "policy": "artifacts/artifact_governance_citation_policy_v1.json",
+    "ledger": "artifacts/artifact_governance_ledger_v1.json",
+    "scanner": "artifacts/artifact_governance_scanner_v1.json",
+    "contract_test": "tests/artifact_governance_citation_policy_contract.rs",
+    "operator_report": "docs/proof/artifact_governance_citation_policy.md",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md",
+    "proof_status": "artifacts/proof_status_snapshot_v1.json"
+  },
+  "relationship_to_existing_surfaces": {
+    "proof_evidence_debt_graph": "Complements proof evidence debt by checking citation semantics for artifact rows; it does not rank proof freshness or replace the debt graph.",
+    "validation_frontier": "Complements validation-frontier rows by preventing blocked-frontier artifacts from being cited as green proof.",
+    "artifact_governance_ledger": "Uses the ledger as the class and no-claim source of truth; this policy does not create new ownership by itself."
+  },
+  "context_catalog": {
+    "readme_agents_discoverability": {
+      "meaning": "README.md, AGENTS.md, or equivalent docs name an artifact so agents can find it.",
+      "requires_no_claim_text": true,
+      "allowed_classes": [
+        "proof-bearing",
+        "advisory",
+        "blocked-frontier",
+        "superseded",
+        "generated-fixture",
+        "operator-report",
+        "excluded"
+      ],
+      "denied_claims": [
+        "release_readiness",
+        "full_workspace_health",
+        "performance_improvement"
+      ]
+    },
+    "proof_status_claim": {
+      "meaning": "A proof-status row maps a claim to an artifact, lane, or blocker.",
+      "requires_no_claim_text": true,
+      "allowed_classes": [
+        "proof-bearing",
+        "blocked-frontier",
+        "operator-report"
+      ],
+      "denied_claims": [
+        "green_proof_without_receipt",
+        "release_readiness"
+      ]
+    },
+    "bead_closeout": {
+      "meaning": "A Beads close reason or comment cites the artifact as evidence for a narrow task.",
+      "requires_no_claim_text": true,
+      "allowed_classes": [
+        "proof-bearing",
+        "blocked-frontier",
+        "operator-report"
+      ],
+      "denied_claims": [
+        "full_workspace_health",
+        "release_readiness"
+      ]
+    },
+    "release_signoff": {
+      "meaning": "A release or publishing signoff claims readiness for a broad ship decision.",
+      "requires_no_claim_text": true,
+      "allowed_classes": [
+        "proof-bearing"
+      ],
+      "denied_claims": [
+        "release_readiness_without_release_lane",
+        "local_cargo_fallback"
+      ]
+    },
+    "operator_runbook": {
+      "meaning": "A runbook or handoff cites the artifact for routing, diagnosis, or next action.",
+      "requires_no_claim_text": true,
+      "allowed_classes": [
+        "proof-bearing",
+        "advisory",
+        "blocked-frontier",
+        "superseded",
+        "generated-fixture",
+        "operator-report",
+        "excluded"
+      ],
+      "denied_claims": [
+        "production_runtime_enforcement",
+        "deletion_authorization"
+      ]
+    },
+    "internal_fixture": {
+      "meaning": "A test fixture cites the artifact to exercise policy behavior.",
+      "requires_no_claim_text": false,
+      "allowed_classes": [
+        "proof-bearing",
+        "advisory",
+        "blocked-frontier",
+        "superseded",
+        "generated-fixture",
+        "operator-report",
+        "excluded"
+      ],
+      "denied_claims": [
+        "production_truth"
+      ]
+    }
+  },
+  "class_policy": {
+    "proof-bearing": {
+      "allowed_contexts": [
+        "readme_agents_discoverability",
+        "proof_status_claim",
+        "bead_closeout",
+        "release_signoff",
+        "operator_runbook",
+        "internal_fixture"
+      ],
+      "must_include_no_claim_boundaries": true,
+      "requires_fresh_contract": true,
+      "denied_claims": [
+        "full_workspace_health",
+        "release_readiness_without_release_lane",
+        "local_cargo_fallback"
+      ]
+    },
+    "advisory": {
+      "allowed_contexts": [
+        "readme_agents_discoverability",
+        "operator_runbook",
+        "internal_fixture"
+      ],
+      "must_include_no_claim_boundaries": true,
+      "requires_fresh_contract": false,
+      "denied_claims": [
+        "acceptance_criteria",
+        "no_regression",
+        "production_runtime_enforcement"
+      ]
+    },
+    "blocked-frontier": {
+      "allowed_contexts": [
+        "readme_agents_discoverability",
+        "proof_status_claim",
+        "bead_closeout",
+        "operator_runbook",
+        "internal_fixture"
+      ],
+      "must_include_no_claim_boundaries": true,
+      "requires_fresh_contract": false,
+      "denied_claims": [
+        "green_proof_without_receipt",
+        "source_correctness",
+        "release_readiness"
+      ]
+    },
+    "superseded": {
+      "allowed_contexts": [
+        "readme_agents_discoverability",
+        "operator_runbook",
+        "internal_fixture"
+      ],
+      "must_include_no_claim_boundaries": true,
+      "requires_fresh_contract": false,
+      "denied_claims": [
+        "current_result",
+        "release_readiness",
+        "deletion_authorization"
+      ]
+    },
+    "generated-fixture": {
+      "allowed_contexts": [
+        "operator_runbook",
+        "internal_fixture"
+      ],
+      "must_include_no_claim_boundaries": true,
+      "requires_fresh_contract": false,
+      "denied_claims": [
+        "release_readiness",
+        "runtime_correctness",
+        "deletion_authorization"
+      ]
+    },
+    "operator-report": {
+      "allowed_contexts": [
+        "readme_agents_discoverability",
+        "proof_status_claim",
+        "bead_closeout",
+        "operator_runbook",
+        "internal_fixture"
+      ],
+      "must_include_no_claim_boundaries": true,
+      "requires_fresh_contract": false,
+      "denied_claims": [
+        "source_correctness",
+        "performance_improvement",
+        "live_rch_fleet_availability"
+      ]
+    },
+    "excluded": {
+      "allowed_contexts": [
+        "readme_agents_discoverability",
+        "operator_runbook",
+        "internal_fixture"
+      ],
+      "must_include_no_claim_boundaries": true,
+      "requires_fresh_contract": false,
+      "denied_claims": [
+        "deletion_authorization",
+        "artifact_absence",
+        "future_artifact_waiver"
+      ]
+    }
+  },
+  "representative_reference_checks": [
+    {
+      "source_path": "README.md",
+      "match": "artifacts/proof_lane_manifest_v1.json",
+      "ledger_row": "proof-lane-manifest-canonical",
+      "context": "readme_agents_discoverability"
+    },
+    {
+      "source_path": "AGENTS.md",
+      "match": "artifacts/proof_lane_manifest_v1.json",
+      "ledger_row": "proof-lane-manifest-canonical",
+      "context": "readme_agents_discoverability"
+    },
+    {
+      "source_path": "artifacts/proof_status_snapshot_v1.json",
+      "match": "artifacts/proof_lane_manifest_v1.json",
+      "ledger_row": "proof-lane-manifest-canonical",
+      "context": "proof_status_claim"
+    }
+  ],
+  "allowed_citations": [
+    {
+      "id": "scanner-bead-closeout",
+      "ledger_row": "artifact-governance-scanner",
+      "context": "bead_closeout",
+      "claim_kind": "representative_scanner_rows",
+      "citation_text": "A2 scanner rows may be cited for representative artifact routing only; does_not_prove_full_corpus_coverage, does_not_prove_fresh_rch_pass, and does_not_authorize_deletion apply.",
+      "required_no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_prove_fresh_rch_pass",
+        "does_not_authorize_deletion"
+      ]
+    },
+    {
+      "id": "proof-manifest-docs-discovery",
+      "ledger_row": "proof-lane-manifest-canonical",
+      "context": "readme_agents_discoverability",
+      "claim_kind": "manifest_inventory",
+      "citation_text": "The proof manifest is discoverable from README/AGENTS as lane inventory; does_not_prove_any_manifest_lane, does_not_prove_workspace_health, and does_not_authorize_local_cargo_fallback apply.",
+      "required_no_claim_boundaries": [
+        "does_not_prove_any_manifest_lane",
+        "does_not_prove_workspace_health",
+        "does_not_authorize_local_cargo_fallback"
+      ]
+    },
+    {
+      "id": "raptorq-advisory-operator-context",
+      "ledger_row": "raptorq-gf256-multiscenario-refresh-v4",
+      "context": "operator_runbook",
+      "claim_kind": "mixed_signal_context",
+      "citation_text": "The RaptorQ packet is advisory mixed-signal context; does_not_prove_track_e_closure, does_not_prove_no_regression, and does_not_replace_closure_grade_guardrails apply.",
+      "required_no_claim_boundaries": [
+        "does_not_prove_track_e_closure",
+        "does_not_prove_no_regression",
+        "does_not_replace_closure_grade_guardrails"
+      ]
+    }
+  ],
+  "negative_fixtures": [
+    {
+      "id": "fixture_only_as_release_proof",
+      "ledger_row": "generated-smoke-artifact-inventory",
+      "context": "release_signoff",
+      "claim_kind": "release_readiness",
+      "citation_text": "Generated smoke inventory proves release readiness.",
+      "expected_error": "context_disallows_class"
+    },
+    {
+      "id": "blocked_frontier_as_green_proof",
+      "ledger_row": "rch-stale-progress-receipt-contract",
+      "context": "proof_status_claim",
+      "claim_kind": "green_proof_without_receipt",
+      "citation_text": "The stale RCH receipt is a green proof for source correctness.",
+      "expected_error": "denied_claim"
+    },
+    {
+      "id": "runtime_pressure_as_production_enforcement",
+      "ledger_row": "runtime-pressure-control-evidence-contract",
+      "context": "operator_runbook",
+      "claim_kind": "production_runtime_enforcement",
+      "citation_text": "The runtime pressure row enables production runtime enforcement.",
+      "expected_error": "denied_claim"
+    }
+  ]
+}

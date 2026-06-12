@@ -190,6 +190,33 @@
       ]
     },
     {
+      "artifact_id": "artifact-governance-citation-policy",
+      "path": "artifacts/artifact_governance_citation_policy_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.3",
+      "producing_lane": "artifact-governance-citation-policy-contract",
+      "domain": "artifact governance",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/artifact_governance_citation_policy_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_artifact_governance_citation_policy_when_policy_contract_passes_on_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_overclaims",
+        "does_not_prove_fresh_rch_pass"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Machine-checked citation context policy for representative artifact-governance rows, overclaim fixtures, and README/AGENTS/proof-status reference checks.",
+      "source_references": [
+        "artifacts/artifact_governance_citation_policy_v1.json",
+        "docs/proof/artifact_governance_citation_policy.md",
+        "tests/artifact_governance_citation_policy_contract.rs"
+      ]
+    },
+    {
       "artifact_id": "proof-lane-manifest-canonical",
       "path": "artifacts/proof_lane_manifest_v1.json",
       "path_status": "tracked",
