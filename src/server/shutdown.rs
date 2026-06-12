@@ -143,6 +143,14 @@ pub struct GracefulDrainReport {
     /// Requests still in flight when the drain ended (force-cancelled at the
     /// hard deadline). Zero on a clean drain to quiescence.
     pub requests_stranded: usize,
+    /// In-flight request count at the moment the soft budget elapsed and the
+    /// drain escalated stragglers, or `None` if escalation never fired.
+    ///
+    /// `requests_completed` counts the in-flight counter reaching zero and
+    /// cannot distinguish naturally-completed requests from ones interrupted
+    /// by post-escalation force-close; this field preserves that boundary
+    /// (br-asupersync-server-stack-hardening-eeexl1.2, D2.4).
+    pub requests_at_escalation: Option<usize>,
     /// Number of in-flight-count observations fed to the certificate.
     pub observations: usize,
     /// Final drain-phase classification from the progress certificate.
@@ -171,6 +179,10 @@ impl std::fmt::Display for GracefulDrainReport {
         writeln!(f, "Requests at start:  {}", self.requests_at_drain_start)?;
         writeln!(f, "Requests completed: {}", self.requests_completed)?;
         writeln!(f, "Requests stranded:  {}", self.requests_stranded)?;
+        match self.requests_at_escalation {
+            Some(count) => writeln!(f, "At escalation:      {count}")?,
+            None => writeln!(f, "At escalation:      never")?,
+        }
         writeln!(f, "Observations:       {}", self.observations)?;
         writeln!(f, "Final drain phase:  {}", self.final_phase)?;
         writeln!(f, "Converging:         {}", self.converging)?;
@@ -210,6 +222,7 @@ pub struct GracefulDrainTracker {
     certificate: ProgressCertificate,
     requests_at_drain_start: usize,
     last_remaining: usize,
+    requests_at_escalation: Option<usize>,
     observations: usize,
     start_time: Time,
 }
@@ -229,8 +242,22 @@ impl GracefulDrainTracker {
             certificate,
             requests_at_drain_start: initial_in_flight,
             last_remaining: initial_in_flight,
+            requests_at_escalation: None,
             observations: 1,
             start_time: now,
+        }
+    }
+
+    /// Record that the drain escalated stragglers with `remaining_in_flight`
+    /// requests still live.
+    ///
+    /// Call at most once, at the soft-deadline escalation transition; the
+    /// first recorded value wins. The report's `requests_at_escalation`
+    /// preserves the completed-naturally vs interrupted-by-escalation
+    /// boundary that the final counter value alone cannot express.
+    pub fn record_escalation(&mut self, remaining_in_flight: usize) {
+        if self.requests_at_escalation.is_none() {
+            self.requests_at_escalation = Some(remaining_in_flight);
         }
     }
 
@@ -277,6 +304,7 @@ impl GracefulDrainTracker {
             requests_at_drain_start: self.requests_at_drain_start,
             requests_completed: completed,
             requests_stranded: stranded,
+            requests_at_escalation: self.requests_at_escalation,
             observations: self.observations,
             final_phase: verdict.drain_phase,
             converging: verdict.converging,
@@ -378,22 +406,52 @@ impl GracefulDrainSupervisor {
     /// return the action the driver should take.
     ///
     /// Quiescence (zero in-flight) wins over every deadline; the hard deadline
-    /// wins over the soft escalation window. [`DrainStep::Escalate`] is emitted
-    /// at most once — on the first observation at or after the soft deadline
-    /// while requests remain — so the driver escalates exactly once.
+    /// wins over the returned action for the soft escalation window. The
+    /// escalation boundary is still recorded before a hard-deadline return so
+    /// the final report preserves the last pre-cancellation in-flight count.
+    /// [`DrainStep::Escalate`] is emitted at most once — on the first
+    /// observation at or after the soft deadline while requests remain and
+    /// before the hard deadline — so the driver escalates exactly once.
     pub fn observe(&mut self, remaining_in_flight: usize, now: Time) -> DrainStep {
         self.tracker.observe(remaining_in_flight);
         if remaining_in_flight == 0 {
             return DrainStep::Quiescent;
         }
+        if now >= self.drain_deadline && !self.escalated {
+            self.escalated = true;
+            self.tracker.record_escalation(remaining_in_flight);
+            if now < self.hard_deadline {
+                return DrainStep::Escalate;
+            }
+        }
         if now >= self.hard_deadline {
             return DrainStep::HardDeadline;
         }
-        if now >= self.drain_deadline && !self.escalated {
-            self.escalated = true;
-            return DrainStep::Escalate;
-        }
         DrainStep::Continue
+    }
+
+    /// Record that another driver path already escalated to force-close at or
+    /// after the soft deadline.
+    ///
+    /// The HTTP listener runs the request-aware supervisor concurrently with
+    /// the connection-manager drain. The connection manager may win the race at
+    /// the soft deadline, force-close handlers, and drop the in-flight counter
+    /// to zero before the supervisor's next tick. In that case the supervisor
+    /// must preserve the last observed non-zero request count as the
+    /// escalation boundary even though its next observed action is
+    /// [`DrainStep::Quiescent`].
+    #[must_use]
+    pub fn record_external_escalation(&mut self) -> bool {
+        if self.escalated {
+            return false;
+        }
+        let remaining = self.tracker.remaining();
+        if remaining == 0 {
+            return false;
+        }
+        self.escalated = true;
+        self.tracker.record_escalation(remaining);
+        true
     }
 
     /// The current drain-phase classification from the progress certificate.
@@ -1792,6 +1850,7 @@ mod tests {
             requests_at_drain_start: 50,
             requests_completed: 50,
             requests_stranded: 0,
+            requests_at_escalation: None,
             observations: 11,
             final_phase: DrainPhase::Quiescent,
             converging: true,
@@ -1808,6 +1867,7 @@ Graceful Drain Report
 Requests at start:  50
 Requests completed: 50
 Requests stranded:  0
+At escalation:      never
 Observations:       11
 Final drain phase:  quiescent
 Converging:         true
@@ -1830,6 +1890,7 @@ Drain duration:     42ms
             requests_at_drain_start: 3,
             requests_completed: 0,
             requests_stranded: 3,
+            requests_at_escalation: Some(3),
             observations: 1,
             final_phase: DrainPhase::Warmup,
             converging: false,
@@ -1846,8 +1907,74 @@ Drain duration:     42ms
             rendered.contains("Final drain phase:  warmup"),
             "{rendered}"
         );
+        assert!(rendered.contains("At escalation:      3"), "{rendered}");
         assert!(rendered.contains("Drain duration:     0ms"), "{rendered}");
         crate::test_complete!("drain_report_display_handles_unknown_remaining");
+    }
+
+    /// The supervisor records the in-flight count at the escalation
+    /// transition; the report keeps the completed-vs-interrupted boundary
+    /// (br-asupersync-server-stack-hardening-eeexl1.2, D2.4).
+    #[test]
+    fn supervisor_records_requests_at_escalation() {
+        init_test("supervisor_records_requests_at_escalation");
+        let mut supervisor =
+            GracefulDrainSupervisor::new(5, t(0), Duration::from_secs(1), Duration::from_secs(10));
+
+        // Within the soft budget: no escalation recorded.
+        assert_eq!(supervisor.observe(5, t(500_000_000)), DrainStep::Continue);
+
+        // Soft deadline elapses with 3 still in flight: escalation fires once
+        // and captures the boundary.
+        assert_eq!(supervisor.observe(3, t(1_500_000_000)), DrainStep::Escalate);
+        assert_eq!(supervisor.observe(1, t(2_000_000_000)), DrainStep::Continue);
+        assert_eq!(
+            supervisor.observe(0, t(2_500_000_000)),
+            DrainStep::Quiescent
+        );
+
+        let report = supervisor.finish(t(2_500_000_000), false);
+        assert_eq!(report.requests_at_escalation, Some(3));
+        assert_eq!(report.requests_completed, 5);
+        assert!(report.reached_quiescence);
+        crate::test_complete!("supervisor_records_requests_at_escalation");
+    }
+
+    /// A drain that reaches quiescence inside the soft budget never
+    /// escalates, and the report says so.
+    #[test]
+    fn supervisor_reports_never_escalated_on_clean_drain() {
+        init_test("supervisor_reports_never_escalated_on_clean_drain");
+        let mut supervisor =
+            GracefulDrainSupervisor::new(2, t(0), Duration::from_secs(1), Duration::from_secs(10));
+        assert_eq!(supervisor.observe(1, t(200_000_000)), DrainStep::Continue);
+        assert_eq!(supervisor.observe(0, t(400_000_000)), DrainStep::Quiescent);
+
+        let report = supervisor.finish(t(400_000_000), false);
+        assert_eq!(report.requests_at_escalation, None);
+        assert!(report.to_string().contains("At escalation:      never"));
+        crate::test_complete!("supervisor_reports_never_escalated_on_clean_drain");
+    }
+
+    /// If another driver path force-closes at the soft deadline before the
+    /// supervisor's next tick, the report still preserves the last observed
+    /// in-flight count as the escalation boundary.
+    #[test]
+    fn supervisor_records_external_escalation_before_quiescent_tick() {
+        init_test("supervisor_records_external_escalation_before_quiescent_tick");
+        let mut supervisor =
+            GracefulDrainSupervisor::new(5, t(0), Duration::from_secs(1), Duration::from_secs(10));
+        assert_eq!(supervisor.observe(5, t(500_000_000)), DrainStep::Continue);
+        assert!(supervisor.record_external_escalation());
+        assert_eq!(
+            supervisor.observe(0, t(1_100_000_000)),
+            DrainStep::Quiescent
+        );
+
+        let report = supervisor.finish(t(1_100_000_000), false);
+        assert_eq!(report.requests_at_escalation, Some(5));
+        assert!(report.reached_quiescence);
+        crate::test_complete!("supervisor_records_external_escalation_before_quiescent_tick");
     }
 
     /// `finish` clamps a backward clock to a zero duration rather than

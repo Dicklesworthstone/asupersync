@@ -10,7 +10,8 @@ use crate::net::tcp::listener::TcpListener;
 use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
 use crate::server::shutdown::{
-    DrainStep, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal, ShutdownStats,
+    DrainStep, GracefulDrainReport, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal,
+    ShutdownStats,
 };
 use crate::tracing_compat::error;
 use crate::{cx::Cx, types::Time};
@@ -32,12 +33,21 @@ const TRANSIENT_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(64);
 /// [`GracefulDrainSupervisor`] decision state machine.
 const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
 
-/// Low-overhead listener counters for diagnosing accept-path stalls.
+/// Low-overhead listener counters for diagnosing accept-path stalls and
+/// observing graceful drains
+/// (br-asupersync-server-stack-hardening-eeexl1.2, D2.4 AC6).
 pub struct Http1ListenerStats {
     accepted_total: AtomicU64,
     transient_accept_errors_total: AtomicU64,
     spawn_failures_total: AtomicU64,
     last_accept_at_ms: AtomicU64,
+    drains_started_total: AtomicU64,
+    drain_escalations_total: AtomicU64,
+    drain_hard_deadline_hits_total: AtomicU64,
+    drains_quiescent_total: AtomicU64,
+    last_drain_requests_at_start: AtomicU64,
+    last_drain_requests_stranded: AtomicU64,
+    last_drain_duration_ms: AtomicU64,
     time_getter: fn() -> Time,
 }
 
@@ -52,6 +62,20 @@ pub struct Http1ListenerStatsSnapshot {
     pub spawn_failures_total: u64,
     /// Logical runtime time in milliseconds when the listener last accepted a connection.
     pub last_accept_at_ms: u64,
+    /// Total request-aware drains started by this listener.
+    pub drains_started_total: u64,
+    /// Total drains whose soft budget elapsed and escalated stragglers.
+    pub drain_escalations_total: u64,
+    /// Total drains that ended on the hard deadline with requests stranded.
+    pub drain_hard_deadline_hits_total: u64,
+    /// Total drains that reached quiescence (zero in-flight requests).
+    pub drains_quiescent_total: u64,
+    /// In-flight request count when the most recent drain started.
+    pub last_drain_requests_at_start: u64,
+    /// Requests still in flight when the most recent drain ended.
+    pub last_drain_requests_stranded: u64,
+    /// Duration of the most recent drain in whole milliseconds.
+    pub last_drain_duration_ms: u64,
 }
 
 impl std::fmt::Debug for Http1ListenerStats {
@@ -73,6 +97,22 @@ impl std::fmt::Debug for Http1ListenerStats {
                 "last_accept_at_ms",
                 &self.last_accept_at_ms.load(Ordering::Relaxed),
             )
+            .field(
+                "drains_started_total",
+                &self.drains_started_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "drain_escalations_total",
+                &self.drain_escalations_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "drain_hard_deadline_hits_total",
+                &self.drain_hard_deadline_hits_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "drains_quiescent_total",
+                &self.drains_quiescent_total.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -90,6 +130,13 @@ impl Http1ListenerStats {
             transient_accept_errors_total: AtomicU64::new(0),
             spawn_failures_total: AtomicU64::new(0),
             last_accept_at_ms: AtomicU64::new(0),
+            drains_started_total: AtomicU64::new(0),
+            drain_escalations_total: AtomicU64::new(0),
+            drain_hard_deadline_hits_total: AtomicU64::new(0),
+            drains_quiescent_total: AtomicU64::new(0),
+            last_drain_requests_at_start: AtomicU64::new(0),
+            last_drain_requests_stranded: AtomicU64::new(0),
+            last_drain_duration_ms: AtomicU64::new(0),
             time_getter,
         }
     }
@@ -109,6 +156,37 @@ impl Http1ListenerStats {
         self.spawn_failures_total.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn record_drain_started(&self, in_flight: usize) {
+        self.drains_started_total.fetch_add(1, Ordering::Relaxed);
+        self.last_drain_requests_at_start.store(
+            u64::try_from(in_flight).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn record_drain_escalated(&self) {
+        self.drain_escalations_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_drain_hard_deadline(&self) {
+        self.drain_hard_deadline_hits_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_drain_finished(&self, report: &GracefulDrainReport) {
+        if report.reached_quiescence {
+            self.drains_quiescent_total.fetch_add(1, Ordering::Relaxed);
+        }
+        self.last_drain_requests_stranded.store(
+            u64::try_from(report.requests_stranded).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.last_drain_duration_ms.store(
+            u64::try_from(report.drain_duration.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
     /// Returns a point-in-time copy of the listener counters.
     #[must_use]
     pub fn snapshot(&self) -> Http1ListenerStatsSnapshot {
@@ -119,6 +197,15 @@ impl Http1ListenerStats {
                 .load(Ordering::Relaxed),
             spawn_failures_total: self.spawn_failures_total.load(Ordering::Relaxed),
             last_accept_at_ms: self.last_accept_at_ms.load(Ordering::Relaxed),
+            drains_started_total: self.drains_started_total.load(Ordering::Relaxed),
+            drain_escalations_total: self.drain_escalations_total.load(Ordering::Relaxed),
+            drain_hard_deadline_hits_total: self
+                .drain_hard_deadline_hits_total
+                .load(Ordering::Relaxed),
+            drains_quiescent_total: self.drains_quiescent_total.load(Ordering::Relaxed),
+            last_drain_requests_at_start: self.last_drain_requests_at_start.load(Ordering::Relaxed),
+            last_drain_requests_stranded: self.last_drain_requests_stranded.load(Ordering::Relaxed),
+            last_drain_duration_ms: self.last_drain_duration_ms.load(Ordering::Relaxed),
         }
     }
 }
@@ -157,6 +244,16 @@ pub struct Http1ListenerConfig {
     /// clamped up to at least `drain_timeout`. When it elapses the drain ends
     /// unconditionally and the drain report records `hard_deadline_hit`.
     pub hard_drain_timeout: Duration,
+    /// Keep the listening socket bound (without accepting) until the drain
+    /// completes (br-asupersync-server-stack-hardening-eeexl1.2, D2.4 AC5).
+    ///
+    /// Default `false`: the socket is closed as soon as draining starts, so
+    /// new connection attempts fail fast with connection-refused. Set `true`
+    /// for load balancers that treat refused connections as hard backend
+    /// failure during connection draining — TCP handshakes then continue to
+    /// succeed (queueing in the accept backlog, never served) until the
+    /// drain finishes and the socket closes.
+    pub lb_compat_keep_socket: bool,
     /// Time source for shutdown bookkeeping, connection metadata, and listener diagnostics.
     pub time_getter: fn() -> Time,
 }
@@ -168,6 +265,7 @@ impl Default for Http1ListenerConfig {
             max_connections: Some(10_000),
             drain_timeout: Duration::from_secs(30),
             hard_drain_timeout: Duration::from_secs(60),
+            lb_compat_keep_socket: false,
             time_getter: default_listener_time_getter,
         }
     }
@@ -199,6 +297,13 @@ impl Http1ListenerConfig {
     #[must_use]
     pub fn hard_drain_timeout(mut self, timeout: Duration) -> Self {
         self.hard_drain_timeout = timeout;
+        self
+    }
+
+    /// Keep the listening socket bound (not accepting) until drain completes.
+    #[must_use]
+    pub fn lb_compat_keep_socket(mut self, keep: bool) -> Self {
+        self.lb_compat_keep_socket = keep;
         self
     }
 
@@ -454,9 +559,23 @@ where
             tasks.push(handle);
         }
 
-        // Drain phase
+        // Drain phase: socket lifetime is explicit
+        // (br-asupersync-server-stack-hardening-eeexl1.2, D2.4 AC5). By
+        // default the listening socket closes here so new connection
+        // attempts fail fast with connection-refused; with
+        // `lb_compat_keep_socket` it stays bound (never accepting) until the
+        // drain completes so LB health probes still see TCP-connectable.
+        let parked_socket = self
+            .config
+            .lb_compat_keep_socket
+            .then_some(self.tcp_listener);
+
         if self.shutdown_signal.phase() == ShutdownPhase::Running {
-            let _ = self.begin_drain();
+            // Inlined begin_drain(): `self.tcp_listener` has been moved out
+            // above, so whole-`self` method calls are no longer possible.
+            let _ = self
+                .connection_manager
+                .begin_drain(self.config.drain_timeout);
         }
 
         // Request-aware drain supervision
@@ -472,8 +591,10 @@ where
         // begin_force_close from whichever side fires second is a no-op.
         let supervise = async {
             let drain_start = (self.config.time_getter)();
+            let in_flight_at_start = self.in_flight_requests.load(Ordering::Acquire);
+            self.stats.record_drain_started(in_flight_at_start);
             let mut supervisor = GracefulDrainSupervisor::new(
-                self.in_flight_requests.load(Ordering::Acquire),
+                in_flight_at_start,
                 drain_start,
                 self.config.drain_timeout,
                 self.config.hard_drain_timeout,
@@ -481,6 +602,12 @@ where
             let mut hard_deadline_hit = false;
             loop {
                 let now = (self.config.time_getter)();
+                if self.shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+                    && now >= supervisor.drain_deadline()
+                    && supervisor.record_external_escalation()
+                {
+                    self.stats.record_drain_escalated();
+                }
                 match supervisor.observe(self.in_flight_requests.load(Ordering::Acquire), now) {
                     DrainStep::Continue => {
                         // Pace ticks on the runtime clock: the listener's
@@ -493,17 +620,21 @@ where
                         crate::time::sleep(sleep_now, DRAIN_SUPERVISION_TICK).await;
                     }
                     DrainStep::Escalate => {
+                        self.stats.record_drain_escalated();
                         let _ = self.shutdown_signal.begin_force_close();
                     }
                     DrainStep::Quiescent => break,
                     DrainStep::HardDeadline => {
                         hard_deadline_hit = true;
+                        self.stats.record_drain_hard_deadline();
                         let _ = self.shutdown_signal.begin_force_close();
                         break;
                     }
                 }
             }
-            supervisor.finish((self.config.time_getter)(), hard_deadline_hit)
+            let report = supervisor.finish((self.config.time_getter)(), hard_deadline_hit);
+            self.stats.record_drain_finished(&report);
+            report
         };
         let drain = self.connection_manager.drain_with_stats();
 
@@ -549,6 +680,10 @@ where
                 stats.drain_report = drain_report;
             }
         }
+
+        // lb_compat: the parked socket stays bound for the whole drain and
+        // closes only now, after quiescence (D2.4 AC5).
+        drop(parked_socket);
         Ok(stats)
     }
 }
