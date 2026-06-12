@@ -1109,7 +1109,10 @@ mod tests {
         );
 
         set_test_time(deadline.as_nanos());
-        let wait_deadline = std::time::Instant::now() + Duration::from_millis(100);
+        // Generous bound: the wake normally lands within a few milliseconds,
+        // but a loaded test worker can starve the watcher past a tight
+        // window (flaked at 100ms on a busy rch worker, br-asupersync-38jlbz).
+        let wait_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !woke.load(Ordering::SeqCst) && std::time::Instant::now() < wait_deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
