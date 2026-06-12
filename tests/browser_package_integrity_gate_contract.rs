@@ -26,8 +26,7 @@ fn array<'a>(value: &'a JsonValue, key: &str) -> &'a [JsonValue] {
     value
         .get(key)
         .and_then(JsonValue::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_else(|| panic!("{key} must be an array"))
+        .map_or_else(|| panic!("{key} must be an array"), Vec::as_slice)
 }
 
 fn object<'a>(value: &'a JsonValue, key: &str) -> &'a serde_json::Map<String, JsonValue> {
