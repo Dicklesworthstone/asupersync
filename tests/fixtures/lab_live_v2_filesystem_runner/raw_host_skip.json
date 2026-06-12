@@ -1,0 +1,48 @@
+{
+  "schema_version": "lab-live-v2-filesystem-runner-fixture-v1",
+  "scenario_id": "3gaiun.lab_live_v2.filesystem.raw_host_skip",
+  "description": "Raw host filesystem probes are explicitly skipped until the project owns a virtualized or captured host-effect surface.",
+  "surface_family": "filesystem",
+  "adapter_family": "captured_filesystem",
+  "surface_id": "filesystem.raw_host.unsupported",
+  "surface_contract_version": "lab-live-v2.filesystem-runner.v1",
+  "canonical_seed": 597340115,
+  "expected_verdict": "skip",
+  "platform_policy": {
+    "raw_host_surface": true,
+    "live_skip_allowed": true,
+    "skip_is_pass": false,
+    "skip_reason": "raw host filesystem timing and metadata are unsupported by the current lab/live scope matrix",
+    "normalization": [
+      "skip raw host probe",
+      "capture intent only",
+      "record no pass evidence"
+    ]
+  },
+  "counters": {
+    "lab": {
+      "raw_host_probe_requested": 1,
+      "raw_host_probe_executed": 0,
+      "host_metadata_compared": 0
+    },
+    "live": {
+      "raw_host_probe_requested": 1,
+      "raw_host_probe_executed": 0,
+      "host_metadata_compared": 0
+    }
+  },
+  "structured_log_expectations": [
+    "LAB_FIXTURE_LOADED",
+    "LIVE_ADAPTER_CAPTURED",
+    "FILESYSTEM_RUNNER_VERDICT"
+  ],
+  "artifact_bundle": {
+    "runner_artifact": "artifacts/lab_live_v2_filesystem_runner_v1.json",
+    "docs": "docs/lab_live_v2_filesystem_runner.md"
+  },
+  "no_claims": [
+    "skip is not pass evidence",
+    "does not prove raw host filesystem parity",
+    "does not compare host scheduler timing"
+  ]
+}

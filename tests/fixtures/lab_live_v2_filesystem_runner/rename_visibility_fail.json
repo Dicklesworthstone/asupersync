@@ -1,0 +1,52 @@
+{
+  "schema_version": "lab-live-v2-filesystem-runner-fixture-v1",
+  "scenario_id": "3gaiun.lab_live_v2.filesystem.rename_visibility_fail",
+  "description": "Captured filesystem rename semantics preserve a live-side temporary visibility mismatch.",
+  "surface_family": "filesystem",
+  "adapter_family": "captured_filesystem",
+  "surface_id": "filesystem.captured.rename_visibility",
+  "surface_contract_version": "lab-live-v2.filesystem-runner.v1",
+  "canonical_seed": 597340114,
+  "expected_verdict": "fail",
+  "platform_policy": {
+    "raw_host_surface": false,
+    "live_skip_allowed": false,
+    "skip_is_pass": false,
+    "normalization": [
+      "path redaction",
+      "mtime omitted",
+      "inode omitted",
+      "errno omitted"
+    ]
+  },
+  "counters": {
+    "lab": {
+      "bytes_written": 4096,
+      "fsync_observed": 1,
+      "temp_visible_before_commit": 0,
+      "final_visible_after_rename": 1,
+      "partial_reads": 0
+    },
+    "live": {
+      "bytes_written": 4096,
+      "fsync_observed": 1,
+      "temp_visible_before_commit": 1,
+      "final_visible_after_rename": 1,
+      "partial_reads": 1
+    }
+  },
+  "structured_log_expectations": [
+    "LAB_FIXTURE_LOADED",
+    "LIVE_ADAPTER_CAPTURED",
+    "FILESYSTEM_RUNNER_VERDICT"
+  ],
+  "artifact_bundle": {
+    "runner_artifact": "artifacts/lab_live_v2_filesystem_runner_v1.json",
+    "docs": "docs/lab_live_v2_filesystem_runner.md"
+  },
+  "no_claims": [
+    "does not exercise raw host paths",
+    "does not compare mtimes, inodes, devices, or errno",
+    "does not prove process or signal support"
+  ]
+}
