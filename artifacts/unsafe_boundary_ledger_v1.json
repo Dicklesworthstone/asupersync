@@ -330,10 +330,10 @@
   },
   "summary": {
     "boundary_rows": 92,
-    "operation_count": 821,
+    "operation_count": 823,
     "operation_kind_counts": {
-      "allow_unsafe_code": 86,
-      "unsafe_block": 621,
+      "allow_unsafe_code": 87,
+      "unsafe_block": 622,
       "unsafe_fn": 94,
       "unsafe_impl": 20,
       "unsafe_trait": 0
@@ -1610,12 +1610,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 156,
+          "line": 151,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 160,
+          "line": 163,
+          "pattern": "unsafe {"
+        },
+        {
+          "kind": "allow_unsafe_code",
+          "line": 167,
+          "pattern": "#[allow(unsafe_code)]"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 171,
           "pattern": "unsafe {"
         }
       ]
@@ -1749,22 +1759,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 9098,
+          "line": 9394,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 9105,
+          "line": 9401,
           "pattern": "unsafe { std::env::set_var(\"SSL_CERT_FILE\", \"/definitely/not/a/postgres-ca.pem\") };"
         },
         {
           "kind": "unsafe_block",
-          "line": 9112,
+          "line": 9408,
           "pattern": "unsafe { std::env::set_var(\"SSL_CERT_FILE\", value) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 9116,
+          "line": 9412,
           "pattern": "unsafe { std::env::remove_var(\"SSL_CERT_FILE\") };"
         }
       ]
@@ -3366,22 +3376,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 4311,
+          "line": 4412,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 5904,
+          "line": 6005,
           "pattern": "unsafe { std::env::set_var(k, v) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5909,
+          "line": 6010,
           "pattern": "unsafe { std::env::remove_var(k) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5934,
+          "line": 6035,
           "pattern": "unsafe { std::env::remove_var(var) };"
         }
       ]
@@ -5113,27 +5123,27 @@
         },
         {
           "kind": "unsafe_impl",
-          "line": 39,
+          "line": 42,
           "pattern": "unsafe impl GlobalAlloc for CountingAllocator {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 40,
+          "line": 43,
           "pattern": "unsafe fn alloc(&self, layout: Layout) -> *mut u8 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 43,
+          "line": 48,
           "pattern": "unsafe { System.alloc(layout) }"
         },
         {
           "kind": "unsafe_fn",
-          "line": 46,
+          "line": 51,
           "pattern": "unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {"
         },
         {
           "kind": "unsafe_block",
-          "line": 47,
+          "line": 52,
           "pattern": "unsafe { System.dealloc(ptr, layout) }"
         }
       ]
@@ -5320,12 +5330,12 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 360,
+          "line": 362,
           "pattern": "let this = unsafe { self.get_unchecked_mut() };"
         },
         {
           "kind": "unsafe_block",
-          "line": 463,
+          "line": 465,
           "pattern": "unsafe { Waker::from_raw(raw) }"
         }
       ]
