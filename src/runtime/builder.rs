@@ -3772,6 +3772,9 @@ struct RuntimeInner {
     root_pending_spawns: Option<Arc<crate::record::region::PendingSpawnCounter>>,
     /// Timer handle for producer-side enqueue timestamps in mailbox mode.
     spawn_clock: Option<TimerDriverHandle>,
+    /// Keeps the producer-side spawn gateway live exactly as long as the
+    /// runtime inner remains live. Retained `Cx` values hold only weak tokens.
+    _spawn_liveness: Arc<()>,
     /// Blocking pool for synchronous operations.
     blocking_pool: Option<crate::runtime::blocking_pool::BlockingPool>,
     /// Shutdown signal for the deadline monitor thread.
@@ -3933,6 +3936,7 @@ impl RuntimeInner {
         // Cx::spawn surface works in every mode (workers' drain costs one
         // atomic emptiness check when idle); SpawnAdmissionMode only
         // selects RuntimeHandle::spawn routing (br-asupersync-hwjqyo / A2.2).
+        let spawn_liveness = Arc::new(());
         let (mailbox, root_pending_spawns, spawn_clock) = {
             let mut guard = state
                 .lock()
@@ -3949,6 +3953,7 @@ impl RuntimeInner {
                 Arc::clone(&mailbox),
                 scheduler.spawn_enqueued_notifier(),
                 clock.clone(),
+                Arc::downgrade(&spawn_liveness),
             )));
             (mailbox, pending, clock)
         };
@@ -3980,6 +3985,7 @@ impl RuntimeInner {
                 spawn_mailbox,
                 root_pending_spawns,
                 spawn_clock,
+                _spawn_liveness: spawn_liveness,
                 blocking_pool,
                 deadline_monitor_shutdown: deadline_monitor.shutdown,
                 deadline_monitor_thread: deadline_monitor.thread,

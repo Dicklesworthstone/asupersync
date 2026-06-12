@@ -3383,14 +3383,14 @@ where
         let Some(pending) = self.pending_spawn_counter_handle() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
-        Ok(self.spawn_via_gateway(
+        self.spawn_via_gateway(
             self.region_id(),
             self.budget(),
             self.capability_budget(),
             &gateway,
             &pending,
             f,
-        ))
+        )
     }
 
     /// Spawns a task into **`scope`'s region** without touching the
@@ -3456,14 +3456,14 @@ where
         let Some(pending) = pending else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
-        Ok(self.spawn_via_gateway(
+        self.spawn_via_gateway(
             scope.region_id(),
             scope.budget(),
             scope.capability_budget(),
             &gateway,
             &pending,
             f,
-        ))
+        )
     }
 
     /// Spawns a task into **`scope`'s region** and registers it through
@@ -3819,7 +3819,7 @@ where
         gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
         pending: &Arc<crate::record::region::PendingSpawnCounter>,
         f: F,
-    ) -> crate::runtime::TaskHandle<Fut::Output>
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
     where
         F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
@@ -3827,6 +3827,10 @@ where
     {
         use crate::runtime::spawn_mailbox::{AdmittedTask, SpawnFactoryFn, SpawnRequest};
         use crate::runtime::task_handle::JoinError;
+
+        if !gateway.is_runtime_available() {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        }
 
         let (result_tx, result_rx) =
             crate::channel::oneshot::channel::<Result<Fut::Output, JoinError>>();
@@ -3906,9 +3910,13 @@ where
                 }
             }));
 
-        gateway.enqueue_and_notify(request);
+        gateway.enqueue_and_notify(request)?;
 
-        crate::runtime::TaskHandle::new_pending(provisional, result_rx, admitted_slot)
+        Ok(crate::runtime::TaskHandle::new_pending(
+            provisional,
+            result_rx,
+            admitted_slot,
+        ))
     }
 
     /// Overlays parent-inherited capability state onto an admission-built

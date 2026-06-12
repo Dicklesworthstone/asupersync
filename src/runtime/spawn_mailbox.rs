@@ -806,6 +806,7 @@ pub struct SpawnGateway {
     mailbox: Arc<SpawnMailbox>,
     notify: Arc<dyn Fn() + Send + Sync>,
     clock: Option<crate::time::TimerDriverHandle>,
+    runtime_liveness: std::sync::Weak<()>,
 }
 
 impl SpawnGateway {
@@ -817,11 +818,13 @@ impl SpawnGateway {
         mailbox: Arc<SpawnMailbox>,
         notify: Arc<dyn Fn() + Send + Sync>,
         clock: Option<crate::time::TimerDriverHandle>,
+        runtime_liveness: std::sync::Weak<()>,
     ) -> Self {
         Self {
             mailbox,
             notify,
             clock,
+            runtime_liveness,
         }
     }
 
@@ -831,15 +834,28 @@ impl SpawnGateway {
         &self.mailbox
     }
 
+    /// Returns true while the runtime that owns this gateway is still alive.
+    #[must_use]
+    pub fn is_runtime_available(&self) -> bool {
+        self.runtime_liveness.upgrade().is_some()
+    }
+
     /// Enqueues a request stamped with the gateway clock and wakes the
     /// consumer.
-    pub fn enqueue_and_notify(&self, request: SpawnRequest) {
+    pub fn enqueue_and_notify(&self, request: SpawnRequest) -> Result<(), SpawnError> {
+        if !self.is_runtime_available() {
+            request
+                .into_parts()
+                .resolve_failed(SpawnError::RuntimeUnavailable);
+            return Err(SpawnError::RuntimeUnavailable);
+        }
         let now = self
             .clock
             .as_ref()
             .map_or(Time::ZERO, crate::time::TimerDriverHandle::now);
         self.mailbox.enqueue(request, now);
         (self.notify)();
+        Ok(())
     }
 }
 
@@ -1978,6 +1994,38 @@ mod tests {
         );
         let result = cx.spawn(|_child| async {});
         assert!(matches!(result, Err(SpawnError::RuntimeUnavailable)));
+    }
+
+    /// A retained runtime-wired Cx must fail closed after its runtime drops:
+    /// no panic, no orphaned mailbox enqueue, no pending-spawn credit.
+    #[test]
+    fn cx_spawn_after_runtime_drop_returns_runtime_unavailable() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let parent_cx = runtime.block_on(
+            runtime
+                .handle()
+                .spawn(async { crate::cx::Cx::current().expect("runtime task Cx") }),
+        );
+        let gateway = parent_cx
+            .spawn_gateway_handle()
+            .expect("runtime task Cx carries spawn gateway");
+        let total_enqueued = gateway.mailbox().total_enqueued();
+
+        drop(runtime);
+
+        assert!(
+            !gateway.is_runtime_available(),
+            "dropping the runtime must expire the gateway liveness token"
+        );
+        let result = parent_cx.spawn(|_child| async { 7usize });
+        assert!(matches!(result, Err(SpawnError::RuntimeUnavailable)));
+        assert_eq!(
+            gateway.mailbox().total_enqueued(),
+            total_enqueued,
+            "post-drop Cx::spawn must not publish orphaned mailbox work"
+        );
     }
 
     /// Spawn into a closing region: admission denies, the cancel slot

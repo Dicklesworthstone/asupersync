@@ -707,6 +707,8 @@ pub struct LabRuntime {
     /// Deterministic spawn intake (br-asupersync-4h8lye / A2.1): requests
     /// enqueued here are admitted in FIFO order at the top of each step.
     spawn_mailbox: Arc<crate::runtime::spawn_mailbox::SpawnMailbox>,
+    /// Keeps the lab spawn gateway live while the lab runtime is alive.
+    _spawn_liveness: Arc<()>,
     /// Tokens seen for I/O submissions (for trace emission).
     seen_io_tokens: DetHashSet<usize>,
     /// Scheduler.
@@ -765,10 +767,12 @@ impl LabRuntime {
         let spawn_mailbox = Arc::new(crate::runtime::spawn_mailbox::SpawnMailbox::with_trace(
             state.trace_handle(),
         ));
+        let spawn_liveness = Arc::new(());
         state.set_spawn_gateway(Arc::new(crate::runtime::spawn_mailbox::SpawnGateway::new(
             Arc::clone(&spawn_mailbox),
             Arc::new(|| {}),
             state.timer_driver_handle(),
+            Arc::downgrade(&spawn_liveness),
         )));
         state.set_entropy_source(Arc::new(DetEntropy::new(config.entropy_seed)));
 
@@ -788,6 +792,7 @@ impl LabRuntime {
             state,
             lab_reactor,
             spawn_mailbox,
+            _spawn_liveness: spawn_liveness,
             seen_io_tokens: DetHashSet::default(),
             scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
             config,
