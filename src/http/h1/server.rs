@@ -18,6 +18,8 @@ use crate::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_r
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -443,6 +445,7 @@ pub struct Http1Server<F> {
     handler: F,
     config: Http1Config,
     shutdown_signal: Option<ShutdownSignal>,
+    in_flight_requests: Option<Arc<AtomicUsize>>,
 }
 
 impl<F, Fut> Http1Server<F>
@@ -456,6 +459,7 @@ where
             handler,
             config: Http1Config::default(),
             shutdown_signal: None,
+            in_flight_requests: None,
         }
     }
 
@@ -465,6 +469,7 @@ where
             handler,
             config,
             shutdown_signal: None,
+            in_flight_requests: None,
         }
     }
 
@@ -472,6 +477,22 @@ where
     #[must_use]
     pub fn with_shutdown_signal(mut self, signal: ShutdownSignal) -> Self {
         self.shutdown_signal = Some(signal);
+        self
+    }
+
+    /// Attach a shared in-flight request counter
+    /// (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b).
+    ///
+    /// The counter is incremented once per request the moment the request
+    /// head has been read off the wire and decremented when the request's
+    /// response has been flushed (or the connection abandons the request).
+    /// A listener shares one counter across every connection it serves so a
+    /// request-aware drain supervisor can observe total live requests, which
+    /// is strictly finer-grained than connection-level tracking: an idle
+    /// keep-alive connection holds no in-flight request.
+    #[must_use]
+    pub fn with_in_flight_requests(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.in_flight_requests = Some(counter);
         self
     }
 
@@ -667,6 +688,13 @@ where
             };
             req.peer_addr = peer_addr;
 
+            // br-asupersync-server-stack-hardening-eeexl1.2 (D2.2b): the
+            // request is now committed — count it as in flight until its
+            // response is flushed or the connection abandons it. The guard
+            // is loop-iteration scoped so every exit path (including early
+            // breaks and error returns) releases it via Drop.
+            let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
+
             // br-asupersync-t9yqht: enforce the allowed-hosts allow-list
             // BEFORE the handler runs. A request whose Host header isn't
             // on the list (or is missing entirely on HTTP/1.1) gets a
@@ -853,10 +881,21 @@ where
                 suppress_response_body_for_head(&mut resp);
             }
 
+            // br-asupersync-server-stack-hardening-eeexl1.2 (D2.2b): once the
+            // drain has begun, every in-flight response advertises
+            // `Connection: close` and the keep-alive loop ends after this
+            // response — idle keep-alive connections already exit at the top
+            // of the loop, and this closes the in-flight half of the
+            // keep-alive coordination contract.
+            let draining = self
+                .shutdown_signal
+                .as_ref()
+                .is_some_and(ShutdownSignal::is_shutting_down);
+
             let close_after = finalize_response_persistence(
                 request_version,
                 &mut resp,
-                close_after || forced_close,
+                close_after || forced_close || draining,
             );
 
             state.phase = ConnectionPhase::Writing;
@@ -891,6 +930,36 @@ where
         let _ = io.shutdown().await;
 
         Ok(state)
+    }
+}
+
+/// RAII guard for the listener-shared in-flight request counter
+/// (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b).
+///
+/// Acquired once a request head has been read off the wire; released on drop
+/// no matter how the request ends (response flushed, handler cancelled,
+/// connection error, force-close break), so the counter can never leak a
+/// request on an early exit path.
+struct InFlightRequestGuard {
+    counter: Option<Arc<AtomicUsize>>,
+}
+
+impl InFlightRequestGuard {
+    fn acquire(counter: Option<&Arc<AtomicUsize>>) -> Self {
+        if let Some(counter) = counter {
+            counter.fetch_add(1, Ordering::AcqRel);
+        }
+        Self {
+            counter: counter.cloned(),
+        }
+    }
+}
+
+impl Drop for InFlightRequestGuard {
+    fn drop(&mut self) {
+        if let Some(counter) = &self.counter {
+            counter.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 

@@ -107,6 +107,15 @@ pub struct ShutdownStats {
     pub force_closed: usize,
     /// Total shutdown duration.
     pub duration: Duration,
+    /// Request-aware drain report when the shutdown was supervised by a
+    /// [`GracefulDrainSupervisor`]
+    /// (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b).
+    ///
+    /// `None` for connection-level-only drains (no request supervision was
+    /// attached). The report carries the in-flight request trajectory and the
+    /// [`ProgressCertificate`](crate::cancel::progress_certificate::ProgressCertificate)
+    /// verdict for the drain.
+    pub drain_report: Option<GracefulDrainReport>,
 }
 
 // ============================================================================
@@ -680,6 +689,7 @@ impl ShutdownSignal {
             drained,
             force_closed,
             duration,
+            drain_report: None,
         }
     }
 
@@ -1681,6 +1691,7 @@ mod tests {
             drained: 5,
             force_closed: 1,
             duration: Duration::from_secs(3),
+            drain_report: None,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("ShutdownStats"), "{dbg}");

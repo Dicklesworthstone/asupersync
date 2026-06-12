@@ -9,7 +9,9 @@ use crate::http::h1::types::{Request, Response};
 use crate::net::tcp::listener::TcpListener;
 use crate::runtime::{JoinHandle, RuntimeHandle, SpawnError};
 use crate::server::connection::{ConnectionGuard, ConnectionManager};
-use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
+use crate::server::shutdown::{
+    DrainStep, GracefulDrainSupervisor, ShutdownPhase, ShutdownSignal, ShutdownStats,
+};
 use crate::tracing_compat::error;
 use crate::{cx::Cx, types::Time};
 use std::future::Future;
@@ -17,12 +19,18 @@ use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
 const TRANSIENT_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 const TRANSIENT_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(64);
+
+/// Tick interval for the request-aware drain supervision loop
+/// (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b). Each tick samples
+/// the shared in-flight request counter and feeds the
+/// [`GracefulDrainSupervisor`] decision state machine.
+const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
 
 /// Low-overhead listener counters for diagnosing accept-path stalls.
 pub struct Http1ListenerStats {
@@ -137,7 +145,18 @@ pub struct Http1ListenerConfig {
     /// Maximum concurrent connections. `None` means unlimited.
     pub max_connections: Option<usize>,
     /// Drain timeout for graceful shutdown.
+    ///
+    /// This is the soft budget of the request-aware drain: when it elapses
+    /// with requests still in flight, the drain supervisor escalates
+    /// stragglers through force-close
+    /// (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b).
     pub drain_timeout: Duration,
+    /// Hard deadline budget for graceful shutdown.
+    ///
+    /// Measured from drain start like [`drain_timeout`](Self::drain_timeout);
+    /// clamped up to at least `drain_timeout`. When it elapses the drain ends
+    /// unconditionally and the drain report records `hard_deadline_hit`.
+    pub hard_drain_timeout: Duration,
     /// Time source for shutdown bookkeeping, connection metadata, and listener diagnostics.
     pub time_getter: fn() -> Time,
 }
@@ -148,6 +167,7 @@ impl Default for Http1ListenerConfig {
             http_config: Http1Config::default(),
             max_connections: Some(10_000),
             drain_timeout: Duration::from_secs(30),
+            hard_drain_timeout: Duration::from_secs(60),
             time_getter: default_listener_time_getter,
         }
     }
@@ -172,6 +192,13 @@ impl Http1ListenerConfig {
     #[must_use]
     pub fn drain_timeout(mut self, timeout: Duration) -> Self {
         self.drain_timeout = timeout;
+        self
+    }
+
+    /// Set the hard drain deadline budget for graceful shutdown.
+    #[must_use]
+    pub fn hard_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.hard_drain_timeout = timeout;
         self
     }
 
@@ -215,6 +242,11 @@ pub struct Http1Listener<F> {
     shutdown_signal: ShutdownSignal,
     connection_manager: ConnectionManager,
     stats: Arc<Http1ListenerStats>,
+    /// Listener-wide live request count, shared with every connection's
+    /// [`Http1Server`] (br-asupersync-server-stack-hardening-eeexl1.2,
+    /// D2.2b). Strictly finer-grained than connection tracking: an idle
+    /// keep-alive connection holds no in-flight request.
+    in_flight_requests: Arc<AtomicUsize>,
 }
 
 impl<F, Fut> Http1Listener<F>
@@ -249,6 +281,7 @@ where
             shutdown_signal,
             connection_manager,
             stats,
+            in_flight_requests: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -273,6 +306,7 @@ where
             shutdown_signal,
             connection_manager,
             stats,
+            in_flight_requests: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -299,6 +333,17 @@ where
     #[must_use]
     pub fn stats_handle(&self) -> Arc<Http1ListenerStats> {
         Arc::clone(&self.stats)
+    }
+
+    /// Returns the listener-wide in-flight request counter
+    /// (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b).
+    ///
+    /// The count covers requests whose head has been read but whose response
+    /// has not yet been flushed, across every connection this listener
+    /// serves.
+    #[must_use]
+    pub fn in_flight_requests(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.in_flight_requests)
     }
 
     /// Returns the local address this listener is bound to.
@@ -385,12 +430,14 @@ where
             let handler = Arc::clone(&self.handler);
             let http_config = self.config.http_config.clone();
             let shutdown_signal = self.shutdown_signal.clone();
+            let in_flight_requests = Arc::clone(&self.in_flight_requests);
             let handle = match spawn_connection(
                 stream,
                 guard,
                 handler,
                 http_config,
                 shutdown_signal,
+                in_flight_requests,
                 runtime,
             ) {
                 Ok(handle) => handle,
@@ -412,7 +459,78 @@ where
             let _ = self.begin_drain();
         }
 
-        let mut stats = self.connection_manager.drain_with_stats().await;
+        // Request-aware drain supervision
+        // (br-asupersync-server-stack-hardening-eeexl1.2, D2.2b): drive the
+        // GracefulDrainSupervisor over the shared in-flight request counter,
+        // CONCURRENTLY with the connection manager's own drain so the
+        // established connection-level accounting (drained vs force_closed
+        // snapshots taken synchronously at force-close time) is untouched.
+        // The soft deadline (`drain_timeout`) escalates stragglers through
+        // force-close (race_force_close interrupts in-flight handlers; the
+        // request region's drop path is the cancellation backstop); the hard
+        // deadline ends the supervision unconditionally. A duplicate
+        // begin_force_close from whichever side fires second is a no-op.
+        let supervise = async {
+            let drain_start = (self.config.time_getter)();
+            let mut supervisor = GracefulDrainSupervisor::new(
+                self.in_flight_requests.load(Ordering::Acquire),
+                drain_start,
+                self.config.drain_timeout,
+                self.config.hard_drain_timeout,
+            );
+            let mut hard_deadline_hit = false;
+            loop {
+                let now = (self.config.time_getter)();
+                match supervisor.observe(self.in_flight_requests.load(Ordering::Acquire), now) {
+                    DrainStep::Continue => {
+                        // Pace ticks on the runtime clock: the listener's
+                        // configured time_getter may be a frozen virtual
+                        // clock in tests, while the tick needs real
+                        // scheduling time to let in-flight work progress.
+                        let sleep_now = Cx::current()
+                            .and_then(|cx| cx.timer_driver())
+                            .map_or_else(crate::time::wall_now, |timer| timer.now());
+                        crate::time::sleep(sleep_now, DRAIN_SUPERVISION_TICK).await;
+                    }
+                    DrainStep::Escalate => {
+                        let _ = self.shutdown_signal.begin_force_close();
+                    }
+                    DrainStep::Quiescent => break,
+                    DrainStep::HardDeadline => {
+                        hard_deadline_hit = true;
+                        let _ = self.shutdown_signal.begin_force_close();
+                        break;
+                    }
+                }
+            }
+            supervisor.finish((self.config.time_getter)(), hard_deadline_hit)
+        };
+        let drain = self.connection_manager.drain_with_stats();
+
+        let mut supervise = core::pin::pin!(supervise);
+        let mut drain = core::pin::pin!(drain);
+        let mut report_slot = None;
+        let mut stats_slot = None;
+        std::future::poll_fn(|cx| {
+            if report_slot.is_none()
+                && let Poll::Ready(report) = supervise.as_mut().poll(cx)
+            {
+                report_slot = Some(report);
+            }
+            if stats_slot.is_none()
+                && let Poll::Ready(stats) = drain.as_mut().poll(cx)
+            {
+                stats_slot = Some(stats);
+            }
+            if report_slot.is_some() && stats_slot.is_some() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        let mut stats = stats_slot.take().expect("drain stats present after join");
+        stats.drain_report = report_slot.take();
 
         // If drain_with_stats returned due to a timeout, it transitioned the phase
         // to ForceClosing, but stats.duration only reflects the time up to the timeout.
@@ -424,9 +542,11 @@ where
         if self.connection_manager.is_empty() {
             self.shutdown_signal.mark_stopped();
             if is_force_closing {
+                let drain_report = stats.drain_report.take();
                 stats = self
                     .shutdown_signal
                     .collect_stats(stats.drained, stats.force_closed);
+                stats.drain_report = drain_report;
             }
         }
         Ok(stats)
@@ -451,6 +571,7 @@ fn spawn_connection<F, Fut>(
     handler: Arc<F>,
     config: Http1Config,
     shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
     runtime: &RuntimeHandle,
 ) -> Result<JoinHandle<()>, SpawnError>
 where
@@ -460,7 +581,8 @@ where
     let handle = runtime.try_spawn(async move {
         let _guard = guard;
         let server = Http1Server::with_config(move |req| handler(req), config)
-            .with_shutdown_signal(shutdown_signal);
+            .with_shutdown_signal(shutdown_signal)
+            .with_in_flight_requests(in_flight_requests);
         let peer_addr = stream.peer_addr().ok();
         let _ = server.serve_with_peer_addr(stream, peer_addr).await;
     })?;
@@ -719,6 +841,7 @@ mod tests {
                 handler,
                 localhost_http_config(),
                 shutdown.clone(),
+                Arc::new(AtomicUsize::new(0)),
                 &handle,
             ) {
                 Ok(_) => panic!("connection spawn should fail while root region is at capacity"),
