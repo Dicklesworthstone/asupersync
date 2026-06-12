@@ -1,0 +1,299 @@
+{
+  "schema_version": "artifact-governance-producer-checklist-v1",
+  "checklist_id": "artifact_governance_producer_checklist_v1",
+  "bead_id": "asupersync-artifact-governance-awdiwy.5",
+  "created_date": "2026-06-12",
+  "purpose": "Define the producer workflow and checked guard for adding durable proof, dashboard, signoff, runbook, and contract artifacts without silently bypassing artifact-governance ownership metadata.",
+  "source_of_truth": {
+    "checklist_artifact": "artifacts/artifact_governance_producer_checklist_v1.json",
+    "governance_ledger": "artifacts/artifact_governance_ledger_v1.json",
+    "citation_policy": "artifacts/artifact_governance_citation_policy_v1.json",
+    "producer_doc": "docs/proof/artifact_governance_producer_checklist.md",
+    "contract_test": "tests/artifact_governance_producer_checklist_contract.rs",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "guard_scope": {
+    "corpus_coverage": "guarded_reference_sources_plus_checked_fixtures_not_full_artifacts_tree",
+    "full_corpus_claim": false,
+    "non_destructive_policy": "The producer guard reports missing ownership metadata only. It does not delete files, clean caches, rewrite artifacts, create branches, create worktrees, or authorize local Cargo fallback for remote-required proof lanes.",
+    "guarded_reference_sources": [
+      {
+        "path": "README.md",
+        "parser": "literal_artifacts_json_reference_scan",
+        "why_guarded": "README proof sections are high-trust discovery surfaces for agents and operators."
+      },
+      {
+        "path": "AGENTS.md",
+        "parser": "literal_artifacts_json_reference_scan",
+        "why_guarded": "AGENTS proof instructions are a high-trust policy surface for agents."
+      },
+      {
+        "path": "artifacts/proof_lane_manifest_v1.json",
+        "parser": "json_literal_artifacts_reference_scan",
+        "why_guarded": "Proof manifest source paths drive proof-citation routing."
+      },
+      {
+        "path": "artifacts/proof_status_snapshot_v1.json",
+        "parser": "json_literal_artifacts_reference_scan",
+        "why_guarded": "Proof-status rows drive green, blocked, and stale claim routing."
+      }
+    ],
+    "durable_reference_rule": {
+      "path_prefix": "artifacts/",
+      "path_suffix": ".json",
+      "required_metadata": "Every referenced artifacts/*.json path in a guarded source must have a governance-ledger row or an explicit non-citeable exclusion in this checklist.",
+      "missing_metadata_error": "missing_governance_metadata"
+    }
+  },
+  "scope": {
+    "corpus_coverage": "representative_guard_not_full_corpus",
+    "full_corpus_claim": false,
+    "non_destructive": true,
+    "guard_result_policy": "If a guarded durable artifact reference is missing ownership metadata, the guard should never ask agents to delete files, create branches, create worktrees, or cite local Cargo fallback. The only allowed fail action is to add ownership metadata or an explicit non-citeable exclusion."
+  },
+  "guard_output_contract": {
+    "fail_action": "add_ownership_metadata",
+    "operator_message": "Do not delete files. Add an artifact-governance ledger row or explicit non-citeable exclusion with no-claim boundaries.",
+    "forbidden_actions": [
+      "delete_file",
+      "clean_generated_output",
+      "create_branch",
+      "create_worktree",
+      "local_cargo_fallback"
+    ]
+  },
+  "producer_workflow": [
+    {
+      "step": "classify_path",
+      "step_id": "classify-durable-artifact",
+      "required_output": "durable_artifact_or_explicit_exclusion",
+      "check": "Every guarded artifacts/*.json reference is classified before citation.",
+      "requirement": "Before adding a durable artifact, decide whether it is proof-bearing, advisory, blocked-frontier, superseded, generated-fixture, operator-report, or excluded under the ledger taxonomy.",
+      "guard_signal": "The contract rejects a guarded artifacts/*.json reference with no ledger row and no explicit exclusion."
+    },
+    {
+      "step": "assign_owner",
+      "step_id": "assign-owner",
+      "required_output": "owning_bead_and_producing_lane",
+      "check": "Durable artifacts carry a ledger row with owning_bead and producing_lane.",
+      "requirement": "Add a row to artifacts/artifact_governance_ledger_v1.json for durable artifacts that should be citeable or routeable; use an explicit checklist exclusion only for intentionally non-citeable or pre-backfill references.",
+      "guard_signal": "The guard checks the ledger path set and the explicit exclusion path set."
+    },
+    {
+      "step": "declare_citeability",
+      "step_id": "declare-citeability",
+      "required_output": "citeability_class",
+      "check": "The citeability class comes from the ledger taxonomy and controls how agents may cite the artifact.",
+      "requirement": "Declare the artifact's citeability class before using it in README, AGENTS, proof-status, or closeout text.",
+      "guard_signal": "The guard rejects missing metadata rather than upgrading references to proof."
+    },
+    {
+      "step": "declare_freshness",
+      "step_id": "declare-freshness",
+      "required_output": "freshness_policy",
+      "check": "Rows say when a fresh RCH proof is required and when an artifact is advisory, stale, or blocked.",
+      "requirement": "Attach a freshness policy that prevents old reports or blocked frontiers from becoming green proof.",
+      "guard_signal": "The guard preserves no-fresh-proof boundaries."
+    },
+    {
+      "step": "attach_no_claim_boundaries",
+      "step_id": "attach-no-claim-boundaries",
+      "required_output": "does_not_boundaries",
+      "check": "Every ledger row or exclusion carries machine-readable does_not_* boundaries.",
+      "requirement": "Every ledger row or exclusion must carry machine-readable does_not_* boundaries, including deletion and overclaim boundaries where relevant.",
+      "guard_signal": "The contract checks no-claim tokens for the producer checklist, fixtures, and exclusions."
+    },
+    {
+      "step": "wire_checks_and_docs",
+      "step_id": "wire-checks-and-docs",
+      "required_output": "checked_by_tests_and_source_references",
+      "check": "Durable artifacts name the contract tests, docs, and source references that keep the artifact discoverable.",
+      "requirement": "Durable artifacts need a focused test, contract, or documented validation lane that verifies their schema and citation limits before they are cited.",
+      "guard_signal": "The checklist artifact is checked by tests/artifact_governance_producer_checklist_contract.rs."
+    }
+  ],
+  "required_metadata": [
+    "artifact_id",
+    "path",
+    "path_status",
+    "owning_bead",
+    "producing_lane",
+    "artifact_family",
+    "checked_by_tests",
+    "citeability_class",
+    "freshness_policy",
+    "no_claim_boundaries",
+    "evidence_scope",
+    "source_references"
+  ],
+  "explicit_exclusions": [
+    {
+      "id": "remote-build-target-cache-roots",
+      "path_pattern": "${TMPDIR:-/tmp}/rch_target_*",
+      "reason": "Ephemeral remote target cache pattern; durable governance tracks committed receipts instead.",
+      "required_no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_hide_future_durable_receipts",
+        "does_not_prove_artifact_absence"
+      ]
+    },
+    {
+      "id": "local-target-cache-root",
+      "path_pattern": "target/test-artifacts/agent-lane",
+      "reason": "Local test artifact directory used for deterministic debugging output; durable governance tracks committed summaries instead.",
+      "required_no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_hide_future_durable_receipts",
+        "does_not_prove_artifact_absence"
+      ]
+    }
+  ],
+  "explicit_reference_exclusions": {
+    "reason_code": "preexisting_backfill_pending",
+    "reason": "These guarded-source references existed before the A5 producer guard and remain non-citeable through this checklist until A7 or a later backfill adds ledger rows. This explicit exclusion is metadata-only and does not authorize deletion or imply the artifacts are absent.",
+    "no_claim_boundaries": [
+      "does_not_make_reference_citeable",
+      "does_not_authorize_deletion",
+      "does_not_prove_artifact_absence"
+    ],
+    "artifact_paths": [
+      "artifacts/api_surface_map_v1.json",
+      "artifacts/atp_native_quic_endpoint_contract_v1.json",
+      "artifacts/atp_quic_dependency_audit_gate_contract_v1.json",
+      "artifacts/baseline.json",
+      "artifacts/browser_consumer_compatibility_matrix_v1.json",
+      "artifacts/browser_edition_readiness_matrix_v1.json",
+      "artifacts/browser_ga_final_signoff_v1.json",
+      "artifacts/browser_package_integrity_gate_v1.json",
+      "artifacts/conformance_registry_contract_v1.json",
+      "artifacts/downstream_consumer_proof_v1.json",
+      "artifacts/durable_rch_proof_e2e_scenarios_v1.json",
+      "artifacts/durable_rch_proof_final_signoff_v1.json",
+      "artifacts/durable_rch_proof_mail_templates_v1.json",
+      "artifacts/durable_rch_proof_receipt_contract_v1.json",
+      "artifacts/formal_proof_posture_contract_v1.json",
+      "artifacts/fourth_wave_governor_final_signoff_v1.json",
+      "artifacts/fourth_wave_swarm_governor_benchmark_contract_v1.json",
+      "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+      "artifacts/golden_checksums.json",
+      "artifacts/http3_qpack_support_matrix_v1.json",
+      "artifacts/lab_live_differential_scenario_contract_v1.json",
+      "artifacts/lab_live_differential_v2_scenarios_v1.json",
+      "artifacts/lab_live_support_claim_report_v1.json",
+      "artifacts/lab_live_timing_platform_policy_v1.json",
+      "artifacts/lab_live_v2_filesystem_runner_v1.json",
+      "artifacts/migration_readiness_planner_signoff_v1.json",
+      "artifacts/no_tokio_feature_boundary_contract_v1.json",
+      "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+      "artifacts/proof_evidence_debt_graph_contract_v1.json",
+      "artifacts/proof_lane_failure_repro_receipt_contract_v1.json",
+      "artifacts/proof_reuse_cache_contract_v1.json",
+      "artifacts/proof_status_snapshot_v1.json",
+      "artifacts/reservation_aware_fallback_work_finder_contract_v1.json",
+      "artifacts/second_wave_swarm_control_loop_certification_v1.json",
+      "artifacts/semantic_lint_ambient_rule_contract_v1.json",
+      "artifacts/semantic_lint_await_holding_rule_contract_v1.json",
+      "artifacts/semantic_lint_cleanup_budget_rule_contract_v1.json",
+      "artifacts/semantic_lint_core_tokio_rule_contract_v1.json",
+      "artifacts/semantic_lint_drop_race_loser_rule_contract_v1.json",
+      "artifacts/semantic_lint_ignored_outcome_rule_contract_v1.json",
+      "artifacts/semantic_lint_loop_checkpoint_rule_contract_v1.json",
+      "artifacts/semantic_lint_proof_lane_contract_v1.json",
+      "artifacts/semantic_lint_proof_lane_summary_v1.json",
+      "artifacts/semantic_lint_rule_inventory_v1.json",
+      "artifacts/slo_policy_bundle_contract_v1.json",
+      "artifacts/swarm_proof_lane_planner_contract_v1.json",
+      "artifacts/swarm_workload_scenario_corpus_v1.json",
+      "artifacts/third_wave_swarm_guardrail_e2e_contract_v1.json",
+      "artifacts/unsafe_boundary_ledger_v1.json",
+      "artifacts/validation_frontier_ledger_schema_v1.json",
+      "artifacts/wave2/browser_native_message_and_stream_apis_evidence.json"
+    ]
+  },
+  "guard_fixtures": [
+    {
+      "id": "ledger_backed_manifest_reference_passes",
+      "classification": "durable_artifact",
+      "source_path": "README.md",
+      "referenced_path": "artifacts/proof_lane_manifest_v1.json",
+      "ledger_row": "proof-lane-manifest-canonical",
+      "expected_result": "pass"
+    },
+    {
+      "id": "checklist_self_reference_passes",
+      "classification": "durable_artifact",
+      "source_path": "docs/proof/artifact_governance_producer_checklist.md",
+      "referenced_path": "artifacts/artifact_governance_producer_checklist_v1.json",
+      "ledger_row": "artifact-governance-producer-checklist",
+      "expected_result": "pass"
+    },
+    {
+      "id": "remote_cache_exclusion_passes",
+      "classification": "explicit_exclusion",
+      "source_path": "AGENTS.md",
+      "referenced_path": "${TMPDIR:-/tmp}/rch_target_check_all_targets",
+      "exclusion": "remote-build-target-cache-roots",
+      "expected_result": "pass"
+    },
+    {
+      "id": "missing_ledger_row_fails",
+      "classification": "durable_artifact",
+      "source_path": "README.md",
+      "referenced_path": "artifacts/example_missing_contract_v1.json",
+      "expected_result": "fail",
+      "expected_error": "missing_ledger_row_or_exclusion"
+    },
+    {
+      "id": "destructive_suggestion_fails",
+      "classification": "durable_artifact",
+      "source_path": "README.md",
+      "referenced_path": "artifacts/proof_lane_manifest_v1.json",
+      "ledger_row": "proof-lane-manifest-canonical",
+      "suggested_action": "delete file instead of adding metadata",
+      "expected_result": "fail",
+      "expected_error": "destructive_suggestion"
+    }
+  ],
+  "fixture_cases": [
+    {
+      "id": "new_checked_artifact_with_ledger_row",
+      "references": [
+        "artifacts/example_checked_contract_v1.json"
+      ],
+      "ledger_paths": [
+        "artifacts/example_checked_contract_v1.json"
+      ],
+      "explicit_exclusions": [],
+      "expected_result": "allowed"
+    },
+    {
+      "id": "new_artifact_missing_metadata",
+      "references": [
+        "artifacts/example_missing_contract_v1.json"
+      ],
+      "ledger_paths": [],
+      "explicit_exclusions": [],
+      "expected_result": "missing_governance_metadata"
+    },
+    {
+      "id": "throwaway_or_prebackfill_reference_is_explicitly_excluded",
+      "references": [
+        "artifacts/example_prebackfill_contract_v1.json"
+      ],
+      "ledger_paths": [],
+      "explicit_exclusions": [
+        "artifacts/example_prebackfill_contract_v1.json"
+      ],
+      "expected_result": "allowed"
+    }
+  ],
+  "no_claim_boundaries": [
+    "does_not_prove_full_corpus_coverage",
+    "does_not_make_excluded_references_citeable",
+    "does_not_authorize_deletion",
+    "does_not_prove_fresh_rch_pass",
+    "does_not_close_future_artifact_gaps",
+    "does_not_authorize_local_cargo_fallback"
+  ]
+}

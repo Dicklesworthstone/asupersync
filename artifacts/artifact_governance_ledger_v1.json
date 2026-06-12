@@ -217,6 +217,34 @@
       ]
     },
     {
+      "artifact_id": "artifact-governance-producer-checklist",
+      "path": "artifacts/artifact_governance_producer_checklist_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.5",
+      "producing_lane": "artifact-governance-producer-checklist-contract",
+      "domain": "artifact governance",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/artifact_governance_producer_checklist_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_artifact_governance_producer_checklist_when_checklist_contract_passes_on_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass",
+        "does_not_close_future_artifact_gaps"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Machine-checked producer checklist and representative non-destructive guard fixtures for future durable artifact ownership, citeability, freshness, and no-claim metadata.",
+      "source_references": [
+        "artifacts/artifact_governance_producer_checklist_v1.json",
+        "docs/proof/artifact_governance_producer_checklist.md",
+        "tests/artifact_governance_producer_checklist_contract.rs"
+      ]
+    },
+    {
       "artifact_id": "proof-lane-manifest-canonical",
       "path": "artifacts/proof_lane_manifest_v1.json",
       "path_status": "tracked",

@@ -400,6 +400,25 @@ fn specific_seed_rows_preserve_fail_closed_citation_boundaries() {
             .contains("does_not_authorize_overclaims")
     );
 
+    let producer_checklist = rows["artifact-governance-producer-checklist"];
+    assert_eq!(string(producer_checklist, "path_status"), "tracked");
+    assert_eq!(
+        string(producer_checklist, "owning_bead"),
+        "asupersync-artifact-governance-awdiwy.5"
+    );
+    assert_eq!(
+        string(producer_checklist, "artifact_family"),
+        "artifact_governance"
+    );
+    assert!(
+        string_set(producer_checklist, "no_claim_boundaries")
+            .contains("does_not_close_future_artifact_gaps")
+    );
+    assert!(
+        string_set(producer_checklist, "no_claim_boundaries")
+            .contains("does_not_authorize_deletion")
+    );
+
     let rch = rows["rch-stale-progress-receipt-contract"];
     assert_eq!(string(rch, "path_status"), "tracked");
     assert!(string_set(rch, "no_claim_boundaries").contains("does_not_prove_source_correctness"));
