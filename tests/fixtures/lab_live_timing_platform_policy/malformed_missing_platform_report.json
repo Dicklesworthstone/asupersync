@@ -1,0 +1,59 @@
+{
+  "schema_version": "lab-live-timing-platform-policy-fixture-v1",
+  "scenario_id": "lab_live_5_3.malformed.missing_platform_report",
+  "claim_id": "phase2.timer.deadline_semantics",
+  "surface_id": "timer_surface",
+  "expected_verdict": "pass",
+  "policy_class": "semantic_match",
+  "time_policy_class": "semantic_time",
+  "scheduler_noise_class": "none",
+  "adapter": {
+    "kind": "negative_fixture",
+    "path": "tests/lab_live_timing_platform_policy_contract.rs",
+    "entry": "malformed_platform_report_fixture_is_rejected"
+  },
+  "classification_inputs": {
+    "semantic_fields_match": true,
+    "skip_is_pass": false,
+    "stale_is_pass": false,
+    "first_failure_field": "",
+    "unsupported_reason": "",
+    "evidence_age_days": 0
+  },
+  "failure_bundle": {
+    "seed": "seed.lab_live_5_3.malformed.0005",
+    "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
+    "platform": "current_thread_runtime",
+    "adapter": "negative_fixture",
+    "logs": [
+      "scenario_id",
+      "expected_error"
+    ],
+    "replay_pointers": [
+      "artifacts/lab_live/lab_live_5_3/malformed_missing_platform_report/summary.json"
+    ],
+    "redaction": "not reached because platform_report is missing"
+  },
+  "expected_logs": [
+    "scenario_id",
+    "expected_error"
+  ],
+  "redaction": {
+    "input_samples": [
+      "token=malformed-secret"
+    ],
+    "redacted_samples": [
+      "token=<redacted>"
+    ],
+    "forbidden_substrings": [
+      "malformed-secret"
+    ]
+  },
+  "docs_alignment": [
+    "docs/lab_live_timing_platform_policy.md"
+  ],
+  "no_claims": [
+    "negative fixture only",
+    "does not represent a valid report"
+  ]
+}

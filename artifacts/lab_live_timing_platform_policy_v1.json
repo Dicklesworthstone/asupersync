@@ -1,0 +1,190 @@
+{
+  "contract_version": "lab-live-timing-platform-policy-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.5.3",
+  "artifact_path": "artifacts/lab_live_timing_platform_policy_v1.json",
+  "source_of_truth": {
+    "contract": "artifacts/lab_live_timing_platform_policy_v1.json",
+    "docs": "docs/lab_live_timing_platform_policy.md",
+    "contract_test": "tests/lab_live_timing_platform_policy_contract.rs",
+    "pass_fixture": "tests/fixtures/lab_live_timing_platform_policy/pass_timer_deadline.json",
+    "fail_fixture": "tests/fixtures/lab_live_timing_platform_policy/fail_region_close.json",
+    "skip_fixture": "tests/fixtures/lab_live_timing_platform_policy/skip_raw_socket.json",
+    "stale_fixture": "tests/fixtures/lab_live_timing_platform_policy/stale_browser_evidence.json",
+    "malformed_fixture": "tests/fixtures/lab_live_timing_platform_policy/malformed_missing_platform_report.json"
+  },
+  "inherits": [
+    {
+      "path": "artifacts/lab_live_differential_scenario_contract_v1.json",
+      "role": "scenario schema and semantic claim map from V1"
+    },
+    {
+      "path": "docs/lab_live_time_normalization_policy.md",
+      "role": "time and scheduler-noise classes"
+    },
+    {
+      "path": "docs/lab_live_virtualized_surface_matrix.md",
+      "role": "platform capability and observability vocabulary"
+    },
+    {
+      "path": "docs/lab_live_divergence_taxonomy.md",
+      "role": "policy classes for semantic failures and unsupported surfaces"
+    },
+    {
+      "path": "docs/lab_live_verification_taxonomy.md",
+      "role": "verification tiers and retained artifact floors"
+    }
+  ],
+  "policy_schema": {
+    "schema_version": "lab-live-timing-platform-policy-fixture-v1",
+    "required_fields": [
+      "schema_version",
+      "scenario_id",
+      "claim_id",
+      "surface_id",
+      "expected_verdict",
+      "policy_class",
+      "time_policy_class",
+      "scheduler_noise_class",
+      "platform_report",
+      "adapter",
+      "classification_inputs",
+      "failure_bundle",
+      "expected_logs",
+      "redaction",
+      "docs_alignment",
+      "no_claims"
+    ],
+    "expected_verdict_values": [
+      "pass",
+      "fail",
+      "skip",
+      "stale"
+    ],
+    "policy_class_values": [
+      "semantic_match",
+      "runtime_semantic_bug",
+      "artifact_schema_violation",
+      "unsupported_surface",
+      "insufficient_observability",
+      "stale_evidence"
+    ],
+    "time_policy_class_values": [
+      "semantic_time",
+      "qualified_time",
+      "provenance_only_time",
+      "scheduler_noise_signal",
+      "unsupported_time_surface"
+    ],
+    "required_platform_report_fields": [
+      "surface_family",
+      "host_role",
+      "capability_status",
+      "eligibility_verdict",
+      "observability_status",
+      "platform_prerequisites"
+    ],
+    "required_failure_bundle_fields": [
+      "seed",
+      "repro_command",
+      "platform",
+      "adapter",
+      "logs",
+      "replay_pointers",
+      "redaction"
+    ],
+    "required_redaction_fields": [
+      "input_samples",
+      "redacted_samples",
+      "forbidden_substrings"
+    ],
+    "skip_is_pass": false,
+    "stale_is_pass": false,
+    "required_no_claim_boundary": "Every fixture must carry nonempty no_claims. Skip and stale verdicts are evidence states, never weak passes."
+  },
+  "classification_rules": [
+    {
+      "expected_verdict": "pass",
+      "policy_class": "semantic_match",
+      "meaning": "The supported scenario emitted complete evidence, platform prerequisites were met, and normalized semantic fields matched.",
+      "required_inputs": [
+        "complete platform_report",
+        "rch repro command",
+        "nonempty no_claims",
+        "redaction proof"
+      ]
+    },
+    {
+      "expected_verdict": "fail",
+      "policy_class": "runtime_semantic_bug",
+      "meaning": "The surface is admitted, artifacts are complete, and a hard normalized semantic field differs.",
+      "required_inputs": [
+        "first_failure_field",
+        "seed lineage",
+        "replay pointer",
+        "structured logs"
+      ]
+    },
+    {
+      "expected_verdict": "skip",
+      "policy_class": "unsupported_surface",
+      "meaning": "The platform or surface is not admitted; the result is retained as a negative-control skip and cannot count as a pass.",
+      "required_inputs": [
+        "unsupported_reason",
+        "eligibility_verdict",
+        "observability_status",
+        "skip_is_pass=false"
+      ]
+    },
+    {
+      "expected_verdict": "stale",
+      "policy_class": "stale_evidence",
+      "meaning": "The support row may be valid in principle, but its evidence is too old or missing to strengthen any claim.",
+      "required_inputs": [
+        "evidence_age_days",
+        "freshness_policy",
+        "next_refresh_command",
+        "stale_is_pass=false"
+      ]
+    }
+  ],
+  "fixture_matrix": [
+    {
+      "fixture": "tests/fixtures/lab_live_timing_platform_policy/pass_timer_deadline.json",
+      "expected_verdict": "pass",
+      "policy_class": "semantic_match"
+    },
+    {
+      "fixture": "tests/fixtures/lab_live_timing_platform_policy/fail_region_close.json",
+      "expected_verdict": "fail",
+      "policy_class": "runtime_semantic_bug"
+    },
+    {
+      "fixture": "tests/fixtures/lab_live_timing_platform_policy/skip_raw_socket.json",
+      "expected_verdict": "skip",
+      "policy_class": "unsupported_surface"
+    },
+    {
+      "fixture": "tests/fixtures/lab_live_timing_platform_policy/stale_browser_evidence.json",
+      "expected_verdict": "stale",
+      "policy_class": "stale_evidence"
+    }
+  ],
+  "negative_fixtures": [
+    {
+      "fixture": "tests/fixtures/lab_live_timing_platform_policy/malformed_missing_platform_report.json",
+      "expected_error": "missing required field platform_report"
+    }
+  ],
+  "validation": {
+    "contract_test": "tests/lab_live_timing_platform_policy_contract.rs",
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
+    "no_local_cargo_fallback": true
+  },
+  "no_claims": [
+    "does not run live adapter scenarios by itself",
+    "does not certify broad workspace health",
+    "does not promote skipped platform capability to pass",
+    "does not replace V2 adapter-family runner evidence",
+    "does not prove browser, raw socket, or real-network parity"
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "schema_version": "lab-live-timing-platform-policy-fixture-v1",
+  "scenario_id": "lab_live_5_3.skip.raw_socket",
+  "claim_id": "phase4.raw_socket.host_timing",
+  "surface_id": "raw_socket",
+  "expected_verdict": "skip",
+  "policy_class": "unsupported_surface",
+  "time_policy_class": "unsupported_time_surface",
+  "scheduler_noise_class": "unsupported_time_surface",
+  "platform_report": {
+    "surface_family": "raw_socket",
+    "host_role": "uncontrolled_host_kernel",
+    "capability_status": "unsupported",
+    "eligibility_verdict": "skip_not_pass",
+    "observability_status": "missing_virtualization_boundary",
+    "platform_prerequisites": [
+      "virtualization_boundary_missing",
+      "capture_manifest_missing"
+    ]
+  },
+  "adapter": {
+    "kind": "not_bound",
+    "path": "docs/lab_live_virtualized_surface_matrix.md",
+    "entry": "raw_socket"
+  },
+  "classification_inputs": {
+    "semantic_fields_match": false,
+    "skip_is_pass": false,
+    "stale_is_pass": false,
+    "first_failure_field": "platform_report.virtualization_boundary",
+    "unsupported_reason": "raw socket host timing is outside the admitted lab-live surface",
+    "evidence_age_days": 0
+  },
+  "failure_bundle": {
+    "seed": "seed.lab_live_5_3.raw_socket.0003",
+    "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
+    "platform": "uncontrolled_host_kernel",
+    "adapter": "raw_socket.policy_fixture",
+    "logs": [
+      "scenario_id",
+      "unsupported_reason",
+      "eligibility_verdict",
+      "observability_status"
+    ],
+    "replay_pointers": [
+      "artifacts/lab_live/lab_live_5_3/skip_raw_socket/summary.json",
+      "artifacts/lab_live/lab_live_5_3/skip_raw_socket/events.ndjson"
+    ],
+    "redaction": "host and path details scrubbed before retention"
+  },
+  "expected_logs": [
+    "scenario_id",
+    "surface_family",
+    "unsupported_reason",
+    "eligibility_verdict",
+    "verdict"
+  ],
+  "redaction": {
+    "input_samples": [
+      "host=raw-socket-worker.internal",
+      "operator@example.com",
+      "/var/tmp/raw-socket-secret"
+    ],
+    "redacted_samples": [
+      "host=<host:redacted>",
+      "<email:redacted>",
+      "<path:redacted>"
+    ],
+    "forbidden_substrings": [
+      "raw-socket-worker.internal",
+      "operator@example.com",
+      "/var/tmp/raw-socket-secret"
+    ]
+  },
+  "docs_alignment": [
+    "docs/lab_live_virtualized_surface_matrix.md",
+    "docs/lab_live_time_normalization_policy.md"
+  ],
+  "no_claims": [
+    "does not treat unsupported raw socket timing as pass",
+    "does not claim kernel wake ordering parity",
+    "does not claim DNS, TLS, packet loss, or real-network behavior"
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "schema_version": "lab-live-timing-platform-policy-fixture-v1",
+  "scenario_id": "lab_live_5_3.pass.timer_deadline",
+  "claim_id": "phase2.timer.deadline_semantics",
+  "surface_id": "timer_surface",
+  "expected_verdict": "pass",
+  "policy_class": "semantic_match",
+  "time_policy_class": "semantic_time",
+  "scheduler_noise_class": "none",
+  "platform_report": {
+    "surface_family": "timer_surface",
+    "host_role": "current_thread_runtime",
+    "capability_status": "supported",
+    "eligibility_verdict": "admitted",
+    "observability_status": "complete",
+    "platform_prerequisites": [
+      "scenario_clock_id",
+      "logical_deadline_id",
+      "normalization_window"
+    ]
+  },
+  "adapter": {
+    "kind": "lab_live_policy_fixture",
+    "path": "tests/lab_live_timing_platform_policy_contract.rs",
+    "entry": "fixtures_are_valid_and_redacted"
+  },
+  "classification_inputs": {
+    "semantic_fields_match": true,
+    "skip_is_pass": false,
+    "stale_is_pass": false,
+    "first_failure_field": "",
+    "unsupported_reason": "",
+    "evidence_age_days": 0
+  },
+  "failure_bundle": {
+    "seed": "seed.lab_live_5_3.timer_deadline.0001",
+    "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
+    "platform": "current_thread_runtime",
+    "adapter": "timer_surface.policy_fixture",
+    "logs": [
+      "scenario_id",
+      "surface_family",
+      "time_policy_class",
+      "verdict"
+    ],
+    "replay_pointers": [
+      "artifacts/lab_live/lab_live_5_3/pass_timer_deadline/summary.json",
+      "artifacts/lab_live/lab_live_5_3/pass_timer_deadline/events.ndjson"
+    ],
+    "redaction": "operator tokens redacted before report retention"
+  },
+  "expected_logs": [
+    "scenario_id",
+    "surface_family",
+    "eligibility_verdict",
+    "verdict",
+    "repro_command"
+  ],
+  "redaction": {
+    "input_samples": [
+      "token=lab-live-secret",
+      "operator@example.com",
+      "/home/ubuntu/private"
+    ],
+    "redacted_samples": [
+      "token=<redacted>",
+      "<email:redacted>",
+      "<path:redacted>"
+    ],
+    "forbidden_substrings": [
+      "lab-live-secret",
+      "operator@example.com",
+      "/home/ubuntu/private"
+    ]
+  },
+  "docs_alignment": [
+    "docs/lab_live_time_normalization_policy.md",
+    "docs/lab_live_virtualized_surface_matrix.md"
+  ],
+  "no_claims": [
+    "does not prove wall-clock latency",
+    "does not prove broad timer runtime health",
+    "does not replace executable V2 adapter evidence"
+  ]
+}
