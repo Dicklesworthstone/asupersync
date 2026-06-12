@@ -141,7 +141,7 @@ fn validate_scanner(scan: &Value) -> Result<(), String> {
     if !bool_field(&Value::Object(coverage.clone()), "non_destructive")? {
         return Err("scanner must be non-destructive".to_owned());
     }
-    let parser_policy = string(&Value::Object(coverage.clone()), "parser_policy")?;
+    let parser_policy = string(&Value::Object(coverage.clone()), "parser_policy")?.to_owned();
     for required in ["JSON", "does not rewrite", "delete"] {
         if !parser_policy.contains(required) {
             return Err(format!("parser_policy must mention {required}"));
