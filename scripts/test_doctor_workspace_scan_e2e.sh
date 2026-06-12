@@ -151,7 +151,9 @@ run_scan_call() {
             printf '%s\n' "${payload}" > "${run_json}"
             if [[ ${rc} -ne 0 ]]; then
                 if [[ "${last_failure_reason}" == "rch_local_fallback" ]]; then
-                    rm -f "${run_json}"
+                    # Keep the captured payload for forensic review; the stage
+                    # remains failed because local fallback is forbidden.
+                    :
                 else
                     echo "  WARN: ${run_label} exited ${rc}; proceeding with captured JSON payload"
                     return 0
@@ -201,7 +203,6 @@ if [[ ${EXIT_CODE} -eq 0 ]]; then
     jq 'del(.root, .workspace_manifest)' "${SCAN2_JSON}" > "${SCAN2_NORM_JSON}"
     if diff -u "${SCAN1_NORM_JSON}" "${SCAN2_NORM_JSON}" > "${ARTIFACT_DIR}/determinism.diff"; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
-        rm -f "${ARTIFACT_DIR}/determinism.diff"
     else
         echo "  ERROR: deterministic output check failed (see determinism.diff)"
         CHECK_FAILURES=$((CHECK_FAILURES + 1))

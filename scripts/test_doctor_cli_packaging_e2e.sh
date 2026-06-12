@@ -110,7 +110,9 @@ run_packaging_call() {
             printf '%s\n' "${payload}" > "${run_json}"
             if [[ ${rc} -ne 0 ]]; then
                 if [[ "${last_failure_reason}" == "rch_local_fallback" ]]; then
-                    rm -f "${run_json}"
+                    # Keep the captured payload for forensic review; the stage
+                    # remains failed because local fallback is forbidden.
+                    :
                 else
                     echo "  WARN: ${run_label} exited ${rc}; proceeding with captured JSON payload"
                     return 0

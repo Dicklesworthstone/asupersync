@@ -3,6 +3,9 @@
 use serde_json::Value;
 
 const RUNNER: &str = include_str!("../scripts/run_doctor_e2e.sh");
+const WORKSPACE_RUNNER: &str = include_str!("../scripts/test_doctor_workspace_scan_e2e.sh");
+const REPORT_EXPORT_RUNNER: &str = include_str!("../scripts/test_doctor_report_export_e2e.sh");
+const CLI_PACKAGING_RUNNER: &str = include_str!("../scripts/test_doctor_cli_packaging_e2e.sh");
 const RUN_ALL_E2E: &str = include_str!("../scripts/run_all_e2e.sh");
 const DOCS: &str = include_str!("../docs/doctor_e2e_harness_contract.md");
 const MANIFEST: &str = include_str!("../artifacts/proof_lane_manifest_v1.json");
@@ -45,6 +48,8 @@ fn runner_emits_required_artifacts_and_fail_closed_events() {
         "operator_report.md",
         "doctor-e2e-proof-lane-event-v1",
         "RCH_REQUIRE_REMOTE=1",
+        "DOCTOR_E2E_STAGE_RETRY_ATTEMPTS",
+        "RETRY (${failure_class}",
         "rch_local_fallback",
         "doctor diagnoses evidence but does not certify broad workspace health",
     ] {
@@ -84,6 +89,23 @@ fn runner_emits_required_artifacts_and_fail_closed_events() {
             RUNNER.contains(fallback_marker),
             "runner must fail closed on {fallback_marker}"
         );
+    }
+}
+
+#[test]
+fn aggregate_doctor_lane_scripts_do_not_delete_files() {
+    for (script_name, script) in [
+        ("run_doctor_e2e.sh", RUNNER),
+        ("test_doctor_workspace_scan_e2e.sh", WORKSPACE_RUNNER),
+        ("test_doctor_report_export_e2e.sh", REPORT_EXPORT_RUNNER),
+        ("test_doctor_cli_packaging_e2e.sh", CLI_PACKAGING_RUNNER),
+    ] {
+        for forbidden in ["rm -f", "rm -rf", "git clean", "git reset --hard"] {
+            assert!(
+                !script.contains(forbidden),
+                "{script_name} must not contain {forbidden}"
+            );
+        }
     }
 }
 

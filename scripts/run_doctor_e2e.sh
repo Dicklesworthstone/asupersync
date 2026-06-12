@@ -24,6 +24,7 @@ NO_CLAIM_TEXT="doctor diagnoses evidence but does not certify broad workspace he
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 export RUST_LOG="${RUST_LOG:-asupersync=info}"
 export TEST_SEED="${TEST_SEED:-0xD0C70E2E}"
+STAGE_RETRY_ATTEMPTS="${DOCTOR_E2E_STAGE_RETRY_ATTEMPTS:-2}"
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 if [[ ! -x "$RCH_BIN" ]]; then
@@ -101,23 +102,42 @@ run_stage() {
     local rc
     local status="passed"
     local failure_class="none"
+    local attempt_log=""
 
     started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo ">>> [${stage_id}] ${coverage_family}"
 
-    set +e
-    "$@" > "$log_file" 2>&1
-    rc=$?
-    set -e
+    for ((attempt = 1; attempt <= STAGE_RETRY_ATTEMPTS; attempt++)); do
+        attempt_log="${ARTIFACT_DIR}/${stage_id}.attempt${attempt}.log"
+        set +e
+        "$@" > "$attempt_log" 2>&1
+        rc=$?
+        set -e
 
-    if rch_attempt_went_local "$log_file"; then
-        status="failed"
-        failure_class="rch_local_fallback"
-        rc=1
-    elif [[ "$rc" -ne 0 ]]; then
-        status="failed"
-        failure_class="stage_failure"
-    fi
+        cp "$attempt_log" "$log_file"
+
+        status="passed"
+        failure_class="none"
+        if rch_attempt_went_local "$attempt_log"; then
+            status="failed"
+            failure_class="rch_local_fallback"
+            rc=1
+        elif [[ "$rc" -ne 0 ]]; then
+            status="failed"
+            failure_class="stage_failure"
+        fi
+
+        if [[ "$status" == "passed" ]]; then
+            break
+        fi
+
+        if [[ "$failure_class" == "rch_local_fallback" && "$attempt" -lt "$STAGE_RETRY_ATTEMPTS" ]]; then
+            echo "    RETRY (${failure_class}, attempt ${attempt}/${STAGE_RETRY_ATTEMPTS})"
+            continue
+        fi
+
+        break
+    done
 
     ended_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     json_event "stage_complete" "$stage_id" "$coverage_family" "$status" "$failure_class" "$rc" "$started_ts" "$ended_ts" "$command_display" "$log_file"
