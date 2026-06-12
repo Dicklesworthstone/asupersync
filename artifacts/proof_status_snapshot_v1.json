@@ -83,6 +83,7 @@
     "formal Lean posture",
     "rustdoc/API examples",
     "downstream consumer proof",
+    "browser GA final signoff",
     "doctor e2e proof lane"
   ],
   "claim_categories": [
@@ -765,6 +766,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Green maps only the D4 aggregate doctor E2E runner contract, orchestrator registration, docs markers, manifest/status mapping, artifact-output expectations, local-fallback guard, and no-claim boundaries; run scripts/run_doctor_e2e.sh for fresh aggregate evidence. It does not prove broad workspace health, release readiness, live RCH fleet availability, performance, or source correctness outside the doctor proof lane."
+    },
+    {
+      "claim_id": "browser-ga-final-signoff",
+      "category": "browser GA final signoff",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/browser_ga_final_signoff_v1.json",
+          "docs/browser_ga_final_signoff.md"
+        ],
+        "AGENTS.md": [
+          "Canonical proof-command manifest",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "browser-ga-final-signoff"
+      ],
+      "manifest_lane_ids": [
+        "browser-ga-final-signoff"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_ga_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test browser_ga_final_signoff_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped Browser GA signoff: cite it only as the scoped JS/TS package GA evidence packet tying B1 readiness, B2 package integrity, B3 consumer compatibility, package hashes, rollback drill, docs markers, and proof manifest/status rows together. It does not execute npm publish, prove broad workspace health, prove full release readiness outside Browser Edition JS/TS package GA, promote Rust browser API to stable, promote service-worker direct runtime, or promote shared-worker direct runtime."
     }
   ],
   "proof_reuse_status_rows": [

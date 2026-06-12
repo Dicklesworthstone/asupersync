@@ -426,6 +426,7 @@
     "downstream-consumer-default-tokio-free",
     "downstream-consumer-internal-only-negative",
     "downstream-consumer-proof-contract",
+    "browser-ga-final-signoff",
     "doctor-e2e-proof-lane-contract",
     "semantic-lint-proof-lane-contract"
   ],
@@ -1166,6 +1167,30 @@
       ]
     },
     {
+      "lane_id": "browser-ga-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_ga_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test browser_ga_final_signoff_contract -- --nocapture",
+      "guarantee_ids": [
+        "browser-ga-final-signoff"
+      ],
+      "feature_flags": [],
+      "expected_signal": "browser_ga_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/browser_ga_final_signoff_v1.json",
+        "tests/browser_ga_final_signoff_contract.rs",
+        "tests/fixtures/browser_ga_final_signoff/rollback_drill.json",
+        "docs/browser_ga_final_signoff.md",
+        "artifacts/browser_edition_readiness_matrix_v1.json",
+        "artifacts/browser_package_integrity_gate_v1.json",
+        "artifacts/browser_consumer_compatibility_matrix_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md"
+      ]
+    },
+    {
       "lane_id": "doctor-e2e-proof-lane-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1453,6 +1478,12 @@
       "guarantee_id": "downstream-consumer-proof-contract",
       "lane_ids": [
         "downstream-consumer-proof-contract"
+      ]
+    },
+    {
+      "guarantee_id": "browser-ga-final-signoff",
+      "lane_ids": [
+        "browser-ga-final-signoff"
       ]
     },
     {

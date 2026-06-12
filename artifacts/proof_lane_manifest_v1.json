@@ -496,6 +496,7 @@
     "downstream-consumer-default-tokio-free",
     "downstream-consumer-internal-only-negative",
     "downstream-consumer-proof-contract",
+    "browser-ga-final-signoff",
     "doctor-e2e-proof-lane-contract",
     "semantic-lint-proof-lane-contract"
   ],
@@ -2025,6 +2026,54 @@
       }
     },
     {
+      "lane_id": "browser-ga-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_ga_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test browser_ga_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "browser-ga-final-signoff"
+      ],
+      "covers": "Verifies the Browser Edition GA final signoff artifact, B1-B3 evidence aggregation, JS/TS package version and artifact hashes, rollback drill fixture, docs freshness markers, manifest/status mapping, and no-claim boundaries.",
+      "explicit_not_covered": "Does not execute npm publish, prove broad workspace health, prove full release readiness outside Browser Edition JS/TS package GA, promote Rust browser API to stable, promote service-worker direct runtime, or promote shared-worker direct runtime.",
+      "expected_signal": "browser_ga_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/browser_ga_final_signoff_v1.json",
+        "tests/browser_ga_final_signoff_contract.rs",
+        "tests/fixtures/browser_ga_final_signoff/rollback_drill.json",
+        "docs/browser_ga_final_signoff.md",
+        "artifacts/browser_edition_readiness_matrix_v1.json",
+        "artifacts/browser_package_integrity_gate_v1.json",
+        "artifacts/browser_consumer_compatibility_matrix_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md"
+      ],
+      "common_unrelated_blockers": [
+        "Browser GA artifact hash drift",
+        "B1/B2/B3 evidence artifact drift",
+        "docs marker drift",
+        "manifest/status mapping drift"
+      ],
+      "escalation_notes": "Use this lane only for the scoped Browser Edition JS/TS package GA signoff packet. It cannot be cited as npm publish proof, broad workspace health, full release readiness, Rust browser stable parity, service-worker direct runtime support, or shared-worker direct runtime support.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "browser-ga-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "rust-browser-stable",
+          "npm-publish"
+        ]
+      }
+    },
+    {
       "lane_id": "doctor-e2e-proof-lane-contract",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -2393,6 +2442,13 @@
       "description": "downstream-consumer-proof-contract is represented by the VF5 artifact verifier lane with explicit no-claim boundaries.",
       "lane_ids": [
         "downstream-consumer-proof-contract"
+      ]
+    },
+    {
+      "guarantee_id": "browser-ga-final-signoff",
+      "description": "Browser Edition GA final signoff packet, B1-B3 aggregation, package hashes, rollback drill, docs markers, manifest/status mapping, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "browser-ga-final-signoff"
       ]
     },
     {

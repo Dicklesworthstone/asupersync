@@ -1636,6 +1636,13 @@ It binds Direct-runtime supported, Package ABI boundary, Preview public lane,
 Broker/coordinator-only, Bridge-only, and Impossible / unsupported rows to
 their fixture evidence, including vanilla/Vite and Webpack consumer lanes.
 
+The scoped Browser Edition GA signoff packet is
+[`artifacts/browser_ga_final_signoff_v1.json`](./artifacts/browser_ga_final_signoff_v1.json),
+with the human report in
+[`docs/browser_ga_final_signoff.md`](./docs/browser_ga_final_signoff.md). It
+aggregates B1 readiness, B2 package integrity, and B3 consumer compatibility
+for the JS/TS package line while keeping the Rust browser API preview-only.
+
 ---
 
 ## Limitations

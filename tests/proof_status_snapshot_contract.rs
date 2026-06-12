@@ -668,7 +668,7 @@ fn snapshot_declares_schema_sources_and_required_categories() {
     );
     assert_eq!(
         actual.len(),
-        22,
+        23,
         "snapshot must cover the requested claim list"
     );
 }
@@ -837,6 +837,48 @@ fn fourth_wave_status_rows_preserve_child_lane_boundaries() {
             && string(aggregate, "notes").contains("production-on-by-default"),
         "aggregate row must stay scoped and non-performance"
     );
+}
+
+#[test]
+fn browser_ga_status_row_preserves_js_ts_scope_and_no_claim_boundaries() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+    let rows = array(&snapshot, "claim_categories");
+    let by_claim = rows
+        .iter()
+        .map(|entry| (string(entry, "claim_id").to_string(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let row = by_claim
+        .get("browser-ga-final-signoff")
+        .expect("browser GA final signoff claim row");
+
+    validate_claim_lane_mapping(row, &lanes, &guarantees).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(string(row, "status"), "yellow_scoped");
+    assert_eq!(string(row, "proof_evidence_status"), "rerun-required");
+    assert_eq!(
+        string_set(row, "manifest_lane_ids"),
+        BTreeSet::from(["browser-ga-final-signoff".to_string()])
+    );
+    assert_eq!(
+        string_set(row, "manifest_guarantee_ids"),
+        BTreeSet::from(["browser-ga-final-signoff".to_string()])
+    );
+    let notes = string(row, "notes");
+    for boundary in [
+        "scoped JS/TS package GA",
+        "does not execute npm publish",
+        "broad workspace health",
+        "Rust browser API to stable",
+        "service-worker direct runtime",
+        "shared-worker direct runtime",
+    ] {
+        assert!(
+            notes.contains(boundary),
+            "browser GA row must preserve boundary {boundary:?}"
+        );
+    }
 }
 
 #[test]
