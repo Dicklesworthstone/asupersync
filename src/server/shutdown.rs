@@ -5,6 +5,7 @@
 //! [`ShutdownController`] by adding drain-phase
 //! awareness and timeout semantics.
 
+use crate::cancel::{DrainPhase, ProgressCertificate};
 use crate::cx::Cx;
 use crate::signal::{ShutdownController, ShutdownReceiver};
 use crate::sync::Notify;
@@ -106,6 +107,192 @@ pub struct ShutdownStats {
     pub force_closed: usize,
     /// Total shutdown duration.
     pub duration: Duration,
+}
+
+// ============================================================================
+// Request-aware drain certificate (br-asupersync-server-stack-hardening-eeexl1.2, D2.1)
+// ============================================================================
+
+/// Structured outcome of a request-aware graceful drain.
+///
+/// Unlike [`ShutdownStats`], which counts *connections*, this report tracks
+/// in-flight *requests* (region children — see `RegionRecord::child_count`)
+/// and carries the [`ProgressCertificate`] verdict that turns "is the drain
+/// converging?" into a measurable claim. It is the operator-visible surface
+/// for the drain: a structured log line plus a programmatic value that tests
+/// and dashboards can assert against.
+///
+/// The [`Display`](std::fmt::Display) rendering is deterministic (fixed float
+/// precision, duration in whole milliseconds) so it can be golden-tested.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GracefulDrainReport {
+    /// In-flight request count observed when the drain began.
+    pub requests_at_drain_start: usize,
+    /// Requests that completed during the drain window
+    /// (`requests_at_drain_start` minus those still live at the end).
+    pub requests_completed: usize,
+    /// Requests still in flight when the drain ended (force-cancelled at the
+    /// hard deadline). Zero on a clean drain to quiescence.
+    pub requests_stranded: usize,
+    /// Number of in-flight-count observations fed to the certificate.
+    pub observations: usize,
+    /// Final drain-phase classification from the progress certificate.
+    pub final_phase: DrainPhase,
+    /// Whether the certificate judged the drain to be converging.
+    pub converging: bool,
+    /// Lower bound on P(quiescence within the estimated remaining steps).
+    pub confidence_bound: f64,
+    /// Estimated remaining steps to quiescence (`None` if undetermined).
+    pub estimated_remaining_steps: Option<f64>,
+    /// Whether the certificate detected a stall (no progress) during drain.
+    pub stall_detected: bool,
+    /// Whether the drain reached quiescence (zero in-flight requests).
+    pub reached_quiescence: bool,
+    /// Whether the drain ended by hitting the hard deadline rather than
+    /// reaching quiescence.
+    pub hard_deadline_hit: bool,
+    /// Wall/virtual time elapsed from drain start to drain end.
+    pub drain_duration: Duration,
+}
+
+impl std::fmt::Display for GracefulDrainReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Graceful Drain Report")?;
+        writeln!(f, "=====================")?;
+        writeln!(f, "Requests at start:  {}", self.requests_at_drain_start)?;
+        writeln!(f, "Requests completed: {}", self.requests_completed)?;
+        writeln!(f, "Requests stranded:  {}", self.requests_stranded)?;
+        writeln!(f, "Observations:       {}", self.observations)?;
+        writeln!(f, "Final drain phase:  {}", self.final_phase)?;
+        writeln!(f, "Converging:         {}", self.converging)?;
+        writeln!(f, "Confidence bound:   {:.6}", self.confidence_bound)?;
+        match self.estimated_remaining_steps {
+            Some(est) => writeln!(f, "Est. remaining:     {est:.1} steps")?,
+            None => writeln!(f, "Est. remaining:     N/A")?,
+        }
+        writeln!(f, "Stall detected:     {}", self.stall_detected)?;
+        writeln!(f, "Reached quiescence: {}", self.reached_quiescence)?;
+        writeln!(f, "Hard deadline hit:  {}", self.hard_deadline_hit)?;
+        writeln!(
+            f,
+            "Drain duration:     {}ms",
+            self.drain_duration.as_millis()
+        )?;
+        Ok(())
+    }
+}
+
+/// Drives a [`ProgressCertificate`] over the live in-flight request count for
+/// the duration of a graceful drain, then produces a [`GracefulDrainReport`].
+///
+/// The certificate models the remaining in-flight request count as a Lyapunov
+/// potential that should descend to zero (quiescence). Feed it one observation
+/// per drain tick via [`observe`](Self::observe); the resulting
+/// [`drain_phase`](Self::phase) distinguishes a normal `slow_tail` from a true
+/// `stalled` drain, which is exactly the signal an operator needs to decide
+/// whether to keep waiting or escalate to the hard deadline.
+///
+/// This type is intentionally transport-agnostic: the HTTP/server layers
+/// (D2.2+) supply the in-flight count (e.g. `RegionRecord::child_count`) and
+/// the clock; the certificate math lives entirely in
+/// [`ProgressCertificate`](crate::cancel::ProgressCertificate).
+#[derive(Debug)]
+pub struct GracefulDrainTracker {
+    certificate: ProgressCertificate,
+    requests_at_drain_start: usize,
+    last_remaining: usize,
+    observations: usize,
+    start_time: Time,
+}
+
+impl GracefulDrainTracker {
+    /// Begin tracking a drain that starts with `initial_in_flight` requests
+    /// at logical time `now`.
+    ///
+    /// The initial count is recorded as the certificate's first observation so
+    /// the report's `requests_at_drain_start` and the certificate's initial
+    /// potential agree.
+    #[must_use]
+    pub fn new(initial_in_flight: usize, now: Time) -> Self {
+        let mut certificate = ProgressCertificate::with_defaults();
+        certificate.observe(usize_to_potential(initial_in_flight));
+        Self {
+            certificate,
+            requests_at_drain_start: initial_in_flight,
+            last_remaining: initial_in_flight,
+            observations: 1,
+            start_time: now,
+        }
+    }
+
+    /// Record the current in-flight request count.
+    ///
+    /// Call once per drain tick. Monotonic descent is expected but not
+    /// required; the certificate clamps and tracks non-decreasing runs as
+    /// stalls.
+    pub fn observe(&mut self, remaining_in_flight: usize) {
+        self.certificate
+            .observe(usize_to_potential(remaining_in_flight));
+        self.last_remaining = remaining_in_flight;
+        self.observations += 1;
+    }
+
+    /// The certificate's current drain-phase classification.
+    #[must_use]
+    pub fn phase(&self) -> DrainPhase {
+        self.certificate.drain_phase()
+    }
+
+    /// The most recently observed in-flight request count.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.last_remaining
+    }
+
+    /// Finish the drain at logical time `now` and produce the report.
+    ///
+    /// `hard_deadline_hit` records whether the drain ended because the hard
+    /// deadline elapsed (rather than reaching quiescence). Any requests still
+    /// in flight at that point are reported as `requests_stranded`.
+    #[must_use]
+    pub fn finish(&self, now: Time, hard_deadline_hit: bool) -> GracefulDrainReport {
+        let verdict = self.certificate.verdict();
+        let stranded = self.last_remaining;
+        let completed = self.requests_at_drain_start.saturating_sub(stranded);
+        let drain_duration = if now > self.start_time {
+            Duration::from_nanos(now.duration_since(self.start_time))
+        } else {
+            Duration::ZERO
+        };
+        GracefulDrainReport {
+            requests_at_drain_start: self.requests_at_drain_start,
+            requests_completed: completed,
+            requests_stranded: stranded,
+            observations: self.observations,
+            final_phase: verdict.drain_phase,
+            converging: verdict.converging,
+            confidence_bound: verdict.confidence_bound,
+            estimated_remaining_steps: verdict.estimated_remaining_steps,
+            stall_detected: verdict.stall_detected,
+            reached_quiescence: stranded == 0,
+            hard_deadline_hit,
+            drain_duration,
+        }
+    }
+}
+
+/// Maps an in-flight request count to a certificate potential.
+///
+/// `usize` request counts are far below `f64`'s exact-integer range
+/// (`2^53`), so the conversion is lossless for any realistic in-flight count.
+#[inline]
+#[allow(clippy::cast_precision_loss)]
+fn usize_to_potential(count: usize) -> f64 {
+    // Precision-safe for counts up to 2^53; above that, saturate rather than
+    // silently aliasing (a count near 2^53 is itself a runtime pathology).
+    const MAX_EXACT_F64: f64 = 9_007_199_254_740_992.0;
+    let count_as_f64 = count as f64;
+    count_as_f64.min(MAX_EXACT_F64)
 }
 
 /// Internal state shared between the signal and its subscribers.
@@ -1365,5 +1552,169 @@ mod tests {
         assert!(dbg.contains("ShutdownStats"), "{dbg}");
         let cloned = s;
         assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    // ------------------------------------------------------------------
+    // Request-aware drain certificate (D2.1, br-...-eeexl1.2)
+    // ------------------------------------------------------------------
+
+    fn t(nanos: u64) -> Time {
+        Time::from_nanos(nanos)
+    }
+
+    /// A clean drain from N in-flight requests down to zero reaches
+    /// quiescence with nothing stranded and a converging certificate.
+    #[test]
+    fn drain_tracker_clean_drain_reaches_quiescence() {
+        init_test("drain_tracker_clean_drain_reaches_quiescence");
+        let mut tracker = GracefulDrainTracker::new(50, t(0));
+        // Steady descent: 50 -> 0 in 10 even steps.
+        for step in 1..=10 {
+            let remaining = 50 - step * 5;
+            tracker.observe(remaining);
+        }
+        assert_eq!(tracker.remaining(), 0);
+        let report = tracker.finish(t(1_000_000), false);
+
+        assert_eq!(report.requests_at_drain_start, 50);
+        assert_eq!(report.requests_completed, 50);
+        assert_eq!(report.requests_stranded, 0);
+        assert!(report.reached_quiescence);
+        assert!(!report.hard_deadline_hit);
+        assert!(
+            report.converging,
+            "a monotone descent to zero must read as converging: {report:?}"
+        );
+        assert_eq!(report.drain_duration, Duration::from_millis(1));
+        crate::test_complete!("drain_tracker_clean_drain_reaches_quiescence");
+    }
+
+    /// A drain that plateaus (no progress) is classified as stalled and
+    /// strands the remaining requests when the hard deadline is hit.
+    #[test]
+    fn drain_tracker_stalled_drain_strands_requests() {
+        init_test("drain_tracker_stalled_drain_strands_requests");
+        let mut tracker = GracefulDrainTracker::new(8, t(0));
+        // Stuck at 5 in-flight for many ticks: no progress.
+        for _ in 0..40 {
+            tracker.observe(5);
+        }
+        let report = tracker.finish(t(5_000_000), true);
+
+        assert_eq!(report.requests_at_drain_start, 8);
+        assert_eq!(report.requests_stranded, 5);
+        assert_eq!(report.requests_completed, 3);
+        assert!(!report.reached_quiescence);
+        assert!(report.hard_deadline_hit);
+        assert!(
+            matches!(report.final_phase, DrainPhase::Stalled),
+            "a long plateau must classify as stalled, got {}",
+            report.final_phase
+        );
+        assert!(report.stall_detected, "stall must be detected: {report:?}");
+        crate::test_complete!("drain_tracker_stalled_drain_strands_requests");
+    }
+
+    /// A partial drain that hits the hard deadline mid-descent strands only
+    /// the still-in-flight requests and counts the rest as completed.
+    #[test]
+    fn drain_tracker_partial_drain_accounts_completed_and_stranded() {
+        init_test("drain_tracker_partial_drain_accounts_completed_and_stranded");
+        let mut tracker = GracefulDrainTracker::new(20, t(0));
+        for remaining in [16, 12, 9, 7] {
+            tracker.observe(remaining);
+        }
+        let report = tracker.finish(t(2_000_000), true);
+
+        assert_eq!(report.requests_completed, 13);
+        assert_eq!(report.requests_stranded, 7);
+        assert_eq!(report.observations, 5); // initial + 4 observations
+        assert!(report.hard_deadline_hit);
+        assert!(!report.reached_quiescence);
+        crate::test_complete!("drain_tracker_partial_drain_accounts_completed_and_stranded");
+    }
+
+    /// The report rendering is deterministic and golden-stable. The float
+    /// fields are produced by the certificate from the fixed observation
+    /// series, so the whole block is reproducible.
+    #[test]
+    fn drain_report_display_is_golden_stable() {
+        init_test("drain_report_display_is_golden_stable");
+        // A directly-constructed report keeps the golden independent of the
+        // certificate's internal float evolution (which has its own tests);
+        // this pins the operator-facing rendering contract.
+        let report = GracefulDrainReport {
+            requests_at_drain_start: 50,
+            requests_completed: 50,
+            requests_stranded: 0,
+            observations: 11,
+            final_phase: DrainPhase::Quiescent,
+            converging: true,
+            confidence_bound: 0.987_654,
+            estimated_remaining_steps: Some(0.0),
+            stall_detected: false,
+            reached_quiescence: true,
+            hard_deadline_hit: false,
+            drain_duration: Duration::from_millis(42),
+        };
+        let expected = "\
+Graceful Drain Report
+=====================
+Requests at start:  50
+Requests completed: 50
+Requests stranded:  0
+Observations:       11
+Final drain phase:  quiescent
+Converging:         true
+Confidence bound:   0.987654
+Est. remaining:     0.0 steps
+Stall detected:     false
+Reached quiescence: true
+Hard deadline hit:  false
+Drain duration:     42ms
+";
+        assert_eq!(report.to_string(), expected);
+        crate::test_complete!("drain_report_display_is_golden_stable");
+    }
+
+    /// The estimated-remaining `None` branch renders as `N/A`.
+    #[test]
+    fn drain_report_display_handles_unknown_remaining() {
+        init_test("drain_report_display_handles_unknown_remaining");
+        let report = GracefulDrainReport {
+            requests_at_drain_start: 3,
+            requests_completed: 0,
+            requests_stranded: 3,
+            observations: 1,
+            final_phase: DrainPhase::Warmup,
+            converging: false,
+            confidence_bound: 0.0,
+            estimated_remaining_steps: None,
+            stall_detected: false,
+            reached_quiescence: false,
+            hard_deadline_hit: true,
+            drain_duration: Duration::ZERO,
+        };
+        let rendered = report.to_string();
+        assert!(rendered.contains("Est. remaining:     N/A"), "{rendered}");
+        assert!(
+            rendered.contains("Final drain phase:  warmup"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Drain duration:     0ms"), "{rendered}");
+        crate::test_complete!("drain_report_display_handles_unknown_remaining");
+    }
+
+    /// `finish` clamps a backward clock to a zero duration rather than
+    /// underflowing.
+    #[test]
+    fn drain_tracker_backward_clock_is_zero_duration() {
+        init_test("drain_tracker_backward_clock_is_zero_duration");
+        let mut tracker = GracefulDrainTracker::new(2, t(1_000));
+        tracker.observe(0);
+        let report = tracker.finish(t(500), false);
+        assert_eq!(report.drain_duration, Duration::ZERO);
+        assert!(report.reached_quiescence);
+        crate::test_complete!("drain_tracker_backward_clock_is_zero_duration");
     }
 }

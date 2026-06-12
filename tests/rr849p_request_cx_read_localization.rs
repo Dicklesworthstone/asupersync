@@ -29,7 +29,9 @@ use asupersync::database::postgres::PgConnection;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::time::wall_now;
 use asupersync::types::Budget;
-use asupersync::web::request_region::{ServerHopOutcome, ServerRequestRegion, derive_request_budget};
+use asupersync::web::request_region::{
+    ServerHopOutcome, ServerRequestRegion, derive_request_budget,
+};
 
 const REGION_BUDGET: Duration = Duration::from_secs(4);
 const SERVER_READ_TIMEOUT: Duration = Duration::from_secs(12);
@@ -44,7 +46,9 @@ fn backend_message(msg_type: u8, body: &[u8]) -> Vec<u8> {
 
 fn read_startup_message(stream: &mut TcpStream) {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).expect("read startup length");
+    stream
+        .read_exact(&mut len_buf)
+        .expect("read startup length");
     let len = i32::from_be_bytes(len_buf) as usize;
     let mut body = vec![0u8; len - 4];
     stream.read_exact(&mut body).expect("read startup body");
@@ -257,8 +261,7 @@ fn localize_request_cx_read_after_write() {
         // budget-deadline wrapper or by the AmbientCxScope / request-cx path.
         let now = wall_now();
         let (budget, source) = derive_request_budget(Budget::INFINITE, now, None, None, None);
-        let region = ServerRequestRegion::mint("rr849p", budget, now)
-            .expect("mint request region");
+        let region = ServerRequestRegion::mint("rr849p", budget, now).expect("mint request region");
         let region_cx = region.cx().clone();
         let watchdog = Cx::for_testing();
         let watchdog_fire = watchdog.clone();
@@ -296,7 +299,9 @@ fn localize_request_cx_read_after_write() {
             // Region-wrapped reads work WITHOUT timeout_at: the stall is the
             // budget-deadline timeout_at wrapper, not the AmbientCxScope /
             // request-cx path.
-            eprintln!("RR849P ISOLATION: region read OK with INFINITE budget (no timeout_at) — stall is timeout_at-specific");
+            eprintln!(
+                "RR849P ISOLATION: region read OK with INFINITE budget (no timeout_at) — stall is timeout_at-specific"
+            );
         }
         ServerHopOutcome::Ok(Outcome::Cancelled(_))
         | ServerHopOutcome::ConnectionLost
