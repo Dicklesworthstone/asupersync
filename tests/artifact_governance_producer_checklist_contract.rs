@@ -173,7 +173,10 @@ fn extract_artifact_json_paths(text: &str) -> BTreeSet<String> {
 
         if end > start {
             let candidate = &text[start..end];
-            if candidate.ends_with(".json") {
+            if std::path::Path::new(candidate)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
                 paths.insert(candidate.to_owned());
             }
             cursor = end;

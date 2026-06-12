@@ -165,7 +165,7 @@ fn bucket_map(report: &Value) -> BTreeMap<String, Value> {
             last.is_empty() || action_id > last,
             "buckets must be sorted by action_id"
         );
-        last = action_id.clone();
+        last.clone_from(&action_id);
         assert!(
             buckets.insert(action_id.clone(), bucket.clone()).is_none(),
             "duplicate bucket {action_id}"
