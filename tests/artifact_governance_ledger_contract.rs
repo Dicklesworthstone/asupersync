@@ -479,6 +479,26 @@ fn specific_seed_rows_preserve_fail_closed_citation_boundaries() {
             .contains("does_not_close_artifact_beads")
     );
 
+    let final_signoff = rows["artifact-governance-final-signoff"];
+    assert_eq!(string(final_signoff, "path_status"), "tracked");
+    assert_eq!(
+        string(final_signoff, "owning_bead"),
+        "asupersync-artifact-governance-awdiwy.6"
+    );
+    assert_eq!(
+        string(final_signoff, "artifact_family"),
+        "artifact_governance"
+    );
+    assert_eq!(string(final_signoff, "citeability_class"), "proof-bearing");
+    assert!(
+        string_set(final_signoff, "no_claim_boundaries")
+            .contains("does_not_authorize_local_cargo_fallback")
+    );
+    assert!(
+        string_set(final_signoff, "no_claim_boundaries")
+            .contains("does_not_prove_release_readiness")
+    );
+
     let rch = rows["rch-stale-progress-receipt-contract"];
     assert_eq!(string(rch, "path_status"), "tracked");
     assert!(string_set(rch, "no_claim_boundaries").contains("does_not_prove_source_correctness"));

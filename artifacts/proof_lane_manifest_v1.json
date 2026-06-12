@@ -499,7 +499,8 @@
     "lab-live-support-claim-report-contract",
     "browser-ga-final-signoff",
     "doctor-e2e-proof-lane-contract",
-    "semantic-lint-proof-lane-contract"
+    "semantic-lint-proof-lane-contract",
+    "artifact-governance-final-signoff"
   ],
   "lanes": [
     {
@@ -2227,6 +2228,55 @@
           "workspace-health"
         ]
       }
+    },
+    {
+      "lane_id": "artifact-governance-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test artifact_governance_final_signoff_contract --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "artifact-governance-final-signoff"
+      ],
+      "covers": "Verifies the artifact-governance final signoff artifact, A1-A5/A7/A8 child deliverable mapping, ledger registration, validation harness count drift, proof manifest/status rows, README/AGENTS markers, closeout checklist, and no-claim boundaries.",
+      "explicit_not_covered": "fresh execution evidence until the exact RCH command is rerun, full-corpus artifact coverage, release readiness, workspace health, runtime correctness, performance improvement, live RCH fleet availability, tracker closure when .beads is dirty, or permission to delete files.",
+      "expected_signal": "artifact_governance_final_signoff_contract and supporting artifact-governance/proof manifest/status contracts pass",
+      "source_paths": [
+        "artifacts/artifact_governance_final_signoff_v1.json",
+        "docs/proof/artifact_governance_final_signoff.md",
+        "tests/artifact_governance_final_signoff_contract.rs",
+        "artifacts/artifact_governance_ledger_v1.json",
+        "artifacts/artifact_governance_validation_harness_v1.json",
+        "tests/artifact_governance_validation_harness_contract.rs",
+        "tests/artifact_governance_ledger_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "artifact-governance child artifact drift",
+        "manifest projection golden drift",
+        "proof-status marker drift",
+        "unrelated dirty tracker rows blocking Beads closeout"
+      ],
+      "escalation_notes": "Use this lane only for the scoped artifact-governance A6 final signoff. It cannot be cited as broad workspace health, release readiness, runtime correctness, performance proof, full-corpus coverage, or permission to mutate/delete artifacts.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "artifact-governance-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability"
+        ]
+      }
     }
   ],
   "guarantees": [
@@ -2522,6 +2572,13 @@
       "description": "semantic-lint-proof-lane-contract is represented by the L4 aggregate semantic-lint verifier with explicit no-claim boundaries.",
       "lane_ids": [
         "semantic-lint-proof-lane-contract"
+      ]
+    },
+    {
+      "guarantee_id": "artifact-governance-final-signoff",
+      "description": "Artifact-governance final signoff artifact, child deliverable mapping, proof manifest/status rows, README/AGENTS markers, closeout checklist, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "artifact-governance-final-signoff"
       ]
     }
   ],

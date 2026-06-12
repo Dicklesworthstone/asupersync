@@ -332,6 +332,38 @@
       ]
     },
     {
+      "artifact_id": "artifact-governance-final-signoff",
+      "path": "artifacts/artifact_governance_final_signoff_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.6",
+      "producing_lane": "artifact-governance-final-signoff",
+      "domain": "artifact governance",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/artifact_governance_final_signoff_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_artifact_governance_final_signoff_when_final_signoff_manifest_lane_passes_remotely_on_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion",
+        "does_not_authorize_local_cargo_fallback",
+        "does_not_prove_release_readiness",
+        "does_not_prove_workspace_health",
+        "does_not_prove_live_rch_fleet_availability"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Machine-checked final artifact-governance signoff tying child deliverables, remote-required proof lane, proof-status row, runbook checklist, and no-claim boundaries together.",
+      "source_references": [
+        "artifacts/artifact_governance_final_signoff_v1.json",
+        "docs/proof/artifact_governance_final_signoff.md",
+        "tests/artifact_governance_final_signoff_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ]
+    },
+    {
       "artifact_id": "proof-lane-manifest-canonical",
       "path": "artifacts/proof_lane_manifest_v1.json",
       "path_status": "tracked",

@@ -300,7 +300,7 @@
       "docs/proof/artifact_governance_validation_harness.md"
     ],
     "artifact_counts_by_class": {
-      "proof-bearing": 6,
+      "proof-bearing": 7,
       "blocked-frontier": 4,
       "operator-report": 2,
       "advisory": 1,

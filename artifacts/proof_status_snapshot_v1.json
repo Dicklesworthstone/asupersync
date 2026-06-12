@@ -85,7 +85,8 @@
     "downstream consumer proof",
     "lab-live support-claim report",
     "browser GA final signoff",
-    "doctor e2e proof lane"
+    "doctor e2e proof lane",
+    "artifact governance final signoff"
   ],
   "claim_categories": [
     {
@@ -821,6 +822,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow-scoped Browser GA signoff: cite it only as the scoped JS/TS package GA evidence packet tying B1 readiness, B2 package integrity, B3 consumer compatibility, package hashes, rollback drill, docs markers, and proof manifest/status rows together. It does not execute npm publish, prove broad workspace health, prove full release readiness outside Browser Edition JS/TS package GA, promote Rust browser API to stable, promote service-worker direct runtime, or promote shared-worker direct runtime."
+    },
+    {
+      "claim_id": "artifact-governance-final-signoff",
+      "category": "artifact governance final signoff",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "artifacts/artifact_governance_final_signoff_v1.json",
+          "docs/proof/artifact_governance_final_signoff.md"
+        ],
+        "AGENTS.md": [
+          "artifacts/artifact_governance_final_signoff_v1.json",
+          "docs/proof/artifact_governance_final_signoff.md"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "artifact-governance-final-signoff"
+      ],
+      "manifest_lane_ids": [
+        "artifact-governance-final-signoff"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test artifact_governance_final_signoff_contract --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped artifact-governance final signoff: cite it only as the A6 aggregation gate tying A1-A5, A7, A8, ledger registration, validation harness counts, proof manifest/status rows, README/AGENTS markers, closeout checklist, and no-claim boundaries together. It does not prove release readiness, workspace health, runtime correctness, performance improvement, live RCH fleet availability, full-corpus artifact coverage, tracker closure while .beads is dirty, or permission to delete files."
     }
   ],
   "proof_reuse_status_rows": [
