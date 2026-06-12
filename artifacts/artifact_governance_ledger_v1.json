@@ -1,0 +1,425 @@
+{
+  "schema_version": "artifact-governance-ledger-v1",
+  "ledger_id": "artifact_governance_ledger_v1",
+  "bead_id": "asupersync-artifact-governance-awdiwy.1",
+  "created_date": "2026-06-12",
+  "purpose": "Define the first durable artifact-governance schema, citeability taxonomy, and non-destructive exclusion policy for representative proof, validation, RCH, runtime-pressure, swarm, browser/wasm, and RaptorQ artifact families.",
+  "source_of_truth": {
+    "ledger": "artifacts/artifact_governance_ledger_v1.json",
+    "contract_test": "tests/artifact_governance_ledger_contract.rs",
+    "agent_instructions": "AGENTS.md",
+    "testing_decision_tree": "TESTING_FOR_AGENTS.md"
+  },
+  "coverage_policy": {
+    "corpus_coverage": "seeded_representative_not_exhaustive",
+    "full_corpus_claim": false,
+    "exclusion_policy": "Excluded rows are explicit governance declarations for paths or path families this ledger version must not treat as durable artifacts. Exclusion never authorizes deletion, mutation, or ignoring future evidence.",
+    "missing_artifact_policy": "A missing_expected_artifact row is a fail-closed pointer to a canonical artifact named by docs or tests but absent from the current tree. It is not citeable proof until the artifact exists and its contract passes on current main.",
+    "non_destructive_policy": "This ledger records ownership and citeability only. It does not delete files, clean generated output, create branches, create worktrees, or permit local Cargo fallback for remote-required proof lanes."
+  },
+  "field_definitions": {
+    "artifact_id": {
+      "meaning": "Stable row identifier for this governance ledger.",
+      "no_claim_boundary": "Does not imply the underlying artifact is current, complete, or proof-bearing."
+    },
+    "path": {
+      "meaning": "Repository-relative path, or explicit path pattern for excluded generated families.",
+      "no_claim_boundary": "Does not imply the path exists unless path_status says tracked."
+    },
+    "path_status": {
+      "meaning": "Current-tree status used by the ledger contract to decide whether path existence is required.",
+      "no_claim_boundary": "Does not repair missing artifacts or certify generated paths."
+    },
+    "owning_bead": {
+      "meaning": "Primary bead responsible for maintaining the row or the artifact family.",
+      "no_claim_boundary": "Does not close the bead or transfer peer-owned work."
+    },
+    "producing_lane": {
+      "meaning": "Lane, contract, runner, or workflow that is expected to produce or validate the artifact.",
+      "no_claim_boundary": "Does not prove that the lane has passed on current main."
+    },
+    "domain": {
+      "meaning": "Human-readable subsystem or operator domain for routing ownership.",
+      "no_claim_boundary": "Does not imply exclusive code ownership."
+    },
+    "artifact_family": {
+      "meaning": "Normalized family bucket used for seed coverage and future scanner grouping.",
+      "no_claim_boundary": "Does not claim every artifact in the family is listed."
+    },
+    "checked_by_tests": {
+      "meaning": "Repository tests or contract files that are expected to validate the artifact shape, policy, or related surface.",
+      "no_claim_boundary": "Does not claim those tests passed unless a fresh proof receipt is attached elsewhere."
+    },
+    "citeability_class": {
+      "meaning": "Taxonomy value that governs whether agents may cite this row as proof, advisory context, a blocker, a superseded artifact, generated fixture evidence, operator report, or explicit exclusion.",
+      "no_claim_boundary": "Does not expand the artifact beyond its row-level evidence_scope and no_claim_boundaries."
+    },
+    "freshness_policy": {
+      "meaning": "Rule for deciding when this row must be refreshed before citation.",
+      "no_claim_boundary": "Does not create a fresh proof by itself."
+    },
+    "superseded_by": {
+      "meaning": "Replacement artifact path when citeability_class is superseded; otherwise null.",
+      "no_claim_boundary": "Does not delete or rewrite the superseded artifact."
+    },
+    "no_claim_boundaries": {
+      "meaning": "Machine-readable boundaries that name what this row must not be cited to prove.",
+      "no_claim_boundary": "Does not waive any AGENTS.md validation, RCH, branch, worktree, or deletion rule."
+    },
+    "exclusion_reason": {
+      "meaning": "Required reason when citeability_class is excluded; null otherwise.",
+      "no_claim_boundary": "Does not authorize deleting excluded files or ignoring new durable artifacts."
+    },
+    "evidence_scope": {
+      "meaning": "Plain-language scope of what the artifact can and cannot support.",
+      "no_claim_boundary": "Does not override citeability_class or no_claim_boundaries."
+    },
+    "source_references": {
+      "meaning": "Existing repo files that explain, test, or document the row.",
+      "no_claim_boundary": "Does not imply those references are exhaustive or current proof receipts."
+    }
+  },
+  "classification_catalog": {
+    "proof-bearing": {
+      "meaning": "Narrowly citeable for the exact artifact contents and contract named by the row.",
+      "cite_rule": "May be cited only with its evidence_scope, checked_by_tests, freshness_policy, and no_claim_boundaries.",
+      "does_not_prove": [
+        "does_not_prove_full_workspace_health",
+        "does_not_prove_release_readiness",
+        "does_not_authorize_local_cargo_fallback"
+      ]
+    },
+    "advisory": {
+      "meaning": "Useful context or mixed-signal evidence that must not be treated as closure-grade proof.",
+      "cite_rule": "May be cited as context only, with the row's no-claim boundaries attached.",
+      "does_not_prove": [
+        "does_not_prove_acceptance_criteria",
+        "does_not_prove_no_regression",
+        "does_not_close_blockers"
+      ]
+    },
+    "blocked-frontier": {
+      "meaning": "Known frontier, stale, missing, or admission-blocked artifact whose existence documents a blocker rather than proof.",
+      "cite_rule": "May be cited only as a blocker or gap until the artifact exists and a fresh remote-required proof receipt passes.",
+      "does_not_prove": [
+        "does_not_prove_source_correctness",
+        "does_not_prove_rch_success",
+        "does_not_prove_current_main_health"
+      ]
+    },
+    "superseded": {
+      "meaning": "Tracked historical artifact retained for lineage but replaced by superseded_by for current citation.",
+      "cite_rule": "May be cited only for historical lineage, never as current evidence.",
+      "does_not_prove": [
+        "does_not_prove_current_result",
+        "does_not_override_successor_artifact",
+        "does_not_authorize_deletion"
+      ]
+    },
+    "generated-fixture": {
+      "meaning": "Inventory or fixture describing generated or reproducible output without committing the raw output tree.",
+      "cite_rule": "May be cited for retention and reproduction policy only when the inventory contract is fresh.",
+      "does_not_prove": [
+        "does_not_prove_generated_outputs_exist_locally",
+        "does_not_authorize_deletion",
+        "does_not_prove_runtime_correctness"
+      ]
+    },
+    "operator-report": {
+      "meaning": "Human/operator-facing report that summarizes evidence or routing decisions but is not a substitute for source-level proof.",
+      "cite_rule": "May be cited for operator decision context and routing hints only.",
+      "does_not_prove": [
+        "does_not_prove_broad_observability_correctness",
+        "does_not_prove_performance_improvement",
+        "does_not_prove_live_rch_fleet_availability"
+      ]
+    },
+    "excluded": {
+      "meaning": "Path or family intentionally outside this ledger's durable artifact surface.",
+      "cite_rule": "May be cited only to explain why the ledger does not track that generated or ephemeral path family.",
+      "does_not_prove": [
+        "does_not_authorize_deletion",
+        "does_not_hide_future_artifacts",
+        "does_not_prove_artifact_absence"
+      ]
+    }
+  },
+  "path_status_catalog": {
+    "tracked": "The path must exist in the repository at contract-test time.",
+    "missing_expected_artifact": "The path must be absent and is tracked as a fail-closed artifact gap.",
+    "generated_or_ignored": "The path is a generated output pattern or ignored cache family; existence is neither required nor trusted."
+  },
+  "required_family_seed_coverage": [
+    "proof_manifest",
+    "validation_frontier",
+    "rch_stale_receipt",
+    "runtime_pressure",
+    "swarm_agent",
+    "browser_wasm",
+    "raptorq",
+    "generated_fixture",
+    "excluded"
+  ],
+  "rows": [
+    {
+      "artifact_id": "proof-lane-manifest-canonical",
+      "path": "artifacts/proof_lane_manifest_v1.json",
+      "path_status": "missing_expected_artifact",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.1",
+      "producing_lane": "proof-lane-manifest-contract",
+      "domain": "proof manifest",
+      "artifact_family": "proof_manifest",
+      "checked_by_tests": [
+        "tests/proof_lane_manifest_contract.rs"
+      ],
+      "citeability_class": "blocked-frontier",
+      "freshness_policy": "not_citeable_until_path_exists_and_contract_passes_on_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_any_manifest_lane",
+        "does_not_prove_workspace_health",
+        "does_not_authorize_local_cargo_fallback"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Names the canonical proof-lane manifest gap currently referenced by docs/tests; this is blocker evidence, not proof-lane evidence.",
+      "source_references": [
+        "AGENTS.md",
+        "tests/proof_lane_manifest_contract.rs"
+      ]
+    },
+    {
+      "artifact_id": "validation-frontier-inventory",
+      "path": "artifacts/validation_frontier_inventory_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-validation-frontier-v2-b5cjsv.1",
+      "producing_lane": "validation-frontier-inventory-contract",
+      "domain": "validation frontier",
+      "artifact_family": "validation_frontier",
+      "checked_by_tests": [
+        "tests/validation_frontier_inventory_contract.rs"
+      ],
+      "citeability_class": "blocked-frontier",
+      "freshness_policy": "cite_only_as_frontier_inventory_until_each_lane_has_fresh_remote_required_receipts",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_all_manifest_lanes_passed",
+        "does_not_prove_production_dependency_graph_health",
+        "does_not_prove_live_rch_fleet_availability"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Inventory of validation-lane expectations and known RCH behavior; useful for routing blockers, not a green proof bundle.",
+      "source_references": [
+        "artifacts/validation_frontier_inventory_v1.json",
+        "docs/proof/validation_frontier_inventory.md",
+        "tests/validation_frontier_inventory_contract.rs"
+      ]
+    },
+    {
+      "artifact_id": "rch-stale-progress-receipt-contract",
+      "path": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+      "path_status": "missing_expected_artifact",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.1",
+      "producing_lane": "rch-stale-progress-receipt-contract",
+      "domain": "rch stale progress",
+      "artifact_family": "rch_stale_receipt",
+      "checked_by_tests": [
+        "tests/rch_stale_progress_receipt_contract.rs"
+      ],
+      "citeability_class": "blocked-frontier",
+      "freshness_policy": "not_citeable_until_contract_fixture_exists_and_focused_rch_lane_passes_remotely",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_source_correctness",
+        "does_not_prove_successful_proof_lane",
+        "does_not_authorize_local_cargo_fallback"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Documents the expected stale-progress receipt surface while the current-tree contract fixture is absent.",
+      "source_references": [
+        "docs/rch_stale_progress_receipt.md",
+        "tests/rch_stale_progress_receipt_contract.rs"
+      ]
+    },
+    {
+      "artifact_id": "runtime-pressure-control-evidence-contract",
+      "path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "path_status": "missing_expected_artifact",
+      "owning_bead": "asupersync-bwcdfl.4",
+      "producing_lane": "runtime-pressure-control-evidence-contract",
+      "domain": "runtime pressure",
+      "artifact_family": "runtime_pressure",
+      "checked_by_tests": [
+        "tests/runtime_pressure_control_evidence_contract.rs"
+      ],
+      "citeability_class": "blocked-frontier",
+      "freshness_policy": "not_citeable_until_contract_fixture_exists_and_remote_required_contract_lane_passes",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_adaptive_controls_are_production_enabled",
+        "does_not_prove_real_host_throughput",
+        "does_not_prove_deadlock_absence"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Tracks the runtime-pressure evidence contract gap and preserves its no-local-fallback boundary.",
+      "source_references": [
+        "docs/runtime_pressure_triage_runbook.md",
+        "tests/runtime_pressure_control_evidence_contract.rs"
+      ]
+    },
+    {
+      "artifact_id": "fifth-wave-live-swarm-telemetry-heatmap",
+      "path": "artifacts/fifth_wave_live_swarm_telemetry_heatmap_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-live-swarm-telemetry-heatmap-wt9b4r",
+      "producing_lane": "fifth-wave-live-swarm-telemetry-heatmap-contract",
+      "domain": "swarm and agent telemetry",
+      "artifact_family": "swarm_agent",
+      "checked_by_tests": [
+        "tests/fifth_wave_live_swarm_telemetry_heatmap_contract.rs"
+      ],
+      "citeability_class": "operator-report",
+      "freshness_policy": "cite_only_with_clean_main_focused_remote_rch_contract_receipt",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_broad_observability_correctness",
+        "does_not_prove_performance_improvement",
+        "does_not_create_branches_or_worktrees"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Operator routing and telemetry heatmap evidence for a focused fifth-wave lane.",
+      "source_references": [
+        "artifacts/fifth_wave_live_swarm_telemetry_heatmap_v1.json",
+        "tests/fifth_wave_live_swarm_telemetry_heatmap_contract.rs"
+      ]
+    },
+    {
+      "artifact_id": "browser-wasm-artifact-integrity-manifest",
+      "path": "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-3qv04.7.2",
+      "producing_lane": "browser-package-integrity-gate",
+      "domain": "browser and wasm packaging",
+      "artifact_family": "browser_wasm",
+      "checked_by_tests": [
+        "tests/browser_package_integrity_gate_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_listed_sha256_entries_when_package_integrity_gate_inputs_match_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_execute_npm_publish",
+        "does_not_prove_full_workspace_health",
+        "does_not_prove_runtime_performance_or_scheduler_correctness"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Narrow hash inventory for committed browser/wasm package artifacts.",
+      "source_references": [
+        "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+        "tests/browser_package_integrity_gate_contract.rs"
+      ]
+    },
+    {
+      "artifact_id": "raptorq-gf256-multiscenario-refresh-v4",
+      "path": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-36m6p",
+      "producing_lane": "raptorq-track-e-gf256-multiscenario-refresh",
+      "domain": "raptorq performance evidence",
+      "artifact_family": "raptorq",
+      "checked_by_tests": [
+        "tests/manual_raptorq_stability_check.rs"
+      ],
+      "citeability_class": "advisory",
+      "freshness_policy": "cite_as_mixed_signal_context_only_until_a_new_closure_grade_packet_supersedes_it",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_track_e_closure",
+        "does_not_prove_no_regression",
+        "does_not_replace_closure_grade_guardrails"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Current-head raw-sample mixed-signal RaptorQ GF256 evidence; useful context, not closure proof.",
+      "source_references": [
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+        "docs/raptorq_program_closure_signoff_packet.md",
+        "tests/manual_raptorq_stability_check.rs"
+      ]
+    },
+    {
+      "artifact_id": "raptorq-gf256-multiscenario-refresh-v3",
+      "path": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-36m6p",
+      "producing_lane": "raptorq-track-e-gf256-multiscenario-refresh",
+      "domain": "raptorq performance evidence",
+      "artifact_family": "raptorq",
+      "checked_by_tests": [
+        "tests/manual_raptorq_stability_check.rs"
+      ],
+      "citeability_class": "superseded",
+      "freshness_policy": "do_not_cite_as_current_result; use superseded_by for current mixed-signal context",
+      "superseded_by": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+      "no_claim_boundaries": [
+        "does_not_prove_current_result",
+        "does_not_override_successor_artifact",
+        "does_not_authorize_deletion"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Historical broader interval-proxy RaptorQ packet retained only for lineage.",
+      "source_references": [
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json"
+      ]
+    },
+    {
+      "artifact_id": "generated-smoke-artifact-inventory",
+      "path": "artifacts/generated_smoke_artifact_inventory_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-beih6k",
+      "producing_lane": "generated-smoke-artifact-inventory-contract",
+      "domain": "generated smoke artifacts",
+      "artifact_family": "generated_fixture",
+      "checked_by_tests": [
+        "tests/generated_smoke_artifact_inventory_contract.rs"
+      ],
+      "citeability_class": "generated-fixture",
+      "freshness_policy": "cite_for_retention_policy_only_when_inventory_contract_matches_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_generated_outputs_exist_locally",
+        "does_not_authorize_deletion",
+        "does_not_prove_runtime_correctness"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Owner, retention, reproduction, and checksum inventory for generated smoke output clusters.",
+      "source_references": [
+        "artifacts/generated_smoke_artifact_inventory_v1.json",
+        "tests/generated_smoke_artifact_inventory_contract.rs"
+      ]
+    },
+    {
+      "artifact_id": "remote-build-target-cache-roots",
+      "path": "${TMPDIR:-/tmp}/rch_target_*",
+      "path_status": "generated_or_ignored",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.1",
+      "producing_lane": "rch-remote-required-proof-lanes",
+      "domain": "remote build cache",
+      "artifact_family": "excluded",
+      "checked_by_tests": [],
+      "citeability_class": "excluded",
+      "freshness_policy": "never_cite_cache_roots_as_artifacts; cite committed receipts_or_ledgers_instead",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_hide_future_durable_receipts",
+        "does_not_prove_artifact_absence"
+      ],
+      "exclusion_reason": "RCH target directories and local build caches are ephemeral execution output; durable governance should track committed receipts, manifests, or ledgers instead.",
+      "evidence_scope": "Non-destructive exclusion of ephemeral build cache patterns from the durable artifact ledger.",
+      "source_references": [
+        "AGENTS.md",
+        "docs/rch_stale_progress_receipt.md"
+      ]
+    }
+  ]
+}
