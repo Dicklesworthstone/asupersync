@@ -1,0 +1,102 @@
+{
+  "schema_version": "lab-live-support-claim-report-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.5.4",
+  "artifact_path": "artifacts/lab_live_support_claim_report_v1.json",
+  "report_name": "lab_live_support_claim_report",
+  "proof_status_claim_id": "lab-live-support-claim-report",
+  "manifest_lane_id": "lab-live-support-claim-report-contract",
+  "manifest_guarantee_id": "lab-live-support-claim-report-contract",
+  "input_artifacts": [
+    "artifacts/lab_live_differential_scenario_contract_v1.json",
+    "artifacts/lab_live_differential_v2_scenarios_v1.json",
+    "artifacts/lab_live_timing_platform_policy_v1.json",
+    "artifacts/lab_live_v2_filesystem_runner_v1.json"
+  ],
+  "docs": [
+    "docs/lab_live_support_claim_report.md",
+    "docs/lab_live_differential_scenarios.md",
+    "docs/lab_live_timing_platform_policy.md",
+    "docs/lab_live_v2_filesystem_runner.md"
+  ],
+  "readme_markers": [
+    "docs/lab_live_support_claim_report.md",
+    "artifacts/lab_live_support_claim_report_v1.json"
+  ],
+  "report_rows": [
+    {
+      "row_id": "captured-filesystem-current-fresh",
+      "source_fixture": "tests/fixtures/lab_live_support_claim_report/fresh_filesystem_claim.json",
+      "target_doc_row": "README.md#Documentation",
+      "support_action": "allow_scoped_claim",
+      "claim_scope": "captured_filesystem",
+      "evidence_status": "fresh",
+      "proof_lane_status": "rerun-required",
+      "expected_report_verdict": "scoped_claim_allowed",
+      "no_claims": [
+        "does not prove raw host filesystem parity",
+        "does not prove process or signal support",
+        "does not prove broad workspace health"
+      ]
+    },
+    {
+      "row_id": "raw-host-filesystem-skip",
+      "source_fixture": "tests/fixtures/lab_live_v2_filesystem_runner/raw_host_skip.json",
+      "target_doc_row": "docs/lab_live_v2_filesystem_runner.md#Fixture-Set",
+      "support_action": "refuse_promotion",
+      "claim_scope": "raw_host_filesystem",
+      "evidence_status": "unsupported",
+      "proof_lane_status": "rerun-required",
+      "expected_report_verdict": "promotion_refused",
+      "no_claims": [
+        "skip is not pass evidence",
+        "does not prove raw host filesystem parity"
+      ]
+    },
+    {
+      "row_id": "stale-evidence-refusal",
+      "source_fixture": "tests/fixtures/lab_live_support_claim_report/stale_evidence_refusal.json",
+      "target_doc_row": "README.md#Documentation",
+      "support_action": "refuse_strengthening",
+      "claim_scope": "captured_filesystem",
+      "evidence_status": "stale",
+      "proof_lane_status": "rerun-required",
+      "expected_report_verdict": "stale_evidence_refused",
+      "no_claims": [
+        "stale evidence cannot strengthen support claims",
+        "stale evidence is not a fresh RCH pass"
+      ]
+    },
+    {
+      "row_id": "drift-demotion",
+      "source_fixture": "tests/fixtures/lab_live_support_claim_report/drift_demotion.json",
+      "target_doc_row": "docs/lab_live_support_claim_report.md#Demotion-Policy",
+      "support_action": "demote_or_block",
+      "claim_scope": "captured_filesystem",
+      "evidence_status": "drift",
+      "proof_lane_status": "rerun-required",
+      "expected_report_verdict": "claim_demotion_required",
+      "no_claims": [
+        "failed live evidence cannot keep a green support claim",
+        "demotion does not prove replacement adapter support"
+      ]
+    }
+  ],
+  "failure_rehearsals": [
+    {
+      "fixture": "tests/fixtures/lab_live_support_claim_report/stale_evidence_refusal.json",
+      "expected_failure": "claim_strengthening_allowed must be false when evidence_status is stale"
+    },
+    {
+      "fixture": "tests/fixtures/lab_live_support_claim_report/drift_demotion.json",
+      "expected_failure": "support claims must demote or block when live drift is observed"
+    }
+  ],
+  "proof_lane": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_support_claim_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_support_claim_report_contract -- --nocapture",
+  "no_claims": [
+    "does not execute every lab-live adapter family",
+    "does not prove raw host filesystem, process, signal, reactor, network, database, or browser parity",
+    "does not prove broad workspace health",
+    "does not replace the child V1, V2, or V3 proof lanes",
+    "does not strengthen README support claims without fresh differential evidence"
+  ]
+}

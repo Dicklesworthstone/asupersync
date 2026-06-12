@@ -496,6 +496,7 @@
     "downstream-consumer-default-tokio-free",
     "downstream-consumer-internal-only-negative",
     "downstream-consumer-proof-contract",
+    "lab-live-support-claim-report-contract",
     "browser-ga-final-signoff",
     "doctor-e2e-proof-lane-contract",
     "semantic-lint-proof-lane-contract"
@@ -2026,6 +2027,57 @@
       }
     },
     {
+      "lane_id": "lab-live-support-claim-report-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_support_claim_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_support_claim_report_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "lab-live-support-claim-report-contract"
+      ],
+      "covers": "Verifies the lab-live support-claim report artifact, stale-evidence refusal, drift demotion, README/docs markers, manifest/status mapping, and no-claim boundaries.",
+      "explicit_not_covered": "Does not execute every child lab-live lane, prove broad workspace health, prove raw host filesystem parity, prove process or signal support, or strengthen README claims without fresh differential evidence.",
+      "expected_signal": "lab_live_support_claim_report_contract tests pass",
+      "source_paths": [
+        "artifacts/lab_live_support_claim_report_v1.json",
+        "docs/lab_live_support_claim_report.md",
+        "tests/lab_live_support_claim_report_contract.rs",
+        "tests/fixtures/lab_live_support_claim_report/fresh_filesystem_claim.json",
+        "tests/fixtures/lab_live_support_claim_report/stale_evidence_refusal.json",
+        "tests/fixtures/lab_live_support_claim_report/drift_demotion.json",
+        "artifacts/lab_live_differential_scenario_contract_v1.json",
+        "artifacts/lab_live_differential_v2_scenarios_v1.json",
+        "artifacts/lab_live_timing_platform_policy_v1.json",
+        "artifacts/lab_live_v2_filesystem_runner_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md"
+      ],
+      "common_unrelated_blockers": [
+        "lab-live child artifact drift",
+        "support-claim fixture drift",
+        "README/docs marker drift",
+        "manifest/status mapping drift"
+      ],
+      "escalation_notes": "Use this lane only for the V4 support-claim report gate. It cannot be cited as raw adapter parity, broad workspace health, release readiness, or fresh proof for every child lab-live lane.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "lab-live-support-claim-report-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "raw-host-filesystem-parity",
+          "process-signal-support"
+        ]
+      }
+    },
+    {
       "lane_id": "browser-ga-final-signoff",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -2442,6 +2494,13 @@
       "description": "downstream-consumer-proof-contract is represented by the VF5 artifact verifier lane with explicit no-claim boundaries.",
       "lane_ids": [
         "downstream-consumer-proof-contract"
+      ]
+    },
+    {
+      "guarantee_id": "lab-live-support-claim-report-contract",
+      "description": "Lab-live support-claim report artifact, stale-evidence refusal, drift demotion, docs markers, manifest/status mapping, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "lab-live-support-claim-report-contract"
       ]
     },
     {

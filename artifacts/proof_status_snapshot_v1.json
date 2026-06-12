@@ -83,6 +83,7 @@
     "formal Lean posture",
     "rustdoc/API examples",
     "downstream consumer proof",
+    "lab-live support-claim report",
     "browser GA final signoff",
     "doctor e2e proof lane"
   ],
@@ -739,6 +740,33 @@
       ],
       "blocked_frontier": null,
       "notes": "Yellow frontier for the external downstream fixture: run the listed profile lanes for fresh proof. No-claim boundaries: broad-workspace-health, conformance-crate, performance, release-readiness, test-internals-public-api."
+    },
+    {
+      "claim_id": "lab-live-support-claim-report",
+      "category": "lab-live support-claim report",
+      "status": "yellow_scoped",
+      "proof_evidence_status": "rerun-required",
+      "doc_claim_markers": {
+        "README.md": [
+          "docs/lab_live_support_claim_report.md",
+          "artifacts/lab_live_support_claim_report_v1.json"
+        ],
+        "AGENTS.md": [
+          "Canonical proof-command manifest",
+          "artifacts/proof_status_snapshot_v1.json"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "lab-live-support-claim-report-contract"
+      ],
+      "manifest_lane_ids": [
+        "lab-live-support-claim-report-contract"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_support_claim_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_support_claim_report_contract -- --nocapture"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped lab-live support-claim report: cite it only as the V4 aggregation gate that maps fresh, skipped, stale, and drift evidence to scoped docs/proof-status updates. It does not execute every child lab-live lane, prove broad workspace health, prove raw host filesystem parity, prove process or signal support, or strengthen README claims without fresh differential evidence."
     },
     {
       "claim_id": "doctor-e2e-proof-lane",

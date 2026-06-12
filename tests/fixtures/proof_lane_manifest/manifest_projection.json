@@ -426,6 +426,7 @@
     "downstream-consumer-default-tokio-free",
     "downstream-consumer-internal-only-negative",
     "downstream-consumer-proof-contract",
+    "lab-live-support-claim-report-contract",
     "browser-ga-final-signoff",
     "doctor-e2e-proof-lane-contract",
     "semantic-lint-proof-lane-contract"
@@ -1167,6 +1168,33 @@
       ]
     },
     {
+      "lane_id": "lab-live-support-claim-report-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "package": "asupersync",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_support_claim_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_support_claim_report_contract -- --nocapture",
+      "guarantee_ids": [
+        "lab-live-support-claim-report-contract"
+      ],
+      "feature_flags": [],
+      "expected_signal": "lab_live_support_claim_report_contract tests pass",
+      "source_paths": [
+        "artifacts/lab_live_support_claim_report_v1.json",
+        "docs/lab_live_support_claim_report.md",
+        "tests/lab_live_support_claim_report_contract.rs",
+        "tests/fixtures/lab_live_support_claim_report/fresh_filesystem_claim.json",
+        "tests/fixtures/lab_live_support_claim_report/stale_evidence_refusal.json",
+        "tests/fixtures/lab_live_support_claim_report/drift_demotion.json",
+        "artifacts/lab_live_differential_scenario_contract_v1.json",
+        "artifacts/lab_live_differential_v2_scenarios_v1.json",
+        "artifacts/lab_live_timing_platform_policy_v1.json",
+        "artifacts/lab_live_v2_filesystem_runner_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md"
+      ]
+    },
+    {
       "lane_id": "browser-ga-final-signoff",
       "kind": "artifact_contract",
       "resource_envelope_class": "artifact-contract-medium",
@@ -1478,6 +1506,12 @@
       "guarantee_id": "downstream-consumer-proof-contract",
       "lane_ids": [
         "downstream-consumer-proof-contract"
+      ]
+    },
+    {
+      "guarantee_id": "lab-live-support-claim-report-contract",
+      "lane_ids": [
+        "lab-live-support-claim-report-contract"
       ]
     },
     {

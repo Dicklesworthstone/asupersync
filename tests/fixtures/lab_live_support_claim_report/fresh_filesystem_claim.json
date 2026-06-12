@@ -1,0 +1,28 @@
+{
+  "schema_version": "lab-live-support-claim-fixture-v1",
+  "fixture_id": "lab-live-support-claim.fresh-filesystem",
+  "row_id": "captured-filesystem-current-fresh",
+  "claim_scope": "captured_filesystem",
+  "previous_support_class": "unsupported",
+  "evidence_status": "fresh",
+  "live_verdict": "pass",
+  "claim_strengthening_allowed": true,
+  "support_action": "allow_scoped_claim",
+  "expected_report_verdict": "scoped_claim_allowed",
+  "freshness": {
+    "max_age_days": 14,
+    "evidence_age_days": 0,
+    "rch_job": "29882573140263270",
+    "worker": "ovh-a"
+  },
+  "artifact_bundle": {
+    "report": "artifacts/lab_live_support_claim_report_v1.json",
+    "source": "artifacts/lab_live_v2_filesystem_runner_v1.json",
+    "docs": "docs/lab_live_v2_filesystem_runner.md"
+  },
+  "no_claims": [
+    "does not prove raw host filesystem parity",
+    "does not prove process or signal support",
+    "does not prove broad workspace health"
+  ]
+}

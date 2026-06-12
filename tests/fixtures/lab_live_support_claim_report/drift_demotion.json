@@ -1,0 +1,25 @@
+{
+  "schema_version": "lab-live-support-claim-fixture-v1",
+  "fixture_id": "lab-live-support-claim.drift-demotion",
+  "row_id": "drift-demotion",
+  "claim_scope": "captured_filesystem",
+  "previous_support_class": "yellow_scoped",
+  "evidence_status": "drift",
+  "live_verdict": "fail",
+  "claim_strengthening_allowed": false,
+  "support_action": "demote_or_block",
+  "expected_report_verdict": "claim_demotion_required",
+  "demotion": {
+    "support_class_after": "blocked_or_unsupported",
+    "reason": "fresh live drift cannot keep a scoped support claim green"
+  },
+  "artifact_bundle": {
+    "report": "artifacts/lab_live_support_claim_report_v1.json",
+    "source": "tests/fixtures/lab_live_v2_filesystem_runner/rename_visibility_fail.json"
+  },
+  "no_claims": [
+    "failed live evidence cannot keep a green support claim",
+    "demotion does not prove replacement adapter support",
+    "does not prove broad workspace health"
+  ]
+}
