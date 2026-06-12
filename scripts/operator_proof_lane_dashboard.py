@@ -162,6 +162,9 @@ def build_dashboard(execute_commands: bool = False, validate_all: bool = False) 
     formal_evidence = []
     quality_gates = []
     known_blockers = []
+    # Snapshot blocked_frontier rows repeat across claims that share one
+    # blocker; dedupe by blocker_id (br-asupersync-a5tzju).
+    seen_blocker_ids = set()
 
     for lane in manifest.get("lanes", []):
         lane_id = lane.get("lane_id")
@@ -195,8 +198,12 @@ def build_dashboard(execute_commands: bool = False, validate_all: bool = False) 
             for claim_id, claim_info in claim_statuses.items():
                 if command in claim_info.get("proof_commands", []):
                     status = claim_info["status"]
-                    if claim_info.get("blocked_frontier"):
-                        known_blockers.append(claim_info["blocked_frontier"])
+                    blocked = claim_info.get("blocked_frontier")
+                    if blocked:
+                        blocker_id = blocked.get("blocker_id", claim_id)
+                        if blocker_id not in seen_blocker_ids:
+                            seen_blocker_ids.add(blocker_id)
+                            known_blockers.append(blocked)
                     break
 
         lane_status = LaneStatus(
@@ -324,7 +331,17 @@ def format_table_output(dashboard: ProofDashboard, category: str = "all") -> str
 
         if section_name == "Known Blockers":
             for blocker in items:
-                if isinstance(blocker, dict):
+                if not isinstance(blocker, dict):
+                    continue
+                if "blocker_id" in blocker:
+                    # Snapshot blocked_frontier rows:
+                    # {blocker_id, blocked_at, reason, required_followup}
+                    # (br-asupersync-a5tzju: these previously fell through the
+                    # execution-row renderer as 'unknown' fields).
+                    lines.append(f"- {blocker.get('blocker_id', 'unknown')} (blocked {blocker.get('blocked_at', 'unknown')})")
+                    lines.append(f"  {blocker.get('reason', '')[:100]}...")
+                else:
+                    # Execution-path rows: {lane_id, command, exit_code, timestamp}
                     lines.append(f"- {blocker.get('lane_id', 'unknown')}: {blocker.get('command', '')[:60]}...")
                     lines.append(f"  Exit: {blocker.get('exit_code', 'unknown')} | {blocker.get('timestamp', 'unknown')}")
         else:
