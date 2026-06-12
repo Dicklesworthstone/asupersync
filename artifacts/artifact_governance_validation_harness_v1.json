@@ -1,0 +1,337 @@
+{
+  "schema_version": "artifact-governance-validation-harness-v1",
+  "harness_id": "artifact_governance_validation_harness_v1",
+  "bead_id": "asupersync-artifact-governance-awdiwy.8",
+  "created_date": "2026-06-12",
+  "purpose": "Provide one deterministic validation surface for artifact-governance schema checks, citation fixtures, supersession fixtures, and e2e-style ledger to scanner to report to signoff flow logs.",
+  "source_of_truth": {
+    "validation_harness": "artifacts/artifact_governance_validation_harness_v1.json",
+    "markdown_report": "docs/proof/artifact_governance_validation_harness.md",
+    "contract_test": "tests/artifact_governance_validation_harness_contract.rs",
+    "governance_ledger": "artifacts/artifact_governance_ledger_v1.json",
+    "scanner": "artifacts/artifact_governance_scanner_v1.json",
+    "operator_report": "artifacts/artifact_governance_operator_report_v1.json",
+    "producer_checklist": "artifacts/artifact_governance_producer_checklist_v1.json"
+  },
+  "harness_policy": {
+    "corpus_coverage": "deterministic_fixture_harness_not_full_corpus_scan",
+    "full_corpus_claim": false,
+    "default_scope": "checked_fixtures_and_registered_artifact_governance_rows_only",
+    "whole_corpus_scan_policy": "whole corpus scans are opt-in report-only work until their runtime and RCH envelope are separately proven",
+    "non_destructive_policy": "The harness reports validation outcomes only. It does not delete, move, rewrite, clean, create branches, create worktrees, or authorize local Cargo fallback for remote-required proof lanes.",
+    "remote_required_validation_command": "RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_validation_harness cargo test -p asupersync --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract -- --nocapture",
+    "no_local_fallback": true
+  },
+  "validation_units": [
+    {
+      "unit_id": "schema_parser_edges",
+      "description": "Fixture rows exercise malformed and valid schema/parser surfaces without scanning the whole artifacts tree.",
+      "required_fixture_kinds": [
+        "valid_citeable_proof_row",
+        "missing_owner_row",
+        "duplicate_path_row",
+        "malformed_no_claim_boundary"
+      ],
+      "checked_by": "tests/artifact_governance_validation_harness_contract.rs"
+    },
+    {
+      "unit_id": "citation_policy_edges",
+      "description": "Fixture rows separate allowed narrow citation from overclaim attempts and advisory-only evidence.",
+      "required_fixture_kinds": [
+        "allowed_citation",
+        "rejected_overclaim",
+        "advisory_only"
+      ],
+      "checked_by": "tests/artifact_governance_validation_harness_contract.rs"
+    },
+    {
+      "unit_id": "supersession_edges",
+      "description": "Fixture rows exercise current, superseded, and missing-successor cases with lineage preserved and no cleanup recommendation.",
+      "required_fixture_kinds": [
+        "current_successor",
+        "superseded_with_successor",
+        "superseded_missing_successor"
+      ],
+      "checked_by": "tests/artifact_governance_validation_harness_contract.rs"
+    },
+    {
+      "unit_id": "e2e_flow_log",
+      "description": "Deterministic flow log pins the ledger to scanner to report to signoff routing summary and first blocker.",
+      "required_fixture_kinds": [
+        "ledger_scan_report_signoff"
+      ],
+      "checked_by": "tests/artifact_governance_validation_harness_contract.rs"
+    }
+  ],
+  "fixture_catalog": {
+    "valid_citeable_proof_row": {
+      "meaning": "A tracked proof-bearing ledger row with owner, tests, sources, and at least three machine-readable no-claim boundaries.",
+      "expected_result": "pass",
+      "no_claim_boundary": "does_not_prove_full_workspace_health"
+    },
+    "missing_owner_row": {
+      "meaning": "A row-shaped artifact reference without an owner must fail closed before citation.",
+      "expected_result": "fail",
+      "expected_error": "missing_owner",
+      "no_claim_boundary": "does_not_authorize_deletion"
+    },
+    "duplicate_path_row": {
+      "meaning": "Two rows cannot silently claim the same durable path inside the fixture set.",
+      "expected_result": "fail",
+      "expected_error": "duplicate_artifact_path",
+      "no_claim_boundary": "does_not_select_owner_winner"
+    },
+    "malformed_no_claim_boundary": {
+      "meaning": "No-claim boundaries must stay machine-readable does_not_* tokens.",
+      "expected_result": "fail",
+      "expected_error": "malformed_no_claim_boundary",
+      "no_claim_boundary": "does_not_authorize_overclaims"
+    },
+    "allowed_citation": {
+      "meaning": "A citation may use a proof-bearing row only for the exact claim tokens it declares.",
+      "expected_result": "pass",
+      "no_claim_boundary": "does_not_expand_claim_scope"
+    },
+    "rejected_overclaim": {
+      "meaning": "A fixture that tries to cite a routing artifact as broad workspace health must fail closed.",
+      "expected_result": "fail",
+      "expected_error": "citation_overclaim",
+      "no_claim_boundary": "does_not_prove_workspace_health"
+    },
+    "advisory_only": {
+      "meaning": "Advisory evidence remains useful context but is rejected as closure-grade proof.",
+      "expected_result": "fail",
+      "expected_error": "advisory_not_closure_proof",
+      "no_claim_boundary": "does_not_close_blockers"
+    },
+    "current_successor": {
+      "meaning": "The current artifact in a supersession chain is citeable only under its own freshness and no-claim policy.",
+      "expected_result": "pass",
+      "no_claim_boundary": "does_not_prove_no_regression"
+    },
+    "superseded_with_successor": {
+      "meaning": "A superseded artifact passes only as lineage when its successor is explicit.",
+      "expected_result": "pass",
+      "no_claim_boundary": "does_not_authorize_deletion"
+    },
+    "superseded_missing_successor": {
+      "meaning": "A superseded row without a successor fails closed and still cannot recommend cleanup.",
+      "expected_result": "fail",
+      "expected_error": "missing_successor",
+      "no_claim_boundary": "does_not_delete_superseded_artifact"
+    },
+    "ledger_scan_report_signoff": {
+      "meaning": "The e2e flow fixture logs deterministic counts and first blocker from the committed governance artifacts.",
+      "expected_result": "pass",
+      "no_claim_boundary": "does_not_prove_release_readiness"
+    }
+  },
+  "schema_fixture_cases": [
+    {
+      "case_id": "valid_proof_bearing_row_passes",
+      "fixture_kind": "valid_citeable_proof_row",
+      "artifact_id": "artifact-governance-producer-checklist",
+      "artifact_path": "artifacts/artifact_governance_producer_checklist_v1.json",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.5",
+      "citeability_class": "proof-bearing",
+      "checked_by_tests": [
+        "tests/artifact_governance_producer_checklist_contract.rs"
+      ],
+      "source_references": [
+        "docs/proof/artifact_governance_producer_checklist.md"
+      ],
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion",
+        "does_not_close_future_artifact_gaps"
+      ],
+      "expected_result": "pass"
+    },
+    {
+      "case_id": "missing_owner_fails_closed",
+      "fixture_kind": "missing_owner_row",
+      "artifact_id": "missing-owner-fixture",
+      "artifact_path": "artifacts/example_missing_owner_v1.json",
+      "owning_bead": null,
+      "citeability_class": "proof-bearing",
+      "checked_by_tests": [
+        "tests/example_missing_owner_contract.rs"
+      ],
+      "source_references": [
+        "docs/proof/example_missing_owner.md"
+      ],
+      "no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_prove_artifact_absence",
+        "does_not_prove_source_correctness"
+      ],
+      "expected_result": "fail",
+      "expected_error": "missing_owner",
+      "operator_action": "add ownership metadata or explicit non-citeable exclusion"
+    },
+    {
+      "case_id": "duplicate_path_fails_closed",
+      "fixture_kind": "duplicate_path_row",
+      "artifact_id": "duplicate-path-fixture-a",
+      "artifact_path": "artifacts/example_duplicate_path_v1.json",
+      "duplicate_artifact_id": "duplicate-path-fixture-b",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.8",
+      "citeability_class": "proof-bearing",
+      "checked_by_tests": [
+        "tests/example_duplicate_path_contract.rs"
+      ],
+      "source_references": [
+        "docs/proof/example_duplicate_path.md"
+      ],
+      "no_claim_boundaries": [
+        "does_not_select_owner_winner",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass"
+      ],
+      "expected_result": "fail",
+      "expected_error": "duplicate_artifact_path",
+      "operator_action": "keep both signals explicit and add one deterministic ledger owner"
+    },
+    {
+      "case_id": "malformed_no_claim_boundary_fails",
+      "fixture_kind": "malformed_no_claim_boundary",
+      "artifact_id": "malformed-boundary-fixture",
+      "artifact_path": "artifacts/example_malformed_boundary_v1.json",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.8",
+      "citeability_class": "proof-bearing",
+      "checked_by_tests": [
+        "tests/example_malformed_boundary_contract.rs"
+      ],
+      "source_references": [
+        "docs/proof/example_malformed_boundary.md"
+      ],
+      "no_claim_boundaries": [
+        "proves_everything",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass"
+      ],
+      "expected_result": "fail",
+      "expected_error": "malformed_no_claim_boundary",
+      "operator_action": "replace every boundary with a machine-readable does_not_* token"
+    }
+  ],
+  "citation_fixture_cases": [
+    {
+      "case_id": "narrow_proof_bearing_citation_passes",
+      "fixture_kind": "allowed_citation",
+      "source_artifact": "artifact-governance-producer-checklist",
+      "citeability_class": "proof-bearing",
+      "requested_claim": "artifact_governance_producer_guard_shape",
+      "allowed_claims": [
+        "artifact_governance_producer_guard_shape",
+        "durable_artifact_metadata_required"
+      ],
+      "expected_result": "pass"
+    },
+    {
+      "case_id": "proof_manifest_workspace_health_overclaim_fails",
+      "fixture_kind": "rejected_overclaim",
+      "source_artifact": "proof-lane-manifest-canonical",
+      "citeability_class": "blocked-frontier",
+      "requested_claim": "workspace_health_green",
+      "allowed_claims": [
+        "proof_manifest_structure",
+        "lane_inventory"
+      ],
+      "expected_result": "fail",
+      "expected_error": "citation_overclaim",
+      "operator_action": "rerun the focused remote-required lane instead of citing the manifest as green proof"
+    },
+    {
+      "case_id": "advisory_raptorq_closure_claim_fails",
+      "fixture_kind": "advisory_only",
+      "source_artifact": "raptorq-gf256-multiscenario-refresh-v4",
+      "citeability_class": "advisory",
+      "requested_claim": "track_e_closure",
+      "allowed_claims": [
+        "mixed_signal_context"
+      ],
+      "expected_result": "fail",
+      "expected_error": "advisory_not_closure_proof",
+      "operator_action": "treat as mixed-signal context until closure-grade guardrails pass"
+    }
+  ],
+  "supersession_fixture_cases": [
+    {
+      "case_id": "current_successor_context_passes",
+      "fixture_kind": "current_successor",
+      "artifact_id": "raptorq-gf256-multiscenario-refresh-v4",
+      "artifact_path": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+      "superseded_by": null,
+      "expected_result": "pass"
+    },
+    {
+      "case_id": "superseded_lineage_with_successor_passes",
+      "fixture_kind": "superseded_with_successor",
+      "artifact_id": "raptorq-gf256-multiscenario-refresh-v3",
+      "artifact_path": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+      "superseded_by": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+      "expected_result": "pass"
+    },
+    {
+      "case_id": "superseded_without_successor_fails_closed",
+      "fixture_kind": "superseded_missing_successor",
+      "artifact_id": "superseded-missing-successor-fixture",
+      "artifact_path": "artifacts/example_superseded_without_successor_v1.json",
+      "superseded_by": null,
+      "expected_result": "fail",
+      "expected_error": "missing_successor",
+      "operator_action": "add successor metadata or keep the artifact non-citeable; do not delete the file"
+    }
+  ],
+  "e2e_flow_log": {
+    "flow_id": "ledger_scanner_report_signoff_fixture",
+    "fixture_kind": "ledger_scan_report_signoff",
+    "command": "cargo test -p asupersync --test artifact_governance_validation_harness_contract -- --nocapture",
+    "remote_required_command": "RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_validation_harness cargo test -p asupersync --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract -- --nocapture",
+    "input_artifacts": [
+      "artifacts/artifact_governance_ledger_v1.json",
+      "artifacts/artifact_governance_scanner_v1.json",
+      "artifacts/artifact_governance_operator_report_v1.json",
+      "artifacts/artifact_governance_producer_checklist_v1.json"
+    ],
+    "output_artifacts": [
+      "artifacts/artifact_governance_validation_harness_v1.json",
+      "docs/proof/artifact_governance_validation_harness.md"
+    ],
+    "artifact_counts_by_class": {
+      "proof-bearing": 6,
+      "blocked-frontier": 4,
+      "operator-report": 2,
+      "advisory": 1,
+      "superseded": 1,
+      "generated-fixture": 1,
+      "excluded": 1
+    },
+    "fixture_counts": {
+      "schema": 4,
+      "citation": 3,
+      "supersession": 3,
+      "e2e": 1,
+      "expected_pass": 5,
+      "expected_fail": 6
+    },
+    "first_blocker": "validation-frontier-inventory",
+    "first_blocker_action": "rerun focused remote-required proof lanes; do not cite blocker rows as green proof",
+    "no_claim_boundary_violations": [
+      "proof_manifest_workspace_health_overclaim_fails",
+      "advisory_raptorq_closure_claim_fails"
+    ],
+    "recommended_next_action": "Use this harness as the A8 gate before A6 final signoff; if RCH admission is unavailable, record a blocker receipt and do not run local Cargo fallback.",
+    "structured_log_golden": "schema=4 citation=3 supersession=3 e2e=1 pass=5 fail=6 first_blocker=validation-frontier-inventory"
+  },
+  "no_claim_boundaries": [
+    "does_not_prove_full_corpus_coverage",
+    "does_not_authorize_deletion",
+    "does_not_prove_fresh_rch_pass",
+    "does_not_authorize_local_cargo_fallback",
+    "does_not_prove_release_readiness",
+    "does_not_close_artifact_beads",
+    "does_not_prove_workspace_health"
+  ]
+}

@@ -302,6 +302,36 @@
       ]
     },
     {
+      "artifact_id": "artifact-governance-validation-harness",
+      "path": "artifacts/artifact_governance_validation_harness_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-artifact-governance-awdiwy.8",
+      "producing_lane": "artifact-governance-validation-harness-contract",
+      "domain": "artifact governance",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/artifact_governance_validation_harness_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_artifact_governance_validation_harness_when_validation_harness_contract_passes_remotely_on_current_main",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass",
+        "does_not_authorize_local_cargo_fallback",
+        "does_not_close_artifact_beads",
+        "does_not_prove_release_readiness"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Machine-checked fixture and e2e-style validation harness for artifact-governance schema edges, citation overclaims, supersession chains, and ledger-to-report signoff logs.",
+      "source_references": [
+        "artifacts/artifact_governance_validation_harness_v1.json",
+        "docs/proof/artifact_governance_validation_harness.md",
+        "tests/artifact_governance_validation_harness_contract.rs"
+      ]
+    },
+    {
       "artifact_id": "proof-lane-manifest-canonical",
       "path": "artifacts/proof_lane_manifest_v1.json",
       "path_status": "tracked",
