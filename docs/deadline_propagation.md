@@ -120,3 +120,39 @@ Budget flow is observable as structured trace events (currently emitted as
 |-----------|-----------|-------------|-------------|------------|
 | Deadline already expired at hop entry | request rejected before handler | `Status::deadline_exceeded` (fail-fast, nothing sent) | `ClientError::DeadlineExceeded` (fail-fast) | entry checkpoint observes exhaustion → `Outcome::Cancelled`, nothing sent |
 | Deadline fires mid-exchange | cancel → bounded drain → `503` | existing timeout race → `DEADLINE_EXCEEDED` (region cancelled first) | future dropped (pooled connection discarded) → `ClientError::DeadlineExceeded` | server-side statement timeout aborts the statement (PG `57014` / MySQL ER 3024 / SQLite `StatementTimeout`); on Cx cancel: drain-phase wire cancel, then `Outcome::Cancelled` |
+
+## Proof artifacts
+
+The chain above is checked across complementary tiers, each scoped to what it
+can prove deterministically:
+
+- **Hop-level, lab-virtual (oracle-clean)**: the D1.1 server-hop lab matrix in
+  `src/web/request_region.rs` (`tests::server_hop`, deterministic seeds for
+  the normal / timeout / **client-disconnect** cells) proves region cancel,
+  drain grace, and quiescence under virtual time with the runtime oracles green.
+- **Wire-cancel frame (unit, loopback)**: `cancel_in_flight_sends_cancel_request_before_resolving`
+  in `src/database/postgres.rs` proves the PostgreSQL `CancelRequest` handshake
+  on a second connection — exact `BackendKeyData` identity, sent before the
+  cancellation resolves — and the connection-close fallback when the cancel
+  target is unreachable.
+- **Budget-derived statement timeout (unit, wire bytes)**:
+  `statement_timeout_derived_from_budget_alone` in `src/database/postgres.rs`
+  pins the `SET statement_timeout` value produced from a Cx budget.
+- **Chain-level, loopback wire (showcase)**:
+  [`tests/e2e_deadline_db_wire_cancel_showcase.rs`](../tests/e2e_deadline_db_wire_cancel_showcase.rs)
+  composes a request region with a real `PgConnection` against a scripted
+  PostgreSQL backend over loopback TCP, under the production asupersync runtime.
+  It asserts that the request-region budget reaches the DB as a
+  `SET statement_timeout = <budget-ms>` on the wire and that the request budget
+  deadline resolves the handler to `Outcome::Cancelled` (committed by the hop,
+  not wedged) (br-asupersync-server-stack-hardening-eeexl1.1, AC2 + the
+  region→DB cancellation composition).
+
+A fully-composed *live* showcase — the in-region query reaching the `SELECT`,
+parking, and the drain dialing the `CancelRequest` over loopback in one flow —
+is tracked by `br-asupersync-rr849p`: a request-region-wrapped `PgConnection`
+currently parks on the read immediately after the budget-derived `SET` write
+and is only re-woken by the budget timer, so the query never advances to the
+`SELECT` whose drain would dial the cancel. The wire-cancel mechanism and the
+region/drain/disconnect behavior are independently proven by the unit and
+lab-virtual tiers above.
