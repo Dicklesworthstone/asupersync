@@ -1,0 +1,293 @@
+{
+  "schema_version": "runtime-trace-inspector-visualization-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.9",
+  "purpose": "Stable input, redaction, renderer, and no-claim contract for a deterministic runtime trace flamechart and inspector visualization packet.",
+  "artifact_path": "artifacts/runtime_trace_inspector_visualization_v1.json",
+  "docs_path": "docs/runtime_trace_inspector_visualization.md",
+  "contract_test": "tests/runtime_trace_inspector_visualization_contract.rs",
+  "source_paths": [
+    "src/observability/task_inspector.rs",
+    "src/observability/cancellation_visualizer.rs",
+    "src/observability/structured_cancellation_analyzer.rs",
+    "src/trace/event.rs",
+    "src/trace/crashpack.rs",
+    "src/runtime/scheduler/three_lane.rs"
+  ],
+  "docs_markers": [
+    "RUNTIME-TRACE-INSPECTOR:SOURCE",
+    "RUNTIME-TRACE-INSPECTOR:SCHEMA",
+    "RUNTIME-TRACE-INSPECTOR:RENDERER",
+    "RUNTIME-TRACE-INSPECTOR:REDACTION",
+    "RUNTIME-TRACE-INSPECTOR:VALIDATION",
+    "RUNTIME-TRACE-INSPECTOR:NO-CLAIMS"
+  ],
+  "required_input_ids": [
+    "trace-events",
+    "task-console-wire-snapshot",
+    "cancellation-propagation",
+    "scheduler-lane-snapshot",
+    "evidence-links"
+  ],
+  "input_schema": {
+    "schema_id": "asupersync.runtime-trace-inspector-input.v1",
+    "ordering_policy": "sort timeline records by logical_time_nanos, then event_sequence, then stable_node_id before rendering",
+    "identity_policy": "all node identifiers are stable strings derived from task, region, obligation, lane, and evidence ids after redaction",
+    "clock_policy": "logical time is authoritative; wall-clock fields are advisory and must not reorder timeline rows",
+    "inputs": [
+      {
+        "input_id": "trace-events",
+        "support_class": "implemented source",
+        "source_schema": "TraceEvent and TraceData",
+        "source_paths": [
+          "src/trace/event.rs"
+        ],
+        "required_fields": [
+          "event_sequence",
+          "logical_time_nanos",
+          "event_kind",
+          "task_id",
+          "region_id",
+          "obligation_id",
+          "redaction_status"
+        ],
+        "visual_channels": [
+          "timeline",
+          "flamechart"
+        ],
+        "failure_policy": "missing logical time, event kind, or redaction status blocks rendering"
+      },
+      {
+        "input_id": "task-console-wire-snapshot",
+        "support_class": "implemented source",
+        "source_schema": "asupersync.task_console_wire.v1",
+        "source_paths": [
+          "src/observability/task_inspector.rs"
+        ],
+        "required_fields": [
+          "schema_version",
+          "generated_at",
+          "summary",
+          "tasks.id",
+          "tasks.region_id",
+          "tasks.phase",
+          "tasks.poll_count",
+          "tasks.obligations",
+          "tasks.waiters"
+        ],
+        "visual_channels": [
+          "task-table",
+          "region-tree"
+        ],
+        "failure_policy": "unknown task-console schema or unsorted task rows blocks rendering"
+      },
+      {
+        "input_id": "cancellation-propagation",
+        "support_class": "implemented source",
+        "source_schema": "CancellationTrace",
+        "source_paths": [
+          "src/observability/cancellation_visualizer.rs",
+          "src/observability/structured_cancellation_analyzer.rs"
+        ],
+        "required_fields": [
+          "trace_id",
+          "root_entity",
+          "root_cancel_reason",
+          "steps.entity_id",
+          "steps.elapsed_since_start",
+          "anomalies"
+        ],
+        "visual_channels": [
+          "cancel-tree",
+          "timeline"
+        ],
+        "failure_policy": "missing root entity or non-redacted cancel reason blocks rendering"
+      },
+      {
+        "input_id": "scheduler-lane-snapshot",
+        "support_class": "planned source",
+        "source_schema": "scheduler lane diagnostics row",
+        "source_paths": [
+          "src/runtime/scheduler/three_lane.rs"
+        ],
+        "required_fields": [
+          "lane_id",
+          "queue_depth",
+          "poll_budget_remaining",
+          "active_region_count",
+          "pressure_state"
+        ],
+        "visual_channels": [
+          "lane-strip",
+          "flamechart"
+        ],
+        "failure_policy": "missing lane diagnostics demotes lane strip to unavailable; it does not block task and trace views"
+      },
+      {
+        "input_id": "evidence-links",
+        "support_class": "implemented source",
+        "source_schema": "crashpack and proof link metadata",
+        "source_paths": [
+          "src/trace/crashpack.rs",
+          "artifacts/proof_lane_manifest_v1.json",
+          "artifacts/proof_status_snapshot_v1.json"
+        ],
+        "required_fields": [
+          "artifact_id",
+          "artifact_path",
+          "proof_lane",
+          "freshness_state",
+          "no_claim_boundary"
+        ],
+        "visual_channels": [
+          "evidence-panel"
+        ],
+        "failure_policy": "stale or missing proof links render as blocked evidence, never as passing proof"
+      }
+    ]
+  },
+  "static_html_renderer": {
+    "renderer_id": "runtime-trace-inspector-static-html-contract",
+    "surface": "static-html",
+    "support_class": "contract renderer, not production dashboard",
+    "root_dom_id": "asupersync-runtime-trace-inspector",
+    "required_dom_ids": [
+      "trace-timeline",
+      "region-tree",
+      "task-state-table",
+      "obligation-holdings",
+      "cancel-propagation",
+      "scheduler-lanes",
+      "evidence-links",
+      "redaction-status",
+      "no-claim-boundaries"
+    ],
+    "required_css_classes": [
+      "asupersync-trace-row",
+      "asupersync-region-node",
+      "asupersync-obligation-chip",
+      "asupersync-evidence-link",
+      "asupersync-blocked-proof"
+    ],
+    "golden_dom_fragments": [
+      "<main id=\"asupersync-runtime-trace-inspector\" data-schema=\"asupersync.runtime-trace-inspector-input.v1\">",
+      "<section id=\"trace-timeline\" aria-label=\"Trace timeline\">",
+      "<section id=\"task-state-table\" aria-label=\"Task states\">",
+      "<section id=\"redaction-status\" data-policy=\"runtime-trace-inspector-redaction-v1\">",
+      "<section id=\"no-claim-boundaries\" aria-label=\"No-claim boundaries\">"
+    ],
+    "dom_test_policy": "golden DOM checks assert required anchors and classes; screenshots are deferred until a browser route or packaged static viewer exists",
+    "unsupported_when": [
+      "input schema mismatch",
+      "redaction_required_but_missing",
+      "missing task-console snapshot",
+      "timeline order not deterministic"
+    ]
+  },
+  "redaction_profile": {
+    "policy_id": "runtime-trace-inspector-redaction-v1",
+    "source_redactor": "redact_browser_trace_event",
+    "source_paths": [
+      "src/trace/event.rs",
+      "src/trace/incident.rs"
+    ],
+    "preserve_fields": [
+      "TaskId",
+      "RegionId",
+      "ObligationId",
+      "TimerId",
+      "logical_time_nanos",
+      "event_sequence",
+      "finite enum discriminants"
+    ],
+    "forbidden_fields": [
+      "panic message payload",
+      "cancel reason free text",
+      "worker id free text",
+      "down reason error text",
+      "message body",
+      "chaos detail payload",
+      "absolute filesystem paths",
+      "secrets, tokens, credentials, or API keys"
+    ],
+    "required_status_values": [
+      "redacted",
+      "not_required",
+      "blocked_missing_redaction"
+    ],
+    "failure_policy": "any input requiring redaction without a completed policy renders only a blocked redaction panel"
+  },
+  "fail_closed_fixtures": [
+    {
+      "fixture_id": "raw-panic-payload",
+      "input_id": "trace-events",
+      "expected_verdict": "blocked",
+      "expected_reason": "reject raw panic message payload without runtime-trace-inspector-redaction-v1"
+    },
+    {
+      "fixture_id": "missing-task-console-schema",
+      "input_id": "task-console-wire-snapshot",
+      "expected_verdict": "blocked",
+      "expected_reason": "reject unknown task console schema version"
+    },
+    {
+      "fixture_id": "unsorted-timeline",
+      "input_id": "trace-events",
+      "expected_verdict": "blocked",
+      "expected_reason": "reject nondeterministic timeline ordering"
+    },
+    {
+      "fixture_id": "stale-proof-link",
+      "input_id": "evidence-links",
+      "expected_verdict": "blocked",
+      "expected_reason": "render stale proof as blocked evidence, not passing proof"
+    }
+  ],
+  "proof_lanes": [
+    {
+      "lane_id": "runtime-trace-inspector-visualization-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_trace_inspector_visualization CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_trace_inspector_visualization_contract --no-default-features -- --nocapture",
+      "covers": [
+        "artifact schema",
+        "live source anchors",
+        "static HTML renderer DOM contract",
+        "redaction policy fail-closed fixtures",
+        "docs marker alignment",
+        "no-claim boundaries"
+      ],
+      "does_not_cover": [
+        "production debug-server route",
+        "browser screenshot correctness",
+        "runtime correctness",
+        "trace correctness",
+        "scheduler correctness",
+        "performance improvement",
+        "broad workspace health",
+        "release readiness",
+        "live RCH fleet availability"
+      ],
+      "no_local_cargo_fallback": true
+    }
+  ],
+  "validation": {
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_trace_inspector_visualization CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_trace_inspector_visualization_contract --no-default-features -- --nocapture",
+    "static_checks": [
+      "jq empty artifacts/runtime_trace_inspector_visualization_v1.json",
+      "rustfmt --edition 2024 --check tests/runtime_trace_inspector_visualization_contract.rs",
+      "git diff --check -- artifacts/runtime_trace_inspector_visualization_v1.json docs/runtime_trace_inspector_visualization.md tests/runtime_trace_inspector_visualization_contract.rs"
+    ],
+    "no_local_cargo_fallback": true
+  },
+  "no_claims": [
+    "does not implement a production debug-server route",
+    "does not provide browser screenshot coverage",
+    "does not prove runtime correctness",
+    "does not prove trace correctness",
+    "does not prove scheduler correctness",
+    "does not prove cancellation correctness",
+    "does not prove performance improvement",
+    "does not prove broad workspace health",
+    "does not prove release readiness",
+    "does not prove live RCH fleet availability",
+    "does not authorize local Cargo fallback"
+  ]
+}
