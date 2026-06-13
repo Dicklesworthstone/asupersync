@@ -367,19 +367,16 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
             if Self::is_preflight(&req) {
                 let mut resp = Response::empty(StatusCode::NO_CONTENT);
                 resp = self.apply_common_headers(resp, &allow_origin);
-                resp.headers.insert(
-                    "access-control-allow-methods".to_string(),
+                resp.set_header(
+                    "access-control-allow-methods",
                     self.policy.allow_methods.join(", "),
                 );
-                resp.headers.insert(
-                    "access-control-allow-headers".to_string(),
+                resp.set_header(
+                    "access-control-allow-headers",
                     self.policy.allow_headers.join(", "),
                 );
                 if let Some(max_age) = self.policy.max_age {
-                    resp.headers.insert(
-                        "access-control-max-age".to_string(),
-                        max_age.as_secs().to_string(),
-                    );
+                    resp.set_header("access-control-max-age", max_age.as_secs().to_string());
                 }
                 append_vary_header(&mut resp, "origin");
                 append_vary_header(&mut resp, "access-control-request-method");
@@ -823,16 +820,17 @@ impl<H: Handler> Handler for BulkheadMiddleware<H> {
 /// Middleware that retries failed handler invocations.
 ///
 /// Only retries on 5xx server errors. The request body is cloned for each
-/// retry attempt. Non-idempotent methods (POST, PATCH, DELETE) are retried
-/// by default — callers should set `idempotent_only` to restrict retries to
-/// safe methods.
+/// retry attempt. By default, retries are restricted to idempotent methods
+/// (GET, HEAD, OPTIONS, PUT, DELETE, TRACE). Call
+/// [`RetryMiddleware::retry_all_methods`] to opt into retrying
+/// non-idempotent methods such as POST and PATCH.
 ///
 /// Note: In Phase 0 (synchronous), retry sleeps block the thread. Production
 /// use should rely on async retry with cooperative yielding (Phase 1+).
 pub struct RetryMiddleware<H> {
     inner: H,
     policy: RetryPolicy,
-    /// When true, only retry GET, HEAD, OPTIONS, PUT (idempotent methods).
+    /// When true, only retry idempotent methods.
     idempotent_only: bool,
 }
 

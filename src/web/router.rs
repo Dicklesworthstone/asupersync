@@ -47,6 +47,7 @@ const METHOD_OPTIONS: &str = "OPTIONS";
 /// A set of handlers for different HTTP methods on a single route.
 pub struct MethodRouter {
     handlers: HashMap<String, Box<dyn Handler>>,
+    method_not_allowed: Box<dyn Handler>,
 }
 
 impl MethodRouter {
@@ -54,6 +55,7 @@ impl MethodRouter {
     fn new() -> Self {
         Self {
             handlers: HashMap::with_capacity(4),
+            method_not_allowed: Box::new(MethodNotAllowedHandler),
         }
     }
 
@@ -116,6 +118,11 @@ impl MethodRouter {
             .into_iter()
             .map(|(method, handler)| (method, wrap(handler)))
             .collect();
+        let method_not_allowed = std::mem::replace(
+            &mut self.method_not_allowed,
+            Box::new(MethodNotAllowedHandler),
+        );
+        self.method_not_allowed = wrap(method_not_allowed);
     }
 
     /// Dispatch a request to the appropriate method handler.
@@ -128,8 +135,20 @@ impl MethodRouter {
         let upper = req.method.to_uppercase();
         match self.handlers.get(&upper) {
             Some(handler) => handler.call(cx, req).await,
-            None => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+            None => self.method_not_allowed.call(cx, req).await,
         }
+    }
+}
+
+struct MethodNotAllowedHandler;
+
+impl Handler for MethodNotAllowedHandler {
+    fn call(
+        &self,
+        _cx: &Cx,
+        _req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        Box::pin(async { StatusCode::METHOD_NOT_ALLOWED.into_response() })
     }
 }
 
@@ -1757,6 +1776,46 @@ mod tests {
                 vec!["enter:mw".to_string(), "exit:mw".to_string()],
                 "fallback handler must be wrapped by .layer()"
             );
+        }
+
+        #[test]
+        fn layer_wraps_method_not_allowed() {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let router = Router::new()
+                .route("/traced", get(FnHandler::new(ok_handler)))
+                .layer(RecordingLayer::new("mw", Arc::clone(&log)));
+
+            let resp = router.handle(Request::new("POST", "/traced"));
+            assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(
+                *log.lock().expect("log lock"),
+                vec!["enter:mw".to_string(), "exit:mw".to_string()],
+                "method-not-allowed must be wrapped by .layer()"
+            );
+        }
+
+        #[test]
+        fn cors_layer_handles_preflight_without_options_route() {
+            use crate::web::middleware::{CorsLayer, CorsPolicy};
+
+            let router = Router::new()
+                .route("/cors", get(FnHandler::new(ok_handler)))
+                .layer(CorsLayer::new(CorsPolicy::default()));
+
+            let resp = router.handle(
+                Request::new("OPTIONS", "/cors")
+                    .with_header("Origin", "https://example.com")
+                    .with_header("Access-Control-Request-Method", "POST")
+                    .with_header("Access-Control-Request-Headers", "content-type"),
+            );
+
+            assert_eq!(resp.status, StatusCode::NO_CONTENT);
+            assert_eq!(
+                resp.headers.get("access-control-allow-origin"),
+                Some(&"*".to_string())
+            );
+            assert!(resp.headers.contains_key("access-control-allow-methods"));
+            assert!(resp.headers.contains_key("access-control-allow-headers"));
         }
 
         #[test]
