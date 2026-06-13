@@ -1211,6 +1211,105 @@ mod tests {
     }
 
     #[test]
+    fn bounded_load_hot_key_reduces_skew_against_unbounded_primary() {
+        let mut ring = HashRing::new(64, 0xB0A_5C0E_u64);
+        for node in ["node-a", "node-b", "node-c", "node-d"] {
+            assert!(ring.add_node(node));
+        }
+
+        let primary = ring.node_for_key(&"hot-key").expect("primary node");
+        let mut unbounded_loads = std::collections::BTreeMap::<String, u64>::new();
+        for node in ring.nodes() {
+            unbounded_loads.insert(node.to_owned(), 0);
+        }
+        *unbounded_loads.get_mut(primary).expect("primary load") = 10_000;
+
+        let config = BoundedLoadConfig::STRICT;
+        let mut bounded_loads = std::collections::BTreeMap::<String, u64>::new();
+        let mut total_load = 0_u64;
+        for _ in 0..10_000 {
+            let decision = ring
+                .bounded_node_for_key(&"hot-key", total_load, config, |node| {
+                    bounded_loads.get(node).copied().unwrap_or(0)
+                })
+                .expect("bounded decision");
+            *bounded_loads
+                .entry(decision.selected_node.to_owned())
+                .or_insert(0) += 1;
+            total_load += 1;
+        }
+
+        let unbounded_max = unbounded_loads.values().copied().max().expect("loads");
+        let unbounded_min = unbounded_loads.values().copied().min().expect("loads");
+        let bounded_max = bounded_loads.values().copied().max().expect("loads");
+        let bounded_min = bounded_loads.values().copied().min().expect("loads");
+
+        assert_eq!(unbounded_max, 10_000);
+        assert_eq!(unbounded_min, 0);
+        assert!(
+            bounded_max - bounded_min <= 1,
+            "strict bounded-load hot-key fixture should collapse skew: {bounded_loads:?}"
+        );
+        assert!(
+            bounded_max < unbounded_max / 3,
+            "bounded-load max should be materially lower than unbounded primary load"
+        );
+    }
+
+    #[test]
+    fn bounded_load_primary_membership_add_moves_only_new_primary_keys() {
+        let keys: Vec<u64> = (0..10_000_u64).collect();
+        let mut before = HashRing::new(64, 0xB0A_ADD_u64);
+        for node in ["node-a", "node-b", "node-c", "node-d"] {
+            assert!(before.add_node(node));
+        }
+
+        let mut after = before.clone();
+        assert!(after.add_node("node-e"));
+
+        let before_assignments = keys
+            .iter()
+            .map(|key| {
+                before
+                    .bounded_node_for_key(key, 0, BoundedLoadConfig::STRICT, |_| 0)
+                    .expect("before assignment")
+                    .selected_node
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        let after_assignments = keys
+            .iter()
+            .map(|key| {
+                after
+                    .bounded_node_for_key(key, 0, BoundedLoadConfig::STRICT, |_| 0)
+                    .expect("after assignment")
+                    .selected_node
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+
+        let changed = before_assignments
+            .iter()
+            .zip(after_assignments.iter())
+            .filter(|(left, right)| left != right)
+            .count();
+        let moved_to_new_node = after_assignments
+            .iter()
+            .filter(|node| node.as_str() == "node-e")
+            .count();
+
+        assert_eq!(
+            changed, moved_to_new_node,
+            "with an empty load snapshot, adding a node should only move keys whose new primary is the added node"
+        );
+        let changed_ratio = changed as f64 / keys.len() as f64;
+        assert!(
+            changed_ratio <= 0.30,
+            "adding one node to four should keep bounded primary remap ratio low: {changed_ratio}"
+        );
+    }
+
+    #[test]
     fn bounded_load_assignments_are_replay_deterministic() {
         fn run_once() -> Vec<String> {
             let mut ring = HashRing::new(32, 0xD15A_5516_u64);

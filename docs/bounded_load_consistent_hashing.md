@@ -25,6 +25,23 @@ The distributed symbol assigner exposes the behavior through
 `AssignmentStrategy::BoundedLoad { epsilon_per_mille, seed }`. Existing
 assignment strategies are unchanged, and the bounded strategy is opt-in.
 
+## Verification Fixtures
+
+The checked fixtures pin the behavior to concrete replayable numbers:
+
+- Hot-key A/B: 10,000 assignments of the same key over four nodes put all
+  10,000 assignments on one primary node with ordinary lookup. Strict
+  bounded-load routing keeps the same workload within one assignment between
+  the least- and most-loaded node.
+- Membership add: with an empty load snapshot, adding one node to a four-node
+  ring only moves keys whose new primary is the added node, and the fixed
+  10,000-key fixture keeps the changed-key ratio below 30%.
+
+The membership fixture scopes the minimal-disruption claim to primary lookup
+with a caller-supplied load snapshot. A batch assigner that recomputes projected
+load after every symbol may intentionally move additional symbols to satisfy the
+load cap; that is a load-balance decision, not a primary-ring remap guarantee.
+
 ## No-Claim Boundaries
 
 This lane proves the bounded routing primitive and its symbol-assignment
