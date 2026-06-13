@@ -240,7 +240,9 @@ The full profile manifest contract is explicit and versioned:
 - schema version: `lean.full.repro.bundle.v1`
 - schema path: `formal/lean/coverage/lean_full_repro_bundle_manifest.schema.json`
 - required contract fields include deterministic repro metadata (`toolchain`, `inputs`,
-  `commands`, `artifacts`) and routing ownership context.
+  `commands`, `frontier_snapshot`, `artifacts`) and routing ownership context.
+- `frontier_snapshot` records the hashed `lean_frontier_buckets_v1.json` state used for
+  failure triage, including its source log and diagnostic/error/warning totals.
 
 Retention policy is also enforced from `ci_verification_profiles.json`:
 - default retention: 30 days

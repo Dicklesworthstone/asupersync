@@ -19,6 +19,7 @@
     "toolchain",
     "inputs",
     "commands",
+    "frontier_snapshot",
     "artifacts"
   ],
   "properties": {
@@ -129,6 +130,56 @@
       "type": "array",
       "minItems": 1,
       "items": { "type": "string", "minLength": 1 }
+    },
+    "frontier_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "exists",
+        "sha256",
+        "size_bytes",
+        "schema_version",
+        "source_log",
+        "generated_by",
+        "diagnostics_total",
+        "errors_total",
+        "warnings_total"
+      ],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "exists": { "type": "boolean" },
+        "sha256": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+          ]
+        },
+        "size_bytes": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        },
+        "schema_version": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        },
+        "source_log": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        },
+        "generated_by": {
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
+        },
+        "diagnostics_total": {
+          "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
+        },
+        "errors_total": {
+          "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
+        },
+        "warnings_total": {
+          "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
+        }
+      }
     },
     "artifacts": {
       "type": "array",

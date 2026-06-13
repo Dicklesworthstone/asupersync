@@ -1114,6 +1114,7 @@ jobs:
 
           manifest_schema_version="$(jq -r '.artifact_contract.manifest_schema_version // empty' "$profile_file")"
           manifest_schema_path="$(jq -r '.artifact_contract.manifest_schema_path // empty' "$profile_file")"
+          frontier_snapshot_path="$(jq -r '.artifact_contract.frontier_snapshot_path // empty' "$profile_file")"
           artifact_name="$(jq -r '.artifact_bundle.name // empty' <<<"$profile_json")"
           artifact_dir="$(jq -r '.artifact_bundle.directory // empty' <<<"$profile_json")"
           retention_days="$(jq -r '.artifact_bundle.retention_days // empty' <<<"$profile_json")"
@@ -1134,8 +1135,8 @@ jobs:
             failure_payload_path="$failure_payload_default"
           fi
 
-          if [[ -z "$manifest_schema_version" || -z "$manifest_schema_path" || -z "$artifact_name" || -z "$artifact_dir" ]]; then
-            echo "::error::Full artifact contract is missing manifest schema version/path/name/directory"
+          if [[ -z "$manifest_schema_version" || -z "$manifest_schema_path" || -z "$frontier_snapshot_path" || -z "$artifact_name" || -z "$artifact_dir" ]]; then
+            echo "::error::Full artifact contract is missing manifest schema version/path/frontier snapshot/name/directory"
             exit 1
           fi
           if [[ ! -f "$manifest_schema_path" ]]; then
@@ -1184,6 +1185,7 @@ jobs:
             printf 'profile_file=%s\n' "$profile_file"
             printf 'manifest_schema_version=%s\n' "$manifest_schema_version"
             printf 'manifest_schema_path=%s\n' "$manifest_schema_path"
+            printf 'frontier_snapshot_path=%s\n' "$frontier_snapshot_path"
             printf 'artifact_name=%s\n' "$artifact_name"
             printf 'artifact_dir=%s\n' "$artifact_dir"
             printf 'retention_days=%s\n' "$retention_days"
@@ -1297,6 +1299,7 @@ jobs:
           profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
           manifest_schema_version="${{ steps.lean_full_contract.outputs.manifest_schema_version }}"
           manifest_schema_path="${{ steps.lean_full_contract.outputs.manifest_schema_path }}"
+          frontier_snapshot_path="${{ steps.lean_full_contract.outputs.frontier_snapshot_path }}"
           repro_bundle_manifest="${{ steps.lean_full_contract.outputs.repro_bundle_manifest }}"
           repro_script="${{ steps.lean_full_contract.outputs.repro_script }}"
           mkdir -p "$artifact_dir"
@@ -1329,6 +1332,48 @@ jobs:
           done
 
           jq -s '.' "$artifact_dir/artifacts.jsonl" > "$artifact_dir/artifacts.json"
+
+          if [[ -f "$frontier_snapshot_path" ]]; then
+            frontier_sha256="$(sha256sum "$frontier_snapshot_path" | awk '{print $1}')"
+            frontier_size_bytes="$(wc -c < "$frontier_snapshot_path" | tr -d ' ')"
+            jq -n \
+              --arg path "$frontier_snapshot_path" \
+              --arg sha256 "$frontier_sha256" \
+              --argjson size_bytes "$frontier_size_bytes" \
+              --arg schema_version "$(jq -r '.schema_version // empty' "$frontier_snapshot_path")" \
+              --arg source_log "$(jq -r '.source_log // empty' "$frontier_snapshot_path")" \
+              --arg generated_by "$(jq -r '.generated_by // empty' "$frontier_snapshot_path")" \
+              --argjson diagnostics_total "$(jq '.diagnostics_total // 0' "$frontier_snapshot_path")" \
+              --argjson errors_total "$(jq '.errors_total // 0' "$frontier_snapshot_path")" \
+              --argjson warnings_total "$(jq '.warnings_total // 0' "$frontier_snapshot_path")" \
+              '{
+                path: $path,
+                exists: true,
+                sha256: $sha256,
+                size_bytes: $size_bytes,
+                schema_version: (if $schema_version == "" then null else $schema_version end),
+                source_log: (if $source_log == "" then null else $source_log end),
+                generated_by: (if $generated_by == "" then null else $generated_by end),
+                diagnostics_total: $diagnostics_total,
+                errors_total: $errors_total,
+                warnings_total: $warnings_total
+              }' > "$artifact_dir/frontier_snapshot.json"
+          else
+            jq -n \
+              --arg path "$frontier_snapshot_path" \
+              '{
+                path: $path,
+                exists: false,
+                sha256: null,
+                size_bytes: null,
+                schema_version: null,
+                source_log: null,
+                generated_by: null,
+                diagnostics_total: null,
+                errors_total: null,
+                warnings_total: null
+              }' > "$artifact_dir/frontier_snapshot.json"
+          fi
 
           {
             echo "#!/usr/bin/env bash"
@@ -1365,6 +1410,7 @@ jobs:
             --argjson expected_runtime_seconds "$(jq '.profiles[] | select(.name == "full") | .expected_runtime_seconds' "$profile_file")" \
             --argjson commands "$(jq -Rsc 'split(\"\\n\")[:-1]' "$artifact_dir/commands.txt")" \
             --argjson artifacts "$(cat "$artifact_dir/artifacts.json")" \
+            --argjson frontier_snapshot "$(cat "$artifact_dir/frontier_snapshot.json")" \
             --argjson manifest_required_fields "$(jq '.artifact_contract.manifest_required_fields' "$profile_file")" \
             '{
               schema_version: $schema_version,
@@ -1398,6 +1444,7 @@ jobs:
               },
               manifest_required_fields: $manifest_required_fields,
               commands: $commands,
+              frontier_snapshot: $frontier_snapshot,
               artifacts: $artifacts
             }' > "$repro_bundle_manifest"
 

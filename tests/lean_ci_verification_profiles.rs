@@ -151,6 +151,18 @@ fn ci_artifact_contract_schema_and_retention_policy_are_explicit() {
         std::path::Path::new(manifest_schema_path).is_file(),
         "artifact_contract.manifest_schema_path must point to an existing file"
     );
+    let frontier_snapshot_path = artifact_contract
+        .get("frontier_snapshot_path")
+        .and_then(Value::as_str)
+        .expect("artifact_contract.frontier_snapshot_path must be string");
+    assert_eq!(
+        frontier_snapshot_path, "formal/lean/coverage/lean_frontier_buckets_v1.json",
+        "artifact_contract.frontier_snapshot_path must point to the canonical frontier buckets artifact"
+    );
+    assert!(
+        std::path::Path::new(frontier_snapshot_path).is_file(),
+        "artifact_contract.frontier_snapshot_path must point to an existing file"
+    );
 
     let manifest_schema: Value =
         serde_json::from_str(MANIFEST_SCHEMA_JSON).expect("manifest schema json must parse");
@@ -189,6 +201,7 @@ fn ci_artifact_contract_schema_and_retention_policy_are_explicit() {
         "toolchain",
         "inputs",
         "commands",
+        "frontier_snapshot",
         "artifacts",
     ] {
         assert!(
@@ -229,6 +242,7 @@ fn ci_artifact_contract_schema_and_retention_policy_are_explicit() {
         "toolchain.rustc",
         "inputs.cargo_lock_sha256",
         "commands",
+        "frontier_snapshot.sha256",
         "artifacts[].path",
         "artifacts[].sha256",
     ] {
@@ -920,6 +934,7 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
         "Resolve Lean full artifact contract",
         ".artifact_contract.manifest_schema_version // empty",
         ".artifact_contract.manifest_schema_path // empty",
+        ".artifact_contract.frontier_snapshot_path // empty",
         ".artifact_contract.misroute_tracking.policy_id // empty",
         ".governance_policy.policy_id // empty",
         ".governance_policy.decision_log_path // empty",
@@ -938,9 +953,12 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
         "Unsupported Lean profile command",
         "ubs --only=rust --diff .",
         "steps.lean_full_contract.outputs.manifest_schema_path",
+        "steps.lean_full_contract.outputs.frontier_snapshot_path",
         "steps.lean_full_contract.outputs.repro_bundle_manifest",
         "steps.lean_full_contract.outputs.repro_script",
         "steps.lean_full_contract.outputs.failure_payload",
+        "frontier_snapshot.json",
+        "frontier_snapshot: $frontier_snapshot",
         "missing required fields from artifact_contract.manifest_required_fields",
         "Append governance decision record",
         "Upload Lean full artifacts",
