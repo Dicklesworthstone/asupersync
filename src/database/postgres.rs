@@ -2598,6 +2598,41 @@ struct PreparedStatementCache {
     /// disables caching (every prepare() goes straight to wire + the
     /// just-inserted entry is evicted on the very next insert).
     cap: usize,
+    /// br-asupersync-server-stack-hardening-eeexl1.5 — cache effectiveness
+    /// counters. The cache is owned by a single `PgConnection` and only
+    /// touched under `&mut self`, so plain counters (no atomics) are correct.
+    stats: PreparedCacheStats,
+}
+
+/// Snapshot of [`PreparedStatementCache`] effectiveness counters
+/// (br-asupersync-server-stack-hardening-eeexl1.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreparedCacheStats {
+    /// Lookups that found a cached statement.
+    pub hits: u64,
+    /// Lookups that missed (the statement had to be prepared on the wire).
+    pub misses: u64,
+    /// Entries removed to make room (LRU eviction) or replaced.
+    pub evictions: u64,
+}
+
+impl PreparedCacheStats {
+    /// Total lookups (`hits + misses`).
+    #[must_use]
+    pub const fn lookups(&self) -> u64 {
+        self.hits + self.misses
+    }
+
+    /// Cache hit ratio in `[0.0, 1.0]`, or `0.0` when there were no lookups.
+    #[must_use]
+    pub fn hit_ratio(&self) -> f64 {
+        let total = self.lookups();
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
+    }
 }
 
 impl PreparedStatementCache {
@@ -2606,14 +2641,24 @@ impl PreparedStatementCache {
             entries: HashMap::with_capacity(cap.min(64)),
             lru: VecDeque::with_capacity(cap.min(64)),
             cap,
+            stats: PreparedCacheStats::default(),
         }
+    }
+
+    /// Returns the current effectiveness counters.
+    fn stats(&self) -> PreparedCacheStats {
+        self.stats
     }
 
     /// Look up a cached statement. Returns a clone of the cached metadata
     /// AND moves the SQL key to the back of the LRU queue (most-recently
     /// used). Returns `None` on miss.
     fn get_and_touch(&mut self, sql: &str) -> Option<PgStatement> {
-        let stmt = self.entries.get(sql)?.clone();
+        let Some(stmt) = self.entries.get(sql).cloned() else {
+            self.stats.misses += 1;
+            return None;
+        };
+        self.stats.hits += 1;
         // Move to back of LRU.
         if let Some(pos) = self.lru.iter().position(|s| s == sql) {
             if let Some(key) = self.lru.remove(pos) {
@@ -2633,6 +2678,7 @@ impl PreparedStatementCache {
     fn insert_returning_evicted_name(&mut self, sql: String, stmt: PgStatement) -> Option<String> {
         // Reject zero-cap configs cleanly: insert returns evicted-self.
         if self.cap == 0 {
+            self.stats.evictions += 1;
             return Some(stmt.name);
         }
         let mut evicted = None;
@@ -2650,6 +2696,9 @@ impl PreparedStatementCache {
                     evicted = Some(victim_stmt.name);
                 }
             }
+        }
+        if evicted.is_some() {
+            self.stats.evictions += 1;
         }
         self.lru.push_back(sql.clone());
         self.entries.insert(sql, stmt);
@@ -5112,6 +5161,16 @@ impl PgConnection {
     #[must_use]
     pub fn needs_discard(&self) -> bool {
         self.inner.needs_discard
+    }
+
+    /// Returns the prepared-statement cache effectiveness counters
+    /// (hits / misses / evictions) for this connection
+    /// (br-asupersync-server-stack-hardening-eeexl1.5). Use these to size the
+    /// statement cache against a real workload and to confirm a repeated-query
+    /// path is actually reusing prepared statements.
+    #[must_use]
+    pub fn prepared_cache_stats(&self) -> PreparedCacheStats {
+        self.inner.prepared_cache.stats()
     }
 
     #[inline]
@@ -15279,6 +15338,65 @@ mod tests {
             param_oids: Vec::new(),
             columns: Vec::new(),
         }
+    }
+
+    #[test]
+    fn prepared_cache_tracks_hit_miss_eviction_counters() {
+        // br-asupersync-server-stack-hardening-eeexl1.5 — the cache exposes
+        // effectiveness counters so a repeated-query workload can be proven to
+        // reuse prepared statements, and cap pressure is visible.
+        let mut cache = PreparedStatementCache::new(2);
+        assert_eq!(cache.stats(), PreparedCacheStats::default());
+
+        // Two misses populate the cache (callers check get_and_touch first).
+        assert!(cache.get_and_touch("sql_a").is_none());
+        assert!(cache.get_and_touch("sql_b").is_none());
+        cache.insert_returning_evicted_name("sql_a".into(), fixture_pg_statement("__s0"));
+        cache.insert_returning_evicted_name("sql_b".into(), fixture_pg_statement("__s1"));
+        let after_fill = cache.stats();
+        assert_eq!(after_fill.misses, 2);
+        assert_eq!(after_fill.hits, 0);
+        assert_eq!(after_fill.evictions, 0);
+
+        // Two hits on the warm entries.
+        assert!(cache.get_and_touch("sql_a").is_some());
+        assert!(cache.get_and_touch("sql_b").is_some());
+        let after_hits = cache.stats();
+        assert_eq!(after_hits.hits, 2);
+        assert_eq!(after_hits.misses, 2);
+        assert_eq!(after_hits.lookups(), 4);
+        assert!((after_hits.hit_ratio() - 0.5).abs() < f64::EPSILON);
+
+        // A third distinct insert at cap evicts one entry → eviction counter.
+        let miss_c = cache.get_and_touch("sql_c");
+        assert!(miss_c.is_none());
+        let evicted =
+            cache.insert_returning_evicted_name("sql_c".into(), fixture_pg_statement("__s2"));
+        assert!(evicted.is_some(), "insert at cap must evict");
+        let after_evict = cache.stats();
+        assert_eq!(after_evict.evictions, 1);
+        assert_eq!(after_evict.misses, 3);
+    }
+
+    #[test]
+    fn prepared_cache_clear_is_schema_change_invalidation() {
+        // Schema-change invalidation clears the cache (returning names to
+        // DEALLOCATE) without disturbing the effectiveness counters, so the
+        // lifetime hit/miss/eviction history survives a re-prepare cycle
+        // (br-asupersync-server-stack-hardening-eeexl1.5).
+        let mut cache = PreparedStatementCache::new(4);
+        cache.insert_returning_evicted_name("sql_a".into(), fixture_pg_statement("__s0"));
+        cache.insert_returning_evicted_name("sql_b".into(), fixture_pg_statement("__s1"));
+        assert_eq!(cache.len(), 2);
+
+        // A schema change (DDL / SET) invalidates every cached statement.
+        let names = cache.clear_returning_names();
+        assert_eq!(names, vec!["__s0".to_string(), "__s1".to_string()]);
+        assert_eq!(cache.len(), 0);
+
+        // After invalidation the same SQL misses and re-prepares.
+        assert!(cache.get_and_touch("sql_a").is_none());
+        assert_eq!(cache.stats().misses, 1);
     }
 
     #[test]
