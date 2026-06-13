@@ -1042,7 +1042,7 @@ fn percent_encode(input: &str) -> String {
 }
 
 /// URL-encode key-value pairs into a `key=value&key=value` string.
-fn url_encode_params<I, K, V>(params: I) -> String
+pub(crate) fn url_encode_params<I, K, V>(params: I) -> String
 where
     I: IntoIterator<Item = (K, V)>,
     K: AsRef<str>,

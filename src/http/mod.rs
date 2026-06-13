@@ -53,6 +53,10 @@ pub use h1::{
     MultipartError, MultipartForm, ParsedUrl, RedirectPolicy, Request, RequestBuilder, Response,
     ResponseBuilder, Scheme, StatusCode, Version,
 };
+
+/// Ergonomic alias for the high-level pooled HTTP client.
+pub type Client = HttpClient;
+
 // br-asupersync-um5wbj: H3Error is the public-facing alias for
 // H3NativeError; expose it unconditionally (was previously gated behind
 // `feature = "http3"` while H3NativeError was unconditional, producing

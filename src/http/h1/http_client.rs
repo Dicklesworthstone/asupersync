@@ -15,7 +15,9 @@
 
 use crate::cx::Cx;
 use crate::http::h1::client::{ClientStreamingResponse, Http1Client};
-use crate::http::h1::types::{Method, MultipartForm, Request, Response, Version};
+use crate::http::h1::types::{
+    Method, MultipartForm, Request, Response, Version, url_encode_params,
+};
 use crate::http::pool::{Pool, PoolConfig, PoolKey};
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::tcp::stream::TcpStream;
@@ -819,12 +821,52 @@ impl<'a> ClientRequestBuilder<'a> {
         self
     }
 
+    /// Append URL-encoded query parameters to the request URL.
+    ///
+    /// Existing query strings are preserved and extended with `&`.
+    #[must_use]
+    pub fn query<I, K, V>(mut self, params: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let encoded = url_encode_params(params);
+        if !encoded.is_empty() {
+            if self.url.contains('?') {
+                self.url.push('&');
+            } else {
+                self.url.push('?');
+            }
+            self.url.push_str(&encoded);
+        }
+        self
+    }
+
     /// Set a JSON body and add `Content-Type: application/json`.
     pub fn json<T: serde::Serialize>(mut self, value: &T) -> Result<Self, serde_json::Error> {
         self.body = serde_json::to_vec(value)?;
         self.headers
             .push(("Content-Type".to_owned(), "application/json".to_owned()));
         Ok(self)
+    }
+
+    /// Set a URL-encoded form body and add
+    /// `Content-Type: application/x-www-form-urlencoded`.
+    #[must_use]
+    pub fn form<I, K, V>(mut self, params: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let encoded = url_encode_params(params);
+        self.body = encoded.into_bytes();
+        self.headers.push((
+            "Content-Type".to_owned(),
+            "application/x-www-form-urlencoded".to_owned(),
+        ));
+        self
     }
 
     /// Set a multipart form-data body and content type.
@@ -3311,6 +3353,38 @@ mod tests {
         assert!(builder.headers.contains(&(
             "Authorization".to_owned(),
             "Basic YWxpY2U6c2VjcmV0".to_owned()
+        )));
+    }
+
+    #[test]
+    fn client_request_builder_query_extends_existing_url() {
+        let client = HttpClient::new();
+        let builder = client
+            .get_request("http://example.com/search?existing=true")
+            .query([("q", "rust async"), ("tag", "a+b")]);
+
+        assert_eq!(
+            builder.url,
+            "http://example.com/search?existing=true&q=rust%20async&tag=a%2Bb"
+        );
+        assert!(builder.body.is_empty());
+    }
+
+    #[test]
+    fn client_request_builder_form_sets_body_and_content_type() {
+        let client = HttpClient::new();
+        let builder = client
+            .post_request("http://example.com/form")
+            .form([("name", "Ada Lovelace"), ("role", "math+runtime")]);
+
+        assert_eq!(builder.method, Method::Post);
+        assert_eq!(
+            builder.body.as_slice(),
+            b"name=Ada%20Lovelace&role=math%2Bruntime"
+        );
+        assert!(builder.headers.contains(&(
+            "Content-Type".to_owned(),
+            "application/x-www-form-urlencoded".to_owned()
         )));
     }
 
