@@ -515,7 +515,12 @@ impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
                     .total_discards
                     .fetch_add(1, Ordering::Relaxed);
             } else {
-                eprintln!("SECURITY: ValidationGuard disconnect failure - pool state preserved");
+                crate::tracing_compat::warn!(
+                    event = "database_pool_disconnect_failure",
+                    guard = "validation",
+                    action = "preserve_pool_state",
+                    "validation guard disconnect failed"
+                );
             }
         }
     }
@@ -855,9 +860,11 @@ impl<M: ConnectionManager> DbPool<M> {
                     if let Some(auth_client) = authenticated_for {
                         if auth_client != client_id_owned {
                             // This is a security-relevant event - connection was authenticated for different client
-                            eprintln!(
-                                "SECURITY: Discarding connection authenticated for '{}' requested by '{}'",
-                                auth_client, client_id_owned
+                            crate::tracing_compat::warn!(
+                                event = "database_pool_authentication_mismatch_discard",
+                                authenticated_for = %auth_client,
+                                requested_by = %client_id_owned,
+                                "discarding connection authenticated for a different client"
                             );
                         }
                     }
@@ -1280,8 +1287,11 @@ impl<M: ConnectionManager> DbPool<M> {
                 // so we need to increment it back to maintain consistency
                 let mut inner = self.inner.lock();
                 inner.total += 1;
-                eprintln!(
-                    "SECURITY: Disconnect failure in return_connection - pool count restored"
+                crate::tracing_compat::warn!(
+                    event = "database_pool_disconnect_failure",
+                    operation = "return_connection",
+                    action = "restore_pool_count",
+                    "disconnect failed while returning connection"
                 );
             } else {
                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
@@ -1321,9 +1331,11 @@ impl<M: ConnectionManager> DbPool<M> {
 
         // If any disconnects failed during close, log the security event
         if failed_disconnects > 0 {
-            eprintln!(
-                "SECURITY: {} disconnect failures during pool close - potential resource leaks",
-                failed_disconnects
+            crate::tracing_compat::warn!(
+                event = "database_pool_disconnect_failure",
+                operation = "close",
+                failed_disconnects,
+                "disconnect failures during pool close"
             );
         }
     }
@@ -1375,9 +1387,12 @@ impl<M: ConnectionManager> DbPool<M> {
         if failed_disconnects > 0 {
             let mut inner = self.inner.lock();
             inner.total += failed_disconnects;
-            eprintln!(
-                "SECURITY: {} disconnect failures during eviction - pool count adjusted",
-                failed_disconnects
+            crate::tracing_compat::warn!(
+                event = "database_pool_disconnect_failure",
+                operation = "evict_idle",
+                failed_disconnects,
+                action = "adjust_pool_count",
+                "disconnect failures during idle eviction"
             );
         }
         evicted
@@ -1421,8 +1436,9 @@ impl<M: ConnectionManager> DbPool<M> {
                 self.stats
                     .total_disconnect_failures
                     .fetch_add(1, Ordering::Relaxed);
-                eprintln!(
-                    "SECURITY WARNING: Connection disconnect failed (panic) - potential resource leak detected"
+                crate::tracing_compat::warn!(
+                    event = "database_pool_disconnect_panic",
+                    "connection disconnect panicked"
                 );
                 false
             }
@@ -1458,9 +1474,11 @@ impl<M: ConnectionManager> DbPool<M> {
         } else {
             // Disconnect failed - log security event but don't update pool counts
             // to prevent resource count inconsistencies
-            eprintln!(
-                "SECURITY: Failed to disconnect connection for client {:?} - resource leak potential",
-                client_id.as_deref().unwrap_or("unknown")
+            crate::tracing_compat::warn!(
+                event = "database_pool_disconnect_failure",
+                client_id = client_id.as_deref().unwrap_or("unknown"),
+                action = "preserve_pool_count",
+                "failed to discard connection"
             );
         }
 
@@ -1617,9 +1635,12 @@ impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
                                 .entry(client_id.clone())
                                 .or_insert(0);
                             *count += 1;
-                            eprintln!(
-                                "SECURITY: Disconnect failure in Drop - client count restored for '{}'",
-                                client_id
+                            crate::tracing_compat::warn!(
+                                event = "database_pool_disconnect_failure",
+                                operation = "pooled_connection_drop",
+                                client_id = %client_id,
+                                action = "restore_client_count",
+                                "disconnect failed while dropping pooled connection"
                             );
                         }
                     }
@@ -2064,8 +2085,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                    eprintln!(
-                        "SECURITY: Async pool discarding connection with authentication state for anonymous get()"
+                    crate::tracing_compat::warn!(
+                        event = "async_database_pool_authentication_state_discard",
+                        requested_by = "anonymous",
+                        "discarding authenticated connection for anonymous checkout"
                     );
                     self.manager.disconnect(idle.conn);
                     continue;
@@ -2158,9 +2181,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             match &idle.authenticated_for {
                                 Some(auth_client) if auth_client != &client_id_owned => {
                                     // SECURITY: Connection authenticated for different client - must not reuse.
-                                    eprintln!(
-                                        "SECURITY: Async pool discarding connection authenticated for '{}' requested by '{}'",
-                                        auth_client, client_id_owned
+                                    crate::tracing_compat::warn!(
+                                        event = "async_database_pool_authentication_mismatch_discard",
+                                        authenticated_for = %auth_client,
+                                        requested_by = %client_id_owned,
+                                        "discarding connection authenticated for a different client"
                                     );
                                     inner.total = inner.total.saturating_sub(1);
                                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
@@ -2594,9 +2619,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
         // If any disconnects failed during close, log the security event
         if failed_disconnects > 0 {
-            eprintln!(
-                "SECURITY: {} disconnect failures during async pool close - potential resource leaks",
-                failed_disconnects
+            crate::tracing_compat::warn!(
+                event = "async_database_pool_disconnect_failure",
+                operation = "close",
+                failed_disconnects,
+                "disconnect failures during async pool close"
             );
         }
     }
@@ -2628,8 +2655,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 self.stats
                     .total_disconnect_failures
                     .fetch_add(1, Ordering::Relaxed);
-                eprintln!(
-                    "SECURITY WARNING: Async pool connection disconnect failed (panic) - potential resource leak detected"
+                crate::tracing_compat::warn!(
+                    event = "async_database_pool_disconnect_panic",
+                    "async pool connection disconnect panicked"
                 );
                 false
             }
@@ -2752,9 +2780,12 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
                                 .entry(client_id.clone())
                                 .or_insert(0);
                             *count += 1;
-                            eprintln!(
-                                "SECURITY: Async pool disconnect failure in Drop - client count restored for '{}'",
-                                client_id
+                            crate::tracing_compat::warn!(
+                                event = "async_database_pool_disconnect_failure",
+                                operation = "async_pooled_connection_drop",
+                                client_id = %client_id,
+                                action = "restore_client_count",
+                                "disconnect failed while dropping async pooled connection"
                             );
                         }
                     }
