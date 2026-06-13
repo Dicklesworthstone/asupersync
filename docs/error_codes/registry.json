@@ -511,7 +511,7 @@
       "code": "ASUP-E501",
       "name": "http-deadline-exhausted",
       "area": "net-http",
-      "status": "reserved",
+      "status": "live",
       "summary": "An HTTP request or response path exhausted its effective deadline.",
       "probable_causes": [
         "The request budget was smaller than the operation latency.",
@@ -522,8 +522,10 @@
         "Log inbound, consumed, and forwarded budget at every server/client hop."
       ],
       "doc_path": "docs/error_codes/ASUP-E501.md",
-      "since": "reserved",
-      "source_refs": []
+      "since": "0.3.4",
+      "source_refs": [
+        "src/web/request_region.rs"
+      ]
     },
     {
       "code": "ASUP-E502",

@@ -46,6 +46,9 @@ use crate::types::{Budget, CancelKind, Time};
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
 
+const HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC: &str =
+    "[ASUP-E501] server request budget deadline exceeded";
+
 // ─── RequestRegion ──────────────────────────────────────────────────────────
 
 /// Wraps a [`Cx`] and a [`Request`] to form a request-scoped region.
@@ -969,7 +972,7 @@ impl ServerRequestRegion {
             Err(_elapsed) => {
                 self.cx.cancel_with(
                     CancelKind::Timeout,
-                    Some("server request budget deadline exceeded"),
+                    Some(HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC),
                 );
                 match drain_until(&self.cx, drain_grace, fut.as_mut()).await {
                     Some(Ok(response)) => {
