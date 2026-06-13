@@ -12,6 +12,9 @@ The companion integrity manifest is
 [`artifacts/rust_crate_release_provenance_integrity_manifest_v1.json`](../artifacts/rust_crate_release_provenance_integrity_manifest_v1.json).
 It indexes the R2 contract, this operator page, and the R1 policy baseline. The
 manifest intentionally excludes a self-hash to avoid a circular digest.
+Fixture records point at that companion manifest and leave their embedded
+manifest digest unset for the same reason: the companion manifest hashes the
+contract that contains the fixtures.
 
 ## Artifact Classes
 

@@ -192,8 +192,10 @@
         "expected_version": "0.3.4"
       },
       "integrity_manifest": {
-        "path": "artifacts/rust_crate_release_provenance_contract_v1.json",
-        "sha256": "sha256:75f95c8d930cd8d6eb3205c633ae8bc0b2c3d2235a75549ba0a8652165bb914c",
+        "path": "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+        "sha256": null,
+        "sha256_status": "recorded_in_companion_manifest",
+        "cycle_break": "The companion manifest hashes this contract, so fixture records do not embed the companion manifest digest.",
         "fixture_only": true
       },
       "supersession": {
@@ -281,8 +283,10 @@
         "expected_version": "0.3.4"
       },
       "integrity_manifest": {
-        "path": "artifacts/rust_crate_release_provenance_contract_v1.json",
-        "sha256": "sha256:75f95c8d930cd8d6eb3205c633ae8bc0b2c3d2235a75549ba0a8652165bb914c",
+        "path": "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+        "sha256": null,
+        "sha256_status": "recorded_in_companion_manifest",
+        "cycle_break": "The companion manifest hashes this contract, so fixture records do not embed the companion manifest digest.",
         "fixture_only": true
       },
       "supersession": {
@@ -370,8 +374,10 @@
         "expected_version": "0.3.4"
       },
       "integrity_manifest": {
-        "path": "artifacts/rust_crate_release_provenance_contract_v1.json",
-        "sha256": "sha256:75f95c8d930cd8d6eb3205c633ae8bc0b2c3d2235a75549ba0a8652165bb914c",
+        "path": "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+        "sha256": null,
+        "sha256_status": "recorded_in_companion_manifest",
+        "cycle_break": "The companion manifest hashes this contract, so fixture records do not embed the companion manifest digest.",
         "fixture_only": true
       },
       "supersession": {
