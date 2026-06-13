@@ -137,6 +137,7 @@ impl AppSpecV1 {
         for group in &self.supervision.groups {
             group.validate(&service_names)?;
         }
+        validate_supervision_assignments(&self.services, &self.supervision.groups)?;
 
         unique_names(
             "observability",
@@ -1080,6 +1081,29 @@ pub enum AppSpecV1ValidationError {
         /// Group name.
         name: String,
     },
+    /// A declared service was not assigned to any supervision group.
+    MissingSupervisionAssignment {
+        /// Service name.
+        service: String,
+    },
+    /// A declared service was assigned to more than one supervision group.
+    DuplicateSupervisionAssignment {
+        /// Service name.
+        service: String,
+        /// First group that listed the service.
+        first_group: String,
+        /// Second group that listed the service.
+        second_group: String,
+    },
+    /// `service.supervision_group` disagreed with group membership.
+    SupervisionGroupMismatch {
+        /// Service name.
+        service: String,
+        /// Group declared on the service.
+        declared_group: String,
+        /// Group that actually lists the service.
+        actual_group: String,
+    },
     /// The embedded compatibility policy is weaker than v1 allows.
     CompatibilityPolicy {
         /// Human-readable reason.
@@ -1118,6 +1142,28 @@ impl std::fmt::Display for AppSpecV1ValidationError {
             Self::EmptySupervisionGroup { name } => {
                 write!(f, "supervision group {name:?} has no services")
             }
+            Self::MissingSupervisionAssignment { service } => {
+                write!(
+                    f,
+                    "service {service:?} is not assigned to a supervision group"
+                )
+            }
+            Self::DuplicateSupervisionAssignment {
+                service,
+                first_group,
+                second_group,
+            } => write!(
+                f,
+                "service {service:?} is assigned to both supervision groups {first_group:?} and {second_group:?}"
+            ),
+            Self::SupervisionGroupMismatch {
+                service,
+                declared_group,
+                actual_group,
+            } => write!(
+                f,
+                "service {service:?} declares supervision group {declared_group:?} but is assigned to {actual_group:?}"
+            ),
             Self::CompatibilityPolicy { reason } => write!(f, "{reason}"),
         }
     }
@@ -1172,6 +1218,44 @@ fn validate_optional_reference(
     if let Some(name) = name {
         validate_reference(field, name, known_names)?;
     }
+    Ok(())
+}
+
+fn validate_supervision_assignments(
+    services: &[AppServiceSpecV1],
+    groups: &[AppSupervisionGroupSpecV1],
+) -> Result<(), AppSpecV1ValidationError> {
+    let mut assignments = BTreeMap::new();
+    for group in groups {
+        for service in &group.services {
+            if let Some(first_group) = assignments.insert(service.as_str(), group.name.as_str()) {
+                return Err(AppSpecV1ValidationError::DuplicateSupervisionAssignment {
+                    service: service.clone(),
+                    first_group: first_group.to_string(),
+                    second_group: group.name.clone(),
+                });
+            }
+        }
+    }
+
+    for service in services {
+        let Some(actual_group) = assignments.get(service.name.as_str()).copied() else {
+            return Err(AppSpecV1ValidationError::MissingSupervisionAssignment {
+                service: service.name.clone(),
+            });
+        };
+
+        if let Some(declared_group) = &service.supervision_group {
+            if declared_group != actual_group {
+                return Err(AppSpecV1ValidationError::SupervisionGroupMismatch {
+                    service: service.name.clone(),
+                    declared_group: declared_group.clone(),
+                    actual_group: actual_group.to_string(),
+                });
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -2243,6 +2327,108 @@ mod tests {
             "unexpected validation error: {err:?}"
         );
         crate::test_complete!("appspec_v1_validate_rejects_duplicate_services");
+    }
+
+    #[test]
+    fn appspec_v1_validate_rejects_unassigned_service() {
+        init_test("appspec_v1_validate_rejects_unassigned_service");
+        let mut spec = appspec_v1_sample();
+        let mut worker = spec.services[0].clone();
+        worker.name = "worker".to_string();
+        worker.supervision_group = None;
+        spec.services.push(worker);
+
+        let err = spec.validate().expect_err("unassigned service rejects");
+        assert!(
+            matches!(
+                err,
+                AppSpecV1ValidationError::MissingSupervisionAssignment {
+                    ref service
+                } if service == "worker"
+            ),
+            "unexpected validation error: {err:?}"
+        );
+        crate::test_complete!("appspec_v1_validate_rejects_unassigned_service");
+    }
+
+    #[test]
+    fn appspec_v1_validate_rejects_duplicate_service_assignment() {
+        init_test("appspec_v1_validate_rejects_duplicate_service_assignment");
+        let mut spec = appspec_v1_sample();
+        spec.supervision.groups.push(AppSupervisionGroupSpecV1 {
+            name: "secondary".to_string(),
+            services: vec!["api".to_string()],
+            restart_policy: AppRestartPolicyV1::OneForOne,
+        });
+
+        let err = spec
+            .validate()
+            .expect_err("duplicate supervision assignment rejects");
+        assert!(
+            matches!(
+                err,
+                AppSpecV1ValidationError::DuplicateSupervisionAssignment {
+                    ref service,
+                    ref first_group,
+                    ref second_group,
+                } if service == "api" && first_group == "root" && second_group == "secondary"
+            ),
+            "unexpected validation error: {err:?}"
+        );
+        crate::test_complete!("appspec_v1_validate_rejects_duplicate_service_assignment");
+    }
+
+    #[test]
+    fn appspec_v1_validate_rejects_service_group_mismatch() {
+        init_test("appspec_v1_validate_rejects_service_group_mismatch");
+        let mut spec = appspec_v1_sample();
+        spec.supervision.groups.push(AppSupervisionGroupSpecV1 {
+            name: "declared".to_string(),
+            services: vec!["shadow".to_string()],
+            restart_policy: AppRestartPolicyV1::OneForOne,
+        });
+        spec.services[0].supervision_group = Some("declared".to_string());
+
+        let err = spec
+            .validate()
+            .expect_err("mismatched supervision group rejects");
+        assert!(
+            matches!(
+                err,
+                AppSpecV1ValidationError::UnknownReference {
+                    field: "supervision.group.services",
+                    ref name,
+                } if name == "shadow"
+            ),
+            "unknown services should still fail before mismatch analysis: {err:?}"
+        );
+
+        let mut spec = appspec_v1_sample();
+        spec.supervision.groups.push(AppSupervisionGroupSpecV1 {
+            name: "declared".to_string(),
+            services: vec!["aux".to_string()],
+            restart_policy: AppRestartPolicyV1::OneForOne,
+        });
+        let mut aux = spec.services[0].clone();
+        aux.name = "aux".to_string();
+        aux.supervision_group = Some("root".to_string());
+        spec.services.push(aux);
+
+        let err = spec
+            .validate()
+            .expect_err("declared group mismatch rejects");
+        assert!(
+            matches!(
+                err,
+                AppSpecV1ValidationError::SupervisionGroupMismatch {
+                    ref service,
+                    ref declared_group,
+                    ref actual_group,
+                } if service == "aux" && declared_group == "root" && actual_group == "declared"
+            ),
+            "unexpected validation error: {err:?}"
+        );
+        crate::test_complete!("appspec_v1_validate_rejects_service_group_mismatch");
     }
 
     #[test]

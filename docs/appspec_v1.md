@@ -105,6 +105,9 @@ express cleanly:
 - `schema_version` must equal `asupersync.appspec.v1`;
 - names in each declared collection must be unique and nonempty;
 - budget, resource, SLO hook, service, and supervision references must resolve;
+- every declared service must be assigned to exactly one supervision group;
+- a service's optional `supervision_group` field must match the group that lists
+  it;
 - route paths must be absolute;
 - budgets must contain at least one limiting dimension;
 - supervision groups must supervise at least one declared service;
