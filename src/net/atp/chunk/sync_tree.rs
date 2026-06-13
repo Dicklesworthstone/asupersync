@@ -427,7 +427,7 @@ impl SyncTreeProfile {
         }
 
         // Simple estimation based on chunk size distribution and similarity scores
-        let mut total_similarity = 0u32;
+        let mut total_similarity = 0u64;
         let mut unique_chunks = std::collections::HashSet::new();
 
         for boundary in boundaries {
@@ -435,7 +435,7 @@ impl SyncTreeProfile {
                 similarity_score, ..
             }) = &boundary.metadata
             {
-                total_similarity += similarity_score;
+                total_similarity = total_similarity.saturating_add(u64::from(*similarity_score));
                 unique_chunks.insert(boundary.content_hash);
             }
         }
@@ -601,6 +601,38 @@ mod tests {
         let ratio = SyncTreeProfile::estimate_deduplication_ratio(&boundaries);
         assert!(ratio > 0.0);
         assert!(ratio <= 1.0);
+    }
+
+    #[test]
+    fn deduplication_ratio_handles_large_similarity_scores() {
+        let boundaries = vec![
+            ChunkBoundary {
+                index: 0,
+                byte_offset: 0,
+                size_bytes: 1000,
+                content_hash: [1; 32],
+                strategy: ChunkStrategy::ContentDefined,
+                metadata: Some(ChunkMetadata::SyncTree {
+                    boundary_hash: 123,
+                    similarity_score: u32::MAX,
+                }),
+            },
+            ChunkBoundary {
+                index: 1,
+                byte_offset: 1000,
+                size_bytes: 1000,
+                content_hash: [1; 32],
+                strategy: ChunkStrategy::ContentDefined,
+                metadata: Some(ChunkMetadata::SyncTree {
+                    boundary_hash: 456,
+                    similarity_score: u32::MAX,
+                }),
+            },
+        ];
+
+        let ratio = SyncTreeProfile::estimate_deduplication_ratio(&boundaries);
+        assert!(ratio.is_finite());
+        assert_eq!(ratio, 0.5);
     }
 
     #[test]

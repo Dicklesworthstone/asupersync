@@ -421,8 +421,9 @@ impl SparseImageProfile {
                 // This chunk overlaps with a sparse region
                 match region.region_type {
                     SparseRegionType::Zero | SparseRegionType::Pattern => {
-                        let hole_size = (region.end - region.start.max(chunk_offset))
-                            .min(chunk_end - chunk_offset);
+                        let overlap_start = region.start.max(chunk_offset);
+                        let overlap_end = region.end.min(chunk_end);
+                        let hole_size = overlap_end.saturating_sub(overlap_start);
 
                         let mut attributes = BTreeMap::new();
                         attributes.insert("pattern".to_string(), region.fill_pattern.clone());
@@ -551,7 +552,9 @@ impl SparseImageProfile {
         } else {
             // Compression ratio = original_size / compressed_size
             // Sparse regions compress to nearly nothing
-            let mut effective_size = total_size - sparse_size + (sparse_size / 1000); // Sparse metadata overhead
+            let accounted_sparse_size = sparse_size.min(total_size);
+            let data_size = total_size - accounted_sparse_size;
+            let mut effective_size = data_size + (accounted_sparse_size / 1000); // Sparse metadata overhead
             if effective_size == 0 {
                 effective_size = 1;
             }
@@ -700,6 +703,15 @@ mod tests {
         );
         assert!(is_sparse);
         assert!(metadata.is_some());
+        assert_eq!(metadata.unwrap().hole_size, 4000);
+
+        // Chunk that begins before the sparse region should only account for
+        // the actual intersection, not the whole chunk.
+        let partially_sparse_chunk = vec![0u8; 4000];
+        let (is_sparse, metadata) =
+            SparseImageProfile::analyze_chunk_sparsity(&partially_sparse_chunk, 0, &sparse_regions);
+        assert!(is_sparse);
+        assert_eq!(metadata.unwrap().hole_size, 3000);
 
         // Chunk that doesn't overlap
         let data_chunk = vec![1u8; 1000];
@@ -807,6 +819,29 @@ mod tests {
         let ratio = SparseImageProfile::estimate_sparse_compression_ratio(&boundaries);
         assert!(ratio > 1.0); // Should have compression benefit
         assert!(ratio < 1000.0); // But reasonable upper bound
+    }
+
+    #[test]
+    fn compression_ratio_caps_malformed_sparse_metadata() {
+        let boundaries = vec![ChunkBoundary {
+            index: 0,
+            byte_offset: 0,
+            size_bytes: 100_000,
+            content_hash: [1; 32],
+            strategy: ChunkStrategy::ObjectSpecific,
+            metadata: Some(ChunkMetadata::SparseImage {
+                is_sparse_hole: true,
+                hole_metadata: Some(SparseHoleMetadata {
+                    hole_size: 200_000,
+                    hole_type: "zero-filled".to_string(),
+                    attributes: BTreeMap::new(),
+                }),
+            }),
+        }];
+
+        let ratio = SparseImageProfile::estimate_sparse_compression_ratio(&boundaries);
+        assert!(ratio.is_finite());
+        assert_eq!(ratio, 1000.0);
     }
 
     #[test]

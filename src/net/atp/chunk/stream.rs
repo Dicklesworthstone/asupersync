@@ -377,7 +377,8 @@ impl StreamProfile {
 
         let completion_ratio = if let Some(total_size) = total_expected_size {
             if total_size > 0 {
-                boundary.byte_offset.saturating_add(boundary.size_bytes) as f64 / total_size as f64
+                let completed = boundary.byte_offset.saturating_add(boundary.size_bytes);
+                (completed as f64 / total_size as f64).min(1.0)
             } else {
                 1.0
             }
@@ -746,6 +747,25 @@ mod tests {
         assert!(update.early_consumption_safe);
         assert!((update.completion_ratio - 0.24576).abs() < 0.001); // (20480 + 4096) / 100000
         assert!(update.timestamp_nanos > 0);
+    }
+
+    #[test]
+    fn rolling_manifest_completion_ratio_is_capped() {
+        let boundary = ChunkBoundary {
+            index: 9,
+            byte_offset: 90_000,
+            size_bytes: 20_000,
+            content_hash: [9; 32],
+            strategy: ChunkStrategy::FixedSize,
+            metadata: Some(ChunkMetadata::Stream {
+                sequence: 9,
+                early_consumption_safe: true,
+            }),
+        };
+
+        let update = StreamProfile::create_rolling_manifest_update(&boundary, Some(100_000));
+
+        assert_eq!(update.completion_ratio, 1.0);
     }
 
     #[test]
