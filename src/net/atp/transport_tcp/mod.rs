@@ -22,20 +22,23 @@
 //! peer, or rejected handshake is a hard error — there is no success path that
 //! moves zero bytes.
 
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::atp::manifest::MerkleRoot;
-use crate::atp::object::{Object, ObjectEdge, ObjectGraph};
+use crate::atp::object::{ContentId, Object, ObjectEdge, ObjectGraph, ObjectId, ObjectKind};
 use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::protocol::codec::AtpFrameCodec;
-use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
+use crate::net::atp::protocol::frames::{Frame, FrameType, MAX_FRAME_SIZE, ProtocolVersion};
 use crate::net::{TcpListener, TcpStream};
 
 /// Protocol identifier carried in the handshake; bump on wire-incompatible
@@ -49,6 +52,14 @@ pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
 /// Default ceiling on a single transfer's total bytes. v1 buffers entries in
 /// memory on the receive side, so this also bounds receiver memory.
 pub const DEFAULT_MAX_TRANSFER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Default maximum time to wait for an accepted peer to make protocol progress.
+/// The timer is restarted for each control/data frame and receipt write.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default maximum time a one-shot receiver waits for the initial TCP accept.
+/// Persistent `serve()` uses the same value as a cancellation checkpoint cadence.
+pub const DEFAULT_ACCEPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum number of files a single transfer manifest may declare. Bounds the
 /// per-entry bookkeeping a remote peer can force the receiver to allocate.
@@ -64,6 +75,11 @@ const INITIAL_ENTRY_CAPACITY: u64 = 4 * 1024 * 1024;
 /// broken listener still terminates instead of hot-looping.
 const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 64;
 
+/// Default number of accepted transfers a persistent server may process at
+/// once. This bounds child task fan-out while preventing one slow peer from
+/// monopolizing the accept loop.
+pub const DEFAULT_MAX_ACTIVE_CONNECTIONS: usize = 64;
+
 /// Transport tuning knobs.
 #[derive(Debug, Clone, Copy)]
 pub struct TransferConfig {
@@ -71,6 +87,15 @@ pub struct TransferConfig {
     pub chunk_size: usize,
     /// Maximum total bytes a single transfer may carry.
     pub max_transfer_bytes: u64,
+    /// Maximum time to wait for a connected peer to produce or accept the next
+    /// protocol frame before failing the transfer closed.
+    pub idle_timeout: Duration,
+    /// Maximum time a one-shot receive waits for `accept()`. In persistent
+    /// `serve()`, this is a cancellation checkpoint interval while idle.
+    pub accept_timeout: Duration,
+    /// Maximum number of connections `serve()` may process concurrently.
+    /// Values of zero are treated as one active connection.
+    pub max_active_connections: usize,
 }
 
 impl Default for TransferConfig {
@@ -78,6 +103,9 @@ impl Default for TransferConfig {
         Self {
             chunk_size: DEFAULT_CHUNK_SIZE,
             max_transfer_bytes: DEFAULT_MAX_TRANSFER_BYTES,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            accept_timeout: DEFAULT_ACCEPT_TIMEOUT,
+            max_active_connections: DEFAULT_MAX_ACTIVE_CONNECTIONS,
         }
     }
 }
@@ -122,6 +150,14 @@ pub enum TransportError {
     /// The transfer was cancelled via the capability context.
     #[error("transfer cancelled")]
     Cancelled,
+    /// A transport operation exceeded its configured timeout.
+    #[error("transport timeout during {operation} after {timeout:?}")]
+    Timeout {
+        /// Operation that timed out.
+        operation: &'static str,
+        /// Configured timeout duration.
+        timeout: Duration,
+    },
 }
 
 // ─── Wire control payloads (JSON) ────────────────────────────────────────────
@@ -282,8 +318,16 @@ where
 
 fn json_frame<T: Serialize>(ty: FrameType, value: &T) -> Result<Frame, TransportError> {
     let payload = serde_json::to_vec(value).map_err(|e| TransportError::Control(e.to_string()))?;
-    Frame::new(ProtocolVersion::CURRENT, ty, payload)
-        .map_err(|e| TransportError::Frame(e.to_string()))
+    let frame = Frame::new(ProtocolVersion::CURRENT, ty, payload)
+        .map_err(|e| TransportError::Frame(e.to_string()))?;
+    let encoded_len = frame.encoded_len() as u64;
+    if encoded_len > MAX_FRAME_SIZE {
+        return Err(TransportError::Frame(format!(
+            "{ty:?} JSON frame encodes to {encoded_len} bytes (max {MAX_FRAME_SIZE}); \
+             split or chunk the manifest/control payload"
+        )));
+    }
+    Ok(frame)
 }
 
 fn parse_json<T: for<'de> Deserialize<'de>>(frame: &Frame) -> Result<T, TransportError> {
@@ -328,6 +372,78 @@ fn build_flat_graph(entries: &[(String, Vec<u8>)]) -> (ObjectGraph, String) {
     let _ = graph.add_root(root);
     let merkle = MerkleRoot::from_graph(&graph);
     (graph, merkle.to_hex())
+}
+
+struct BorrowedFlatObject<'a> {
+    kind: ObjectKind,
+    size_bytes: Option<u64>,
+    children: Vec<ObjectEdge>,
+    content: Option<&'a [u8]>,
+}
+
+/// Compute the same flat object-graph merkle root as [`build_flat_graph`]
+/// without cloning file contents into an owned [`ObjectGraph`]. The receiver
+/// uses this after buffering incoming entries, keeping verification at one
+/// buffered copy instead of cloning every entry before hashing.
+fn flat_merkle_root_from_slices<'a>(
+    entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> String {
+    let mut sorted: Vec<(&'a str, &'a [u8])> = entries.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut objects: BTreeMap<ObjectId, BorrowedFlatObject<'a>> = BTreeMap::new();
+    let mut edges = Vec::with_capacity(sorted.len());
+    for (rel_path, bytes) in sorted {
+        let id = ObjectId::content(ContentId::from_bytes(bytes));
+        objects
+            .entry(id.clone())
+            .or_insert_with(|| BorrowedFlatObject {
+                kind: ObjectKind::FileObject,
+                size_bytes: Some(bytes.len() as u64),
+                children: Vec::new(),
+                content: Some(bytes),
+            });
+        edges.push(ObjectEdge::new(id, rel_path.to_string()));
+    }
+
+    let root = Object::directory(edges);
+    objects.insert(
+        root.id,
+        BorrowedFlatObject {
+            kind: root.metadata.kind,
+            size_bytes: root.metadata.size_bytes,
+            children: root.children,
+            content: None,
+        },
+    );
+
+    let mut hasher = Sha256::new();
+    for (id, object) in objects {
+        hasher.update(id.hash_bytes());
+        hasher.update([object.kind as u8]);
+        if let Some(size) = object.size_bytes {
+            hasher.update(size.to_be_bytes());
+        }
+
+        let mut child_indices: Vec<usize> = (0..object.children.len()).collect();
+        child_indices.sort_by(|&a, &b| object.children[a].name.cmp(&object.children[b].name));
+        for idx in child_indices {
+            let edge = &object.children[idx];
+            hasher.update(edge.name.as_bytes());
+            hasher.update(edge.child_id.hash_bytes());
+            hasher.update([u8::from(edge.is_symlink)]);
+            if let Some(target) = &edge.symlink_target {
+                hasher.update(target.as_os_str().as_encoded_bytes());
+            }
+        }
+
+        if let Some(content) = object.content {
+            let content_hash = Sha256::digest(content);
+            hasher.update(content_hash);
+        }
+    }
+
+    hex_encode(&hasher.finalize())
 }
 
 /// Walk a path into `(rel_path, bytes)` entries. A single file yields one entry
@@ -431,15 +547,63 @@ fn validate_manifest(
             manifest.entries.len()
         )));
     }
-    let declared_total: u64 = manifest
-        .entries
-        .iter()
-        .fold(0u64, |acc, e| acc.saturating_add(e.size));
+    if !manifest.is_directory && manifest.entries.len() != 1 {
+        return Err(TransportError::Frame(format!(
+            "single-file transfer manifest declares {} entries",
+            manifest.entries.len()
+        )));
+    }
+    let mut seen_rel_paths = std::collections::BTreeSet::new();
+    let declared_total: u64 =
+        manifest
+            .entries
+            .iter()
+            .enumerate()
+            .try_fold(0u64, |acc, (position, entry)| {
+                let expected = u32::try_from(position).map_err(|_| {
+                    TransportError::Frame("manifest contains too many indexed entries".to_string())
+                })?;
+                if entry.index != expected {
+                    return Err(TransportError::Frame(format!(
+                        "manifest entry index {} does not match position {expected}",
+                        entry.index
+                    )));
+                }
+                validate_manifest_rel_path(&entry.rel_path)?;
+                if !seen_rel_paths.insert(entry.rel_path.as_str()) {
+                    return Err(TransportError::Frame(format!(
+                        "duplicate manifest rel_path: {}",
+                        entry.rel_path
+                    )));
+                }
+                Ok(acc.saturating_add(entry.size))
+            })?;
     if declared_total > config.max_transfer_bytes {
         return Err(TransportError::TooLarge {
             size: declared_total,
             max: config.max_transfer_bytes,
         });
+    }
+    Ok(())
+}
+
+fn validate_manifest_rel_path(rel: &str) -> Result<(), TransportError> {
+    if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
+        return Err(TransportError::Source(format!(
+            "unsafe manifest rel_path: {rel}"
+        )));
+    }
+    for component in rel.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.contains('\\')
+            || component.contains(':')
+        {
+            return Err(TransportError::Source(format!(
+                "unsafe manifest rel_path: {rel}"
+            )));
+        }
     }
     Ok(())
 }
@@ -463,6 +627,82 @@ fn parse_data_frame(frame: &Frame) -> Result<(u32, u64, &[u8]), TransportError> 
     let index = u32::from_be_bytes([p[0], p[1], p[2], p[3]]);
     let offset = u64::from_be_bytes([p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]]);
     Ok((index, offset, &p[12..]))
+}
+
+async fn with_transport_timeout<T, E, F>(
+    cx: &Cx,
+    timeout: Duration,
+    operation: &'static str,
+    future: F,
+) -> Result<T, TransportError>
+where
+    F: Future<Output = Result<T, E>>,
+    TransportError: From<E>,
+{
+    if timeout.is_zero() {
+        return Err(TransportError::Timeout { operation, timeout });
+    }
+    match crate::time::timeout(cx.now(), timeout, future).await {
+        Ok(result) => result.map_err(TransportError::from),
+        Err(_elapsed) => Err(TransportError::Timeout { operation, timeout }),
+    }
+}
+
+type ReceiveTaskHandle = crate::runtime::TaskHandle<Result<ReceiveReport, TransportError>>;
+
+fn receive_task_join_error(err: crate::runtime::JoinError) -> TransportError {
+    match err {
+        crate::runtime::JoinError::Cancelled(_) => TransportError::Cancelled,
+        crate::runtime::JoinError::Panicked(_)
+        | crate::runtime::JoinError::PolledAfterCompletion => {
+            TransportError::Frame(format!("receive task join failed: {err}"))
+        }
+    }
+}
+
+fn drain_finished_receive_tasks<F>(active: &mut Vec<ReceiveTaskHandle>, on_result: &mut F)
+where
+    F: FnMut(Result<ReceiveReport, TransportError>),
+{
+    let mut idx = 0;
+    while idx < active.len() {
+        if !active[idx].is_finished() {
+            idx += 1;
+            continue;
+        }
+
+        match active[idx].try_join() {
+            Ok(Some(result)) => {
+                active.swap_remove(idx);
+                on_result(result);
+            }
+            Ok(None) => {
+                idx += 1;
+            }
+            Err(err) => {
+                active.swap_remove(idx);
+                on_result(Err(receive_task_join_error(err)));
+            }
+        }
+    }
+}
+
+async fn abort_and_drain_receive_tasks<F>(
+    cx: &Cx,
+    active: &mut Vec<ReceiveTaskHandle>,
+    on_result: &mut F,
+) where
+    F: FnMut(Result<ReceiveReport, TransportError>),
+{
+    for handle in active.iter() {
+        handle.abort_with_reason(crate::types::CancelReason::parent_cancelled());
+    }
+    while let Some(mut handle) = active.pop() {
+        match handle.join(cx).await {
+            Ok(result) => on_result(result),
+            Err(err) => on_result(Err(receive_task_join_error(err))),
+        }
+    }
 }
 
 // ─── Public API: send ────────────────────────────────────────────────────────
@@ -617,7 +857,8 @@ pub async fn receive_once(
     config: TransferConfig,
     peer_id: &str,
 ) -> Result<ReceiveReport, TransportError> {
-    let (stream, peer) = listener.accept().await?;
+    let (stream, peer) =
+        with_transport_timeout(cx, config.accept_timeout, "accept", listener.accept()).await?;
     receive_connection(cx, stream, peer, dest_dir, config, peer_id).await
 }
 
@@ -633,7 +874,13 @@ pub async fn receive_connection(
     let mut transport = FrameTransport::new(stream);
 
     // Handshake.
-    let hello_frame = transport.recv().await?;
+    let hello_frame = with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "receive handshake",
+        transport.recv(),
+    )
+    .await?;
     if hello_frame.frame_type() != FrameType::Handshake {
         return Err(TransportError::Unexpected {
             got: hello_frame.frame_type(),
@@ -642,23 +889,28 @@ pub async fn receive_connection(
     }
     let hello: Hello = parse_json(&hello_frame)?;
     let accepted = hello.protocol == ATP_TCP_PROTOCOL;
-    transport
-        .send(&json_frame(
-            FrameType::HandshakeAck,
-            &HelloAck {
-                accepted,
-                peer_id: peer_id.to_string(),
-                reason: if accepted {
-                    None
-                } else {
-                    Some(format!(
-                        "unsupported protocol {} (this peer speaks {ATP_TCP_PROTOCOL})",
-                        hello.protocol
-                    ))
-                },
+    let handshake_ack = json_frame(
+        FrameType::HandshakeAck,
+        &HelloAck {
+            accepted,
+            peer_id: peer_id.to_string(),
+            reason: if accepted {
+                None
+            } else {
+                Some(format!(
+                    "unsupported protocol {} (this peer speaks {ATP_TCP_PROTOCOL})",
+                    hello.protocol
+                ))
             },
-        )?)
-        .await?;
+        },
+    )?;
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send handshake ack",
+        transport.send(&handshake_ack),
+    )
+    .await?;
     if !accepted {
         return Err(TransportError::HandshakeRejected(format!(
             "unsupported protocol {}",
@@ -667,7 +919,13 @@ pub async fn receive_connection(
     }
 
     // Manifest.
-    let manifest_frame = transport.recv().await?;
+    let manifest_frame = with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "receive manifest",
+        transport.recv(),
+    )
+    .await?;
     if manifest_frame.frame_type() != FrameType::ObjectManifest {
         return Err(TransportError::Unexpected {
             got: manifest_frame.frame_type(),
@@ -693,7 +951,9 @@ pub async fn receive_connection(
 
     loop {
         cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        let frame = transport.recv().await?;
+        let frame =
+            with_transport_timeout(cx, config.idle_timeout, "receive frame", transport.recv())
+                .await?;
         match frame.frame_type() {
             FrameType::ObjectData => {
                 let (index, offset, chunk) = parse_data_frame(&frame)?;
@@ -748,13 +1008,13 @@ pub async fn receive_connection(
             break;
         }
     }
-    let rebuilt: Vec<(String, Vec<u8>)> = manifest
-        .entries
-        .iter()
-        .zip(buffers.iter())
-        .map(|(e, b)| (e.rel_path.clone(), b.clone()))
-        .collect();
-    let (_, rebuilt_root) = build_flat_graph(&rebuilt);
+    let rebuilt_root = flat_merkle_root_from_slices(
+        manifest
+            .entries
+            .iter()
+            .zip(buffers.iter())
+            .map(|(entry, bytes)| (entry.rel_path.as_str(), bytes.as_slice())),
+    );
     let merkle_ok = rebuilt_root == manifest.merkle_root_hex;
 
     let mut committed_paths: Vec<PathBuf> = Vec::new();
@@ -795,12 +1055,22 @@ pub async fn receive_connection(
             .map(|p| p.display().to_string())
             .collect(),
     };
-    transport
-        .send(&json_frame(FrameType::Proof, &receipt)?)
-        .await?;
-    let _ = transport
-        .send(&Frame::empty(FrameType::Close).map_err(|e| TransportError::Frame(e.to_string()))?)
-        .await;
+    let proof = json_frame(FrameType::Proof, &receipt)?;
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send proof",
+        transport.send(&proof),
+    )
+    .await?;
+    let close = Frame::empty(FrameType::Close).map_err(|e| TransportError::Frame(e.to_string()))?;
+    let _ = with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send close",
+        transport.send(&close),
+    )
+    .await;
 
     if !committed {
         return Err(TransportError::Integrity(
@@ -888,16 +1158,46 @@ where
     F: FnMut(Result<ReceiveReport, TransportError>),
 {
     let mut consecutive_failures: u32 = 0;
+    let max_active_connections = config.max_active_connections.max(1);
+    let capacity_wait = if config.accept_timeout.is_zero() {
+        DEFAULT_ACCEPT_TIMEOUT
+    } else {
+        config.accept_timeout
+    };
+    let mut active: Vec<ReceiveTaskHandle> = Vec::new();
     loop {
+        drain_finished_receive_tasks(&mut active, &mut on_result);
         if cx.is_cancel_requested() {
+            abort_and_drain_receive_tasks(cx, &mut active, &mut on_result).await;
             return Ok(());
         }
-        match listener.accept().await {
+        if active.len() >= max_active_connections {
+            crate::time::sleep(cx.now(), capacity_wait).await;
+            continue;
+        }
+        let accept =
+            with_transport_timeout(cx, config.accept_timeout, "accept", listener.accept()).await;
+        match accept {
             Ok((stream, peer)) => {
                 consecutive_failures = 0;
-                let result =
-                    receive_connection(cx, stream, peer, &dest_dir, config, &peer_id).await;
-                on_result(result);
+                let dest_dir = dest_dir.clone();
+                let peer_id = peer_id.clone();
+                match cx.spawn(move |child| async move {
+                    receive_connection(&child, stream, peer, &dest_dir, config, &peer_id).await
+                }) {
+                    Ok(handle) => active.push(handle),
+                    Err(err) => on_result(Err(TransportError::Frame(format!(
+                        "spawn receive task failed: {err}"
+                    )))),
+                }
+            }
+            Err(TransportError::Timeout {
+                operation: "accept",
+                ..
+            }) => {
+                // No pending connection. Keep the listener alive while giving
+                // the loop a bounded cancellation checkpoint.
+                consecutive_failures = 0;
             }
             Err(err) => {
                 // A transient accept error (e.g. ECONNABORTED, EMFILE) must not
@@ -905,7 +1205,7 @@ where
                 // listener must terminate rather than hot-loop.
                 consecutive_failures += 1;
                 let message = err.to_string();
-                on_result(Err(TransportError::Io(err)));
+                on_result(Err(err));
                 if consecutive_failures >= MAX_CONSECUTIVE_ACCEPT_FAILURES {
                     return Err(TransportError::Frame(format!(
                         "accept loop aborted after {consecutive_failures} consecutive failures; \
@@ -935,6 +1235,25 @@ mod tests {
         let (_, rb) = build_flat_graph(&b);
         assert_eq!(ra, rb, "merkle root must be independent of entry order");
         assert_eq!(ra.len(), 64, "sha-256 hex root is 64 chars");
+    }
+
+    #[test]
+    fn borrowed_flat_merkle_root_matches_owned_graph_with_duplicate_content() {
+        let entries = vec![
+            ("b.txt".to_string(), b"same".to_vec()),
+            ("a.txt".to_string(), b"same".to_vec()),
+            ("c.txt".to_string(), b"different".to_vec()),
+        ];
+        let borrowed_root = flat_merkle_root_from_slices(
+            entries
+                .iter()
+                .map(|(rel_path, bytes)| (rel_path.as_str(), bytes.as_slice())),
+        );
+        let (_, owned_root) = build_flat_graph(&entries);
+        assert_eq!(
+            borrowed_root, owned_root,
+            "borrowed receive-side hashing must preserve the owned ObjectGraph contract"
+        );
     }
 
     #[test]
@@ -989,6 +1308,55 @@ mod tests {
         let json = serde_json::to_vec(&manifest).unwrap();
         let back: TransferManifest = serde_json::from_slice(&json).unwrap();
         assert_eq!(manifest, back);
+    }
+
+    #[test]
+    fn json_frame_rejects_oversized_manifest_with_actionable_error() {
+        let manifest = TransferManifest {
+            transfer_id: "abc".to_string(),
+            root_name: "x".repeat(usize::try_from(MAX_FRAME_SIZE).unwrap()),
+            is_directory: true,
+            total_bytes: 0,
+            merkle_root_hex: "00".repeat(32),
+            entries: Vec::new(),
+        };
+        assert!(matches!(
+            json_frame(FrameType::ObjectManifest, &manifest),
+            Err(TransportError::Frame(msg))
+                if msg.contains("ObjectManifest")
+                    && msg.contains("split or chunk")
+                    && msg.contains("max")
+        ));
+    }
+
+    #[test]
+    fn transfer_config_defaults_bound_accept_and_idle_waits() {
+        let cfg = TransferConfig::default();
+        assert_eq!(cfg.idle_timeout, DEFAULT_IDLE_TIMEOUT);
+        assert_eq!(cfg.accept_timeout, DEFAULT_ACCEPT_TIMEOUT);
+        assert_eq!(cfg.max_active_connections, DEFAULT_MAX_ACTIVE_CONNECTIONS);
+        assert!(!cfg.idle_timeout.is_zero());
+        assert!(!cfg.accept_timeout.is_zero());
+        assert!(cfg.max_active_connections > 0);
+    }
+
+    #[test]
+    fn timeout_error_names_operation_and_duration() {
+        let err = TransportError::Timeout {
+            operation: "receive frame",
+            timeout: Duration::from_secs(60),
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("receive frame"));
+        assert!(rendered.contains("60s"));
+    }
+
+    #[test]
+    fn receive_task_join_error_preserves_cancellation() {
+        let err = receive_task_join_error(crate::runtime::JoinError::Cancelled(
+            crate::types::CancelReason::parent_cancelled(),
+        ));
+        assert!(matches!(err, TransportError::Cancelled));
     }
 
     #[test]
@@ -1075,6 +1443,60 @@ mod tests {
             validate_manifest(&m, &cfg),
             Err(TransportError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_single_file_with_multiple_entries() {
+        let mut m = manifest_with(vec![entry(0, 10), entry(1, 20)], 30);
+        m.is_directory = false;
+        assert!(matches!(
+            validate_manifest(&m, &TransferConfig::default()),
+            Err(TransportError::Frame(msg)) if msg.contains("single-file transfer")
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_duplicate_relative_paths() {
+        let mut entries = vec![entry(0, 10), entry(1, 20)];
+        entries[1].rel_path = entries[0].rel_path.clone();
+        let m = manifest_with(entries, 30);
+        assert!(matches!(
+            validate_manifest(&m, &TransferConfig::default()),
+            Err(TransportError::Frame(msg)) if msg.contains("duplicate manifest rel_path")
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_nonsequential_indexes() {
+        let m = manifest_with(vec![entry(0, 10), entry(7, 20)], 30);
+        assert!(matches!(
+            validate_manifest(&m, &TransferConfig::default()),
+            Err(TransportError::Frame(msg)) if msg.contains("does not match position")
+        ));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_unsafe_relative_paths() {
+        for rel_path in [
+            "",
+            "/abs",
+            "../escape",
+            "a/../escape",
+            "a//b",
+            "a\\b",
+            "c:drive",
+        ] {
+            let mut e = entry(0, 10);
+            e.rel_path = rel_path.to_string();
+            let m = manifest_with(vec![e], 10);
+            assert!(
+                matches!(
+                    validate_manifest(&m, &TransferConfig::default()),
+                    Err(TransportError::Source(msg)) if msg.contains("unsafe manifest rel_path")
+                ),
+                "rel_path {rel_path:?} should fail closed"
+            );
+        }
     }
 
     #[test]
