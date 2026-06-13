@@ -1,0 +1,309 @@
+{
+  "schema_version": "state-snapshot-live-upgrade-readiness-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.15",
+  "artifact_path": "artifacts/state_snapshot_live_upgrade_readiness_v1.json",
+  "docs_path": "docs/state_snapshot_live_upgrade_readiness.md",
+  "contract_test": "tests/state_snapshot_live_upgrade_readiness_contract.rs",
+  "purpose": "Feasibility matrix and fail-closed readiness contract for versioned runtime snapshots and restart-style handoff. This is not arbitrary hot code reload.",
+  "docs_markers": [
+    "STATE-SNAPSHOT-LIVE-UPGRADE:SOURCE",
+    "STATE-SNAPSHOT-LIVE-UPGRADE:SCHEMA",
+    "STATE-SNAPSHOT-LIVE-UPGRADE:MATRIX",
+    "STATE-SNAPSHOT-LIVE-UPGRADE:HANDOFF",
+    "STATE-SNAPSHOT-LIVE-UPGRADE:FIXTURES",
+    "STATE-SNAPSHOT-LIVE-UPGRADE:NO-CLAIMS"
+  ],
+  "required_surface_ids": [
+    "lab-restorable-snapshot",
+    "lab-determinism-roundtrip",
+    "runtime-region-quiescence-handoff",
+    "distributed-snapshot-distribution",
+    "browser-coordinator-handoff",
+    "arbitrary-hot-code-reload"
+  ],
+  "required_fail_closed_fixture_ids": [
+    "incompatible-schema-version",
+    "content-hash-mismatch",
+    "non-quiescent-region",
+    "orphan-task-reference",
+    "unresolved-obligation",
+    "unsupported-hot-code-reload"
+  ],
+  "versioned_snapshot_schema": {
+    "schema_id": "asupersync-state-snapshot-handoff-v1",
+    "current_snapshot_source": "src/lab/snapshot_restore.rs",
+    "current_runtime_snapshot_source": "src/runtime/state.rs",
+    "version_field": "RestorableSnapshot::schema_version",
+    "current_schema_version_source": "RestorableSnapshot::SCHEMA_VERSION",
+    "content_integrity_field": "RestorableSnapshot::content_hash",
+    "compatible_upgrade_policy": "Only exact schema-version matches are eligible for restart-style handoff until an explicit migration table exists.",
+    "required_sections": [
+      "schema_version",
+      "content_hash",
+      "runtime_snapshot",
+      "region_tree",
+      "task_table",
+      "obligation_table",
+      "logical_time",
+      "quiescence_proof"
+    ],
+    "incompatible_state_policy": {
+      "unknown_schema_version": "reject",
+      "hash_mismatch": "reject",
+      "orphan_task": "reject",
+      "orphan_obligation": "reject",
+      "cyclic_region_tree": "reject",
+      "closed_region_with_live_children": "reject",
+      "unresolved_handoff_obligations": "reject"
+    }
+  },
+  "handoff_protocol": {
+    "protocol_id": "quiesce-snapshot-validate-restore-v1",
+    "phases": [
+      {
+        "phase": "prepare",
+        "required_evidence": [
+          "operator selects an explicitly supported surface",
+          "target build declares accepted snapshot schema versions",
+          "source runtime records no arbitrary hot-code-reload claim"
+        ]
+      },
+      {
+        "phase": "quiesce",
+        "required_evidence": [
+          "regions selected for handoff are closed or closing to quiescence",
+          "no live child tasks remain under closed regions",
+          "obligations are committed, aborted, or explicitly leaked before handoff"
+        ]
+      },
+      {
+        "phase": "snapshot",
+        "required_evidence": [
+          "RestorableSnapshot captures schema_version and content_hash",
+          "snapshot source path is recorded",
+          "logical time and region/task/obligation tables are included"
+        ]
+      },
+      {
+        "phase": "validate",
+        "required_evidence": [
+          "content hash verifies",
+          "structural validation passes",
+          "target accepts the snapshot schema version"
+        ]
+      },
+      {
+        "phase": "restore",
+        "required_evidence": [
+          "restore happens into a fresh runtime state",
+          "restored state is run to quiescence before success is reported",
+          "operator report records pass, blocked, or unsupported without collapsing them together"
+        ]
+      }
+    ]
+  },
+  "feasibility_matrix": [
+    {
+      "surface_id": "lab-restorable-snapshot",
+      "support_class": "implemented-foundation",
+      "readiness": "ready-for-focused-proof",
+      "source_paths": [
+        "src/lab/snapshot_restore.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "RestorableSnapshot carries schema_version and content_hash",
+        "validate() checks orphan references, region-tree cycles, non-quiescent closed regions, duplicate ids, and timestamps"
+      ],
+      "next_steps": [
+        "rerun the focused contract after snapshot_restore source overlap",
+        "add migration-table rows before accepting cross-version snapshots"
+      ],
+      "no_claims": [
+        "does not prove production live upgrade",
+        "does not prove arbitrary hot code reload"
+      ]
+    },
+    {
+      "surface_id": "lab-determinism-roundtrip",
+      "support_class": "implemented-test-surface",
+      "readiness": "ready-for-focused-proof",
+      "source_paths": [
+        "src/lab_determinism_conformance_tests.rs",
+        "README.md"
+      ],
+      "evidence": [
+        "lab determinism conformance suite contains snapshot/restore round-trip and quiescence preservation sections"
+      ],
+      "next_steps": [
+        "bind round-trip receipts into an operator handoff report",
+        "keep stale or local-fallback receipts blocked"
+      ],
+      "no_claims": [
+        "does not prove real host restart handoff",
+        "does not prove distributed snapshot compatibility"
+      ]
+    },
+    {
+      "surface_id": "runtime-region-quiescence-handoff",
+      "support_class": "design-required",
+      "readiness": "blocked-until-runtime-api",
+      "source_paths": [
+        "src/runtime/state.rs",
+        "src/lab/snapshot_restore.rs"
+      ],
+      "evidence": [
+        "region close implies quiescence is a core invariant",
+        "no public runtime handoff API is claimed by this readiness contract"
+      ],
+      "next_steps": [
+        "define an explicit handoff API that requires quiescence-before-snapshot",
+        "add operator report rows for pass, blocked, unsupported, and stale evidence"
+      ],
+      "no_claims": [
+        "does not claim production runtime handoff is implemented",
+        "does not bypass Cx or region ownership"
+      ]
+    },
+    {
+      "surface_id": "distributed-snapshot-distribution",
+      "support_class": "adjacent-foundation",
+      "readiness": "needs-integration-proof",
+      "source_paths": [
+        "README.md",
+        "src/raptorq/"
+      ],
+      "evidence": [
+        "README documents RaptorQ-based distributed snapshot distribution as an existing capability"
+      ],
+      "next_steps": [
+        "connect snapshot handoff receipts to distributed symbol recovery evidence",
+        "keep distribution success separate from restore compatibility"
+      ],
+      "no_claims": [
+        "does not prove a restored distributed runtime is compatible",
+        "does not prove crash durability"
+      ]
+    },
+    {
+      "surface_id": "browser-coordinator-handoff",
+      "support_class": "bounded-browser-surface",
+      "readiness": "needs-consumer-proof",
+      "source_paths": [
+        "README.md",
+        "docs/wasm_abi_compatibility_policy.md",
+        "docs/wasm_typescript_package_topology.md"
+      ],
+      "evidence": [
+        "browser docs describe bounded coordinator attach, package topology, and ABI compatibility policy"
+      ],
+      "next_steps": [
+        "define which browser coordinator state is serializable",
+        "add incompatible ABI and unsupported host fixtures"
+      ],
+      "no_claims": [
+        "does not support direct service-worker runtime handoff",
+        "does not prove browser package upgrade compatibility by itself"
+      ]
+    },
+    {
+      "surface_id": "arbitrary-hot-code-reload",
+      "support_class": "explicitly-unsupported",
+      "readiness": "unsupported",
+      "source_paths": [
+        "docs/state_snapshot_live_upgrade_readiness.md"
+      ],
+      "evidence": [
+        "the readiness track is restart-style handoff only"
+      ],
+      "next_steps": [
+        "fail closed if any report claims arbitrary hot code reload support"
+      ],
+      "no_claims": [
+        "does not support arbitrary hot code reload",
+        "does not mutate live task code or stack frames"
+      ]
+    }
+  ],
+  "fail_closed_fixtures": [
+    {
+      "fixture_id": "incompatible-schema-version",
+      "mutation": "snapshot schema_version is not accepted by target runtime",
+      "expected_verdict": "blocked",
+      "expected_reason": "reject unknown or incompatible snapshot schema versions"
+    },
+    {
+      "fixture_id": "content-hash-mismatch",
+      "mutation": "snapshot content is changed after content_hash is recorded",
+      "expected_verdict": "blocked",
+      "expected_reason": "reject snapshots that fail integrity verification"
+    },
+    {
+      "fixture_id": "non-quiescent-region",
+      "mutation": "closed region still contains a live child or running task",
+      "expected_verdict": "blocked",
+      "expected_reason": "handoff requires quiescence before success"
+    },
+    {
+      "fixture_id": "orphan-task-reference",
+      "mutation": "task references a missing region",
+      "expected_verdict": "blocked",
+      "expected_reason": "structural validation rejects orphan task references"
+    },
+    {
+      "fixture_id": "unresolved-obligation",
+      "mutation": "handoff report claims success while a send permit remains reserved",
+      "expected_verdict": "blocked",
+      "expected_reason": "handoff cannot hide unresolved obligations"
+    },
+    {
+      "fixture_id": "unsupported-hot-code-reload",
+      "mutation": "operator report claims arbitrary hot code reload",
+      "expected_verdict": "blocked",
+      "expected_reason": "arbitrary hot code reload is an explicit non-goal"
+    }
+  ],
+  "proof_lanes": [
+    {
+      "lane_id": "state-snapshot-live-upgrade-readiness-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_state_snapshot_live_upgrade_readiness CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test state_snapshot_live_upgrade_readiness_contract --no-default-features -- --nocapture",
+      "covers": [
+        "artifact schema",
+        "feasibility matrix coverage",
+        "versioned snapshot schema policy",
+        "handoff phase evidence",
+        "fail-closed fixtures",
+        "docs markers",
+        "no-claim boundaries"
+      ],
+      "does_not_cover": [
+        "production live upgrade",
+        "arbitrary hot code reload",
+        "broad workspace health",
+        "runtime correctness outside cited surfaces",
+        "live RCH fleet availability"
+      ]
+    }
+  ],
+  "validation": {
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_state_snapshot_live_upgrade_readiness CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test state_snapshot_live_upgrade_readiness_contract --no-default-features -- --nocapture",
+    "no_local_cargo_fallback": true
+  },
+  "source_paths": [
+    "artifacts/state_snapshot_live_upgrade_readiness_v1.json",
+    "docs/state_snapshot_live_upgrade_readiness.md",
+    "tests/state_snapshot_live_upgrade_readiness_contract.rs",
+    "src/lab/snapshot_restore.rs",
+    "src/lab_determinism_conformance_tests.rs",
+    "src/runtime/state.rs",
+    "README.md",
+    "docs/wasm_abi_compatibility_policy.md",
+    "docs/wasm_typescript_package_topology.md"
+  ],
+  "no_claims": [
+    "This contract does not implement production live upgrade or restart handoff.",
+    "This contract does not support arbitrary hot code reload, stack migration, live task code mutation, or bypassing region quiescence.",
+    "This contract does not prove broad workspace health, release readiness, distributed restore compatibility, browser upgrade compatibility, performance improvement, or live RCH fleet availability.",
+    "This contract does not authorize local Cargo fallback for proof, file deletion, branch creation, or worktree creation."
+  ]
+}
