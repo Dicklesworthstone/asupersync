@@ -44,7 +44,7 @@ bit-for-bit SHA-256 verification of every single transfer.
 - `gen_payloads.sh` — run on the **sender**: builds `/root/atp-bench/payloads`
   (512KB/1MB/10MB/100MB/1GB urandom files + heterogeneous nested tree) and
   SHA-256 manifests. Idempotent.
-- `sampler.sh` — background process sampler (`ps`/loadavg → JSONL).
+- `collect_metrics.sh` — background process sampler (`ps`/loadavg → JSONL).
 - `run_one.sh` — runs one sender command under `/usr/bin/time -v` (+ `perf
   stat` if present), emits a JSON result line.
 - `run_bench.sh` — orchestrator (run from the dev box): deploys binaries +

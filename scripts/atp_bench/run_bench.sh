@@ -47,8 +47,8 @@ note "deploying scripts + binary"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 "${SSH_S[@]}" "mkdir -p $BASE/recv $BASE/manifests"
 "${SSH_R[@]}" "mkdir -p $BASE/recv $BASE/manifests"
-"${SCP_S[@]}" "$SCRIPT_DIR/gen_payloads.sh" "$SCRIPT_DIR/sampler.sh" "$SCRIPT_DIR/run_one.sh" "$SENDER:$BASE/"
-"${SCP_R[@]}" "$SCRIPT_DIR/sampler.sh" "$RECEIVER:$BASE/"
+"${SCP_S[@]}" "$SCRIPT_DIR/gen_payloads.sh" "$SCRIPT_DIR/collect_metrics.sh" "$SCRIPT_DIR/run_one.sh" "$SENDER:$BASE/"
+"${SCP_R[@]}" "$SCRIPT_DIR/collect_metrics.sh" "$RECEIVER:$BASE/"
 "${SCP_S[@]}" "$ATP_BINARY" "$SENDER:$BASE/atp"
 "${SCP_R[@]}" "$ATP_BINARY" "$RECEIVER:$BASE/atp"
 "${SSH_S[@]}" "chmod +x $BASE/atp $BASE/*.sh"
@@ -122,13 +122,13 @@ run_transfer() { # tool payload run_idx -> appends one JSON line to RESULTS
     local recv_pid_file="$BASE/recv_run.pid"
     case "$tool" in
         atp-tcp)
-            "${SSH_R[@]}" "rm -f $BASE/recv_time.txt; nohup $BASE/sampler.sh '$BASE/atp recv' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid
+            "${SSH_R[@]}" "rm -f $BASE/recv_time.txt; nohup $BASE/collect_metrics.sh '$BASE/atp recv' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid
 nohup /usr/bin/time -v -o $BASE/recv_time.txt $BASE/atp recv $BASE/recv --listen 0.0.0.0:$ATP_PORT --once > $BASE/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
             sleep 1 ;;
         rsync-ssh)
-            "${SSH_R[@]}" "nohup $BASE/sampler.sh 'rsync' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid" ;;
+            "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh 'rsync' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid" ;;
         rsyncd)
-            "${SSH_R[@]}" "nohup $BASE/sampler.sh 'rsync' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid" ;;
+            "${SSH_R[@]}" "nohup $BASE/collect_metrics.sh 'rsync' $BASE/sampler.jsonl >/dev/null 2>&1 & echo \$! > $BASE/sampler.pid" ;;
     esac
 
     # Sender command.
